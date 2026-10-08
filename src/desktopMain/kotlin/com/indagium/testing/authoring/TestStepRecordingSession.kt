@@ -7,6 +7,7 @@ import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.debug.SWIPE_DURATION_MAX_MS
 import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
+import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.newExampleId
@@ -50,14 +51,26 @@ data class RecordedTestStep(
     val inputAtMs: Long = 0L,
     /** Wall-clock time the input began (a touch's press); equals [inputAtMs] for keys and text. */
     val inputStartMs: Long = 0L,
+    /** Set on a row the AI rewrite made: the ids of the raw rows it stands for, in recorded order. Empty on a raw row. */
+    val sourceInputIds: List<String> = emptyList(),
+    /** Set with [sourceInputIds]: the raw inputs described for the AI that later runs the step (becomes a reference example). */
+    val sourceHint: String? = null,
+    /** Checks the rewrite proposed for this step; they become the applied step's checks. */
+    val checks: List<StepCheck> = emptyList(),
 )
 
-/** [pendingSnapshots] counts queued screen images plus the screen-context probe while one is waiting or running. */
+/**
+ * [pendingSnapshots] counts queued screen images plus the screen-context probe while one is waiting or running. After an AI
+ * rewrite [steps] are the rewritten rows and [rawSteps] the recorded ones they replaced (null before a rewrite); [rewriteNotes]
+ * is what the AI said about its choices.
+ */
 data class TestStepRecordingSnapshot(
     val active: Boolean,
     val steps: List<RecordedTestStep> = emptyList(),
     val warnings: List<String> = emptyList(),
     val pendingSnapshots: Int = 0,
+    val rawSteps: List<RecordedTestStep>? = null,
+    val rewriteNotes: String = "",
 )
 
 private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
@@ -190,6 +203,42 @@ class TestStepRecordingSession internal constructor(
         true
     }
 
+    /** Why an AI rewrite cannot start now, in words the reviewer can act on; null when it can. */
+    internal fun rewriteBlockedReason(): String? = synchronized(lock) {
+        val current = mutableSnapshot.value
+        when {
+            current.active -> "Stop the recording first."
+            applicationReserved -> "This recording is being applied."
+            current.pendingSnapshots > 0 -> "Waiting for ${current.pendingSnapshots} screen snapshot(s) to finish."
+            (current.rawSteps ?: current.steps).isEmpty() -> "No input was recorded."
+            else -> null
+        }
+    }
+
+    /** The recorded rows an AI rewrite starts from: always the raw ones, also after an earlier rewrite. */
+    internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) { mutableSnapshot.value.let { it.rawSteps ?: it.steps } }
+
+    /**
+     * Swaps the recorded rows for [rewritten], keeping them as [TestStepRecordingSnapshot.rawSteps]. False (nothing changes)
+     * when the recording is active or being applied, or when its recorded rows are no longer the ones with ids [rawIds].
+     */
+    internal fun applyRewrite(rawIds: List<String>, rewritten: List<RecordedTestStep>, notes: String): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        val raw = current.rawSteps ?: current.steps
+        if (current.active || applicationReserved || rewritten.isEmpty() || raw.map { it.id } != rawIds) return@synchronized false
+        mutableSnapshot.value = current.copy(steps = rewritten.take(MAX_RECORDED_STEPS), rawSteps = raw, rewriteNotes = notes)
+        true
+    }
+
+    /** Puts the recorded rows back exactly as they were before the rewrite (same ids). False when there is nothing to restore. */
+    fun restoreRaw(): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        val raw = current.rawSteps
+        if (raw == null || current.active || applicationReserved) return@synchronized false
+        mutableSnapshot.value = current.copy(steps = raw, rawSteps = null, rewriteNotes = "")
+        true
+    }
+
     fun updateReviewedSteps(
         actionsAndExpected: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String> = emptySet(),
@@ -288,15 +337,22 @@ class TestStepRecordingSession internal constructor(
     internal fun releaseApplyReservation() = synchronized(lock) { applicationReserved = false }
 
     internal fun toTestSteps(rows: List<RecordedTestStep>, assetPathFor: (ByteArray) -> String? = { null }): List<TestStep> = rows.map { row ->
+        val rewritten = row.sourceInputIds.isNotEmpty()
         val context = row.screenContext?.takeIf(String::isNotBlank)
         val assetPath = row.screenshotJpeg?.takeIf { row.useScreenshotAsExpected }?.let(assetPathFor)
         val examples = buildList {
-            if (context != null) add(StepExample.ReferenceLog(newExampleId(), caption = "Input-time screen context (before this action)", text = context))
+            when {
+                rewritten -> row.sourceHint?.takeIf(String::isNotBlank)?.let {
+                    add(StepExample.ReferenceLog(newExampleId(), caption = REWRITE_HINT_CAPTION, text = it))
+                }
+                context != null ->
+                    add(StepExample.ReferenceLog(newExampleId(), caption = "Input-time screen context (before this action)", text = context))
+            }
             if (assetPath != null && row.useScreenshotAsExpected) {
-                val caption = if (row.screenshotFromAdb) {
-                    "Reviewed expected screenshot; read through adb just after the input"
-                } else {
-                    "Reviewed expected screenshot; captured at input time"
+                val caption = when {
+                    rewritten -> "Reviewed expected screenshot; the screen after the recorded inputs of this step"
+                    row.screenshotFromAdb -> "Reviewed expected screenshot; read through adb just after the input"
+                    else -> "Reviewed expected screenshot; captured at input time"
                 }
                 add(StepExample.GoldenScreenshot(newExampleId(), caption = caption, assetPath = assetPath))
             }
@@ -305,6 +361,7 @@ class TestStepRecordingSession internal constructor(
             id = "",
             action = row.action,
             expected = row.expected,
+            checks = row.checks,
             examples = examples,
         )
     }
@@ -673,6 +730,7 @@ class TestStepRecordingSession internal constructor(
         const val PASTE_TEXT_PREFIX = "Paste text: "
         const val MASKED_TEXT = "••••"
         const val DELETE_ACTION = "Press Delete"
+        const val REWRITE_HINT_CAPTION = "Recorded input (hint; prefer what is on screen)"
         const val PROBE_FAILED_WARNING = "The screen context (UI hierarchy) could not be read through adb; steps keep coordinates and images only."
         const val KEYCODE_BACK = 4
         const val KEYCODE_TAB = 61

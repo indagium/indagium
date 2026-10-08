@@ -28,7 +28,7 @@ class TestStepDraftServiceTest {
     )
 
     private fun service(
-        generate: suspend (String, String) -> String = { _, _ -> """{"steps":[{"action":"Tap sign in","expected":"Home appears"}]}""" },
+        generate: suspend (String, String, String?, String?) -> String = { _, _, _, _ -> """{"steps":[{"action":"Tap sign in","expected":"Home appears"}]}""" },
         preflight: (String, String) -> StoreResult<Unit> = { _, _ -> StoreResult.Ok(Unit) },
         inserts: AtomicInteger = AtomicInteger(),
         insert: ((String, List<TestStep>, Int?) -> StoreResult<List<TestStep>>)? = null,
@@ -62,7 +62,7 @@ class TestStepDraftServiceTest {
     fun readonlyOrFreePreflightRefusesBeforePaidGeneration() = runBlocking {
         val generatorCalls = AtomicInteger()
         val service = service(
-            generate = { _, _ -> generatorCalls.incrementAndGet(); "{}" },
+            generate = { _, _, _, _ -> generatorCalls.incrementAndGet(); "{}" },
             preflight = { _, _ -> StoreResult.Invalid("The case is locked by the Free limit.") },
         )
         val result = service.create("suite-1", "case-1", "profile", "Add sign-in")
@@ -72,7 +72,7 @@ class TestStepDraftServiceTest {
 
     @Test
     fun malformedProviderProposalIsNeverPublishedAsAPreview() = runBlocking {
-        val service = service(generate = { _, _ -> """{"steps":[{"expected":"Missing action"}]}""" })
+        val service = service(generate = { _, _, _, _ -> """{"steps":[{"expected":"Missing action"}]}""" })
         val result = service.create("suite-1", "case-1", "profile", "Add a step")
         assertTrue(result is StoreResult.Invalid)
     }
@@ -102,12 +102,12 @@ class TestStepDraftServiceTest {
 
     @Test
     fun generationTimeoutIsActionableAndUserCancellationStillCancels() = runBlocking {
-        val timeout = service(generate = { _, _ -> withTimeout(10) { CompletableDeferred<String>().await() } })
+        val timeout = service(generate = { _, _, _, _ -> withTimeout(10) { CompletableDeferred<String>().await() } })
         val timedOut = assertIs<StoreResult.Invalid>(timeout.create("suite-1", "case-1", "profile", "Slow generation"))
         assertTrue(timedOut.reason.contains("timed out", ignoreCase = true))
 
         val entered = CompletableDeferred<Unit>()
-        val cancelled = service(generate = { _, _ -> entered.complete(Unit); awaitCancellation() })
+        val cancelled = service(generate = { _, _, _, _ -> entered.complete(Unit); awaitCancellation() })
         val request = async { cancelled.create("suite-1", "case-1", "profile", "Cancel generation") }
         entered.await()
         request.cancelAndJoin()

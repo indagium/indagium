@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 148: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 150: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3153,7 +3153,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording, insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordingScreenProbe.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (with its screen-context probe and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -3163,7 +3163,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | `edition` | `Edition.kt` | `Edition`, `EditionLimits`, `EditionService` |
 | `security` | `SecretStore.kt` | OS-keychain secret storage with a session-only fallback |
 | `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `TestRunCaptureArgs.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
-| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
+| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `AiModelEffortPickers.kt`, `TestsStepAuthoring.kt`, `TestsRecordingRewrite.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
 
 Dependency direction. `testing` depends on `model`, `utils`, `capture`, `edition`, `security`, and —
 for the agent launchers and the gateway type — `ai` and `debug`. It has **no** dependency on `ui`.
@@ -3488,6 +3488,7 @@ called while holding one that could take another lock, and none is ever held tog
 | `testLibraryMirrorLock`, `testRunMirrorLock` | `ui/AppState.kt:1911,2013` | The `AppState` mirrors of the library and run flows: the value is read **inside** the lock so the last assignment is the freshest |
 | `testStorageLock` | `ui/AppState.kt:1928` | Switching the AI test folders (`reconcileTestStorage`, `initTestStorage`): swapping the `TestLibraryStore` and the pinned `activeTest*Dir` fields. **Leaf lock**; the library mirror and `forgetFinishedRuns()` are touched only after it is released |
 | `mutex` (coroutine `Mutex`) | `testing/run/StepSequence.kt:135` | A sequence's step state; with the `finishing` flag it makes `finish_step` and the watchdog mutually exclusive |
+| `testStepRecordingLock` (`AppState`), recording session `lock` / `probeLock` | `ui/AppState.kt`, `testing/authoring/TestStepRecordingSession.kt` | The one recording session and its `recordingApplications` / `recordingRewrites` sets (an apply and a rewrite of one session exclude each other, decided in one critical section). The session `lock` is a leaf: adb work runs on the session's two workers, an AI call runs with **no** lock held, and `probeLock` is only taken after `lock` (§26.12) |
 | `stateLock` (existing) | `laneCaptureSerials`, `manualCaptureStartSerial` in `ui/AppState.kt` | The per-device claim of lane captures; the one place this feature takes `stateLock`, and only in `AppState` (never inside `testing/`). Claim and release are short and call nothing while holding it |
 | `LaneCaptureHandle.stopTablessOnce` (`@Synchronized`), `LaneNotes` (`AtomicReference`) | `ui/LaneCaptures.kt`, `ui/CaptureMarkerWriter.kt` | Leaf: start the one stop job of a tabless lane; compare-and-set of its notes |
 
@@ -3621,8 +3622,8 @@ There are two audiences, with two gates:
   `export_test_suite`, `set_edition`, `try_test_script`, `run_test_suite`, `cancel_test_run`,
   `rerun_test_step`, `apply_step_fix`, `delete_issue`, `send_issue_to_tracker`. A call is also raised
   to `CONFIRMATION_REQUIRED` *per call* when its arguments send data to an external service
-  (`create_issue_from_step` with `destination: tracker`, `draft_test_steps` with a remote provider,
-  `sendsToExternalService`). Inside a
+  (`create_issue_from_step` with `destination: tracker`, `draft_test_steps` and `rewrite_test_recording`
+  with a remote provider, `sendsToExternalService`). Inside a
   run, an **`ASK` script** becomes a confirmation card through the lane gateway's
   `extraConfirmationRequired` (names only known at run time); `AUTO` scripts run without asking.
   `ManagedMcpRunRegistry.register` gives a lane's managed endpoint its **own**
@@ -3632,8 +3633,8 @@ There are two audiences, with two gates:
   Indagium's own AI panel; an external client holding the control token would otherwise run any
   command a script holds with nobody asked. The set (`debug/ExternalToolApproval.kt:22`) is
   `try_test_script`, `run_test_suite`, `rerun_test_step`, `rerun_failed_test_cases`,
-  `test_lane_tool_call`, `draft_test_steps`, `start_test_recording`, `apply_test_recording`,
-  `import_test_script`, `export_test_script`, `export_test_run_report`,
+  `test_lane_tool_call`, `draft_test_steps`, `rewrite_test_recording`, `start_test_recording`,
+  `apply_test_recording`, `import_test_script`, `export_test_script`, `export_test_run_report`,
   `collect_android_bugreport`, `export_issue_step_clip`, `create_issue_from_step`,
   `send_issue_to_tracker`. Each call opens a dialog describing *that exact
   call* — a remote draft's provider, endpoint/account and bounded context; the client, the script and
@@ -3767,6 +3768,63 @@ reachable by any prompt-injected lane agent, which is why the default permission
 10. **The archive of an issue is exported late.** A draft issue (also an automatic one) only carries the
    wish for it; the ZIP is built when the issue is created or sent, so a run folder that was deleted
    before then can no longer provide it (the delivery fails with that reason; untick the archive to go on).
+
+### 26.12 Recording review: screen context and AI rewrite
+
+"Record from device" (`ui/TestsStepAuthoring.kt`, `TestStepRecordingSession`) turns accepted mirror input
+into review rows. The mirror carries no UI hierarchy, so the session adds its own context, and an
+optional AI step turns the raw rows into readable steps.
+
+**Screen-context probe.** With a `screenProbe` set (`AppState.startTestStepRecording`), a single separate
+worker (`RecordingScreenProbe`) reads the UI hierarchy (`uiautomator dump`, the command shared with
+`TestDeviceSession`), the top activity (`dumpsys activity activities`) and an adb screenshot, once when
+recording starts and once ~800 ms after the last input (latest-wins: a waiting probe is replaced, so at
+most one runs and one waits). A probe state is attached to a row only when its wall-clock window proves it
+(`attachScreenStates`): after-state of the last input that ended before the probe started, before-state of
+the next input only if that began after the probe finished; otherwise it is unknown, never guessed. The
+element under a tap is resolved from the row's before-state. States live in a bounded map on the session
+(`MAX_RECORDED_STEPS + 1` states, 48 MB of images). The session `lock` is a leaf: no adb work runs under
+it.
+
+**Typed text and passwords.** If the screen read before or after a typing run shows a focused password
+node (or a password node when nothing reports focus), the whole run (consecutive typed/pasted rows with
+Delete presses between) is stored as `Enter text: ••••` and a warning is raised. The real text is dropped
+at that moment and can never be recovered; the rewrite brief, the evidence tools and the applied step only
+ever use a row's current action text. `uiautomator` already blanks password node text.
+
+**Rewrite with AI** (`RecordingRewriteService`, UI `TestsRecordingRewrite.kt`, MCP `rewrite_test_recording`).
+Allowed only for a stopped, drained recording that is not being applied or rewritten. `AppState`
+registers the session in `recordingRewrites` under `testStepRecordingLock` (apply, edit, undo and discard
+refuse while it is set), then calls the service with **no lock held**:
+
+1. Preflight (case exists, library/suite writable, edition limits), then the brief
+   (`RecordingRewriteBrief.kt`): suite and case text and the user's note as plain instructions; the numbered
+   raw inputs (kind, action, tapped element, app/screen before and after, held time, images available) in
+   untrusted-data fences, chunked below the fence clip.
+2. One agent run through the lane launchers (`AppState.runAgentForText`, shared with the step draft; an
+   in-app model over HTTP, or Claude Code/Codex through the managed MCP lease), with the profile after
+   `withRunOverrides(model, effort)`, a tool budget of `min(3 x inputs, 60)` and a 180 s timeout. Its gateway
+   (`RecordingRewriteTools`) is read-only and holds only `get_recorded_input`, `get_recorded_screen`
+   (image result, in `IMAGE_RESULT_TOOL_NAMES`) and `get_recorded_ui`; device text travels inside the
+   `untrusted_data` envelope. The answer is the assistant text after the last tool call.
+3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action and expected;
+   `sourceInputs` ascending, consecutive, non-overlapping and covering every input exactly once in order;
+   an optional `expectedScreenshot` of the form `after-of-input-N` with N among the step's inputs; checks
+   through the draft's parser and `validateStep`, with script checks and example references refused. An
+   invalid answer is an error with the reason and **changes nothing**.
+4. `TestStepRecordingSession.applyRewrite` swaps the rows in one step, keeping the recorded rows as
+   `rawSteps` (refused if the recording is being applied or its recorded rows changed). Each new row keeps
+   `sourceInputIds`; its candidate expected screenshot is the after-image of its last (or named) source
+   input and is **off** until the reviewer ticks it. Re-running always starts from `rawSteps`;
+   `restoreRaw` (UI "Undo rewrite", MCP `restore_test_recording_raw`) puts them back with their ids.
+
+**Apply.** `toTestSteps` turns a rewritten row into a `TestStep` with the readable action/expected, the
+AI's checks, a `ReferenceLog` example "Recorded input (hint; prefer what is on screen)" listing the raw
+inputs (action, element label/id, package), and a golden screenshot only when ticked. Raw rows apply as
+before. **Privacy.** A remote rewrite sends screenshots, screen text and typed text (not passwords) to the
+profile's provider, so `rewrite_test_recording` is in `PER_CALL_APPROVAL_MCP_TOOLS` and raised to
+`CONFIRMATION_REQUIRED` for a remote profile exactly like `draft_test_steps`; `restore_test_recording_raw`
+sends nothing and is not gated.
 
 ---
 

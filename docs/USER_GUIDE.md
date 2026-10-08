@@ -1313,7 +1313,8 @@ Indagium, at most 10 MB) or a **Reference log**. The agent receives the current 
 them with lane-scoped example tools; screenshots are decoded and bounded before delivery, and log references are
 returned as fenced text.
 
-The case editor has four authoring helpers. **Draft with AI** uses a selected provider profile and returns a
+The case editor has four authoring helpers. **Draft with AI** uses a selected provider profile (and, if you like, a
+model and reasoning effort other than the profile's own) and returns a
 validated, editable preview; it does not edit the library or operate a device until you choose **Apply**. **Record
 from device** observes accepted input from a selected live mirror, then converts taps, swipes, keys and text into a
 reviewable ordered draft. It never injects input. Unsupported gestures are called out, and captured screen images
@@ -1323,6 +1324,30 @@ results before applying. **Insert shared steps** copies a selected sequence at t
 position with fresh IDs, so later edits are independent; missing referenced images are reported. **Paste log lines**
 parses tag/message pairs into literal, regex-escaped log checks with the default wait duration. Edit the checks and
 choose the insertion position before adding them to the selected step.
+
+#### Readable steps from a recording
+
+While you record, Indagium also notes which app and screen is in front and which element each tap landed on (it
+reads the screen through adb after every input; a read can fail, then the row keeps only its coordinates and
+image). A slow swipe keeps its duration. To get steps a person can read:
+
+1. **Record from device**, perform the test on the mirror, then **Stop and review**.
+2. Under **Rewrite with AI** choose a provider profile (and, if you want, a model and reasoning effort), optionally
+   say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
+   recorded inputs, the screen text, the text you typed and screenshots from the device. **Text typed into a password
+   field is never recorded or sent**: it shows as `••••`.
+3. The raw taps and swipes are replaced by a few steps such as "Open YouTube" or "Search for 'lofi'", each with an
+   expected result. Every input you made is inside exactly one step; **From N recorded inputs** shows which. The AI's
+   notes (for example an input it thought was accidental) are shown above the steps. Edit any action or
+   expected result. The picture of the screen after a step can be used as an expected screenshot, but only if you tick
+   it.
+4. **Undo rewrite** brings back the recorded rows exactly; **Rewrite again** always starts from them. Nothing is
+   added to the case until you press **Apply recorded steps**. It stays disabled until every step has an expected
+   result and says which ones are missing.
+
+Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", with the original taps so
+the agent that runs the case has the precise gesture when a label is ambiguous. An MCP client does the same with
+`rewrite_test_recording` and `restore_test_recording_raw`.
 
 ### Scripts: your own tools for the agent
 

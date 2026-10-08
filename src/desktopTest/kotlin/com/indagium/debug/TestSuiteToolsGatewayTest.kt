@@ -739,7 +739,7 @@ class TestSuiteToolsGatewayTest {
         listOf("preconditions", "setup", "teardown").forEach { assertTrue(schemaText("create_test_case").contains("\"$it\"")) }
         assertTrue(schemaText("create_test_case").contains("sharedStepId"), "case hooks use the hook item schema")
         assertTrue(schemaText("update_test_step").contains("\"maxToolCalls\""))
-        assertEquals(48, TEST_SUITE_MCP_TOOLS.size)
+        assertEquals(50, TEST_SUITE_MCP_TOOLS.size)
         assertFalse(TEST_SUITE_MCP_TOOLS.any { it.name.startsWith("run_") }, "run tools belong to a later phase")
         val names = TEST_SUITE_MCP_TOOLS.map { it.name }.toSet()
         assertEquals(names.size, operations.openAiFunctionDefinitions().count { it.name in names })

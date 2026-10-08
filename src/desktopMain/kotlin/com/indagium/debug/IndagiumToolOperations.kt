@@ -373,7 +373,7 @@ internal class IndagiumToolOperations(
         operationHandlers,
         testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
         externalServiceCall = { name, args ->
-            sendsToExternalService(name, args) || if (name == "draft_test_steps") {
+            sendsToExternalService(name, args) || if (name == "draft_test_steps" || name == "rewrite_test_recording") {
                 val profileId = args["profileId"] as? String
                 val profile = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId }
                 profile != null && (!profile.kind.usesHttpEndpoint || runCatching { java.net.URI(profile.baseUrl).host.orEmpty() }

@@ -653,9 +653,10 @@ private const val EXTERNAL_APPROVAL_NOTE =
 internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot", "test_lane_tool_call")
 
 // A test judge's evidence tools (get_step_screenshot, get_example) return images too, for Claude Code and Codex judges that
-// reach the judge-only gateway over the managed MCP server.
+// reach the judge-only gateway over the managed MCP server; so does a recording rewrite's get_recorded_screen.
 internal val IMAGE_RESULT_TOOL_NAMES: Set<String> =
-    setOf("get_video_frame", "get_step_screenshot", "get_example", "get_step_example", "get_test_recording") + SCREEN_IMAGE_TOOL_NAMES
+    setOf("get_video_frame", "get_step_screenshot", "get_example", "get_step_example", "get_test_recording", "get_recorded_screen") +
+        SCREEN_IMAGE_TOOL_NAMES
 
 internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
     val fields = rawResult as? Map<*, *>

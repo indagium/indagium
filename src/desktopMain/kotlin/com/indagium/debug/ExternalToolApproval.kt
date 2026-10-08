@@ -33,7 +33,7 @@ private const val APPROVAL_INSTRUCTION_PREVIEW_CHARS = 180
 // agent and an external service (ExternalTrackerApproval.kt); create_issue_from_step with any other destination needs no approval.
 internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf(
     "try_test_script", "run_test_suite", "rerun_test_step", "rerun_failed_test_cases", "test_lane_tool_call",
-    "draft_test_steps", "import_test_script", "export_test_script", "start_test_recording", "apply_test_recording",
+    "draft_test_steps", "rewrite_test_recording", "import_test_script", "export_test_script", "start_test_recording", "apply_test_recording",
     "export_test_run_report", "collect_android_bugreport", "export_issue_step_clip", "create_issue_from_step", "send_issue_to_tracker",
 )
 
@@ -45,6 +45,7 @@ internal suspend fun describePerCallApproval(appState: AppState, toolName: Strin
         "rerun_test_step" -> describeRerunStepCall(appState, arguments, clientName)
         "rerun_failed_test_cases" -> describeRerunFailedCall(appState, arguments, clientName)
         "draft_test_steps" -> describeDraftStepCall(appState, arguments, clientName)
+        "rewrite_test_recording" -> describeRewriteRecordingCall(appState, arguments, clientName)
         "import_test_script" -> describeScriptImportCall(arguments, clientName)
         "export_test_script" -> describeScriptExportCall(appState, arguments, clientName)
         "start_test_recording" -> describeRecordingStartCall(appState, arguments, clientName)
@@ -66,20 +67,16 @@ private fun describeDraftStepCall(appState: AppState, arguments: Map<String, Any
     val suite = appState.testLibrary.suite(suiteId) ?: return null
     val testCase = suite.cases.firstOrNull { it.id == caseId } ?: return null
     val instruction = (arguments["instruction"] as? String)?.takeIf(String::isNotBlank) ?: return null
-    val endpointHost = if (profile.kind.usesHttpEndpoint) {
-        runCatching { java.net.URI(profile.baseUrl).host }.getOrNull()?.takeIf(String::isNotBlank) ?: "provider endpoint (unresolved)"
-    } else {
-        "signed-in local CLI account"
-    }
-    val sendsRemotely = !profile.kind.usesHttpEndpoint || !isLoopbackHost(endpointHost)
-    if (!sendsRemotely) return null
+    val endpointHost = remoteDestination(profile) ?: return null
+    val model = (arguments["model"] as? String)?.takeIf(String::isNotBlank)
     return ExternalActionDetails(
         title = "Send test context to an AI provider?",
         summary =
             "$clientName wants to draft steps for '${testCase.name}'. The provider receives the request and bounded suite/case context; " +
                 "it returns a preview only and does not edit the library or control a device.",
-        fields = listOf(
+        fields = listOfNotNull(
             "Provider" to "${profile.displayName} · ${profile.kind.label}",
+            model?.let { "Model" to it },
             "Destination" to endpointHost,
             "Suite and case context" to "${suite.name} / ${testCase.name}",
             "Draft request" to instruction.clip(APPROVAL_INSTRUCTION_PREVIEW_CHARS),
@@ -87,6 +84,48 @@ private fun describeDraftStepCall(appState: AppState, arguments: Map<String, Any
         ),
         allowLabel = "Generate preview",
         declinedMessage = "The user declined to send this test context to the configured provider; no draft was generated.",
+    )
+}
+
+/** Where a profile's requests go; null when they stay on this computer (a loopback endpoint) and need no disclosure. */
+private fun remoteDestination(profile: com.indagium.model.AiProviderProfile): String? {
+    val endpointHost = if (profile.kind.usesHttpEndpoint) {
+        runCatching { java.net.URI(profile.baseUrl).host }.getOrNull()?.takeIf(String::isNotBlank) ?: "provider endpoint (unresolved)"
+    } else {
+        "signed-in local CLI account"
+    }
+    return endpointHost.takeIf { !profile.kind.usesHttpEndpoint || !isLoopbackHost(endpointHost) }
+}
+
+@Suppress("ReturnCount") // Fail-closed argument checks each return an actionable refusal.
+private fun describeRewriteRecordingCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
+    val profileId = arguments["profileId"] as? String ?: return null
+    val profile = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId } ?: return null
+    val sessionId = arguments["sessionId"] as? String ?: return null
+    val snapshot = (appState.testStepRecordingSnapshot(sessionId) as? StoreResult.Ok)?.value ?: return null
+    if (snapshot.active || snapshot.pendingSnapshots != 0 || appState.isTestStepRecordingApplying(sessionId)) return null
+    val target = appState.testStepRecordingTarget ?: return null
+    val suite = appState.testLibrary.suite(target.first) ?: return null
+    val testCase = suite.cases.firstOrNull { it.id == target.second } ?: return null
+    val destination = remoteDestination(profile) ?: return null
+    val recorded = snapshot.rawSteps ?: snapshot.steps
+    val model = (arguments["model"] as? String)?.takeIf(String::isNotBlank) ?: profile.model
+    return ExternalActionDetails(
+        title = "Send a recording to an AI provider?",
+        summary =
+            "$clientName wants to rewrite the recording for '${testCase.name}' as readable steps. The provider receives the recorded inputs, " +
+                "screen elements and text, typed text (passwords are hidden) and screenshots from the device; it returns a preview " +
+                "only and does not edit the library or control a device.",
+        fields = listOf(
+            "Provider" to "${profile.displayName} · ${profile.kind.label}",
+            "Model" to model,
+            "Destination" to destination,
+            "Suite and case context" to "${suite.name} / ${testCase.name}",
+            "Recorded inputs" to "${recorded.size} input(s) with their screenshots and screen text",
+            "Changes" to "Replaces the recording's rows for review; applying them to the case is a separate action",
+        ),
+        allowLabel = "Rewrite recording",
+        declinedMessage = "The user declined to send this recording to the configured provider; it was not rewritten.",
     )
 }
 

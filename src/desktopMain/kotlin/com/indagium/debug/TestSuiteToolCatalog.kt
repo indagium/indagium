@@ -23,6 +23,8 @@ private val SCRIPT_PERMISSION_NAMES = ScriptPermission.entries.map { it.name }
 private val SCRIPT_PARAM_TYPE_NAMES = ScriptParamType.entries.map { it.name }
 private val EDITION_NAMES = Edition.entries.map { it.name }
 
+private const val MODEL_OVERRIDE_NOTE = "Optional: a model to use instead of the profile's own."
+private const val EFFORT_OVERRIDE_NOTE = "Optional: a reasoning effort (such as low or high) to use instead of the profile's own."
 private const val MOVE_NOTE = "toIndex is the final 0-based position (clamped into the list)."
 private const val LOCKED_NOTE =
     "Under the Free edition limit (1 suite / 5 cases) the entries past the limit are locked: still readable, " +
@@ -372,7 +374,12 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "it never changes the library or controls a device. Call apply_test_step_draft only after reviewing/editing that preview.",
         schema(
             "suiteId" to "string", "caseId" to "string", "profileId" to "string", "instruction" to "string",
+            "model" to "string", "reasoningEffort" to "string",
             required = listOf("suiteId", "caseId", "profileId", "instruction"),
+            descriptions = mapOf(
+                "model" to MODEL_OVERRIDE_NOTE,
+                "reasoningEffort" to EFFORT_OVERRIDE_NOTE,
+            ),
         ),
     ),
     IndagiumToolDescriptor(
@@ -431,6 +438,30 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
                 ),
             ),
         ),
+    ),
+    IndagiumToolDescriptor(
+        "rewrite_test_recording",
+        "Ask an existing provider profile to rewrite a STOPPED recording into readable steps with expected results (for example " +
+            "\"Open YouTube\", \"Search for 'lofi'\") instead of raw taps and swipes. It reads the recorded inputs, the screens and the " +
+            "screen elements the recorder stored, so screenshots, screen text and typed text (passwords are hidden) go to the provider. " +
+            "The rewritten rows replace the recording's rows for review; the raw rows are kept (restore_test_recording_raw returns " +
+            "them) and nothing is added to the library until apply_test_recording. Every recorded input is covered by exactly one " +
+            "step; an invalid answer changes nothing. Asks for approval for a remote provider.",
+        schema(
+            "sessionId" to "string", "profileId" to "string", "model" to "string", "reasoningEffort" to "string", "note" to "string",
+            required = listOf("sessionId", "profileId"),
+            descriptions = mapOf(
+                "model" to MODEL_OVERRIDE_NOTE,
+                "reasoningEffort" to EFFORT_OVERRIDE_NOTE,
+                "note" to "Optional: what the test is about, in the user's words (up to 1000 characters).",
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "restore_test_recording_raw",
+        "Undo rewrite_test_recording: put the recorded (raw) rows back exactly as they were, with their ids. Refused while the " +
+            "recording is being rewritten or applied.",
+        schema("sessionId" to "string", required = listOf("sessionId")),
     ),
     IndagiumToolDescriptor(
         "discard_test_recording",
