@@ -1285,9 +1285,13 @@ panel stacks below the editor.
    a script or a shared step before and after the whole suite.
 2. **New case.** Fill in the **Goal** (what the case verifies), **Preconditions**, and *Instructions for the
    agent*. A case can have its own setup/teardown hooks and, if you want to narrow it, a list of allowed tools.
-3. **Add steps.** Each step has an **Action** ("Open Settings and tap Wi-Fi") and an **Expected result**
-   ("The Wi-Fi list is shown"). Under *Settings*: **When it fails**, **Timeout** (default 60 s), **Retries**
-   (default 1, so a failing step is tried twice) and **Max tool calls** (default 15).
+3. **Add steps.** Each required step has an **Action** ("Open Settings and tap Wi-Fi") and an **Expected result**
+   ("The Wi-Fi list is shown"). Mark a step **Optional** and describe its **Condition** when it only applies in
+   some runs, such as "A Skip ad button is visible". The agent skips it when the condition is absent; this is a
+   non-failing `SKIPPED` result. Optional steps may omit an expected result; when applying a recording rewrite,
+   required steps need an expected result before they can be applied.
+   Under *Settings*: **When it fails**, **Timeout** (default 60 s), **Retries** (default 1, so a failing step is
+   tried twice) and **Max tool calls** (default 15).
 4. **When it fails** decides what happens once the retries are used up: *Stop the case*, *Continue*,
    *Create issue, continue* (a draft issue is made for you) or *Pause for me* (the run waits and you choose
    retry, continue or stop).
@@ -1317,33 +1321,45 @@ The case editor has four authoring helpers. **Draft with AI** uses a selected pr
 model and reasoning effort other than the profile's own) and returns a
 validated, editable preview; it does not edit the library or operate a device until you choose **Apply**. **Record
 from device** observes accepted input from a selected live mirror, then converts taps, swipes, keys and text into a
-reviewable ordered draft. It never injects input. Unsupported gestures are called out, and captured screen images
-are labeled as input-time context; they become expected-reference examples only if you explicitly opt in while
-reviewing. Add explicit judge checks separately when you want the judge to evaluate a screen. Enter expected
-results before applying. **Insert shared steps** copies a selected sequence at the chosen
+reviewable ordered draft. It never injects input. Unsupported gestures are called out. Screenshots with a clean capture
+interval are labeled as verified before/after evidence; a mirror preview with uncertain timing is still available as a raw
+preview but is not treated as either side automatically. An AI rewrite can leave a step for review when it cannot identify
+a tap target or expected result; fill the expected result before applying. Captured images become expected-reference
+examples only if you explicitly opt in while reviewing. Add explicit judge checks separately when you want the judge to
+evaluate a screen. **Insert shared steps** copies a selected sequence at the chosen
 position with fresh IDs, so later edits are independent; missing referenced images are reported. **Paste log lines**
 parses tag/message pairs into literal, regex-escaped log checks with the default wait duration. Edit the checks and
 choose the insertion position before adding them to the selected step.
 
 #### Readable steps from a recording
 
-While you record, Indagium also notes which app and screen is in front and which element each tap landed on (it
-reads the screen through adb after every input; a read can fail, then the row keeps only its coordinates and
-image). A slow swipe keeps its duration. To get steps a person can read:
+While you record, Indagium captures a screenshot before slower app and UI reads. It keeps the screenshot's acquisition
+interval separate from the full UI/activity probe: a fast image can still be useful if the later screen read overlaps an
+input, but it will not be labeled with that later app or activity. The app/activity before and after an input are reported
+separately and may be unavailable. A slow swipe keeps its duration. To get steps a person can read:
 
 1. **Record from device**, perform the test on the mirror, then **Stop and review**.
 2. Under **Rewrite with AI** choose a provider profile (and, if you want, a model and reasoning effort), optionally
    say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
-   recorded inputs, the screen text, the text you typed and screenshots from the device. **Text typed into a password
-   field is never recorded or sent**: it shows as `••••`.
-3. The raw taps and swipes are replaced by a few steps such as "Open YouTube" or "Search for 'lofi'", each with an
-   expected result. Every input you made is inside exactly one step; **From N recorded inputs** shows which. The AI's
-   notes (for example an input it thought was accidental) are shown above the steps. Edit any action or
-   expected result. The picture of the screen after a step can be used as an expected screenshot, but only if you tick
-   it.
+   recorded inputs, the screen text, the text you typed and screenshots from the device. Known password text is
+   masked in action descriptions and hidden from the AI; password-edit video windows are withheld when they can be
+   identified. The video timeline is copied from the mirror's existing stream
+   and can be inspected as a timestamped contact sheet around an input or within a short time range. Its frame-to-input
+   alignment is approximate; held static frames show their actual age, and gaps or missing video are reported. Video
+   frames from a known password-edit screen are withheld through a trusted screen transition or the end of the recording.
+   The rewrite brief marks available screenshots and UI readings; the AI reads only evidence needed to resolve an
+   uncertainty and reuses a capture shared by adjacent inputs.
+3. The raw taps and swipes are replaced by a few steps such as "Open YouTube", "Pause playback", or "Search for 'lofi'".
+   Every input you made is inside exactly one step; **From N recorded inputs** shows which. A launcher-to-app video
+   transition can support a broad action like opening that app without identifying a specific control. If evidence still
+   leaves a required action or result uncertain, the row keeps its original gesture and explains what needs review.
+   Incidental actions such as dismissing a skippable ad may be optional when their condition says when to perform them;
+   they can have no expected result and are skipped without failing the case when absent. The AI's notes (for example an
+   input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The picture
+   of the screen after a step can be used as an expected screenshot, but only if you tick it.
 4. **Undo rewrite** brings back the recorded rows exactly; **Rewrite again** always starts from them. Nothing is
-   added to the case until you press **Apply recorded steps**. It stays disabled until every step has an expected
-   result and says which ones are missing.
+   added to the case until you press **Apply recorded steps**. It stays disabled until every required step has an expected
+   result and every optional step has a condition.
 
 Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", with the original taps so
 the agent that runs the case has the precise gesture when a label is ambiguous. An MCP client does the same with

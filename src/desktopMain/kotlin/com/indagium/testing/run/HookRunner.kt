@@ -113,6 +113,6 @@ internal class HookRunner(
         )
         driver.drive(sequence, null, iteration, budget)
         val results = sequence.results()
-        return results.size == shared.steps.size && results.all { it.status == StepStatus.PASS }
+        return results.size == shared.steps.size && results.all { it.status == StepStatus.PASS || it.status == StepStatus.SKIPPED }
     }
 }

@@ -39,6 +39,145 @@ import kotlin.test.assertTrue
  */
 class EmbeddedDeviceSessionTest {
     @org.junit.Test(timeout = 20_000)
+    fun sharedRecordingSessionPublishesItsMuxedPacketsToVideoObservers() {
+        val stream = videoStream(
+            width = 64,
+            height = 96,
+            config = H264_FIXTURE.config,
+            packets = listOf(
+                Packet(0, true, H264_FIXTURE.key),
+                Packet(33_000, false, H264_FIXTURE.delta),
+            ),
+        )
+        val openedConnections = AtomicLong(0)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            openedConnections.incrementAndGet()
+            fakeConnection(stream)
+        }
+        val observed = CopyOnWriteArrayList<MirrorVideoPacket>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 0,
+        )
+        val subscription = session.addVideoPacketListener { observed += it }
+        try {
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue { observed.size >= 3 }
+            assertTrue(observed.first().config)
+            assertTrue(observed.any { it.keyFrame })
+            assertTrue(observed.any { !it.config && !it.keyFrame })
+            assertTrue(observed.all { it.width == 64 && it.height == 96 })
+            assertTrue(observed.all { it.connectionEpoch == observed.first().connectionEpoch })
+            assertEquals(1L, openedConnections.get(), "the video tap must reuse the recording stream")
+        } finally {
+            subscription.close()
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun sharedRecordingSessionClearsPacketPrerollAcrossRecordingStarts() {
+        val streams = mapOf(
+            "first-device" to videoStream(
+                width = 64,
+                height = 96,
+                config = H264_FIXTURE.config,
+                packets = listOf(Packet(111, true, H264_FIXTURE.key)),
+            ),
+            "second-device" to videoStream(
+                width = 64,
+                height = 96,
+                config = H264_FIXTURE.config,
+                packets = listOf(Packet(900, true, H264_FIXTURE.key)),
+            ),
+        )
+        val transport = EmbeddedMirrorTransport { serial, _ -> fakeConnection(requireNotNull(streams[serial])) }
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 0,
+        )
+        val observed = CopyOnWriteArrayList<MirrorVideoPacket>()
+        val subscriptions = mutableListOf<java.io.Closeable>()
+        try {
+            session.start("first-device", MirrorStreamOptions())
+            awaitTrue { session.hasReceivedFirstVideoPacket() && session.connectionSnapshot().state == EmbeddedMirrorState.FAILED }
+            session.stop()
+
+            subscriptions += session.addVideoPacketListener(observed::add)
+            assertTrue(observed.isEmpty(), "a new recording must not replay the previous device's config or GOP")
+
+            session.start("second-device", MirrorStreamOptions())
+            awaitTrue { observed.any { it.sourcePtsUs == 900L && it.keyFrame } }
+            assertTrue(observed.none { it.sourcePtsUs == 111L }, "only the current recording's packets may reach its listener")
+        } finally {
+            subscriptions.forEach { it.close() }
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun sharedReconnectClearsReplayBeforeLiveButPreservesAttachedObserver() {
+        val reconnectPayload = videoStreamPayload(
+            H264_FIXTURE.config,
+            listOf(Packet(900, true, H264_FIXTURE.key)),
+        )
+        val reconnectInput = DelayedPacketInputStream(videoStreamHeader(64, 96), reconnectPayload)
+        val opened = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            if (opened.getAndIncrement() == 0) {
+                fakeConnection(
+                    videoStream(64, 96, H264_FIXTURE.config, listOf(Packet(100, true, H264_FIXTURE.key))),
+                )
+            } else {
+                object : EmbeddedMirrorConnection {
+                    override val videoInput: InputStream = reconnectInput
+                    override val audioInput: InputStream? = null
+
+                    override fun sendControl(bytes: ByteArray) = Unit
+
+                    override fun close() = Unit
+                }
+            }
+        }
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 1,
+            reconnectDelay = Duration.ofMillis(1),
+        )
+        val allPackets = CopyOnWriteArrayList<MirrorVideoPacket>()
+        val allSubscription = session.addVideoPacketListener(allPackets::add)
+        var reconnectSubscription: java.io.Closeable? = null
+        try {
+            session.start("reconnect-device", MirrorStreamOptions())
+            awaitTrue {
+                session.connectionSnapshot().state == EmbeddedMirrorState.LIVE &&
+                    session.connectionSnapshot().reconnectAttempt == 1 &&
+                    reconnectInput.waitingForPayload.count == 0L
+            }
+            assertTrue(allPackets.any { it.keyFrame && it.sourcePtsUs == 100L })
+
+            val reconnectPackets = CopyOnWriteArrayList<MirrorVideoPacket>()
+            reconnectSubscription = session.addVideoPacketListener(reconnectPackets::add)
+            assertTrue(reconnectPackets.isEmpty(), "the new connection must not replay the prior GOP")
+
+            reconnectInput.releasePayload.countDown()
+            awaitTrue { reconnectPackets.any { it.keyFrame && it.sourcePtsUs == 900L } }
+            assertTrue(allPackets.any { it.keyFrame && it.sourcePtsUs == 900L })
+        } finally {
+            reconnectInput.releasePayload.countDown()
+            reconnectSubscription?.close()
+            allSubscription.close()
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
     fun writesVideoStartingAtZeroAndReportsVideoStartElapsedOnFirstPacket() {
         val stream = videoStream(
             width = 100,
@@ -571,12 +710,20 @@ class EmbeddedDeviceSessionTest {
     }.toByteArray()
 
     private fun videoStream(width: Int, height: Int, config: ByteArray, packets: List<Packet>): ByteArray =
+        videoStreamHeader(width, height) + videoStreamPayload(config, packets)
+
+    private fun videoStreamHeader(width: Int, height: Int): ByteArray = ByteArrayOutputStream().also { out ->
+        DataOutputStream(out).apply {
+            writeInt(ScrcpyCodecIds.H264)
+            writeInt(0x80000000.toInt())
+            writeInt(width)
+            writeInt(height)
+        }
+    }.toByteArray()
+
+    private fun videoStreamPayload(config: ByteArray, packets: List<Packet>): ByteArray =
         ByteArrayOutputStream().also { out ->
             DataOutputStream(out).apply {
-                writeInt(ScrcpyCodecIds.H264)
-                writeInt(0x80000000.toInt())
-                writeInt(width)
-                writeInt(height)
                 writeLong(1L shl 62)
                 writeInt(config.size)
                 write(config)
@@ -608,6 +755,35 @@ class EmbeddedDeviceSessionTest {
             Thread.sleep(10)
         }
         assertTrue(condition(), "condition was not met before timeout")
+    }
+
+    private class DelayedPacketInputStream(prefix: ByteArray, payload: ByteArray) : InputStream() {
+        private val prefixInput = ByteArrayInputStream(prefix)
+        private val payloadInput = ByteArrayInputStream(payload)
+        val waitingForPayload = CountDownLatch(1)
+        val releasePayload = CountDownLatch(1)
+
+        override fun read(): Int {
+            val single = ByteArray(1)
+            val count = read(single, 0, single.size)
+            return if (count < 0) -1 else single[0].toInt() and 0xff
+        }
+
+        override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val prefixCount = prefixInput.read(buffer, off, len)
+            if (prefixCount >= 0) return prefixCount
+            waitingForPayload.countDown()
+            try {
+                releasePayload.await()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return -1
+            }
+            return payloadInput.read(buffer, off, len)
+        }
+
+        override fun close() = Unit
     }
 
     private companion object {

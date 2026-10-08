@@ -38,10 +38,13 @@ internal data class JudgedStatus(val status: StepStatus, val inconclusive: Boole
 internal fun hasJudgeChecks(step: TestStep): Boolean = step.checks.any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge }
 
 /** Whether the judge is asked about an attempt. A step with judge checks always needs it: nothing else can answer them. */
-internal fun shouldJudge(mode: JudgeMode, step: TestStep, claim: LaneStepStatus, deterministicFailed: Boolean): Boolean = when (mode) {
-    JudgeMode.OFF -> false
-    JudgeMode.EVERY_STEP -> true
-    JudgeMode.FAILURES_ONLY -> deterministicFailed || claim != LaneStepStatus.PASS || hasJudgeChecks(step)
+internal fun shouldJudge(mode: JudgeMode, step: TestStep, claim: LaneStepStatus, deterministicFailed: Boolean): Boolean {
+    if (claim == LaneStepStatus.SKIPPED || step.optional && step.expected.isBlank() && step.checks.isEmpty()) return false
+    return when (mode) {
+        JudgeMode.OFF -> false
+        JudgeMode.EVERY_STEP -> true
+        JudgeMode.FAILURES_ONLY -> deterministicFailed || claim != LaneStepStatus.PASS || hasJudgeChecks(step)
+    }
 }
 
 internal fun settleWithJudge(base: StepStatus, judgement: StepJudgement?, requiresVerdict: Boolean = false): JudgedStatus {

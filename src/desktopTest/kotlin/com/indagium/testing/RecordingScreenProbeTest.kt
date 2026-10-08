@@ -7,6 +7,7 @@ import com.indagium.testing.authoring.RecordedPoint
 import com.indagium.testing.authoring.RecordingAdb
 import com.indagium.testing.authoring.RecordingScreenProbe
 import com.indagium.testing.authoring.RecordingScreenState
+import com.indagium.testing.authoring.RecordingScreenshotEvidence
 import com.indagium.testing.authoring.TappedElement
 import com.indagium.testing.authoring.parseTopActivity
 import com.indagium.testing.authoring.resolveTappedElement
@@ -113,18 +114,30 @@ class RecordingScreenProbeTest {
 
     @Test
     fun aProbeReadsHierarchyActivityAndImageWithinItsClockWindow() {
-        val times = ArrayDeque(listOf(1_000L, 1_450L))
+        val times = ArrayDeque(listOf(1_000L, 1_010L, 1_020L, 1_450L))
         val calls = mutableListOf<List<String>>()
-        val probe = RecordingScreenProbe(fakeAdb(result(dump), result(dumpsysApi31), calls), screencap = ::png, clock = { times.removeFirst() })
-        val state = assertNotNull(probe.read())
-        assertEquals(1_000L, state.startedAt)
+        val order = mutableListOf<String>()
+        val adb = RecordingAdb { arguments, _, _ ->
+            order += if (arguments == UI_DUMP_COMMAND) "hierarchy" else "activity"
+            calls += arguments
+            if (arguments == UI_DUMP_COMMAND) result(dump) else result(dumpsysApi31)
+        }
+        val probe = RecordingScreenProbe(adb, screencap = { order += "screenshot"; png() }, clock = { times.removeFirst() })
+        var earlyEvidence: RecordingScreenshotEvidence? = null
+        val state = assertNotNull(probe.read { evidence -> earlyEvidence = evidence; order += "delivered" })
+        assertEquals(1_020L, state.startedAt)
         assertEquals(1_450L, state.finishedAt)
+        assertEquals(1_000L, state.screenshotStartedAt)
+        assertEquals(1_010L, state.screenshotFinishedAt)
+        assertEquals(1_000L, earlyEvidence?.acquiredAtMs)
+        assertEquals(1_010L, earlyEvidence?.acquisitionFinishedAtMs)
         assertEquals("com.example.shop", state.packageName)
         assertEquals(".checkout.CheckoutActivity", state.activity)
         assertEquals(1000 to 2000, state.screenWidth to state.screenHeight)
         assertTrue(state.nodes.any { it.text == "Search" })
         val image = ImageIO.read(ByteArrayInputStream(assertNotNull(state.screenshotJpeg)))
         assertEquals(20, image.width)
+        assertEquals(listOf("screenshot", "delivered", "hierarchy", "activity"), order)
         assertEquals(listOf(UI_DUMP_COMMAND, listOf("shell", "dumpsys", "activity", "activities")), calls)
     }
 

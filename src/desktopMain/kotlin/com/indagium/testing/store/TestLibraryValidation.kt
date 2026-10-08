@@ -1,6 +1,7 @@
 package com.indagium.testing.store
 
 import com.indagium.debug.requireValidAndroidPackageName
+import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.MAX_TAG_CHARS
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.SharedStep
@@ -59,15 +60,25 @@ private fun validateRegex(regex: String): String? = when {
 private fun validateDuration(label: String, value: Long): String? =
     if (value in 1..MAX_STEP_TIMEOUT_MS) null else "$label must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
 
-internal fun validateStep(step: TestStep): String? {
-    if (step.timeoutMs !in 1..MAX_STEP_TIMEOUT_MS) return "Step timeout must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
-    if (step.retries !in 0..MAX_STEP_RETRIES) return "Step retries must be between 0 and $MAX_STEP_RETRIES."
-    if (step.maxToolCalls !in MIN_STEP_MAX_TOOL_CALLS..MAX_STEP_MAX_TOOL_CALLS) {
-        return "Step max tool calls must be between $MIN_STEP_MAX_TOOL_CALLS and $MAX_STEP_MAX_TOOL_CALLS."
-    }
-    if (step.checks.map { it.id }.distinct().size != step.checks.size) return "Check ids must be unique within a step."
-    if (step.examples.map { it.id }.distinct().size != step.examples.size) return "Example ids must be unique within a step."
-    return step.checks.firstNotNullOfOrNull { validateCheck(it) }
+internal fun validateStep(step: TestStep): String? =
+    validateStepSettings(step) ?: validateStepCondition(step) ?: step.checks.firstNotNullOfOrNull { validateCheck(it) }
+
+private fun validateStepSettings(step: TestStep): String? = when {
+    step.timeoutMs !in 1..MAX_STEP_TIMEOUT_MS -> "Step timeout must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
+    step.retries !in 0..MAX_STEP_RETRIES -> "Step retries must be between 0 and $MAX_STEP_RETRIES."
+    step.maxToolCalls !in MIN_STEP_MAX_TOOL_CALLS..MAX_STEP_MAX_TOOL_CALLS ->
+        "Step max tool calls must be between $MIN_STEP_MAX_TOOL_CALLS and $MAX_STEP_MAX_TOOL_CALLS."
+    step.checks.map { it.id }.distinct().size != step.checks.size -> "Check ids must be unique within a step."
+    step.examples.map { it.id }.distinct().size != step.examples.size -> "Example ids must be unique within a step."
+    else -> null
+}
+
+private fun validateStepCondition(step: TestStep): String? = when {
+    step.optional && step.condition.isNullOrBlank() -> "An optional step needs a condition that explains when to perform it."
+    !step.optional && !step.condition.isNullOrBlank() -> "A step condition can be used only on an optional step."
+    step.condition != null && step.condition.length > MAX_STEP_CONDITION_CHARS ->
+        "Step condition is longer than $MAX_STEP_CONDITION_CHARS characters."
+    else -> null
 }
 
 internal fun validateCase(case: TestCase): String? =

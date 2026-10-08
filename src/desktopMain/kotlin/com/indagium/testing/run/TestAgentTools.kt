@@ -61,7 +61,7 @@ internal val LANE_FREE_TOOL_NAMES: Set<String> = LANE_PROTOCOL_TOOL_NAMES
 
 private val GLOBAL_TOOL_NAMES: Set<String> by lazy { MCP_TOOLS.map { it.name }.toSet() }
 
-enum class LaneStepStatus { PASS, FAIL, BLOCKED }
+enum class LaneStepStatus { PASS, FAIL, BLOCKED, SKIPPED }
 
 /** What the agent is currently asked to do. */
 internal data class LaneStepBrief(
@@ -75,6 +75,8 @@ internal data class LaneStepBrief(
     /** Short, permission-filtered references for the current step; returned by protocol tools on every step transition. */
     val examples: List<LaneStepExampleBrief> = emptyList(),
     val availableExampleTools: List<String> = emptyList(),
+    val optional: Boolean = false,
+    val condition: String? = null,
 )
 
 internal data class LaneStepExampleBrief(val exampleId: String, val kind: String, val caption: String)
@@ -276,7 +278,7 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
         IndagiumToolDescriptor(
             "get_current_step",
-            "Read the step you are working on: its action, what is expected, its position in the case and the attempt number.",
+            "Read the step you are working on: its action, expected result and any optional condition, its position and attempt.",
             schema(),
         ),
         guarded {
@@ -288,6 +290,8 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "stepCount" to step.stepCount,
                 "action" to step.action,
                 "expected" to step.expected,
+                "optional" to step.optional,
+                "condition" to step.condition,
                 "attempt" to step.attempt,
             ) + step.exampleMetadata()
         },
@@ -308,14 +312,15 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
             "finish_step",
             "End the current step. Call it exactly once per step, after you did the action and looked at the result. " +
                 "status is pass when what you see matches what is expected, fail when it does not, blocked when you could " +
-                "not do the action at all. observation says what you actually saw. The answer tells you the next step, " +
+                "not do the action at all. For an optional step only, use skipped when its stated condition is absent; explain " +
+                "what you checked in observation. observation says what you actually saw. The answer tells you the next step, " +
                 "that you must redo this one, or that the case is over.",
             schema(
                 "status" to "string", "observation" to "string",
                 required = listOf("status", "observation"),
                 enums = mapOf("status" to LaneStepStatus.entries.map { it.name.lowercase() }),
                 descriptions = mapOf(
-                    "status" to "pass, fail or blocked.",
+                    "status" to "pass, fail, blocked, or skipped only for an optional step whose condition is absent.",
                     "observation" to "What you actually saw on the device, in plain words.",
                 ),
             ),

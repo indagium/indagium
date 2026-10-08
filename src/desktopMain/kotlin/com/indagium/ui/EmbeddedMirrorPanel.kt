@@ -109,6 +109,7 @@ import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirror.MirrorTouchAction
+import com.indagium.capture.mirror.MirrorVideoPacket
 import com.indagium.capture.mirror.ScrcpyControlEncoder
 import com.indagium.debug.AppLogger
 import com.indagium.model.LogTab
@@ -416,6 +417,9 @@ internal class EmbeddedMirrorHandle private constructor(
         }
         return accepted
     }
+
+    /** Observes compressed frames from the backend's existing stream. The listener only queues data and must not block. */
+    internal fun observeVideoPackets(listener: (MirrorVideoPacket) -> Unit): Closeable = backend.observeVideoPackets(listener)
 
     /** Whether this mirror's device stream has an audio track to play — see [MirrorBackend.hasLiveAudio]. */
     val hasLiveAudio: Boolean get() = backend.hasLiveAudio
@@ -806,6 +810,8 @@ internal interface MirrorBackend : Closeable {
 
     fun send(command: MirrorControlCommand): Boolean
 
+    fun observeVideoPackets(listener: (MirrorVideoPacket) -> Unit): Closeable = Closeable { }
+
     /** Whether calling [start] again for [serial] right now would be redundant — see
      * [EmbeddedMirrorHandle.start]'s doc for why this can't be answered the same way for both
      * backends. */
@@ -875,6 +881,8 @@ internal interface MirrorBackend : Closeable {
         override fun stop() = runtime.stop()
 
         override fun send(command: MirrorControlCommand): Boolean = runtime.send(command)
+
+        override fun observeVideoPackets(listener: (MirrorVideoPacket) -> Unit): Closeable = runtime.addVideoPacketListener(listener)
 
         /** Compose has decoded a replacement frame from the existing connection. */
         fun hideMacSurface() {
@@ -1371,6 +1379,8 @@ internal interface MirrorBackend : Closeable {
 
         override fun send(command: MirrorControlCommand): Boolean =
             session.sendControl(ScrcpyControlEncoder.encode(command))
+
+        override fun observeVideoPackets(listener: (MirrorVideoPacket) -> Unit): Closeable = session.addVideoPacketListener(listener)
 
         override val hasLiveAudio: Boolean get() = session.hasAudioStream()
 

@@ -92,6 +92,8 @@ internal class ScrcpyToAnnexBInputStream(rawInput: InputStream) : InputStream() 
 internal class BoundedScrcpyAnnexBFeed(
     private val rawInput: InputStream,
     capacity: Int = DEFAULT_CAPACITY,
+    private val connectionEpoch: Long = 0L,
+    private val onPacket: (MirrorVideoPacket) -> Unit = {},
 ) : Closeable {
     private val feed = BoundedAnnexBFeed(capacity)
     val input: InputStream = feed.input
@@ -103,11 +105,37 @@ internal class BoundedScrcpyAnnexBFeed(
                 ScrcpyStreamHeader.Disabled -> throw IOException("scrcpy video stream is disabled")
                 ScrcpyStreamHeader.Error -> throw ScrcpyStreamErrorException("scrcpy reported a server configuration error")
             }
+            var width = 0
+            var height = 0
+            var sequence = 0L
             while (true) {
                 val event = reader.readNext() ?: break
                 when (event) {
-                    is ScrcpyStreamEvent.SessionMeta -> Unit
-                    is ScrcpyStreamEvent.Packet -> feed.offer(event.data, event.config, event.keyFrame)
+                    is ScrcpyStreamEvent.SessionMeta -> {
+                        width = event.width
+                        height = event.height
+                    }
+                    is ScrcpyStreamEvent.Packet -> {
+                        val receivedAtNanos = System.nanoTime()
+                        val receivedAtMs = System.currentTimeMillis()
+                        runCatching {
+                            onPacket(
+                                MirrorVideoPacket(
+                                    sourcePtsUs = event.ptsUs,
+                                    config = event.config,
+                                    keyFrame = event.keyFrame,
+                                    data = event.data,
+                                    width = width,
+                                    height = height,
+                                    receivedAtMs = receivedAtMs,
+                                    receivedAtNanos = receivedAtNanos,
+                                    connectionEpoch = connectionEpoch,
+                                    sequence = ++sequence,
+                                ),
+                            )
+                        }
+                        feed.offer(event.data, event.config, event.keyFrame)
+                    }
                 }
             }
         } catch (_: EOFException) {
@@ -158,8 +186,20 @@ internal class BoundedScrcpyPacketFeed(
     private val packetLimit: Int = MAX_PACKETS,
     startPump: Boolean = true,
     private val closeInputOnClose: Boolean = true,
+    private val connectionEpoch: Long = 0L,
+    private val onPacket: (Packet) -> Unit = {},
 ) : Closeable {
-    data class Packet(val ptsUs: Long, val config: Boolean, val keyFrame: Boolean, val data: ByteArray, val enqueuedNs: Long = System.nanoTime())
+    data class Packet(
+        val ptsUs: Long,
+        val config: Boolean,
+        val keyFrame: Boolean,
+        val data: ByteArray,
+        val enqueuedNs: Long = System.nanoTime(),
+        val width: Int = 0,
+        val height: Int = 0,
+        val receivedAtMs: Long = System.currentTimeMillis(),
+        val connectionEpoch: Long = 0L,
+    )
 
     private val lock = Object()
     private val queue = ArrayDeque<Packet>()
@@ -188,10 +228,30 @@ internal class BoundedScrcpyPacketFeed(
                     is ScrcpyStreamHeader.Codec -> Unit
                     else -> throw IOException("scrcpy video stream is unavailable")
                 }
+                var width = 0
+                var height = 0
                 while (true) {
                     val event = reader.readNext() ?: break
-                    if (event is ScrcpyStreamEvent.Packet) {
-                        offer(Packet(event.ptsUs, event.config, event.keyFrame, event.data, nanoTime()))
+                    when (event) {
+                        is ScrcpyStreamEvent.SessionMeta -> {
+                            width = event.width
+                            height = event.height
+                        }
+                        is ScrcpyStreamEvent.Packet -> {
+                            val packet = Packet(
+                                event.ptsUs,
+                                event.config,
+                                event.keyFrame,
+                                event.data,
+                                nanoTime(),
+                                width,
+                                height,
+                                System.currentTimeMillis(),
+                                connectionEpoch,
+                            )
+                            runCatching { onPacket(packet) }
+                            offer(packet)
+                        }
                     }
                 }
             } catch (_: IOException) {

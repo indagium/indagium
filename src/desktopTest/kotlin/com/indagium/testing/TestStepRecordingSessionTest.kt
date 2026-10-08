@@ -7,9 +7,14 @@ import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.authoring.RecordedInputKind
+import com.indagium.testing.authoring.RecordingScreenState
+import com.indagium.testing.authoring.RecordingScreenshotEvidence
+import com.indagium.testing.authoring.RecordingScreenshotSource
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.recordingApplyBlockedReason
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -32,6 +37,8 @@ class TestStepRecordingSessionTest {
     )
 
     private fun frame() = MirrorFrame(16, 12, IntArray(16 * 12) { 0xff44aa77.toInt() })
+
+    private fun png(): ByteArray = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(16, 12, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
 
     @Test
     fun tapSwipeLongPressKeyTextAndImageContextAreRecordedInOrder() = runBlocking {
@@ -58,9 +65,8 @@ class TestStepRecordingSessionTest {
         assertEquals("Press Enter", snapshot.steps[3].action)
         assertEquals("Enter text: hello fixture", snapshot.steps[4].action)
         assertTrue(snapshot.steps.all { "UI hierarchy isn't exposed" in it.screenContext.orEmpty() })
-        val screenshot = snapshot.steps.first().screenshotJpeg
-        assertNotNull(screenshot)
-        val decoded = ImageIO.read(ByteArrayInputStream(screenshot!!))
+        val screenshot = assertNotNull(snapshot.steps.first().screenshotJpeg)
+        val decoded = ImageIO.read(ByteArrayInputStream(screenshot))
         assertNotNull(decoded)
         assertTrue(decoded.width <= 1280 && decoded.height <= 1280)
         session.close()
@@ -113,7 +119,7 @@ class TestStepRecordingSessionTest {
         val defaultStep = session.toTestSteps { "assets/context.jpg" }.single()
         assertTrue(defaultStep.examples.none { it is com.indagium.testing.model.StepExample.GoldenScreenshot })
         val inputContext = defaultStep.examples.filterIsInstance<com.indagium.testing.model.StepExample.ReferenceLog>().single()
-        assertTrue(inputContext.caption.contains("before this action"))
+        assertTrue(inputContext.caption.contains("Recorded input context"))
         assertTrue(inputContext.text.contains("UI hierarchy isn't exposed"))
 
         assertTrue(session.updateReviewedSteps(listOf("open settings" to "settings screen is open"), setOf(row.id)))
@@ -122,9 +128,97 @@ class TestStepRecordingSessionTest {
         assertTrue(
             reviewedStep.examples
                 .filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>()
-                .single().caption.contains("captured at input time"),
+                .single().caption.contains("uncertain raw input preview"),
         )
         session.close()
+    }
+
+    @Test
+    fun adbPreviewTimingCoversCaptureOnlyAndCanBecomeEligibleAfterEvidence() = runBlocking {
+        val times = ArrayDeque(listOf(1_010L, 1_020L))
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            screencap = ::png,
+            wallClockMs = { times.removeFirst() },
+        )
+        session.accept(MirrorControlCommand.Text("open settings"), nowMs = 1_000)
+        val row = session.stopAndDrain().steps.single()
+
+        assertEquals(RecordingScreenshotSource.ADB_INPUT, row.screenshotSource)
+        assertEquals(1_010L, row.screenshotAcquiredAtMs)
+        assertEquals(1_020L, row.screenshotAcquisitionFinishedAtMs)
+        assertFalse(row.screenshotTimingUncertain)
+        val inputScreenshot = assertNotNull(row.screenshotJpeg)
+        val afterScreenshot = assertNotNull(row.afterScreenshot)
+        assertTrue(inputScreenshot.contentEquals(afterScreenshot.jpeg))
+        assertEquals(1_010L, afterScreenshot.acquiredAtMs)
+        session.close()
+    }
+
+    @Test
+    fun anEarlyProbeImageSurvivesWhenTheUiActivityReadExceedsTheDrainBudget() = runBlocking {
+        val captured = CountDownLatch(1)
+        val releaseProbe = CountDownLatch(1)
+        val image = byteArrayOf(1, 2, 3)
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            screenProbeWithScreenshot = { onScreenshot ->
+                onScreenshot(RecordingScreenshotEvidence(image, RecordingScreenshotSource.SCREEN_PROBE, 0, 50, false))
+                captured.countDown()
+                releaseProbe.await(5, TimeUnit.SECONDS)
+                RecordingScreenState(0, 60, 250, "com.example.youtube", ".Main", emptyList(), 0, 0)
+            },
+            probeDrainTimeoutMs = 20,
+        )
+        assertTrue(captured.await(2, TimeUnit.SECONDS))
+        session.accept(touch(MirrorTouchAction.DOWN, 1, 54, 62), nowMs = 100)
+        session.accept(touch(MirrorTouchAction.UP, 1, 54, 62), nowMs = 200)
+
+        val row = session.stopAndDrain().steps.single()
+        assertTrue(image.contentEquals(row.beforeScreenshot?.jpeg), "the pre-input image is retained independently of the slow probe")
+        assertNull(row.before, "the overlapping UI/activity result cannot be attached to the earlier image")
+        assertTrue(session.snapshot.value.warnings.any { "last screen context could not be read" in it })
+        releaseProbe.countDown()
+        session.close()
+    }
+
+    @Test
+    fun legacyImageOnlyProbeStatesUseFullProbeIntervalsWithoutAttachingUiRefs() = runBlocking {
+        val probeCalls = AtomicInteger()
+        val beforeImage = byteArrayOf(10, 11)
+        val afterImage = byteArrayOf(20, 21)
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            screenProbe = {
+                when (probeCalls.incrementAndGet()) {
+                    1 -> RecordingScreenState(0, 0, 50, null, null, emptyList(), 0, 0, screenshotJpeg = beforeImage)
+                    2 -> RecordingScreenState(0, 150, 160, null, null, emptyList(), 0, 0, screenshotJpeg = afterImage)
+                    else -> null
+                }
+            },
+            settleDelayMs = 0,
+        )
+
+        awaitStoredProbeState(session, 1)
+        session.accept(MirrorControlCommand.Text("open settings"), nowMs = 100)
+        awaitStoredProbeState(session, 2)
+        val row = session.stopAndDrain().steps.single()
+
+        assertTrue(beforeImage.contentEquals(row.beforeScreenshot?.jpeg))
+        assertTrue(afterImage.contentEquals(row.afterScreenshot?.jpeg))
+        assertNull(row.before, "an image-only legacy probe must not manufacture a before UI/app reference")
+        assertNull(row.after, "an image-only legacy probe must not manufacture an after UI/app reference")
+        assertEquals(0L, row.beforeScreenshot?.acquiredAtMs)
+        assertEquals(50L, row.beforeScreenshot?.acquisitionFinishedAtMs)
+        assertEquals(150L, row.afterScreenshot?.acquiredAtMs)
+        assertEquals(160L, row.afterScreenshot?.acquisitionFinishedAtMs)
+        session.close()
+    }
+
+    private suspend fun awaitStoredProbeState(session: TestStepRecordingSession, seq: Int) {
+        withTimeout(2_000L) {
+            while (session.screenState(seq) == null) delay(5)
+        }
     }
 
     @Test

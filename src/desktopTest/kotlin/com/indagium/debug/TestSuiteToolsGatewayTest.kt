@@ -661,6 +661,64 @@ class TestSuiteToolsGatewayTest {
     }
 
     @Test
+    fun optionalStepConditionIsValidatedAndCanBeDisabledThroughMcp() {
+        val case = caseIn(suiteNamed("Conditional").id(), "Watch video")
+        val required = stepIn(case.id(), "Skip ad")
+        assertError(
+            call("create_test_step", "caseId" to case.id(), "action" to "Skip ad", "optional" to true),
+            "condition is required",
+        )
+        assertError(
+            call("create_test_step", "caseId" to case.id(), "action" to "Skip ad", "optional" to "true", "condition" to "button shown"),
+            "optional must be a boolean",
+        )
+        assertError(
+            call("create_test_step", "caseId" to case.id(), "action" to "Skip ad", "optional" to true, "condition" to "  "),
+            "condition is required",
+        )
+        assertError(
+            call("update_test_step", "stepId" to required.id(), "optional" to true),
+            "condition is required",
+        )
+        assertError(
+            call("update_test_step", "stepId" to required.id(), "optional" to "true", "condition" to "button shown"),
+            "optional must be a boolean",
+        )
+        assertError(
+            call("update_test_step", "stepId" to required.id(), "optional" to true, "condition" to " "),
+            "condition is required",
+        )
+        val enabled = assertOk(
+            call(
+                "update_test_step",
+                "stepId" to required.id(),
+                "optional" to true,
+                "condition" to "A visible Skip ad button appears.",
+            ),
+        )
+        assertEquals(true, enabled["optional"])
+        assertEquals("A visible Skip ad button appears.", enabled["condition"])
+
+        val optional = assertOk(
+            call(
+                "create_test_step",
+                "caseId" to case.id(),
+                "action" to "Skip ad",
+                "expected" to "",
+                "optional" to true,
+                "condition" to "A visible Skip ad button appears.",
+            ),
+        )
+        assertEquals(true, optional["optional"])
+        assertEquals("A visible Skip ad button appears.", optional["condition"])
+        assertEquals("", optional["expected"])
+
+        val disabled = assertOk(call("update_test_step", "stepId" to optional.id(), "optional" to false))
+        assertEquals(false, disabled["optional"])
+        assertNull(disabled["condition"], "turning optional off also clears the now-invalid condition")
+    }
+
+    @Test
     fun danglingScriptAndSharedStepReferencesAreWarningsNotErrors() {
         val suite = assertOk(
             call(

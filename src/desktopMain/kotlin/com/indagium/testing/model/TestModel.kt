@@ -164,6 +164,10 @@ data class TestStep(
     /** How many lane-tool calls the agent may spend on this step before the run gives up on it. */
     val maxToolCalls: Int = DEFAULT_STEP_MAX_TOOL_CALLS,
     val onFailure: OnFailure = OnFailure.STOP_CASE,
+    /** When true, the lane may skip this step if [condition] is not present on the device. */
+    val optional: Boolean = false,
+    /** A visible, testable condition that must be present before an optional step is performed. */
+    val condition: String? = null,
 )
 
 /**

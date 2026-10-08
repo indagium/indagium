@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
@@ -96,26 +97,74 @@ private const val EXAMPLES_KEY = "examples"
  * The step id is never read from the arguments.
  */
 internal fun applyStepFields(args: ToolArgs, base: TestStep, label: String = "step"): TestStep {
-    val ids = IdAllocator()
-    val examples = args.objects(EXAMPLES_KEY)?.let { parseExamples(it, ids, "$label.$EXAMPLES_KEY") } ?: base.examples.also { list ->
-        ids.reserve(list.map { it.id })
-    }
-    val checks = args.objects(CHECKS_KEY)?.let { parseChecks(it, ids, "$label.$CHECKS_KEY") } ?: base.checks.also { list ->
-        ids.reserve(list.map { it.id })
-    }
+    val optionalFields = parseStepOptionalFields(args, base, label)
+    val collections = parseStepCollections(args, base, label)
     val step = base.copy(
-        action = args.string("action")?.also { if (it.isBlank()) toolArgError("$label.action must not be blank.") } ?: base.action,
+        action = readStepAction(args, base, label),
         expected = args.string("expected") ?: base.expected,
         timeoutMs = args.long("timeoutMs") ?: base.timeoutMs,
         retries = args.int("retries") ?: base.retries,
         maxToolCalls = args.int("maxToolCalls") ?: base.maxToolCalls,
         onFailure = args.enum("onFailure", OnFailure.entries) ?: base.onFailure,
-        checks = checks,
-        examples = examples,
+        optional = optionalFields.optional,
+        condition = optionalFields.condition,
+        checks = collections.checks,
+        examples = collections.examples,
     )
+    validateStepOptionalFields(step, label)
+    validateStepExampleReferences(step, label)
+    return step
+}
+
+private data class StepOptionalFields(val optional: Boolean, val condition: String?)
+
+private data class StepCollections(val checks: List<StepCheck>, val examples: List<StepExample>)
+
+private fun parseStepOptionalFields(args: ToolArgs, base: TestStep, label: String): StepOptionalFields {
+    if (args.hasKey("optional") && args.map["optional"] !is Boolean) toolArgError("$label.optional must be a boolean.")
+    if (args.hasKey("condition") && args.map["condition"] != null && args.map["condition"] !is String) {
+        toolArgError("$label.condition must be a string or null.")
+    }
+    val requestedOptional = args.bool("optional")
+    val optional = requestedOptional ?: base.optional
+    val condition = when {
+        args.hasKey("condition") -> args.string("condition")?.trim()?.takeIf(String::isNotEmpty)
+        requestedOptional == false -> null
+        else -> base.condition
+    }
+    val fields = StepOptionalFields(optional, condition)
+    validateStepOptionalFields(fields, label)
+    return fields
+}
+
+private fun parseStepCollections(args: ToolArgs, base: TestStep, label: String): StepCollections {
+    val ids = IdAllocator()
+    val examples = args.objects(EXAMPLES_KEY)?.let { parseExamples(it, ids, "$label.$EXAMPLES_KEY") } ?: base.examples.also {
+        ids.reserve(it.map { example -> example.id })
+    }
+    val checks = args.objects(CHECKS_KEY)?.let { parseChecks(it, ids, "$label.$CHECKS_KEY") } ?: base.checks.also {
+        ids.reserve(it.map { check -> check.id })
+    }
+    return StepCollections(checks, examples)
+}
+
+private fun readStepAction(args: ToolArgs, base: TestStep, label: String): String =
+    args.string("action")?.also { if (it.isBlank()) toolArgError("$label.action must not be blank.") } ?: base.action
+
+private fun validateStepOptionalFields(step: TestStep, label: String) =
+    validateStepOptionalFields(StepOptionalFields(step.optional, step.condition), label)
+
+private fun validateStepOptionalFields(fields: StepOptionalFields, label: String) {
+    if (fields.optional && fields.condition.isNullOrBlank()) toolArgError("$label.condition is required for an optional step.")
+    if (!fields.optional && !fields.condition.isNullOrBlank()) toolArgError("$label.condition requires optional=true.")
+    if (fields.condition != null && fields.condition.length > MAX_STEP_CONDITION_CHARS) {
+        toolArgError("$label.condition may not exceed $MAX_STEP_CONDITION_CHARS characters.")
+    }
+}
+
+private fun validateStepExampleReferences(step: TestStep, label: String) {
     val dangling = step.checks.mapNotNull { it.exampleRefOrNull() }.firstOrNull { ref -> step.examples.none { it.id == ref } }
     if (dangling != null) toolArgError("$label: a screenJudge check's exampleRef '$dangling' does not match an example of this step.")
-    return step
 }
 
 /** A brand-new step (fresh id) from one element of a `steps` array. */

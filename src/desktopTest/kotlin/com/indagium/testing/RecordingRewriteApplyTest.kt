@@ -2,10 +2,13 @@
 
 package com.indagium.testing
 
+import com.indagium.capture.mirror.MirrorControlCommand
+import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.authoring.RecordingRewrite
 import com.indagium.testing.authoring.RecordingRewriteService
 import com.indagium.testing.authoring.TestStepRecordingApplyService
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.StoreResult
@@ -48,13 +51,14 @@ class RecordingRewriteApplyTest {
         }
         assertEquals(
             listOf(
-                "1. Tap at (54%, 31%) | element: \"Search\" id=search_button class=Button | app: $SHOP_PACKAGE",
-                "2. Enter text: lofi",
+                "1. Tap at (54%, 31%) | element: \"Search\" id=search_button class=Button | before app: $SHOP_PACKAGE " +
+                    "| before activity: .HomeActivity | after app: unavailable | after activity: unavailable",
+                "2. Enter text: lofi | before app: unavailable | before activity: unavailable | after app: unavailable | after activity: unavailable",
             ),
             steps[0].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines(),
         )
         assertEquals(
-            listOf("3. Press Enter | app: $SHOP_PACKAGE"),
+            listOf("3. Press Enter | before app: unavailable | before activity: unavailable | after app: $SHOP_PACKAGE | after activity: .ResultsActivity"),
             steps[1].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines(),
         )
     }
@@ -73,7 +77,7 @@ class RecordingRewriteApplyTest {
         assertTrue(steps[0].examples.none { it is StepExample.GoldenScreenshot })
         val golden = steps[1].examples.filterIsInstance<StepExample.GoldenScreenshot>().single()
         assertEquals("assets/after-search.jpg", golden.assetPath)
-        assertTrue("after the recorded inputs" in golden.caption, golden.caption)
+        assertTrue("verified after evidence" in golden.caption, golden.caption)
         assertTrue(steps[1].examples.first() is StepExample.ReferenceLog, "the hint stays")
     }
 
@@ -94,7 +98,7 @@ class RecordingRewriteApplyTest {
         val raw = session.toTestSteps()
         assertEquals(3, raw.size)
         val contexts = raw.map { it.examples.single() }
-        assertTrue(contexts.all { it is StepExample.ReferenceLog && it.caption.startsWith("Input-time") }, "raw rows apply as before")
+        assertTrue(contexts.all { it is StepExample.ReferenceLog && it.caption.startsWith("Recorded input context") }, "raw rows apply as before")
     }
 
     @Test
@@ -144,6 +148,32 @@ class RecordingRewriteApplyTest {
     }
 
     @Test
+    fun aConditionedOptionalBlankExpectedIsAppliedAndKeepsItsSeparateRequiredStep() = runBlocking {
+        val response = """{"steps":[
+            {"action":"Dismiss the ad if Skip ad appears","expected":"","optional":true,
+                "condition":"A visible Skip ad button appears.","sourceInputs":[1]},
+            {"action":"Pause playback","expected":"The player shows paused state","sourceInputs":[2,3]}
+        ]}"""
+        val session = rewritten(response)
+        val inserted = mutableListOf<TestStep>()
+        val applier = TestStepRecordingApplyService(
+            preflight = { _, _ -> StoreResult.Ok(Unit) },
+            importImage = { _, _ -> error("not ticked") },
+            resolveImage = { _, _ -> File("unused") },
+            insertSteps = { _, steps, _ -> inserted += steps; StoreResult.Ok(steps) },
+        )
+
+        assertNull(recordingApplyBlockedReason(session.snapshot.value))
+        assertIs<StoreResult.Ok<List<TestStep>>>(applier.apply(session, SHOP_SUITE_ID, SHOP_CASE_ID))
+
+        assertEquals(listOf("Dismiss the ad if Skip ad appears", "Pause playback"), inserted.map { it.action })
+        assertEquals(listOf(true, false), inserted.map { it.optional })
+        assertEquals("A visible Skip ad button appears.", inserted.first().condition)
+        assertEquals("", inserted.first().expected)
+        assertEquals("The player shows paused state", inserted.last().expected)
+    }
+
+    @Test
     fun anUnfilledExpectedResultStillBlocksTheApplyOfARewrittenRecording() = runBlocking<Unit> {
         val session = rewritten()
         val rows = session.snapshot.value.steps
@@ -155,5 +185,48 @@ class RecordingRewriteApplyTest {
             insertSteps = { _, _, _ -> error("nothing may be inserted") },
         )
         assertIs<StoreResult.Invalid>(applier.apply(session, SHOP_SUITE_ID, SHOP_CASE_ID))
+    }
+
+    @Test
+    fun anUnresolvedTapStaysRawAndRequiresAnEditedExpectedResultBeforeApply() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device").also { sessions += it }
+        session.accept(
+            MirrorControlCommand.Touch(action = MirrorTouchAction.DOWN, pointerId = 1, x = 54, y = 62, screenWidth = 100, screenHeight = 200),
+            nowMs = 100,
+        )
+        session.accept(
+            MirrorControlCommand.Touch(action = MirrorTouchAction.UP, pointerId = 1, x = 54, y = 62, screenWidth = 100, screenHeight = 200),
+            nowMs = 120,
+        )
+        session.stopAndDrain()
+        val response = """{"steps":[{"action":"Open settings","expected":"Settings is open","optional":true,
+            "condition":"A settings shortcut is visible.","sourceInputs":[1],
+            "expectedScreenshot":"after-of-input-1","checks":[{"type":"askJudge","text":"Is settings open?"}]}]}"""
+        val rewrite = RecordingRewriteService({ shopLibrary() }, { _, _ -> StoreResult.Ok(Unit) }, { response })
+        assertIs<StoreResult.Ok<RecordingRewrite>>(rewrite.rewrite(session, SHOP_SUITE_ID, SHOP_CASE_ID, "p", null, null, ""))
+
+        val row = session.snapshot.value.steps.single()
+        assertEquals("Tap at (54%, 31%)", row.action)
+        assertEquals("", row.expected)
+        assertFalse(row.optional, "an unresolved gesture cannot bypass review by being marked optional")
+        assertNull(row.condition)
+        assertTrue(row.reviewReason?.contains("resolved target") == true)
+        assertTrue(row.reviewReason?.contains("trustworthy inspected video/screenshot evidence") == true)
+        assertTrue(row.checks.isEmpty())
+        assertNull(row.screenshotJpeg)
+        assertTrue(recordingApplyBlockedReason(session.snapshot.value).orEmpty().contains("Expected"))
+
+        val inserted = mutableListOf<TestStep>()
+        val applier = TestStepRecordingApplyService(
+            preflight = { _, _ -> StoreResult.Ok(Unit) },
+            importImage = { _, _ -> error("no uncertain screenshot may be attached") },
+            resolveImage = { _, _ -> null },
+            insertSteps = { _, steps, _ -> inserted += steps; StoreResult.Ok(steps) },
+        )
+        assertIs<StoreResult.Invalid>(applier.apply(session, SHOP_SUITE_ID, SHOP_CASE_ID))
+        assertTrue(session.updateReviewedSteps(listOf("Tap Settings" to "The Settings screen is visible")))
+        assertNull(session.snapshot.value.steps.single().reviewReason, "a supplied expected result clears the review-required state")
+        assertIs<StoreResult.Ok<List<TestStep>>>(applier.apply(session, SHOP_SUITE_ID, SHOP_CASE_ID))
+        assertEquals("Tap Settings", inserted.single().action)
     }
 }

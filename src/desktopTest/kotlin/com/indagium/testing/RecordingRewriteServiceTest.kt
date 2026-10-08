@@ -76,6 +76,10 @@ class RecordingRewriteServiceTest {
         assertTrue("Shop suite" in request.prompt && "Use the staging account." in request.prompt && SHOP_PACKAGE in request.prompt)
         assertTrue("Search for music" in request.prompt && "Find a playlist" in request.prompt)
         assertTrue("1. [TAP] Tap at (54%, 31%)" in request.prompt && "element: \"Search\"" in request.prompt, request.prompt)
+        assertTrue("before UI: available" in request.prompt && "after UI: unavailable" in request.prompt, request.prompt)
+        assertTrue("never request unavailable evidence" in request.systemPrompt, request.systemPrompt)
+        assertTrue("Repeated capture IDs" in request.systemPrompt, request.systemPrompt)
+        assertTrue("Example uncertain step" in request.prompt && "reviewReason" in request.prompt, request.prompt)
         assertTrue("2. [TEXT] Enter text: lofi" in request.prompt && "3. [KEY] Press Enter" in request.prompt, request.prompt)
         assertTrue("<untrusted_data source=\"recorded_inputs\">" in request.prompt, "device and typed text is fenced")
         assertEquals(listOf("get_recorded_input", "get_recorded_screen", "get_recorded_ui"), request.gateway.tools.map { it.name })
@@ -111,10 +115,47 @@ class RecordingRewriteServiceTest {
     fun checksAreValidatedLikeADraftAndKeptOnTheRow() = runBlocking {
         val session = session()
         val response = """{"steps":[{"action":"Do all","expected":"Done","sourceInputs":[1,2,3],
-            "checks":[{"type":"askJudge","text":"Is the result list visible?"}]}]}"""
+            "reviewReason":null,"checks":[{"type":"askJudge","text":"Is the result list visible?"}]}]}"""
         assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { response }).run(session))
         val check = session.snapshot.value.steps.single().checks.single()
         assertEquals("Is the result list visible?", assertIs<StepCheck.AskJudge>(check).text)
+    }
+
+    @Test
+    fun anIncidentalOptionalActionStaysSeparateFromTheRequiredPlaybackAction() = runBlocking {
+        val response = """{"steps":[
+            {"action":"Dismiss the ad if Skip ad appears","expected":"","optional":true,
+                "condition":"A visible Skip ad button appears.","sourceInputs":[1]},
+            {"action":"Pause playback","expected":"The player shows paused state","sourceInputs":[2,3]}
+        ]}"""
+        val session = session()
+        val seen = mutableListOf<RewriteGeneration>()
+
+        assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { seen += it; response }).run(session))
+
+        val rows = session.snapshot.value.steps
+        assertEquals(listOf("Dismiss the ad if Skip ad appears", "Pause playback"), rows.map { it.action })
+        assertEquals(listOf(true, false), rows.map { it.optional })
+        assertEquals("A visible Skip ad button appears.", rows.first().condition)
+        assertEquals("", rows.first().expected)
+        assertEquals(1, rows.first().sourceInputIds.size)
+        assertEquals(2, rows.last().sourceInputIds.size)
+        assertTrue(
+            "never merge an optional ad dismissal with a required action" in seen.single().prompt,
+        )
+    }
+
+    @Test
+    fun emptyAndWhitespaceReviewReasonsAreNormalizedToAbsent() = runBlocking {
+        val session = session()
+        val response = """{"steps":[
+            {"action":"Tap Search","expected":"Search field is ready","sourceInputs":[1],"reviewReason":""},
+            {"action":"Enter query","expected":"Query is entered","sourceInputs":[2],"reviewReason":"   "},
+            {"action":"Submit search","expected":"Results are shown","sourceInputs":[3],"reviewReason":" \t\n "}
+        ]}"""
+
+        assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { response }).run(session))
+        assertEquals(listOf(null, null, null), session.snapshot.value.steps.map { it.reviewReason })
     }
 
     // ── An invalid answer changes nothing ────────────────────────────
@@ -157,6 +198,53 @@ class RecordingRewriteServiceTest {
         assertRejected("not json at all", "valid JSON")
         assertRejected("[]", "JSON object")
         assertRejected("""{"notes":"no steps"}""", "'steps' array")
+    }
+
+    @Test
+    fun aBlankExpectedIsAcceptedOnlyWhenReviewReasonExplainsIt() = runBlocking {
+        val session = session()
+        val response = """{"steps":[{"action":"Search","expected":"",
+            "reviewReason":"Confirm the result after search.","sourceInputs":[1,2,3]}]}"""
+
+        assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { response }).run(session))
+        val row = session.snapshot.value.steps.single()
+        assertEquals("", row.expected)
+        assertEquals("Confirm the result after search.", row.reviewReason)
+        assertTrue(row.action.contains("Tap at"), "review-required output keeps the recorded gesture description")
+    }
+
+    @Test
+    fun anOptionalProposalWithReviewReasonBecomesARequiredRawReviewRow() = runBlocking {
+        val session = session()
+        val response = """{"steps":[{"action":"Skip ad","expected":"","optional":true,
+            "condition":"A Skip ad button is visible.","reviewReason":"Confirm this gesture dismisses the ad.","sourceInputs":[1,2,3]}]}"""
+
+        assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { response }).run(session))
+
+        val row = session.snapshot.value.steps.single()
+        assertTrue(
+            row.action.contains("Tap at"),
+            "the gesture remains raw until someone resolves the target",
+        )
+        assertEquals("", row.expected)
+        assertFalse(row.optional, "review uncertainty cannot be bypassed by optional=true")
+        assertNull(row.condition)
+        assertTrue(row.reviewReason.orEmpty().isNotBlank())
+    }
+
+    @Test
+    fun whitespaceReasonDoesNotAuthorizeBlankExpectedAndInvalidReasonTypesOrLengthsAreRejected() {
+        assertRejected(
+            answer("""{"action":"A","expected":"","reviewReason":" \t\n ","sourceInputs":[1,2,3]}"""),
+            "expected may be blank only",
+        )
+        assertRejected(
+            answer("""{"action":"A","expected":"","reviewReason":null,"sourceInputs":[1,2,3]}"""),
+            "expected may be blank only",
+        )
+        assertRejected(answer(step(1, 2, 3, extra = ""","reviewReason":7""")), "reviewReason must be a string or null")
+        val tooLong = "x".repeat(501)
+        assertRejected(answer(step(1, 2, 3, extra = ""","reviewReason":"$tooLong"""")), "longer than 500")
     }
 
     @Test

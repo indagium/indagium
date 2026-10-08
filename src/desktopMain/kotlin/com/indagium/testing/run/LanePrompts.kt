@@ -18,9 +18,11 @@ private const val MAX_FENCED_CHARS = 6_000
 internal const val LANE_SYSTEM_PROMPT =
     "You are an automated QA tester driving ONE Android device through a test case, one step at a time.\n" +
         "- You are shown only the current step. Do what it says on the device with your tools, look at the result, then call " +
-        "finish_step exactly once with status pass, fail or blocked and an observation of what you actually saw.\n" +
+        "finish_step exactly once with status pass, fail, blocked or (only for an optional step) skipped, and an observation of what you actually saw.\n" +
         "- Use pass only when what you see matches what is expected. If the app behaves differently, use fail and describe the " +
-        "difference. Use blocked when you cannot do the action at all. Never claim something you did not observe.\n" +
+        "difference. Use blocked when you cannot do the action at all. For an optional step, inspect for its stated condition first; " +
+        "if absent, do not perform the action and finish as skipped with what you checked. If present, perform it and report pass/fail normally. " +
+        "Never skip a required step or claim something you did not observe.\n" +
         "- finish_step answers with the next step, with a request to redo the step, or with the end of the case. When the case " +
         "is over, stop calling tools and reply with one short sentence.\n" +
         "- take_screenshot shows the screen; tap and swipe use the pixels of the latest screenshot; dump_ui_tree lists the " +
@@ -91,6 +93,7 @@ internal fun lanePrompt(
         if (attempt > 1) append(" (attempt $attempt)")
         append(":\n  Action: ").append(step.action.trim()).append('\n')
         if (step.expected.isNotBlank()) append("  Expected: ").append(step.expected.trim()).append('\n')
+        if (step.optional) append("  Optional condition: ").append(step.condition.orEmpty().trim()).append('\n')
         if (step.examples.isNotEmpty()) {
             val available = listOf("list_step_examples", "get_step_example").filter { allowedTools == null || it in allowedTools }
             if (available.isNotEmpty()) {

@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.readTestScriptEnvelope
 import com.indagium.testing.authoring.testScriptSchemaPreview
 import com.indagium.testing.authoring.testScriptUsageReferences
@@ -81,8 +82,20 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             if (rows.any { it.containsKey("id") } && rowIds == null) {
                 toolArgError("If any steps[].id is sent, send the correct id for every row in its original order.")
             }
-            appState.applyTestStepRecording(a.requiredString("sessionId"), pairs, a.int("index"), expectedScreens, rowIds).toResult { inserted ->
-                mapOf("sessionId" to a.requiredString("sessionId"), "steps" to inserted.map(::stepResult), "stepIds" to inserted.map { it.id })
+            val optionalOverrides = recordingOptionalOverrides(rows)
+            appState.applyTestStepRecording(
+                a.requiredString("sessionId"),
+                pairs,
+                a.int("index"),
+                expectedScreens,
+                rowIds,
+                optionalOverrides,
+            ).toResult { inserted ->
+                mapOf(
+                    "sessionId" to a.requiredString("sessionId"),
+                    "steps" to inserted.map(::stepResult),
+                    "stepIds" to inserted.map { it.id },
+                )
             }
         },
     )
@@ -332,7 +345,8 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 toolArgError("If any steps[].id is sent, send the correct id for every row in its original order.")
             }
             val id = a.requiredString("sessionId")
-            appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds).toResult { recordingMap(id, it) }
+            val optionalOverrides = recordingOptionalOverrides(rows)
+            appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds, optionalOverrides).toResult { recordingMap(id, it) }
         },
         "restore_test_recording_raw" to tool { a ->
             val id = a.requiredString("sessionId")
@@ -475,49 +489,120 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         imageRowId: String? = null,
     ): Map<String, Any?> {
         val imageRow = imageRowId?.let { wanted -> snapshot.steps.firstOrNull { it.id == wanted } }
-        val image = imageRow?.screenshotJpeg
         return buildMap {
             put("sessionId", id)
             put("active", snapshot.active)
             put("pendingSnapshots", snapshot.pendingSnapshots)
             put("rewritten", snapshot.rawSteps != null)
             if (snapshot.rawSteps != null) put("rewriteNotes", snapshot.rewriteNotes)
-            put("steps", snapshot.steps.map { row ->
-                val screen = row.before ?: row.after
-                buildMap<String, Any?> {
-                    put("id", row.id)
-                    put("action", row.action)
-                    put("expected", row.expected)
-                    put("screenContext", row.screenContext)
-                    put("hasScreenshot", row.screenshotJpeg != null)
-                    put("useScreenshotAsExpected", row.useScreenshotAsExpected)
-                    put("durationMs", row.durationMs)
-                    put("package", screen?.packageName)
-                    put("activity", screen?.activity)
-                    put("tappedElement", row.tappedElement?.let {
-                        mapOf("text" to it.text, "contentDesc" to it.contentDesc, "resourceId" to it.resourceId, "className" to it.className)
-                    })
-                    if (row.sourceInputIds.isNotEmpty()) {
-                        put("sourceInputIds", row.sourceInputIds)
-                        put("checks", row.checks.size)
-                    }
-                }
-            })
-            if (image != null) {
-                put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))
-                put("mimeType", "image/jpeg")
-                put("kind", "inputTimeContext")
-                put("exampleId", imageRow.id)
-                val rewritten = imageRow.sourceInputIds.isNotEmpty()
-                val caption = if (rewritten) {
-                    "Screen after the recorded inputs of: ${imageRow.action}"
-                } else {
-                    "Captured at input time before action: ${imageRow.action}"
-                }
-                put("caption", caption.take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
-                put("message", "Saved input-time context; this is not an expected-result oracle or current device screen.")
+            put("steps", snapshot.steps.map(::recordingStepMap))
+            snapshot.videoTimeline?.let { timeline ->
+                put(
+                    "videoTimeline",
+                    mapOf(
+                        "available" to timeline.available,
+                        "finished" to timeline.finished,
+                        "alignment" to timeline.alignment,
+                        "durationMs" to timeline.durationMs,
+                        "packetCount" to timeline.packetCount,
+                        "gapCount" to timeline.gapCount,
+                        "capReached" to timeline.capReached,
+                        "warning" to timeline.warning,
+                    ),
+                )
             }
+            imageRow?.let { row -> row.screenshotJpeg?.let { image -> putAll(recordingImageMap(row, image)) } }
             put("warnings", snapshot.warnings)
+        }
+    }
+
+    private fun recordingStepMap(row: RecordedTestStep): Map<String, Any?> {
+        val screen = row.before?.takeIf { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() } ?: row.after
+        return buildMap {
+            put("id", row.id)
+            put("action", row.action)
+            put("expected", row.expected)
+            put("optional", row.optional)
+            put("condition", row.condition)
+            put("screenContext", row.screenContext)
+            put("hasScreenshot", row.screenshotJpeg != null)
+            put("hasBeforeScreenshot", row.beforeScreenshot != null)
+            put("hasAfterScreenshot", row.afterScreenshot != null)
+            put("useScreenshotAsExpected", row.useScreenshotAsExpected)
+            put("durationMs", row.durationMs)
+            put("beforeApp", row.before?.packageName ?: "unavailable")
+            put("beforeActivity", row.before?.activity ?: "unavailable")
+            put("afterApp", row.after?.packageName ?: "unavailable")
+            put("afterActivity", row.after?.activity ?: "unavailable")
+            put("reviewReason", row.reviewReason)
+            put("screenshotSource", row.screenshotSource?.name?.lowercase())
+            put("screenshotAcquiredAtMs", row.screenshotAcquiredAtMs)
+            put("screenshotAcquisitionFinishedAtMs", row.screenshotAcquisitionFinishedAtMs)
+            put("screenshotTimingUncertain", row.screenshotTimingUncertain)
+            put("screenshotVerifiedMoment", row.screenshotVerifiedMoment)
+            put("package", screen?.packageName)
+            put("activity", screen?.activity)
+            put("tappedElement", row.tappedElement?.let {
+                mapOf(
+                    "text" to it.text,
+                    "contentDesc" to it.contentDesc,
+                    "resourceId" to it.resourceId,
+                    "className" to it.className,
+                )
+            })
+            if (row.sourceInputIds.isNotEmpty()) {
+                put("sourceInputIds", row.sourceInputIds)
+                put("checks", row.checks.size)
+            }
+        }
+    }
+
+    /** Optional semantics are an atomic row edit: callers send both fields and stable row ids together. */
+    private fun recordingOptionalOverrides(rows: List<Map<String, Any?>>): Map<String, Pair<Boolean, String?>> {
+        if (rows.none { it.containsKey("optional") || it.containsKey("condition") }) return emptyMap()
+        return rows.mapIndexedNotNull { index, row ->
+            if (!row.containsKey("optional") && !row.containsKey("condition")) return@mapIndexedNotNull null
+            val rowId = row["id"] as? String ?: toolArgError("steps[$index].id is required when editing optional semantics.")
+            val optional = row["optional"] as? Boolean
+                ?: toolArgError("steps[$index].optional must be a boolean when editing optional semantics.")
+            val rawCondition = row["condition"]
+            val condition = when (rawCondition) {
+                null -> null
+                is String -> rawCondition.trim().takeIf(String::isNotEmpty)
+                else -> toolArgError("steps[$index].condition must be a string or null.")
+            }
+            if (optional && condition == null) toolArgError("steps[$index].condition is required for an optional step.")
+            if (!optional && condition != null) toolArgError("Clear steps[$index].condition when optional is false.")
+            rowId to (optional to condition)
+        }.toMap()
+    }
+
+    private fun recordingImageMap(row: RecordedTestStep, image: ByteArray): Map<String, Any?> = buildMap {
+        put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))
+        put("mimeType", "image/jpeg")
+        put("kind", "inputTimeContext")
+        put("exampleId", row.id)
+        put("source", row.screenshotSource?.name?.lowercase() ?: "unknown")
+        put("acquiredAtMs", row.screenshotAcquiredAtMs)
+        put("acquisitionFinishedAtMs", row.screenshotAcquisitionFinishedAtMs)
+        put("timingUncertain", row.screenshotTimingUncertain)
+        put("verifiedFor", row.screenshotVerifiedMoment)
+        put("caption", recordingImageCaption(row).take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
+        put("message", "Saved screenshot context with explicit source and timing; it is not the current device screen.")
+    }
+
+    private fun recordingImageCaption(row: RecordedTestStep): String {
+        val source = row.screenshotSource?.name?.lowercase() ?: "unknown"
+        val intervalStart = row.screenshotAcquiredAtMs ?: "unknown"
+        val intervalEnd = row.screenshotAcquisitionFinishedAtMs ?: "unknown"
+        val interval = "$intervalStart..$intervalEnd ms"
+        return when {
+            row.sourceInputIds.isNotEmpty() ->
+                "Verified ${row.screenshotVerifiedMoment ?: "after"} screenshot evidence for: ${row.action}; " +
+                    "source=$source; acquired=$interval"
+            row.screenshotTimingUncertain ->
+                "Uncertain raw input preview for: ${row.action}; source=$source; acquisition interval unavailable"
+            else -> "Raw input preview for: ${row.action}; source=$source; acquired=$interval"
         }
     }
 

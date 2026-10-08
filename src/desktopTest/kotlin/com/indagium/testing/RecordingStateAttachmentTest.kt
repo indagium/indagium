@@ -49,14 +49,47 @@ class RecordingStateAttachmentTest {
 
     @Test
     fun anInputThatBeginsWhileAProbeIsReadingHasNoKnownBeforeState() {
-        assertEquals(listOf(null to 2, null to null), attach(listOf(at(100), at(200)), probe(2, 150, 250)))
-        assertEquals(listOf(null to 2, null to null), attach(listOf(at(100), at(200)), probe(2, 150, 200)), "touching is not after")
+        assertEquals(listOf(null to null, null to null), attach(listOf(at(100), at(200)), probe(2, 150, 250)))
+        assertEquals(listOf(null to null, null to null), attach(listOf(at(100), at(200)), probe(2, 150, 200)), "touching is not after")
     }
 
     @Test
     fun aProbeThatStartedMidGestureAttachesToNothing() {
         val inputs = listOf(com.indagium.testing.authoring.InputWindow(100, 900), at(1_000))
         assertEquals(listOf(null to null, null to null), attach(inputs, probe(2, 500, 520)))
+    }
+
+    @Test
+    fun equalityAndOverlapAtEitherBoundaryAreRejected() {
+        assertEquals(listOf(null to null), attach(listOf(at(100)), probe(1, 0, 100)))
+        assertEquals(listOf(null to null), attach(listOf(at(100)), probe(1, 100, 150)))
+        assertEquals(listOf(null to null), attach(listOf(com.indagium.testing.authoring.InputWindow(100, 200)), probe(1, 90, 110)))
+    }
+
+    @Test
+    fun aLaterOverlappingProbeDoesNotReplaceAnEarlierEligibleOne() {
+        val inputs = listOf(at(100), at(300))
+        assertEquals(
+            listOf(null to 1, 1 to null),
+            attach(inputs, probe(1, 150, 200), probe(2, 290, 310)),
+        )
+    }
+
+    @Test
+    fun aFastScreenshotCanBeBeforeEvidenceWhileItsSlowUiProbeOverlapsTheInput() {
+        val inputs = listOf(com.indagium.testing.authoring.InputWindow(100, 200))
+        assertEquals(listOf(null to null), attach(inputs, probe(1, 60, 250)))
+        val screenshots = com.indagium.testing.authoring.attachEvidenceWindows(
+            inputs,
+            listOf(com.indagium.testing.authoring.EvidenceWindow(7, 10, 50)),
+        )
+        assertEquals(com.indagium.testing.authoring.RowAttachment(beforeSeq = 7), screenshots.single())
+    }
+
+    @Test
+    fun outOfOrderOverlappingInputsCannotCreateAFalseEvidenceGap() {
+        val inputs = listOf(at(100), com.indagium.testing.authoring.InputWindow(50, 200))
+        assertEquals(listOf(null to null, null to null), attach(inputs, probe(1, 60, 70)))
     }
 
     @Test
@@ -133,12 +166,12 @@ class RecordingStateAttachmentTest {
         assertEquals("com.example.shop", tap.before?.packageName)
         assertNull(tap.after, "no probe ran between the two inputs")
         assertEquals("Search", tap.tappedElement?.text)
-        assertEquals("on 'Search' in com.example.shop", tap.contextHint())
+        assertEquals("target 'Search' from before evidence; before: com.example.shop .Main; after: unavailable", tap.contextHint())
         assertNull(enter.before, "never guessed")
         assertEquals(2, enter.after?.seq)
         assertEquals(".Main", enter.after?.activity)
         assertNull(enter.tappedElement)
-        assertEquals("in com.example.shop", enter.contextHint())
+        assertEquals("before: unavailable; after: com.example.shop .Main", enter.contextHint())
         assertEquals(0, snapshot.pendingSnapshots)
         session.close()
     }

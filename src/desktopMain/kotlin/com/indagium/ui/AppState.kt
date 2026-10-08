@@ -60,6 +60,7 @@ import com.indagium.source.SourceIndexer
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
+import com.indagium.testing.authoring.RecordedVideoTimeline
 import com.indagium.testing.authoring.RecordingScreenProbe
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.model.SharedStep
@@ -1991,7 +1992,11 @@ class AppState(
 
     @Suppress("ReturnCount") // Preconditions return typed messages before a mirror observer or recording session is created.
     internal fun startTestStepRecording(serial: String, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> {
-        if (serial !in liveEmbeddedMirrorSerials()) return StoreResult.Invalid("Open and connect a live mirror for this device before recording.")
+        val mirror = synchronized(stateLock) {
+            embeddedMirrorsByTab.values.firstOrNull { handle ->
+                handle.snapshot.value.deviceSerial == serial && handle.snapshot.value.state == com.indagium.capture.mirror.EmbeddedMirrorState.LIVE
+            }
+        } ?: return StoreResult.Invalid("Open and connect a live mirror for this device before recording.")
         val library = testLibraryStore.library.value
         val suite = library.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
         if (suite.cases.none { it.id == caseId }) return StoreResult.NotFound("case", caseId)
@@ -2014,9 +2019,15 @@ class AppState(
             adb = { arguments, timeout, limit -> captureService.toolsForStart(settings.captureSettings).runAdb(serial, arguments, timeout, limit) },
             screencap = screencap,
         )
-        val session = TestStepRecordingSession(serial, screencap = screencap, screenProbe = probe::read)
+        val session = TestStepRecordingSession(
+            serial,
+            screencap = screencap,
+            screenProbeWithScreenshot = { onScreenshot -> probe.read(onScreenshot) },
+            videoTimeline = RecordedVideoTimeline(),
+        )
         registerTestStepRecording(session, suiteId, caseId).let { if (it !is StoreResult.Ok) return it }
         session.attach(MirrorInputObservers.observe(serial) { input -> session.accept(input.command, input.frame) })
+        session.attachVideoSubscription(mirror.observeVideoPackets(requireNotNull(session.videoTimeline)::offer))
         return StoreResult.Ok(session)
     }
 
@@ -2052,6 +2063,7 @@ class AppState(
         edited: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
+        optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
     ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
         val session = testStepRecordingSession?.takeIf { it.id == sessionId }
             ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
@@ -2061,7 +2073,7 @@ class AppState(
         if (sessionId in recordingRewrites) {
             return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
         }
-        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds)) {
+        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides)) {
             return@synchronized StoreResult.Invalid("The recording must be stopped and the edited rows and screenshot choices must match its current draft.")
         }
         StoreResult.Ok(session.snapshot.value)
@@ -2073,6 +2085,7 @@ class AppState(
         index: Int? = null,
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
+        optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
     ): StoreResult<List<TestStep>> {
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
@@ -2084,7 +2097,7 @@ class AppState(
             active to selectedTarget
         }
         val result = try {
-            if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds)) {
+            if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides)) {
                 return StoreResult.Invalid("Stop recording and send one edited action/result pair and valid screenshot choices in the original row order.")
             }
             session.stopAndDrain()

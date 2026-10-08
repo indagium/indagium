@@ -22,6 +22,14 @@ private val SCRIPT_TARGET_NAMES = ScriptTarget.entries.map { it.name }
 private val SCRIPT_PERMISSION_NAMES = ScriptPermission.entries.map { it.name }
 private val SCRIPT_PARAM_TYPE_NAMES = ScriptParamType.entries.map { it.name }
 private val EDITION_NAMES = Edition.entries.map { it.name }
+private val RECORDING_STEP_FIELDS = listOf(
+    "id" to "string",
+    "action" to "string",
+    "expected" to "string",
+    "optional" to "boolean",
+    "condition" to "string",
+    "useScreenshotAsExpected" to "boolean",
+)
 
 private const val MODEL_OVERRIDE_NOTE = "Optional: a model to use instead of the profile's own."
 private const val EFFORT_OVERRIDE_NOTE = "Optional: a reasoning effort (such as low or high) to use instead of the profile's own."
@@ -72,15 +80,18 @@ private val EXAMPLE_ITEM_SCHEMA = ObjectArrayItemSchema(
 
 private val STEP_ITEM_SCHEMA = ObjectArrayItemSchema(
     props = listOf(
-        "action" to "string", "expected" to "string", "timeoutMs" to "integer", "retries" to "integer",
-        "onFailure" to "string", "maxToolCalls" to "integer", "checks" to "array", "examples" to "array",
+        "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
+        "timeoutMs" to "integer", "retries" to "integer", "onFailure" to "string", "maxToolCalls" to "integer",
+        "checks" to "array", "examples" to "array",
     ),
     required = listOf("action"),
     enums = mapOf("onFailure" to ON_FAILURE_NAMES),
     descriptions = mapOf(
         "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
         "action" to "What the tester does, required.",
-        "expected" to "What should happen; the judge compares it with what the agent observed.",
+        "expected" to "What should happen; may be blank only for an optional step with a condition.",
+        "optional" to "True when the step may be skipped if condition is absent; defaults to false.",
+        "condition" to "For optional steps, the visible condition that must be present before performing it; required when optional is true.",
         "timeoutMs" to "Step timeout, 1..3600000 (default 60000).",
         "retries" to "Retries after a failed attempt, 0..10 (default 1).",
         "onFailure" to "STOP_CASE (default), CONTINUE, CREATE_ISSUE_AND_CONTINUE or PAUSE_FOR_USER.",
@@ -145,14 +156,17 @@ private val SUITE_FIELD_DESCRIPTIONS = mapOf(
 )
 
 private val STEP_FIELD_PROPS = listOf(
-    "action" to "string", "expected" to "string", "timeoutMs" to "integer", "retries" to "integer",
-    "maxToolCalls" to "integer", "onFailure" to "string", "checks" to "array", "examples" to "array",
+    "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
+    "timeoutMs" to "integer", "retries" to "integer", "maxToolCalls" to "integer",
+    "onFailure" to "string", "checks" to "array", "examples" to "array",
 )
 private val STEP_OBJECT_ARRAYS = mapOf("checks" to CHECK_ITEM_SCHEMA, "examples" to EXAMPLE_ITEM_SCHEMA)
 private val STEP_FIELD_DESCRIPTIONS = mapOf(
     "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
     "action" to "What the tester does.",
-    "expected" to "What should happen; the judge compares it with what the agent observed.",
+    "expected" to "What should happen; may be blank only for an optional step with a condition.",
+    "optional" to "True when the step may be skipped if condition is absent; defaults to false.",
+    "condition" to "For optional steps, the visible condition that must be present before performing it; required when optional is true.",
     "timeoutMs" to "Step timeout, 1..3600000 (default 60000).",
     "retries" to "Retries after a failed attempt, 0..10 (default 1).",
     "onFailure" to "STOP_CASE (default), CONTINUE, CREATE_ISSUE_AND_CONTINUE or PAUSE_FOR_USER.",
@@ -407,13 +421,13 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "update_test_recording",
-        "Edit action and expected-result text in a stopped recording preview. Send one row for every recorded step; " +
-            "captured images are input-time context, not expected-result oracles unless useScreenshotAsExpected is explicitly true.",
+        "Edit action, expected-result text and optional condition in a stopped recording preview. Send one row for every recorded step; " +
+            "an optional row requires a condition and may have blank expected text. Captured images are context unless explicitly selected.",
         schema(
             "sessionId" to "string", "steps" to "array", required = listOf("sessionId", "steps"),
             objectArrays = mapOf(
                 "steps" to ObjectArrayItemSchema(
-                    listOf("id" to "string", "action" to "string", "expected" to "string", "useScreenshotAsExpected" to "boolean"),
+                    RECORDING_STEP_FIELDS,
                     required = listOf("action", "expected"),
                 ),
             ),
@@ -427,13 +441,14 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "apply_test_recording",
         "Apply a stopped, edited recording preview to its original target case. Send every action and expected result; " +
-            "input-time screen snapshots are not expected-result oracles unless useScreenshotAsExpected is explicitly true. " +
+            "an optional row requires a condition and may have blank expected text. " +
+            "Input-time screen snapshots are not expected-result oracles unless useScreenshotAsExpected is explicitly true. " +
             "Assets are staged and removed if insertion fails. Asks for confirmation.",
         schema(
             "sessionId" to "string", "steps" to "array", "index" to "integer", required = listOf("sessionId", "steps"),
             objectArrays = mapOf(
                 "steps" to ObjectArrayItemSchema(
-                    listOf("id" to "string", "action" to "string", "expected" to "string", "useScreenshotAsExpected" to "boolean"),
+                    RECORDING_STEP_FIELDS,
                     required = listOf("action", "expected"),
                 ),
             ),

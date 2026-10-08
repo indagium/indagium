@@ -18,6 +18,18 @@ enum class RecordedInputKind { TAP, LONG_PRESS, SWIPE, KEY, TEXT, BACK }
 /** One sampled touch position in mirror coordinates, with the mirror screen size they refer to. */
 data class RecordedPoint(val x: Int, val y: Int, val screenWidth: Int, val screenHeight: Int)
 
+/** Where a recorded screenshot came from. Mirror timestamps are presentation times, not wall-clock acquisition times. */
+enum class RecordingScreenshotSource { SCREEN_PROBE, ADB_INPUT, MIRROR_INPUT }
+
+/** A screenshot whose acquisition interval and source stay separate from the UI/activity reading around it. */
+data class RecordingScreenshotEvidence(
+    val jpeg: ByteArray,
+    val source: RecordingScreenshotSource,
+    val acquiredAtMs: Long?,
+    val acquisitionFinishedAtMs: Long?,
+    val timingUncertain: Boolean,
+)
+
 /** The element under a tap, as the UI hierarchy described it. */
 data class TappedElement(val text: String, val contentDesc: String, val resourceId: String, val className: String) {
     /** A short human label: the visible text, else the content description, else the id without its package, else the class. */
@@ -28,9 +40,9 @@ data class TappedElement(val text: String, val contentDesc: String, val resource
 data class RecordingScreenRef(val seq: Int, val packageName: String?, val activity: String?)
 
 /**
- * One probe result. [startedAt]/[finishedAt] are wall-clock milliseconds around the whole read; [seq] is assigned by the
- * recording session when the state is stored. [screenWidth]/[screenHeight] are the hierarchy root's pixel size (0 when the
- * hierarchy could not be read).
+ * One probe result. [startedAt]/[finishedAt] cover the complete UI/activity read; the optional screenshot timestamps cover
+ * only the image acquisition and exclude encoding. Older in-memory states without screenshot times conservatively use the
+ * complete probe interval for screenshot eligibility. [seq] is assigned when the state is stored.
  */
 data class RecordingScreenState(
     val seq: Int,
@@ -42,6 +54,8 @@ data class RecordingScreenState(
     val screenWidth: Int,
     val screenHeight: Int,
     val screenshotJpeg: ByteArray? = null,
+    val screenshotStartedAt: Long? = null,
+    val screenshotFinishedAt: Long? = null,
 ) {
     fun ref(): RecordingScreenRef = RecordingScreenRef(seq, packageName, activity)
 
@@ -70,23 +84,50 @@ class RecordingScreenProbe(
     private val screencap: (() -> ByteArray)? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    fun read(): RecordingScreenState? {
+    fun read(): RecordingScreenState? = readInternal(null)
+
+    /** Sends bounded screenshot evidence to [onScreenshotAcquired] before the slower hierarchy/activity reads begin. */
+    fun read(onScreenshotAcquired: (RecordingScreenshotEvidence) -> Unit): RecordingScreenState? = readInternal(onScreenshotAcquired)
+
+    private fun readInternal(onScreenshotAcquired: ((RecordingScreenshotEvidence) -> Unit)?): RecordingScreenState? {
+        // Read the image first so a slow hierarchy/activity command cannot make a useful, quick frame appear later than it was.
+        // The interval brackets capture only; bounding/resizing the PNG happens after the timestamps have been recorded.
+        val screenshotStartedAt = if (screencap != null) clock() else null
+        val screenshotPng = if (Thread.currentThread().isInterrupted) null else readScreenshotBytes()
+        val screenshotFinishedAt = if (screencap != null) clock() else null
+        val screenshot = screenshotPng?.let { runCatching { encodeRecordingScreencap(it) }.getOrNull() }
+        if (screenshot != null && screenshotStartedAt != null && screenshotFinishedAt != null) {
+            runCatching {
+                onScreenshotAcquired?.invoke(
+                    RecordingScreenshotEvidence(
+                        jpeg = screenshot,
+                        source = RecordingScreenshotSource.SCREEN_PROBE,
+                        acquiredAtMs = screenshotStartedAt,
+                        acquisitionFinishedAtMs = screenshotFinishedAt,
+                        timingUncertain = false,
+                    ),
+                )
+            }
+        }
+
         val startedAt = clock()
         val tree = readTree()
         val activity = if (Thread.currentThread().isInterrupted) null else readTopActivity()
-        val screenshot = if (Thread.currentThread().isInterrupted) null else readScreenshot()
+        val finishedAt = clock()
         val packageName = activity?.first ?: tree?.packageName?.takeIf(String::isNotBlank)
         if (tree == null && activity == null && screenshot == null) return null
         return RecordingScreenState(
             seq = 0,
             startedAt = startedAt,
-            finishedAt = clock(),
+            finishedAt = finishedAt,
             packageName = packageName,
             activity = activity?.second,
             nodes = tree?.nodes.orEmpty(),
             screenWidth = tree?.screenWidth ?: 0,
             screenHeight = tree?.screenHeight ?: 0,
             screenshotJpeg = screenshot,
+            screenshotStartedAt = screenshotStartedAt,
+            screenshotFinishedAt = screenshotFinishedAt,
         )
     }
 
@@ -98,7 +139,7 @@ class RecordingScreenProbe(
         adb.run(ACTIVITY_DUMP_COMMAND, Duration.ofSeconds(ACTIVITY_DUMP_TIMEOUT_SECONDS), MAX_ACTIVITY_DUMP_BYTES)
     }.getOrNull()?.takeIf { !it.timedOut && it.exitCode == 0 }?.let { parseTopActivity(it.stdoutText()) }
 
-    private fun readScreenshot(): ByteArray? = screencap?.let { capture -> runCatching { encodeRecordingScreencap(capture()) }.getOrNull() }
+    private fun readScreenshotBytes(): ByteArray? = screencap?.let { capture -> runCatching(capture).getOrNull() }
 }
 
 private val ACTIVITY_DUMP_COMMAND = listOf("shell", "dumpsys", "activity", "activities")

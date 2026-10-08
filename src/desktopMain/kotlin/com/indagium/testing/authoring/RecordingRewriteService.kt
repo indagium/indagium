@@ -43,27 +43,34 @@ internal class RecordingRewriteService(
     ): StoreResult<RecordingRewrite> {
         if (note.length > MAX_REWRITE_NOTE_CHARS) return StoreResult.Invalid("The note is limited to $MAX_REWRITE_NOTE_CHARS characters.")
         session.rewriteBlockedReason()?.let { return StoreResult.Invalid(it) }
+        session.stopAndDrain()
+        session.rewriteBlockedReason()?.let { return StoreResult.Invalid(it) }
+        if (session.snapshot.value.videoTimeline?.finished == false) {
+            return StoreResult.Invalid("The recorded video timeline is still finishing; stop and drain the recording before rewriting it.")
+        }
         val eligibility = preflight(suiteId, caseId)
         if (eligibility !is StoreResult.Ok) return eligibility.propagate()
         val suite = library().suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
         val case = suite.cases.firstOrNull { it.id == caseId } ?: return StoreResult.NotFound("case", caseId)
         val rows = session.rewriteRows()
         val inputs = rewriteInputsOf(rows, session::screenState)
-        val toolLimit = rewriteToolCallLimit(inputs.size)
+        val rewriteTools = RecordingRewriteTools(inputs, session.videoTimeline)
+        val videoSummary = session.videoTimeline?.summary()
+        val toolLimit = rewriteToolCallLimit(inputs.size, videoSummary?.available == true)
         val request = RewriteGeneration(
             profileId = profileId,
             model = model,
             effort = effort,
-            prompt = rewritePrompt(suite, case, note, inputs),
+            prompt = rewritePrompt(suite, case, note, inputs, videoSummary),
             systemPrompt = REWRITE_SYSTEM_PROMPT,
-            gateway = RecordingRewriteTools(inputs).gateway,
+            gateway = rewriteTools.gateway,
             toolCallLimit = toolLimit,
             maxTurns = toolLimit + REWRITE_TURN_HEADROOM,
         )
         return try {
             val response = withTimeout(timeoutMs) { generate(request) }
             val proposal = parseRewriteResponse(response, inputs.size)
-            val rewritten = buildRewrittenRows(proposal, inputs)
+            val rewritten = buildRewrittenRows(proposal, inputs, rewriteTools.videoInspectedInputs())
             if (!session.applyRewrite(rows.map { it.id }, rewritten, proposal.notes)) {
                 return StoreResult.Invalid("The recording changed while it was being rewritten; nothing was applied. Rewrite it again.")
             }
