@@ -33,6 +33,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.capture.CaptureDevice
 import com.indagium.model.AiProviderProfile
+import com.indagium.model.WorkflowAiSelection
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeMode
@@ -49,8 +50,7 @@ import kotlinx.coroutines.withContext
 // on which device; add, remove and reorder them), the judge (profile, model, effort), the recording every lane does (the same
 // "Before start" controls as a manual live capture), repeat, the tool-call limit and the evidence to keep. Lanes on different
 // devices run at the same time, lanes that share a device one after another (the dialog says so). Start validates through the coordinator (which refuses
-// with every problem at once); on success the Runs screen opens on the new run. The device list is read with adb off the UI thread
-// and never offers the device the live capture holds.
+// with every problem at once); on success the Runs screen opens on the new run. The device list is read with adb off the UI thread.
 
 private val DIALOG_WIDTH = 640.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
@@ -79,9 +79,17 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
         return
     }
     val runnable = suite.cases.filterNot { limits.isCaseLocked(it.id) }
-    val profiles = ui.state.settings.aiProviderProfiles
+    val settings = ui.state.settings
+    val profiles = com.indagium.ai.normalizeAiProviderProfiles(settings.aiProviderProfiles)
     val choices = remember(profiles) { laneChoices(profiles) }
     var model by remember(target, choices) {
+        val laneSelection = resolveAiWorkflowSelection(settings, AiWorkflow.TEST_RUN_LANE, profiles)
+        val judgeSelection = resolveAiWorkflowSelection(
+            settings,
+            AiWorkflow.TEST_RUN_JUDGE,
+            profiles,
+            fallbackProfileIds = listOf(settings.testing.defaultJudgeProfileId),
+        )
         mutableStateOf(
             RunDialogModel(
                 suiteId = suite.id,
@@ -89,9 +97,18 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
                     ?: target.initialConfig?.caseIds?.toSet()
                     ?: target.caseId?.let { setOf(it) }
                     ?: runnable.map { it.id }.toSet(),
-                choice = choices.firstOrNull { it.profileId == selectedProfileId(ui.state) } ?: choices.firstOrNull(),
+                choice = choices.firstOrNull { it.profileId == laneSelection.profileId } ?: choices.firstOrNull(),
                 deviceSerial = null,
+                firstLaneModel = laneSelection.modelId,
+                firstLaneEffort = laneSelection.reasoningEffort,
+                firstLaneModelWasDiscovered = laneSelection.modelWasDiscovered,
             ).withTestingDefaults(ui.state.settings.testing, profiles)
+                .copy(
+                    judgeProfileId = judgeSelection.profileId,
+                    judgeModel = judgeSelection.modelId,
+                    judgeReasoningEffort = judgeSelection.reasoningEffort,
+                    judgeModelWasDiscovered = judgeSelection.modelWasDiscovered,
+                )
                 .withCaptureDefaults(ui.state.settings.captureSettings, ui.state.settings.testing).let { initial ->
                     target.initialConfig?.let { initial.withRunConfig(it, choices) } ?: initial
                 },
@@ -196,8 +213,6 @@ internal fun RunDialogModel.withDefaultDevices(devices: List<DeviceChoice>): Run
     return if (fixed == lanes) this else withLanes(fixed)
 }
 
-private fun selectedProfileId(state: AppState): String? = state.settings.aiProviderProfiles.firstOrNull { it.selected }?.id
-
 private sealed interface DevicesState {
     data object Loading : DevicesState
 
@@ -268,7 +283,7 @@ private fun LanesSection(
     when (devices) {
         DevicesState.Loading -> TestsHint("Looking for devices…")
         is DevicesState.Failed -> TestsErrorText(devices.message)
-        is DevicesState.Ready -> if (devices.choices.isEmpty()) TestsHint("No ready device. The device of the live capture tab is not offered.")
+        is DevicesState.Ready -> if (devices.choices.isEmpty()) TestsHint("No ready Android device was found.")
     }
     if (lanes.any { it.choice?.isExternal == true }) TestsHint("An external lane has no agent: drive it with the test_lane_tool_call MCP tool.")
 }
@@ -283,6 +298,7 @@ private fun LaneRow(
     onChange: (LaneDraft) -> Unit,
     modifier: Modifier,
 ) {
+    val ui = LocalTestsUi.current
     val profile = profiles.firstOrNull { it.id == draft.choice?.profileId }
     FlowRow(
         modifier,
@@ -295,14 +311,19 @@ private fun LaneRow(
             options = choices,
             optionLabel = { it.label },
             // A model or effort belongs to one provider; picking another profile starts from that profile's own values again.
-            onSelect = { onChange(draft.copy(choice = it, model = null, reasoningEffort = null)) },
+            onSelect = {
+                onChange(draft.copy(choice = it, model = null, reasoningEffort = null, modelWasDiscovered = false))
+                it.profileId?.let { profileId ->
+                    ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_RUN_LANE, WorkflowAiSelection(profileId))
+                }
+            },
             menuWidth = MENU_WIDTH,
             isSelected = { it == draft.choice },
         )
         TestsDropdown(
-            selectedLabel = deviceChoices.firstOrNull { it.serial == draft.deviceSerial }?.label ?: "Choose a device",
+            selectedLabel = deviceChoices.firstOrNull { it.serial == draft.deviceSerial }?.let(::deviceChoiceLabel) ?: "Choose a device",
             options = deviceChoices,
-            optionLabel = { it.label },
+            optionLabel = ::deviceChoiceLabel,
             onSelect = { onChange(draft.copy(deviceSerial = it.serial)) },
             menuWidth = MENU_WIDTH,
             isSelected = { it.serial == draft.deviceSerial },
@@ -314,7 +335,14 @@ private fun LaneRow(
                 catalog = catalog,
                 model = draft.model,
                 effort = draft.reasoningEffort,
-                onChange = { model, effort -> onChange(draft.copy(model = model, reasoningEffort = effort)) },
+                modelWasDiscovered = draft.modelWasDiscovered,
+                onChange = { model, effort, discovered ->
+                    onChange(draft.copy(model = model, reasoningEffort = effort, modelWasDiscovered = discovered))
+                    ui.state.rememberAiWorkflowSelection(
+                        AiWorkflow.TEST_RUN_LANE,
+                        WorkflowAiSelection(profile.id, model, effort, discovered),
+                    )
+                },
             )
         }
     }
@@ -329,6 +357,7 @@ private fun JudgeSection(
     profiles: List<AiProviderProfile>,
     catalog: ModelCatalog,
 ) {
+    val ui = LocalTestsUi.current
     TestsSectionTitle("Judge")
     TestsHint(
         "A blind AI judge compares each step's expected result with the screenshot, the log and the check results, " +
@@ -352,7 +381,19 @@ private fun JudgeSection(
             selectedLabel = selected?.label ?: "Choose the judge's AI profile",
             options = profileChoices,
             optionLabel = { it.label },
-            onSelect = { onModel(model.copy(judgeProfileId = it.profileId, judgeModel = null, judgeReasoningEffort = null)) },
+            onSelect = {
+                onModel(
+                    model.copy(
+                        judgeProfileId = it.profileId,
+                        judgeModel = null,
+                        judgeReasoningEffort = null,
+                        judgeModelWasDiscovered = false,
+                    ),
+                )
+                it.profileId?.let { profileId ->
+                    ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_RUN_JUDGE, WorkflowAiSelection(profileId))
+                }
+            },
             menuWidth = MENU_WIDTH,
             isSelected = { it.profileId == model.judgeProfileId },
             modifier = Modifier.padding(top = 6.dp),
@@ -370,7 +411,14 @@ private fun JudgeSection(
                     catalog = catalog,
                     model = model.judgeModel,
                     effort = model.judgeReasoningEffort,
-                    onChange = { picked, effort -> onModel(model.copy(judgeModel = picked, judgeReasoningEffort = effort)) },
+                    modelWasDiscovered = model.judgeModelWasDiscovered,
+                    onChange = { picked, effort, discovered ->
+                        onModel(model.copy(judgeModel = picked, judgeReasoningEffort = effort, judgeModelWasDiscovered = discovered))
+                        ui.state.rememberAiWorkflowSelection(
+                            AiWorkflow.TEST_RUN_JUDGE,
+                            WorkflowAiSelection(judgeProfile.id, picked, effort, discovered),
+                        )
+                    },
                 )
             }
         }
@@ -410,7 +458,17 @@ private fun RecordingSection(model: RunDialogModel, onModel: (RunDialogModel) ->
             "Lanes record the same way without a tab. A failed step's issue can still include the whole capture archive."
         },
     )
+    val liveSerial = ui.state.liveCaptureSerial()
+    if (liveSerial != null && model.allLanes().any { it.deviceSerial == liveSerial }) {
+        TestsHint(
+            "A lane on $liveSerial will borrow the active manual capture. It keeps running after the lane finishes; its current capture settings apply, " +
+                "and the Recording options above apply only to newly started lane captures.",
+        )
+    }
 }
+
+private fun deviceChoiceLabel(choice: DeviceChoice): String =
+    if (choice.sharesLiveCapture) "${choice.label} · share current capture" else choice.label
 
 @Composable
 private fun SettingsSection(

@@ -683,6 +683,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     // Appended last, JSON form only (see TestingSettingsCodec.kt). The tracker's access token is never part of settings.
     put("tracker", trackerSettingsJson(tracker))
     put("testing", testingSettingsJson(testing))
+    put("workflowAiSelections", workflowAiSelectionsJson(workflowAiSelections))
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -1016,6 +1017,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
         tracker = trackerSettingsFromJson(o["tracker"]),
         testing = testingSettingsFromJson(o["testing"]),
+        workflowAiSelections = o.workflowAiSelectionsFromJson(),
     )
 }.getOrNull()
 

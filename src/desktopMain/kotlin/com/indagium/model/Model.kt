@@ -1025,6 +1025,15 @@ data class AiProviderProfile(
     val reasoningEffort: String = "",
 )
 
+/** A workflow's last provider/model/effort choice. Profile credentials are never stored here. */
+data class WorkflowAiSelection(
+    val profileId: String? = null,
+    val modelId: String? = null,
+    val reasoningEffort: String? = null,
+    /** True only when the user chose this model from a provider catalog, not when they typed a custom id. */
+    val modelWasDiscovered: Boolean = false,
+)
+
 const val DEFAULT_LM_STUDIO_PROFILE_ID = "lm-studio"
 
 // A multi-step investigation (gathering filtered evidence across several tool calls, then writing
@@ -1413,6 +1422,8 @@ data class AppSettings(
     // same rule as above. The tracker's access token is NOT a setting: it lives only in the SecretStore.
     val tracker: com.indagium.testing.model.TrackerSettings = com.indagium.testing.model.TrackerSettings(),
     val testing: com.indagium.testing.model.TestingSettings = com.indagium.testing.model.TestingSettings(),
+    /** Last AI choices per tests workflow; JSON-only and deliberately independent from the global selected profile. */
+    val workflowAiSelections: Map<String, WorkflowAiSelection> = emptyMap(),
 )
 
 /** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,

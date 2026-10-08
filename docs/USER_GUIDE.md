@@ -1317,12 +1317,14 @@ Indagium, at most 10 MB) or a **Reference log**. The agent receives the current 
 them with lane-scoped example tools; screenshots are decoded and bounded before delivery, and log references are
 returned as fenced text.
 
-The case editor has four authoring helpers. **Draft with AI** uses a selected provider profile (and, if you like, a
-model and reasoning effort other than the profile's own) and returns a
-validated, editable preview; it does not edit the library or operate a device until you choose **Apply**. **Record
-from device** observes accepted input from a selected live mirror, then converts taps, swipes, keys and text into a
-reviewable ordered draft. It never injects input. Unsupported gestures are called out. Screenshots with a clean capture
-interval are labeled as verified before/after evidence; a mirror preview with uncertain timing is still available as a raw
+The case editor has four authoring helpers. **Draft with AI** remembers its own provider, model and reasoning effort
+(initially the selected profile) and returns a validated, editable preview; it does not edit the library or operate a
+device until you choose **Apply**. **Record from device** discovers connected devices each time you start. Choose one
+when several are available; Indagium starts or reuses its capture, connects the embedded mirror, and keeps the Tests
+workspace in front while it connects. The capture remains live after recording stops so you can reuse it for a run.
+It observes accepted input, then converts taps, swipes, keys and text into a reviewable ordered draft. It never injects
+input. Unsupported gestures are called out. Screenshots with a clean capture interval are labeled as verified
+before/after evidence; a mirror preview with uncertain timing is still available as a raw
 preview but is not treated as either side automatically. An AI rewrite can leave a step for review when it cannot identify
 a tap target or expected result; fill the expected result before applying. Captured images become expected-reference
 examples only if you explicitly opt in while reviewing. Add explicit judge checks separately when you want the judge to
@@ -1339,8 +1341,8 @@ input, but it will not be labeled with that later app or activity. The app/activ
 separately and may be unavailable. A slow swipe keeps its duration. To get steps a person can read:
 
 1. **Record from device**, perform the test on the mirror, then **Stop and review**.
-2. Under **Rewrite with AI** choose a provider profile (and, if you want, a model and reasoning effort), optionally
-   say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
+2. Under **Rewrite with AI**, the last provider, model and reasoning effort used for a rewrite are preselected
+   (initially the selected profile). Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
    recorded inputs, the screen text, the text you typed and screenshots from the device. Known password text is
    masked in action descriptions and hidden from the AI; password-edit video windows are withheld when they can be
    identified. The video timeline is copied from the mirror's existing stream
@@ -1351,8 +1353,11 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    uncertainty and reuses a capture shared by adjacent inputs.
 3. The raw taps and swipes are replaced by a few steps such as "Open YouTube", "Pause playback", or "Search for 'lofi'".
    Every input you made is inside exactly one step; **From N recorded inputs** shows which. A launcher-to-app video
-   transition can support a broad action like opening that app without identifying a specific control. If evidence still
-   leaves a required action or result uncertain, the row keeps its original gesture and explains what needs review.
+   transition can support a broad action like opening that app without identifying a specific control. Exact video
+   titles are included only when the case goal, preconditions or your note explicitly make the title part of the requested test.
+   Revealing playback controls and then tapping Pause can become one **Pause playback** step. Incidental actions such as
+   skipping an ad stay separate and conditional. If evidence still leaves a required action or result uncertain, the row
+   keeps its original gesture and explains what needs review.
    Incidental actions such as dismissing a skippable ad may be optional when their condition says when to perform them;
    they can have no expected result and are skipped without failing the case when absent. The AI's notes (for example an
    input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The picture
@@ -1402,12 +1407,17 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
 - **Lanes** — a lane is one device driven by one agent. Choose what drives it (a Claude Code, Codex or API
   profile from *Settings → AI providers*, or *External (MCP)* if a developer's AI client will drive it) and
   which connected device it uses. Add several lanes: lanes on **different devices run at the same time** (up to
-  four devices at once; the others wait), lanes that share a device run one after another. A device held by the
-  live capture tab is not offered. Next to the profile, each agent lane has a **model** picker (the profile's own
+  four devices at once; the others wait), lanes that share a device run one after another. A device with an active
+  step-authoring recording cannot be used until you stop and review it. A matching manual live capture is offered as a
+  shared source: the lane reuses its encoder and mirror, then leaves that source recording when the lane ends. Source
+  capture settings apply to a shared recording; the dialog's **Recording** overrides only apply when the run starts its
+  own capture. Each run keeps a bounded lane-local evidence copy that survives later source deletion. Provider, model
+  and reasoning-effort choices are remembered separately for test lanes. Next to the profile, each agent lane has a **model** picker (the profile's own
   model until you pick another; *Find models* lists what the provider offers, and you can always type a model id)
   and, for models that have reasoning levels, a **reasoning effort** picker. Leave them alone to use the profile's
   values. The report and the live view name each lane as *profile · model · effort*.
-- **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. Any reachable
+- **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. The judge's last
+  provider, model and reasoning effort are remembered separately from lane and authoring choices. Any reachable
   **Screen judge** or **Ask the judge** check requires a usable judge and a mode other than *No judge*; validation
   happens before the run starts. If such a judge errors or is inconclusive, the check is unresolved and the step is
   **Blocked** (then retries and the selected failure policy apply). A deterministic check failure remains **Fail**.

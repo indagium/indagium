@@ -177,7 +177,6 @@ private fun describeScriptExportCall(appState: AppState, arguments: Map<String, 
 @Suppress("ReturnCount") // Device/session preflight remains explicit and fail-closed.
 private fun describeRecordingStartCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
     val serial = (arguments["deviceSerial"] as? String)?.takeIf(String::isNotBlank) ?: return null
-    if (serial !in appState.liveEmbeddedMirrorSerials()) return null
     val suiteId = arguments["suiteId"] as? String ?: return null
     val caseId = arguments["caseId"] as? String ?: return null
     val suite = appState.testLibrary.suite(suiteId) ?: return null
@@ -190,9 +189,13 @@ private fun describeRecordingStartCall(appState: AppState, arguments: Map<String
     return ExternalActionDetails(
         title = "Observe test input from a live mirror?",
         summary =
-            "$clientName wants to record accepted mirror input on $serial for '${suite.name} / ${targetCase.name}'. " +
-                "Recording observes actions; it does not inject input or drive the device.",
-        fields = listOf("Source device" to serial, "Target case" to targetCase.name, "Capture" to "Ordered actions and bounded input-time screen context"),
+            "$clientName wants to start or reuse a capture and connect its embedded mirror on $serial, then record accepted user input " +
+                "for '${suite.name} / ${targetCase.name}'. Recording observes actions; it does not inject input or drive the device.",
+        fields = listOf(
+            "Source device" to serial,
+            "Target case" to targetCase.name,
+            "Capture" to "The app's configured local log/video capture plus ordered actions and bounded screen context",
+        ),
         allowLabel = "Start recording",
         declinedMessage = "The user declined to observe mirror input; recording did not start.",
     )

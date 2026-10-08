@@ -3,11 +3,15 @@ package com.indagium.testing
 import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureStatus
 import com.indagium.capture.parseMarkerHeader
+import com.indagium.capture.readCaptureSessionDirectory
 import com.indagium.capture.reanchorImportedCaptureNotes
 import com.indagium.model.AnnBlock
+import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.device.LaneMarkerOutcome
 import com.indagium.testing.device.LaneMarkerRequest
+import com.indagium.testing.store.StoreResult
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppLaneCapture
 import kotlinx.coroutines.runBlocking
@@ -19,8 +23,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 private const val STOP_WAIT_MS = 30_000L
@@ -69,14 +75,77 @@ class LaneCaptureAppStateTest {
     // ── The per-device guard ────────────────────────────────────────
 
     @Test
-    fun aLaneRefusesTheDeviceOfTheManualLiveCapture() {
+    fun aLaneBorrowsTheMatchingManualCaptureAndLeavesItsSourceRunning() {
         val h = harness()
         val manual = TabCaptureControllerFixture.liveManualCapture(h)
         assertEquals(manual.tabId, h.state.liveCaptureTabId)
 
-        val failure = assertFailsWith<IllegalStateException> { h.startLane("lane-a") }
-        assertTrue(failure.message.orEmpty().contains("live capture in the main window"), failure.message)
-        assertNull(h.state.laneCaptureOnDevice(FIXTURE_SERIAL), "a refused lane holds nothing")
+        val handle = h.startLane("lane-a")
+        assertTrue(handle.isBorrowed)
+        assertEquals(manual.tabId, handle.borrowedSourceTabId)
+        assertSame(h.state.captureControllerFor(manual.tabId), handle.controller, "the lane shares the existing recorder and mirror")
+        assertNotEquals(manual.session.directory, handle.laneSession.directory, "run evidence has its own directory")
+        assertFailsWith<IllegalStateException> { h.state.aiCaptureBinding(manual.tabId) }
+        assertFailsWith<IllegalStateException> { h.startLane("lane-b") }
+        val capture = AppLaneCapture(h.state, handle, h.laneDir("lane-a"))
+        h.emit(FIXTURE_SERIAL, "borrowed row")
+        awaitTrue("borrowed log copy") { handle.laneSession.logFile.readText().contains("borrowed row") }
+        val sourceCheckpoint = manual.controller.snapshotForExport().session.effectiveSnapshotCheckpointMs
+        val archiveWhileLive = File(h.dir, "borrowed-live.zip")
+        assertTrue(capture.exportArchive(archiveWhileLive).file.isFile)
+        assertEquals(
+            sourceCheckpoint,
+            manual.controller.snapshotForExport().session.effectiveSnapshotCheckpointMs,
+            "lane export leaves source checkpoints alone",
+        )
+
+        capture.stop()
+        assertFalse(capture.isRecording, "a stopped borrower no longer presents itself as recording")
+        assertTrue(manual.controller.snapshot.value.state == com.indagium.capture.RecorderState.RECORDING, "ending the lane keeps the manual capture recording")
+        assertNull(h.state.laneCaptureOnDevice(FIXTURE_SERIAL), "the lane releases its device claim")
+        h.emit(FIXTURE_SERIAL, "after lane stop")
+        awaitTrue("source continues after lane stop") { manual.session.logFile.readText().contains("after lane stop") }
+        val frozenLocalLength = handle.laneSession.logFile.length()
+        val frozenLocalText = handle.laneSession.logFile.readText()
+        assertFalse(frozenLocalText.contains("after lane stop"), "the lane copy ends at its stop boundary")
+        manual.controller.stop()
+        manual.close()
+        manual.session.directory.deleteRecursively()
+        assertTrue(handle.laneSession.logFile.isFile, "run-local log survives source deletion")
+        assertEquals(frozenLocalLength, handle.laneSession.logFile.length(), "source shutdown does not extend frozen lane evidence")
+        assertEquals(frozenLocalText, handle.laneSession.logFile.readText())
+        val localDescriptor = assertNotNull(readCaptureSessionDirectory(handle.laneSession.directory))
+        assertNotEquals(manual.session.id, localDescriptor.id, "the lane has a distinct session identity")
+        assertEquals(CaptureStatus.STOPPED, localDescriptor.status, "a completed borrow is represented as completed locally")
+        val archive = File(h.dir, "borrowed-final.zip")
+        assertTrue(capture.exportArchive(archive).file.isFile, "the frozen lane evidence remains archivable")
+        val imported = CaptureArchiveReader.open(archive, File(h.dir, "borrowed-final-cache"))
+        assertTrue(imported.logFile.readText().contains("borrowed row"))
+        assertFalse(imported.logFile.readText().contains("after lane stop"), "the exported lane archive excludes later source rows")
+        manual.close()
+    }
+
+    @Test
+    fun aBorrowedLaneReportsSourceStopAndReleasesItsDeviceClaim() {
+        val h = harness()
+        val manual = TabCaptureControllerFixture.liveManualCapture(h)
+        val handle = h.startLane("lane-a")
+        val capture = AppLaneCapture(h.state, handle, h.laneDir("lane-a"))
+        h.emit(FIXTURE_SERIAL, "before disconnect")
+        awaitTrue("initial borrowed evidence") { handle.laneSession.logFile.readText().contains("before disconnect") }
+
+        manual.controller.stop()
+
+        val reason = runBlocking { withTimeout(STOP_WAIT_MS) { capture.lost.await() } }
+        assertTrue(reason.contains("capture ended"), reason)
+        capture.stop()
+        assertNull(h.state.laneCaptureOnDevice(FIXTURE_SERIAL), "lost source still releases the lane claim")
+        val local = assertNotNull(readCaptureSessionDirectory(handle.laneSession.directory))
+        assertEquals(CaptureStatus.STOPPED, local.status)
+        val frozenLog = handle.laneSession.logFile.readText()
+        assertTrue(frozenLog.contains("before disconnect"))
+        assertTrue(capture.exportArchive(File(h.dir, "source-stopped.zip")).file.isFile)
+        assertEquals(frozenLog, handle.laneSession.logFile.readText(), "export cannot extend frozen lane evidence")
         manual.close()
     }
 
@@ -98,6 +167,53 @@ class LaneCaptureAppStateTest {
         val failure = assertFailsWith<IllegalStateException> { h.startLane("lane-b") }
         assertTrue(failure.message.orEmpty().contains("another test lane"), failure.message)
         assertEquals(h.ref("lane-a"), h.state.laneCaptureOnDevice(FIXTURE_SERIAL))
+    }
+
+    @Test
+    fun aLaneCannotBorrowADeviceWhileStepAuthoringIsStillRecording() {
+        val h = harness()
+        val manual = TabCaptureControllerFixture.liveManualCapture(h)
+        val recording = TestStepRecordingSession(FIXTURE_SERIAL)
+        assertIs<StoreResult.Ok<TestStepRecordingSession>>(h.state.registerTestStepRecording(recording, "suite", "case"))
+
+        val failure = assertFailsWith<IllegalStateException> { h.startLane("lane-a") }
+
+        assertTrue(failure.message.orEmpty().contains("Stop recording steps"), failure.message)
+        assertEquals(com.indagium.capture.RecorderState.RECORDING, manual.controller.snapshot.value.state)
+        assertNull(h.state.laneCaptureOnDevice(FIXTURE_SERIAL))
+        h.state.clearTestStepRecording(force = true)
+        manual.close()
+    }
+
+    @Test
+    fun aClaimedLanePreventsAuthoringInputRegistrationOnItsDevice() {
+        val h = harness()
+        h.startLane("lane-a")
+        val session = TestStepRecordingSession(FIXTURE_SERIAL)
+
+        val result = h.state.registerTestStepRecording(session, "suite", "case")
+
+        assertIs<StoreResult.Invalid>(result)
+        assertNull(h.state.testStepRecordingSession)
+        assertEquals(h.ref("lane-a"), h.state.laneCaptureOnDevice(FIXTURE_SERIAL))
+    }
+
+    @Test
+    fun recordingTargetPreflightDoesNotDiscoverDevicesOrStartCapture() {
+        val h = harness()
+        var toolsRequested = false
+        h.state.captureToolsProvider = {
+            toolsRequested = true
+            fixtureTools(h.farm.adb(FIXTURE_SERIAL))
+        }
+
+        val result = runBlocking { h.state.prepareTestStepRecording(FIXTURE_SERIAL, "missing-suite", "missing-case") }
+
+        assertIs<StoreResult.NotFound>(result)
+        assertFalse(toolsRequested, "preflight rejects before adb/device discovery")
+        assertFalse(h.state.captureStartInProgress)
+        assertNull(h.state.liveCaptureTabId)
+        assertNull(h.state.testStepRecordingSession)
     }
 
     @Test
@@ -242,7 +358,7 @@ class LaneCaptureAppStateTest {
 
 /** A manual live capture on [FIXTURE_SERIAL] the way the toolbar's flow leaves one: a controller, its tab and its session id. */
 private object TabCaptureControllerFixture {
-    class Manual(val tabId: String, private val controller: com.indagium.ui.TabCaptureController) {
+    class Manual(val tabId: String, val controller: com.indagium.ui.TabCaptureController, val session: com.indagium.capture.CaptureSession) {
         fun close() = controller.close()
     }
 
@@ -257,6 +373,6 @@ private object TabCaptureControllerFixture {
         awaitTrue("tab loaded") { !h.state.isLoading }
         h.state.registerCaptureControllerForTest(tabId, controller)
         h.state.upTab(tabId) { it.copy(captureSessionId = session.id) }
-        return Manual(tabId, controller)
+        return Manual(tabId, controller, session)
     }
 }

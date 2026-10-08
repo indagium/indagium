@@ -59,6 +59,13 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
      * transport never blocks a request thread on them; they include bounded file operations and recording.
      */
     val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "start_test_recording" to suspendTool { a ->
+            val suiteId = a.requiredString("suiteId")
+            val caseId = a.requiredString("caseId")
+            appState.prepareTestStepRecording(a.requiredString("deviceSerial"), suiteId, caseId).toResult {
+                mapOf("sessionId" to it.id, "suiteId" to suiteId, "caseId" to caseId, "deviceSerial" to it.deviceSerial, "active" to true)
+            }
+        },
         "try_test_script" to suspendTool { a -> tryScript(a) },
         "draft_test_steps" to suspendTool { a -> draftSteps(a) },
         "rewrite_test_recording" to suspendTool { a -> rewriteRecording(a) },
@@ -311,13 +318,6 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         },
         "insert_log_checks" to tool { a -> insertLogChecks(a) },
         "apply_test_step_draft" to tool { a -> applyStepDraft(a) },
-        "start_test_recording" to tool { a ->
-            val suiteId = a.requiredString("suiteId")
-            val caseId = a.requiredString("caseId")
-            appState.startTestStepRecording(a.requiredString("deviceSerial"), suiteId, caseId).toResult {
-                mapOf("sessionId" to it.id, "suiteId" to suiteId, "caseId" to caseId, "deviceSerial" to it.deviceSerial, "active" to true)
-            }
-        },
         "get_test_recording" to tool { a ->
             val id = a.requiredString("sessionId")
             val rowId = a.string("rowId")

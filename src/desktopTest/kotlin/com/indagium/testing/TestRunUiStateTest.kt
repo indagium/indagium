@@ -54,7 +54,7 @@ class TestRunUiStateTest {
     }
 
     @Test
-    fun theLiveCaptureDeviceAndUnreadyDevicesAreNotOffered() {
+    fun theLiveCaptureDeviceIsOfferedForBorrowingAndUnreadyDevicesAreNotOffered() {
         val devices = listOf(
             CaptureDevice("SER-A", "device", "Pixel 8"),
             CaptureDevice("SER-LIVE", "device", "Pixel 7"),
@@ -62,7 +62,8 @@ class TestRunUiStateTest {
             CaptureDevice("SER-B", "device"),
         )
         val offered = deviceChoices(devices, liveCaptureSerial = "SER-LIVE")
-        assertEquals(listOf("SER-A", "SER-B"), offered.map { it.serial })
+        assertEquals(listOf("SER-A", "SER-LIVE", "SER-B"), offered.map { it.serial })
+        assertTrue(offered.single { it.serial == "SER-LIVE" }.sharesLiveCapture)
         assertEquals("Pixel 8 (SER-A)", offered.first().label)
         assertEquals("SER-B", offered.last().label)
         assertEquals(3, deviceChoices(devices, null).size)

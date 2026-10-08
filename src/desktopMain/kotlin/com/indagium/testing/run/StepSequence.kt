@@ -626,7 +626,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?): JudgeEvidence {
         val start = attemptLogOffset
-        val logFile = env.session.logFile
+        val logFile = env.session.readLogFile
         val lane = JudgeLaneEvidence(
             label = JUDGE_LANE_LABEL,
             laneId = "",

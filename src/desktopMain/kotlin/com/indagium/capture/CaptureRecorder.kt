@@ -1199,7 +1199,8 @@ private fun stripLeadingNonPngBytes(bytes: ByteArray): ByteArray? {
     return null
 }
 
-private const val SESSION_FILE = "session.json"
+const val CAPTURE_SESSION_FILE_NAME = "session.json"
+private const val SESSION_FILE = CAPTURE_SESSION_FILE_NAME
 private const val PREVIEW_PUBLISH_INTERVAL_MS = 250L
 private const val SPACE_CHECK_INTERVAL_MS = 1_000L
 private const val SESSION_METADATA_PERSIST_INTERVAL_MS = 5_000L

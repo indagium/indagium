@@ -919,6 +919,7 @@ classDiagram
         +Int mcpControlPort
         +Boolean mcpAllowBrowserClients
         +List~AiProviderProfile~ aiProviderProfiles
+        +Map~String, WorkflowAiSelection~ workflowAiSelections
         +Int aiMaxToolRounds
         +VoiceInputSettings voiceInput
         +CaptureSettings captureSettings
@@ -1816,7 +1817,11 @@ existing autosave — the worst case is a stale but valid file plus an orphaned 
 its session directory is recovered as interrupted capture data. After Stop, the same tab carries a
 durable `attachedVideo`/capture descriptor link, so the finalized capture can be restored normally.
 `AppSettings.captureSettings` is persisted in the keyed settings JSON and is applied immediately by
-the Capture section of Settings. `AppSettings.tracker` and `AppSettings.testing` are likewise JSON-only
+the Capture section of Settings. `workflowAiSelections` remembers the provider, optional model and
+reasoning-effort override independently for test-step drafting, recording rewrite, test lanes and the
+judge; it does not change the global selected profile and contains no credentials. A remembered profile
+is resolved against current settings on open, and stale discovered catalog choices fall back safely.
+`AppSettings.tracker` and `AppSettings.testing` are likewise JSON-only
 (appended last to `settingsJson()`); the issue tracker's access token is **not** part of settings — it
 lives only in the OS keychain (§26.9.3). Test suites, runs and issues are stored in the three test folders
 (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only, §26.3), not in the autosave.
@@ -3436,15 +3441,19 @@ flowchart LR
   panel, and a lane without a tab has no in-app mirror (an external scrcpy window still opens). The
   controller of a lane is created on the lane's own folder, so its session is
   `lanes/<laneId>/capture/<sessionId>` and every run-folder consumer keeps working.
-- **The manual rule is unchanged.** `LogTab.testLane` (session-only, not in the autosave) marks a lane
-  tab. `AppState.liveCaptureTabId` filters `testLane == null`, so the toolbar, the launcher and the device
-  AI tools never see a lane as "the live capture", and `aiCaptureBinding` refuses a lane tab (the run's own
-  agent drives that device). What keeps a lane and a manual capture, or two lanes, off one phone is a
-  per-device claim in `laneCaptureSerials` (+ `manualCaptureStartSerial` for a manual start that is
-  still resolving), checked and taken in one step under `stateLock`: a lane refuses a serial a manual
-  capture holds and a manual start refuses a serial a lane holds, each with a message naming the other.
-  `captureStartInProgress` is **not** used by lanes, so lanes on different devices start side by side
-  and never block the UI.
+- **One device owner with an explicit borrow path.** `LogTab.testLane` (session-only, not in the
+  autosave) marks a lane tab. `AppState.liveCaptureTabId` filters `testLane == null`, so toolbar and
+  device-AI discovery never mistake a lane tab for the user's capture. `aiCaptureBinding` also checks
+  `laneCaptureSerials`, preventing another agent from controlling a device while a lane borrows a
+  manual capture. An active step-authoring recording blocks a test lane until the user stops and
+  reviews it. A matching manual live capture can be borrowed by one lane: both use the same
+  `TabCaptureController`, recorder, mirror and encoder; the run's per-device claim prevents a second
+  lane or new manual capture from taking that serial. The source tab, settings, notes and checkpoint
+  remain user-owned. The run dialog explains that source settings win for a borrowed capture; its
+  Recording overrides only affect a lane that starts a new capture. Claims are checked atomically in
+  `stateLock`; capture discovery, copying and startup never happen while it is held. Authoring
+  discovery and mirror readiness run in the Tests workspace coroutine, with cancellation and no
+  focus change.
 - **Stop, close, cancel.** `AppState.finishLaneCapture` stops through the paths a tab Stop uses:
   `stopCaptureTab` (mirror `requestStop`, recorder stop, drain, finalization; waits for the controller to be
   removed, bounded and interruptible) or, for a tabless lane, a stop + `finalizeStopped` job on `ioScope`.
@@ -3454,10 +3463,22 @@ flowchart LR
   on a lane: it only waits (bounded) for coordinator jobs, and no lane code waits on a mirror lifecycle
   lock or on the EDT. Closing a lane tab (or pressing Stop in it) makes the recorder leave `RECORDING`,
   which `AppLaneCapture.lost` turns into the lane's error.
-- **Session lookup.** A lane session is not under a capture root, so it never appears in the launcher's
-  retained list (no unfinished session to recover after a crash, nothing to delete by mistake);
-  `CaptureService.registerLaneSession` makes `retainedSession`/`sessionById` find it by id for this
-  launch, which is all Save ZIP, the marker files and the strip need.
+- **Borrowed-session boundary.** `AppLaneCapture` copies a borrowed source's flushed log/index and
+  bounded video prefix into a lane-specific session directory. A dedicated evidence lock orders
+  periodic copies, lane stop and archive export. The final copy freezes source lengths before file
+  I/O, writes a lane-specific session id and terminal descriptor, and never advances the source's
+  checkpoints or extends source notes. After stop, marker-window reads, judge log reads and exports
+  use only the frozen lane files; the user's source capture continues until they stop it. If the
+  source ends first, the lane reports capture loss, freezes its local evidence and releases its
+  device claim. Copies use bounded-memory chunks; timestamps retain the source index's existing
+  approximate alignment.
+- **Session lookup.** An owned lane session is not under a capture root, so it never appears in the
+  launcher's retained list (no unfinished session to recover after a crash, nothing to delete by
+  mistake); `CaptureService.registerLaneSession` makes `retainedSession`/`sessionById` find it by id
+  for this launch, which is all Save ZIP, the marker files and the strip need. A borrowed lane's
+  separate local session is deliberately not registered as a source capture; it is resolved from
+  its run folder and exported directly, while its manual source remains under normal capture-tab
+  ownership.
 - **AI "Mark issue".** When a non-setup step ends `FAIL`, `TIMEOUT`, `BLOCKED` or `ERROR`,
   `LaneRunner.stepRecorded` asks the lane's capture for a marker (`LaneMarkerText.kt`: the label
   `AI · <case> · step N failed` and a Markdown note of the action, the expected result, the failed checks
@@ -3467,9 +3488,10 @@ flowchart LR
   the screenshot under it, and, after `markerPostMs`, the LogRef of the window; it writes either into a
   tab's Notes (`TabMarkerNotes`) or into the `LaneNotes` a tabless lane holds. At the end of the lane the
   notes are written to `lane-notes.ann` so a later issue export has them.
-- **Archive.** `AppLaneCapture.exportArchive` is the capture ZIP of the whole session: while recording
-  it is a live Save ZIP (`controller.export`), afterwards the retained-session export; both through
-  `CaptureArchiveExporter`, with the lane's notes (the tab's current ones while it is open). Lane captures
+- **Archive.** `AppLaneCapture.exportArchive` is the capture ZIP of the lane's whole bounded session:
+  borrowed captures export from lane-local files before or after source Stop/deletion without touching
+  source export checkpoints; owned captures use the existing live/retained-session paths. Both use
+  `CaptureArchiveExporter` and the lane's notes (the tab's current ones while it is open). Lane captures
   force `markerNotesInSnapshot` so the markers always travel with it. Reopening it ("Bug report / archive")
   shows the log, the video and the AI markers at the failure (`LaneRunCaptureTest` round-trips it through
   `CaptureArchiveReader` and `reanchorImportedCaptureNotes`).
@@ -3777,6 +3799,17 @@ reachable by any prompt-injected lane agent, which is why the default permission
 "Record from device" (`ui/TestsStepAuthoring.kt`, `TestStepRecordingSession`) turns accepted mirror input
 into review rows. The mirror carries no UI hierarchy, so the session adds its own context, and an
 optional AI step turns the raw rows into readable steps.
+
+**Authoring capture preparation.** The UI keeps `ActiveSurface.Tests` selected while it refreshes
+device discovery, starts or reuses the selected device's configured manual capture with embedded
+mirror enabled, and awaits mirror `LIVE` on a cancellable workspace coroutine. A matching existing
+capture is reused; another-device live capture or a lane claim is reported instead of silently
+stopping either one. `takeFocus=false` publishes the new capture tab without changing the active
+Tests surface, and the mirror window is detached from the editor so the test editor stays visible.
+Starting capture alone does not register an input observer. The observer and timeline subscription
+are installed only after mirror readiness and a final coroutine cancellation check; changing cases
+or leaving the editor cancels an in-flight preparation. Stopping/reviewing the recording does not
+stop its capture, so a later same-device lane can borrow it.
 
 **Screen-context probe.** With a `screenProbe` set (`AppState.startTestStepRecording`), a single separate
 worker (`RecordingScreenProbe`) captures the screenshot first, then reads the UI hierarchy

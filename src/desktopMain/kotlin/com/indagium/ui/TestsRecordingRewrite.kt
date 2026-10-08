@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.model.WorkflowAiSelection
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.TestStepRecordingSnapshot
@@ -40,9 +41,11 @@ private val PROFILE_MENU_WIDTH = 280.dp
 internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: TestCase, snapshot: TestStepRecordingSnapshot, locked: Boolean) {
     val ui = LocalTestsUi.current
     val profiles = normalizeAiProviderProfiles(ui.state.settings.aiProviderProfiles)
-    var profile by remember(profiles) { mutableStateOf(profiles.firstOrNull { it.selected } ?: profiles.firstOrNull()) }
-    var model by remember(profile?.id) { mutableStateOf<String?>(null) }
-    var effort by remember(profile?.id) { mutableStateOf<String?>(null) }
+    val savedSelection = ui.state.settings.workflowAiSelections[AiWorkflow.RECORDING_REWRITE]
+    var selection by remember(profiles, savedSelection) {
+        mutableStateOf(resolveAiWorkflowSelection(ui.state.settings, AiWorkflow.RECORDING_REWRITE, profiles))
+    }
+    val profile = profiles.firstOrNull { it.id == selection.profileId }
     var note by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var rewriting by remember { mutableStateOf(false) }
@@ -68,7 +71,10 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             selectedLabel = profile?.displayName ?: "Choose a configured profile",
             options = profiles,
             optionLabel = { it.displayName },
-            onSelect = { profile = it },
+            onSelect = {
+                selection = WorkflowAiSelection(profileId = it.id)
+                ui.state.rememberAiWorkflowSelection(AiWorkflow.RECORDING_REWRITE, selection)
+            },
             enabled = !busy,
             isSelected = { it.id == profile?.id },
             emptyText = "Configure a provider profile in Settings first",
@@ -78,9 +84,13 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             ModelAndEffortPickers(
                 profile = chosen,
                 catalog = catalog,
-                model = model,
-                effort = effort,
-                onChange = { pickedModel, pickedEffort -> model = pickedModel; effort = pickedEffort },
+                model = selection.modelId,
+                effort = selection.reasoningEffort,
+                modelWasDiscovered = selection.modelWasDiscovered,
+                onChange = { pickedModel, pickedEffort, discovered ->
+                    selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
+                    ui.state.rememberAiWorkflowSelection(AiWorkflow.RECORDING_REWRITE, selection)
+                },
             )
         }
     }
@@ -115,7 +125,9 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
                 error = null
                 job = ui.scope.launch {
                     try {
-                        val result = ui.state.rewriteTestStepRecording(session.id, chosen.id, model, effort, note)
+                        val result = ui.state.rewriteTestStepRecording(
+                            session.id, chosen.id, selection.modelId, selection.reasoningEffort, note,
+                        )
                         if (result !is StoreResult.Ok) error = result.userMessage()
                     } finally {
                         rewriting = false

@@ -19,6 +19,7 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureTimeline
@@ -32,6 +33,7 @@ import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.nativeMediaAdaptationNotice
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.readScreencapPng
+import com.indagium.capture.withMirrorMode
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -1000,6 +1002,8 @@ private const val EMBEDDED_MIRROR_SESSION_WAIT_MS = 5_000L
  * before giving up rather than silently opening a second embedded scrcpy server — see that
  * function's doc for the race this closes. */
 private const val EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS = 10_000L
+private const val AUTHORING_MIRROR_WAIT_MS = 30_000L
+private const val AUTHORING_MIRROR_POLL_MS = 50L
 
 /** Upper bound a closed capture tab's recorder stop waits for that tab's mirror close to finish first. */
 private const val RECORDER_STOP_MIRROR_CLOSE_WAIT_MS = 10_000L
@@ -1992,31 +1996,19 @@ class AppState(
 
     @Suppress("ReturnCount") // Preconditions return typed messages before a mirror observer or recording session is created.
     internal fun startTestStepRecording(serial: String, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> {
+        laneCaptureOnDevice(serial)?.let { lane -> return StoreResult.Invalid(laneHoldsDeviceMessage(serial, lane)) }
+        validateTestStepRecordingTarget(suiteId, caseId)?.let { return it }
         val mirror = synchronized(stateLock) {
             embeddedMirrorsByTab.values.firstOrNull { handle ->
                 handle.snapshot.value.deviceSerial == serial && handle.snapshot.value.state == com.indagium.capture.mirror.EmbeddedMirrorState.LIVE
             }
         } ?: return StoreResult.Invalid("Open and connect a live mirror for this device before recording.")
-        val library = testLibraryStore.library.value
-        val suite = library.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
-        if (suite.cases.none { it.id == caseId }) return StoreResult.NotFound("case", caseId)
-        when {
-            library.readOnly -> return StoreResult.Invalid(LIBRARY_READ_ONLY_MESSAGE)
-            suite.readOnly -> return StoreResult.Invalid(SUITE_READ_ONLY_MESSAGE)
-        }
-        when (val decision = com.indagium.testing.limits.decide(
-            library,
-            com.indagium.testing.limits.LimitOperation.EditCase(suiteId, caseId),
-            editionService.limits(),
-        )) {
-            is com.indagium.testing.limits.LimitDecision.Refused -> return StoreResult.LimitReached(decision)
-            else -> Unit
-        }
         // GPU mirror paths publish no CPU pixels with an input, so the session falls back to adb on its own image worker.
-        val screencap = { captureService.toolsForStart(settings.captureSettings).readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) }
+        val recordingTools = captureToolsProvider(settings.captureSettings)
+        val screencap = { recordingTools.readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) }
         // The probe reads the UI hierarchy, top activity and an image over adb on the session's own worker; it never touches the mirror.
         val probe = RecordingScreenProbe(
-            adb = { arguments, timeout, limit -> captureService.toolsForStart(settings.captureSettings).runAdb(serial, arguments, timeout, limit) },
+            adb = { arguments, timeout, limit -> recordingTools.runAdb(serial, arguments, timeout, limit) },
             screencap = screencap,
         )
         val session = TestStepRecordingSession(
@@ -2031,17 +2023,150 @@ class AppState(
         return StoreResult.Ok(session)
     }
 
+    private fun validateTestStepRecordingTarget(suiteId: String, caseId: String): StoreResult<Nothing>? {
+        val library = testLibraryStore.library.value
+        val suite = library.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
+        if (suite.cases.none { it.id == caseId }) return StoreResult.NotFound("case", caseId)
+        when {
+            library.readOnly -> return StoreResult.Invalid(LIBRARY_READ_ONLY_MESSAGE)
+            suite.readOnly -> return StoreResult.Invalid(SUITE_READ_ONLY_MESSAGE)
+        }
+        return when (val decision = com.indagium.testing.limits.decide(
+            library,
+            com.indagium.testing.limits.LimitOperation.EditCase(suiteId, caseId),
+            editionService.limits(),
+        )) {
+            is com.indagium.testing.limits.LimitDecision.Refused -> StoreResult.LimitReached(decision)
+            else -> null
+        }
+    }
+
+    /** ADB device discovery for recording authoring; call from a background coroutine. */
+    internal fun discoverTestStepRecordingDevices(): List<CaptureDevice> =
+        testStepRecordingDeviceDiscovery().filter { it.available }
+
+    /**
+     * Opens or reuses a capture for the chosen device, then awaits its embedded mirror without changing the Tests surface. Starting
+     * adb/scrcpy can take several seconds, so callers invoke this from the workspace coroutine rather than the Compose event thread.
+     */
+    internal suspend fun prepareTestStepRecording(
+        serial: String,
+        suiteId: String,
+        caseId: String,
+    ): StoreResult<TestStepRecordingSession> {
+        recordingPreparationProblem(serial, suiteId, caseId)?.let { return it }
+        val deviceResult = discoverAuthoringDevice(serial)
+        deviceResult.failureOrNull()?.let { return it }
+        val device = (deviceResult as StoreResult.Ok).value
+        val captureResult = chooseAuthoringCapture(serial, device)
+        captureResult.failureOrNull()?.let { return it }
+        val (tabId, _) = (captureResult as StoreResult.Ok).value
+        awaitAuthoringMirror(tabId, serial)?.let { return StoreResult.Invalid(it) }
+        currentCoroutineContext().ensureActive()
+        detachEmbeddedMirror(tabId)
+        return startTestStepRecording(serial, suiteId, caseId)
+    }
+
+    private fun recordingPreparationProblem(
+        serial: String,
+        suiteId: String,
+        caseId: String,
+    ): StoreResult<Nothing>? {
+        laneCaptureOnDevice(serial)?.let { lane -> return StoreResult.Invalid(laneHoldsDeviceMessage(serial, lane)) }
+        if (testStepRecordingSession != null) return StoreResult.Invalid("Stop or review the current recording before starting another.")
+        return validateTestStepRecordingTarget(suiteId, caseId)
+    }
+
+    @Suppress("TooGenericExceptionCaught") // ADB discovery can fail through process, authorization, or native-tool wrappers.
+    private suspend fun discoverAuthoringDevice(serial: String): StoreResult<CaptureDevice> {
+        val devices = try {
+            withContext(Dispatchers.IO) { discoverTestStepRecordingDevices() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            val detail = failure.message ?: failure::class.simpleName
+            return StoreResult.Invalid("Could not discover Android devices: $detail")
+        }
+        val device = devices.firstOrNull { it.serial == serial }
+        return device?.let { StoreResult.Ok(it) } ?: StoreResult.Invalid("Android device $serial is not connected or authorized.")
+    }
+
+    private fun chooseAuthoringCapture(
+        serial: String,
+        device: CaptureDevice,
+    ): StoreResult<Pair<String, TabCaptureController>> {
+        val liveTabId = liveCaptureTabId
+        val liveController = liveTabId?.let(::captureControllerFor)
+        val currentSerial = liveController?.selectedSession?.value?.device?.serial
+        if (liveTabId != null && currentSerial != null && currentSerial != serial) {
+            return StoreResult.Invalid("A capture is already live on $currentSerial. Stop it or select that device to record steps.")
+        }
+        if (liveTabId != null && currentSerial == null) {
+            return StoreResult.Invalid("The live capture is still starting; try again shortly.")
+        }
+        val tabId = liveTabId ?: startCaptureTab(
+            device,
+            settingsOverride = { it.withMirrorMode(CaptureMirrorMode.EMBEDDED) },
+            takeFocus = false,
+        ) ?: return StoreResult.Invalid(captureService.error ?: "The capture could not start.")
+        val controller = captureControllerFor(tabId) ?: return StoreResult.Invalid("The capture is no longer available. Try again.")
+        val sourceSession = controller.selectedSession.value
+        if (sourceSession != null && sourceSession.device.serial != serial) {
+            return StoreResult.Invalid("The live capture belongs to ${sourceSession.device.serial}, not $serial.")
+        }
+        return StoreResult.Ok(tabId to controller)
+    }
+
+    private suspend fun awaitAuthoringMirror(tabId: String, serial: String): String? {
+        val controller = captureControllerFor(tabId) ?: return "The capture is no longer available. Try again."
+        val session = awaitCaptureSession(controller)
+            ?: return "The capture did not become ready in time. Check capture status and try again."
+        if (session.device.serial != serial) return "The live capture belongs to ${session.device.serial}, not $serial."
+        ensureEmbeddedMirror(tabId, autoStart = true)
+        val mirrorReady = withTimeoutOrNull(AUTHORING_MIRROR_WAIT_MS) {
+            while (true) {
+                when (embeddedMirrorFor(tabId)?.snapshot?.value?.state) {
+                    com.indagium.capture.mirror.EmbeddedMirrorState.LIVE -> return@withTimeoutOrNull true
+                    com.indagium.capture.mirror.EmbeddedMirrorState.FAILED -> return@withTimeoutOrNull false
+                    else -> if (embeddedMirrorSetupError(tabId) != null) return@withTimeoutOrNull false
+                }
+                delay(AUTHORING_MIRROR_POLL_MS)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            false
+        } ?: false
+        if (mirrorReady) return null
+        val reason = embeddedMirrorSetupError(tabId)
+            ?: embeddedMirrorFor(tabId)?.snapshot?.value?.error
+            ?: "the connection timed out"
+        return "Could not connect the embedded mirror for recording: $reason"
+    }
+
+    private fun <T> StoreResult<T>.failureOrNull(): StoreResult<Nothing>? = when (this) {
+        is StoreResult.Ok -> null
+        is StoreResult.Invalid -> this
+        is StoreResult.LimitReached -> this
+        is StoreResult.NotFound -> this
+    }
+
     /** Makes [session] the app's one recording, for the case [caseId] of [suiteId]; refused while another recording exists. */
     internal fun registerTestStepRecording(session: TestStepRecordingSession, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> =
-        synchronized(testStepRecordingLock) {
-            if (testStepRecordingSession != null) {
-                session.close()
-                return@synchronized StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")
+        synchronized(stateLock) {
+            val lane = laneCaptureSerials[session.deviceSerial]
+            if (lane != null) {
+                StoreResult.Invalid(laneHoldsDeviceMessage(session.deviceSerial, lane))
+            } else {
+                synchronized(testStepRecordingLock) {
+                    if (testStepRecordingSession != null) {
+                        StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")
+                    } else {
+                        testStepRecordingSession = session
+                        testStepRecordingTarget = suiteId to caseId
+                        StoreResult.Ok(session)
+                    }
+                }
             }
-            testStepRecordingSession = session
-            testStepRecordingTarget = suiteId to caseId
-            StoreResult.Ok(session)
-        }
+        }.also { if (it !is StoreResult.Ok) session.close() }
 
     internal fun stopTestStepRecording(): TestStepRecordingSession? {
         testStepRecordingSession?.stop()
@@ -2748,6 +2873,9 @@ class AppState(
     /** Test seam: the adb/scrcpy tools a capture start uses. Production resolves them from the capture settings. */
     internal var captureToolsProvider: (com.indagium.capture.CaptureSettings) -> CaptureTools = { captureService.toolsForStart(it) }
 
+    /** Test seam for fresh authoring-device discovery; production performs ADB discovery on the caller's IO dispatcher. */
+    internal var testStepRecordingDeviceDiscovery: () -> List<CaptureDevice> = { captureService.discoverDevicesNow() }
+
     /** Test seam: whether the bundled native media stack can load (see NativeMediaSupport.kt). */
     internal var captureMediaSupportProvider: () -> NativeMediaSupport = { captureService.nativeMediaSupportNow() }
 
@@ -2918,6 +3046,9 @@ class AppState(
         check(tab(tabId)?.testLane == null) { "This capture belongs to a lane of an AI test run, whose agent drives its device." }
         val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
         val session = controller.selectedSession.value ?: error("The bound capture has no active session")
+        check(laneCaptureOnDevice(session.device.serial) == null) {
+            "An AI test lane currently drives Android device ${session.device.serial}; another AI capture session cannot control it."
+        }
         val tools = captureService.toolsForStart(session.settings)
         val connected = tools.listDevices().any { it.device.serial == session.device.serial && it.device.available }
         check(connected) { "Android device ${session.device.serial} is disconnected" }
@@ -3913,7 +4044,7 @@ class AppState(
                 try {
                     val session = awaitCaptureSession(controller)
                         ?: error("capture session is not ready")
-                    val tools = captureService.toolsForStart(session.settings)
+                    val tools = captureToolsProvider(session.settings)
                     // A capture that's actively recording video already owns one embedded scrcpy
                     // session (CaptureRecorder/EmbeddedDeviceSession) — share it instead of opening
                     // a second device encoder. Mirror-only captures (recordVideo=false) skip the wait
@@ -4486,10 +4617,14 @@ class AppState(
      * [startCaptureForAi]'s `recordVideo`/`includeEarlierDeviceLogs` per-launch overrides, the only
      * current caller that passes one.
      */
-    internal fun startCaptureTab(device: CaptureDevice, settingsOverride: CaptureSettingsOverride? = null): String? {
+    internal fun startCaptureTab(
+        device: CaptureDevice,
+        settingsOverride: CaptureSettingsOverride? = null,
+        takeFocus: Boolean = true,
+    ): String? {
         val existing = liveCaptureTabId
         if (existing != null) {
-            activateTab(existing)
+            if (takeFocus) activateTab(existing)
             return existing
         }
         if (!device.available) {
@@ -4513,9 +4648,9 @@ class AppState(
         val controller = captureService.newController()
         val tabId = "t${tabCounter.getAndIncrement()}"
         // Where Start was pressed: the live tab takes the launcher's place (see publishOpenedTab).
-        val originLauncherId = activeLauncherTabId()
+        val originLauncherId = activeLauncherTabId().takeIf { takeFocus }
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
-        val plan = CaptureStartPlan(device, settings, controller, tabId, "Capture — ${device.model}", lane = null, originLauncherId)
+        val plan = CaptureStartPlan(device, settings, controller, tabId, "Capture — ${device.model}", lane = null, originLauncherId, takeFocus)
         ioScope.launch {
             try {
                 runCaptureStart(plan)
@@ -4543,6 +4678,7 @@ class AppState(
         /** Non-null: the capture of an AI test lane, not "the live capture" (see [liveCaptureTabId]). */
         val lane: TestLaneTabRef?,
         val originLauncherId: String?,
+        val takeFocus: Boolean = true,
     )
 
     /**
@@ -4577,7 +4713,7 @@ class AppState(
                 openCaptureDisplay(plan, adaptedSettings)
             }
             captureService.updateSessions()
-            if (plan.lane == null) closeCaptureLauncherTabs()
+            if (plan.lane == null && plan.takeFocus) closeCaptureLauncherTabs()
             plan.tabId?.let { monitorCaptureLifecycle(it, plan.controller) }
             return session
         } catch (failure: Throwable) {
@@ -4608,12 +4744,11 @@ class AppState(
             testLane = plan.lane,
         )
         synchronized(stateLock) {
-            if (plan.lane == null) {
+            if (plan.lane == null && plan.takeFocus) {
                 check(tabs.none { it.captureSessionId != null && it.testLane == null }) { "A capture is already recording" }
                 publishOpenedTab(liveTab, plan.originLauncherId)
             } else {
-                // A lane's tab opens quietly: whatever the user is looking at (the Tests workspace) keeps the focus. Only when nothing is
-                // shown at all does the new tab become what is shown.
+                // Lane tabs and authoring-only captures open quietly: the surface the user is looking at stays in front.
                 tabs = tabs + liveTab
                 if (activeSurface == null) setActiveSurfaceToTab(liveTab.id)
             }
@@ -4629,7 +4764,7 @@ class AppState(
                 // doesn't compose while videoPanelVisible is false, so a mirror-enabled capture that starts with the panel hidden
                 // would otherwise never auto-start its mirror and never surface a setup error either. A lane's tab does not touch the
                 // panel: the mirror starts anyway and shows when the user opens the tab.
-                if (plan.lane == null) videoPanelVisible = true
+                if (plan.lane == null && plan.takeFocus) videoPanelVisible = true
                 ensureEmbeddedMirror(tabId, autoStart = true)
             }
             CaptureMirrorStartRoute.EXTERNAL -> {
@@ -4776,11 +4911,10 @@ class AppState(
         "Device $serial is recording for an AI test run (run ${lane.runId}, lane ${lane.laneId}); wait for it to finish or choose another device."
 
     /**
-     * Reserves [serial] for [lane]. Refused with an [IllegalStateException] naming who holds it when a manual capture (live or still
-     * starting) or another lane already does. The check and the claim are one step under [stateLock], and a manual start makes the same
-     * check under the same lock, so the two can never both win.
+     * Reserves [serial] for [lane]. A matching manual capture is allowed only when its tab id is supplied for borrowing. The check
+     * and the claim are one step under [stateLock], and a manual start makes the same check under the same lock, so the two cannot race.
      */
-    internal fun claimLaneDevice(serial: String, lane: TestLaneTabRef) {
+    internal fun claimLaneDevice(serial: String, lane: TestLaneTabRef, borrowedTabId: String? = null) {
         synchronized(stateLock) {
             laneCaptureSerials[serial]?.let { held ->
                 throw IllegalStateException(
@@ -4788,8 +4922,26 @@ class AppState(
                         "wait for it to finish or choose another device.",
                 )
             }
-            check(manualCaptureStartSerial != serial && liveCaptureSerial() != serial) {
-                "Device $serial is held by the live capture in the main window; stop that capture or choose another device."
+            val activeAuthoring = testStepRecordingSession?.takeIf { it.deviceSerial == serial && it.snapshot.value.active }
+            check(activeAuthoring == null) {
+                "Device $serial has an active test-step recording. Stop recording steps before starting the AI test run."
+            }
+            val liveManualTabId = tabs.firstOrNull { tab ->
+                tab.captureSessionId != null && tab.testLane == null &&
+                    captureControllersByTab[tab.id]?.selectedSession?.value?.device?.serial == serial
+            }?.id
+            if (borrowedTabId == null) {
+                check(manualCaptureStartSerial != serial && liveManualTabId == null) {
+                    "Device $serial is held by the live capture in the main window; choose its existing capture to share or stop it."
+                }
+            } else {
+                check(manualCaptureStartSerial != serial && liveManualTabId == borrowedTabId) {
+                    "The selected manual capture on $serial is no longer available to share. Refresh the run and try again."
+                }
+                val borrowedController = captureControllersByTab[borrowedTabId]
+                check(borrowedController?.snapshot?.value?.state == com.indagium.capture.RecorderState.RECORDING) {
+                    "The manual capture on $serial is not recording and cannot be shared with the lane."
+                }
             }
             laneCaptureSerials[serial] = lane
         }
@@ -4805,6 +4957,13 @@ class AppState(
      */
     internal fun beginLaneCapture(request: LaneCaptureStart): LaneCaptureHandle {
         val serial = request.device.serial
+        val existingManualTabId = synchronized(stateLock) {
+            tabs.firstOrNull { tab ->
+                tab.captureSessionId != null && tab.testLane == null &&
+                    captureControllersByTab[tab.id]?.selectedSession?.value?.device?.serial == serial
+            }?.id
+        }
+        if (existingManualTabId != null) return beginBorrowedLaneCapture(request, existingManualTabId)
         claimLaneDevice(serial, request.lane)
         try {
             request.captureRoot.mkdirs()
@@ -4827,6 +4986,51 @@ class AppState(
         }
     }
 
+    private fun beginBorrowedLaneCapture(request: LaneCaptureStart, sourceTabId: String): LaneCaptureHandle {
+        val lane = request.lane
+        val controller = synchronized(stateLock) {
+            claimLaneDevice(request.device.serial, lane, sourceTabId)
+            checkNotNull(captureControllersByTab[sourceTabId]) { "The manual capture tab is no longer live." }
+        }
+        try {
+            val sourceSession = controller.selectedSession.value
+                ?: error("The manual capture is still starting; wait for it to become live and retry.")
+            check(sourceSession.device.serial == request.device.serial) { "The selected manual capture belongs to another device." }
+            check(controller.snapshot.value.state == com.indagium.capture.RecorderState.RECORDING) {
+                "The manual capture is not recording and cannot be shared with the lane."
+            }
+            val localId = "borrowed-${UUID.randomUUID()}"
+            val localDirectory = File(request.captureRoot, localId).absoluteFile
+            check(localDirectory.canonicalFile.toPath().startsWith(request.captureRoot.canonicalFile.toPath())) {
+                "The lane evidence directory escaped its run folder."
+            }
+            check(localDirectory.mkdirs() || localDirectory.isDirectory) { "Cannot create lane capture evidence at $localDirectory" }
+            val laneSession = sourceSession.copy(
+                id = localId,
+                directory = localDirectory,
+                status = com.indagium.capture.CaptureStatus.INTERRUPTED,
+                elapsedMs = 0,
+            )
+            return LaneCaptureHandle(
+                lane = lane,
+                tabId = null,
+                controller = controller,
+                session = sourceSession,
+                device = request.device,
+                laneSession = laneSession,
+                borrowedSourceTabId = sourceTabId,
+            )
+        } catch (failure: Throwable) {
+            releaseLaneDevice(request.device.serial, lane)
+            throw failure
+        }
+    }
+
+    internal fun releaseBorrowedLaneCapture(handle: LaneCaptureHandle) {
+        check(handle.isBorrowed) { "Only a lane borrowing a manual capture can release it without stopping." }
+        releaseLaneDevice(handle.device.serial, handle.lane)
+    }
+
     private fun laneKeyOf(lane: TestLaneTabRef) = "${lane.runId}/${lane.laneId}"
 
     /**
@@ -4835,6 +5039,10 @@ class AppState(
      * the mirror is stopped before the recorder and no thread waits on the EDT or on a mirror lifecycle lock. Blocking: call on IO.
      */
     internal fun finishLaneCapture(handle: LaneCaptureHandle, waitMs: Long) {
+        if (handle.isBorrowed) {
+            releaseBorrowedLaneCapture(handle)
+            return
+        }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs)
         try {
             val tabId = handle.tabId

@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.capture.CaptureDevice
+import com.indagium.model.WorkflowAiSelection
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
@@ -72,40 +74,65 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
     }
     var draftOpen by remember { mutableStateOf(false) }
     var logOpen by remember { mutableStateOf(false) }
-    var recordError by remember { mutableStateOf<String?>(null) }
-    val mirrorSerials = ui.state.liveEmbeddedMirrorSerials()
-    var selectedMirror by remember(mirrorSerials) { mutableStateOf(mirrorSerials.singleOrNull() ?: mirrorSerials.firstOrNull()) }
+    var recordError by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
+    var authoringDevices by remember(suiteId, case.id) { mutableStateOf<List<CaptureDevice>>(emptyList()) }
+    var selectedAuthoringSerial by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
+    var preparingRecording by remember(suiteId, case.id) { mutableStateOf(false) }
+    var recordingPreparationJob by remember(suiteId, case.id) { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(suiteId, case.id) {
+        onDispose { recordingPreparationJob?.cancel() }
+    }
 
     TestsSectionTitle("Step authoring")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         HintedButton("Draft steps with AI", onClick = { draftOpen = true }, enabled = editable, disabledHint = "This case is read-only.")
-        if (mirrorSerials.size > 1) {
+        if (authoringDevices.size > 1) {
             TestsDropdown(
-                selectedLabel = selectedMirror ?: "Choose live mirror",
-                options = mirrorSerials,
-                optionLabel = { it },
-                onSelect = { selectedMirror = it },
-                enabled = editable,
-                isSelected = { it == selectedMirror },
+                selectedLabel = authoringDevices.firstOrNull { it.serial == selectedAuthoringSerial }?.let(::recordingDeviceLabel)
+                    ?: "Choose device",
+                options = authoringDevices,
+                optionLabel = ::recordingDeviceLabel,
+                onSelect = { selectedAuthoringSerial = it.serial },
+                enabled = editable && !preparingRecording,
+                isSelected = { it.serial == selectedAuthoringSerial },
                 menuWidth = 240.dp,
             )
         }
         HintedButton(
-            "Record from device",
+            if (preparingRecording) "Connecting…" else "Record from device",
             onClick = {
-                val serial = selectedMirror
-                if (serial == null) {
-                    recordError = "Connect a live device mirror first. Recording observes accepted input from that mirror and never sends input itself."
-                } else {
-                    when (val started = ui.state.startTestStepRecording(serial, suiteId, case.id)) {
-                        is StoreResult.Ok -> recordError = null
-                        else -> recordError = started.userMessage()
+                if (preparingRecording) return@HintedButton
+                recordingPreparationJob = ui.scope.launch {
+                    preparingRecording = true
+                    try {
+                        handleAuthoringPreparationFailure({ recordError = it }) {
+                            authoringDevices = withContext(Dispatchers.IO) { ui.state.discoverTestStepRecordingDevices() }
+                            val preferredSerial = ui.state.liveCaptureSerial()
+                            val serial = selectedAuthoringSerial?.takeIf { selected -> authoringDevices.any { it.serial == selected } }
+                                ?: authoringDevices.firstOrNull { it.serial == preferredSerial }?.serial
+                                ?: authoringDevices.singleOrNull()?.serial
+                            selectedAuthoringSerial = serial
+                            if (authoringDevices.isEmpty()) {
+                                recordError = "No connected Android devices are available. Connect or authorize a device, then try again."
+                            } else if (serial == null) {
+                                recordError = "Choose the device to record. The Tests workspace will stay open while its mirror connects."
+                            } else {
+                                startAuthoringRecording(serial, ui, suiteId, case.id) { recordError = it }
+                            }
+                        }
+                    } finally {
+                        preparingRecording = false
+                        recordingPreparationJob = null
                     }
                 }
             },
-            enabled = editable && mirrorSerials.isNotEmpty(),
-            disabledHint = if (!editable) "This case is read-only." else "Connect a live device mirror first.",
+            enabled = editable && !preparingRecording,
+            disabledHint = if (!editable) "This case is read-only." else "Preparing the device mirror.",
         )
+        if (preparingRecording) {
+            AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
+        }
         if (shared.isNotEmpty()) {
             TestsDropdown(
                 selectedLabel = selectedShared?.name ?: "Shared sequence",
@@ -155,15 +182,49 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
     }
 }
 
+private fun recordingDeviceLabel(device: CaptureDevice): String =
+    if (device.model == device.serial) device.serial else "${device.model} (${device.serial})"
+
+/** ADB/scrcpy setup failures have several platform-specific wrappers; cancellation still propagates to the UI job. */
+@Suppress("TooGenericExceptionCaught")
+private suspend fun handleAuthoringPreparationFailure(onFailure: (String) -> Unit, action: suspend () -> Unit) {
+    try {
+        action()
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        onFailure("Could not prepare recording: ${failure.message ?: failure::class.simpleName}")
+    }
+}
+
+private suspend fun startAuthoringRecording(
+    serial: String?,
+    ui: TestsUi,
+    suiteId: String,
+    caseId: String,
+    onError: (String?) -> Unit,
+) {
+    if (serial == null) {
+        onError("Choose the device to record.")
+        return
+    }
+    when (val started = ui.state.prepareTestStepRecording(serial, suiteId, caseId)) {
+        is StoreResult.Ok -> onError(null)
+        else -> onError(started.userMessage())
+    }
+}
+
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
 private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -> Unit) {
     val ui = LocalTestsUi.current
     val tc = tc()
     val profiles = normalizeAiProviderProfiles(ui.state.settings.aiProviderProfiles)
-    var profile by remember(profiles) { mutableStateOf(profiles.firstOrNull { it.selected } ?: profiles.firstOrNull()) }
-    var model by remember(profile?.id) { mutableStateOf<String?>(null) }
-    var effort by remember(profile?.id) { mutableStateOf<String?>(null) }
+    val savedSelection = ui.state.settings.workflowAiSelections[AiWorkflow.TEST_STEP_DRAFT]
+    var selection by remember(profiles, savedSelection) {
+        mutableStateOf(resolveAiWorkflowSelection(ui.state.settings, AiWorkflow.TEST_STEP_DRAFT, profiles))
+    }
+    val profile = profiles.firstOrNull { it.id == selection.profileId }
     val catalog = remember { ModelCatalog() }
     var prompt by remember { mutableStateOf(case.description.takeIf(String::isNotBlank) ?: "") }
     var draft by remember { mutableStateOf<TestStepDraft?>(null) }
@@ -208,7 +269,10 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                         selectedLabel = profile?.displayName ?: "Choose a configured profile",
                         options = profiles,
                         optionLabel = { it.displayName },
-                        onSelect = { profile = it },
+                        onSelect = {
+                            selection = WorkflowAiSelection(profileId = it.id)
+                            ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
+                        },
                         isSelected = { it.id == profile?.id },
                         emptyText = "Configure a provider profile in Settings first",
                         menuWidth = 320.dp,
@@ -219,9 +283,13 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                         ModelAndEffortPickers(
                             profile = chosen,
                             catalog = catalog,
-                            model = model,
-                            effort = effort,
-                            onChange = { pickedModel, pickedEffort -> model = pickedModel; effort = pickedEffort },
+                            model = selection.modelId,
+                            effort = selection.reasoningEffort,
+                            modelWasDiscovered = selection.modelWasDiscovered,
+                            onChange = { pickedModel, pickedEffort, discovered ->
+                                selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
+                                ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
+                            },
                         )
                     }
                 }
@@ -241,7 +309,9 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                             error = null
                             job = ui.scope.launch {
                                 try {
-                                    when (val result = ui.state.testStepDraftService.create(suiteId, case.id, selected.id, prompt, model, effort)) {
+                                    when (val result = ui.state.testStepDraftService.create(
+                                        suiteId, case.id, selected.id, prompt, selection.modelId, selection.reasoningEffort,
+                                    )) {
                                         is StoreResult.Ok -> draft = result.value
                                         else -> error = result.userMessage()
                                     }
@@ -403,7 +473,16 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     CommitTextField(row.action, { text -> updateRecorded(session, index) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, placeholder = "Recorded action")
                 }
                 TestsLabeled("Expected result") {
-                    CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying")
+                    CommitTextField(
+                        row.expected,
+                        { text ->
+                            updateRecorded(session, index) { it.copy(expected = text) }
+                            StoreResult.Ok(Unit)
+                        },
+                        enabled = !applying && !rewriting,
+                        multiline = true,
+                        placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
+                    )
                 }
                 CheckRow(checked = row.optional, onToggle = {
                     updateRecorded(session, index) {
@@ -415,7 +494,16 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 }
                 if (row.optional) {
                     TestsLabeled("Perform only when") {
-                        CommitTextField(row.condition.orEmpty(), { text -> updateRecorded(session, index) { it.copy(condition = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
+                        CommitTextField(
+                            row.condition.orEmpty(),
+                            { text ->
+                                updateRecorded(session, index) { it.copy(condition = text) }
+                                StoreResult.Ok(Unit)
+                            },
+                            enabled = !applying && !rewriting,
+                            multiline = true,
+                            placeholder = "Describe the visible condition, such as an ad is playing",
+                        )
                     }
                 }
                 if (row.sourceInputIds.isNotEmpty()) {
