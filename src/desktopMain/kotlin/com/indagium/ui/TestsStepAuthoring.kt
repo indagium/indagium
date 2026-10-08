@@ -162,6 +162,9 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
     val tc = tc()
     val profiles = normalizeAiProviderProfiles(ui.state.settings.aiProviderProfiles)
     var profile by remember(profiles) { mutableStateOf(profiles.firstOrNull { it.selected } ?: profiles.firstOrNull()) }
+    var model by remember(profile?.id) { mutableStateOf<String?>(null) }
+    var effort by remember(profile?.id) { mutableStateOf<String?>(null) }
+    val catalog = remember { ModelCatalog() }
     var prompt by remember { mutableStateOf(case.description.takeIf(String::isNotBlank) ?: "") }
     var draft by remember { mutableStateOf<TestStepDraft?>(null) }
     val editableSteps = remember(draft?.id) { mutableStateListOf<TestStep>().apply { draft?.steps?.let(::addAll) } }
@@ -211,6 +214,17 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                         menuWidth = 320.dp,
                     )
                 }
+                profile?.let { chosen ->
+                    FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        ModelAndEffortPickers(
+                            profile = chosen,
+                            catalog = catalog,
+                            model = model,
+                            effort = effort,
+                            onChange = { pickedModel, pickedEffort -> model = pickedModel; effort = pickedEffort },
+                        )
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 TestsLabeled("What should the added steps do?") {
                     ScrollableTextArea(prompt, { prompt = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
@@ -227,7 +241,7 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                             error = null
                             job = ui.scope.launch {
                                 try {
-                                    when (val result = ui.state.testStepDraftService.create(suiteId, case.id, selected.id, prompt)) {
+                                    when (val result = ui.state.testStepDraftService.create(suiteId, case.id, selected.id, prompt, model, effort)) {
                                         is StoreResult.Ok -> draft = result.value
                                         else -> error = result.userMessage()
                                     }
@@ -366,6 +380,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     val snapshot by session.snapshot.collectAsState()
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    val rewriting = ui.state.isTestStepRecordingRewriting(session.id)
     val applying = working || ui.state.isTestStepRecordingApplying(session.id)
     val applyBlockedReason = recordingApplyBlockedReason(snapshot)
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
@@ -380,14 +395,19 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
             }
         }
         if (snapshot.steps.isEmpty()) TestsHint("No accepted mirror input recorded yet.")
+        if (!snapshot.active && snapshot.steps.isNotEmpty()) RecordingRewriteSection(session, case, snapshot, locked = applying)
         snapshot.steps.forEachIndexed { index, row ->
             Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
                 AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 TestsLabeled("Action") {
-                    CommitTextField(row.action, { text -> updateRecorded(session, index) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = !applying, placeholder = "Recorded action")
+                    CommitTextField(row.action, { text -> updateRecorded(session, index) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, placeholder = "Recorded action")
                 }
                 TestsLabeled("Expected result") {
-                    CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying, multiline = true, placeholder = "Required before applying")
+                    CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = "Required before applying")
+                }
+                if (row.sourceInputIds.isNotEmpty()) {
+                    RecordedInputsList(row, snapshot.rawSteps.orEmpty())
+                    if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
                 }
                 row.contextHint()?.let { TestsHint("Screen context: $it") }
                 row.screenContext?.let { TestsHint(if (row.screenshotJpeg != null) "$it This is an input-time preview before the action, not an expected result." else it) }
@@ -395,7 +415,10 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     RecordedScreenshotPreview(bytes)
                     CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
                         updateRecorded(session, index) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
-                    }, enabled = !applying) { AppText("Use this input-time image as an expected screenshot (review first)", color = tc.ts, fontSize = 9.sp) }
+                    }, enabled = !applying && !rewriting) {
+                        val label = if (row.sourceInputIds.isNotEmpty()) "Use the screen after these inputs as an expected screenshot (review first)" else "Use this input-time image as an expected screenshot (review first)"
+                        AppText(label, color = tc.ts, fontSize = 9.sp)
+                    }
                 }
             }
             Spacer(Modifier.height(6.dp))
@@ -405,7 +428,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         if (!snapshot.active) {
             if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id), variant = ButtonVariant.Ghost)
+                AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id) && !rewriting, variant = ButtonVariant.Ghost)
                 HintedButton(
                     if (working) "Applying…" else "Apply recorded steps",
                     onClick = {
@@ -428,8 +451,8 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             }
                         }
                     },
-                    enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && applyBlockedReason == null,
-                    disabledHint = applyBlockedReason ?: "This recording is being applied.",
+                    enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && !rewriting && applyBlockedReason == null,
+                    disabledHint = applyBlockedReason ?: if (rewriting) "The recording is being rewritten." else "This recording is being applied.",
                     variant = ButtonVariant.Primary,
                 )
             }

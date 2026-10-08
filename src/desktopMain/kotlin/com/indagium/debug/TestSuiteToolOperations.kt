@@ -60,6 +60,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
     val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
         "try_test_script" to suspendTool { a -> tryScript(a) },
         "draft_test_steps" to suspendTool { a -> draftSteps(a) },
+        "rewrite_test_recording" to suspendTool { a -> rewriteRecording(a) },
         "import_test_script" to suspendTool { a -> importScript(a) },
         "export_test_script" to suspendTool { a -> exportScript(a) },
         "stop_test_recording" to suspendTool { a ->
@@ -333,6 +334,10 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             val id = a.requiredString("sessionId")
             appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds).toResult { recordingMap(id, it) }
         },
+        "restore_test_recording_raw" to tool { a ->
+            val id = a.requiredString("sessionId")
+            appState.restoreTestStepRecordingRaw(id).toResult { recordingMap(id, it) }
+        },
         "discard_test_recording" to tool { a ->
             val id = a.requiredString("sessionId")
             if (!appState.clearTestStepRecording(id)) errorMap("This recording is being applied and cannot be discarded yet.")
@@ -427,6 +432,8 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             caseId = a.requiredString("caseId"),
             profileId = a.requiredString("profileId"),
             instruction = a.requiredString("instruction"),
+            model = a.string("model"),
+            effort = a.string("reasoningEffort"),
         )
         return result.toResult { draft ->
             mapOf(
@@ -436,6 +443,21 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 "profileId" to draft.profileId,
                 "steps" to draft.steps.map(::stepResult),
             )
+        }
+    }
+
+    private suspend fun rewriteRecording(a: ToolArgs): Map<String, Any?> {
+        val id = a.requiredString("sessionId")
+        val rewrite = appState.rewriteTestStepRecording(
+            sessionId = id,
+            profileId = a.requiredString("profileId"),
+            model = a.string("model"),
+            reasoningEffort = a.string("reasoningEffort"),
+            note = a.string("note").orEmpty(),
+        )
+        return rewrite.toResult { done ->
+            val snapshot = (appState.testStepRecordingSnapshot(id) as? StoreResult.Ok)?.value
+            snapshot?.let { recordingMap(id, it) + ("notes" to done.notes) } ?: mapOf("sessionId" to id, "notes" to done.notes)
         }
     }
 
@@ -458,21 +480,41 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             put("sessionId", id)
             put("active", snapshot.active)
             put("pendingSnapshots", snapshot.pendingSnapshots)
+            put("rewritten", snapshot.rawSteps != null)
+            if (snapshot.rawSteps != null) put("rewriteNotes", snapshot.rewriteNotes)
             put("steps", snapshot.steps.map { row ->
                 val screen = row.before ?: row.after
-                mapOf("id" to row.id, "action" to row.action, "expected" to row.expected, "screenContext" to row.screenContext,
-                    "hasScreenshot" to (row.screenshotJpeg != null), "useScreenshotAsExpected" to row.useScreenshotAsExpected,
-                    "durationMs" to row.durationMs, "package" to screen?.packageName, "activity" to screen?.activity,
-                    "tappedElement" to row.tappedElement?.let {
+                buildMap<String, Any?> {
+                    put("id", row.id)
+                    put("action", row.action)
+                    put("expected", row.expected)
+                    put("screenContext", row.screenContext)
+                    put("hasScreenshot", row.screenshotJpeg != null)
+                    put("useScreenshotAsExpected", row.useScreenshotAsExpected)
+                    put("durationMs", row.durationMs)
+                    put("package", screen?.packageName)
+                    put("activity", screen?.activity)
+                    put("tappedElement", row.tappedElement?.let {
                         mapOf("text" to it.text, "contentDesc" to it.contentDesc, "resourceId" to it.resourceId, "className" to it.className)
                     })
+                    if (row.sourceInputIds.isNotEmpty()) {
+                        put("sourceInputIds", row.sourceInputIds)
+                        put("checks", row.checks.size)
+                    }
+                }
             })
             if (image != null) {
                 put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))
                 put("mimeType", "image/jpeg")
                 put("kind", "inputTimeContext")
                 put("exampleId", imageRow.id)
-                put("caption", "Captured at input time before action: ${imageRow.action}".take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
+                val rewritten = imageRow.sourceInputIds.isNotEmpty()
+                val caption = if (rewritten) {
+                    "Screen after the recorded inputs of: ${imageRow.action}"
+                } else {
+                    "Captured at input time before action: ${imageRow.action}"
+                }
+                put("caption", caption.take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
                 put("message", "Saved input-time context; this is not an expected-result oracle or current device screen.")
             }
             put("warnings", snapshot.warnings)

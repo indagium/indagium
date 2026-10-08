@@ -1964,6 +1964,7 @@ class AppState(
         private set
     private val testStepRecordingLock = Any()
     private val recordingApplications = mutableSetOf<String>()
+    private val recordingRewrites = mutableSetOf<String>()
 
     private val testStepRecordingApplyService by lazy {
         com.indagium.testing.authoring.TestStepRecordingApplyService(
@@ -1971,6 +1972,14 @@ class AppState(
             importImage = ::importTestGoldenImage,
             resolveImage = ::testGoldenImageFile,
             insertSteps = ::createTestSteps,
+        )
+    }
+
+    internal val testRecordingRewriteService by lazy {
+        com.indagium.testing.authoring.RecordingRewriteService(
+            library = { testLibrary },
+            preflight = ::recordingTargetPreflight,
+            generate = { request -> generateRecordingRewrite(request) },
         )
     }
 
@@ -2006,16 +2015,22 @@ class AppState(
             screencap = screencap,
         )
         val session = TestStepRecordingSession(serial, screencap = screencap, screenProbe = probe::read)
-        synchronized(testStepRecordingLock) {
-            if (testStepRecordingSession != null) {
-                return StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")
-            }
-            testStepRecordingSession = session
-            testStepRecordingTarget = suiteId to caseId
-        }
+        registerTestStepRecording(session, suiteId, caseId).let { if (it !is StoreResult.Ok) return it }
         session.attach(MirrorInputObservers.observe(serial) { input -> session.accept(input.command, input.frame) })
         return StoreResult.Ok(session)
     }
+
+    /** Makes [session] the app's one recording, for the case [caseId] of [suiteId]; refused while another recording exists. */
+    internal fun registerTestStepRecording(session: TestStepRecordingSession, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> =
+        synchronized(testStepRecordingLock) {
+            if (testStepRecordingSession != null) {
+                session.close()
+                return@synchronized StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")
+            }
+            testStepRecordingSession = session
+            testStepRecordingTarget = suiteId to caseId
+            StoreResult.Ok(session)
+        }
 
     internal fun stopTestStepRecording(): TestStepRecordingSession? {
         testStepRecordingSession?.stop()
@@ -2043,6 +2058,9 @@ class AppState(
         if (sessionId in recordingApplications) {
             return@synchronized StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
         }
+        if (sessionId in recordingRewrites) {
+            return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+        }
         if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds)) {
             return@synchronized StoreResult.Invalid("The recording must be stopped and the edited rows and screenshot choices must match its current draft.")
         }
@@ -2059,6 +2077,7 @@ class AppState(
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
             if (sessionId in recordingApplications) return StoreResult.Invalid("This recording is already being applied.")
+            if (sessionId in recordingRewrites) return StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
             val selectedTarget = testStepRecordingTarget?.takeIf { it.first.isNotBlank() && it.second.isNotBlank() }
                 ?: return StoreResult.Invalid("The recording target is no longer available.")
             recordingApplications += sessionId
@@ -2081,11 +2100,56 @@ class AppState(
         sessionId in recordingApplications
     }
 
+    internal fun isTestStepRecordingRewriting(sessionId: String): Boolean = synchronized(testStepRecordingLock) {
+        sessionId in recordingRewrites
+    }
+
+    /**
+     * Rewrites a stopped recording into readable steps through an AI profile. Refused while the recording is being applied or
+     * rewritten; the AI call itself runs with no lock held, and an apply or edit that arrives meanwhile is refused instead.
+     */
+    internal suspend fun rewriteTestStepRecording(
+        sessionId: String,
+        profileId: String,
+        model: String? = null,
+        reasoningEffort: String? = null,
+        note: String = "",
+    ): StoreResult<com.indagium.testing.authoring.RecordingRewrite> {
+        val (session, target) = synchronized(testStepRecordingLock) {
+            val active = testStepRecordingSession?.takeIf { it.id == sessionId }
+                ?: return StoreResult.Invalid("That recording session is no longer active.")
+            if (sessionId in recordingApplications) return StoreResult.Invalid("This recording is already being applied.")
+            if (sessionId in recordingRewrites) return StoreResult.Invalid("This recording is already being rewritten.")
+            val selectedTarget = testStepRecordingTarget?.takeIf { it.first.isNotBlank() && it.second.isNotBlank() }
+                ?: return StoreResult.Invalid("The recording target is no longer available.")
+            recordingRewrites += sessionId
+            active to selectedTarget
+        }
+        try {
+            return testRecordingRewriteService.rewrite(session, target.first, target.second, profileId, model, reasoningEffort, note)
+        } finally {
+            synchronized(testStepRecordingLock) { recordingRewrites.remove(sessionId) }
+        }
+    }
+
+    /** Puts a rewritten recording's recorded rows back (same ids); refused while it is being applied or rewritten. */
+    internal fun restoreTestStepRecordingRaw(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> =
+        synchronized(testStepRecordingLock) {
+            val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+                ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+            when {
+                sessionId in recordingApplications -> StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+                sessionId in recordingRewrites -> StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+                !session.restoreRaw() -> StoreResult.Invalid("This recording has no AI rewrite to undo.")
+                else -> StoreResult.Ok(session.snapshot.value)
+            }
+        }
+
     internal fun clearTestStepRecording(expectedSessionId: String? = null, force: Boolean = false): Boolean {
         val old = synchronized(testStepRecordingLock) {
             val session = testStepRecordingSession
             if (expectedSessionId != null && session?.id != expectedSessionId) return false
-            if (!force && session?.id?.let { it in recordingApplications } == true) return false
+            if (!force && session?.id?.let { it in recordingApplications || it in recordingRewrites } == true) return false
             testStepRecordingSession = null
             testStepRecordingTarget = null
             session
@@ -2266,7 +2330,7 @@ class AppState(
                     }
                 }
             },
-            generate = { profileId, prompt -> generateTestStepDraft(profileId, prompt) },
+            generate = { profileId, prompt, model, effort -> generateTestStepDraft(profileId, prompt, model, effort) },
             insert = { caseId, steps, index -> createTestSteps(caseId, steps, index) },
             assetExists = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.isFile == true },
         )

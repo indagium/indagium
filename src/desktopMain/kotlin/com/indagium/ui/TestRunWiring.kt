@@ -8,6 +8,9 @@ import com.indagium.ai.ManagedMcpServerLease
 import com.indagium.ai.defaultAiProviderFactory
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.testing.authoring.RewriteGeneration
+import com.indagium.testing.authoring.rewriteBudgetGuidance
+import com.indagium.testing.authoring.rewritePromptPreamble
 import com.indagium.testing.run.AgentSegmentRequest
 import com.indagium.testing.run.CoordinatorDeps
 import com.indagium.testing.run.EngineTuning
@@ -16,6 +19,10 @@ import com.indagium.testing.run.LaneDeviceOpener
 import com.indagium.testing.run.TestRunCoordinator
 import com.indagium.testing.run.defaultLaneAgentFactory
 import com.indagium.testing.run.laneAccountRunnerFactory
+import com.indagium.testing.run.laneBudgetGuidance
+import com.indagium.testing.run.lanePromptPreamble
+import com.indagium.testing.run.overrideProblems
+import com.indagium.testing.run.withRunOverrides
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TestRunStore
 import com.indagium.testing.store.readBoundedTestAsset
@@ -49,38 +56,121 @@ internal fun AppState.productionAgentFactory(overrides: TestRunOverrides): LaneA
     laneAccountRunnerFactory { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
 )
 
+/**
+ * The words around an agent run that only answers in text: what its session is called, what is said when it fails, ends early or says
+ * nothing, and how an in-app model and an account agent are told about their tool budget.
+ */
+internal class AgentTextWording(
+    val sessionPrefix: String,
+    val failure: String,
+    val unfinished: String,
+    val empty: String,
+    val budgetGuidance: (AiRun) -> String = ::laneBudgetGuidance,
+    val promptPreamble: (AiRun) -> String = ::lanePromptPreamble,
+)
+
+/** One agent run whose answer is text: the profile ([model] / [reasoningEffort] replace its own), the words, its tools and its limits. */
+internal class AgentTextRequest(
+    val profileId: String,
+    val model: String?,
+    val reasoningEffort: String?,
+    val prompt: String,
+    val systemPrompt: String,
+    val gateway: IndagiumToolGateway,
+    val toolCallLimit: Int,
+    val maxTurns: Int,
+    val timeoutMs: Long,
+    val wording: AgentTextWording,
+)
+
+private val STEP_DRAFT_WORDING = AgentTextWording(
+    sessionPrefix = "test-step-draft",
+    failure = "The provider could not draft steps",
+    unfinished = "The provider did not finish the draft request.",
+    empty = "The provider returned no step draft.",
+)
+
 /** Drafts steps through an existing profile with an empty MCP gateway and no host tools or device session. */
-internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: String): String {
-    val profile = normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == profileId }
+internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: String, model: String? = null, reasoningEffort: String? = null): String =
+    runAgentForText(
+        AgentTextRequest(
+            profileId = profileId,
+            model = model,
+            reasoningEffort = reasoningEffort,
+            prompt = prompt,
+            systemPrompt =
+                "You draft Android QA test steps. Return only the requested JSON. You have no device or tools; " +
+                    "do not claim to have run or observed anything.",
+            gateway = IndagiumToolGateway(emptyList(), emptyMap()),
+            toolCallLimit = 1,
+            maxTurns = 2,
+            timeoutMs = TEST_STEP_DRAFT_TIMEOUT_MS,
+            wording = STEP_DRAFT_WORDING,
+        ),
+    )
+
+private val RECORDING_REWRITE_WORDING = AgentTextWording(
+    sessionPrefix = "test-recording-rewrite",
+    failure = "The provider could not rewrite the recording",
+    unfinished = "The provider did not finish the rewrite request.",
+    empty = "The provider returned no rewrite.",
+    budgetGuidance = ::rewriteBudgetGuidance,
+    promptPreamble = ::rewritePromptPreamble,
+)
+
+/** Rewrites a recording through an existing profile; its only tools read the recording ([RewriteGeneration.gateway]). */
+internal suspend fun AppState.generateRecordingRewrite(request: RewriteGeneration): String = runAgentForText(
+    AgentTextRequest(
+        profileId = request.profileId,
+        model = request.model,
+        reasoningEffort = request.effort,
+        prompt = request.prompt,
+        systemPrompt = request.systemPrompt,
+        gateway = request.gateway,
+        toolCallLimit = request.toolCallLimit,
+        maxTurns = request.maxTurns,
+        timeoutMs = RECORDING_REWRITE_TIMEOUT_MS,
+        wording = RECORDING_REWRITE_WORDING,
+    ),
+)
+
+/**
+ * Runs one agent through the lane launchers (an in-app model over HTTP, or Claude Code / Codex as the signed-in account, which
+ * reach [AgentTextRequest.gateway] through the managed MCP lease) and returns what it answered after its last tool call. Cancelling
+ * the caller cancels the run; the run and its workspace are cleaned up either way.
+ */
+internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String {
+    val base = normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == request.profileId }
         ?: error("Choose an existing provider profile.")
-    val agent = productionAgentFactory(testRunOverrides).create(profile, aiProviderApiKey(profileId))
-    val tabId = "test-step-draft:${java.util.UUID.randomUUID()}"
+    val problems = overrideProblems("Model", base, request.model, request.reasoningEffort)
+    check(problems.isEmpty()) { problems.joinToString(" ") }
+    val profile = base.withRunOverrides(request.model, request.reasoningEffort)
+    val agent = productionAgentFactory(testRunOverrides).create(profile, aiProviderApiKey(request.profileId))
+    val tabId = "${request.wording.sessionPrefix}:${java.util.UUID.randomUUID()}"
     val session = com.indagium.ai.AiSession(tabId)
     var run: AiRun? = null
     try {
-        val gateway = IndagiumToolGateway(emptyList(), emptyMap())
         val activeRun = agent.start(
             AgentSegmentRequest(
                 session = session,
-                prompt = prompt,
-                systemPrompt =
-                    "You draft Android QA test steps. Return only the requested JSON. You have no device or tools; " +
-                        "do not claim to have run or observed anything.",
+                prompt = request.prompt,
+                systemPrompt = request.systemPrompt,
                 context = AiInvestigationContext(tabId),
-                gateway = gateway,
-                toolCallLimit = 1,
-                maxTurns = 2,
+                gateway = request.gateway,
+                toolCallLimit = request.toolCallLimit,
+                maxTurns = request.maxTurns,
                 freeTools = emptySet(),
                 confirmationTimeoutMs = 1_000,
+                budgetGuidance = request.wording.budgetGuidance,
+                promptPreamble = request.wording.promptPreamble,
             ),
         )
         run = activeRun
-        withTimeout(TEST_STEP_DRAFT_TIMEOUT_MS) { activeRun.job?.join() }
+        withTimeout(request.timeoutMs) { activeRun.job?.join() }
         val error = activeRun.history.filterIsInstance<AiRunEvent.Error>().lastOrNull()
-        check(error == null) { "The provider could not draft steps: ${error?.message}" }
-        check(activeRun.job?.isActive != true) { "The provider did not finish the draft request." }
-        return activeRun.history.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString("") { it.text }
-            .also { check(it.isNotBlank()) { "The provider returned no step draft." } }
+        check(error == null) { "${request.wording.failure}: ${error?.message}" }
+        check(activeRun.job?.isActive != true) { request.wording.unfinished }
+        return finalAnswerText(activeRun.history).also { check(it.isNotBlank()) { request.wording.empty } }
     } finally {
         run?.cancel()
         withContext(NonCancellable) { withTimeoutOrNull(TEST_STEP_DRAFT_CLEANUP_MS) { run?.job?.join() } }
@@ -89,8 +179,17 @@ internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: S
     }
 }
 
+/** The assistant text after the run's last tool call: what an agent said between tool calls is thinking aloud, not the answer. */
+internal fun finalAnswerText(history: List<AiRunEvent>): String {
+    val lastTool = history.indexOfLast { it is AiRunEvent.ToolRequested || it is AiRunEvent.ToolCompleted }
+    return history.drop(lastTool + 1).filterIsInstance<AiRunEvent.AssistantDelta>().joinToString("") { it.text }
+}
+
 private const val TEST_STEP_DRAFT_TIMEOUT_MS = 120_000L
 private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
+
+/** A little longer than the service's own timeout (180 s), so the service answers first with its message. */
+private const val RECORDING_REWRITE_TIMEOUT_MS = 190_000L
 
 private const val LIVE_CAPTURE_PROBLEM = "is held by the live capture in the main window; stop that capture or choose another device."
 

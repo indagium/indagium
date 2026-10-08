@@ -23,7 +23,7 @@ data class TestStepDraft(val id: String, val suiteId: String, val caseId: String
 internal class TestStepDraftService(
     private val library: () -> TestLibrary,
     private val preflight: (suiteId: String, caseId: String) -> StoreResult<Unit>,
-    private val generate: suspend (profileId: String, prompt: String) -> String,
+    private val generate: suspend (profileId: String, prompt: String, model: String?, effort: String?) -> String,
     private val insert: (caseId: String, steps: List<TestStep>, index: Int?) -> StoreResult<List<TestStep>>,
     private val assetExists: (suiteId: String, assetPath: String) -> Boolean,
     private val now: () -> Long = System::currentTimeMillis,
@@ -33,7 +33,14 @@ internal class TestStepDraftService(
     private val pending = LinkedHashMap<String, Pending>()
 
     @Suppress("ReturnCount", "TooGenericExceptionCaught") // Converts provider failures to typed results after preserving caller cancellation.
-    suspend fun create(suiteId: String, caseId: String, profileId: String, instruction: String): StoreResult<TestStepDraft> {
+    suspend fun create(
+        suiteId: String,
+        caseId: String,
+        profileId: String,
+        instruction: String,
+        model: String? = null,
+        effort: String? = null,
+    ): StoreResult<TestStepDraft> {
         if (instruction.isBlank()) return StoreResult.Invalid("Describe the steps to draft.")
         if (instruction.length > MAX_INSTRUCTION_CHARS) return StoreResult.Invalid("Draft instructions are limited to $MAX_INSTRUCTION_CHARS characters.")
         val eligibility = preflight(suiteId, caseId)
@@ -42,7 +49,7 @@ internal class TestStepDraftService(
         val suite = snapshot.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
         val case = suite.cases.firstOrNull { it.id == caseId } ?: return StoreResult.NotFound("case", caseId)
         return try {
-            val response = withTimeout(DRAFT_GENERATION_TIMEOUT_MS) { generate(profileId, promptFor(suite, case, instruction)) }
+            val response = withTimeout(DRAFT_GENERATION_TIMEOUT_MS) { generate(profileId, promptFor(suite, case, instruction), model, effort) }
             val proposed = parseSteps(response)
             validateProposed(library(), suite.id, proposed)?.let { return StoreResult.Invalid(it) }
             val draft = TestStepDraft(UUID.randomUUID().toString(), suite.id, case.id, profileId, proposed)
@@ -168,13 +175,6 @@ internal class TestStepDraftService(
         pending.entries.removeIf { it.value.expiresAt <= time }
     }
 
-    private fun <T> StoreResult<*>.propagate(): StoreResult<T> = when (this) {
-        is StoreResult.Invalid -> StoreResult.Invalid(reason)
-        is StoreResult.LimitReached -> StoreResult.LimitReached(decision)
-        is StoreResult.NotFound -> StoreResult.NotFound(kind, id)
-        is StoreResult.Ok<*> -> StoreResult.Invalid("The operation was refused.")
-    }
-
     private companion object {
         const val MAX_INSTRUCTION_CHARS = 2_000
         const val MAX_DRAFT_STEPS = 20
@@ -187,4 +187,12 @@ internal class TestStepDraftService(
         const val DRAFT_TTL_MS = 30 * 60 * 1_000L
         const val DRAFT_GENERATION_TIMEOUT_MS = 90_000L
     }
+}
+
+/** A refusal ([StoreResult.Invalid], limit or not-found) carried over to a result of another type; an Ok has nothing to carry. */
+internal fun <T> StoreResult<*>.propagate(): StoreResult<T> = when (this) {
+    is StoreResult.Invalid -> StoreResult.Invalid(reason)
+    is StoreResult.LimitReached -> StoreResult.LimitReached(decision)
+    is StoreResult.NotFound -> StoreResult.NotFound(kind, id)
+    is StoreResult.Ok<*> -> StoreResult.Invalid("The operation was refused.")
 }

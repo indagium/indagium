@@ -296,7 +296,7 @@ and reference logs are fenced untrusted text. Case `allowedTools` remains enforc
 These operations share the same services as the Tests UI. Previews do not mutate the library; applying a draft
 or recording is a separate confirmation-required call.
 
-- `draft_test_steps` (suiteId, caseId, profileId, instruction) asks a configured profile to propose steps
+- `draft_test_steps` (suiteId, caseId, profileId, instruction, optional model, reasoningEffort) asks a configured profile to propose steps
   through a restricted drafting gateway. It returns a short-lived editable preview and does not operate a device
   or update the library. Sending context to a remote provider requires approval naming the profile and bounded
   suite/case context.
@@ -315,6 +315,17 @@ or recording is a separate confirmation-required call.
   and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
   `stop_test_recording`, `discard_test_recording`, and `apply_test_recording` stop/drain, discard without
   library mutation, or apply the reviewed preview at an optional index to its original case.
+  `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note) asks a configured profile to
+  turn a stopped recording into readable steps with expected results. The provider reads the recorded inputs, screen
+  elements and screenshots through a read-only gateway (`get_recorded_input`, `get_recorded_screen`,
+  `get_recorded_ui`; typed passwords are hidden and never sent) and every input must land in exactly one step, or
+  nothing changes. The rewritten rows replace the recording's rows for review (`rewritten`, `rewriteNotes`, and
+  `sourceInputIds` per row in `get_test_recording`); sending the recording to a remote provider requires approval.
+  `restore_test_recording_raw` (sessionId) puts the recorded rows back exactly (same row ids); it needs no approval.
+  Both are refused while the recording is being applied or rewritten, and a later `apply_test_recording` is refused
+  while a rewrite runs. An applied rewritten step keeps a reference example "Recorded input (hint; prefer what is on
+  screen)" listing the raw inputs; its after-screenshot becomes a golden image only when `useScreenshotAsExpected`
+  is true for that row.
 - `duplicate_test_script` (scriptId) assigns a fresh id and unique tool name. `import_test_script` accepts
   exactly one of text or path; `export_test_script` accepts scriptId and optional path/overwrite. Both use the
   versioned script JSON envelope. `get_test_script_schema` returns the actual lane tool schema, and
