@@ -72,9 +72,10 @@ private fun awaitState(session: TestStepRecordingSession, seq: Int) {
 
 /**
  * A stopped, drained recording of three inputs: a tap on "Search", the text [typed] and Enter. When [passwordField] is set the
- * screen shows a focused password field and the text comes first, so it is hidden. Input 1 has a before screen, input 3 an after screen.
+ * screen shows a focused password field and the text comes first, so it is hidden. Input 1 has a before screen, input 3 an after screen
+ * (none of them without [images]).
  */
-internal fun recordedShopSession(typed: String = "lofi", passwordField: Boolean = false): TestStepRecordingSession {
+internal fun recordedShopSession(typed: String = "lofi", passwordField: Boolean = false, images: Boolean = true): TestStepRecordingSession {
     val field = shopNode(
         100, 400, 900, 500, resourceId = "$SHOP_PACKAGE:id/query", className = "android.widget.EditText", password = passwordField, focused = true,
     )
@@ -82,8 +83,8 @@ internal fun recordedShopSession(typed: String = "lofi", passwordField: Boolean 
     val results = if (passwordField) "Signed in" else "Results for $typed"
     val probe = ScriptedRecordingProbe(
         listOf(
-            shopState(0, 50, ".HomeActivity", SHOP_BEFORE_IMAGE, search, field),
-            shopState(10_000, 10_100, ".ResultsActivity", SHOP_AFTER_IMAGE, shopNode(0, 100, 900, 200, text = results)),
+            shopState(0, 50, ".HomeActivity", SHOP_BEFORE_IMAGE.takeIf { images }, search, field),
+            shopState(10_000, 10_100, ".ResultsActivity", SHOP_AFTER_IMAGE.takeIf { images }, shopNode(0, 100, 900, 200, text = results)),
         ),
     )
     val session = TestStepRecordingSession("fixture-device", screenProbe = probe::read, settleDelayMs = 60_000L, probeDrainTimeoutMs = 5_000L)

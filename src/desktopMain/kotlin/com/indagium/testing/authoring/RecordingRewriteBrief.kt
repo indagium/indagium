@@ -46,6 +46,11 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "there is no stable result to assert. Never merge it with a required action such as Pause playback. Do not mark an unresolved " +
         "tap optional to avoid review.\n" +
         "- Use evidence tools only when the brief is insufficient and the needed reading is available. You have a small tool budget.\n" +
+        "- When the request says screenshots are attached, they arrive with it as images, introduced in order (\"Image 3: ...\"), and " +
+        "each input line says which images show it and lists the screen elements near the touch. Read them before anything else and " +
+        "answer from them; the evidence tools are only for a close-up the attached evidence cannot give (a full UI reading, a larger " +
+        "look, a video storyboard). Do not fetch what is attached. An input whose line says its evidence is withheld has none; treat " +
+        "it like any input without evidence.\n" +
         "- A numbered input marked [$FIXED_STEP_LABEL] is a step the person wrote, not a recording. Return it unchanged as its own " +
         "step; never reword, merge, move, split or drop it.\n" +
         "- Rows of kind NOTIFICATIONS, QUICK_SETTINGS, CLOSE_PANELS, ROTATE and SCREEN_ON, and key rows such as Power, Volume up, " +
@@ -83,6 +88,12 @@ internal fun rewritePromptPreamble(run: AiRun): String =
     rewriteBudgetGuidance(run) + "\n\nYou have one MCP server named indagium. It offers only the tools to read this recording; use only " +
         "those tools. Do not use host shell, browser or desktop actions, and do not inspect the local workspace; it is intentionally empty."
 
+/**
+ * The request for a rewrite. With [evidence] the lines of the inputs also hold the screen text; [attachImages] says the images of
+ * [evidence] go with the request (the prompt introduces them and the tools are for close-ups) or do not (the prompt names the tools
+ * that fetch what an image would have shown).
+ */
+@Suppress("LongParameterList") // One request: the case, the person's note, the inputs, and what accompanies them.
 internal fun rewritePrompt(
     suite: TestSuite,
     case: TestCase,
@@ -90,6 +101,8 @@ internal fun rewritePrompt(
     inputs: List<RewriteInput>,
     timeline: RecordedVideoTimelineSummary? = null,
     scripts: List<TestScript> = emptyList(),
+    evidence: RewriteEvidence? = null,
+    attachImages: Boolean = false,
 ): String = buildString {
     appendLine("Rewrite a recording of ${inputs.size} device input(s) as readable QA test steps, as JSON only.")
     appendLine("Suite: ${suite.name.take(MAX_CONTEXT_NAME_CHARS)}")
@@ -125,14 +138,21 @@ internal fun rewritePrompt(
     appendLine()
     append(OUTPUT_CONTRACT)
     appendLine()
+    evidence?.let { appendLine(if (attachImages) it.attachedSection() else it.fetchSection(timeline?.available == true)) }
+    if (evidence != null && attachImages) appendLine(CLOSE_UP_INSTRUCTION)
     appendLine(
         "The recorded inputs, numbered in test order (normally the order they happened; the person may have reordered them). " +
             "Text the person typed is shown as typed; a password is hidden as ••••.",
     )
     val evidenceIds = RewriteEvidenceIds(inputs)
-    chunks(inputs.map { it.describe(RewriteDescription.BRIEF, evidenceIds) }).forEach { appendLine(fenceUntrusted("recorded_inputs", it)) }
+    val lines = inputs.map { it.describe(RewriteDescription.BRIEF, evidenceIds, evidence?.lineExtra(it.number, attachImages).orEmpty()) }
+    chunks(lines).forEach { appendLine(fenceUntrusted("recorded_inputs", it)) }
     appendScriptLibrary(scripts)
 }
+
+private const val CLOSE_UP_INSTRUCTION =
+    "Answer from the attached evidence. The evidence tools are for close-ups only and their budget is small; give the JSON object as " +
+        "soon as the evidence is enough."
 
 private const val MAX_LISTED_SCRIPTS = 40
 private const val MAX_SCRIPT_LINE_CHARS = 500

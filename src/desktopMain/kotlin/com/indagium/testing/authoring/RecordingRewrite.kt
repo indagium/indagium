@@ -459,9 +459,10 @@ private const val MAX_ACTION_CHARS = 300
 
 /**
  * One input as a line of text. The action is the row's current text (a hidden password stays hidden). BRIEF is what the AI is
- * shown (it adds the screens and which images exist); HINT is what the runner of the finished step keeps.
+ * shown (it adds the screens and which images exist); HINT is what the runner of the finished step keeps. [extra] is appended to the
+ * line of a recorded input (the screen text and the image references of [RewriteEvidence.lineExtra]).
  */
-internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null): String = buildString {
+internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null, extra: String = ""): String = buildString {
     append(number).append(". ")
     if (fixed) {
         // Not a recording: the person wrote this step. It is shown whole (the answer must repeat it exactly), never cut to a preview.
@@ -490,6 +491,7 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     append(" | after activity: ").append(row.after?.activity ?: "unavailable")
     if (row.stateChanges.isNotEmpty()) append(" | device changes after it: ").append(stateChangesText(row.stateChanges))
     if (mode == RewriteDescription.BRIEF) appendBriefDetails(this@describe, evidenceIds)
+    append(extra)
 }
 
 private const val MAX_STATE_CHANGES_TEXT_CHARS = 400
