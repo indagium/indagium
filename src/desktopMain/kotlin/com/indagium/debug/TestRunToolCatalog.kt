@@ -6,6 +6,7 @@ import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.ManualStepsOption
 
 // MCP catalogue of the AI test-RUN tools. Handlers: TestRunToolOperations.kt (the gateway's init throws if the two
 // drift). A run is started with run_test_suite and then observed with get_test_run_status / get_test_run_report; an
@@ -26,6 +27,7 @@ private val LANE_ITEM_SCHEMA = ObjectArrayItemSchema(
 )
 
 private val DECISIONS = listOf("retry", "continue", "stop")
+private val MANUAL_DECISIONS = listOf("done", "failed", "skip")
 private val REPORT_FORMATS = listOf("json", "markdown")
 private val EXPORT_FORMATS = listOf("json", "markdown", "evidence_zip")
 
@@ -45,7 +47,9 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "suiteId" to "string", "caseIds" to "array", "lanes" to "array", "repeat" to "integer",
             "caseToolCallLimit" to "integer", "evidence" to "object", "judgeProfileId" to "string", "judgeMode" to "string",
             "judgeModel" to "string", "judgeReasoningEffort" to "string", "capture" to "object", "openLaneTabs" to "boolean",
+            "manualSteps" to "string",
             required = listOf("suiteId", "lanes"),
+            enums = mapOf("manualSteps" to ManualStepsOption.entries.map { it.wire }),
             descriptions = mapOf(
                 "suiteId" to "Id of the suite (list_test_suites).",
                 "caseIds" to "Only these cases (default: every case of the suite).",
@@ -65,6 +69,10 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "bufferMode (default|all|custom), buffers (names, for custom), videoQuality (${CAPTURE_QUALITY_WORDS.joinToString("|")}) }.",
                 "openLaneTabs" to "true (default): each lane opens a live capture tab (without taking focus) that stays as a stopped capture " +
                     "tab afterwards. false: lanes record the same way without a tab.",
+                "manualSteps" to "What to do with manual steps: ${ManualStepsOption.USE_SCRIPT_THEN_WAIT.wire} (default: run the step's automation " +
+                    "script when it has one, otherwise wait for a tester), ${ManualStepsOption.WAIT_FOR_TESTER.wire} (always wait for a " +
+                    "tester) or ${ManualStepsOption.SKIP.wire} (report manual steps as skipped and go on). A waiting lane is listed in " +
+                    "get_test_run_status; answer it with resolve_manual_step.",
             ),
             objectArrays = mapOf("lanes" to LANE_ITEM_SCHEMA),
         ),
@@ -72,8 +80,9 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "get_test_run_status",
         "Where a run is: its status (QUEUED, RUNNING, PASSED, FAILED, CANCELLED, ERROR), each lane with its status, the case and step " +
-            "it is on and its case results so far, per-case/per-lane/run AI usage, the confirmation cards an agent is waiting on and " +
-            "the lanes paused for a decision. Tool counts are independent of bounded recent activity history.",
+            "it is on and its case results so far, per-case/per-lane/run AI usage, the confirmation cards an agent (or a script step) is " +
+            "waiting on, the lanes paused for a decision and the lanes (waitingLanes) waiting for a tester to do a manual step. Tool counts " +
+            "are independent of bounded recent activity history.",
         schema("runId" to "string", required = listOf("runId")),
     ),
     IndagiumToolDescriptor(
@@ -114,6 +123,18 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "runId" to "string", "laneId" to "string", "decision" to "string",
             required = listOf("runId", "laneId", "decision"),
             enums = mapOf("decision" to DECISIONS),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "resolve_manual_step",
+        "Answer the manual step a lane is waiting on (listed as waitingLanes in get_test_run_status): done (the tester did it), failed (it " +
+            "did not work) or skip. A step that completes by its checks only cannot be answered done. A note is kept in the step's result. " +
+            "Answer only what a person actually did or saw; Indagium takes this as the tester's word.",
+        schema(
+            "runId" to "string", "laneId" to "string", "decision" to "string", "note" to "string",
+            required = listOf("runId", "laneId", "decision"),
+            enums = mapOf("decision" to MANUAL_DECISIONS),
+            descriptions = mapOf("note" to "Optional: what the tester did or saw (up to 500 characters)."),
         ),
     ),
     IndagiumToolDescriptor(

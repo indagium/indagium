@@ -6,6 +6,7 @@ import com.indagium.model.AiUsageStats
 import com.indagium.model.sumAiUsage
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
@@ -226,9 +227,14 @@ internal class TestStepDraftService(
         }
         return rows.mapIndexed { index, row ->
             val obj = row as? JsonObject ?: throw IllegalArgumentException("steps[$index] must be an object.")
-            runCatching { parseNewStep(obj.toPlainMap(), "steps[$index]") }.getOrElse {
+            val step = runCatching { parseNewStep(obj.toPlainMap(), "steps[$index]") }.getOrElse {
                 throw IllegalArgumentException("steps[$index]: ${it.message ?: "could not be validated"}")
             }
+            // A draft is for the AI agent that will run the steps: who performs a step, and which scripts run, are the author's choices.
+            require(step.kind == StepKind.AGENT && step.script == null && step.checks.none { it is StepCheck.DeviceState }) {
+                "steps[$index]: drafts contain AI steps only (no kind, script, manualCompletion or deviceState check)."
+            }
+            step
         }
     }
 
@@ -236,7 +242,7 @@ internal class TestStepDraftService(
         appendLine("Draft Android QA test steps as JSON only. Do not call tools, control devices, or change any library.")
         appendLine("Return exactly {\"steps\":[{\"action\":\"...\",\"expected\":\"...\"}]}; no markdown or prose.")
         appendLine("Use only these fields: action, expected, timeoutMs, retries, maxToolCalls, onFailure, checks, examples.")
-        appendLine("Do not create golden image references or script checks. Prefer concise, observable actions and expected results.")
+        appendLine("Do not create golden image references, script checks or device-state checks. Prefer concise, observable actions and expected results.")
         appendLine("Suite: ${suite.name.take(MAX_CONTEXT_NAME_CHARS)}")
         appendLine("Suite instructions: ${suite.instructions.take(MAX_CONTEXT_INSTRUCTIONS_CHARS)}")
         appendLine("Target package: ${suite.targetPackage.take(MAX_CONTEXT_NAME_CHARS)}")

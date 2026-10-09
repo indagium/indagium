@@ -566,6 +566,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         return buildMap {
             put("id", row.id)
             if (row.authorAdded) put("authorAdded", true)
+            if (row.stepKind != com.indagium.testing.model.StepKind.AGENT) put("stepKind", row.stepKind.name)
             put("action", row.action)
             put("expected", row.expected)
             put("optional", row.optional)

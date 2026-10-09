@@ -14,6 +14,7 @@ import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
@@ -97,6 +98,8 @@ internal data class RunDialogModel(
     val openLaneTabs: Boolean = true,
     val firstLaneModelWasDiscovered: Boolean = false,
     val judgeModelWasDiscovered: Boolean = false,
+    /** What the run does with manual steps; the dialog only offers the choice when the suite has some. */
+    val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
 ) {
     /** Every lane row, first lane first. */
     fun allLanes(): List<LaneDraft> =
@@ -186,6 +189,7 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             judgeReasoningEffort = judgeReasoningEffort?.takeIf { judgeMode != JudgeMode.OFF },
             capture = capture,
             openLaneTabs = openLaneTabs,
+            manualSteps = manualSteps,
         ),
     )
 }
@@ -223,6 +227,7 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
         judgeReasoningEffort = config.judgeReasoningEffort,
         capture = config.capture ?: capture,
         openLaneTabs = config.openLaneTabs,
+        manualSteps = config.manualSteps,
     )
 }
 

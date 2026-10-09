@@ -9,11 +9,15 @@ import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.model.AiUsageStats
 import com.indagium.model.sumAiUsage
+import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newExampleId
+import com.indagium.testing.model.withKind
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.awt.image.BufferedImage
@@ -80,6 +84,13 @@ data class RecordedTestStep(
      * An AI rewrite passes such a row through verbatim and in place; see [TestStepRecordingSession].
      */
     val authorAdded: Boolean = false,
+    /**
+     * Who performs the step it becomes: an AI agent (every recorded input), or, on an author-added row, a tester or a script. A script
+     * row needs [script]; a manual row may carry one as its automation alternative, and [checks] that detect it done.
+     */
+    val stepKind: StepKind = StepKind.AGENT,
+    val script: ScriptCall? = null,
+    val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
 )
 
 /**
@@ -305,7 +316,8 @@ class TestStepRecordingSession internal constructor(
     }
 
     /**
-     * Inserts an author-added copy of [row] (its action, expected text, optional flag, condition and id; nothing else) before the
+     * Inserts an author-added copy of [row] (its action, expected text, optional flag, condition, id, and the kind, script, completion
+     * mode and checks of a manual or script step; nothing else) before the
      * row now at [index] (0..size; size appends). False when review changes are not allowed, the list is full, [index] is out of
      * range, the id is already used, or the optional/condition pair is invalid. The action may be blank: the reviewer fills it in
      * before applying, and an AI rewrite is refused until every author row has one.
@@ -323,6 +335,10 @@ class TestStepRecordingSession internal constructor(
             condition = row.condition,
             id = row.id,
             authorAdded = true,
+            checks = row.checks,
+            stepKind = row.stepKind,
+            script = row.script,
+            manualCompletion = row.manualCompletion,
         )
         if (inserted.id in used || RecordingRowIssue.CONDITION in recordingRowIssues(inserted, requireExpected = false)) return@synchronized false
         mutableSnapshot.value = current.copy(steps = current.steps.toMutableList().apply { add(index, inserted) })
@@ -670,7 +686,9 @@ class TestStepRecordingSession internal constructor(
             examples = examples,
             optional = row.optional,
             condition = row.condition,
-        )
+            script = row.script,
+            manualCompletion = row.manualCompletion,
+        ).withKind(row.stepKind)
     }
 
     @Suppress("CyclomaticComplexMethod") // One lock-protected multi-pointer gesture state machine.

@@ -15,6 +15,7 @@ import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
@@ -162,7 +163,14 @@ private fun reproductionSteps(run: TestRun, case: TestCase, failing: TestStep): 
     case.setup.forEach { add(hookLine(run, "Case", it)) }
     if (case.preconditions.isNotBlank()) add("Precondition: ${oneLine(case.preconditions)}")
     val failingIndex = case.steps.indexOfFirst { it.id == failing.id }
-    case.steps.take(failingIndex + 1).forEach { add(oneLine(it.action)) }
+    case.steps.take(failingIndex + 1).forEach { add(reproductionLine(it)) }
+}
+
+/** A step as a line of the reproduction: what is done by a person or a script is marked, since an agent or a tester has to do it too. */
+private fun reproductionLine(step: TestStep): String = when (step.kind) {
+    StepKind.AGENT -> oneLine(step.action)
+    StepKind.MANUAL -> "(by hand) ${oneLine(step.action)}"
+    StepKind.SCRIPT -> "(script) ${oneLine(step.action)}"
 }
 
 private fun describeCheck(check: StepCheck): String = when (check) {
@@ -174,6 +182,7 @@ private fun describeCheck(check: StepCheck): String = when (check) {
     is StepCheck.ScriptResult -> "Script ${check.scriptId}${argsText(check.args)} ends with exit code ${check.exitCode ?: "any"}" +
         (check.stdoutContains?.let { " and prints “$it”" } ?: "")
     is StepCheck.AskJudge -> "The judge's question is answered positively: ${oneLine(check.text)}"
+    is StepCheck.DeviceState -> "The device property ${check.key} matches /${check.expectedRegex}/ within ${check.withinMs} ms"
 }
 
 private fun expectedText(definition: TestStep, step: StepResult): String {

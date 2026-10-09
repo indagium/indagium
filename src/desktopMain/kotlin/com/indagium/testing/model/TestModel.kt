@@ -27,6 +27,10 @@ const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000L
 const val DEFAULT_SCRIPT_OUTPUT_CAP_BYTES = 64 * 1024
 const val DEFAULT_SCRIPT_EXIT_CODE = 0
 
+/** A manual step waits for a person, so its default time allowance is long. */
+const val DEFAULT_MANUAL_STEP_TIMEOUT_MS = 10 * 60 * 1000L
+const val DEFAULT_DEVICE_STATE_WITHIN_MS = 10_000L
+
 fun newPrefixedId(prefix: String): String = prefix + UUID.randomUUID()
 
 fun newSuiteId(): String = newPrefixedId(SUITE_ID_PREFIX)
@@ -49,6 +53,30 @@ fun newVariableId(): String = newPrefixedId(VARIABLE_ID_PREFIX)
 
 /** Where a failed step sends the run. */
 enum class OnFailure { STOP_CASE, CONTINUE, CREATE_ISSUE_AND_CONTINUE, PAUSE_FOR_USER }
+
+/**
+ * Who performs a step. AGENT: the lane's AI agent (or the external client) does it on the device. MANUAL: a tester does it by hand
+ * (the lane waits), optionally detected by the step's checks and optionally replaced by an automation [TestStep.script]. SCRIPT:
+ * the run itself runs a library script; no AI agent is involved.
+ */
+enum class StepKind { AGENT, MANUAL, SCRIPT }
+
+/**
+ * How a MANUAL step is completed. TESTER_ONLY: only the tester's Done. CHECKS_ONLY: only its completion checks (log-appears and
+ * device-state checks) turning true. TESTER_OR_CHECKS: whichever comes first.
+ */
+enum class ManualCompletion { TESTER_ONLY, CHECKS_ONLY, TESTER_OR_CHECKS }
+
+/**
+ * A library script run by a step: required for a SCRIPT step, the optional automation alternative of a MANUAL step. [exitCode]
+ * null accepts any exit code; [stdoutContains] null accepts any output (the same expectations as [StepCheck.ScriptResult]).
+ */
+data class ScriptCall(
+    val scriptId: String,
+    val args: Map<String, String> = emptyMap(),
+    val exitCode: Int? = DEFAULT_SCRIPT_EXIT_CODE,
+    val stdoutContains: String? = null,
+)
 
 /** Where a custom script runs: on the computer, or inside the device through `adb shell`. */
 enum class ScriptTarget { HOST_SHELL, ADB_SHELL }
@@ -141,6 +169,17 @@ sealed interface StepCheck {
     ) : StepCheck
 
     data class AskJudge(override val id: String, val text: String) : StepCheck
+
+    /**
+     * A property of the device that [key] names (see testing/device/DeviceState.kt, e.g. `usb.devices`) must match [expectedRegex];
+     * the state is read repeatedly for up to [withinMs]. On a MANUAL step it is also how the lane notices the tester finished.
+     */
+    data class DeviceState(
+        override val id: String,
+        val key: String,
+        val expectedRegex: String,
+        val withinMs: Long = DEFAULT_DEVICE_STATE_WITHIN_MS,
+    ) : StepCheck
 }
 
 /** Reference material for the judge. */
@@ -169,6 +208,12 @@ data class TestStep(
     val optional: Boolean = false,
     /** A visible, testable condition that must be present before an optional step is performed. */
     val condition: String? = null,
+    /** Who performs the step. Appended last: a step written before step kinds existed is an AGENT step. */
+    val kind: StepKind = StepKind.AGENT,
+    /** SCRIPT: the script to run. MANUAL: the optional automation alternative. AGENT: none. */
+    val script: ScriptCall? = null,
+    /** MANUAL only: how the step is completed. */
+    val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
 )
 
 /**

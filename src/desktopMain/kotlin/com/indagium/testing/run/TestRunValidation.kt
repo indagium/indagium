@@ -14,11 +14,15 @@ import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
+import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import java.net.URI
 
@@ -183,6 +187,11 @@ internal fun validateRun(
     errors += laneProblems(config, profiles, apiKey)
     errors += judgeProblems(config, profiles, apiKey, warnings)
     errors += explicitJudgeCheckErrors(suite, plan, library, config)
+    if (suite != null) {
+        val driverSteps = driverStepsOf(suite, plan.cases, library, config.stopAfterStepId)
+        errors += driverStepProblems(driverSteps, library, config.manualSteps)
+        warnings += manualStepWarnings(driverSteps, config.manualSteps)
+    }
     warnings += deviceSharingWarnings(config.lanes)
     if (suite != null && config.stopAfterStepId != null && plan.cases.none { case -> case.steps.any { it.id == config.stopAfterStepId } }) {
         errors += "Step '${config.stopAfterStepId}' is not in any of the cases to run."
@@ -198,4 +207,49 @@ private fun explicitJudgeCheckErrors(suite: TestSuite?, plan: CasePlan, library:
         "The selected cases contain explicit ScreenJudge/AskJudge checks (${assertions.joinToString()}); " +
             "choose a judge mode and a usable judge profile before running.",
     )
+}
+
+// ── Manual and script steps ──────────────────────────────────────────
+
+/** A manual or script step the run will perform, with where it is for a message. */
+private class DriverStepRef(val where: String, val step: TestStep)
+
+/** The manual and script steps of the cases to run (up to the step a re-run stops after) and of the shared steps their hooks use. */
+private fun driverStepsOf(suite: TestSuite, cases: List<TestCase>, library: TestLibrary, stopAfterStepId: String?): List<DriverStepRef> {
+    val sharedIds = (suite.setup + suite.teardown + cases.flatMap { it.setup + it.teardown })
+        .filterIsInstance<HookItem.Shared>().map { it.sharedStepId }.toSet()
+    return buildList {
+        cases.forEach { case ->
+            val stopIndex = case.steps.indexOfFirst { it.id == stopAfterStepId }
+            val steps = if (stopIndex >= 0) case.steps.take(stopIndex + 1) else case.steps
+            steps.filter { it.kind != StepKind.AGENT }
+                .forEach { add(DriverStepRef("case '${case.name}', step '${it.action.take(MAX_REPORTED_ACTION_CHARS)}'", it)) }
+        }
+        library.sharedSteps.filter { it.id in sharedIds }.forEach { shared ->
+            shared.steps.filter { it.kind != StepKind.AGENT }
+                .forEach { add(DriverStepRef("shared step '${shared.name}', step '${it.action.take(MAX_REPORTED_ACTION_CHARS)}'", it)) }
+        }
+    }
+}
+
+/** A script a step needs must be in the library and startable from a step; a manual step's script only counts when the run uses it. */
+private fun driverStepProblems(steps: List<DriverStepRef>, library: TestLibrary, option: ManualStepsOption): List<String> = steps.mapNotNull { ref ->
+    val call = ref.step.script
+    val needsScript = ref.step.kind == StepKind.SCRIPT || (ref.step.kind == StepKind.MANUAL && option == ManualStepsOption.USE_SCRIPT_THEN_WAIT)
+    val script = call?.let { library.script(it.scriptId) }
+    when {
+        !needsScript || call == null -> null
+        script == null -> "${ref.where}: script '${call.scriptId}' is not in the library."
+        script.permission == ScriptPermission.SETUP_TEARDOWN_ONLY -> "${ref.where}: script '${script.toolName}' is limited to setup and teardown hooks."
+        else -> null
+    }
+}
+
+private fun manualStepWarnings(steps: List<DriverStepRef>, option: ManualStepsOption): List<String> {
+    val manual = steps.count { it.step.kind == StepKind.MANUAL }
+    return when {
+        manual == 0 -> emptyList()
+        option == ManualStepsOption.SKIP -> listOf("$manual manual step(s) will be skipped in this run.")
+        else -> listOf("$manual manual step(s): a lane waits for a tester at each (up to its time allowance) and fails it as not confirmed otherwise.")
+    }
 }

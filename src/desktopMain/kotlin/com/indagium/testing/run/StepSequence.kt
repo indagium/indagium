@@ -6,16 +6,21 @@ import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepCompletion
 import com.indagium.testing.model.StepJudgement
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.isDriverStep
 import com.indagium.testing.script.ScriptRunContext
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TranscriptWriter
@@ -54,11 +59,21 @@ internal const val CASE_BUDGET_EXHAUSTED_NOTE = "The case tool-call budget was e
 // judge sees the evidence only, never the agent's claim. While the run is paused (RunPauseGate) finish_step holds its
 // answer, after the step is recorded, until the run is resumed; the step timer is frozen and restarted meanwhile.
 //
+// A MANUAL or SCRIPT step is performed by the RUN, not by the agent (see DriverStepRunner.kt): the lane driver sees [driverStep] and runs
+// it, then reports the outcome through finishDriverStep. While such a step is current the agent's tools and finish_step are refused,
+// the watchdog leaves it alone (the driver owns its deadline) and the agent is told, when its finish_step moves the sequence onto
+// one, that the next step is not its own: the driver then restarts an agent segment at the next AGENT step.
+//
 // All state changes happen under [mutex]; `finishing` makes finish_step and the watchdog mutually exclusive, so the
 // timer never fires while a step is being finished and a second finish_step cannot start in parallel.
 
 private const val NANOS_PER_MILLI = 1_000_000L
 private const val SCREENSHOT_EXTENSION = "png"
+private const val DRIVER_STEP_MESSAGE =
+    "The app is performing this step itself (a manual or script step); wait for the next step before using device or script tools."
+private const val HANDOFF_MESSAGE =
+    "Recorded. The next step is performed by the app, not by you (it is a manual or script step). Stop now and do not call any more " +
+        "tools; you will be started again for the step after it."
 private const val STEP_PAUSED_MESSAGE = "The run is paused until the user decides what to do with this step; wait."
 private const val CASE_OVER_MESSAGE = "The case is finished. Stop now and do not call any more tools."
 private const val SETUP_OVER_MESSAGE = "This setup is finished. Stop now and do not call any more tools."
@@ -115,6 +130,9 @@ internal interface SequenceListener {
     fun judgeUsage(usage: AiUsageStats) = Unit
 
     suspend fun awaitUser(paused: PausedStep): PauseDecision
+
+    /** The lane started or stopped waiting for a tester or a script confirmation (something the status views show, not stored in the run). */
+    fun waitStateChanged() = Unit
 }
 
 /** [evidencePrefix] makes screenshot file names unique across cases and iterations. */
@@ -163,6 +181,19 @@ private class Evaluation(
     val failedChecks: List<String>,
     val stepIndex: Int,
     val attemptNumber: Int,
+)
+
+/**
+ * What the run learned performing a MANUAL or SCRIPT step. [claim] is the verdict before the checks (PASS: it was done, FAIL: it
+ * was not or it failed, BLOCKED: it could not be done); [checks] is which of the step's checks to evaluate (null: all of them).
+ */
+internal class DriverReport(
+    val claim: LaneStepStatus,
+    val observation: String,
+    /** Who finished the step; null when nobody did (it was not confirmed in time). */
+    val completion: StepCompletion?,
+    val checks: List<StepCheck>? = null,
+    val note: String? = null,
 )
 
 private data class ToolAdmission(val refusal: String?, val paid: Boolean, val activity: LaneToolCall?)
@@ -253,7 +284,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** Index of the step the sequence is on; the number of steps once it is over. */
     val currentIndex: Int get() = if (ended) spec.steps.size else index
 
-    private fun scriptContext() = ScriptRunContext(
+    fun scriptContext() = ScriptRunContext(
         deviceSerial = env.session.serial,
         packageName = env.packageName,
         runDir = env.laneDir,
@@ -263,7 +294,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     fun brief(): LaneStepBrief? {
         if (!active) return null
-        val step = spec.steps.getOrNull(index) ?: return null
+        val step = spec.steps.getOrNull(index)?.takeUnless { it.isDriverStep } ?: return null
         val allowedExampleTools = tools.gateway.tools.map { it.name }.filter { it == "list_step_examples" || it == "get_step_example" }
         return LaneStepBrief(
             step.id,
@@ -322,6 +353,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 val step = spec.steps.getOrNull(index)
                 when {
                     step == null -> null
+                    step.isDriverStep -> DRIVER_STEP_MESSAGE
                     tool in LANE_PROTOCOL_TOOL_NAMES ->
                         if (toolCalls.get() >= step.maxToolCalls) STEP_BUDGET_EXHAUSTED_MESSAGE else null
                     finishing.get() || awaitingUser -> "The step is finishing or paused; wait for the next step before using device or script tools."
@@ -442,6 +474,51 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     private fun elapsedMs(): Long = (env.nanoTime() - attemptStartNanos) / NANOS_PER_MILLI
 
+    // ── Steps the run performs itself ────────────────────────────────
+
+    /** The current step when the RUN performs it (a manual or script step), else null. Such a step is closed through the methods below. */
+    val driverStep: TestStep? get() = if (ended || !active) null else spec.steps.getOrNull(index)?.takeIf { it.isDriverStep }
+
+    /** What this sequence works with (the device, the script runner, the clock), for whoever performs its driver steps. */
+    val environment: SequenceEnv get() = env
+
+    /** Closes the current driver step as done or failed: runs [report]'s checks, judges when it has judge checks, records the result and moves on. */
+    suspend fun finishDriverStep(report: DriverReport) {
+        val evaluation = mutex.withLock {
+            val step = driverStep ?: return@withLock null
+            // Waiting used the step's time allowance; evaluating its checks (and their windows) gets a fresh one.
+            resetStepTimer()
+            val completed = withTimeoutOrNull(step.timeoutMs) { evaluateLocked(report.claim, report.observation, report) }
+            completed ?: timeoutEvaluationLocked(step.id, index, attempt, verifyDeadline = false)
+        } ?: return
+        decideFlow(evaluation)
+    }
+
+    /** Closes the current driver step as skipped (the tester skipped it, or the run skips manual steps) and continues with the next one. */
+    suspend fun skipDriverStep(report: DriverReport) {
+        mutex.withLock {
+            val step = driverStep ?: return@withLock
+            val evaluation = skippedEvaluationLocked(step, report.observation, report) ?: return@withLock
+            settleLocked(evaluation, Flow.Next(index + 1), issue = false)
+        }
+    }
+
+    /**
+     * Closes the current driver step as not confirmed (a manual step nobody completed in time, or whose script could not even start):
+     * recorded as a timeout that is the step's or the run's problem, never an app defect, then the step's onFailure applies.
+     */
+    suspend fun failDriverStep(report: DriverReport, status: StepStatus) {
+        val evaluation = mutex.withLock {
+            val step = driverStep ?: return@withLock null
+            val shot = captureScreenshot()
+            val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
+            val result = buildResult(step, status, null, report.observation, emptyList(), shot.path, logEnd, driver = report)
+                .copy(classification = JudgeClassification.AGENT_OR_STEP_PROBLEM)
+            Evaluation(step, status, result, emptyList(), index, attempt)
+        } ?: return
+        decideFlow(evaluation)
+    }
+
     // ── LaneCallbacks ────────────────────────────────────────────────
 
     override fun reportObservation(text: String) {
@@ -450,8 +527,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     @Suppress("ReturnCount") // Distinct protocol guards refuse without settling a stale step.
     override suspend fun finishStep(status: LaneStepStatus, observation: String): Map<String, Any?> {
-        if (ended) return mapOf("error" to overMessage())
-        if (awaitingUser) return mapOf("error" to STEP_PAUSED_MESSAGE)
+        finishRefusal()?.let { return mapOf("error" to it) }
         if (!finishing.compareAndSet(false, true)) return mapOf("error" to "finish_step is already running; wait for its answer.")
         try {
             if (mutex.withLock { activePaidDispatches > 0 }) {
@@ -488,7 +564,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             val currentEvaluation = evaluation ?: return mapOf("error" to "No step is active.")
             val answer = when {
                 timedOut -> respond(settleTimeout(currentEvaluation, cancelAgentBeforePause = false))
-                status == LaneStepStatus.SKIPPED -> respond(mutex.withLock { settleLocked(currentEvaluation, Flow.Next(index + 1), issue = false) })
+                status == LaneStepStatus.SKIPPED -> {
+                    val flow = mutex.withLock { settleLocked(currentEvaluation, Flow.Next(index + 1), issue = false) }
+                    announceHandoff(flow)
+                    respond(flow)
+                }
                 else -> decide(currentEvaluation)
             }
             if (!ended) holdWhilePaused()
@@ -498,18 +578,45 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         }
     }
 
+    /** Why finish_step cannot start now: the case is over, the app performs the current step itself, or the user is deciding. */
+    private fun finishRefusal(): String? = when {
+        ended -> overMessage()
+        driverStep != null -> DRIVER_STEP_MESSAGE
+        awaitingUser -> STEP_PAUSED_MESSAGE
+        else -> null
+    }
+
     private suspend fun decide(evaluation: Evaluation): Map<String, Any?> {
-        if (!mutex.withLock { isCurrentLocked(evaluation) }) return mapOf("error" to overMessage())
+        val flow = decideFlow(evaluation) ?: return mapOf("error" to overMessage())
+        announceHandoff(flow)
+        return respond(flow)
+    }
+
+    /** Where the sequence goes after [evaluation]: the next step on a pass, a retry, or what the step's onFailure says. Null when the step is stale. */
+    private suspend fun decideFlow(evaluation: Evaluation): Flow? {
+        if (!mutex.withLock { isCurrentLocked(evaluation) }) return null
         val step = evaluation.step
-        if (evaluation.status == StepStatus.PASS) return respond(mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) })
-        if (attempt < step.retries + 1) return respond(mutex.withLock { retryLocked(evaluation) })
-        val flow = when (step.onFailure) {
+        if (evaluation.status == StepStatus.PASS) return mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) }
+        // Nobody can redo a manual step by itself: a retry would only make the tester wait again.
+        val retries = if (step.kind == StepKind.MANUAL) 0 else step.retries
+        if (evaluation.status != StepStatus.TIMEOUT && attempt < retries + 1) return mutex.withLock { retryLocked(evaluation) }
+        return when (step.onFailure) {
             OnFailure.PAUSE_FOR_USER -> pauseFlow(evaluation)
             OnFailure.STOP_CASE -> mutex.withLock { settleLocked(evaluation, Flow.End, issue = false) }
             OnFailure.CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) }
             OnFailure.CREATE_ISSUE_AND_CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = true) }
         }
-        return respond(flow)
+    }
+
+    /**
+     * The agent's finish_step moved the sequence onto a step the run performs itself: make the agent's gateway stale and tell the lane
+     * driver, which then closes that agent run, performs the step and starts a new agent run at the next agent step.
+     */
+    private fun announceHandoff(flow: Flow) {
+        if (flow is Flow.Next && driverStep != null) {
+            epoch.incrementAndGet()
+            events.trySend(SequenceEvent.Moved(flow.index))
+        }
     }
 
     /** Pause all: the step is recorded, the next one started; the agent hears about it only once the run is resumed. */
@@ -530,7 +637,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** Turns the outcome of a settled step into the tool answer. The next step has already been started. */
     private fun respond(flow: Flow): Map<String, Any?> = when (flow) {
         Flow.End -> mapOf("result" to "case_finished", "message" to overMessage())
-        is Flow.Next -> mapOf("result" to "next_step", "message" to "Recorded. Continue with the next step.", "step" to stepMap())
+        is Flow.Next ->
+            if (driverStep != null) {
+                mapOf("result" to "handoff", "message" to HANDOFF_MESSAGE)
+            } else {
+                mapOf("result" to "next_step", "message" to "Recorded. Continue with the next step.", "step" to stepMap())
+            }
         Flow.Redo -> mapOf(
             "result" to "redo",
             "message" to "Attempt ${attempt - 1} did not pass. Redo this step from its current screen state (attempt $attempt).",
@@ -554,23 +666,23 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     // ── Evaluating a step ────────────────────────────────────────────
 
     /** A condition-unmet optional action advances without checks, judging, retries or a screenshot capture. */
-    private suspend fun skippedEvaluationLocked(step: TestStep, observation: String): Evaluation? {
+    private suspend fun skippedEvaluationLocked(step: TestStep, observation: String, driver: DriverReport? = null): Evaluation? {
         if (!active || ended) return null
         val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
         val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
-        val result = buildResult(step, StepStatus.SKIPPED, "skipped", reported, emptyList(), null, logEnd)
+        val result = buildResult(step, StepStatus.SKIPPED, "skipped".takeIf { driver == null }, reported, emptyList(), null, logEnd, driver = driver)
         return Evaluation(step, StepStatus.SKIPPED, result, emptyList(), index, attempt)
     }
 
-    private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String): Evaluation? {
+    private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String, driver: DriverReport? = null): Evaluation? {
         if (!active || ended) return null
         val step = spec.steps[index]
         val shot = captureScreenshot()
         lastAttemptChecks = emptyList()
-        val automatic = checks.evaluateAll(step.checks, attemptLogOffset) { result -> lastAttemptChecks = lastAttemptChecks + result }
+        val automatic = checks.evaluateAll(driver?.checks ?: step.checks, attemptLogOffset) { result -> lastAttemptChecks = lastAttemptChecks + result }
         val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
-        val judgement = judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd)
+        val judgement = if (judgeable(step, driver)) judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd) else null
         val results = applyJudgementToChecks(automatic, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val base = deterministicBaseStatus(claim, failed.isNotEmpty())
@@ -580,7 +692,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         }
         val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
         val unresolved = hasJudgeChecks(step) && (judgement == null || judgement.verdict == JudgeVerdict.INCONCLUSIVE)
-        val result = buildResult(step, settled.status, claim.name.lowercase(), reported, results, shot.path, logEnd, judgement, settled.inconclusive)
+        val result = buildResult(step, settled.status, claimText(claim, driver), reported, results, shot.path, logEnd, judgement, settled.inconclusive, driver)
             .let {
                 if (!unresolved) it else it.copy(
                     note = listOfNotNull(
@@ -592,6 +704,16 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             }
         return Evaluation(step, settled.status, result, failed.map { it.checkId }, index, attempt)
     }
+
+    /**
+     * A manual or script step is only judged for the judge checks it is evaluated with: a tester's "failed" or a script's
+     * verdict needs no second opinion.
+     */
+    private fun judgeable(step: TestStep, driver: DriverReport?): Boolean =
+        driver == null || (driver.checks ?: step.checks).any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge }
+
+    /** What the agent said about the step; nobody said anything about a step the run performed. */
+    private fun claimText(claim: LaneStepStatus, driver: DriverReport?): String? = claim.name.lowercase().takeIf { driver == null }
 
     private fun deterministicBaseStatus(claim: LaneStepStatus, hasFailures: Boolean): StepStatus = when {
         claim == LaneStepStatus.PASS && !hasFailures -> StepStatus.PASS
@@ -656,6 +778,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         knownLogEnd: Long? = null,
         judgement: StepJudgement? = null,
         judgeInconclusive: Boolean = false,
+        driver: DriverReport? = null,
     ): StepResult {
         val logEnd = knownLogEnd ?: runCatching { env.session.logMarker() }.getOrNull()
         return StepResult(
@@ -676,9 +799,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             transcriptEndOffset = env.transcript?.sizeBytes,
             startedAt = firstAttemptWallMs,
             durationMs = env.wallClock() - firstAttemptWallMs,
-            note = attemptNotes.takeIf { it.isNotEmpty() }?.joinToString(" "),
+            note = (attemptNotes + listOfNotNull(driver?.note)).takeIf { it.isNotEmpty() }?.joinToString(" "),
             judge = judgement,
             judgeInconclusive = judgeInconclusive,
+            kind = step.kind,
+            completedBy = driver?.completion,
+            manualCompletion = step.manualCompletion.takeIf { step.kind == StepKind.MANUAL },
         )
     }
 
@@ -795,7 +921,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val expectedIndex = index
         val expectedAttempt = attempt
         val step = spec.steps.getOrNull(expectedIndex) ?: return false
-        if (elapsedMs() < step.timeoutMs) return false
+        if (step.isDriverStep || elapsedMs() < step.timeoutMs) return false
         if (!finishing.compareAndSet(false, true)) return false
         try {
             val evaluation = mutex.withLock {

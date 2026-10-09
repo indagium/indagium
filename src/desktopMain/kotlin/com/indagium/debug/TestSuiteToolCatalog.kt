@@ -1,10 +1,12 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.store.CHECK_TYPE_NAMES
 import com.indagium.testing.store.EXAMPLE_TYPE_NAMES
 import com.indagium.testing.store.HOOK_TYPE_NAMES
@@ -18,6 +20,8 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 // TEST_SUITE_MCP_TOOLS, which reads them.
 
 private val ON_FAILURE_NAMES = OnFailure.entries.map { it.name }
+private val STEP_KIND_NAMES = StepKind.entries.map { it.name }
+private val MANUAL_COMPLETION_NAMES = ManualCompletion.entries.map { it.name }
 private val SCRIPT_TARGET_NAMES = ScriptTarget.entries.map { it.name }
 private val SCRIPT_PERMISSION_NAMES = ScriptPermission.entries.map { it.name }
 private val SCRIPT_PARAM_TYPE_NAMES = ScriptParamType.entries.map { it.name }
@@ -31,6 +35,15 @@ private val RECORDING_STEP_FIELDS = listOf(
     "useScreenshotAsExpected" to "boolean",
 )
 
+private const val STEP_KIND_DESCRIPTION =
+    "Who performs the step: AGENT (default, an AI agent or the external client on the device), MANUAL (a tester does it by hand while " +
+        "the lane waits; action holds the instructions, default timeout 10 minutes) or SCRIPT (the run runs a library script, no AI)."
+private const val STEP_SCRIPT_DESCRIPTION =
+    "A library script call { scriptId, args?, exitCode? (default 0, null accepts any), stdoutContains? }: required for kind SCRIPT, the " +
+        "optional automation alternative of a MANUAL step. The script must exist and not be limited to setup and teardown. Send null to clear."
+private const val MANUAL_COMPLETION_DESCRIPTION =
+    "MANUAL only: TESTER_ONLY (the tester's Done), CHECKS_ONLY (the step's logAppears/deviceState checks turn true) or " +
+        "TESTER_OR_CHECKS (default: whichever comes first)."
 private const val MODEL_OVERRIDE_NOTE = "Optional: a model to use instead of the profile's own."
 private const val EFFORT_OVERRIDE_NOTE = "Optional: a reasoning effort (such as low or high) to use instead of the profile's own."
 private const val MOVE_NOTE = "toIndex is the final 0-based position (clamped into the list)."
@@ -42,7 +55,7 @@ private val CHECK_ITEM_SCHEMA = ObjectArrayItemSchema(
     props = listOf(
         "id" to "string", "type" to "string", "tag" to "string", "regex" to "string", "withinMs" to "integer",
         "forMs" to "integer", "text" to "string", "exampleRef" to "string", "scriptId" to "string",
-        "args" to "object", "exitCode" to "integer", "stdoutContains" to "string",
+        "args" to "object", "exitCode" to "integer", "stdoutContains" to "string", "key" to "string", "expectedRegex" to "string",
     ),
     required = listOf("type"),
     enums = mapOf("type" to CHECK_TYPE_NAMES),
@@ -50,10 +63,12 @@ private val CHECK_ITEM_SCHEMA = ObjectArrayItemSchema(
         "id" to "Stable id; auto-generated when omitted. Keep it when re-sending an existing check.",
         "type" to "logAppears: a log line matching regex must appear within withinMs. logAbsent: none may match for forMs. " +
             "screenJudge: the judge verifies `text` on the step's screenshot. scriptResult: run library script scriptId " +
-            "with args and check its result. askJudge: a free-form question `text` for the judge.",
+            "with args and check its result. askJudge: a free-form question `text` for the judge. deviceState: the device property " +
+            "`key` (usb.devices, bt.enabled, wifi.enabled or airplane) must match `expectedRegex` within withinMs; on a manual step it is " +
+            "also how the step is noticed as done.",
         "tag" to "logAppears/logAbsent: only match lines with this tag (optional).",
         "regex" to "logAppears/logAbsent: Java regular expression, required for those types.",
-        "withinMs" to "logAppears: how long to wait for the line (default 10000).",
+        "withinMs" to "logAppears/deviceState: how long to wait for the line or the device state (default 10000).",
         "forMs" to "logAbsent: how long the line must stay absent (default 5000).",
         "text" to "screenJudge/askJudge: what the judge verifies or answers, required for those types.",
         "exampleRef" to "screenJudge: id of an example in the same step the judge compares against (optional).",
@@ -61,6 +76,9 @@ private val CHECK_ITEM_SCHEMA = ObjectArrayItemSchema(
         "args" to "scriptResult: script arguments as a { name: value } object of strings.",
         "exitCode" to "scriptResult: expected exit code (default 0); send null to accept any exit code.",
         "stdoutContains" to "scriptResult: text the script's stdout must contain (optional).",
+        "key" to "deviceState: the device property to read: usb.devices (one `vvvv:pppp name` line per attached host-mode USB device), " +
+            "bt.enabled, wifi.enabled or airplane (true/false). Required for that type.",
+        "expectedRegex" to "deviceState: a regular expression searched in the property's text, required for that type (e.g. 0781:5581).",
     ),
 )
 
@@ -82,11 +100,14 @@ private val STEP_ITEM_SCHEMA = ObjectArrayItemSchema(
     props = listOf(
         "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
         "timeoutMs" to "integer", "retries" to "integer", "onFailure" to "string", "maxToolCalls" to "integer",
-        "checks" to "array", "examples" to "array",
+        "checks" to "array", "examples" to "array", "kind" to "string", "script" to "object", "manualCompletion" to "string",
     ),
     required = listOf("action"),
-    enums = mapOf("onFailure" to ON_FAILURE_NAMES),
+    enums = mapOf("onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
     descriptions = mapOf(
+        "kind" to STEP_KIND_DESCRIPTION,
+        "script" to STEP_SCRIPT_DESCRIPTION,
+        "manualCompletion" to MANUAL_COMPLETION_DESCRIPTION,
         "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
         "action" to "What the tester does, required.",
         "expected" to "What should happen; may be blank only for an optional step with a condition.",
@@ -158,10 +179,14 @@ private val SUITE_FIELD_DESCRIPTIONS = mapOf(
 private val STEP_FIELD_PROPS = listOf(
     "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
     "timeoutMs" to "integer", "retries" to "integer", "maxToolCalls" to "integer",
-    "onFailure" to "string", "checks" to "array", "examples" to "array",
+    "onFailure" to "string", "checks" to "array", "examples" to "array", "kind" to "string", "script" to "object", "manualCompletion" to "string",
 )
+private val STEP_ENUMS = mapOf("onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES)
 private val STEP_OBJECT_ARRAYS = mapOf("checks" to CHECK_ITEM_SCHEMA, "examples" to EXAMPLE_ITEM_SCHEMA)
 private val STEP_FIELD_DESCRIPTIONS = mapOf(
+    "kind" to STEP_KIND_DESCRIPTION,
+    "script" to STEP_SCRIPT_DESCRIPTION,
+    "manualCompletion" to MANUAL_COMPLETION_DESCRIPTION,
     "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
     "action" to "What the tester does.",
     "expected" to "What should happen; may be blank only for an optional step with a condition.",
@@ -350,7 +375,7 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         schemaOf(
             listOf("caseId" to "string"), STEP_FIELD_PROPS, listOf("index" to "integer"),
             required = listOf("caseId", "action"),
-            enums = mapOf("onFailure" to ON_FAILURE_NAMES),
+            enums = STEP_ENUMS,
             descriptions = STEP_FIELD_DESCRIPTIONS,
             objectArrays = STEP_OBJECT_ARRAYS,
         ),
@@ -362,7 +387,7 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         schemaOf(
             listOf("stepId" to "string"), STEP_FIELD_PROPS,
             required = listOf("stepId"),
-            enums = mapOf("onFailure" to ON_FAILURE_NAMES),
+            enums = STEP_ENUMS,
             descriptions = STEP_FIELD_DESCRIPTIONS,
             objectArrays = STEP_OBJECT_ARRAYS,
         ),

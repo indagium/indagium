@@ -62,6 +62,20 @@ class TestStepDraftServiceTest {
     }
 
     @Test
+    fun aDraftIsForTheAiAgentSoItCannotChooseWhoPerformsAStepOrWhichScriptRuns() = runBlocking {
+        val proposals = listOf(
+            """{"steps":[{"action":"Plug it in","kind":"MANUAL"}]}""",
+            """{"steps":[{"action":"Hub","kind":"SCRIPT","script":{"scriptId":"script-1"}}]}""",
+            """{"steps":[{"action":"Tap","checks":[{"type":"deviceState","key":"usb.devices","expectedRegex":"0781"}]}]}""",
+        )
+        proposals.forEach { proposal ->
+            val result = service(generate = { _, _, _, _ -> proposal }).create("suite-1", "case-1", "profile", "Add a step")
+            val reason = assertIs<StoreResult.Invalid>(result, proposal).reason
+            assertTrue(reason.contains("AI steps only"), reason)
+        }
+    }
+
+    @Test
     fun readonlyOrFreePreflightRefusesBeforePaidGeneration() = runBlocking {
         val generatorCalls = AtomicInteger()
         val service = service(

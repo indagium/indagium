@@ -2,8 +2,10 @@ package com.indagium.testing.store
 
 import com.indagium.testing.model.CASE_ID_PREFIX
 import com.indagium.testing.model.CHECK_ID_PREFIX
+import com.indagium.testing.model.DEFAULT_DEVICE_STATE_WITHIN_MS
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
 import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
+import com.indagium.testing.model.DEFAULT_MANUAL_STEP_TIMEOUT_MS
 import com.indagium.testing.model.DEFAULT_SCRIPT_EXIT_CODE
 import com.indagium.testing.model.DEFAULT_SCRIPT_OUTPUT_CAP_BYTES
 import com.indagium.testing.model.DEFAULT_SCRIPT_TIMEOUT_MS
@@ -13,11 +15,13 @@ import com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS
 import com.indagium.testing.model.EXAMPLE_ID_PREFIX
 import com.indagium.testing.model.HOOK_ID_PREFIX
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.SCRIPT_ID_PREFIX
 import com.indagium.testing.model.SHARED_STEP_ID_PREFIX
 import com.indagium.testing.model.STEP_ID_PREFIX
 import com.indagium.testing.model.SUITE_ID_PREFIX
+import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
@@ -25,6 +29,7 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
@@ -33,6 +38,7 @@ import com.indagium.testing.model.TestVariable
 import com.indagium.testing.model.VARIABLE_ID_PREFIX
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newPrefixedId
+import com.indagium.testing.model.usesStepKinds
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -51,8 +57,13 @@ import kotlinx.serialization.json.put
 // JSON codec for the test library files, on the kotlinx.serialization RUNTIME API only (buildJsonObject /
 // parseToJsonElement) — the project does not apply the serialization compiler plugin.
 //
-//   suites/<id>.json  {"format":"indagium-test-suite","version":1,"suite":{...}}
-//   library.json      {"format":"indagium-test-library","version":1,"suiteOrder":[...],"scripts":[...],"sharedSteps":[...]}
+//   suites/<id>.json  {"format":"indagium-test-suite","version":2,"suite":{...}}
+//   library.json      {"format":"indagium-test-library","version":2,"suiteOrder":[...],"scripts":[...],"sharedSteps":[...]}
+//
+// Version policy: files are written at the BASE version (2) unless they hold something an older build would hand to the wrong
+// actor: a MANUAL or SCRIPT step (it would give "plug in the USB device" to an AI agent) or a device-state check. Those are
+// written at the STEP-KINDS version (3), which every build that predates them opens read-only. TEST_*_FILE_VERSION is the newest
+// version this build reads. A suite with only AI steps therefore stays byte-identical to what earlier builds wrote.
 //
 // Reads are tolerant: unknown keys are ignored, a missing or mistyped field takes its default, an
 // entry of an unknown kind is skipped, and a missing/duplicate/unsafe id is replaced by a fresh one.
@@ -61,12 +72,14 @@ import kotlinx.serialization.json.put
 
 const val TEST_SUITE_FILE_FORMAT = "indagium-test-suite"
 const val TEST_LIBRARY_FILE_FORMAT = "indagium-test-library"
-const val TEST_SUITE_FILE_VERSION = 2
-const val TEST_LIBRARY_FILE_VERSION = 2
+const val TEST_SUITE_FILE_VERSION = 3
+const val TEST_LIBRARY_FILE_VERSION = 3
+const val TEST_SUITE_BASE_FILE_VERSION = 2
+const val TEST_LIBRARY_BASE_FILE_VERSION = 2
 
 // The `type` values of the polymorphic entries. A reader skips an entry of any other type, so a caller
 // that must not lose input silently (the MCP authoring tools) checks against these first.
-val CHECK_TYPE_NAMES: List<String> = listOf("logAppears", "logAbsent", "screenJudge", "scriptResult", "askJudge")
+val CHECK_TYPE_NAMES: List<String> = listOf("logAppears", "logAbsent", "screenJudge", "scriptResult", "askJudge", "deviceState")
 val EXAMPLE_TYPE_NAMES: List<String> = listOf("goldenScreenshot", "referenceLog")
 val HOOK_TYPE_NAMES: List<String> = listOf("script", "shared")
 
@@ -159,6 +172,12 @@ internal fun checkToJson(check: StepCheck): JsonObject = buildJsonObject {
             put("type", "askJudge")
             put("text", check.text)
         }
+        is StepCheck.DeviceState -> {
+            put("type", "deviceState")
+            put("key", check.key)
+            put("expectedRegex", check.expectedRegex)
+            put("withinMs", check.withinMs)
+        }
     }
 }
 
@@ -177,6 +196,13 @@ internal fun exampleToJson(example: StepExample): JsonObject = buildJsonObject {
     }
 }
 
+internal fun scriptCallToJson(call: ScriptCall): JsonObject = buildJsonObject {
+    put("scriptId", call.scriptId)
+    putStringMap("args", call.args)
+    put("exitCode", call.exitCode)
+    call.stdoutContains?.let { put("stdoutContains", it) }
+}
+
 internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     put("id", step.id)
     put("action", step.action)
@@ -189,6 +215,10 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     step.condition?.let { put("condition", it) }
     put("checks", buildJsonArray { step.checks.forEach { add(checkToJson(it)) } })
     put("examples", buildJsonArray { step.examples.forEach { add(exampleToJson(it)) } })
+    // Appended last, and only when set: a step that only an AI agent performs is written exactly as before step kinds existed.
+    if (step.kind != StepKind.AGENT) put("kind", step.kind.name)
+    step.script?.let { put("script", scriptCallToJson(it)) }
+    if (step.kind == StepKind.MANUAL) put("manualCompletion", step.manualCompletion.name)
 }
 
 internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
@@ -270,11 +300,18 @@ internal fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject 
     put("steps", buildJsonArray { shared.steps.forEach { add(stepToJson(it)) } })
 }
 
+/** The envelope version [suite] is written with: the base version, or the step-kinds version when it holds a manual/script step. */
+fun suiteFileVersionFor(suite: TestSuite): Int = if (suite.usesStepKinds()) TEST_SUITE_FILE_VERSION else TEST_SUITE_BASE_FILE_VERSION
+
+/** The envelope version a library file with these shared steps is written with. */
+fun libraryFileVersionFor(sharedSteps: List<SharedStep>): Int =
+    if (sharedSteps.any { shared -> shared.steps.any { it.usesStepKinds() } }) TEST_LIBRARY_FILE_VERSION else TEST_LIBRARY_BASE_FILE_VERSION
+
 fun encodeSuiteFile(suite: TestSuite, externalAssetsRequired: Boolean = false): String = prettyJson.encodeToString(
     JsonObject.serializer(),
     buildJsonObject {
         put("format", TEST_SUITE_FILE_FORMAT)
-        put("version", TEST_SUITE_FILE_VERSION)
+        put("version", suiteFileVersionFor(suite))
         put("suite", suiteToJson(suite))
         if (externalAssetsRequired) {
             put("externalAssetsRequired", true)
@@ -292,7 +329,7 @@ fun encodeLibraryFile(suiteOrder: List<String>, scripts: List<TestScript>, share
         JsonObject.serializer(),
         buildJsonObject {
             put("format", TEST_LIBRARY_FILE_FORMAT)
-            put("version", TEST_LIBRARY_FILE_VERSION)
+            put("version", libraryFileVersionFor(sharedSteps))
             put("suiteOrder", buildJsonArray { suiteOrder.forEach { add(JsonPrimitive(it)) } })
             put("scripts", buildJsonArray { scripts.forEach { add(scriptToJson(it)) } })
             put("sharedSteps", buildJsonArray { sharedSteps.forEach { add(sharedStepToJson(it)) } })
@@ -316,8 +353,20 @@ internal fun decodeCheck(o: JsonObject, ids: IdAllocator): StepCheck? {
             stdoutContains = o.optStr("stdoutContains"),
         )
         "askJudge" -> StepCheck.AskJudge(id, o.str("text"))
+        "deviceState" -> StepCheck.DeviceState(id, o.str("key"), o.str("expectedRegex"), o.long("withinMs", DEFAULT_DEVICE_STATE_WITHIN_MS))
         else -> null
     }
+}
+
+internal fun decodeScriptCall(o: JsonObject): ScriptCall? {
+    val scriptId = o.str("scriptId").takeIf { it.isNotBlank() } ?: return null
+    return ScriptCall(
+        scriptId = scriptId,
+        args = o.stringMap("args"),
+        // An absent key means the default; an explicit null means "any exit code".
+        exitCode = if (o.containsKey("exitCode")) (o["exitCode"] as? JsonPrimitive)?.intOrNull else DEFAULT_SCRIPT_EXIT_CODE,
+        stdoutContains = o.optStr("stdoutContains"),
+    )
 }
 
 internal fun decodeExample(o: JsonObject, ids: IdAllocator): StepExample? {
@@ -329,19 +378,25 @@ internal fun decodeExample(o: JsonObject, ids: IdAllocator): StepExample? {
     }
 }
 
-private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep = TestStep(
-    id = ids.next(o["id"], STEP_ID_PREFIX),
-    action = o.str("action"),
-    expected = o.str("expected"),
-    checks = o.objects("checks").mapNotNull { decodeCheck(it, ids) },
-    examples = o.objects("examples").mapNotNull { decodeExample(it, ids) },
-    timeoutMs = o.long("timeoutMs", DEFAULT_STEP_TIMEOUT_MS),
-    retries = o.int("retries", DEFAULT_STEP_RETRIES),
-    maxToolCalls = o.int("maxToolCalls", DEFAULT_STEP_MAX_TOOL_CALLS),
-    onFailure = o.enumOr("onFailure", OnFailure.STOP_CASE),
-    optional = o.bool("optional", false),
-    condition = o.optStr("condition"),
-)
+private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep {
+    val kind = o.enumOr("kind", StepKind.AGENT)
+    return TestStep(
+        id = ids.next(o["id"], STEP_ID_PREFIX),
+        action = o.str("action"),
+        expected = o.str("expected"),
+        checks = o.objects("checks").mapNotNull { decodeCheck(it, ids) },
+        examples = o.objects("examples").mapNotNull { decodeExample(it, ids) },
+        timeoutMs = o.long("timeoutMs", if (kind == StepKind.MANUAL) DEFAULT_MANUAL_STEP_TIMEOUT_MS else DEFAULT_STEP_TIMEOUT_MS),
+        retries = o.int("retries", DEFAULT_STEP_RETRIES),
+        maxToolCalls = o.int("maxToolCalls", DEFAULT_STEP_MAX_TOOL_CALLS),
+        onFailure = o.enumOr("onFailure", OnFailure.STOP_CASE),
+        optional = o.bool("optional", false),
+        condition = o.optStr("condition"),
+        kind = kind,
+        script = (o["script"] as? JsonObject)?.let { decodeScriptCall(it) },
+        manualCompletion = o.enumOr("manualCompletion", ManualCompletion.TESTER_OR_CHECKS),
+    )
+}
 
 private fun decodeCase(o: JsonObject, ids: IdAllocator): TestCase = TestCase(
     id = ids.next(o["id"], CASE_ID_PREFIX),

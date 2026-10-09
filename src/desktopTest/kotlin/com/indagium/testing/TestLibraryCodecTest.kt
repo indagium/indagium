@@ -8,7 +8,8 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestCase
-import com.indagium.testing.store.TEST_LIBRARY_FILE_VERSION
+import com.indagium.testing.store.TEST_LIBRARY_BASE_FILE_VERSION
+import com.indagium.testing.store.TEST_SUITE_BASE_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_FILE_VERSION
 import com.indagium.testing.store.decodeLibraryFile
 import com.indagium.testing.store.decodeSuiteFile
@@ -36,7 +37,8 @@ class TestLibraryCodecTest {
     fun suiteFileUsesTheDocumentedEnvelope() {
         val root = rootOf(encodeSuiteFile(fullSuite()))
         assertEquals("indagium-test-suite", (root["format"] as JsonPrimitive).content)
-        assertEquals(TEST_SUITE_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
+        // Only AI steps: the file stays at the base version so builds that predate step kinds still edit it.
+        assertEquals(TEST_SUITE_BASE_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
         assertTrue(root["suite"] is JsonObject)
     }
 
@@ -44,7 +46,7 @@ class TestLibraryCodecTest {
     fun libraryFileUsesTheDocumentedEnvelope() {
         val root = rootOf(encodeLibraryFile(listOf("suite-a"), listOf(sampleScript()), listOf(sampleSharedStep())))
         assertEquals("indagium-test-library", (root["format"] as JsonPrimitive).content)
-        assertEquals(TEST_LIBRARY_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
+        assertEquals(TEST_LIBRARY_BASE_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
         assertEquals(1, (root["suiteOrder"] as JsonArray).size)
         assertEquals(1, (root["scripts"] as JsonArray).size)
         assertEquals(1, (root["sharedSteps"] as JsonArray).size)

@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 153: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 154: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3184,21 +3184,37 @@ and no separate index is persisted. Ids are prefixed UUIDs unique across the lib
 `case-`, `step-`, `chk-`, `ex-`, `script-`, `shared-`, `hook-`, `var-`; run-side `run-`, `lane-`,
 `jdg-`, `cmp-`; `issue-`), so a case or step is found by id alone (`TestLibrary.findCase/findStep`,
 `testing/model/TestModel.kt:233,241`). A step's checks are a sealed type —
-`LogAppears`, `LogAbsent`, `ScreenJudge`, `ScriptResult`, `AskJudge` — and its examples
+`LogAppears`, `LogAbsent`, `ScreenJudge`, `ScriptResult`, `AskJudge`, `DeviceState` — and its examples
 `GoldenScreenshot` or `ReferenceLog` (`testing/model/TestModel.kt:113,146`). A step is required by default; an optional step
 must have a condition that describes when to perform it. Only an optional step can settle as `SKIPPED`, which does not fail
 the case; expected text may be blank only for a conditioned optional step. Library and suite envelopes write schema v2 and
 read v1 with required-step defaults, so older files remain readable and a newer writer cannot silently discard conditions.
 
+**Step kinds and the v3 envelope.** `TestStep.kind` is `AGENT` (default), `MANUAL` or `SCRIPT`, with `TestStep.script`
+(`ScriptCall(scriptId, args, exitCode, stdoutContains)`: required for `SCRIPT`, the optional automation alternative of a
+`MANUAL` step) and `TestStep.manualCompletion` (`TESTER_ONLY`, `CHECKS_ONLY`, `TESTER_OR_CHECKS`); all three are appended
+last in `stepToJson`, and written **only when set**, so an AI step is byte-identical to what builds before step kinds wrote.
+A suite file holding any non-`AGENT` step or a `DeviceState` check is written at envelope **version 3**
+(`suiteFileVersionFor`, `libraryFileVersionFor` over the shared steps); everything else stays at version 2. A build that
+predates step kinds reads versions up to 2 and opens a version 3 file **read-only** (`readEnvelope`), so "plug in the USB
+device" is never handed to an AI agent by an older build, and its store never rewrites the file. `TEST_SUITE_FILE_VERSION`
+(3) is the newest version this build reads, `TEST_SUITE_BASE_FILE_VERSION` (2) what it writes by default. A manual step has
+no timeout in the file: the decoder gives it `DEFAULT_MANUAL_STEP_TIMEOUT_MS` (10 minutes). Write-time validation
+(`validateStep(step, scripts)`) checks, against the library, that a step's script exists, may be started from a step (not
+`SETUP_TEARDOWN_ONLY`) and accepts its arguments (`validateScriptArgs`), that a `MANUAL` step has instructions and, for
+`CHECKS_ONLY`, a completion check, and that neither kind is optional; steps already stored are not rejected for a script
+deleted afterwards (data is never dropped; a run reports it). AI step drafts and AI recording rewrites may not carry a kind,
+a script or a device-state check: those are the author's choices.
+
 **Storage layout.**
 
 | Path | Contents | Format |
 |---|---|---|
-| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `indagium-test-library` v2 (reads v1 with required steps as the default) (`testing/store/TestLibraryCodec.kt`) |
-| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `indagium-test-suite` v2 (reads v1 with required steps as the default) (`:62`); the file name must equal the suite id |
+| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `indagium-test-library` v2, v3 when a shared step uses a step kind or a device-state check (reads v1 with required steps as the default) (`testing/store/TestLibraryCodec.kt`) |
+| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `indagium-test-suite` v2, v3 when it uses a step kind or a device-state check (reads v1 with required steps as the default) (`:62`); the file name must equal the suite id |
 | `<test suites folder>/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
 | `<issues folder>/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
-| `<test runs folder>/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
+| `<test runs folder>/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config (`manualSteps`), per-lane results (a step result appends `kind`, `completedBy`, `manualCompletion`, `classification`), comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
 | `<test runs folder>/<runId>/lanes/<laneId>/` | `capture/<sessionId>/` (the lane's capture session exactly as a manual capture writes it: `logs/logcat.log`, `mapping/`, optional `video/screen.mkv` with audio, `session.json`, and after the lane the finalized `capture.indagium.json`), `lane-notes.ann` (the lane's notes with every AI marker), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates. The lane's sessions live inside the run folder (not under a capture root) so the report, the step clips and the evidence export find them where they always did, and deleting a run deletes its recordings; `CaptureService` knows them by id for this launch only (§26.5.5) |
 | `<test runs folder>/<runId>/judge.jsonl` | Everything the judge runs of the run said and did, tagged with what each judged | JSON lines, redacted |
 
@@ -3386,11 +3402,52 @@ flowchart TB
   the live view: lanes stop at the next step boundary — `finish_step` records the step, then holds its
   answer until resumed, with the step timer frozen and restarted — and between cases. *PAUSE_FOR_USER*
   is per step: the lane suspends in `LaneHandle.awaitDecision` (a `CompletableDeferred`) until the user,
-  or `resume_paused_step`, decides retry / continue / stop.
+  or `resume_paused_step`, decides retry / continue / stop. A *manual step* wait is a third, separate suspension (below):
+  `resolve_manual_step` answers it.
 - **Confirmation timeout.** `AiRun.confirmationTimeoutMs` is optional and **off by default**; a test
   run sets it (default 5 min, Settings > Testing, `DEFAULT_CONFIRMATION_TIMEOUT_MS`) so a card nobody
   answers counts as denied instead of stalling a lane forever
   (`ai/AiToolExecutionCoordinator.kt:140`).
+
+**Manual and script steps (`testing/run/DriverStepRunner.kt`).** A `MANUAL` or `SCRIPT` step is performed by the *run*,
+never by an agent or an external client; no AI agent is started for it. `StepSequence.driverStep` is the current step when
+it is one of these: while it is current the lane tools and `finish_step` are refused (`DRIVER_STEP_MESSAGE`), `brief()` is
+null and the watchdog (`checkTimeout`) leaves the step alone, because the executor owns its deadline. `LaneDriver` calls
+`DriverStepRunner.runPending()` before every agent segment and, for an external lane, in `awaitEnd`; it returns once the
+sequence stands on an `AGENT` step again or has ended. **Mixed cases.** When an agent's `finish_step` settles a step and the
+next one is a driver step, `decide` calls `announceHandoff`: the epoch advances (the agent's gateway goes stale), a
+`SequenceEvent.Moved` is sent and the answer is `result: "handoff"` ("stop now, you will be started again"). The driver then
+closes that agent *segment* (the same path as a timeout restart), performs the step, and starts a **new segment** whose prompt
+(`lanePrompt`) names the next AI step and lists the earlier results, including `[manual step, done by tester]`; the
+case's tool-call budget is shared across segments as before. This costs one agent restart per run of consecutive non-AI steps
+and needs no change to the agent protocol, which is why it was preferred over holding the agent's `finish_step` answer for up to
+the manual step's 10-minute allowance. The sequence reports the outcome through `finishDriverStep` (screenshot, log range,
+the step's checks, the judge only for judge checks, then `decideFlow`: pass, retry, `onFailure`), `skipDriverStep` and
+`failDriverStep` (a manual step nobody confirmed: status `TIMEOUT`, `classification = AGENT_OR_STEP_PROBLEM`, then
+`onFailure`). A manual step is never retried.
+
+- **SCRIPT.** `TestScriptRunner` runs the library script (adb or host target, env-only arguments, its own timeout and output
+  cap). A script with permission `ASK` waits for a card (`LaneHandle.awaitScriptConfirmation`, listed with the agent's cards in
+  `pendingConfirmations`, answered by the UI or `resolve_test_confirmation`; no answer within the run's confirmation timeout
+  is a refusal): a refusal BLOCKS the step and nothing runs. A non-zero exit, a timeout, an unmet `exitCode` or a missing
+  `stdoutContains` fails it; then the step's other checks run (skipped when the script already failed).
+- **MANUAL.** Depending on the run's `manualSteps` option (`ManualStepsOption`): `SKIP` reports the step `SKIPPED` and goes
+  on; `USE_SCRIPT_THEN_WAIT` (default) runs the step's automation script first and, if it passes, completes the step as
+  `SCRIPT` — if it fails or is refused the lane falls back to waiting; `WAIT_FOR_TESTER` always waits. Waiting is
+  `LaneHandle.beginManualWait` (`ManualWait`: instructions, device, deadline, completion mode), visible through
+  `TestRunCoordinator.waitingSteps()` (the live-view "Waiting for you" card, `get_test_run_status.waitingLanes`); the lane
+  coroutine suspends in `awaitCompletion`, which wakes at once on the tester's answer
+  (`resolveManualStep`: Done, Failed, Skip) and every `manualPollMs` (1 s) reads the **completion checks** (`DeviceState`
+  and `LogAppears`, with their waiting window set to zero). `TESTER_ONLY` completes only on Done (and then verifies every check),
+  `CHECKS_ONLY` only when the checks are all true (Done is refused), `TESTER_OR_CHECKS` on whichever comes first (a Done
+  replaces the completion checks). The wait ends in `TIMEOUT` ("not confirmed") after the step's `timeoutMs`. Each lane waits
+  independently on its own device; cancelling the run cancels the wait. *Pause all* holds the lane at the next step boundary,
+  not inside a wait.
+- **Device state.** `StepCheck.DeviceState(key, expectedRegex, withinMs)` is evaluated by `DeterministicChecks` through
+  `TestDeviceSession.readDeviceState`, whose `DeviceStateReader` is replaceable (the environment probe of the recording work
+  supplies a richer one). The production `AdbDeviceStateReader` runs **one bounded `adb shell` per key** (`dumpsys usb`, or
+  `settings get global …`) for `usb.devices`, `bt.enabled`, `wifi.enabled` and `airplane`; an unknown key is a permanent error
+  that names the supported ones, an adb hiccup is retried until `withinMs`.
 
 #### 26.5.4 Cancellation and bounded close
 
@@ -3774,6 +3831,9 @@ reachable by any prompt-injected lane agent, which is why the default permission
    (`TestRunCoordinator.setPaused`, `:254`); over MCP a lane can only be paused by a step's
    `PAUSE_FOR_USER` and resumed with `resume_paused_step`. `cancel_test_run` is the only way to stop a
    run from a client.
+   `resolve_manual_step` takes whoever calls it at its word that a manual step was done: like `resume_paused_step` it has no
+   per-call approval (the run was approved), so an MCP client can complete a step that asked for a person. Use
+   `CHECKS_ONLY` for a step that must be proven by the device.
 5. **Library edits write on the caller's thread.** The `AppState` delegates call
    `TestLibraryStore`, whose write (one suite file plus `library.json`, both small) happens inline under
    `writeLock`. From the UI this is the UI thread; the files are tiny and atomic, but a slow disk shows

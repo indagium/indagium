@@ -31,13 +31,17 @@ import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
 import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.ScriptCall
+import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newCheckId
 import com.indagium.testing.model.newExampleId
 import com.indagium.testing.model.newStepId
+import com.indagium.testing.model.withKind
 import com.indagium.testing.store.MAX_STEP_MAX_TOOL_CALLS
 import com.indagium.testing.store.MAX_STEP_RETRIES
 import com.indagium.testing.store.MAX_STEP_TIMEOUT_MS
@@ -114,6 +118,7 @@ private fun StepCard(step: TestStep, row: ReorderRowScope, ops: StepListOps) {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+                stepKindBadge(step)?.let { TestsBadge(it) }
                 stepCheckBadges(step).forEach { TestsBadge(it) }
                 AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 10.sp)
             }
@@ -140,12 +145,20 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
     var configuringOptional by remember(step.id, step.optional) { mutableStateOf(false) }
     var optionalCondition by remember(step.id, step.condition) { mutableStateOf(step.condition.orEmpty()) }
     Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        TestsLabeled("Action") {
+        StepKindSelector(step.kind, ops.editable) { kind -> changeStepKind(ui, step, kind, update) }
+        TestsHint(stepKindHint(step.kind))
+        TestsLabeled(if (step.kind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
             CommitTextField(
                 step.action, { text -> update { it.copy(action = text) } },
-                enabled = ops.editable, multiline = true, placeholder = "What the agent should do",
+                enabled = ops.editable, multiline = true,
+                placeholder = when (step.kind) {
+                    StepKind.AGENT -> "What the agent should do"
+                    StepKind.MANUAL -> "What the tester should do, such as plug the USB stick into the phone"
+                    StepKind.SCRIPT -> "What the script does (shown in the report)"
+                },
             )
         }
+        StepKindFields(step, ops, update)
         TestsLabeled("Expected result") {
             CommitTextField(
                 step.expected, { text -> update { it.copy(expected = text) } },
@@ -153,40 +166,93 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
                 placeholder = if (step.optional) "What should be true when this optional action runs" else "What should be true afterwards",
             )
         }
-        CheckRow(checked = step.optional || configuringOptional, onToggle = {
-            if (step.optional) {
-                update { it.copy(optional = false, condition = null) }
-            } else {
-                configuringOptional = !configuringOptional
-                optionalCondition = step.condition.orEmpty()
-            }
-        }, enabled = ops.editable) {
-            AppText("Optional: skip when its condition is absent", color = tc().ts, fontSize = 11.sp)
-        }
-        if (step.optional) {
-            TestsLabeled("Perform only when") {
-                CommitTextField(
-                    step.condition.orEmpty(), { text -> update { it.copy(condition = text) } },
-                    enabled = ops.editable, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing",
-                )
-            }
-        } else if (configuringOptional) {
-            TestsLabeled("Perform only when") {
-                CommitTextField(optionalCondition, { text -> optionalCondition = text; StoreResult.Ok(Unit) }, enabled = ops.editable,
-                    multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppButton("Save condition", enabled = ops.editable && optionalCondition.isNotBlank(), onClick = {
-                    val result = update { it.copy(optional = true, condition = optionalCondition.trim()) }
-                    ui.report(result)
-                    if (result is StoreResult.Ok) configuringOptional = false
-                }, variant = ButtonVariant.Secondary)
-                AppButton("Cancel", onClick = { configuringOptional = false }, variant = ButtonVariant.Ghost)
-            }
+        if (step.kind == StepKind.AGENT) {
+            OptionalStepEditor(step, ops, update, configuringOptional, optionalCondition, { configuringOptional = it }, { optionalCondition = it })
         }
         ChecksEditor(step, ops)
         ExamplesEditor(step, ops)
         StepSettings(step, ops)
+    }
+}
+
+/** Switches the step's kind. A script step needs a script, so one is chosen (or created) as part of the switch. */
+private fun changeStepKind(ui: TestsUi, step: TestStep, kind: StepKind, update: ((TestStep) -> TestStep) -> StoreResult<*>) {
+    if (kind != StepKind.SCRIPT || step.script != null) {
+        ui.report(update { it.withKind(kind) })
+        return
+    }
+    val existing = ui.library.scripts.firstOrNull { it.permission != ScriptPermission.SETUP_TEARDOWN_ONLY }
+    val script = existing ?: createPlaceholderScript(ui) ?: return
+    val result = ui.report(update { it.withKind(kind).copy(script = ScriptCall(script.id, defaultArgsFor(script))) })
+    if (existing == null && result is StoreResult.Ok) ui.view.openScriptEditorFor(script.id, step.id)
+}
+
+@Composable
+private fun StepKindFields(step: TestStep, ops: StepListOps, update: ((TestStep) -> TestStep) -> StoreResult<*>) {
+    val ui = LocalTestsUi.current
+    val addScript: () -> Unit = {
+        createScriptForStep(ui, step.id)?.let { script -> ui.report(update { it.copy(script = ScriptCall(script.id, defaultArgsFor(script))) }) }
+    }
+    when (step.kind) {
+        StepKind.AGENT -> Unit
+        StepKind.SCRIPT -> TestsLabeled("Script to run") {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                ScriptCallEditor(step.script, ops.editable, optional = false, onChange = { call -> update { it.copy(script = call) } }, onNewScript = addScript)
+            }
+        }
+        StepKind.MANUAL -> ManualStepFields(
+            completion = step.manualCompletion,
+            script = step.script,
+            enabled = ops.editable,
+            onCompletion = { mode -> ui.report(update { it.copy(manualCompletion = mode) }) },
+            onScript = { call -> update { it.copy(script = call) } },
+            onNewScript = addScript,
+        )
+    }
+}
+
+@Suppress("LongParameterList") // The optional-step controls keep their draft state with the step editor that owns it.
+@Composable
+private fun OptionalStepEditor(
+    step: TestStep,
+    ops: StepListOps,
+    update: ((TestStep) -> TestStep) -> StoreResult<*>,
+    configuringOptional: Boolean,
+    optionalCondition: String,
+    onConfiguring: (Boolean) -> Unit,
+    onCondition: (String) -> Unit,
+) {
+    val ui = LocalTestsUi.current
+    CheckRow(checked = step.optional || configuringOptional, onToggle = {
+        if (step.optional) {
+            update { it.copy(optional = false, condition = null) }
+        } else {
+            onConfiguring(!configuringOptional)
+            onCondition(step.condition.orEmpty())
+        }
+    }, enabled = ops.editable) {
+        AppText("Optional: skip when its condition is absent", color = tc().ts, fontSize = 11.sp)
+    }
+    if (step.optional) {
+        TestsLabeled("Perform only when") {
+            CommitTextField(
+                step.condition.orEmpty(), { text -> update { it.copy(condition = text) } },
+                enabled = ops.editable, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing",
+            )
+        }
+    } else if (configuringOptional) {
+        TestsLabeled("Perform only when") {
+            CommitTextField(optionalCondition, { text -> onCondition(text); StoreResult.Ok(Unit) }, enabled = ops.editable,
+                multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppButton("Save condition", enabled = ops.editable && optionalCondition.isNotBlank(), onClick = {
+                val result = update { it.copy(optional = true, condition = optionalCondition.trim()) }
+                ui.report(result)
+                if (result is StoreResult.Ok) onConfiguring(false)
+            }, variant = ButtonVariant.Secondary)
+            AppButton("Cancel", onClick = { onConfiguring(false) }, variant = ButtonVariant.Ghost)
+        }
     }
 }
 
@@ -213,17 +279,24 @@ private fun StepSettings(step: TestStep, ops: StepListOps) {
                 isSelected = { it == step.onFailure },
             )
         }
-        TestsLabeled("Timeout (ms)", Modifier.width(NUMBER_FIELD_WIDTH)) {
+        TestsLabeled(if (step.kind == StepKind.MANUAL) "Wait up to (ms)" else "Timeout (ms)", Modifier.width(NUMBER_FIELD_WIDTH)) {
             CommitNumberField(step.timeoutMs, 1L, MAX_STEP_TIMEOUT_MS, { n -> update { it.copy(timeoutMs = n) } }, enabled = ops.editable)
         }
-        TestsLabeled("Retries", Modifier.width(NUMBER_FIELD_WIDTH)) {
-            CommitNumberField(step.retries.toLong(), 0L, MAX_STEP_RETRIES.toLong(), { n -> update { it.copy(retries = n.toInt()) } }, enabled = ops.editable)
+        // A manual step is not retried (the tester would only wait again) and only an AI agent spends tool calls.
+        if (step.kind != StepKind.MANUAL) {
+            TestsLabeled("Retries", Modifier.width(NUMBER_FIELD_WIDTH)) {
+                CommitNumberField(
+                    step.retries.toLong(), 0L, MAX_STEP_RETRIES.toLong(), { n -> update { it.copy(retries = n.toInt()) } }, enabled = ops.editable,
+                )
+            }
         }
-        TestsLabeled("Max tool calls", Modifier.width(NUMBER_FIELD_WIDTH)) {
-            CommitNumberField(
-                step.maxToolCalls.toLong(), MIN_STEP_MAX_TOOL_CALLS.toLong(), MAX_STEP_MAX_TOOL_CALLS.toLong(),
-                { n -> update { it.copy(maxToolCalls = n.toInt()) } }, enabled = ops.editable,
-            )
+        if (step.kind == StepKind.AGENT) {
+            TestsLabeled("Max tool calls", Modifier.width(NUMBER_FIELD_WIDTH)) {
+                CommitNumberField(
+                    step.maxToolCalls.toLong(), MIN_STEP_MAX_TOOL_CALLS.toLong(), MAX_STEP_MAX_TOOL_CALLS.toLong(),
+                    { n -> update { it.copy(maxToolCalls = n.toInt()) } }, enabled = ops.editable,
+                )
+            }
         }
     }
 }
@@ -236,6 +309,7 @@ private enum class CheckKind(val label: String) {
     SCREEN_JUDGE("Screen judge"),
     SCRIPT_RESULT("Script result"),
     ASK_JUDGE("Ask the judge"),
+    DEVICE_STATE("Device state"),
 }
 
 private inline fun <reified C : StepCheck> TestStep.mapCheck(id: String, transform: (C) -> C): TestStep =
@@ -283,6 +357,7 @@ private fun newCheck(kind: CheckKind, firstScriptId: String): StepCheck = when (
     CheckKind.SCREEN_JUDGE -> StepCheck.ScreenJudge(newCheckId(), "")
     CheckKind.SCRIPT_RESULT -> StepCheck.ScriptResult(newCheckId(), firstScriptId)
     CheckKind.ASK_JUDGE -> StepCheck.AskJudge(newCheckId(), "")
+    CheckKind.DEVICE_STATE -> newDeviceStateCheck()
 }
 
 @Composable
@@ -309,6 +384,7 @@ private fun CheckBody(check: StepCheck, step: TestStep, editable: Boolean, updat
                 enabled = editable, multiline = true, placeholder = "A question the judge answers yes or no",
             )
         }
+        is StepCheck.DeviceState -> DeviceStateCheckBody(check, editable) { changed -> update { s -> s.mapCheck<StepCheck.DeviceState>(check.id) { changed } } }
     }
 }
 

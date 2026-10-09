@@ -256,7 +256,17 @@ entries are active.
   remains unchanged. `maxToolCalls` (1..100, default 15) is the step's
   lane-tool call budget; `onFailure` is `STOP_CASE` (default), `CONTINUE`,
   `CREATE_ISSUE_AND_CONTINUE` or `PAUSE_FOR_USER`. Refused when the case or its suite is locked.
-- `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition;
+  Three more fields say **who performs the step**: `kind` (`AGENT` — default, an AI agent or the external client; `MANUAL` —
+  a tester does it by hand while the lane waits, `action` holds the instructions and the default `timeoutMs` is 10 minutes;
+  `SCRIPT` — the run itself runs a library script, no AI agent is involved), `script` (`{ scriptId, args?, exitCode?,
+  stdoutContains? }`, required for `SCRIPT`, the optional automation alternative of a `MANUAL` step; `exitCode` defaults to 0
+  and `null` accepts any; `null` for the whole field clears it; the script must exist, accept `args`, and not be limited to
+  setup and teardown) and `manualCompletion` (`MANUAL` only: `TESTER_ONLY`, `CHECKS_ONLY` — needs a `logAppears` or
+  `deviceState` check — or `TESTER_OR_CHECKS`, the default). A manual step is not retried and cannot be `optional`.
+  A suite that holds a manual or script step or a `deviceState` check is written as suite-file version 3, which builds that
+  predate step kinds open read-only; a suite of AI steps only stays at version 2.
+- `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition; changing
+  `kind` also moves a default timeout (60 s for an AI step, 10 minutes for a manual one);
   `checks` and `examples` **replace the whole
   ordered lists**: send every entry you want to keep, re-sending an entry's `id` keeps its identity.
 - `delete_test_step` (`stepId`), `duplicate_test_step` (`stepId`; deep copy with new ids placed after the
@@ -265,7 +275,10 @@ entries are active.
 Check entries have a `type`: `logAppears` (`regex`, optional `tag`, `withinMs`), `logAbsent` (`regex`,
 optional `tag`, `forMs`), `screenJudge` (`text`, optional `exampleRef` = the id of one of the step's
 examples), `scriptResult` (`scriptId`, optional `args` object, `exitCode` — default 0, `null` for any —
-and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `goldenScreenshot`
+and `stdoutContains`), `askJudge` (`text`) and `deviceState` (`key`, `expectedRegex`, optional `withinMs` — the
+property is read repeatedly until its text matches the expression or `withinMs` is up; keys: `usb.devices`, one
+`vvvv:pppp name` line per attached host-mode USB device, and `bt.enabled`, `wifi.enabled`, `airplane` as
+`true`/`false`; an unknown key fails the check with a message that lists them). Example entries have a `type`: `goldenScreenshot`
 (`assetPath` relative to the suite's asset folder; the image itself is not uploaded over MCP) or
 `referenceLog` (`text`), with an optional `caption`. Both accept an optional `id`.
 
@@ -437,7 +450,10 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   is saved back and an unknown key is refused: `recordVideo`, `audio`, `includeEarlierDeviceLogs`, `keepDeviceAudio`
   (booleans), `microphone` (`off`, `default` or a microphone id), `deviceDisplay` (`in_app_mirror`, `scrcpy_window`,
   `off`), `bufferMode` (`default`|`all`|`custom`) with `buffers` (`main`, `system`, `crash`, `kernel`, `events`,
-  `radio`) and `videoQuality` (`compact`|`balanced`|`detailed`|`smooth`). `openLaneTabs` (default `true`) opens a live
+  `radio`) and `videoQuality` (`compact`|`balanced`|`detailed`|`smooth`). `manualSteps` is what the run does with
+  manual steps: `use_script_then_wait` (default — run the step's automation script when it has one, otherwise wait for a
+  tester; a failing script leaves the step to the tester), `wait_for_tester` or `skip` (report them as skipped and go on).
+  `openLaneTabs` (default `true`) opens a live
   capture tab per lane; `false` records the same way without a tab (and without an in-app mirror). With a `capture`
   the lane's log is the capture itself and is always kept (`evidence.logcat` has no effect; `evidence.video`, when
   given, decides `capture.recordVideo` unless `capture` sets it). The approval dialog of an external client lists each lane's model and effort, the judge and
@@ -452,7 +468,9 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
 - `get_test_run_status` (`runId`) — `status` (`QUEUED`, `RUNNING`, `PASSED`, `FAILED`, `CANCELLED`, `ERROR`),
   `warnings`, every lane with its status, the case and step it is on and its case results so far,
   `pendingConfirmations` (cards an in-app agent waits on), `pausedLanes` (a step with `onFailure`
-  `PAUSE_FOR_USER` failed), `paused` (the run was paused from the live view; there is no tool to pause a run),
+  `PAUSE_FOR_USER` failed), `waitingLanes` (lanes waiting for a tester to do a manual step: `laneId`, `case`,
+  `stepNumber`, `instructions`, `expected`, `deviceSerial`, `completion`, `testerCanComplete`, `deadlineAt`, `hint`),
+  `paused` (the run was paused from the live view; there is no tool to pause a run),
   the number of `comparisons`, per-case `agentUsage`, `judgeUsage`, `externalToolCalls` and combined `usage`, per-lane
   `usage`, and a `summary` (`passedSteps`, `totalSteps`, `cases`) plus run `usage`. Tool counts are independent of the
   bounded recent activity history.
@@ -473,6 +491,12 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   app) counts as denied.
 - `resume_paused_step` (`runId`, `laneId`, `decision` `retry`|`continue`|`stop`) — what a lane does after a
   `PAUSE_FOR_USER` step failed.
+- `resolve_manual_step` (`runId`, `laneId`, `decision` `done`|`failed`|`skip`, optional `note`) — answers the manual step a
+  lane is waiting on (see `waitingLanes` in `get_test_run_status`): `done` (the tester did it), `failed`, or `skip` (the
+  step is reported as skipped and the case goes on). A step that completes by its checks only cannot be answered `done`.
+  The answer is taken as the tester's word and recorded as such; like `resume_paused_step` it needs no per-call approval,
+  because the run itself was approved. A manual step nobody answers (and whose checks never turn true) within its
+  `timeoutMs` fails as not confirmed, classified as a problem of the step or the run, never an app defect.
 - `apply_step_fix` (`runId`, `stepId`, `fixRef`) — applies the fix a judge suggested (the id of a step's `judge` or of
   a comparison) to that step in the **library**: its action and/or expected text are replaced; the run's own frozen
   copy is not touched. Refused with the usual `limit` shape when the step is locked by the edition limit, and when
@@ -509,6 +533,13 @@ deterministic checks (`logAppears`, `logAbsent`, `scriptResult`) and the judge, 
 remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CREATE_ISSUE_AND_CONTINUE` move on,
 `PAUSE_FOR_USER` waits for `resume_paused_step` or the user). A step that outlives its `timeoutMs` is closed as
 `TIMEOUT` and an agent run is restarted at the next step with a summary of the earlier ones.
+
+A `MANUAL` or `SCRIPT` step is never handed to the agent or to an external client: the run performs it between the agent's
+steps. When an agent's (or a client's) `finish_step` moves the case onto one, the answer is `result: "handoff"`; the agent
+run is closed, the step is performed, and a new agent run starts at the next AI step with a summary of what was done
+(an external lane just waits). `get_current_step` and the device tools are refused while such a step is current. A report
+step carries `kind` (omitted for AI steps), `completedBy` (`TESTER`, `CHECKS`, `SCRIPT`, `SKIPPED`), `manualCompletion` and,
+for a step nobody confirmed, `classification: AGENT_OR_STEP_PROBLEM`.
 
 An optional step's `get_current_step` result includes its condition. If that condition is absent, report `SKIPPED` with
 an observation explaining why. Only an optional step can be skipped; a required-step skip is refused. A valid skip records

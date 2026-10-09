@@ -1,6 +1,7 @@
 package com.indagium.testing.run
 
 import com.indagium.model.LogEntry
+import com.indagium.testing.device.DeviceStateReading
 import com.indagium.testing.device.LogAbsentResult
 import com.indagium.testing.device.LogWaitResult
 import com.indagium.testing.device.TestDeviceSession
@@ -15,6 +16,7 @@ import com.indagium.testing.script.ScriptRunOutcome
 import com.indagium.testing.script.ScriptRunResult
 import com.indagium.testing.script.TestScriptRunner
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import java.io.IOException
 
 // The checks of a step that need no judge: they read the lane's recorded log or run a library script. Each answers with
@@ -31,6 +33,8 @@ private const val MAX_CHECK_WAIT_MS = 10 * 60 * 1000L
 private const val ROW_EXCERPT_CHARS = 200
 private const val OUTPUT_EXCERPT_CHARS = 300
 private const val NANOS_PER_MILLI = 1_000_000L
+private const val DEVICE_STATE_POLL_MS = 1_000L
+private const val STATE_EXCERPT_CHARS = 200
 private const val JUDGE_PENDING_DETAIL = "Needs a judge; this run has none configured."
 
 internal fun StepCheck.kindName(): String = when (this) {
@@ -39,6 +43,7 @@ internal fun StepCheck.kindName(): String = when (this) {
     is StepCheck.ScreenJudge -> "screenJudge"
     is StepCheck.ScriptResult -> "scriptResult"
     is StepCheck.AskJudge -> "askJudge"
+    is StepCheck.DeviceState -> "deviceState"
 }
 
 internal class DeterministicChecks(
@@ -61,6 +66,7 @@ internal class DeterministicChecks(
                 is StepCheck.LogAppears -> logAppears(check, stepLogOffset)
                 is StepCheck.LogAbsent -> logAbsent(check, stepLogOffset)
                 is StepCheck.ScriptResult -> scriptResult(check)
+                is StepCheck.DeviceState -> deviceState(check)
                 is StepCheck.ScreenJudge, is StepCheck.AskJudge -> Outcome(CheckStatus.NOT_EVALUATED, JUDGE_PENDING_DETAIL)
             }
         } catch (cancelled: CancellationException) {
@@ -96,6 +102,34 @@ internal class DeterministicChecks(
             is LogAbsentResult.Found -> Outcome(CheckStatus.FAIL, "A row matching /${check.regex}/ appeared: ${rowExcerpt(result.entry)}")
         }
     }
+
+    /** Reads the device property until its text matches the check's expression (searched in it) or [StepCheck.DeviceState.withinMs] is up. */
+    private suspend fun deviceState(check: StepCheck.DeviceState): Outcome {
+        val expected = Regex(check.expectedRegex)
+        val startedNanos = System.nanoTime()
+        val window = check.withinMs.coerceIn(0L, MAX_CHECK_WAIT_MS)
+        var last: DeviceStateReading
+        while (true) {
+            last = session.readDeviceState(check.key)
+            val reading = last
+            if (reading is DeviceStateReading.Value && expected.containsMatchIn(reading.text)) {
+                return Outcome(CheckStatus.PASS, "${check.key} = ${stateText(reading)} matches /${check.expectedRegex}/.")
+            }
+            if (reading is DeviceStateReading.Unavailable && reading.permanent) return Outcome(CheckStatus.ERROR, reading.reason)
+            val remaining = window - (System.nanoTime() - startedNanos) / NANOS_PER_MILLI
+            if (remaining <= 0) break
+            delay(minOf(DEVICE_STATE_POLL_MS, remaining))
+        }
+        return when (val reading = last) {
+            is DeviceStateReading.Unavailable -> Outcome(CheckStatus.ERROR, reading.reason)
+            is DeviceStateReading.Value -> Outcome(
+                CheckStatus.FAIL,
+                "${check.key} = ${stateText(reading)} does not match /${check.expectedRegex}/ within ${check.withinMs} ms.",
+            )
+        }
+    }
+
+    private fun stateText(reading: DeviceStateReading.Value): String = excerpt(reading.text, STATE_EXCERPT_CHARS).ifEmpty { "(empty)" }
 
     private suspend fun scriptResult(check: StepCheck.ScriptResult): Outcome {
         val script = findScript(check.scriptId) ?: return Outcome(CheckStatus.ERROR, "Script '${check.scriptId}' is not in the library.")

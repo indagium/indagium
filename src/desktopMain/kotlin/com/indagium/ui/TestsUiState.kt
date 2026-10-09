@@ -12,6 +12,7 @@ import com.indagium.testing.limits.activeSuiteIds
 import com.indagium.testing.limits.decide
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
@@ -74,8 +75,40 @@ internal class TestsViewState {
     /** Non-null while the issue dialog is open. */
     var issueDialog: IssueDialogTarget? by mutableStateOf(null)
 
+    /** Where "Back to the step" returns to after a script was created for a step and its editor opened; see [openScriptEditorFor]. */
+    var scriptReturn: ScriptReturn? by mutableStateOf(null)
+
     /** Width of the left navigation column in dp; dragged through the shared HDivider, clamped by [clampTestsNavWidth]. */
     var navWidthDp: Float by mutableStateOf(TESTS_NAV_WIDTH_DEFAULT_DP)
+}
+
+/** The place a step was edited in, so the script editor opened from it can lead back there. */
+internal data class ScriptReturn(
+    val nav: TestsNav,
+    val suiteId: String?,
+    val suiteTab: SuiteTab,
+    val caseId: String?,
+    val sharedStepId: String?,
+    val stepId: String,
+)
+
+/** Opens the script editor on [scriptId], remembering the step (and where it is) that asked for it. */
+internal fun TestsViewState.openScriptEditorFor(scriptId: String, stepId: String) {
+    scriptReturn = ScriptReturn(nav, selectedSuiteId, selectedSuiteTab, selectedCaseId, selectedSharedStepId, stepId)
+    selectedScriptId = scriptId
+    nav = TestsNav.Scripts
+}
+
+/** Leads back to the step that opened the script editor, expanded; does nothing when no step did. */
+internal fun TestsViewState.returnFromScriptEditor() {
+    val target = scriptReturn ?: return
+    scriptReturn = null
+    nav = target.nav
+    selectedSuiteId = target.suiteId
+    selectedSuiteTab = target.suiteTab
+    selectedCaseId = target.caseId
+    selectedSharedStepId = target.sharedStepId
+    expandedStepId = target.stepId
 }
 
 internal const val TESTS_NAV_WIDTH_DEFAULT_DP = 248f
@@ -230,11 +263,15 @@ internal fun checkKindLabel(check: StepCheck): String = when (check) {
     is StepCheck.ScreenJudge -> "Screen"
     is StepCheck.ScriptResult -> "Script"
     is StepCheck.AskJudge -> "Judge"
+    is StepCheck.DeviceState -> "Device state"
 }
 
 /** One badge label per distinct check kind of [step], in first-seen order, with a count when a kind repeats. */
 internal fun stepCheckBadges(step: TestStep): List<String> =
     step.checks.groupBy { checkKindLabel(it) }.map { (label, checks) -> if (checks.size > 1) "$label ×${checks.size}" else label }
+
+/** The badge that says who performs [step] when it is not the AI agent, else null. */
+internal fun stepKindBadge(step: TestStep): String? = if (step.kind == StepKind.AGENT) null else stepKindLabel(step.kind)
 
 /** [text] as a whole number within [min]..[max], or null when it is not one. */
 internal fun parseWholeNumber(text: String, min: Long, max: Long): Long? = text.trim().toLongOrNull()?.takeIf { it in min..max }
@@ -264,7 +301,8 @@ internal fun scriptUsageCount(library: TestLibrary, scriptId: String): Int {
     val hooks = library.suites.flatMap { it.allHooks() }.count { it is HookItem.Script && it.scriptId == scriptId }
     val steps = library.suites.flatMap { it.allSteps() } + library.sharedSteps.flatMap { it.steps }
     val checks = steps.flatMap { it.checks }.count { it is StepCheck.ScriptResult && it.scriptId == scriptId }
-    return hooks + checks
+    val stepScripts = steps.count { it.script?.scriptId == scriptId }
+    return hooks + checks + stepScripts
 }
 
 /** How many suite and case hooks run shared step [sharedStepId]. */

@@ -275,7 +275,7 @@ class TestLibraryStore(
             notFound = StoreResult.NotFound("suite", suiteId),
             operation = { LimitOperation.CreateCase(suiteId) },
         ) { lib, suite ->
-            val problem = validateEntityId("Case", withId.id) ?: validateCase(withId)
+            val problem = validateEntityId("Case", withId.id) ?: validateCase(withId, lib.scripts)
             when {
                 problem != null -> SuiteEdit.Fail(problem)
                 lib.findCase(withId.id) != null -> SuiteEdit.Fail("A case with id '${withId.id}' already exists.")
@@ -359,7 +359,7 @@ class TestLibraryStore(
     fun createStep(caseId: String, step: TestStep, atIndex: Int? = null): StoreResult<TestStep> {
         val withId = if (step.id.isBlank()) step.copy(id = newStepId()) else step
         return editCase(caseId) { lib, case ->
-            val problem = validateEntityId("Step", withId.id) ?: validateStep(withId)
+            val problem = validateEntityId("Step", withId.id) ?: validateStep(withId, lib.scripts)
             when {
                 problem != null -> CaseEdit.Fail(problem)
                 lib.findStep(withId.id) != null -> CaseEdit.Fail("A step with id '${withId.id}' already exists.")
@@ -377,7 +377,7 @@ class TestLibraryStore(
         val copies = steps.map { it.withFreshIds() }
         return editCase(caseId) { lib, case ->
             copies.forEachIndexed { index, step ->
-                val problem = validateEntityId("Step", step.id) ?: validateStep(step)
+                val problem = validateEntityId("Step", step.id) ?: validateStep(step, lib.scripts)
                 if (problem != null) return@editCase CaseEdit.Fail("Step ${index + 1}: $problem")
                 if (lib.findStep(step.id) != null || case.steps.any { existing -> copies.any { it.id == existing.id } }) {
                     return@editCase CaseEdit.Fail("A step with an inserted id already exists.")
@@ -392,9 +392,9 @@ class TestLibraryStore(
 
     /** Replaces the step; its id is kept. Checks and examples are replaced as whole ordered lists. */
     fun updateStep(stepId: String, transform: (TestStep) -> TestStep): StoreResult<TestStep> =
-        editStep(stepId) { case, old ->
+        editStep(stepId) { lib, case, old ->
             val updated = transform(old).copy(id = stepId)
-            val problem = validateStep(updated)
+            val problem = validateStep(updated, lib.scripts)
             if (problem != null) {
                 CaseEdit.Fail(problem)
             } else {
@@ -403,11 +403,11 @@ class TestLibraryStore(
         }
 
     fun deleteStep(stepId: String): StoreResult<Unit> =
-        editStep(stepId) { case, _ -> CaseEdit.Done(case.copy(steps = case.steps.filterNot { it.id == stepId }), Unit) }
+        editStep(stepId) { _, case, _ -> CaseEdit.Done(case.copy(steps = case.steps.filterNot { it.id == stepId }), Unit) }
 
     /** A copy with new ids, placed right after the original. */
     fun duplicateStep(stepId: String): StoreResult<TestStep> =
-        editStep(stepId) { case, old ->
+        editStep(stepId) { _, case, old ->
             val copy = old.withFreshIds()
             val index = case.steps.indexOfFirst { it.id == stepId }
             CaseEdit.Done(case.copy(steps = case.steps.toMutableList().apply { add(index + 1, copy) }), copy)
@@ -415,7 +415,7 @@ class TestLibraryStore(
 
     /** Moves the step to [toIndex] within its case. */
     fun moveStep(stepId: String, toIndex: Int): StoreResult<Unit> =
-        editStep(stepId) { case, _ -> CaseEdit.Done(case.copy(steps = case.steps.moveById(stepId, toIndex) { it.id }), Unit) }
+        editStep(stepId) { _, case, _ -> CaseEdit.Done(case.copy(steps = case.steps.moveById(stepId, toIndex) { it.id }), Unit) }
 
     // ── Scripts ──────────────────────────────────────────────────────
 
@@ -464,7 +464,7 @@ class TestLibraryStore(
             libraryFileRejection(lib)?.let { return@mutate it }
             val problem = validateEntityId("Shared step", withId.id)
                 ?: (if (lib.sharedStep(withId.id) != null) "A shared step with id '${withId.id}' already exists." else null)
-                ?: validateSharedStep(withId)
+                ?: validateSharedStep(withId, lib.scripts)
             if (problem != null) return@mutate invalid(problem)
             Outcome.Apply(lib.copy(sharedSteps = lib.sharedSteps + withId), withId, Dirty(libraryFile = true))
         }
@@ -475,7 +475,9 @@ class TestLibraryStore(
         libraryFileRejection(lib)?.let { return@mutate it }
         val old = lib.sharedStep(sharedId) ?: return@mutate notFound("shared step", sharedId)
         val updated = transform(old).copy(id = sharedId)
-        validateSharedStep(updated)?.let { return@mutate invalid(it) }
+        // Steps that were already there are not rejected for a script deleted since; the ones this edit changed are checked against the library.
+        val problem = validateSharedStep(updated) ?: updated.steps.filter { it !in old.steps }.firstNotNullOfOrNull { validateStep(it, lib.scripts) }
+        problem?.let { return@mutate invalid(it) }
         Outcome.Apply(lib.copy(sharedSteps = lib.sharedSteps.map { if (it.id == sharedId) updated else it }), updated, Dirty(libraryFile = true))
     }
 
@@ -573,14 +575,14 @@ class TestLibraryStore(
             operation = { LimitOperation.EditCase(it.id, caseId) },
         ) { lib, suite -> applyCaseEdit(lib, suite, caseId, edit) }
 
-    private fun <T> editStep(stepId: String, edit: (TestCase, TestStep) -> CaseEdit<T>): StoreResult<T> =
+    private fun <T> editStep(stepId: String, edit: (TestLibrary, TestCase, TestStep) -> CaseEdit<T>): StoreResult<T> =
         editSuite(
             locate = { lib -> lib.findStep(stepId)?.suite },
             notFound = StoreResult.NotFound("step", stepId),
             operation = { suite -> suite.cases.firstOrNull { c -> c.steps.any { it.id == stepId } }?.let { LimitOperation.EditCase(suite.id, it.id) } },
         ) { lib, suite ->
             val location: StepLocation = lib.findStep(stepId) ?: return@editSuite SuiteEdit.Fail("No step with id '$stepId'.")
-            applyCaseEdit(lib, suite, location.case.id) { _, case -> edit(case, location.step) }
+            applyCaseEdit(lib, suite, location.case.id) { _, case -> edit(lib, case, location.step) }
         }
 
     private fun <T> applyCaseEdit(
