@@ -12,6 +12,7 @@ import com.indagium.ai.logSummary
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.debug.AppLogger
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.testing.authoring.RewriteAttachment
 import com.indagium.testing.authoring.RewriteGeneration
 import com.indagium.testing.authoring.rewriteBudgetGuidance
 import com.indagium.testing.authoring.rewritePromptPreamble
@@ -75,6 +76,7 @@ internal class AgentTextWording(
 )
 
 /** One agent run whose answer is text: the profile ([model] / [reasoningEffort] replace its own), the words, its tools and its limits. */
+@Suppress("LongParameterList") // One run request: the profile, the words, its tools, its limits and the images that go with it.
 internal class AgentTextRequest(
     val profileId: String,
     val model: String?,
@@ -87,6 +89,8 @@ internal class AgentTextRequest(
     val timeoutMs: Long,
     val wording: AgentTextWording,
     val onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
+    /** Images that go with [prompt] when the agent takes them; otherwise the run is the attachment's fallback (see [runAgentForText]). */
+    val attachment: RewriteAttachment? = null,
 )
 
 private val STEP_DRAFT_WORDING = AgentTextWording(
@@ -145,13 +149,15 @@ internal suspend fun AppState.generateRecordingRewrite(request: RewriteGeneratio
         timeoutMs = RECORDING_REWRITE_TIMEOUT_MS,
         wording = RECORDING_REWRITE_WORDING,
         onUsage = request.onUsage,
+        attachment = request.attachment,
     ),
 )
 
 /**
  * Runs one agent through the lane launchers (an in-app model over HTTP, or Claude Code / Codex as the signed-in account, which
  * reach [AgentTextRequest.gateway] through the managed MCP lease) and returns what it answered after its last tool call. Cancelling
- * the caller cancels the run; the run and its workspace are cleaned up either way.
+ * the caller cancels the run; the run and its workspace are cleaned up either way. An [AgentTextRequest.attachment] goes with the first
+ * message when the agent takes images; an agent that does not runs the attachment's fallback prompt and tool budget instead.
  */
 internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String {
     val base = normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == request.profileId }
@@ -163,20 +169,28 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
     val tabId = "${request.wording.sessionPrefix}:${java.util.UUID.randomUUID()}"
     val session = com.indagium.ai.AiSession(tabId)
     var run: AiRun? = null
+    val attachment = request.attachment
+    val attached = attachment?.takeIf { agent.acceptsImagesUpFront && it.images.isNotEmpty() }
+    val fallback = attachment?.takeIf { attached == null }
+    if (fallback != null) {
+        AppLogger.info(AGENT_TIMING_LOG_COMPONENT, "rewrite_brief: this agent takes no images; the tools fetch the evidence")
+    }
     try {
         val activeRun = agent.start(
             AgentSegmentRequest(
                 session = session,
-                prompt = request.prompt,
+                prompt = fallback?.fallbackPrompt ?: request.prompt,
                 systemPrompt = request.systemPrompt,
                 context = AiInvestigationContext(tabId),
                 gateway = request.gateway,
-                toolCallLimit = request.toolCallLimit,
-                maxTurns = request.maxTurns,
+                toolCallLimit = fallback?.fallbackToolCallLimit ?: request.toolCallLimit,
+                maxTurns = fallback?.fallbackMaxTurns ?: request.maxTurns,
                 freeTools = emptySet(),
                 confirmationTimeoutMs = 1_000,
                 budgetGuidance = request.wording.budgetGuidance,
                 promptPreamble = request.wording.promptPreamble,
+                images = attached?.images.orEmpty(),
+                promptWithoutImages = attachment?.fallbackPrompt,
             ),
         )
         run = activeRun

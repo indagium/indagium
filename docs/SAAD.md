@@ -2766,6 +2766,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Lane scheduling (parallel across devices, sequential on one) and the confirmation timeout | `TestLaneSchedulingTest`, `ConfirmationGateTimeoutTest` |
 | The judge is blind, and comparison of disagreeing lanes | `JudgeBlindnessTest`, `JudgeComparisonTest` |
 | The judge's evidence and images come with its first message, for every agent kind | `JudgeEvidenceUpFrontTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
+| The rewrite's screenshots, contact sheets and screen text come with its first message; password windows never | `RecordingRewriteEvidenceTest`, `RecordingRewriteUpFrontTest` |
 | Run store, report actions, issue drafts, issue store, notes destination | `TestRunStoreTest`, `TestRunReportActionsTest`, `IssueDraftBuilderTest`, `IssueStoreTest`, `IssueToNotesTest`, `IssueEngineTest` |
 | Secrets stay off argv; fallback to memory; real macOS keychain round trip | `SecretStoreCommandTest`, `MacOsKeychainRoundTripTest` |
 | Tracker client (JSON and SSE, session header), issue creator, proxied tools | `TrackerMcpClientTest`, `TrackerIssueCreatorTest`, `TrackerToolsTest`, `TrackerSendTest` |
@@ -3159,7 +3160,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RewriteEvidence.kt`, `RewriteSensitivity.kt`, `ContactSheet.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -4128,13 +4129,34 @@ refuse while it is set), then calls the service with **no lock held**:
    evidence requires a review reason; an uncertain mirror preview is never presented as verified before/after evidence.
 2. One agent run through the lane launchers (`AppState.runAgentForText`, shared with the step draft; an
    in-app model over HTTP, or Claude Code/Codex through the managed MCP lease), with the profile after
-   `withRunOverrides(model, effort)`, a budget of three tool calls per input without video or four with video (capped at 60),
-   and a 180 s timeout. Its gateway (`RecordingRewriteTools`) is read-only and holds only `get_recorded_input`,
+   `withRunOverrides(model, effort)`, a budget of three tool calls per input without video or four with video (capped at 60;
+   `REWRITE_CLOSEUP_TOOL_CALLS` = 6 when the evidence is attached, see *Evidence up front* below), and a 180 s timeout. Its gateway (`RecordingRewriteTools`) is read-only and holds only `get_recorded_input`,
    `get_recorded_screen` (image result), `get_recorded_ui`, and, when captured, `get_recorded_video_storyboard` (one real
    image result through HTTP and MCP); device text travels inside the
    `untrusted_data` envelope. The answer is the assistant text after the last tool call.
    The brief numbers only retained raw inputs. The video still covers the complete timeline and may show removed actions;
    it explicitly tells the model not to recreate those actions or fold them into retained steps.
+   **Evidence up front** (`RewriteEvidence.kt`, `buildRewriteEvidence`). The brief attaches the images the tools would
+   fetch, so a rewrite can answer in one or two model turns. For a recording whose distinct before/after screenshots fit
+   (`REWRITE_MAX_ATTACHED_IMAGES` = 10, 8 MB), each is attached once, labelled in order ("Image 3: input 2 after, input 3
+   before"; a capture shared by two adjacent inputs is attached once). A longer recording is covered by contact sheets, every
+   input on exactly one sheet: three inputs per sheet with before and after, then six per sheet with one screen each, at most
+   ten sheets; inputs beyond that are named in the prompt for `get_recorded_screen`. A sheet is the video storyboard of the
+   inputs' time window (`storyboardForRange`, only when the window is at most 30 s and frames could be decoded) or, otherwise,
+   one composed from the stored JPEGs by the same layout (`ContactSheet.kt`, shared with the storyboard). Author-added and
+   external-event rows get no images. Each recorded input's line also carries a compact UI summary inside the fence: the five
+   labelled elements nearest the touch before it and the first texts of the screen after it (password nodes never), plus which
+   images show it. **Password rule** (`RewriteSensitivity.kt`, shared with the video: `rewriteSensitiveIntervals`): an input whose
+   action is masked ("••••") or whose screens show a password being edited, and any input or screenshot whose time lies in the
+   sensitive window (from the start of the recording until a later screen proves the password screen is gone; to the end when
+   none does), has no image and no screen text; its line says the evidence is withheld. The images travel as in the judge
+   (`RewriteAttachment` in `RewriteGeneration`, `AgentTextRequest.attachment`, `AgentSegmentRequest.images`). When the profile or
+   the agent cannot take images (`acceptsImagesUpFront`, checked by the service from the profile and again by `runAgentForText`
+   from the agent), or no image could be built, the prompt lists the tools that fetch the screens (the screen text stays) and
+   the budget is the full one; so it is when some inputs have no image (limits reached). Building the evidence runs on
+   `Dispatchers.IO` inside the rewrite's timeout and never fails the rewrite. The app log (`test-agent-timing`) gets a
+   `rewrite_brief:` line (`evidenceUpFront`, `kind`, `images`, `notAttached`, `promptChars`, `briefMs`, `toolBudget`, `inputs`).
+   Tests: `RecordingRewriteEvidenceTest`, `RecordingRewriteUpFrontTest`.
 3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action; expected result must be
    non-blank unless `reviewReason` explains what needs review (a null, missing, empty or whitespace-only
    reason is treated as absent when expected is present; a blank expected requires either an optional step with a

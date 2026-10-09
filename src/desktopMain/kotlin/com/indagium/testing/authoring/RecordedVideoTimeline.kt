@@ -7,9 +7,6 @@ import com.indagium.capture.mirror.MirrorVideoPacket
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
 import org.bytedeco.javacv.Java2DFrameConverter
-import java.awt.Color
-import java.awt.Font
-import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import java.io.BufferedWriter
 import java.io.Closeable
@@ -102,7 +99,12 @@ internal class RecordedVideoTimeline(
         val relation: String,
         val inputNumber: Int?,
         val ageMs: Long,
-    )
+    ) {
+        fun toCell(): ContactSheetCell {
+            val age = if (relation == "before" && ageMs > 0L) " • held $ageMs ms" else ""
+            return ContactSheetCell(image, relation, "actual $actualMs ms • ${inputNumber?.let { "input $it " }.orEmpty()}$relation$age")
+        }
+    }
 
     /** The chosen frame of one request; [frame] is a deep copy the caller owns and must close. */
     private class SelectedFrame(val ptsUs: Long, val sessionMs: Long, val frame: Frame)
@@ -310,7 +312,7 @@ internal class RecordedVideoTimeline(
         val decoded = synchronized(storyboardLock) { decodeFrames(requests, sensitive) } ?: return null
         if (decoded.isEmpty()) return null
         val attributed = attributeRangeFrames(decoded, inputs)
-        val image = composeContactSheet(attributed)
+        val image = composeContactSheet(attributed.map(DecodedFrame::toCell))
         val output = java.io.ByteArrayOutputStream()
         if (!ImageIO.write(image, "png", output)) return null
         val coverage = coveredInputs(decoded, inputs)
@@ -546,65 +548,8 @@ internal class RecordedVideoTimeline(
         input.number.takeIf { before && after }
     }
 
-    private fun composeContactSheet(frames: List<DecodedFrame>): BufferedImage {
-        val columns = 3
-        val rows = (frames.size + columns - 1) / columns
-        val cellWidth = 480
-        val imageHeight = 800
-        val labelHeight = 42
-        val sheet = BufferedImage(columns * cellWidth, rows * (imageHeight + labelHeight), BufferedImage.TYPE_INT_RGB)
-        val graphics = sheet.createGraphics()
-        graphics.color = Color(17, 21, 29)
-        graphics.fillRect(0, 0, sheet.width, sheet.height)
-        graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
-        graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        frames.forEachIndexed { index, frame ->
-            val x = index % columns * cellWidth
-            val y = index / columns * (imageHeight + labelHeight)
-            val source = frame.image
-            val scale = minOf(cellWidth.toDouble() / source.width, imageHeight.toDouble() / source.height)
-            val width = (source.width * scale).toInt()
-            val height = (source.height * scale).toInt()
-            graphics.drawImage(source, x + (cellWidth - width) / 2, y + (imageHeight - height) / 2, width, height, null)
-            graphics.color = when (frame.relation) {
-                "after" -> Color(127, 205, 160)
-                "before" -> Color(235, 202, 111)
-                else -> Color(185, 190, 205)
-            }
-            graphics.font = Font(Font.SANS_SERIF, Font.BOLD, 15)
-            val age = if (frame.relation == "before" && frame.ageMs > 0L) " • held ${frame.ageMs} ms" else ""
-            val label = "actual ${frame.actualMs} ms • ${frame.inputNumber?.let { "input $it " }.orEmpty()}${frame.relation}$age"
-            graphics.drawString(label, x + 10, y + imageHeight + 27)
-        }
-        graphics.dispose()
-        return sheet
-    }
-
-    private fun sensitiveIntervals(inputs: List<RewriteInput>): List<LongRange> {
-        val passwordInputs = inputs.indices.filter { index ->
-            val input = inputs[index]
-            input.row.action.contains("••••") || input.before?.passwordFieldLikelyEdited() == true || input.after?.passwordFieldLikelyEdited() == true
-        }
-        if (passwordInputs.isEmpty()) return emptyList()
-        val lastSensitiveAt = passwordInputs.maxOf { inputs[it].row.inputAtMs }
-        val passwordScreens = passwordInputs.flatMap { index ->
-            listOfNotNull(inputs[index].before, inputs[index].after)
-                .filter(RecordingScreenState::passwordFieldLikelyEdited)
-                .map { it.packageName to it.activity }
-        }.toSet()
-        val safeExit = inputs.asSequence().flatMap { input -> sequenceOf(input.before, input.after) }
-            .filterNotNull()
-            .filter { state ->
-                val location = state.packageName to state.activity
-                state.finishedAt >= lastSensitiveAt && state.nodes.isNotEmpty() && state.nodes.none { it.password } &&
-                    location.first != null && location.second != null && location !in passwordScreens
-            }
-            .minOfOrNull { it.finishedAt }
-        // Redact pre-roll too: a held mirror frame can predate Record while the same password screen remains visible.
-        // If the recorder never proves that transition, withhold video through the end of the session.
-        val recordingEnd = stoppedWallClockMs.get().takeIf { it >= 0L } ?: Long.MAX_VALUE
-        return listOf(Long.MIN_VALUE..(safeExit ?: recordingEnd))
-    }
+    private fun sensitiveIntervals(inputs: List<RewriteInput>): List<LongRange> =
+        rewriteSensitiveIntervals(inputs, stoppedWallClockMs.get().takeIf { it >= 0L } ?: Long.MAX_VALUE)
 
     private fun writePackets() {
         try {

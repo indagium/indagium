@@ -12,6 +12,7 @@ import com.indagium.ai.AiSidebarRuntime
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
 import com.indagium.ai.LocalAccountCli
+import com.indagium.ai.acceptsImagesUpFront
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.ai.recoveredBundledCodexPath
 import com.indagium.ai.validateAiProviderProfile
@@ -1994,6 +1995,9 @@ class AppState(
             library = { testLibrary },
             preflight = ::recordingTargetPreflight,
             generate = { request -> generateRecordingRewrite(request) },
+            acceptsImagesUpFront = { profileId ->
+                normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == profileId }?.kind?.acceptsImagesUpFront() ?: true
+            },
         )
     }
 

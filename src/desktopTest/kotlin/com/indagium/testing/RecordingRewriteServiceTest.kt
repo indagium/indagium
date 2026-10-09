@@ -73,7 +73,8 @@ class RecordingRewriteServiceTest {
 
         val request = seen.single()
         assertEquals(listOf("profile", "m-1", "high"), listOf(request.profileId, request.model, request.effort))
-        assertEquals(9, request.toolCallLimit, "three looks per input")
+        assertEquals(6, request.toolCallLimit, "the evidence is attached, so the tools are for close-ups only")
+        assertEquals(9, request.attachment?.fallbackToolCallLimit, "three looks per input when the agent takes no images")
         assertTrue("Searching for music" in request.prompt)
         assertTrue("Shop suite" in request.prompt && "Use the staging account." in request.prompt && SHOP_PACKAGE in request.prompt)
         assertTrue("Search for music" in request.prompt && "Find a playlist" in request.prompt)

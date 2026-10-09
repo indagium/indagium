@@ -26,9 +26,14 @@ private const val AUTHOR_STEP_KIND = "AUTHOR_STEP"
 private val SCREEN_MOMENTS = listOf("before", "after", "input")
 private val UI_MOMENTS = listOf("before", "after")
 
-/** Keep the original three-look budget for image-only sessions; captured video adds a storyboard look per input. */
-internal fun rewriteToolCallLimit(inputCount: Int, videoAvailable: Boolean = false): Int =
-    minOf(inputCount * (if (videoAvailable) VIDEO_CALLS_PER_INPUT else CALLS_PER_INPUT), MAX_REWRITE_TOOL_CALLS)
+/**
+ * Keep the original three-look budget for image-only sessions; captured video adds a storyboard look per input. When the first message
+ * carries the evidence ([evidenceUpFront]) the tools are only for close-ups: a small fixed budget, never more than the full one.
+ */
+internal fun rewriteToolCallLimit(inputCount: Int, videoAvailable: Boolean = false, evidenceUpFront: Boolean = false): Int {
+    val full = minOf(inputCount * (if (videoAvailable) VIDEO_CALLS_PER_INPUT else CALLS_PER_INPUT), MAX_REWRITE_TOOL_CALLS)
+    return if (evidenceUpFront) minOf(full, REWRITE_CLOSEUP_TOOL_CALLS) else full
+}
 
 private const val CALLS_PER_INPUT = 3
 private const val VIDEO_CALLS_PER_INPUT = 4
