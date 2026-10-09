@@ -178,6 +178,13 @@ internal class AiRun internal constructor(
     var agentReadyAt: Long? = null
         private set
 
+    /**
+     * True when this run's agent was already running before the run began: a judge that took over a kept Codex process (see
+     * [CodexJudgeHost]), so its startup does not include launching one. False for every run that started its own agent.
+     */
+    @Volatile
+    internal var agentReused: Boolean = false
+
     val events: SharedFlow<AiRunEvent> = _events.asSharedFlow()
 
     /** Full event history for this retained, current-launch run; not limited by SharedFlow replay. */

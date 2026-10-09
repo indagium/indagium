@@ -160,6 +160,12 @@ sealed interface CodexAppServerEvent {
     data class ProtocolError(
         val message: String,
         val line: String? = null,
+        /**
+         * The client itself found the connection in an unusable or unexpected state (a line it could not parse, a response nobody
+         * waits for, a reader that failed), as opposed to the server reporting an error of its own. A process that was reused
+         * after such a fault could answer the wrong request, so a caller that keeps a client between runs drops it.
+         */
+        val transportFault: Boolean = false,
     ) : CodexAppServerEvent
 
     data class ProcessExited(val exitCode: Int?) : CodexAppServerEvent
@@ -364,7 +370,7 @@ class CodexAppServerClient(
                 )
                 pending.values.forEach { it.completeExceptionally(failure) }
                 pending.clear()
-                eventBus.emit(CodexAppServerEvent.ProtocolError(failure.message ?: "Process failed"))
+                eventBus.emit(CodexAppServerEvent.ProtocolError(failure.message ?: "Process failed", transportFault = true))
             }
         }
     }
@@ -377,6 +383,7 @@ class CodexAppServerClient(
                 CodexAppServerEvent.ProtocolError(
                     message = "Invalid JSONL message: ${error.message ?: "parse error"}",
                     line = line,
+                    transportFault = true,
                 ),
             )
             return
@@ -392,7 +399,7 @@ class CodexAppServerClient(
         if (id != null) {
             val response = pending[id]
             if (response == null) {
-                eventBus.emit(CodexAppServerEvent.ProtocolError("Response for unknown request id $id", line))
+                eventBus.emit(CodexAppServerEvent.ProtocolError("Response for unknown request id $id", line, transportFault = true))
             } else {
                 val error = message["error"]?.jsonObject
                 if (error != null) {

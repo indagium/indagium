@@ -4,6 +4,8 @@ import com.indagium.ai.AiRun
 import com.indagium.ai.ManagedMcpAccess
 import com.indagium.ai.ManagedMcpRun
 import com.indagium.ai.ManagedMcpRunRegistry
+import com.indagium.ai.NO_ACTIVE_MCP_TARGET_MESSAGE
+import com.indagium.ai.SwitchableMcpRoute
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.LogLevel
@@ -284,6 +286,10 @@ class ControlServer(
     internal fun registerManagedMcpRun(run: AiRun, gateway: IndagiumToolGateway? = null): ManagedMcpAccess? =
         if (engine == null) null else managedMcpRuns.register(run, gateway)
 
+    /** Registers a lease that outlives one run and answers each tool call for [route]'s current target (see [SwitchableMcpRoute]). */
+    internal fun registerManagedMcpRoute(route: SwitchableMcpRoute): ManagedMcpAccess? =
+        if (engine == null) null else managedMcpRuns.register(route)
+
     internal fun releaseManagedMcpRun(access: ManagedMcpAccess) {
         managedMcpRuns.remove(access.token)
         managedMcpServers.remove(access.token)?.sessions?.values?.forEach { session ->
@@ -526,13 +532,15 @@ class ControlServer(
             Server(
                 serverInfo = Implementation(name = "indagium-managed-agent", version = "1.0.0"),
                 options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
-                instructions = if (managed.gateway == null) DEVICE_CAPTURE_MCP_INSTRUCTIONS else GATEWAY_OVERRIDE_MCP_INSTRUCTIONS,
+                instructions = if (managed.tools == null) DEVICE_CAPTURE_MCP_INSTRUCTIONS else GATEWAY_OVERRIDE_MCP_INSTRUCTIONS,
             ).also { server ->
                 // A run that brought its own gateway (an AI test-run lane) sees only that gateway's tools.
-                (managed.gateway ?: toolGateway).tools.forEach { tool ->
+                (managed.tools ?: toolGateway.tools).forEach { tool ->
                     server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
                         val (raw, content) = try {
-                            val executed = managed.toolExecutor.executeManaged(managed.run, tool.name, request.arguments?.toArgMap() ?: emptyMap())
+                            // The target is read once per call: the run that books the call and the gateway that executes it stay together.
+                            val target = checkNotNull(managed.currentTarget()) { NO_ACTIVE_MCP_TARGET_MESSAGE }
+                            val executed = target.toolExecutor.executeManaged(target.run, tool.name, request.arguments?.toArgMap() ?: emptyMap())
                             executed.raw to executed.content
                         } catch (error: Exception) {
                             null to "{\"error\":${Json.encode(error.message ?: "managed MCP tool failed")}}"

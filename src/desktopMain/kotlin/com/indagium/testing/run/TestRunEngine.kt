@@ -72,7 +72,7 @@ internal class TestRunEngine(
             throw stop
         } finally {
             withContext(NonCancellable) {
-                judge?.close()
+                judge?.shutdown()
                 finish(cancelled)
             }
         }
@@ -113,6 +113,9 @@ internal class TestRunEngine(
         } catch (crash: Exception) {
             val message = "The lane stopped unexpectedly: ${crash.message ?: crash::class.simpleName}"
             state.updateLane(config.id) { it.copy(status = RunStatus.ERROR, error = message, finishedAt = deps.wallClock()) }
+        } finally {
+            // The lane's judges are over, however the lane ended: the Codex process they shared is closed with it.
+            withContext(NonCancellable) { judge?.releaseLane(config.id) }
         }
     }
 

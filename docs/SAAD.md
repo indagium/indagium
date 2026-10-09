@@ -3591,6 +3591,7 @@ called while holding one that could take another lock, and none is ever held tog
 | `mutex` (coroutine `Mutex`) | `testing/run/StepSequence.kt:135` | A sequence's step state; with the `finishing` flag it makes `finish_step` and the watchdog mutually exclusive |
 | `testStepRecordingLock` (`AppState`), recording session `lock` / `probeLock` | `ui/AppState.kt`, `testing/authoring/TestStepRecordingSession.kt` | The one recording session and its `recordingApplications` / `recordingRewrites` sets (an apply and a rewrite of one session exclude each other, decided in one critical section). The session `lock` is a leaf: adb work runs on the session's two workers and the device input recorder's worker, an AI call runs with **no** lock held, and `probeLock` is only taken after `lock` (§26.12) |
 | `stateLock` (existing) | `laneCaptureSerials`, `manualCaptureStartSerial` in `ui/AppState.kt` | The per-device claim of lane captures; the one place this feature takes `stateLock`, and only in `AppState` (never inside `testing/`). Claim and release are short and call nothing while holding it |
+| `turnLock` (coroutine `Mutex`) | `ai/CodexJudgeHost.kt` | One judge at a time on a lane's kept Codex process, held for the judge's whole run including winding down. Leaf: nothing else is locked under it and nothing waits for the UI thread (§26.7) |
 | `LaneCaptureHandle.stopTablessOnce` (`@Synchronized`), `LaneNotes` (`AtomicReference`) | `ui/LaneCaptures.kt`, `ui/CaptureMarkerWriter.kt` | Leaf: start the one stop job of a tabless lane; compare-and-set of its notes |
 
 `AppState` mirrors the store's `StateFlow` into `mutableStateOf` and exposes thin delegates; the
@@ -3654,7 +3655,8 @@ cannot gets the text evidence plus a request to fetch the images with `get_step_
 while the judge works, so a hung or killed judge still leaves its lines. Each judge run ends with exactly one
 `judge_finished` line (also for a judge that was cancelled, timed out or could not start, with `partial: true`):
 `startupMs`, `firstResponseMs`, `modelTurns`, `toolCalls`, `verdictMs`, `totalMs`, `inputTokens`, `outputTokens`,
-`partial`, then `cleanupMs` (verdict until the agent was wound down), `verdict` and `error`. One calculator,
+`partial`, then `cleanupMs` (verdict until the agent was wound down), `verdict`, `error`, `briefMs` and `hostReused` (true when the
+judge took over a Codex process an earlier judge of its lane had started, see **The Codex judge host** below). One calculator,
 `aiRunTiming` (`ai/AiRunTimingCalculator.kt`, definitions in its KDoc), measures from `AiRun.createdAt`: `startupMs`
 until the agent was ready (`AiRun.markAgentReady`: Codex when its managed MCP server reports ready or the turn starts,
 Claude Code at its first stream line, an in-app model as the first request goes out, so about 0), `modelTurns` counts
@@ -3665,6 +3667,44 @@ older files), shown as "Judge: 4.2 s (2 model turns)" in the step detail and the
 `get_test_run_status`. `finish_step` adds a `finish_step_timing` line to the lane transcript
 (`evidenceCaptureMs`, `deterministicChecksMs`, `judgeMs`, `totalMs`), and `runAgentForText` (step drafts and recording
 rewrites) logs the same breakdown to the app log under `test-agent-timing`.
+
+**The Codex judge host.** A Codex judge used to launch a `codex app-server` process, a managed MCP lease (one `ControlServer` on
+its own loopback port) and a workspace for every step. `CodexJudgeHost` (`ai/CodexJudgeHost.kt`) keeps all three for the
+judges of **one lane**, so a judge pays only for a new thread and turn:
+
+- *Ownership.* `JudgeService` asks its judge agent for `LaneAgent.reusableForLaneJudge()` the first time a lane judges
+  (`AccountLaneAgent` answers for `CODEX_ACCOUNT` only, through `AccountRunnerFactory.judgeHost`; HTTP providers are already one
+  shared provider per lane, and Claude Code's CLI is one process per request, so both return null and run as before). A run has one
+  judge profile, model and effort, so the lane id is the whole key; a lane that judged earlier with another tool list (the host
+  compares the tool names of each judge) gets a new process. The host is closed by `JudgeService.releaseLane`, called from
+  `TestRunEngine.runLane`'s `finally` (inside `NonCancellable`, bounded by `agentCancelWaitMs`), and by `JudgeService.shutdown`
+  when the run ends, is cancelled or closed. The comparison judge always starts its own short-lived run. Lanes on parallel devices
+  have separate hosts; one lane's judges are sequential (a coroutine `Mutex` held for a judge's whole run, including winding down).
+- *One lease, switched per judge.* The lease is a `SwitchableMcpRoute` (`ai/ManagedMcpRunRegistry.kt`): the catalogue of the judge
+  tools is fixed when the process starts, and each judge `activate`s the route with **its own `AiRun` and gateway** (a fresh
+  `AiToolExecutionCoordinator`), so confirmations, the call budget, device bookkeeping and the timing marks stay per judge. A
+  call is answered for the target read **once** at the moment it arrives; when no judge is active (`clear` runs first thing when
+  a judge ends) the call is refused with "This tool session is not active". A judge starts only after the previous judge's turn
+  has been interrupted and has reported its end, so a late call of the previous model cannot reach the next judge's evidence.
+- *Per judge.* A new **ephemeral thread** and turn on the shared client (no context carries over), images in a `judge-N`
+  subdirectory of the host workspace that is deleted when the judge is over, and `CodexTurnEvents` (`ai/CodexAccountTurn.kt`, the
+  event handling shared with `AccountAgentRunner`) bound to that thread. One collector per process dispatches events to the judge
+  that is on and rejects an app-server request when none is.
+- *Ending a judge.* A judge is cancelled as soon as its verdict is in, so the normal end is `turn/interrupt` on the running turn;
+  the process survives. The interrupt must be accepted within `CODEX_JUDGE_INTERRUPT_SETTLE_MS` (3 s) and the turn reported over
+  within another 3 s (awaited in the background; the next judge waits for it) or the process is dropped.
+- *Dropped and rebuilt by the next judge:* the process exited, a `ProtocolError` with `transportFault` (a line that does not parse,
+  a response nobody waits for, a failed reader), the managed MCP server could not start or Codex asked for a host action this app
+  does not support (`CodexProcessFault`), a request was left unanswered by a cancelled judge (its answer would reach the next
+  one), or an interrupt did not settle. A failed or crashed judge is `INCONCLUSIVE` as before; it is not retried on a new process.
+- *Threading and locks.* Everything runs on the host's own IO scope, never on Ktor, Default or the UI thread. `turnLock` is a
+  coroutine lock held across a judge's run; the engine's flags are volatile and its plain fields are touched only under it; no
+  other lock is taken while it is held and nothing waits for the UI thread (it is a leaf, like the table in §26.6). `close()` is
+  safe from any thread at any time.
+- *Known limits.* A late MCP call of a judge whose interrupt settled could in principle still arrive; it is refused when no
+  judge is active and cannot be told from the next judge's own call when one is (Codex sends no per-turn identity with an MCP
+  call), which is why the next judge waits for the end of the interrupted turn. Ephemeral threads stay in the process's memory
+  until it ends (one per judged step of the lane).
 
 **Status rule — explicit verdicts are mandatory.** Run validation checks every reachable `ScreenJudge`/`AskJudge` check in the selected cases and reachable suite/case hooks. These checks cannot run with judge mode `OFF` or without a configured, usable judge. Steps with no explicit judge checks retain optional-judge behavior.
 
@@ -3874,8 +3914,9 @@ reachable by any prompt-injected lane agent, which is why the default permission
    is in practice kept locally, not filed in the tracker.
 3. **The judge through account agents is lightly tested.** The blindness guarantee and the
    comparison judge are pinned by `JudgeBlindnessTest`/`JudgeComparisonTest`, which use scripted in-app
-   agents; a Claude Code or Codex judge goes through the managed MCP lease and has no dedicated test
-   (only the lane path is covered with fake processes, `TestRunEngineAccountAgentTest`). Those CLIs'
+   agents; a Claude Code or Codex judge goes through the managed MCP lease and is covered with fake
+   processes only (`JudgeEvidenceUpFrontTest` for the first message, `CodexJudgeHostTest` for the kept Codex
+   process), never against a real CLI. Those CLIs'
    MCP clients may also give up on a long inline judge call, which is why the judge is bounded to 60 s.
 4. **No MCP tool to pause a run.** *Pause all* exists only in the live view
    (`TestRunCoordinator.setPaused`, `:254`); over MCP a lane can only be paused by a step's

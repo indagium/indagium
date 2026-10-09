@@ -3,7 +3,6 @@ package com.indagium.ai
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -139,126 +138,20 @@ internal class AccountAgentRunner(
                     ephemeral = true,
                 ),
             )
-            val terminal = CompletableDeferred<Unit>()
-            val agentMessages = AgentTurnMessageBuffer()
-            var receivedAgentMessage = false
-            var lastReportedTotalTokens: Long? = null
-            val events: Job = scope.launch {
-                client.events.collect { event ->
-                    when (event) {
-                        is CodexAppServerEvent.TurnStarted -> if (event.turn.threadId == null || event.turn.threadId == thread.id) {
-                            // The process is up, initialised and has accepted the prompt: ready, even if no MCP status said so.
-                            run.markAgentReady()
-                            run.emit(AiRunEvent.Status("Codex is investigating…"))
-                        }
-                        is CodexAppServerEvent.AgentTextDelta -> {
-                            if (event.threadId == null || event.threadId == thread.id) {
-                                if (!receivedAgentMessage) {
-                                    receivedAgentMessage = true
-                                    run.emit(AiRunEvent.Status("Codex is gathering evidence…"))
-                                }
-                                agentMessages.append(event.itemId, event.text)?.let { text ->
-                                    run.emit(AiRunEvent.AgentProgress(text))
-                                }
-                            }
-                        }
-                        is CodexAppServerEvent.McpToolProgress -> {
-                            if (event.threadId == null || event.threadId == thread.id) {
-                                run.emit(AiRunEvent.Status("Codex MCP: ${event.message}"))
-                            }
-                        }
-                        is CodexAppServerEvent.McpServerStartupStatus -> {
-                            if (event.serverName == MANAGED_MCP_SERVER_NAME) {
-                                val detail = event.message ?: event.status ?: "updated"
-                                if (event.status.equals("failed", ignoreCase = true) || event.status.equals("error", ignoreCase = true)) {
-                                    terminal.completeExceptionally(IllegalStateException("Indagium MCP could not start: $detail"))
-                                } else {
-                                    if (detail.equals(CODEX_MCP_READY_STATUS, ignoreCase = true)) run.markAgentReady()
-                                    run.emit(AiRunEvent.Status("Indagium MCP: $detail"))
-                                }
-                            }
-                        }
-                        is CodexAppServerEvent.ServerRequest -> when (event.method) {
-                            "mcpServer/elicitation/request" -> {
-                                val decision = decideCodexElicitation(event.params)
-                                client.resolveServerRequest(event.id, decision.response)
-                                if (!decision.isManagedServerApproval) {
-                                    // Some other MCP server configured in the user's Codex profile (e.g. an
-                                    // OAuth-backed integration) is asking for approval. Decline it gracefully
-                                    // instead of aborting; that server just stays unavailable for this run.
-                                    run.emit(
-                                        AiRunEvent.Status(
-                                            "Codex declined a request from another MCP server; it stays unavailable for this run.",
-                                        ),
-                                    )
-                                }
-                            }
-                            else -> {
-                                client.rejectServerRequest(event.id, "Indagium does not support this app-server request.")
-                                terminal.completeExceptionally(
-                                    IllegalStateException("Codex requested unsupported host action: ${event.method}"),
-                                )
-                            }
-                        }
-                        is CodexAppServerEvent.TokenUsageUpdated -> if (event.threadId == null || event.threadId == thread.id) {
-                            // Codex reports the run's token usage once per model response; a repeat of the same total is not a new one.
-                            if (event.total.totalTokens != lastReportedTotalTokens) run.markModelResponse()
-                            lastReportedTotalTokens = event.total.totalTokens
-                            run.emit(
-                                AiRunEvent.Usage(
-                                    inputTokens = event.total.inputTokens,
-                                    outputTokens = event.total.outputTokens,
-                                    totalTokens = event.total.totalTokens,
-                                    cachedInputTokens = event.total.cachedInputTokens,
-                                    reasoningOutputTokens = event.total.reasoningOutputTokens,
-                                    requestId = thread.id,
-                                    aggregation = AiUsageAggregation.RUN_CUMULATIVE,
-                                ),
-                            )
-                        }
-                        is CodexAppServerEvent.TurnCompleted -> if (event.threadId == null || event.threadId == thread.id) {
-                            agentMessages.finalText()
-                                ?.let { run.emit(AiRunEvent.AssistantDelta(it)) }
-                            terminal.complete(Unit)
-                        }
-                        is CodexAppServerEvent.TurnFailed -> if (event.threadId == null || event.threadId == thread.id) {
-                            terminal.completeExceptionally(IllegalStateException(event.message))
-                        }
-                        is CodexAppServerEvent.ProcessExited -> terminal.completeExceptionally(
-                            IllegalStateException("Codex app-server exited before the response completed."),
-                        )
-                        is CodexAppServerEvent.ProtocolError -> run.emit(AiRunEvent.Status("Codex protocol: ${event.message}"))
-                        else -> Unit
-                    }
-                }
-            }
+            val turnEvents = CodexTurnEvents(client, run).also { it.bind(thread.id) }
+            val events: Job = scope.launch { client.events.collect { event -> turnEvents.handle(event) } }
             try {
-                val input = codexTurnInput(run, request, systemPrompt, workspace)
+                val input = codexTurnInput(run, request, systemPrompt, promptPreamble(run), workspace)
                 client.startTurn(
                     thread.id, input.text, profile.model.takeIf(String::isNotBlank), workspace.toString(),
                     profile.reasoningEffort.takeIf(String::isNotBlank), input.imagePaths,
                 )
-                terminal.await()
+                turnEvents.terminal.await()
                 run.emit(AiRunEvent.Done)
             } finally {
                 events.cancel()
             }
         }
-    }
-
-    /**
-     * The text of the Codex turn and the image files that go with it. The files are written into [workspace], which is deleted when the
-     * run ends (Codex reads them as the turn starts); when they cannot be written the text is the prompt without images and a status says so.
-     */
-    @Suppress("TooGenericExceptionCaught") // Whatever stops the files from being written means "no images", never a failed run.
-    private suspend fun codexTurnInput(run: AiRun, request: AccountRequest, systemPrompt: String, workspace: Path): CodexTurnInput {
-        val paths = try {
-            writeAttachedImages(workspace, request.images).map(Path::toString)
-        } catch (failure: Exception) {
-            run.emit(AiRunEvent.Status("Could not attach the evidence images for Codex (${failure.message ?: failure::class.simpleName}); it will fetch them."))
-            emptyList()
-        }
-        return CodexTurnInput(accountPrompt(run, systemPrompt, request.promptFor(attached = paths.isNotEmpty())), paths)
     }
 
     private suspend fun runClaude(
@@ -347,7 +240,7 @@ internal class AccountAgentRunner(
     }
 
     private fun accountPrompt(run: AiRun, systemPrompt: String, prompt: String): String =
-        "$systemPrompt\n\n${promptPreamble(run)}\n\nUser request:\n$prompt"
+        accountPromptText(systemPrompt, promptPreamble(run), prompt)
 
     private fun deleteWorkspace(workspace: Path) {
         runCatching {
@@ -356,14 +249,6 @@ internal class AccountAgentRunner(
             }
         }
     }
-}
-
-private class CodexTurnInput(val text: String, val imagePaths: List<String>)
-
-/** What an account run is asked: [prompt] with [images], or [promptWithoutImages] when the images cannot be attached. */
-private class AccountRequest(val prompt: String, val images: List<LlmImage>, private val promptWithoutImages: String?) {
-    /** [prompt], unless there were images and none could be [attached]. */
-    fun promptFor(attached: Boolean): String = if (images.isEmpty() || attached) prompt else promptWithoutImages ?: prompt
 }
 
 /** The sidebar's wording: the MCP budget sentence plus the rule to use only the managed MCP server's tools. */
@@ -427,9 +312,6 @@ internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
     mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)
 
 private const val CODEX_INDAGIUM_MCP_TOKEN_ENV = "INDAGIUM_MCP_TOKEN"
-
-/** What Codex's startup status for the managed MCP server says once the server is connected. */
-private const val CODEX_MCP_READY_STATUS = "ready"
 
 /** Restrict a managed evidence-only Codex run to its configured Indagium MCP server. These are
  * per-process CLI overrides; the user's persistent Codex configuration is never modified. */

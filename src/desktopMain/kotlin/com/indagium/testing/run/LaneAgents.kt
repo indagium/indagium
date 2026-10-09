@@ -6,9 +6,12 @@ import com.indagium.ai.AiInvestigationContext
 import com.indagium.ai.AiProviderFactory
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiSession
+import com.indagium.ai.CodexJudgeHost
+import com.indagium.ai.CodexJudgeTurn
 import com.indagium.ai.LlmImage
 import com.indagium.ai.LlmProvider
 import com.indagium.ai.ManagedMcpServerLease
+import com.indagium.ai.SwitchableMcpRoute
 import com.indagium.ai.acceptsImagesUpFront
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.model.AiProviderKind
@@ -53,6 +56,13 @@ internal interface LaneAgent : AutoCloseable {
 
     /** Starts one agent run; it ends by itself (Done / Error / Cancelled) and can be cancelled through the returned run. */
     fun start(request: AgentSegmentRequest): AiRun
+
+    /**
+     * An agent for the judges of ONE lane that keeps what it started between them (a Codex process, see [CodexJudgeHost]), closed by the
+     * caller when the lane ends; null when every run of this agent already starts only what it needs (an HTTP provider shared by the
+     * lane) or cannot share it (Claude Code's CLI is one process per request). The judges that use it must run one after another.
+     */
+    fun reusableForLaneJudge(): LaneAgent? = null
 }
 
 /** Builds the agent of an AGENT_PROFILE lane. */
@@ -101,18 +111,28 @@ internal class ProviderLaneAgent(
 /** Builds the account runner of one segment; the seam tests use to give it fake processes. */
 internal fun interface AccountRunnerFactory {
     fun create(request: AgentSegmentRequest): AccountAgentRunner
+
+    /** The Codex process a lane keeps for its judges, or null when this factory has none (then each judge starts its own). */
+    fun judgeHost(profile: AiProviderProfile): CodexJudgeHost? = null
 }
 
-/** The production account runner: its managed MCP server is bound to the segment's lane gateway. */
-internal fun laneAccountRunnerFactory(leaseFactory: (AiRun, IndagiumToolGateway) -> ManagedMcpServerLease): AccountRunnerFactory =
-    AccountRunnerFactory { request ->
-        AccountAgentRunner(
-            managedMcpServerFactory = { run -> leaseFactory(run, request.gateway) },
-            maxToolRounds = request.toolCallLimit,
-            maxTurns = request.maxTurns,
-            promptPreamble = request.promptPreamble,
-        )
-    }
+/**
+ * The production account runner: its managed MCP server is bound to the segment's lane gateway. [routeLeaseFactory], when given, also
+ * lets a lane's judges share one Codex process behind one switchable managed MCP server (see [CodexJudgeHost]).
+ */
+internal fun laneAccountRunnerFactory(
+    leaseFactory: (AiRun, IndagiumToolGateway) -> ManagedMcpServerLease,
+    routeLeaseFactory: ((SwitchableMcpRoute) -> ManagedMcpServerLease)? = null,
+): AccountRunnerFactory = object : AccountRunnerFactory {
+    override fun create(request: AgentSegmentRequest): AccountAgentRunner = AccountAgentRunner(
+        managedMcpServerFactory = { run -> leaseFactory(run, request.gateway) },
+        maxToolRounds = request.toolCallLimit,
+        maxTurns = request.maxTurns,
+        promptPreamble = request.promptPreamble,
+    )
+
+    override fun judgeHost(profile: AiProviderProfile): CodexJudgeHost? = routeLeaseFactory?.let { CodexJudgeHost(profile, it) }
+}
 
 /** Claude Code or Codex running as the signed-in account. */
 internal class AccountLaneAgent(private val profile: AiProviderProfile, private val runners: AccountRunnerFactory) : LaneAgent {
@@ -135,7 +155,31 @@ internal class AccountLaneAgent(private val profile: AiProviderProfile, private 
         return run
     }
 
+    override fun reusableForLaneJudge(): LaneAgent? =
+        if (profile.kind == AiProviderKind.CODEX_ACCOUNT) runners.judgeHost(profile)?.let(::CodexJudgeLaneAgent) else null
+
     override fun close() = Unit
+}
+
+/** The judges of one lane on one kept Codex process; closing it closes the process, its managed MCP server and its workspace. */
+internal class CodexJudgeLaneAgent(private val host: CodexJudgeHost) : LaneAgent {
+    override fun start(request: AgentSegmentRequest): AiRun = host.start(
+        CodexJudgeTurn(
+            session = request.session,
+            prompt = request.prompt,
+            systemPrompt = request.systemPrompt,
+            context = request.context,
+            gateway = request.gateway,
+            toolCallLimit = request.toolCallLimit,
+            freeTools = request.freeTools,
+            confirmationTimeoutMs = request.confirmationTimeoutMs,
+            promptPreamble = request.promptPreamble,
+            images = request.images,
+            promptWithoutImages = request.promptWithoutImages,
+        ),
+    )
+
+    override fun close() = host.close()
 }
 
 /** The production factory: HTTP profiles use [providers], Codex and Claude Code use [accountRunners]. */

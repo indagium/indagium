@@ -20,9 +20,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.ConcurrentHashMap
 
 // Runs the judge: one separate AiRun per judgement (a step) or comparison (lanes that disagreed), through the same agent
 // launchers as the lanes (an in-app model, Claude Code or Codex), behind a judge-only gateway (JudgeTools). The run ends
@@ -30,7 +32,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 // reason in [StepJudgement.error]; it never throws, so a flaky judge cannot break a run. Everything the judge says and does
 // goes to the run's judge.jsonl, each line tagged with what it judged and stamped with the time it really happened (the run
 // stamps its events as it emits them; the file follows while the judge runs). Every judge run ends with one judge_finished line,
-// the timing breakdown of AiRunTiming, written even when the judge was cancelled, timed out or never started (partial = true).
+// the timing breakdown of AiRunTiming, written even when the judge was cancelled, timed out or never started (partial = true), and
+// hostReused: whether the judge took over a Codex process that an earlier judge of its lane had started (see CodexJudgeHost).
+// A lane's judges share one agent from [LaneAgent.reusableForLaneJudge] when the judge agent has one; it is released when the lane
+// ends. The comparison judge always starts its own short-lived run.
 
 private const val ENDED_WITHOUT_ANSWER = "The judge ended without submitting a verdict."
 private const val SESSION_PREFIX = "testjudge"
@@ -60,6 +65,9 @@ internal class JudgeService(
     private val goldenImage: (suiteId: String, assetPath: String) -> ByteArray?,
     private val wallClock: () -> Long,
 ) : AutoCloseable {
+    /** The agent each lane's judges use: a kept one (a Codex process) where the judge agent has one, otherwise the shared [agent]. */
+    private val laneAgents = ConcurrentHashMap<String, LaneAgent>()
+
     /** The judge of one lane's steps. */
     fun forLane(laneId: String): StepJudge = object : UsageReportingStepJudge {
         override suspend fun judge(site: JudgeSite, evidence: JudgeEvidence): StepJudgement = judgeStep(laneId, site, evidence)
@@ -79,7 +87,7 @@ internal class JudgeService(
     ): StepJudgement {
         val label = "$laneId:${site.evidencePrefix}-s${site.stepNumber}-a${site.attempt}"
         val spec = JudgeRunSpec(JUDGE_SYSTEM_PROMPT, JUDGE_TOOL_CALL_BUDGET, JUDGE_FETCH_TOOL_CALL_BUDGET, judgePrompt(evidence))
-        val outcome = runJudge(evidence, label, spec, onUsage)
+        val outcome = runJudge(evidence, label, spec, onUsage, agentForLane(laneId))
         val submission = outcome.submission
         return StepJudgement(
             verdict = submission?.verdict ?: JudgeVerdict.INCONCLUSIVE,
@@ -127,7 +135,29 @@ internal class JudgeService(
         )
     }
 
-    override fun close() = agent.close()
+    /** The lane's judges are over: its kept agent (a Codex process, its managed MCP server, its workspace) is closed, within a bound. */
+    suspend fun releaseLane(laneId: String) {
+        val kept = laneAgents.remove(laneId) ?: return
+        if (kept !== agent) closeBounded(kept)
+    }
+
+    /** Closes what the lanes still hold (bounded, so a stuck process cannot hold the run) and the judge agent. */
+    suspend fun shutdown() {
+        laneAgents.keys.toList().forEach { releaseLane(it) }
+        agent.close()
+    }
+
+    override fun close() {
+        laneAgents.values.toList().forEach { if (it !== agent) it.close() }
+        laneAgents.clear()
+        agent.close()
+    }
+
+    private fun agentForLane(laneId: String): LaneAgent = laneAgents.computeIfAbsent(laneId) { agent.reusableForLaneJudge() ?: agent }
+
+    private suspend fun closeBounded(kept: AutoCloseable) = withContext(NonCancellable + Dispatchers.IO) {
+        withTimeoutOrNull(tuning.agentCancelWaitMs) { runInterruptible { runCatching { kept.close() } } }
+    }
 
     // ── One judge run ────────────────────────────────────────────────
 
@@ -137,6 +167,8 @@ internal class JudgeService(
         label: String,
         spec: JudgeRunSpec,
         onUsage: (AiUsageStats) -> Unit = {},
+        /** The agent that runs this judge: the lane's kept one, or the shared [agent] for a judge with no lane (the comparison judge). */
+        runner: LaneAgent = agent,
     ): JudgeOutcome {
         val started = wallClock()
         val tools = JudgeTools(evidence, ::loadExample)
@@ -173,13 +205,13 @@ internal class JudgeService(
             ),
         )
         val run = try {
-            agent.start(request)
+            runner.start(request)
         } catch (failure: Exception) {
             session.deleteClaudeCodeWorkspace()
             val elapsed = wallClock() - started
             val reason = "The judge could not start: ${failure.message ?: failure::class.simpleName}"
             val timing = AiRunTiming(totalMs = elapsed, partial = true)
-            transcript?.append("judge_finished", finishedFields(label, timing, null, reason, briefMs))
+            transcript?.append("judge_finished", finishedFields(label, timing, null, reason, briefMs, hostReused = false))
             return JudgeOutcome(null, reason, elapsed, null, timing)
         }
         val tail = transcript?.let { TranscriptTail(run, it, mapOf("judge" to label)) }
@@ -210,19 +242,23 @@ internal class JudgeService(
                 )
                 runCatching { usage?.let(onUsage) }
                 timing = aiRunTiming(run, answerToolNames = JUDGE_FREE_TOOL_NAMES, partial = !cleanupComplete || submission == null)
-                transcript?.append("judge_finished", finishedFields(label, timing, submission, failure, briefMs))
+                transcript?.append("judge_finished", finishedFields(label, timing, submission, failure, briefMs, run.agentReused))
             }
         }
         return JudgeOutcome(submission, failure, wallClock() - started, usage, timing)
     }
 
-    /** The `judge_finished` line: [AiRunTiming] flat, plus how long winding the agent down took after the verdict and what was decided. */
+    /**
+     * The `judge_finished` line: [AiRunTiming] flat, plus how long winding the agent down took after the verdict and what was decided,
+     * and whether the judge [hostReused] a Codex process an earlier judge of its lane had started (its startupMs then leaves the launch out).
+     */
     private fun finishedFields(
         label: String,
         timing: AiRunTiming,
         submission: JudgeSubmission?,
         error: String?,
         briefMs: Long,
+        hostReused: Boolean,
     ): Map<String, Any?> = linkedMapOf(
         "judge" to label,
         "startupMs" to timing.startupMs,
@@ -238,6 +274,7 @@ internal class JudgeService(
         "verdict" to (submission?.verdict?.name ?: submission?.laneVerdicts?.entries?.joinToString(",") { "${it.key}=${it.value.name}" }),
         "error" to error,
         "briefMs" to briefMs,
+        "hostReused" to hostReused,
     )
 
     /**
@@ -252,7 +289,7 @@ internal class JudgeService(
         val elapsed = wallClock() - started
         transcript?.append(
             "judge_finished",
-            finishedFields(label, AiRunTiming(totalMs = elapsed, partial = true), null, "The judge was cancelled.", elapsed),
+            finishedFields(label, AiRunTiming(totalMs = elapsed, partial = true), null, "The judge was cancelled.", elapsed, hostReused = false),
         )
         throw cancelled
     } catch (failure: Exception) {

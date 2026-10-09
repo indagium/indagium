@@ -59,7 +59,10 @@ internal class TestRunOverrides(
 /** How an agent (a lane, the judge, the issue-filing job) is started: [TestRunOverrides.agentFactory] or the real launchers. */
 internal fun AppState.productionAgentFactory(overrides: TestRunOverrides): LaneAgentFactory = overrides.agentFactory ?: defaultLaneAgentFactory(
     defaultAiProviderFactory,
-    laneAccountRunnerFactory { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
+    laneAccountRunnerFactory(
+        leaseFactory = { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
+        routeLeaseFactory = { route -> ManagedMcpServerLease.startSwitchable(this, route) },
+    ),
 )
 
 /**
