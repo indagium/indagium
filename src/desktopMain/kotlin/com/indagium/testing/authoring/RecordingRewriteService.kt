@@ -3,6 +3,7 @@ package com.indagium.testing.authoring
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.TestLibrary
+import com.indagium.testing.model.TestScript
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -63,7 +64,7 @@ internal class RecordingRewriteService(
             profileId = profileId,
             model = model,
             effort = effort,
-            prompt = rewritePrompt(suite, case, note, inputs, videoSummary),
+            prompt = rewritePrompt(suite, case, note, inputs, videoSummary, library().scripts),
             systemPrompt = REWRITE_SYSTEM_PROMPT,
             gateway = rewriteTools.gateway,
             toolCallLimit = toolLimit,
@@ -74,7 +75,7 @@ internal class RecordingRewriteService(
         var completed = false
         return try {
             val response = withTimeout(timeoutMs) { generate(request) }
-            val proposal = parseRewriteResponse(response, inputs.size, inputs.filter { it.fixed }.associate { it.number to it.row })
+            val proposal = parseRewriteResponse(response, rewriteExpectations(inputs, library().scripts))
             val rewritten = buildRewrittenRows(proposal, inputs, rewriteTools.videoInspectedInputs())
             if (!session.applyRewrite(rows.map { it.id }, rewritten, proposal.notes)) {
                 return StoreResult.Invalid("The recording changed while it was being rewritten; nothing was applied. Rewrite it again.")
@@ -98,3 +99,11 @@ internal class RecordingRewriteService(
         const val REWRITE_TURN_HEADROOM = 6
     }
 }
+
+/** What the answer for [inputs] is checked against: the person's own steps, the external events with their proposed checks, the library's scripts. */
+internal fun rewriteExpectations(inputs: List<RewriteInput>, scripts: List<TestScript>) = RewriteExpectations(
+    inputCount = inputs.size,
+    fixedInputs = inputs.filter { it.fixed }.associate { it.number to it.row },
+    externalInputs = inputs.filter { !it.fixed && it.row.isExternalEvent }.associate { it.number to it.row.checks },
+    scripts = scripts,
+)

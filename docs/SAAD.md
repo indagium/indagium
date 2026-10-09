@@ -3203,8 +3203,9 @@ no timeout in the file: the decoder gives it `DEFAULT_MANUAL_STEP_TIMEOUT_MS` (1
 (`validateStep(step, scripts)`) checks, against the library, that a step's script exists, may be started from a step (not
 `SETUP_TEARDOWN_ONLY`) and accepts its arguments (`validateScriptArgs`), that a `MANUAL` step has instructions and, for
 `CHECKS_ONLY`, a completion check, and that neither kind is optional; steps already stored are not rejected for a script
-deleted afterwards (data is never dropped; a run reports it). AI step drafts and AI recording rewrites may not carry a kind,
-a script or a device-state check: those are the author's choices.
+deleted afterwards (data is never dropped; a run reports it). AI step drafts (`draft_test_steps`) may not carry a kind, a script
+or a device-state check: those are the author's choices. An AI recording rewrite may, under the rules of §26.12 (only an
+external-event step may be manual or script, and its script must exist and validate).
 
 **Storage layout.**
 
@@ -3444,10 +3445,15 @@ the step's checks, the judge only for judge checks, then `decideFlow`: pass, ret
   independently on its own device; cancelling the run cancels the wait. *Pause all* holds the lane at the next step boundary,
   not inside a wait.
 - **Device state.** `StepCheck.DeviceState(key, expectedRegex, withinMs)` is evaluated by `DeterministicChecks` through
-  `TestDeviceSession.readDeviceState`, whose `DeviceStateReader` is replaceable (the environment probe of the recording work
-  supplies a richer one). The production `AdbDeviceStateReader` runs **one bounded `adb shell` per key** (`dumpsys usb`, or
-  `settings get global …`) for `usb.devices`, `bt.enabled`, `wifi.enabled` and `airplane`; an unknown key is a permanent error
-  that names the supported ones, an adb hiccup is retried until `withinMs`.
+  `TestDeviceSession.readDeviceState`, whose `DeviceStateReader` is replaceable. The production `AdbDeviceStateReader` runs
+  **one bounded `adb shell` per key**, the fixed command of the key's `DeviceStateSource` (`dumpsys usb`, `dumpsys battery`,
+  `dumpsys bluetooth_manager`, `dumpsys audio`, `dumpsys power`, `dumpsys window displays` or `settings get global …`), and parses
+  it with the pure parsers of `DeviceStateParsers.kt` - the same parsers and the same table the recording's environment watcher
+  uses (§26.12), so a key means the same when recorded and when checked. The keys are `KNOWN_DEVICE_STATE_KEYS`: `usb.devices`,
+  `bt.enabled`, `bt.connected`, `wifi.enabled`, `airplane`, `mobile_data`, `power.source`, `battery.status`, `audio.devices`,
+  `screen.awake` and `rotation` (`DEVICE_STATE_KEY_HINTS` describes their values). A dump that is empty, is the shell's or
+  `dumpsys`'s own complaint, or is not understood gives an `Unavailable` reading (retried until `withinMs`) rather than a guess;
+  an unknown key is a permanent error that names the supported ones.
 
 #### 26.5.4 Cancellation and bounded close
 
@@ -3864,6 +3870,14 @@ reachable by any prompt-injected lane agent, which is why the default permission
 10. **The archive of an issue is exported late.** A draft issue (also an automatic one) only carries the
    wish for it; the ZIP is built when the issue is created or sent, so a run folder that was deleted
    before then can no longer provide it (the delivery fails with that reason; untick the archive to go on).
+11. **The environment watcher is best effort and not free.** While a recording runs, one `adb shell` every two seconds asks
+   `dumpsys` for usb, battery, bluetooth_manager, audio, power and window state: a small but real load on the device under
+   test. The USB, battery, power, rotation and settings readings were built against Android 17 emulator dumps (plus hand-built
+   variants for an attached USB device, a charger unplugged, a connected Bluetooth device and a wired headset); the
+   Bluetooth-connected and wired-audio readings depend on the Android version's dump layout and may report nothing (the
+   recording warns once per unreadable key). Nothing was verified against a physical USB peripheral, Bluetooth device or
+   headset. A change is reported after two polls agree (so up to about four seconds late) and one made in the last seconds
+   before Stop is lost.
 
 ### 26.12 Recording review: screen context and AI rewrite
 
@@ -3988,6 +4002,66 @@ tool gained the same keys; `SLEEP` and similar remain out); `open_system_panel(n
 original values back, deleting `user_rotation` if it was unset. Lane tools are not in the global MCP catalogue (`MCP_TOOLS` and its
 count are unchanged); they are listed in `RESERVED_SCRIPT_TOOL_NAMES`, the lane prompt and the `test_lane_tool_call` description.
 
+**Environment watcher** (`RecordingEnvironmentWatcher.kt`, `EnvironmentEvents.kt`, `ExternalEventRows.kt`). Started by
+`AppState.startTestStepRecording` for every recording (mirror or device input) and attached with `attachEnvironmentWatcher`;
+`stop()` and `close()` detach and close it (a flag, a latch and an interrupt of its daemon thread, never a join, so the UI thread
+does not wait). Every `ENVIRONMENT_POLL_MS` (2 s, fixed delay) its own thread runs **one** bounded `adb shell` whose remote command
+is the constant `sh -c '<script>'`: for each `DeviceStateSource` an `echo @@INDAGIUM-ENV@@<section>` marker, then the source's
+fixed command with stderr merged and its output cut by `head -c 262144`, so no section can starve the next; the whole output is
+capped at 2.5 MiB and the call at 8 s. The script is built from constants only (no user, device or session text ever reaches it)
+and a test pins that it holds no quote of either kind (a double quote would need escaping when the host is Windows). `parseEnvironmentOutput` cuts the output at the marker lines and parses each
+section with `DeviceStateSource.parse`, the parsers of the run-time `DeviceState` reader: `usb.devices` (block-aware - the
+proto-style dump prints one field per line inside `{ }` records, a list of one without brackets - and only a record in the
+`devices` of `host_manager` counts, only with its own fields; `vendor_id=-1` filters, `device_manager`, `port_manager` and nested
+configurations/interfaces never do; the one-line layout of older Android is read outside any `{ }`), `power.source` and
+`battery.status` (`dumpsys battery`), `bt.enabled`, `wifi.enabled`, `airplane`, `mobile_data` (`settings get global`),
+`bt.connected` (the device lines under `Connected devices: N` of `dumpsys bluetooth_manager`, else the adapter's `ConnectionState`;
+best effort), `audio.devices` (the wired/USB names in the `Devices:` line of each stream of `dumpsys audio`; best effort),
+`screen.awake` (`mWakefulness`) and `rotation`. A section that is missing, empty, a service complaint or not understood is dropped
+and warned once per key per recording (one aggregated warning); a failed poll (adb error, timeout) warns once and polling goes on.
+
+`EnvironmentDiffer` turns snapshots into `EnvironmentEvent(key, from, to, atMs, sinceMs)`: the first value of a key is its
+baseline and never an event; a different value is reported only when the next poll sees the same different value (a flap or one
+glitching read is never reported), once, timed at the poll that first saw it, with `sinceMs` the last poll that saw the old value;
+list values (`usb.devices`, `bt.connected`, `audio.devices`) are sorted before comparing so a dump's order is no change; a key
+missing from a poll changes nothing. `TestStepRecordingSession.environmentEventsLocked` (under the session lock, which is a leaf:
+the sink is the only place the watcher takes it, adb never runs under it) attributes each event. An event is **evidence** of the
+latest recorded input that precedes it when the change could have happened within 3 s after that input
+(`input <= atMs` and `input + 3 s >= sinceMs`, because the change is only known to lie between two polls): it is appended to that
+row's `stateChanges` (append-last field of `RecordedTestStep`). Any other event becomes a row of the new `RecordedInputKind.EXTERNAL`
+(appended last). `battery.status` is evidence only (never a row, and dropped when `power.source` changed in the same batch);
+at most 60 events are kept per recording (one warning). External rows are left out of the screen-state attachment windows so they
+neither need a screen nor split the gaps between real inputs, and events after `stop()` are dropped (a change that no second poll
+confirmed before Stop is lost; a change confirmed before a slow typing-burst row exists is shown as an external row).
+
+An external row is born as a **manual step** (`stepKind = MANUAL`, `performerEditable`): `action` is the tester's instruction
+("Connect the USB device 'Ultra' (0781:5581) to the phone"), `screenContext` the observation, `stateChanges` the event, and `checks`
+a prefilled `DeviceState` check (key plus a regular expression for the new value - plain or `Regex.escape`d; a vanished list item
+is checked by a negative look-ahead - within `DEFAULT_MANUAL_STEP_TIMEOUT_MS`), so a run can notice the step done. Device-supplied
+names are made safe for sentences (`cleanDeviceText`: control characters collapsed, 60 characters) and matched literally in
+checks. The review chooser (`ExternalEventRowEditor`, pure transitions in `ExternalEventRows.kt`) offers **Wait for tester**, **Run
+script ▾** (library scripts, `ScriptCallEditor` with its argument form) and **+ New script**; a script makes a SCRIPT step, or with
+"keep manual fallback" a MANUAL step whose script is the automation alternative; the check's window follows the kind unless the
+person changed it. **+ New script** creates a library script named after the event (`connect_usb_device`, `disable_wifi`, …) with
+the instruction as its description and the placeholder command `echo '…' >&2; exit 1`: a command is never invented, and a step
+cannot pass before someone wrote the real one. `RecordedPerformerEdit` (UI and MCP) re-assigns who performs a row; only author-added
+rows and external rows accept it, and an external row never becomes an AI step. `toTestSteps` converts external rows through the
+unchanged path (`withKind(row.stepKind)`; manual/script rows carry no examples).
+
+*Rewrite and external events.* The brief shows an ordinary input's `stateChanges` ("device changes after it: …") and an external
+row as `[EXTERNAL EVENT] detected: … | proposed step for a tester: "…" | proposed check: key matches /…/`, and lists the library
+scripts that a step may run (not `SETUP_TEARDOWN_ONLY` ones) as id, tool name, target, description and parameters in a
+`library_scripts` untrusted-data fence. The output contract adds `kind` (`agent|manual|script`), `scriptId`/`args`,
+`manualCompletion` and `deviceState` checks. `parseRewriteResponse(response, RewriteExpectations)` validates: an external input
+must be a step of its own with kind manual or script; no other step may be anything but an AI step; a script step needs a
+`scriptId`; `scriptId`/`args`/`manualCompletion` are refused on an AI step; the assembled step passes `validateStep(step,
+library.scripts)` (the script exists, may be started from a step and accepts the arguments; `CHECKS_ONLY` needs a completion
+check); a manual/script step is never optional and may have a blank expected result; an answer that gives an external step no
+device-state check gets the row's proposed ones; script checks and example references stay refused. An author-added row must still
+come back unchanged and alone: its `kind` (when sent) must equal the row's, and scripts, arguments, completion, checks, review
+reasons and screenshots are refused. `draft_test_steps` keeps refusing kinds, scripts and device-state checks. Coverage is
+unchanged: every input and event is in exactly one step.
+
 **Typed text and passwords.** If the screen read before or after a typing run shows a focused password
 node (or a password node when nothing reports focus), the whole run (consecutive typed/pasted rows with
 Delete presses between) is stored as `Enter text: ••••` and a warning is raised. The real text is dropped
@@ -4025,7 +4099,8 @@ refuse while it is set), then calls the service with **no lock held**:
    a wrong type or non-empty reason over 500 characters is invalid);
    `sourceInputs` ascending, consecutive, non-overlapping and covering every input exactly once in order;
    an optional `expectedScreenshot` of the form `after-of-input-N` with N among the step's inputs; checks
-   through the draft's parser and `validateStep`, with script checks and example references refused. An
+   through the draft's parser and `validateStep`, with script checks and example references refused (device-state checks are
+   allowed here, unlike in a draft; see the environment watcher below for kinds and scripts). An
    invalid answer is an error with the reason and **changes nothing**. A tap or long press with neither a
    resolved target nor successful input-centered video inspection or a trustworthy before screenshot is forced into review
    even if the model claims confidence: its recorded gesture remains unchanged, expected text and checks are cleared, and Apply

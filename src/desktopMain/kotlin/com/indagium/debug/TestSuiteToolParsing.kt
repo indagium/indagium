@@ -133,7 +133,7 @@ internal fun applyStepFields(args: ToolArgs, original: TestStep, label: String =
 private val SCRIPT_CALL_FIELDS = setOf("scriptId", "args", "exitCode", "stdoutContains")
 
 /** `script` replaces the step's script call, null (sent explicitly) clears it, and leaving it out keeps it. */
-private fun parseStepScript(args: ToolArgs, base: TestStep, label: String): ScriptCall? {
+internal fun parseStepScript(args: ToolArgs, base: TestStep, label: String): ScriptCall? {
     if (!args.hasKey("script")) return base.script
     val raw = args.map["script"] ?: return null
     val where = "$label.script"

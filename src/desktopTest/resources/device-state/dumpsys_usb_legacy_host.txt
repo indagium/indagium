@@ -1,0 +1,11 @@
+USB Manager State:
+  Device Manager:
+    mCurrentFunctions=mtp
+    mConnected=true
+  Host Manager:
+    num_connects=1
+    connected devices:
+      name=/dev/bus/usb/001/002 vendor_id=1921 product_id=21889 class=0 subclass=0 protocol=0 manufacturer_name=SanDisk product_name=Ultra serial_number=ABC123
+      name=/dev/bus/usb/001/003 vendor_id=0x046d product_id=0xc52b class=0 subclass=0 protocol=0 manufacturer_name=Logitech product_name=USB Receiver
+  Settings:
+    device attached filter: vendor_id=-1 product_id=-1 class=255

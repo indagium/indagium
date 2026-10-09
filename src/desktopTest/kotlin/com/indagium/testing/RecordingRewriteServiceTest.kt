@@ -297,10 +297,6 @@ class RecordingRewriteServiceTest {
     @Test
     fun checksThatPointOutsideTheStepAreRejected() {
         assertRejected(answer(step(1, 2, 3, extra = ""","checks":[{"type":"scriptResult","scriptId":"s1"}]""")), "script checks")
-        assertRejected(
-            answer(step(1, 2, 3, extra = ""","checks":[{"type":"deviceState","key":"usb.devices","expectedRegex":"0781"}]""")),
-            "device-state checks",
-        )
         assertRejected(answer(step(1, 2, 3, extra = ""","checks":[{"type":"screenJudge","text":"Same?","exampleRef":"ex-1"}]""")), "example")
         assertRejected(answer(step(1, 2, 3, extra = ""","checks":[{"type":"logAppears"}]""")), "regex")
         assertRejected(answer(step(1, 2, 3, extra = ""","checks":"none"""")), "checks must be an array")

@@ -42,6 +42,7 @@ import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.contextHint
+import com.indagium.testing.authoring.isExternalEvent
 import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
@@ -487,7 +488,8 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         Spacer(Modifier.height(5.dp))
         TestsHint(
             "Device ${session.deviceSerial}. Use the device or emulator window directly, or the Indagium mirror. " +
-                "Taps, swipes, buttons, panels, rotation and typing are observed; this recorder never sends input to the device.",
+                "Taps, swipes, buttons, panels, rotation and typing are observed, and so are changes to USB, Bluetooth, power and the like; " +
+                "this recorder never sends input to the device.",
         )
         if (snapshot.active) {
             Spacer(Modifier.height(8.dp))
@@ -525,6 +527,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     ReorderGrip(scope)
                     AppText("STEP ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                     if (row.authorAdded) TestsBadge("ADDED BY YOU")
+                    if (row.isExternalEvent) TestsBadge("DETECTED ON THE DEVICE")
                     Spacer(Modifier.weight(1f))
                     ReorderMoveButtons(scope)
                     AppButton(
@@ -546,6 +549,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     )
                 }
                 if (row.authorAdded) RecordedRowKindEditor(session, row, editable)
+                if (row.isExternalEvent) ExternalEventRowEditor(session, row, editable)
                 TestsLabeled(if (row.stepKind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
                     CommitTextField(
                         row.action,
@@ -602,6 +606,9 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 if (row.sourceInputIds.isNotEmpty()) {
                     RecordedInputsList(row, snapshot.rawSteps.orEmpty())
                     if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
+                }
+                if (row.stepKind == StepKind.AGENT && row.stateChanges.isNotEmpty() && row.sourceInputIds.isEmpty()) {
+                    RecordedStateChangesHint(session, row, editable)
                 }
                 row.contextHint()?.let { TestsHint("Screen context: $it") }
                 row.screenContext?.let { TestsHint(it) }

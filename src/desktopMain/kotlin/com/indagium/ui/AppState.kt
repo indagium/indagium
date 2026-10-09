@@ -68,6 +68,7 @@ import com.indagium.testing.authoring.DeviceInputRecorder
 import com.indagium.testing.authoring.GETEVENT_STREAM_COMMAND
 import com.indagium.testing.authoring.RecordedVideoTimeline
 import com.indagium.testing.authoring.RecordingAdb
+import com.indagium.testing.authoring.RecordingEnvironmentWatcher
 import com.indagium.testing.authoring.RecordingScreenProbe
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.preflightDeviceInput
@@ -2061,6 +2062,10 @@ class AppState(
             session.attachDeviceInput(started)
             started.start()
         }
+        // Whatever the input source, the device's surroundings (USB, Bluetooth, power, screen) are watched for changes no input explains.
+        val environment = RecordingEnvironmentWatcher(recordingAdb, session.environmentSink)
+        session.attachEnvironmentWatcher(environment)
+        environment.start()
         return StoreResult.Ok(session)
     }
 
@@ -2247,6 +2252,7 @@ class AppState(
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
+        performerEdits: Map<String, com.indagium.testing.authoring.RecordedPerformerEdit> = emptyMap(),
     ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
         val session = testStepRecordingSession?.takeIf { it.id == sessionId }
             ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
@@ -2256,7 +2262,7 @@ class AppState(
         if (sessionId in recordingRewrites) {
             return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
         }
-        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides, allowReorder = true)) {
+        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides, allowReorder = true, performerEdits)) {
             return@synchronized StoreResult.Invalid(
                 "The recording must be stopped and the edited rows and screenshot choices must match its current draft; " +
                     "row ids may be sent in any order but must name every current row once.",

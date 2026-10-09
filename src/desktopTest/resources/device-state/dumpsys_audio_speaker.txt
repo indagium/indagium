@@ -1,0 +1,76 @@
+AudioService Dumpsys
+Current time: Fri Oct 09 17:18:33 GMT+03:00 2026
+
+## AudioDeviceBroker
+  Message handler (watch for unhandled messages):
+    Handler (com.android.server.audio.AudioDeviceBroker$BrokerHandler) {cfdde8a} @ 274968
+      Looper (AudioDeviceBroker, tid 139) {b219241}
+        (MessageQueue is using DeliQueue implementation)
+        (Total messages: 0, polling=true, quitting=false)
+
+    BECOMING_NOISY_INTENT_DEVICES_SET=
+ 0x400 0x800 0x8000000 0x80 0x200 0x100 0x2000 0x4000 0x4000000 0x20000000 0x20000001 0x20000 0x20000002 0x4 0x20000004 0x8
+    Preferred devices for strategy:
+
+    Non-default devices for strategy:
+
+    Connected devices:
+
+    APM Connected device:
+
+    Preferred devices for capture preset:
+
+    Applied devices roles for strategies (from API):
+
+    Applied devices roles for strategies (internal):
+
+    Applied devices roles for presets (from API):
+
+    Applied devices roles for presets (internal:
+
+devices:
+
+# Volume state
+
+Stream volumes (device: index)
+- STREAM_VOICE_CALL:
+   Muted: false
+   Muted Internally: false
+   Min: 1
+   Max: 15
+   streamVolume:3
+   Current: 2 (speaker): 3, 40000000 (default): 3
+   Devices: speaker(2)
+   Volume Group: AUDIO_STREAM_VOICE_CALL
+
+
+- STREAM_SYSTEM (aliased to: STREAM_RING):
+   Muted: false
+   Muted Internally: false
+   Min: 0
+   Max: 7
+   streamVolume:5
+   Current: 2 (speaker): 5, 40000000 (default): 5
+   Devices: speaker(2)
+   Volume Group: AUDIO_STREAM_SYSTEM
+
+
+- STREAM_RING:
+   Muted: false
+   Muted Internally: false
+   Min: 0
+   Max: 7
+   streamVolume:5
+   Current: 2 (speaker): 5, 40000000 (default): 5
+   Devices: speaker(2)
+   Volume Group: AUDIO_STREAM_RING
+
+
+- STREAM_MUSIC:
+   Muted: false
+   Muted Internally: false
+   Min: 0
+   Max: 15
+   streamVolume:5
+   Current: 2 (speaker): 5, 8000 (remote_submix): 7, 40000000 (default): 5
+   Devices: speaker(2)

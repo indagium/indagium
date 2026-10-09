@@ -4,6 +4,7 @@ package com.indagium.testing.authoring
 
 import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorTouchAction
+import com.indagium.testing.device.parseDisplayRotation
 import java.io.ByteArrayInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals

@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.testing.device.KNOWN_DEVICE_STATE_KEYS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptParamType
@@ -64,7 +65,7 @@ private val CHECK_ITEM_SCHEMA = ObjectArrayItemSchema(
         "type" to "logAppears: a log line matching regex must appear within withinMs. logAbsent: none may match for forMs. " +
             "screenJudge: the judge verifies `text` on the step's screenshot. scriptResult: run library script scriptId " +
             "with args and check its result. askJudge: a free-form question `text` for the judge. deviceState: the device property " +
-            "`key` (usb.devices, bt.enabled, wifi.enabled or airplane) must match `expectedRegex` within withinMs; on a manual step it is " +
+            "`key` (see key) must match `expectedRegex` within withinMs; on a manual step it is " +
             "also how the step is noticed as done.",
         "tag" to "logAppears/logAbsent: only match lines with this tag (optional).",
         "regex" to "logAppears/logAbsent: Java regular expression, required for those types.",
@@ -76,8 +77,8 @@ private val CHECK_ITEM_SCHEMA = ObjectArrayItemSchema(
         "args" to "scriptResult: script arguments as a { name: value } object of strings.",
         "exitCode" to "scriptResult: expected exit code (default 0); send null to accept any exit code.",
         "stdoutContains" to "scriptResult: text the script's stdout must contain (optional).",
-        "key" to "deviceState: the device property to read: usb.devices (one `vvvv:pppp name` line per attached host-mode USB device), " +
-            "bt.enabled, wifi.enabled or airplane (true/false). Required for that type.",
+        "key" to "deviceState: the device property to read, required for that type: ${KNOWN_DEVICE_STATE_KEYS.joinToString(", ")}. " +
+            "usb.devices is one `vvvv:pppp name` line per attached host-mode USB device; the on/off properties are true/false.",
         "expectedRegex" to "deviceState: a regular expression searched in the property's text, required for that type (e.g. 0781:5581).",
     ),
 )
@@ -120,6 +121,25 @@ private val STEP_ITEM_SCHEMA = ObjectArrayItemSchema(
         "examples" to "Ordered examples, same shape as create_test_step.examples.",
     ),
     nested = mapOf("checks" to CHECK_ITEM_SCHEMA, "examples" to EXAMPLE_ITEM_SCHEMA),
+)
+
+private const val RECORDING_PERFORMER_NOTE =
+    " Only rows you added (insert_test_recording_row) and detected external events (inputKind EXTERNAL) can be re-assigned; " +
+        "an external event can be MANUAL or SCRIPT but never AGENT."
+
+/** The rows of update_test_recording: the text edits every row takes, plus who performs a row you added or an external event. */
+private val RECORDING_UPDATE_ITEM_SCHEMA = ObjectArrayItemSchema(
+    props = RECORDING_STEP_FIELDS + listOf("kind" to "string", "script" to "object", "manualCompletion" to "string", "checks" to "array"),
+    required = listOf("action", "expected"),
+    enums = mapOf("kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
+    descriptions = mapOf(
+        "kind" to STEP_KIND_DESCRIPTION + RECORDING_PERFORMER_NOTE,
+        "script" to STEP_SCRIPT_DESCRIPTION,
+        "manualCompletion" to MANUAL_COMPLETION_DESCRIPTION,
+        "checks" to "Replaces the row's checks (same shape as create_test_step.checks); send them with the row's id. A manual external " +
+            "event is proposed with a deviceState check that notices it done.",
+    ),
+    nested = mapOf("checks" to CHECK_ITEM_SCHEMA),
 )
 
 private val HOOK_ITEM_SCHEMA = ObjectArrayItemSchema(
@@ -444,7 +464,11 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         "Read the current recording preview and its warnings. Screen snapshots are bounded. Each row also carries best-effort " +
             "screen context that an adb probe read while recording: tappedElement (what a tap landed on), package, activity and " +
             "durationMs. A probe can fail or miss a fast input, so any of these may be null; the mirror itself exposes no UI hierarchy. " +
-            "The response also includes source exclusions and latest/session rewrite usage when available. Optionally request one " +
+            "The response also includes source exclusions and latest/session rewrite usage when available. While recording, a watcher " +
+            "reads the device's surroundings (USB, Bluetooth, power, Wi-Fi, headset, screen, rotation): a change that follows an input " +
+            "within a few seconds is listed in that row's stateChanges; any other change is a row with inputKind EXTERNAL (proposed as a " +
+            "MANUAL step with a deviceState check; see update_test_recording to make it a script step). Rows that are not AI steps " +
+            "report stepKind, script, manualCompletion and stepChecks. Optionally request one " +
             "captured input-time image by rowId; it is context, not an expected-result oracle or current device screen.",
         schema("sessionId" to "string", "rowId" to "string", required = listOf("sessionId")),
     ),
@@ -453,31 +477,37 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         "Edit action, expected-result text and optional condition in a stopped recording preview. Send one row for every current review row; " +
             "an optional row requires a condition and may have blank expected text. Captured images are context unless explicitly selected. " +
             "To reorder, send every row with its id in the new order (any permutation of the current ids, each exactly once; rows keep " +
-            "their evidence). Without ids the rows are matched to the current order.",
+            "their evidence). Without ids the rows are matched to the current order. A row you added, or a detected external event " +
+            "(inputKind EXTERNAL: a USB device plugged in, Bluetooth turned off...), can also change who performs it: kind MANUAL (a " +
+            "tester; action is the instruction), SCRIPT (a library script, script { scriptId, args }) or AGENT (not for an external " +
+            "event), manualCompletion, and checks (for example a deviceState check). The edited step is validated against the library.",
         schema(
             "sessionId" to "string", "steps" to "array", required = listOf("sessionId", "steps"),
-            objectArrays = mapOf(
-                "steps" to ObjectArrayItemSchema(
-                    RECORDING_STEP_FIELDS,
-                    required = listOf("action", "expected"),
-                ),
-            ),
+            objectArrays = mapOf("steps" to RECORDING_UPDATE_ITEM_SCHEMA),
         ),
     ),
     IndagiumToolDescriptor(
         "insert_test_recording_row",
         "Insert a step you write into a stopped recording review, before the row now at index (0 = first; the number of rows appends). " +
-            "It has no recorded input. An AI rewrite keeps it exactly as written and in place, as a step of its own. Returns the new " +
+            "It has no recorded input. It is an AI step unless you give kind MANUAL or SCRIPT (with script, manualCompletion and checks, " +
+            "validated against the library). An AI rewrite keeps it exactly as written and in place, as a step of its own. Returns the new " +
             "rowId; edit it later with update_test_recording and delete it with remove_test_recording_steps (an inserted row is deleted, " +
             "not kept as a removed input). Refused while recording, applying or rewriting.",
         schema(
             "sessionId" to "string", "index" to "integer", "action" to "string", "expected" to "string",
+            "kind" to "string", "script" to "object", "manualCompletion" to "string", "checks" to "array",
             required = listOf("sessionId", "index", "action"),
+            enums = mapOf("kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
             descriptions = mapOf(
                 "index" to "Where the row goes, from 0 to the current number of rows.",
-                "action" to "What the tester does; must not be blank.",
-                "expected" to "What should happen; may be blank now but is required before apply_test_recording.",
+                "action" to "What the tester does; must not be blank. For a MANUAL step these are the tester's instructions.",
+                "expected" to "What should happen; may be blank now but is required for an AGENT step before apply_test_recording.",
+                "kind" to STEP_KIND_DESCRIPTION,
+                "script" to STEP_SCRIPT_DESCRIPTION,
+                "manualCompletion" to MANUAL_COMPLETION_DESCRIPTION,
+                "checks" to "The step's checks, same shape as create_test_step.checks (for example a deviceState check).",
             ),
+            objectArrays = mapOf("checks" to CHECK_ITEM_SCHEMA),
         ),
     ),
     IndagiumToolDescriptor(

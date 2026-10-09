@@ -3,8 +3,12 @@ package com.indagium.debug
 import com.indagium.edition.Edition
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.authoring.MAX_FIXED_STEP_CHARS
+import com.indagium.testing.authoring.RecordedInputKind
+import com.indagium.testing.authoring.RecordedPerformerEdit
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.performerEditable
 import com.indagium.testing.authoring.readTestScriptEnvelope
+import com.indagium.testing.authoring.summary
 import com.indagium.testing.authoring.testScriptSchemaPreview
 import com.indagium.testing.authoring.testScriptUsageReferences
 import com.indagium.testing.authoring.writeTestScriptEnvelope
@@ -13,8 +17,10 @@ import com.indagium.testing.limits.activeCaseIds
 import com.indagium.testing.limits.activeSuiteIds
 import com.indagium.testing.limits.isCaseLocked
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
@@ -29,10 +35,12 @@ import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TEST_SUITE_FILE_FORMAT
 import com.indagium.testing.store.caseToJson
 import com.indagium.testing.store.checkToJson
+import com.indagium.testing.store.scriptCallToJson
 import com.indagium.testing.store.scriptToJson
 import com.indagium.testing.store.sharedStepToJson
 import com.indagium.testing.store.stepToJson
 import com.indagium.testing.store.suiteToJson
+import com.indagium.testing.store.validateStep
 import com.indagium.ui.AppState
 import com.indagium.ui.tryTestScript
 import kotlinx.coroutines.CancellationException
@@ -362,7 +370,9 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             }
             val id = a.requiredString("sessionId")
             val optionalOverrides = recordingOptionalOverrides(rows)
-            appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds, optionalOverrides).toResult { recordingMap(id, it) }
+            val performerEdits = recordingPerformerEdits(id, rows, pairs)
+            appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds, optionalOverrides, performerEdits)
+                .toResult { recordingMap(id, it) }
         },
         "insert_test_recording_row" to tool { a ->
             val id = a.requiredString("sessionId")
@@ -372,7 +382,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             if (action.length > MAX_FIXED_STEP_CHARS || expected.length > MAX_FIXED_STEP_CHARS) {
                 toolArgError("action and expected are limited to $MAX_FIXED_STEP_CHARS characters.")
             }
-            val row = RecordedTestStep(action = action, expected = expected, authorAdded = true)
+            val row = insertedRecordingRow(a, action, expected)
             appState.insertTestRecordingRow(id, index, row).toResult { recordingMap(id, it) + ("rowId" to row.id) + ("index" to index) }
         },
         "remove_test_recording_steps" to tool { a ->
@@ -566,7 +576,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         return buildMap {
             put("id", row.id)
             if (row.authorAdded) put("authorAdded", true)
-            if (row.stepKind != com.indagium.testing.model.StepKind.AGENT) put("stepKind", row.stepKind.name)
+            if (row.stepKind != StepKind.AGENT) put("stepKind", row.stepKind.name)
             put("action", row.action)
             put("expected", row.expected)
             put("optional", row.optional)
@@ -601,8 +611,91 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 put("sourceInputIds", row.sourceInputIds)
                 put("checks", row.checks.size)
             }
+            if (row.kind == RecordedInputKind.EXTERNAL) put("inputKind", "EXTERNAL")
+            if (row.stateChanges.isNotEmpty()) {
+                put(
+                    "stateChanges",
+                    row.stateChanges.map {
+                        mapOf("key" to it.key, "from" to it.from, "to" to it.to, "atMs" to it.atMs, "text" to it.summary())
+                    },
+                )
+            }
+            if (row.stepKind != StepKind.AGENT) {
+                put("script", row.script?.let { scriptCallToJson(it).toPlainMap() })
+                put("manualCompletion", row.manualCompletion.name)
+            }
+            if (row.checks.isNotEmpty() && (row.stepKind != StepKind.AGENT || row.performerEditable)) {
+                put("stepChecks", row.checks.map { checkToJson(it).toPlainMap() })
+            }
         }
     }
+
+    private val performerKeys = listOf("kind", "script", "manualCompletion", "checks")
+    private val noStep = TestStep("", "")
+
+    /**
+     * Who performs a row (kind, script, completion, checks), per row id. Only rows a person may re-assign accept it, and each edited
+     * step is validated against the library (the script must exist and take the arguments; a manual step needs instructions...).
+     */
+    private fun recordingPerformerEdits(
+        sessionId: String,
+        rows: List<Map<String, Any?>>,
+        edited: List<Pair<String, String>>,
+    ): Map<String, RecordedPerformerEdit> {
+        if (rows.none { row -> performerKeys.any(row::containsKey) }) return emptyMap()
+        val current = (appState.testStepRecordingSnapshot(sessionId) as? StoreResult.Ok)?.value?.steps.orEmpty().associateBy { it.id }
+        return rows.mapIndexedNotNull { index, row ->
+            if (performerKeys.none(row::containsKey)) return@mapIndexedNotNull null
+            val label = "steps[$index]"
+            val rowId = row["id"] as? String ?: toolArgError("$label.id is required when changing who performs a step.")
+            val target = current[rowId] ?: toolArgError("$label.id '$rowId' is not a current recording row.")
+            val args = ToolArgs(row)
+            val edit = RecordedPerformerEdit(
+                stepKind = args.enum("kind", StepKind.entries),
+                setScript = args.hasKey("script"),
+                script = if (args.hasKey("script")) parseStepScript(args, noStep, label) else null,
+                manualCompletion = args.enum("manualCompletion", ManualCompletion.entries),
+                checks = args.objects("checks")?.let { parseChecks(it, IdAllocator(), "$label.checks") },
+            )
+            if (!edit.allowedOn(target)) {
+                toolArgError(
+                    "$label: only a row you added or a detected external event can change who performs it, and an external event " +
+                        "cannot be an AI step.",
+                )
+            }
+            val effective = edit.applyTo(target.copy(action = edited[index].first, expected = edited[index].second))
+            recordedRowProblem(effective)?.let { toolArgError("$label: $it") }
+            rowId to edit
+        }.toMap()
+    }
+
+    /** The row you inserted: an AI step unless it names another performer, checked against the library like a step you create. */
+    private fun insertedRecordingRow(a: ToolArgs, action: String, expected: String): RecordedTestStep {
+        val row = RecordedTestStep(
+            action = action,
+            expected = expected,
+            authorAdded = true,
+            stepKind = a.enum("kind", StepKind.entries) ?: StepKind.AGENT,
+            script = if (a.hasKey("script")) parseStepScript(a, noStep, "script") else null,
+            manualCompletion = a.enum("manualCompletion", ManualCompletion.entries) ?: ManualCompletion.TESTER_OR_CHECKS,
+            checks = a.objects("checks")?.let { parseChecks(it, IdAllocator(), "checks") }.orEmpty(),
+        )
+        recordedRowProblem(row)?.let { toolArgError(it) }
+        return row
+    }
+
+    private fun recordedRowProblem(row: RecordedTestStep): String? = validateStep(
+        TestStep(
+            "",
+            row.action,
+            row.expected,
+            row.checks,
+            kind = row.stepKind,
+            script = row.script,
+            manualCompletion = row.manualCompletion,
+        ),
+        library.scripts,
+    )
 
     /** Optional semantics are an atomic row edit: callers send both fields and stable row ids together. */
     private fun recordingOptionalOverrides(rows: List<Map<String, Any?>>): Map<String, Pair<Boolean, String?>> {
