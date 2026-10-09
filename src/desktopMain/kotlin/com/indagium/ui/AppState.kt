@@ -2199,8 +2199,11 @@ class AppState(
         if (sessionId in recordingRewrites) {
             return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
         }
-        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides)) {
-            return@synchronized StoreResult.Invalid("The recording must be stopped and the edited rows and screenshot choices must match its current draft.")
+        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides, allowReorder = true)) {
+            return@synchronized StoreResult.Invalid(
+                "The recording must be stopped and the edited rows and screenshot choices must match its current draft; " +
+                    "row ids may be sent in any order but must name every current row once.",
+            )
         }
         StoreResult.Ok(session.snapshot.value)
     }
@@ -2220,6 +2223,46 @@ class AppState(
                 else -> StoreResult.Ok(session.snapshot.value)
             }
         }
+
+    /** Moves one reviewed row to [toIndex] (clamped); refused while recording, applying or rewriting. Evidence travels with the row. */
+    internal fun moveTestRecordingRow(
+        sessionId: String,
+        rowId: String,
+        toIndex: Int,
+    ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+        when {
+            sessionId in recordingApplications -> StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+            sessionId in recordingRewrites -> StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+            session.snapshot.value.active -> StoreResult.Invalid("Stop the recording before moving reviewed steps.")
+            session.snapshot.value.pendingSnapshots > 0 -> StoreResult.Invalid("Wait for captured screen snapshots to finish before moving reviewed steps.")
+            !session.moveReviewedRow(rowId, toIndex) -> StoreResult.Invalid("Select a row from the current stopped preview to move.")
+            else -> StoreResult.Ok(session.snapshot.value)
+        }
+    }
+
+    /** Inserts an author-added [row] before position [index] (0..size) of the review; same refusals as [moveTestRecordingRow]. */
+    internal fun insertTestRecordingRow(
+        sessionId: String,
+        index: Int,
+        row: com.indagium.testing.authoring.RecordedTestStep,
+    ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+        when {
+            sessionId in recordingApplications -> StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+            sessionId in recordingRewrites -> StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+            session.snapshot.value.active -> StoreResult.Invalid("Stop the recording before adding reviewed steps.")
+            session.snapshot.value.pendingSnapshots > 0 -> StoreResult.Invalid("Wait for captured screen snapshots to finish before adding reviewed steps.")
+            !session.insertReviewedRow(index, row) ->
+                StoreResult.Invalid(
+                    "The step could not be added: use an index from 0 to the number of steps and a valid optional condition " +
+                        "(a review holds at most 100 steps).",
+                )
+            else -> StoreResult.Ok(session.snapshot.value)
+        }
+    }
 
     internal fun restoreRemovedTestRecordingInputs(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> =
         synchronized(testStepRecordingLock) {

@@ -74,7 +74,7 @@ internal class RecordingRewriteService(
         var completed = false
         return try {
             val response = withTimeout(timeoutMs) { generate(request) }
-            val proposal = parseRewriteResponse(response, inputs.size)
+            val proposal = parseRewriteResponse(response, inputs.size, inputs.filter { it.fixed }.associate { it.number to it.row })
             val rewritten = buildRewrittenRows(proposal, inputs, rewriteTools.videoInspectedInputs())
             if (!session.applyRewrite(rows.map { it.id }, rewritten, proposal.notes)) {
                 return StoreResult.Invalid("The recording changed while it was being rewritten; nothing was applied. Rewrite it again.")

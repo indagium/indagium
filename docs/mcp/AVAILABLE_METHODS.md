@@ -330,11 +330,18 @@ or recording is a separate confirmation-required call.
   MCP image content with source, acquisition interval, and verification metadata. It also returns `excludedSourceInputIds`,
   `latestRewriteUsage`, `rewriteSessionUsage` and `rewriteAttempts` when available.
   `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
-  and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
+  and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in. To reorder, send every row
+  with its `id` in the new order: any permutation of the current row ids, each exactly once, becomes the review order and
+  every row keeps its evidence (without ids the rows are matched to the current order; `apply_test_recording` never reorders).
+  `insert_test_recording_row` (sessionId, index, action, optional expected) inserts a step you write before the row now at
+  `index` (0 to the number of rows; the count appends) and returns its `rowId`; it has no recorded input, shows as
+  `authorAdded` in `get_test_recording`, and an AI rewrite keeps it exactly as written and in place. Like the other recording
+  edits it needs no approval and is refused while recording, applying or rewriting, and until snapshots drain.
   `remove_test_recording_steps` (sessionId, rowIds) excludes selected stopped review rows while preserving raw history;
-  removing an AI-rewritten row excludes every source input it represents. Removal waits for all snapshots to drain and is
+  removing an AI-rewritten row excludes every source input it represents, while a row inserted with
+  `insert_test_recording_row` is deleted outright. Removal waits for all snapshots to drain and is
   refused during rewrite/apply. `restore_test_recording_inputs` clears exclusions and restores the full raw review (also
-  undoing the rewrite); `restore_test_recording_raw` undoes only the rewrite and keeps exclusions. `stop_test_recording`,
+  undoing the rewrite) in the current reviewed order; `restore_test_recording_raw` undoes only the rewrite and keeps exclusions. `stop_test_recording`,
   `discard_test_recording`, and `apply_test_recording` stop/drain, discard without library mutation, or apply the reviewed
   preview at an optional index to its original case. An empty review cannot be applied or rewritten. Rewrites use only
   retained inputs even if the full video timeline shows removed actions.
@@ -362,7 +369,10 @@ or recording is a separate confirmation-required call.
   invalid. The
   rewritten rows replace the recording's rows for review (`rewritten`, `rewriteNotes`, and
   `sourceInputIds` per row in `get_test_recording`); sending the recording to a remote provider requires approval.
-  `restore_test_recording_raw` (sessionId) puts the recorded rows back exactly (same row ids); it needs no approval.
+  The rewrite numbers inputs in the current review order (so moved rows are numbered where they now stand) and an inserted
+  row is passed as a fixed "author step, keep as is" that the answer must return unchanged, alone and in place, or nothing
+  changes. `restore_test_recording_raw` (sessionId) puts the recorded rows back exactly (same row ids) in the order the
+  rewritten rows now have, with any inserted rows where they stand; it needs no approval.
   Both are refused while the recording is being applied or rewritten, and a later `apply_test_recording` is refused
   while a rewrite runs. An applied rewritten step keeps a reference example "Recorded input (hint; prefer what is on
   screen)" listing the raw inputs; its after-screenshot becomes a golden image only when `useScreenshotAsExpected`

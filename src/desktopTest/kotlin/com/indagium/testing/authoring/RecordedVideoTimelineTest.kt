@@ -97,6 +97,49 @@ class RecordedVideoTimelineTest {
     }
 
     @Test
+    fun movedInputsAndAnAuthorRowKeepChronologicalVideoBoundariesWhileNumbersFollowTheReviewOrder() {
+        val fixture = syntheticScenes
+        val wall = AtomicLong(BASE_WALL_MS)
+        val monotonic = AtomicLong(BASE_NANOS)
+        val timeline = RecordedVideoTimeline(wallClockMs = wall::get, monotonicNanos = monotonic::get)
+        val chronological = inputRows(BASE_WALL_MS)
+        // The reviewer moved the second tap to the front and added a step of their own in the middle.
+        val reviewed = listOf(
+            RewriteInput(1, chronological[1].row, null, null),
+            RewriteInput(2, RecordedTestStep(action = "Sign in", expected = "Home", authorAdded = true), null, null),
+            RewriteInput(3, chronological[0].row, null, null),
+        )
+        try {
+            timeline.offer(packet(fixture.config, BASE_WALL_MS - 60_000, BASE_NANOS - 60_000_000_000, 0, config = true))
+            fixture.samples.forEachIndexed { index, sample ->
+                val elapsed = listOf(-60_000L, 100L, 250L, 400L, 800L)[index]
+                timeline.offer(
+                    packet(sample.data, BASE_WALL_MS + elapsed, BASE_NANOS + elapsed * NANOS_PER_MS, (index + 1).toLong(), keyFrame = sample.keyFrame),
+                )
+            }
+            wall.set(BASE_WALL_MS + 1_000)
+            monotonic.set(BASE_NANOS + 1_000 * NANOS_PER_MS)
+            timeline.stop()
+            assertTrue(timeline.awaitFinished(15_000), "video remux worker should drain")
+
+            val original = assertNotNull(timeline.storyboardForInput(1, chronological))
+            val moved = assertNotNull(timeline.storyboardForInput(3, reviewed))
+            assertEquals(
+                original.frames.map { Triple(it.requestedMs, it.relation, it.actualMs) },
+                moved.frames.map { Triple(it.requestedMs, it.relation, it.actualMs) },
+                "the same frames as before the move: neighbours are found by time, not by list position",
+            )
+            assertTrue(moved.frames.mapNotNull { it.inputNumber }.all { it == 3 }, moved.frames.toString())
+            assertNull(timeline.storyboardForInput(2, reviewed), "an author-added step has no video")
+
+            val range = assertNotNull(timeline.storyboardForRange(0, 900, reviewed))
+            assertEquals(setOf(1, 3), range.coveredInputs.toSet(), range.coveredInputs.toString())
+        } finally {
+            timeline.close()
+        }
+    }
+
+    @Test
     fun passwordVideoStaysWithheldAfterTheLastMaskedInputUntilRecordingStops() {
         val fixture = syntheticScenes
         val wall = AtomicLong(BASE_WALL_MS)

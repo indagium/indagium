@@ -19,7 +19,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -474,7 +473,14 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     val rewriting = ui.state.isTestStepRecordingRewriting(session.id)
     val applying = working || ui.state.isTestStepRecordingApplying(session.id)
     val editable = !snapshot.active && !applying && !rewriting
+    // Moving, adding and removing rows also wait for the screen snapshots, like Remove always did.
+    val reviewEditable = editable && snapshot.pendingSnapshots == 0
     val applyBlockedReason = recordingApplyBlockedReason(snapshot)
+
+    fun addRecordedStep(at: Int) {
+        error = ui.state.insertTestRecordingRow(session.id, at, RecordedTestStep(action = "")).takeIf { it !is StoreResult.Ok }?.userMessage()
+        ui.reclaimFocus()
+    }
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
         AppText(if (snapshot.active) "Recording device input…" else "Review recorded steps", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(5.dp))
@@ -494,96 +500,118 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     "No accepted mirror input recorded yet."
                 },
             )
+            if (!snapshot.active) AppButton("+ Add step", onClick = { addRecordedStep(0) }, enabled = reviewEditable, variant = ButtonVariant.Ghost)
         }
         if (!snapshot.active && snapshot.pendingSnapshots > 0) {
             TestsHint("Wait for the recorded screen snapshots to finish before removing or restoring inputs.")
         }
         if (!snapshot.active) RecordingRewriteSection(session, case, snapshot, locked = applying)
-        snapshot.steps.forEachIndexed { index, row ->
-            key(row.id) {
-                Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                        AppButton(
-                            "Remove",
-                            onClick = {
-                                when (val result = ui.state.removeTestRecordingRows(session.id, setOf(row.id))) {
-                                    is StoreResult.Ok -> error = null
-                                    else -> error = result.userMessage()
-                                }
-                            },
-                            enabled = !applying && !rewriting && !snapshot.active && snapshot.pendingSnapshots == 0,
-                            variant = ButtonVariant.Ghost,
-                        )
+        if (!snapshot.active && snapshot.steps.isNotEmpty()) {
+            AppButton("+ Add step at start", onClick = { addRecordedStep(0) }, enabled = reviewEditable, variant = ButtonVariant.Ghost)
+        }
+        ReorderableColumn(
+            items = snapshot.steps,
+            idOf = { it.id },
+            onMove = { id, to -> error = ui.state.moveTestRecordingRow(session.id, id, to).takeIf { it !is StoreResult.Ok }?.userMessage() },
+            reorderEnabled = reviewEditable,
+            rowGap = 6.dp,
+        ) { row, scope ->
+            Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ReorderGrip(scope)
+                    AppText("STEP ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                    if (row.authorAdded) TestsBadge("ADDED BY YOU")
+                    Spacer(Modifier.weight(1f))
+                    ReorderMoveButtons(scope)
+                    AppButton(
+                        "+ Add step below",
+                        onClick = { addRecordedStep(scope.index + 1) },
+                        enabled = reviewEditable,
+                        variant = ButtonVariant.Ghost,
+                    )
+                    AppButton(
+                        "Remove",
+                        onClick = {
+                            when (val result = ui.state.removeTestRecordingRows(session.id, setOf(row.id))) {
+                                is StoreResult.Ok -> error = null
+                                else -> error = result.userMessage()
+                            }
+                        },
+                        enabled = reviewEditable,
+                        variant = ButtonVariant.Ghost,
+                    )
+                }
+                TestsLabeled("Action") {
+                    CommitTextField(
+                        row.action,
+                        { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) },
+                        enabled = editable,
+                        placeholder = if (row.authorAdded) "What the tester does" else "Recorded action",
+                    )
+                }
+                TestsLabeled("Expected result") {
+                    CommitTextField(
+                        row.expected,
+                        { text ->
+                            updateRecorded(session, row.id) { it.copy(expected = text) }
+                            StoreResult.Ok(Unit)
+                        },
+                        enabled = editable,
+                        multiline = true,
+                        placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
+                    )
+                }
+                CheckRow(checked = row.optional, onToggle = {
+                    updateRecorded(session, row.id) {
+                        if (it.optional) it.copy(optional = false, condition = null)
+                        else it.copy(optional = true)
                     }
-                    TestsLabeled("Action") {
-                        CommitTextField(row.action, { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = editable, placeholder = "Recorded action")
-                    }
-                    TestsLabeled("Expected result") {
+                }, enabled = editable) {
+                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
+                }
+                if (row.optional) {
+                    TestsLabeled("Perform only when") {
                         CommitTextField(
-                            row.expected,
+                            row.condition.orEmpty(),
                             { text ->
-                                updateRecorded(session, row.id) { it.copy(expected = text) }
+                                updateRecorded(session, row.id) { it.copy(condition = text) }
                                 StoreResult.Ok(Unit)
                             },
                             enabled = editable,
                             multiline = true,
-                            placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
+                            placeholder = "Describe the visible condition, such as an ad is playing",
                         )
                     }
-                    CheckRow(checked = row.optional, onToggle = {
-                        updateRecorded(session, row.id) {
-                            if (it.optional) it.copy(optional = false, condition = null)
-                            else it.copy(optional = true)
-                        }
+                }
+                if (row.sourceInputIds.isNotEmpty()) {
+                    RecordedInputsList(row, snapshot.rawSteps.orEmpty())
+                    if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
+                }
+                row.contextHint()?.let { TestsHint("Screen context: $it") }
+                row.screenContext?.let { TestsHint(it) }
+                row.reviewReason?.let {
+                    if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
+                }
+                row.screenshotJpeg?.let { bytes ->
+                    val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
+                    val caption = when {
+                        row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
+                        row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
+                        else -> "Image: raw input preview from $source; acquisition interval recorded."
+                    }
+                    TestsHint(caption)
+                    RecordedScreenshotPreview(bytes)
+                    CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
+                        updateRecorded(session, row.id) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
                     }, enabled = editable) {
-                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
-                    }
-                    if (row.optional) {
-                        TestsLabeled("Perform only when") {
-                            CommitTextField(
-                                row.condition.orEmpty(),
-                                { text ->
-                                    updateRecorded(session, row.id) { it.copy(condition = text) }
-                                    StoreResult.Ok(Unit)
-                                },
-                                enabled = editable,
-                                multiline = true,
-                                placeholder = "Describe the visible condition, such as an ad is playing",
-                            )
+                        val label = if (row.screenshotVerifiedMoment == "after") {
+                            "Use this verified after screenshot as an expected screenshot (review first)"
+                        } else {
+                            "Use this raw input preview as an expected screenshot (review first)"
                         }
-                    }
-                    if (row.sourceInputIds.isNotEmpty()) {
-                        RecordedInputsList(row, snapshot.rawSteps.orEmpty())
-                        if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
-                    }
-                    row.contextHint()?.let { TestsHint("Screen context: $it") }
-                    row.screenContext?.let { TestsHint(it) }
-                    row.reviewReason?.let {
-                        if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
-                    }
-                    row.screenshotJpeg?.let { bytes ->
-                        val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
-                        val caption = when {
-                            row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
-                            row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
-                            else -> "Image: raw input preview from $source; acquisition interval recorded."
-                        }
-                        TestsHint(caption)
-                        RecordedScreenshotPreview(bytes)
-                        CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
-                            updateRecorded(session, row.id) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
-                        }, enabled = editable) {
-                            val label = if (row.screenshotVerifiedMoment == "after") {
-                                "Use this verified after screenshot as an expected screenshot (review first)"
-                            } else {
-                                "Use this raw input preview as an expected screenshot (review first)"
-                            }
-                            AppText(label, color = tc.ts, fontSize = 9.sp)
-                        }
+                        AppText(label, color = tc.ts, fontSize = 9.sp)
                     }
                 }
-                Spacer(Modifier.height(6.dp))
             }
         }
         snapshot.warnings.forEach { TestsErrorText(it) }

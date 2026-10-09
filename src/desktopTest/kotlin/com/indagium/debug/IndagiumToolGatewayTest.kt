@@ -90,7 +90,7 @@ class IndagiumToolGatewayTest {
             "duplicate_test_script", "import_test_script", "export_test_script", "get_test_script_schema",
             "get_test_script_usage", "try_test_script",
             "draft_test_steps", "apply_test_step_draft", "start_test_recording", "get_test_recording",
-            "update_test_recording", "stop_test_recording", "apply_test_recording", "discard_test_recording",
+            "update_test_recording", "insert_test_recording_row", "stop_test_recording", "apply_test_recording", "discard_test_recording",
             "rewrite_test_recording", "restore_test_recording_raw", "remove_test_recording_steps",
             "restore_test_recording_inputs",
             "insert_shared_steps", "preview_log_checks", "insert_log_checks",

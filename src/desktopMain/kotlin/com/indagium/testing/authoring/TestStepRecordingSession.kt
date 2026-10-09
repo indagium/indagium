@@ -12,6 +12,7 @@ import com.indagium.model.sumAiUsage
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newExampleId
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -74,12 +75,18 @@ data class RecordedTestStep(
     val screenshotTimingUncertain: Boolean = true,
     /** The screenshot is only verified for this moment when selected from eligible evidence. Raw previews use "input". */
     val screenshotVerifiedMoment: String? = null,
+    /**
+     * True on a row the reviewer typed in during review (no recorded input behind it, [kind] and [sourceInputIds] empty).
+     * An AI rewrite passes such a row through verbatim and in place; see [TestStepRecordingSession].
+     */
+    val authorAdded: Boolean = false,
 )
 
 /**
  * [pendingSnapshots] counts queued screen images plus the screen-context probe while one is waiting or running. After an AI
  * rewrite [steps] are the rewritten rows and [rawSteps] the recorded ones they replaced (null before a rewrite); [rewriteNotes]
- * is what the AI said about its choices.
+ * is what the AI said about its choices. [rawSteps] is history, not the review order: reordering never rewrites it, the session
+ * derives the reviewed raw order from [steps] (see [TestStepRecordingSession]).
  */
 data class TestStepRecordingSnapshot(
     val active: Boolean,
@@ -117,6 +124,16 @@ private const val VIDEO_DRAIN_TIMEOUT_MS = 12_000L
  * once at the start and again [settleDelayMs] after the last input (a newer input replaces a probe that has not started),
  * so at most one probe runs and one waits. Probe results are matched to rows by time and never guessed, see
  * [attachScreenStates]. The recording [lock] is a leaf: adb work only ever runs on the two workers, never under it.
+ *
+ * Review order. Once stopped, the reviewer can [moveReviewedRow], [insertReviewedRow] (an author-added row, no recorded input
+ * behind it) and [removeReviewedRows]. A moved row keeps all its evidence (it is the same object); only its place changes. The
+ * order of [TestStepRecordingSnapshot.steps] is the one source of truth, and [reviewedRaw] derives everything else from it:
+ *  - the raw review list (recorded rows, plus author rows) in reviewed order: each visible row in turn, a rewritten row standing
+ *    for its [RecordedTestStep.sourceInputIds] in recorded order, and removed rows anchored after the row that preceded them;
+ *  - an AI rewrite numbers exactly that list (minus removed rows), so the numbers follow the review order, and an author row
+ *    reaches the AI as a fixed "keep as is" input that the answer must return unchanged and in place (RecordingRewrite.kt);
+ *  - Undo rewrite and Restore removed inputs put raw rows back in that same order, author rows included. Removing an author
+ *    row deletes it (it has no recorded input to restore), so it never counts as an excluded input.
  */
 class TestStepRecordingSession internal constructor(
     val deviceSerial: String,
@@ -255,15 +272,19 @@ class TestStepRecordingSession internal constructor(
         true
     }
 
-    /** Removes reviewed rows without discarding their recorded source inputs or evidence. */
+    /**
+     * Removes reviewed rows without discarding their recorded source inputs or evidence. An author-added row has no recorded input,
+     * so removing it deletes it outright (it never becomes an excluded input).
+     */
     fun removeReviewedRows(rowIds: Set<String>): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         if (!reviewMutationAvailable(current) || rowIds.isEmpty()) return@synchronized false
         val visibleIds = current.steps.mapTo(HashSet()) { it.id }
         if (!visibleIds.containsAll(rowIds)) return@synchronized false
         val removed = current.steps.filter { it.id in rowIds }
-        val sourceIds = removed.flatMap { row -> row.sourceInputIds.ifEmpty { listOf(row.id) } }.toSet()
-        val raw = current.rawSteps ?: current.steps
+        val authorIds = removed.filter { it.authorAdded }.mapTo(HashSet()) { it.id }
+        val sourceIds = removed.filterNot { it.authorAdded }.flatMap { row -> row.sourceInputIds.ifEmpty { listOf(row.id) } }.toSet()
+        val raw = (current.rawSteps ?: current.steps).filterNot { it.id in authorIds }
         mutableSnapshot.value = current.copy(
             steps = current.steps.filterNot { it.id in rowIds },
             rawSteps = raw,
@@ -272,24 +293,93 @@ class TestStepRecordingSession internal constructor(
         true
     }
 
+    /**
+     * Moves the reviewed row [rowId] to [toIndex] (clamped to the list, like every other `move*`). False when the row is unknown or
+     * review changes are not allowed now; moving a row onto its own place succeeds and changes nothing.
+     */
+    fun moveReviewedRow(rowId: String, toIndex: Int): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        if (!reviewMutationAvailable(current) || current.steps.none { it.id == rowId }) return@synchronized false
+        mutableSnapshot.value = current.copy(steps = current.steps.moveById(rowId, toIndex) { it.id })
+        true
+    }
+
+    /**
+     * Inserts an author-added copy of [row] (its action, expected text, optional flag, condition and id; nothing else) before the
+     * row now at [index] (0..size; size appends). False when review changes are not allowed, the list is full, [index] is out of
+     * range, the id is already used, or the optional/condition pair is invalid. The action may be blank: the reviewer fills it in
+     * before applying, and an AI rewrite is refused until every author row has one.
+     */
+    fun insertReviewedRow(index: Int, row: RecordedTestStep): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        if (!reviewMutationAvailable(current) || current.steps.size >= MAX_RECORDED_STEPS || index !in 0..current.steps.size) {
+            return@synchronized false
+        }
+        val used = current.steps.mapTo(HashSet()) { it.id } + current.rawSteps.orEmpty().map { it.id }
+        val inserted = RecordedTestStep(
+            action = row.action,
+            expected = row.expected,
+            optional = row.optional,
+            condition = row.condition,
+            id = row.id,
+            authorAdded = true,
+        )
+        if (inserted.id in used || RecordingRowIssue.CONDITION in recordingRowIssues(inserted, requireExpected = false)) return@synchronized false
+        mutableSnapshot.value = current.copy(steps = current.steps.toMutableList().apply { add(index, inserted) })
+        true
+    }
+
     /** Why an AI rewrite cannot start now, in words the reviewer can act on; null when it can. */
     internal fun rewriteBlockedReason(): String? = synchronized(lock) {
         val current = mutableSnapshot.value
+        val rows = rewriteRowsOf(current)
         when {
             current.active -> "Stop the recording first."
             applicationReserved -> "This recording is being applied."
             current.pendingSnapshots > 0 -> "Waiting for ${current.pendingSnapshots} screen snapshot(s) to finish."
-            (current.rawSteps ?: current.steps).none { it.id !in current.excludedSourceInputIds } ->
+            rows.none { !it.authorAdded } ->
                 "No recorded inputs remain. Restore removed inputs or keep at least one step before rewriting."
+            rows.any { it.authorAdded && it.action.isBlank() } ->
+                "An added step has no action. Fill it in or remove it before rewriting."
+            rows.any { it.authorAdded && max(it.action.length, it.expected.length) > MAX_FIXED_STEP_CHARS } ->
+                "An added step is longer than $MAX_FIXED_STEP_CHARS characters. Shorten it before rewriting."
             else -> null
         }
     }
 
-    /** The recorded rows an AI rewrite starts from: raw inputs minus explicit user exclusions. */
-    internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) {
-        mutableSnapshot.value.let { current ->
-            (current.rawSteps ?: current.steps).filterNot { it.id in current.excludedSourceInputIds }
+    /**
+     * The rows an AI rewrite starts from, in review order: raw inputs and author-added rows minus explicit user exclusions. An
+     * author-added row is a fixed input the rewrite must keep as is.
+     */
+    internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) { rewriteRowsOf(mutableSnapshot.value) }
+
+    private fun rewriteRowsOf(current: TestStepRecordingSnapshot): List<RecordedTestStep> =
+        reviewedRaw(current).filterNot { it.id in current.excludedSourceInputIds }
+
+    /**
+     * The raw review list in reviewed order (see the class comment): recorded rows and author rows, removed rows included.
+     * Without history ([TestStepRecordingSnapshot.rawSteps] null) the visible rows are the list.
+     */
+    private fun reviewedRaw(current: TestStepRecordingSnapshot): List<RecordedTestStep> {
+        val raw = current.rawSteps ?: return current.steps
+        val rawById = raw.associateBy { it.id }
+        val result = ArrayList<RecordedTestStep>(raw.size)
+        val placed = HashSet<String>()
+
+        fun place(row: RecordedTestStep) {
+            if (placed.add(row.id)) result += row
         }
+        current.steps.forEach { step ->
+            // A recorded or author row stands for itself (its latest edits win); a rewritten row for the raw rows it covers.
+            if (step.sourceInputIds.isEmpty()) place(step) else step.sourceInputIds.forEach { id -> rawById[id]?.let(::place) }
+        }
+        raw.forEachIndexed { index, row ->
+            if (row.id in placed) return@forEachIndexed
+            val anchor = (index - 1 downTo 0).map { raw[it].id }.firstOrNull { it in placed }
+            result.add(anchor?.let { id -> result.indexOfFirst { it.id == id } + 1 } ?: 0, row)
+            placed += row.id
+        }
+        return result
     }
 
     internal fun beginRewriteUsageAttempt(): Boolean = synchronized(lock) {
@@ -351,34 +441,35 @@ class TestStepRecordingSession internal constructor(
      */
     internal fun applyRewrite(rawIds: List<String>, rewritten: List<RecordedTestStep>, notes: String): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
-        val raw = current.rawSteps ?: current.steps
+        val raw = reviewedRaw(current)
         val included = raw.filterNot { it.id in current.excludedSourceInputIds }
         if (current.active || applicationReserved || rewritten.isEmpty() || included.map { it.id } != rawIds) return@synchronized false
         mutableSnapshot.value = current.copy(steps = rewritten.take(MAX_RECORDED_STEPS), rawSteps = raw, rewriteNotes = notes, rewriteApplied = true)
         true
     }
 
-    /** Puts the non-excluded recorded rows back (same ids). Exclusions remain explicit and recoverable separately. */
+    /**
+     * Puts the non-excluded recorded rows back (same ids), in their reviewed order, with any author-added rows where they stood.
+     * Exclusions remain explicit and recoverable separately.
+     */
     fun restoreRaw(): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
-        val raw = current.rawSteps
-        if (raw == null || !current.rewriteApplied) return@synchronized false
+        if (current.rawSteps == null || !current.rewriteApplied) return@synchronized false
         if (current.active || current.rewriteInProgress || applicationReserved) return@synchronized false
         mutableSnapshot.value = current.copy(
-            steps = raw.filterNot { it.id in current.excludedSourceInputIds },
+            steps = rewriteRowsOf(current),
             rewriteNotes = "",
             rewriteApplied = false,
         )
         true
     }
 
-    /** Restores the full raw review and clears exclusions; this is the recovery path for removed source inputs. */
+    /** Restores the full raw review (reviewed order) and clears exclusions; this is the recovery path for removed source inputs. */
     fun restoreExcludedInputs(): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         if (!reviewMutationAvailable(current) || current.excludedSourceInputIds.isEmpty()) return@synchronized false
-        val raw = current.rawSteps ?: current.steps
         mutableSnapshot.value = current.copy(
-            steps = raw,
+            steps = reviewedRaw(current),
             rawSteps = current.rawSteps,
             excludedSourceInputIds = emptySet(),
             rewriteNotes = "",
@@ -390,13 +481,29 @@ class TestStepRecordingSession internal constructor(
     private fun reviewMutationAvailable(current: TestStepRecordingSnapshot): Boolean =
         !current.active && current.pendingSnapshots == 0 && !applicationReserved && !current.rewriteInProgress
 
+    /**
+     * Edits the reviewed rows. [actionsAndExpected] follow the current row order, or - when [allowReorder] and [expectedRowIds] is
+     * given - the order of [expectedRowIds], which must then be a permutation of the current row ids and becomes the new review
+     * order. Without [allowReorder], [expectedRowIds] must equal the current order (the apply path never reorders).
+     */
     fun updateReviewedSteps(
         actionsAndExpected: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
+        allowReorder: Boolean = false,
     ): Boolean = synchronized(lock) {
-        val old = mutableSnapshot.value.steps
+        val current = mutableSnapshot.value
+        val original = current.steps
+        val old = if (allowReorder && expectedRowIds != null) {
+            val byId = original.associateBy { it.id }
+            if (expectedRowIds.size != original.size || expectedRowIds.toSet().size != original.size || !byId.keys.containsAll(expectedRowIds)) {
+                return@synchronized false
+            }
+            expectedRowIds.map { byId.getValue(it) }
+        } else {
+            original
+        }
         if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides)) return@synchronized false
         val edited = old.mapIndexed { index, row ->
             val optional = optionalOverrides[row.id]?.first ?: row.optional
@@ -410,10 +517,9 @@ class TestStepRecordingSession internal constructor(
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
         }
-        val current = mutableSnapshot.value
         mutableSnapshot.value = current.copy(
             steps = edited,
-            rawSteps = current.rawSteps?.takeUnless { current.rewriteApplied }?.let { syncRawReviewRows(it, old, edited) } ?: current.rawSteps,
+            rawSteps = current.rawSteps?.takeUnless { current.rewriteApplied }?.let { syncRawReviewRows(it, original, edited) } ?: current.rawSteps,
         )
         true
     }
@@ -883,7 +989,8 @@ class TestStepRecordingSession internal constructor(
     }
 
     private fun withScreenContext(rows: List<RecordedTestStep>): Pair<List<RecordedTestStep>, List<Int>> {
-        val recorded = rows.indices.filter { rows[it].kind != null }
+        // Attachment needs chronological order; a reviewer may have moved rows, so sort by completion (a stable sort keeps list order for ties).
+        val recorded = rows.indices.filter { rows[it].kind != null }.sortedBy { rows[it].inputAtMs }
         val inputWindows = recorded.map { InputWindow(rows[it].inputStartMs, rows[it].inputAtMs) }
         val windows = screenStates.values
             .filter { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() || it.nodes.isNotEmpty() }
