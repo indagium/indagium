@@ -46,6 +46,8 @@ internal class AccountAgentRunner(
     private val claudeProcessFactory: ClaudeCodeProcessFactory = SystemClaudeCodeProcessFactory,
     private val codexLauncher: (List<String>, Map<String, String>, CoroutineScope) -> CodexAppServerClient =
         { command, environment, launchScope -> CodexAppServerClient.launch(command, environment, launchScope) },
+    /** The clock of the runs this runner starts (see [AiRun]); a test injects a ticking one. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : AutoCloseable {
     fun start(
         session: AiSession,
@@ -68,6 +70,7 @@ internal class AccountAgentRunner(
             maxToolCalls = maxToolRounds,
             freeTools = freeTools,
             confirmationTimeoutMs = confirmationTimeoutMs,
+            clock = clock,
         )
         session.lastPrompt = prompt
         session.lastContext = context
@@ -133,10 +136,13 @@ internal class AccountAgentRunner(
             val terminal = CompletableDeferred<Unit>()
             val agentMessages = AgentTurnMessageBuffer()
             var receivedAgentMessage = false
+            var lastReportedTotalTokens: Long? = null
             val events: Job = scope.launch {
                 client.events.collect { event ->
                     when (event) {
                         is CodexAppServerEvent.TurnStarted -> if (event.turn.threadId == null || event.turn.threadId == thread.id) {
+                            // The process is up, initialised and has accepted the prompt: ready, even if no MCP status said so.
+                            run.markAgentReady()
                             run.emit(AiRunEvent.Status("Codex is investigating…"))
                         }
                         is CodexAppServerEvent.AgentTextDelta -> {
@@ -161,6 +167,7 @@ internal class AccountAgentRunner(
                                 if (event.status.equals("failed", ignoreCase = true) || event.status.equals("error", ignoreCase = true)) {
                                     terminal.completeExceptionally(IllegalStateException("Indagium MCP could not start: $detail"))
                                 } else {
+                                    if (detail.equals(CODEX_MCP_READY_STATUS, ignoreCase = true)) run.markAgentReady()
                                     run.emit(AiRunEvent.Status("Indagium MCP: $detail"))
                                 }
                             }
@@ -188,6 +195,9 @@ internal class AccountAgentRunner(
                             }
                         }
                         is CodexAppServerEvent.TokenUsageUpdated -> if (event.threadId == null || event.threadId == thread.id) {
+                            // Codex reports the run's token usage once per model response; a repeat of the same total is not a new one.
+                            if (event.total.totalTokens != lastReportedTotalTokens) run.markModelResponse()
+                            lastReportedTotalTokens = event.total.totalTokens
                             run.emit(
                                 AiRunEvent.Usage(
                                     inputTokens = event.total.inputTokens,
@@ -274,7 +284,10 @@ internal class AccountAgentRunner(
                         run.emit(AiRunEvent.AgentProgress(text))
                     }
                 }
-                is ClaudeCodeEvent.TurnBoundary -> turnIndex++
+                is ClaudeCodeEvent.TurnBoundary -> {
+                    turnIndex++
+                    run.markModelResponse()
+                }
                 is ClaudeCodeEvent.Final -> {
                     val finalText = turnMessages.finalText()
                     if (finalText != null) {
@@ -301,7 +314,11 @@ internal class AccountAgentRunner(
                     completed = true
                 }
                 is ClaudeCodeEvent.Error -> throw IllegalStateException(event.message)
-                is ClaudeCodeEvent.SessionId -> session.claudeCodeSessionId = event.value
+                is ClaudeCodeEvent.SessionId -> {
+                    // The CLI names its session in its first stream line: it is running and has loaded the managed MCP server.
+                    run.markAgentReady()
+                    session.claudeCodeSessionId = event.value
+                }
             }
         }
         if (!completed) throw IllegalStateException("Claude Code ended before the response completed.")
@@ -381,6 +398,9 @@ internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
     mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)
 
 private const val CODEX_INDAGIUM_MCP_TOKEN_ENV = "INDAGIUM_MCP_TOKEN"
+
+/** What Codex's startup status for the managed MCP server says once the server is connected. */
+private const val CODEX_MCP_READY_STATUS = "ready"
 
 /** Restrict a managed evidence-only Codex run to its configured Indagium MCP server. These are
  * per-process CLI overrides; the user's persistent Codex configuration is never modified. */

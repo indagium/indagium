@@ -677,12 +677,17 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String, driver: DriverReport? = null): Evaluation? {
         if (!active || ended) return null
         val step = spec.steps[index]
+        val evaluationStart = env.nanoTime()
         val shot = captureScreenshot()
+        val evidenceDone = env.nanoTime()
         lastAttemptChecks = emptyList()
         val automatic = checks.evaluateAll(driver?.checks ?: step.checks, attemptLogOffset) { result -> lastAttemptChecks = lastAttemptChecks + result }
         val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
+        val checksDone = env.nanoTime()
         val judgement = if (judgeable(step, driver)) judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd) else null
+        val judgeDone = env.nanoTime()
+        appendStepTiming(step, evidenceDone - evaluationStart, checksDone - evidenceDone, judgement?.let { judgeDone - checksDone })
         val results = applyJudgementToChecks(automatic, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val base = deterministicBaseStatus(claim, failed.isNotEmpty())
@@ -703,6 +708,29 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 )
             }
         return Evaluation(step, settled.status, result, failed.map { it.checkId }, index, attempt)
+    }
+
+    /**
+     * Where finish_step's wait went, in the lane transcript next to the finish_step tool call: taking the screenshot, running the
+     * deterministic checks (and reading the log end), and the judge (null when none judged). The agent is blocked for their sum.
+     */
+    private fun appendStepTiming(step: TestStep, evidenceNanos: Long, checksNanos: Long, judgeNanos: Long?) {
+        val transcript = env.transcript ?: return
+        val evidenceMs = evidenceNanos / NANOS_PER_MILLI
+        val checksMs = checksNanos / NANOS_PER_MILLI
+        val judgeMs = judgeNanos?.let { it / NANOS_PER_MILLI }
+        transcript.append(
+            "finish_step_timing",
+            mapOf(
+                "step" to step.id,
+                "stepNumber" to index + 1,
+                "attempt" to attempt,
+                "evidenceCaptureMs" to evidenceMs,
+                "deterministicChecksMs" to checksMs,
+                "judgeMs" to judgeMs,
+                "totalMs" to evidenceMs + checksMs + (judgeMs ?: 0L),
+            ),
+        )
     }
 
     /**

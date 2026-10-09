@@ -24,9 +24,10 @@ class TranscriptWriter(val file: File, private val clock: () -> Long = System::c
     /** Bytes written so far; the offset the next line starts at. */
     val sizeBytes: Long get() = if (file.isFile) file.length() else 0L
 
-    fun append(kind: String, fields: Map<String, Any?> = emptyMap()) {
+    /** Appends a line stamped with [at] (the time an event really happened) or, when null, with the clock's time now. */
+    fun append(kind: String, fields: Map<String, Any?> = emptyMap(), at: Long? = null) {
         val line = buildJsonObject {
-            put("t", clock())
+            put("t", at ?: clock())
             put("kind", kind)
             fields.forEach { (key, value) -> put(key, redacted(value)) }
         }.toString() + "\n"

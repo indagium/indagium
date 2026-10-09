@@ -5,6 +5,7 @@ import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepFix
+import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
@@ -54,15 +55,7 @@ private fun StringBuilder.step(result: StepResult) {
         append("  - Check ").append(check.kind).append(": ").append(check.status.name)
             .append(" — ").append(check.detail.trim().take(MAX_CHECK_DETAIL)).append('\n')
     }
-    result.judge?.let { judge ->
-        append("  - Judge: **").append(judge.verdict.name).append("** (").append(judge.classification.name.lowercase()).append(")")
-        if (result.judgeInconclusive) append(" — the step status is the agent's claim and the checks alone")
-        append('\n')
-        judge.error?.let { append("    - Judge problem: ").append(it).append('\n') }
-        judge.usage?.let { append("    - Judge attempt usage: ").append(it.summaryLabel()).append('\n') }
-        judge.reasoning.takeIf { it.isNotBlank() }?.let { append("    - Reasoning: ").append(it.trim().replace('\n', ' ')).append('\n') }
-        judge.suggestedFix?.let { fix -> appendFix(fix, judge.fixApplied, judge.id) }
-    }
+    result.judge?.let { judge -> appendJudge(judge, result.judgeInconclusive) }
     result.agentError?.let { append("  - Marked as an agent error: ").append(it.trim().replace('\n', ' ')).append('\n') }
     result.screenshotPath?.let { append("  - Screenshot: `").append(it).append("`\n") }
     if (result.logStartOffset != null && result.logEndOffset != null) {
@@ -72,6 +65,18 @@ private fun StringBuilder.step(result: StepResult) {
     if (result.issueRequested) {
         append("  - An issue was requested for this step").append(result.issueId?.let { " (draft `$it`)" }.orEmpty()).append(".\n")
     }
+}
+
+/** The judge's verdict on a step with what it cost: the problem it had, its usage, its time, its reasoning and its suggested fix. */
+private fun StringBuilder.appendJudge(judge: StepJudgement, inconclusive: Boolean) {
+    append("  - Judge: **").append(judge.verdict.name).append("** (").append(judge.classification.name.lowercase()).append(")")
+    if (inconclusive) append(" — the step status is the agent's claim and the checks alone")
+    append('\n')
+    judge.error?.let { append("    - Judge problem: ").append(it).append('\n') }
+    judge.usage?.let { append("    - Judge attempt usage: ").append(it.summaryLabel()).append('\n') }
+    judge.timing?.let { append("    - Judge time: ").append(it.summaryLabel()).append('\n') }
+    judge.reasoning.takeIf { it.isNotBlank() }?.let { append("    - Reasoning: ").append(it.trim().replace('\n', ' ')).append('\n') }
+    judge.suggestedFix?.let { fix -> appendFix(fix, judge.fixApplied, judge.id) }
 }
 
 /** Who performed a manual or script step and how it ended, and whom a failure nobody judged is blamed on. */

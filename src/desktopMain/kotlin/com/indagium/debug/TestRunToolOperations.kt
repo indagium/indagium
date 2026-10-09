@@ -10,6 +10,7 @@ import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.summary
@@ -286,6 +287,7 @@ internal class TestRunToolOperations(private val appState: AppState) {
                     put("iteration", case.iteration)
                     put("status", case.status?.name)
                     put("steps", case.steps.map { it.status.name })
+                    judgedStepTimings(case.steps).takeIf { it.isNotEmpty() }?.let { put("judgedSteps", it) }
                     usageMap(case.agentUsage)?.let { put("agentUsage", it) }
                     usageMap(case.judgeUsage)?.let { put("judgeUsage", it) }
                     case.externalToolCalls?.let { put("externalToolCalls", it) }
@@ -293,6 +295,11 @@ internal class TestRunToolOperations(private val appState: AppState) {
                 }
             },
         )
+    }
+
+    /** How long the judge took for each judged step, in the units of the report's `judgeMs` / `judgeModelTurns`. */
+    private fun judgedStepTimings(steps: List<StepResult>): List<Map<String, Any?>> = steps.mapNotNull { step ->
+        step.judge?.timing?.let { mapOf("stepNumber" to step.stepNumber, "stepId" to step.stepId, "judgeMs" to it.totalMs, "judgeModelTurns" to it.modelTurns) }
     }
 
     private suspend fun listRuns(): Map<String, Any?> = mapOf(

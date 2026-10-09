@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.model.summaryLabel
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
@@ -140,6 +141,7 @@ private fun JudgeSection(run: TestRun, row: MatrixRow.Step, judge: StepJudgement
             TestsBadge(judge.classification.label())
         }
         judge.error?.let { TestsErrorText(it) }
+        judge.timing?.let { AppText("Judge: ${it.summaryLabel()}", color = tc.td, fontSize = 11.sp) }
         DetailLine("Reasoning (written by the judge model)", judge.reasoning)
         judge.suggestedFix?.let { FixLine(run, row, it, judge.id, judge.fixApplied) }
     }

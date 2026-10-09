@@ -1570,6 +1570,12 @@ Everything is kept under `<Test runs folder>/<run>/` (by default `<save folder>/
 (`lanes/<lane>/capture/…`, with its `logcat.log` and video), `screens/`, `transcript.jsonl`, `judge.jsonl` and lane tool
 activity. A lane's capture lives with its run, so deleting the run deletes the recordings.
 
+**Where the judge's time went.** A judged step's detail shows "Judge: 4.2 s (2 model turns)", the time the lane waited for
+the judge. `judge.jsonl` has every line stamped with when it really happened and ends each judge with a `judge_finished`
+line: how long the agent took to start, to answer first, how many model turns and tool calls it needed, when it gave its
+verdict and the total. The lane's `transcript.jsonl` has a `finish_step_timing` line per finished step that splits the wait
+into taking the screenshot, the automatic checks and the judge.
+
 **Lane capture tabs and your own captures.** A lane tab is not "your" live capture: it never stops you from starting
 a capture of your own, and the toolbar's Capture button and the device AI tools ignore it. What cannot happen is two
 recordings of the same phone: a lane refuses a device you are capturing, and Start capture refuses a device a lane

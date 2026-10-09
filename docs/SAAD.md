@@ -3622,6 +3622,24 @@ lanes of a run ended a step differently, one **comparison judge** (budget 12) lo
 evidence once all lanes are done (`compareDisagreements`, `testing/run/ComparisonRunner.kt:84`).
 Everything either judge says goes to `judge.jsonl`.
 
+**Timing.** `AiRun` stamps every event with its own clock at the moment `emit` takes it in
+(`AiRun.timedHistory`), and `TranscriptTail` writes each line with that stamp, so `judge.jsonl` (and a lane's
+`transcript.jsonl`) show when things really happened however late the file is flushed; `JudgeService` runs a tail
+while the judge works, so a hung or killed judge still leaves its lines. Each judge run ends with exactly one
+`judge_finished` line (also for a judge that was cancelled, timed out or could not start, with `partial: true`):
+`startupMs`, `firstResponseMs`, `modelTurns`, `toolCalls`, `verdictMs`, `totalMs`, `inputTokens`, `outputTokens`,
+`partial`, then `cleanupMs` (verdict until the agent was wound down), `verdict` and `error`. One calculator,
+`aiRunTiming` (`ai/AiRunTimingCalculator.kt`, definitions in its KDoc), measures from `AiRun.createdAt`: `startupMs`
+until the agent was ready (`AiRun.markAgentReady`: Codex when its managed MCP server reports ready or the turn starts,
+Claude Code at its first stream line, an in-app model as the first request goes out, so about 0), `modelTurns` counts
+`AiRun.markModelResponse` (an HTTP stream that completed, a Codex token-usage report with a new total, a Claude Code
+assistant turn; a lower bound). The same breakdown is kept on `StepJudgement.timing` (`run.json`, append-last, absent in
+older files), shown as "Judge: 4.2 s (2 model turns)" in the step detail and the Markdown report, and exposed as
+`judgeMs` / `judgeModelTurns` per step by `get_test_run_report` and as `judgedSteps` per case by
+`get_test_run_status`. `finish_step` adds a `finish_step_timing` line to the lane transcript
+(`evidenceCaptureMs`, `deterministicChecksMs`, `judgeMs`, `totalMs`), and `runAgentForText` (step drafts and recording
+rewrites) logs the same breakdown to the app log under `test-agent-timing`.
+
 **Status rule — explicit verdicts are mandatory.** Run validation checks every reachable `ScreenJudge`/`AskJudge` check in the selected cases and reachable suite/case hooks. These checks cannot run with judge mode `OFF` or without a configured, usable judge. Steps with no explicit judge checks retain optional-judge behavior.
 
 1. Deterministic failures remain `FAIL`, even if the agent says `blocked` or an explicit judge is

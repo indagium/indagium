@@ -1,5 +1,6 @@
 package com.indagium.testing.model
 
+import com.indagium.model.AiRunTiming
 import com.indagium.model.AiUsageStats
 
 // Domain types of the blind judge: what a run asks of it (JudgeMode), what it answers for one step (StepJudgement) and
@@ -63,6 +64,8 @@ data class StepJudgement(
     val fixApplied: Boolean = false,
     /** Usage of this single judge attempt; CaseResult.judgeUsage holds the aggregate across retries. */
     val usage: AiUsageStats? = null,
+    /** Where the time of this judge attempt went; null on a result written before timing was recorded. Appended last. */
+    val timing: AiRunTiming? = null,
 )
 
 /**

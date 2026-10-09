@@ -1,5 +1,6 @@
 package com.indagium.testing.store
 
+import com.indagium.model.AiRunTiming
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.JudgeVerdict
@@ -8,9 +9,12 @@ import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newComparisonId
 import com.indagium.testing.model.newJudgementId
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 // JSON of the judge's results inside run.json (the same tolerant style as TestRunCodec: unknown keys are ignored, a
@@ -39,6 +43,37 @@ internal fun judgementToJson(judgement: StepJudgement): JsonObject = buildJsonOb
     judgement.error?.let { put("error", it) }
     put("fixApplied", judgement.fixApplied)
     judgement.usage?.let { put("usage", aiUsageToJson(it)) }
+    judgement.timing?.let { put("timing", timingToJson(it)) }
+}
+
+private fun timingToJson(timing: AiRunTiming): JsonObject = buildJsonObject {
+    timing.startupMs?.let { put("startupMs", it) }
+    timing.firstResponseMs?.let { put("firstResponseMs", it) }
+    put("modelTurns", timing.modelTurns)
+    put("toolCalls", timing.toolCalls)
+    timing.verdictMs?.let { put("verdictMs", it) }
+    put("totalMs", timing.totalMs)
+    timing.inputTokens?.let { put("inputTokens", it) }
+    timing.outputTokens?.let { put("outputTokens", it) }
+    put("partial", timing.partial)
+}
+
+/** The timing of a judge attempt, or null when the file has none (written before timing was recorded) or it is not an object. */
+private fun decodeTiming(element: JsonElement?): AiRunTiming? {
+    val value = element as? JsonObject ?: return null
+
+    fun count(key: String): Long? = (value[key] as? JsonPrimitive)?.longOrNull?.takeIf { it >= 0L }
+    return AiRunTiming(
+        startupMs = count("startupMs"),
+        firstResponseMs = count("firstResponseMs"),
+        modelTurns = count("modelTurns")?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0,
+        toolCalls = count("toolCalls")?.coerceAtMost(Int.MAX_VALUE.toLong())?.toInt() ?: 0,
+        verdictMs = count("verdictMs"),
+        totalMs = count("totalMs") ?: 0L,
+        inputTokens = count("inputTokens"),
+        outputTokens = count("outputTokens"),
+        partial = (value["partial"] as? JsonPrimitive)?.booleanOrNull ?: false,
+    )
 }
 
 internal fun decodeJudgement(o: JsonObject): StepJudgement = StepJudgement(
@@ -52,6 +87,7 @@ internal fun decodeJudgement(o: JsonObject): StepJudgement = StepJudgement(
     error = o.optStr("error"),
     fixApplied = o.bool("fixApplied", false),
     usage = decodeAiUsage(o["usage"]),
+    timing = decodeTiming(o["timing"]),
 )
 
 internal fun comparisonToJson(comparison: JudgeComparison): JsonObject = buildJsonObject {

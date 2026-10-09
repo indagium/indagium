@@ -453,7 +453,8 @@ behavior. Screenshot, deterministic checks and judging share the full attempt de
 ended a step differently (status or judge
 verdict), one comparison judge (budget 12) looks at every lane's own evidence once all lanes are done and
 stores a comparison (`comparisons[]`: a verdict per lane, classification, explanation, `suggestedStepFix`) in the
-report. What the judges said is in `judge.jsonl` next to `run.json`.
+report. What the judges said is in `judge.jsonl` next to `run.json`, each line stamped with the time it happened and
+each judge run closed by a `judge_finished` line with its timing breakdown.
 
 - `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
   1..500, `evidence` `{ video, screenshots, logcat, transcript }`, `judgeProfileId` and `judgeMode`
@@ -490,13 +491,16 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   `stepNumber`, `instructions`, `expected`, `deviceSerial`, `completion`, `testerCanComplete`, `deadlineAt`, `hint`),
   `paused` (the run was paused from the live view; there is no tool to pause a run),
   the number of `comparisons`, per-case `agentUsage`, `judgeUsage`, `externalToolCalls` and combined `usage`, per-lane
-  `usage`, and a `summary` (`passedSteps`, `totalSteps`, `cases`) plus run `usage`. Tool counts are independent of the
-  bounded recent activity history.
+  `usage`, and a `summary` (`passedSteps`, `totalSteps`, `cases`) plus run `usage`. A case that had judged steps with
+  recorded timing also lists `judgedSteps` (`stepNumber`, `stepId`, `judgeMs`, `judgeModelTurns`). Tool counts are
+  independent of the bounded recent activity history.
 - `list_test_runs` — the runs of this session and the stored ones, newest first.
 - `get_test_run_report` (`runId`; optional `format` `json`|`markdown`) — per lane and case every step with its
   status (`PASS`, `FAIL`, `BLOCKED`, `TIMEOUT`, `SKIPPED`, `ERROR`), `attempts`, the agent's `agentClaim` and
   `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for a judge check nobody judged),
-  the step's `judge` verdict (`id`, `verdict`, `reasoning`, `classification`, `suggestedFix`), `judgeInconclusive`,
+  the step's `judge` verdict (`id`, `verdict`, `reasoning`, `classification`, `suggestedFix`, and `timing`: `startupMs`,
+  `firstResponseMs`, `modelTurns`, `toolCalls`, `verdictMs`, `totalMs`, tokens, `partial`), the step's `judgeMs` and
+  `judgeModelTurns` (absent when no timing was recorded, as in runs made before it existed), `judgeInconclusive`,
   `agentError`, per-step judge-attempt usage, per-case agent and inline-judge usage, per-lane and run usage, the run's
   comparison usage, and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
   lane's `logcat.log`), transcript range, tool activity path and artifact paths, all relative to the run folder. Agent, observation and

@@ -2,6 +2,7 @@ package com.indagium.testing.run
 
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
+import com.indagium.ai.TimedAiRunEvent
 import com.indagium.capture.CaptureSettings
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.device.TestDeviceSession
@@ -118,8 +119,10 @@ private const val MAX_LOGGED_ARGUMENT_CHARS = 2_000
 private const val MAX_LOGGED_RESULT_CHARS = 2_000
 
 /**
- * Copies the events of [run] into [writer] as JSON lines, in order. The run's history is read, not its event flow, so
- * nothing is lost to a late start. Assistant text arrives in many small deltas and is written as one line.
+ * Copies the events of [run] into [writer] as JSON lines, in order, each stamped with the time the run emitted it (not the time
+ * this tail got to write it), so a transcript shows when things really happened however late it is flushed. The run's history is
+ * read, not its event flow, so nothing is lost to a late start. Assistant text arrives in many small deltas and is written as one
+ * line, stamped with its last delta.
  */
 internal class TranscriptTail(
     private val run: AiRun,
@@ -129,11 +132,12 @@ internal class TranscriptTail(
 ) {
     private var written = 0
     private val assistant = StringBuilder()
+    private var assistantAt = 0L
 
     /** Writes everything the run has recorded since the last call. The last assistant text stays buffered until [close]. */
     @Synchronized
     fun flush() {
-        val events = run.history
+        val events = run.timedHistory
         events.drop(written).forEach(::write)
         written = events.size
     }
@@ -153,15 +157,18 @@ internal class TranscriptTail(
     }
 
     private fun flushAssistant() {
-        if (assistant.isNotEmpty()) append("assistant", mapOf("text" to assistant.toString()))
+        if (assistant.isNotEmpty()) append("assistant", mapOf("text" to assistant.toString()), assistantAt)
         assistant.clear()
     }
 
-    private fun append(kind: String, fields: Map<String, Any?> = emptyMap()) = writer.append(kind, extra + fields)
+    private fun append(kind: String, fields: Map<String, Any?> = emptyMap(), at: Long) = writer.append(kind, extra + fields, at)
 
-    private fun write(event: AiRunEvent) {
+    private fun write(timed: TimedAiRunEvent) {
+        val event = timed.event
+        val at = timed.at
         if (event is AiRunEvent.AssistantDelta) {
             assistant.append(event.text)
+            assistantAt = at
             return
         }
         flushAssistant()
@@ -169,16 +176,18 @@ internal class TranscriptTail(
             is AiRunEvent.ToolRequested -> append(
                 "tool_call",
                 mapOf("tool" to event.call.name, "arguments" to event.call.argumentsJson.take(MAX_LOGGED_ARGUMENT_CHARS)),
+                at,
             )
             is AiRunEvent.ToolCompleted -> append(
                 "tool_result",
                 mapOf("tool" to event.call.name, "result" to event.resultPreview.take(MAX_LOGGED_RESULT_CHARS), "truncated" to event.resultTruncated),
+                at,
             )
-            is AiRunEvent.AgentProgress -> append("assistant", mapOf("text" to event.text))
+            is AiRunEvent.AgentProgress -> append("assistant", mapOf("text" to event.text), at)
             is AiRunEvent.ConfirmationRequired ->
-                append("confirmation", mapOf("tool" to event.confirmation.call.name, "description" to event.confirmation.description))
-            is AiRunEvent.Error -> append("error", mapOf("message" to event.message))
-            is AiRunEvent.Status -> append("status", mapOf("text" to event.text))
+                append("confirmation", mapOf("tool" to event.confirmation.call.name, "description" to event.confirmation.description), at)
+            is AiRunEvent.Error -> append("error", mapOf("message" to event.message), at = at)
+            is AiRunEvent.Status -> append("status", mapOf("text" to event.text), at)
             is AiRunEvent.Usage -> append(
                 "usage",
                 mapOf(
@@ -191,9 +200,10 @@ internal class TranscriptTail(
                     "reasoningOutput" to event.reasoningOutputTokens,
                     "aggregation" to event.aggregation.name,
                 ),
+                at,
             )
-            AiRunEvent.Cancelled -> append("cancelled")
-            AiRunEvent.Done -> append("done")
+            AiRunEvent.Cancelled -> append("cancelled", at = at)
+            AiRunEvent.Done -> append("done", at = at)
             is AiRunEvent.AssistantDelta, is AiRunEvent.ToolExecutionStarted, is AiRunEvent.UsageRequestStarted -> Unit
         }
     }

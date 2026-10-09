@@ -137,6 +137,11 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     putIfNotNull("completedBy", step.completedBy?.name)
     putIfNotNull("manualCompletion", step.manualCompletion?.name)
     putIfNotNull("classification", step.classification?.name)
+    // Derived from judge.timing for the report (get_test_run_report reads the step as written); the decoder ignores them.
+    step.judge?.timing?.let {
+        put("judgeMs", it.totalMs)
+        put("judgeModelTurns", it.modelTurns)
+    }
 }
 
 private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
