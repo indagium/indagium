@@ -3158,7 +3158,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -3581,7 +3581,7 @@ called while holding one that could take another lock, and none is ever held tog
 | `testLibraryMirrorLock`, `testRunMirrorLock` | `ui/AppState.kt:1911,2013` | The `AppState` mirrors of the library and run flows: the value is read **inside** the lock so the last assignment is the freshest |
 | `testStorageLock` | `ui/AppState.kt:1928` | Switching the AI test folders (`reconcileTestStorage`, `initTestStorage`): swapping the `TestLibraryStore` and the pinned `activeTest*Dir` fields. **Leaf lock**; the library mirror and `forgetFinishedRuns()` are touched only after it is released |
 | `mutex` (coroutine `Mutex`) | `testing/run/StepSequence.kt:135` | A sequence's step state; with the `finishing` flag it makes `finish_step` and the watchdog mutually exclusive |
-| `testStepRecordingLock` (`AppState`), recording session `lock` / `probeLock` | `ui/AppState.kt`, `testing/authoring/TestStepRecordingSession.kt` | The one recording session and its `recordingApplications` / `recordingRewrites` sets (an apply and a rewrite of one session exclude each other, decided in one critical section). The session `lock` is a leaf: adb work runs on the session's two workers, an AI call runs with **no** lock held, and `probeLock` is only taken after `lock` (§26.12) |
+| `testStepRecordingLock` (`AppState`), recording session `lock` / `probeLock` | `ui/AppState.kt`, `testing/authoring/TestStepRecordingSession.kt` | The one recording session and its `recordingApplications` / `recordingRewrites` sets (an apply and a rewrite of one session exclude each other, decided in one critical section). The session `lock` is a leaf: adb work runs on the session's two workers and the device input recorder's worker, an AI call runs with **no** lock held, and `probeLock` is only taken after `lock` (§26.12) |
 | `stateLock` (existing) | `laneCaptureSerials`, `manualCaptureStartSerial` in `ui/AppState.kt` | The per-device claim of lane captures; the one place this feature takes `stateLock`, and only in `AppState` (never inside `testing/`). Claim and release are short and call nothing while holding it |
 | `LaneCaptureHandle.stopTablessOnce` (`@Synchronized`), `LaneNotes` (`AtomicReference`) | `ui/LaneCaptures.kt`, `ui/CaptureMarkerWriter.kt` | Leaf: start the one stop job of a tabless lane; compare-and-set of its notes |
 
@@ -3922,6 +3922,71 @@ newer contaminated probe cannot hide an older valid one. The element under a tap
 that input's before UI state. Probe and preview data live in bounded session storage
 (`MAX_RECORDED_STEPS + 1` rows, 48 MB of images); adb work stays off the UI thread and outside the
 session lock, with bounded queue, cancellation, and drain behavior.
+
+**Input sources.** A recording has two independent sources that feed the same `TestStepRecordingSession.accept` (a defaulted
+`source` parameter says which, so a row's context text does not claim the mirror for a device event): the mirror
+(`MirrorInputObservers`, only while a mirror is live) and the device itself (`DeviceInputRecorder`, over adb, mirror or not).
+`AppState.prepareTestStepRecording` still starts or reuses the capture and waits for its mirror, but a mirror that fails or
+times out is now a warning ("Recording continues without the mirror…") instead of an error, and the recording has no
+`RecordedVideoTimeline` then (screens come from the adb probe and screencap). `startTestStepRecording` refuses only when there is
+neither a live mirror nor a usable device-input plan, with both reasons in the message.
+
+*Device input* (`DeviceInputRecorder`, all pure parsing in `GeteventParsers.kt` / `GeteventKeys.kt` / `DeviceInputEnvironment.kt`).
+A preflight (off the UI thread) runs three fixed commands: `getevent -lp` (parsed by `GeteventDeviceParser`: touchscreens are
+devices with `INPUT_PROP_DIRECT` plus `ABS_MT_POSITION_X/Y` or single-touch `ABS_X/Y`, or, when the dump has no properties at all,
+a device with touch axes and `BTN_TOUCH`; pointer/touchpad devices are not touchscreens; devices whose name matches `scrcpy|uhid`
+(the mirror's UHID keyboard and mouse) are excluded; devices with `KEY_*` labels from the key table are key devices), `wm size`
+(natural size, override first) and one `dumpsys window displays` rotation read. Unusable output gives `Unavailable` (the session
+falls back to the mirror alone with a warning). It then streams `adb shell getevent -lt` through `CaptureTools.startAdb` (the same
+process helper the logcat reader uses; stderr merged, descendant kill on close). Threads: a reader that only parses bounded lines
+(`forEachBoundedLine`, 512 bytes per line, over-long lines skipped) and feeds `GeteventTouchParser` and the key table; a worker that
+runs `DeviceInputPipeline` (the only thread that asks the device anything again); a 2 s rotation poller. The reader never blocks
+on the device. getevent timestamps are kernel uptime: `KernelClock` maps them to wall clock with the smallest observed offset and
+never runs backwards. `GeteventTouchParser` handles protocol B (slots, tracking ids), protocol A (`SYN_MT_REPORT` groups) and
+single-touch (`BTN_TOUCH` + `SYN_REPORT`), scales a raw axis position to natural display pixels (`value * size / (max - min + 1)`),
+then turns it by the display rotation read at that moment (Android's own rule: 90 gives `(y, W-1-x)`, 180 `(W-1-x, H-1-y)`,
+270 `(H-1-y, x)`), and emits the `MirrorControlCommand.Touch` values the mirror produces, with `screenWidth/Height` set to the
+logical size, so tap/long-press/swipe/multi-touch handling, probes, the rewrite and the video logic are shared unchanged. The
+rotation comes from the preflight, the poll and every probe (`RecordingScreenState.rotation`, the UI dump's
+`<hierarchy rotation>`), and is cached in a volatile field. Key presses (`KEY_BACK`, `KEY_HOMEPAGE`, `KEY_APPSELECT`,
+`KEY_POWER`, volume, mute, media, Enter, Tab, Escape, arrows) become `Key` commands with row labels Home, Back, Recents, Power,
+Volume up/down, Mute, Play/Pause; printable keys from a hardware or emulator-host keyboard go through `KeyTextAccumulator`
+(Shift and Caps Lock aware, Ctrl/Alt/Meta combinations ignored, Backspace edits the run) into one `Enter text` row after 1.5 s of
+silence or at the next control key or touch. Mirror system commands (`ExpandNotifications`, `ExpandSettings`, `Collapse*`,
+`RotateDevice`, `SetDisplayPowerOn`) are rows with their own `RecordedInputKind` (`NOTIFICATIONS`, `QUICK_SETTINGS`,
+`CLOSE_PANELS`, `ROTATE`, `SCREEN_ON`, appended last) instead of a warning. `accept` drops an identical Key/Text/Touch down or up
+from the *other* source within 50 ms (touches within 4 px); the mirror's injected input does not show in getevent, so this is a
+safety net.
+
+*Privacy of the on-screen keyboard.* The pipeline buffers a gesture until every finger is up, then asks for the keyboard state
+(`dumpsys input_method`: `mInputShown`/`mIsInputViewShown`; the IME window frame from `dumpsys window windows`, fallback the
+bottom 40 % of the screen; cached 1.5 s, invalidated by any non-keyboard gesture or control key). A gesture whose every down
+lands inside the frame while the keyboard is shown is **never passed to the session**: it only extends a typing burst
+(start/last time, nothing else). The burst ends when the keyboard hides, another gesture or key arrives, or 2 s pass; after 0.6 s of
+quiet a snapshot of the focused field is read (UI dump; `focusedFieldOf`: focused password or edit control) so an outside tap
+that ends the burst does not read the next screen. The session then writes one `TEXT` row (`keyboardTextLocked`): the field text
+minus what the last screen state before the burst showed (`typedTextDelta`), `Enter text: ••••` when the field is a password
+(or an earlier state showed a password being edited), `Type text on the on-screen keyboard` when nothing could be read, or
+`Clear the text field`. The row has no gesture path, tapped element or percentage, and no key coordinate exists anywhere (rows,
+sampled paths, probes, video/storyboard windows, MCP output); the existing password redaction of video windows keys on the `••••`
+row. A keyboard state that cannot be read is warned once and taps then fall back to ordinary tap rows. Known limit: if the screen
+changes before any field read, the row says only that text was typed.
+
+*Stop.* `stop()` marks the session pending (`tailPending`, part of `pendingSnapshots`, so review edits and Apply wait) and calls
+`DeviceInputHandle.finish()` outside the session lock: non-blocking; the worker drains its queue, flushes typed text and the open
+burst (one bounded field read) and reports `deviceInputFinished`; those rows are accepted although the session is no longer
+active, but get no new probe or image. `stopAndDrain` waits for it (12 s, then closes the recorder and warns); `close()` closes the
+recorder at once. The getevent process is closed on a separate daemon thread, never on the caller (the Stop button runs on the
+UI thread). No recording lock is held across adb, and no mirror lifecycle lock is involved.
+
+*Replay.* The lane tools can do what these rows record: `press_key` takes `DEVICE_KEY_CODES`, now also `POWER`, `VOLUME_MUTE`,
+`APP_SWITCH` and `MEDIA_PLAY_PAUSE` (the table is shared with the global `device_key` tool, whose enum is derived from it, so that
+tool gained the same keys; `SLEEP` and similar remain out); `open_system_panel(notifications|quick_settings|close)` runs one fixed
+`cmd statusbar expand-notifications|expand-settings|collapse`; `rotate_device(0..3)` reads `accelerometer_rotation` and
+`user_rotation` once (refusing when they cannot be read, since they could not be undone), then writes `accelerometer_rotation 0` and
+`user_rotation N`. `TestDeviceSession.closeBlocking` (the lane's `release` runs it in `NonCancellable`, so also after a cancel) puts the
+original values back, deleting `user_rotation` if it was unset. Lane tools are not in the global MCP catalogue (`MCP_TOOLS` and its
+count are unchanged); they are listed in `RESERVED_SCRIPT_TOOL_NAMES`, the lane prompt and the `test_lane_tool_call` description.
 
 **Typed text and passwords.** If the screen read before or after a typing run shows a focused password
 node (or a password node when nothing reports focus), the whole run (consecutive typed/pasted rows with

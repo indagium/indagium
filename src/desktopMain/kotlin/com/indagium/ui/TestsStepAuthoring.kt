@@ -120,7 +120,7 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
                             if (authoringDevices.isEmpty()) {
                                 recordError = "No connected Android devices are available. Connect or authorize a device, then try again."
                             } else if (serial == null) {
-                                recordError = "Choose the device to record. The Tests workspace will stay open while its mirror connects."
+                                recordError = "Choose the device to record. The Tests workspace will stay open while the recording prepares."
                             } else {
                                 startAuthoringRecording(serial, ui, suiteId, case.id) { recordError = it }
                             }
@@ -132,7 +132,7 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
                 }
             },
             enabled = editable && !preparingRecording,
-            disabledHint = if (!editable) "This case is read-only." else "Preparing the device mirror.",
+            disabledHint = if (!editable) "This case is read-only." else "Preparing the recording.",
         )
         if (preparingRecording) {
             AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
@@ -485,7 +485,10 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
         AppText(if (snapshot.active) "Recording device input…" else "Review recorded steps", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(5.dp))
-        TestsHint("Device ${session.deviceSerial}. Tap, swipe, key and text input are observed through the existing mirror. No device actions are sent by this recorder.")
+        TestsHint(
+            "Device ${session.deviceSerial}. Use the device or emulator window directly, or the Indagium mirror. " +
+                "Taps, swipes, buttons, panels, rotation and typing are observed; this recorder never sends input to the device.",
+        )
         if (snapshot.active) {
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
@@ -498,7 +501,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 if (snapshot.excludedSourceInputIds.isNotEmpty()) {
                     "No steps remain in review. Restore removed inputs to bring the original recording back."
                 } else {
-                    "No accepted mirror input recorded yet."
+                    "No input recorded yet."
                 },
             )
             if (!snapshot.active) AppButton("+ Add step", onClick = { addRecordedStep(0) }, enabled = reviewEditable, variant = ButtonVariant.Ghost)

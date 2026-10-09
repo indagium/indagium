@@ -433,8 +433,9 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "start_test_recording",
-        "Start or reuse a local capture for the selected connected device, connect its embedded mirror, and begin a review-only " +
-            "recording session for accepted user input. This observes mirror commands only; it never sends input or drives a device. " +
+        "Start or reuse a local capture for the selected connected device, try to connect its embedded mirror, and begin a review-only " +
+            "recording session. Input is observed from the device itself over adb getevent (touches, buttons, Power and volume keys, " +
+            "keyboards) and from the mirror when it is live; the mirror is optional. It never sends input or drives a device. " +
             "Asks for confirmation.",
         schema("suiteId" to "string", "caseId" to "string", "deviceSerial" to "string", required = listOf("suiteId", "caseId", "deviceSerial")),
     ),

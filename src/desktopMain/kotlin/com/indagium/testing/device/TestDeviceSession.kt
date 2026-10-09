@@ -27,6 +27,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Duration
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
 // One device lane of an AI test run. It records through a [LaneCapture] (production: a real capture controller, with or
@@ -40,6 +41,11 @@ import kotlin.math.roundToInt
 /** The folder of a lane (under the run folder `lanes/<laneId>/`) that holds its capture sessions. */
 const val LANE_CAPTURE_DIRECTORY = "capture"
 private const val INPUT_TIMEOUT_SECONDS = 5L
+private const val ACCELEROMETER_ROTATION_SETTING = "accelerometer_rotation"
+private const val USER_ROTATION_SETTING = "user_rotation"
+private const val ROTATION_LOCKED = 0
+private const val MIN_ROTATION = 0
+private const val MAX_ROTATION = 3
 private const val LAUNCH_TIMEOUT_SECONDS = 10L
 private const val DEVICE_STATE_TIMEOUT_SECONDS = 8L
 private const val ADB_ERROR_MESSAGE_MAX_CHARS = 500
@@ -50,6 +56,23 @@ private const val MAX_LOG_READ_ROWS = 500
 private const val MAX_LOG_SCAN_BYTES = 16L * 1024 * 1024
 private const val DEFAULT_SWIPE_MS = 350
 private const val LIVE_CAPTURE_REFUSAL = "is held by the live capture in the main window; stop that capture or choose another device."
+
+/** The system panels a lane can open or close with `cmd statusbar`; [command] is the fixed sub-command, [toolValue] what the agent passes. */
+internal enum class SystemPanel(val toolValue: String, val command: String) {
+    NOTIFICATIONS("notifications", "expand-notifications"),
+    QUICK_SETTINGS("quick_settings", "expand-settings"),
+    CLOSE("close", "collapse"),
+    ;
+
+    companion object {
+        fun fromToolValue(value: String): SystemPanel =
+            entries.firstOrNull { it.toolValue == value.trim().lowercase() }
+                ?: throw IllegalArgumentException("panel must be one of ${entries.joinToString(", ") { it.toolValue }}")
+    }
+}
+
+/** What the rotation settings were before the lane first rotated the device: null means the setting did not exist. */
+private data class RotationRestore(val accelerometer: Int?, val user: Int?)
 
 /** A screenshot as the agent sees it, plus the full-resolution PNG kept for evidence. */
 internal class SessionScreenshot(
@@ -97,6 +120,7 @@ internal class TestDeviceSession private constructor(
 ) {
     private val logReader = CaptureLogReader(capture.readLogFile)
     private val inputLock = Mutex()
+    private val rotationRestore = AtomicReference<RotationRestore?>(null)
 
     @Volatile
     private var space: DeviceScreenCoordinateSpace? = null
@@ -165,6 +189,47 @@ internal class TestDeviceSession private constructor(
         val keyCode = DEVICE_KEY_CODES[name] ?: throw IllegalArgumentException("Supported keys are ${DEVICE_KEY_CODES.keys.joinToString(", ")}")
         runInput(listOf("input", "keyevent", keyCode))
         return name
+    }
+
+    /** Opens the notification shade or quick settings, or closes them, with `cmd statusbar`. */
+    suspend fun openSystemPanel(panel: SystemPanel) {
+        runInput(listOf("cmd", "statusbar", panel.command))
+    }
+
+    /**
+     * Turns the display to [rotation] quarter turns (0 upright, 1..3 counterclockwise) by switching auto-rotate off and setting the
+     * user rotation. The settings the device had are remembered the first time and put back when the lane ends ([closeBlocking]).
+     * Refused when those settings cannot be read, since they could not be restored. The screenshot coordinate space is dropped: take a
+     * new screenshot before the next tap.
+     */
+    suspend fun rotateDevice(rotation: Int) {
+        require(rotation in MIN_ROTATION..MAX_ROTATION) { "rotation must be 0, 1, 2 or 3 (quarter turns)" }
+        inputLock.withLock {
+            if (rotationRestore.get() == null) {
+                val accelerometer = readSystemSetting(ACCELEROMETER_ROTATION_SETTING)
+                val user = readSystemSetting(USER_ROTATION_SETTING)
+                rotationRestore.set(RotationRestore(accelerometer, user))
+            }
+            putSystemSetting(ACCELEROMETER_ROTATION_SETTING, ROTATION_LOCKED)
+            putSystemSetting(USER_ROTATION_SETTING, rotation)
+        }
+        space = null
+    }
+
+    /** The integer value of a `settings get system` key; null when the key is unset. Throws when the device could not be asked. */
+    private suspend fun readSystemSetting(key: String): Int? {
+        val result = adb(listOf("shell", "settings", "get", "system", key), INPUT_TIMEOUT_SECONDS)
+        check(!result.timedOut && result.exitCode == 0) {
+            "Could not read the device's rotation settings, so a rotation could not be undone when the lane ends."
+        }
+        return result.stdoutText().trim().toIntOrNull()
+    }
+
+    private suspend fun putSystemSetting(key: String, value: Int) {
+        val result = adb(listOf("shell", "settings", "put", "system", key, value.toString()), INPUT_TIMEOUT_SECONDS)
+        check(!result.timedOut && result.exitCode == 0) {
+            "Could not set $key: ${(result.stderrText() + "\n" + result.stdoutText()).trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}"
+        }
     }
 
     suspend fun inputText(text: String) {
@@ -346,7 +411,25 @@ internal class TestDeviceSession private constructor(
 
     /** For callers that are already off the UI and request threads (an IO lane's own cleanup, tests). */
     fun closeBlocking() {
+        restoreRotationBlocking()
         capture.stop()
+    }
+
+    /** Puts back the rotation settings the lane changed; best effort, bounded, and only when the lane rotated the device. */
+    private fun restoreRotationBlocking() {
+        val before = rotationRestore.getAndSet(null) ?: return
+        // The user rotation first, so the display does not jump when auto-rotate comes back on.
+        restoreSystemSetting(USER_ROTATION_SETTING, before.user)
+        restoreSystemSetting(ACCELEROMETER_ROTATION_SETTING, before.accelerometer)
+    }
+
+    private fun restoreSystemSetting(key: String, value: Int?) {
+        val arguments = if (value == null) {
+            listOf("shell", "settings", "delete", "system", key)
+        } else {
+            listOf("shell", "settings", "put", "system", key, value.toString())
+        }
+        runCatching { tools.runAdb(serial, arguments, Duration.ofSeconds(INPUT_TIMEOUT_SECONDS)) }
     }
 
     companion object {

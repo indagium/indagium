@@ -12,6 +12,7 @@ import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.debug.schema
 import com.indagium.model.LogEntry
 import com.indagium.testing.device.LogWaitResult
+import com.indagium.testing.device.SystemPanel
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.device.UiTreeNodeView
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
@@ -432,10 +433,43 @@ private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
         IndagiumToolDescriptor(
             "press_key",
-            "Press a navigation or editing key on the device.",
+            "Press a navigation, editing, volume, media or power key on the device. POWER toggles the screen.",
             schema("key" to "string", required = listOf("key"), enums = mapOf("key" to DEVICE_KEY_CODES.keys.toList())),
         ),
         guarded { args -> mapOf("ok" to true, "key" to context.session.pressKey(args.requiredString("key"))) },
+    ),
+    LaneTool(
+        IndagiumToolDescriptor(
+            "open_system_panel",
+            "Open the notification shade (notifications) or quick settings (quick_settings) from anywhere, or close either (close).",
+            schema(
+                "panel" to "string",
+                required = listOf("panel"),
+                enums = mapOf("panel" to SystemPanel.entries.map { it.toolValue }),
+            ),
+        ),
+        guarded { args ->
+            val panel = SystemPanel.fromToolValue(args.requiredString("panel"))
+            context.session.openSystemPanel(panel)
+            mapOf("ok" to true, "panel" to panel.toolValue)
+        },
+    ),
+    LaneTool(
+        IndagiumToolDescriptor(
+            "rotate_device",
+            "Turn the display to a rotation (0 upright, 1, 2 or 3 quarter turns counterclockwise); auto-rotate is switched off. The " +
+                "device's own rotation settings come back when your lane ends. Take a new screenshot afterwards: its size changes.",
+            schema(
+                "rotation" to "integer",
+                required = listOf("rotation"),
+                descriptions = mapOf("rotation" to "0, 1, 2 or 3 quarter turns counterclockwise from upright."),
+            ),
+        ),
+        guarded { args ->
+            val rotation = args.requiredInt("rotation")
+            context.session.rotateDevice(rotation)
+            mapOf("ok" to true, "rotation" to rotation, "next" to "take_screenshot")
+        },
     ),
     LaneTool(
         IndagiumToolDescriptor(

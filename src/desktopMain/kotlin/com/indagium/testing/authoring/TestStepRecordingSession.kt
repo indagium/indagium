@@ -119,6 +119,9 @@ data class TestStepRecordingSnapshot(
     val rewriteInProgress: Boolean = false,
 )
 
+/** Where an accepted input came from: a command the Indagium mirror sent, or an event the device itself produced (adb getevent). */
+internal enum class InputSource { MIRROR, DEVICE }
+
 private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
 private const val MAX_RECORDING_SNAPSHOT_BYTES = 2 * 1024 * 1024
 private const val MAX_RECORDING_SNAPSHOT_DIMENSION = 1_280
@@ -176,6 +179,9 @@ class TestStepRecordingSession internal constructor(
         var stride: Int = 1,
     )
 
+    /** The last mirror or device input that can be a duplicate of the other source's, for [isDuplicateOfOtherSource]. */
+    private data class LastInput(val command: MirrorControlCommand, val source: InputSource, val atMs: Long)
+
     private val mutableSnapshot = MutableStateFlow(TestStepRecordingSnapshot(active = true))
     val snapshot: StateFlow<TestStepRecordingSnapshot> = mutableSnapshot
     private val touches = mutableMapOf<Long, TouchStart>()
@@ -184,6 +190,14 @@ class TestStepRecordingSession internal constructor(
     private val lock = Any()
     private var subscription: Closeable? = subscription
     private var videoSubscription: Closeable? = null
+    private var deviceInput: DeviceInputHandle? = null
+    private var tailPending = false
+    private val tailDone = CountDownLatch(1)
+    private var inputSource = InputSource.MIRROR
+
+    /** How long [stopAndDrain] waits for the device input recorder's last rows; tests shorten it. */
+    internal var tailDrainTimeoutMs: Long = TAIL_DRAIN_TIMEOUT_MS
+    private var lastInput: LastInput? = null
     private var applicationReserved = false
     private var completedRewriteUsage: AiUsageStats? = null
     private var pendingRewriteUsage: AiUsageStats? = null
@@ -238,11 +252,23 @@ class TestStepRecordingSession internal constructor(
         if (reject) subscription.close()
     }
 
-    internal fun accept(command: MirrorControlCommand, frame: MirrorFrame? = null, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
-        if (!mutableSnapshot.value.active || mutableSnapshot.value.steps.size >= MAX_RECORDED_STEPS) {
-            if (mutableSnapshot.value.active) warn("Recording stopped accepting input after $MAX_RECORDED_STEPS steps.")
-            return@synchronized
+    internal fun accept(
+        command: MirrorControlCommand,
+        frame: MirrorFrame? = null,
+        nowMs: Long = System.currentTimeMillis(),
+        source: InputSource = InputSource.MIRROR,
+    ) = synchronized(lock) {
+        if (mutableSnapshot.value.active) acceptLocked(command, frame, nowMs, source)
+    }
+
+    private fun acceptLocked(command: MirrorControlCommand, frame: MirrorFrame?, nowMs: Long, source: InputSource) {
+        val current = mutableSnapshot.value
+        if (current.steps.size >= MAX_RECORDED_STEPS) {
+            if (current.active) warn("Recording stopped accepting input after $MAX_RECORDED_STEPS steps.")
+            return
         }
+        if (isDuplicateOfOtherSource(command, nowMs, source)) return
+        inputSource = source
         when (command) {
             is MirrorControlCommand.Touch -> touch(command, frame, nowMs)
             is MirrorControlCommand.Key -> if (command.action == MirrorKeyAction.DOWN && command.repeat == 0) key(command.keycode, frame, nowMs)
@@ -251,12 +277,84 @@ class TestStepRecordingSession internal constructor(
                 recordText(it, frame, nowMs, pasted = true)
             }
             is MirrorControlCommand.Back -> if (command.action == MirrorKeyAction.UP) {
-                add("Press Back", "Android Back was sent through the device mirror.", frame, RecordedInputKind.BACK, nowMs)
+                add("Press Back", "Android Back was ${channel()}.", frame, RecordedInputKind.BACK, nowMs)
             }
-            MirrorControlCommand.ExpandNotifications, MirrorControlCommand.ExpandSettings,
-            MirrorControlCommand.CollapsePanels, MirrorControlCommand.CollapseNotifications,
-            MirrorControlCommand.RotateDevice, MirrorControlCommand.SetDisplayPowerOn -> warn("This device control is not converted to a test step yet.")
+            MirrorControlCommand.ExpandNotifications, MirrorControlCommand.ExpandSettings, MirrorControlCommand.CollapsePanels,
+            MirrorControlCommand.CollapseNotifications, MirrorControlCommand.RotateDevice, MirrorControlCommand.SetDisplayPowerOn ->
+                acceptSystemControl(command, frame, nowMs)
             is MirrorControlCommand.GetClipboard -> Unit
+        }
+    }
+
+    /** The mirror's panel, rotation and screen-on commands, as rows. */
+    private fun acceptSystemControl(command: MirrorControlCommand, frame: MirrorFrame?, nowMs: Long) {
+        when (command) {
+            MirrorControlCommand.ExpandNotifications -> addSystem("Open the notification shade", RecordedInputKind.NOTIFICATIONS, frame, nowMs)
+            MirrorControlCommand.ExpandSettings -> addSystem("Open quick settings", RecordedInputKind.QUICK_SETTINGS, frame, nowMs)
+            MirrorControlCommand.CollapsePanels, MirrorControlCommand.CollapseNotifications ->
+                addSystem("Close the notification panels", RecordedInputKind.CLOSE_PANELS, frame, nowMs)
+            MirrorControlCommand.RotateDevice -> addSystem("Rotate the device", RecordedInputKind.ROTATE, frame, nowMs)
+            MirrorControlCommand.SetDisplayPowerOn -> addSystem("Turn the screen on", RecordedInputKind.SCREEN_ON, frame, nowMs)
+            else -> Unit
+        }
+    }
+
+    /**
+     * True when [command] repeats, within [DUPLICATE_WINDOW_MS], the same input the other source just delivered (a safety net: the
+     * mirror's injected input does not show up in getevent, but nothing guarantees every setup behaves so). Moves are not compared.
+     */
+    private fun isDuplicateOfOtherSource(command: MirrorControlCommand, nowMs: Long, source: InputSource): Boolean {
+        if (command is MirrorControlCommand.Touch && command.action == MirrorTouchAction.MOVE) return false
+        val previous = lastInput
+        val duplicate = previous != null && previous.source != source && nowMs - previous.atMs in 0..DUPLICATE_WINDOW_MS &&
+            sameInput(previous.command, command)
+        if (!duplicate) lastInput = LastInput(command, source, nowMs)
+        return duplicate
+    }
+
+    private fun sameInput(a: MirrorControlCommand, b: MirrorControlCommand): Boolean = when {
+        a is MirrorControlCommand.Touch && b is MirrorControlCommand.Touch ->
+            a.action == b.action && a.screenWidth == b.screenWidth && a.screenHeight == b.screenHeight &&
+                abs(a.x - b.x) <= DUPLICATE_TOUCH_TOLERANCE_PX && abs(a.y - b.y) <= DUPLICATE_TOUCH_TOLERANCE_PX
+        else -> a == b
+    }
+
+    /** The words for how the current input reached the recorder, used in a row's context. */
+    private fun channel(): String =
+        if (inputSource == InputSource.DEVICE) "observed on the device (adb getevent)" else "sent through the device mirror"
+
+    /**
+     * Connects the device input recorder. [stop] asks it to [DeviceInputHandle.finish] (the session then counts as pending until it
+     * reports back through [deviceInputSink]); [close] closes it at once.
+     */
+    internal fun attachDeviceInput(handle: DeviceInputHandle) {
+        val reject = synchronized(lock) {
+            if (!mutableSnapshot.value.active || deviceInput != null) {
+                true
+            } else { deviceInput = handle; false }
+        }
+        if (reject) handle.close()
+    }
+
+    /** Adds a warning to the recording; for the setup code that learns something the session cannot (a mirror that did not start). */
+    internal fun addWarning(message: String) = synchronized(lock) { warn(message) }
+
+    /** What the device input recorder delivers to: rows are added in order, also in the short tail after [stop]. */
+    internal val deviceInputSink: DeviceInputSink = object : DeviceInputSink {
+        override fun deviceInput(command: MirrorControlCommand, atMs: Long) = synchronized(lock) {
+            if (mutableSnapshot.value.active || tailPending) acceptLocked(command, null, atMs, InputSource.DEVICE)
+        }
+
+        override fun keyboardText(reading: KeyboardTextReading, startMs: Long, endMs: Long) = synchronized(lock) {
+            if (mutableSnapshot.value.active || tailPending) keyboardTextLocked(reading, startMs, endMs)
+        }
+
+        override fun deviceInputWarning(message: String) = synchronized(lock) { warn(message) }
+
+        override fun deviceInputFinished() = synchronized(lock) {
+            tailPending = false
+            tailDone.countDown()
+            refreshPending()
         }
     }
 
@@ -567,11 +665,14 @@ class TestStepRecordingSession internal constructor(
     }
 
     fun stop(): TestStepRecordingSnapshot {
+        var finishingInput: DeviceInputHandle? = null
         val detached = synchronized(lock) {
             var oldSubscription: Closeable? = null
             if (mutableSnapshot.value.active) {
                 touches.clear()
-                mutableSnapshot.value = mutableSnapshot.value.copy(active = false)
+                finishingInput = deviceInput
+                if (finishingInput == null) tailDone.countDown() else tailPending = true
+                mutableSnapshot.value = mutableSnapshot.value.copy(active = false, pendingSnapshots = pendingCount())
                 oldSubscription = subscription
                 subscription = null
                 screenshotWorker.shutdown()
@@ -585,6 +686,8 @@ class TestStepRecordingSession internal constructor(
         }
         detached.first?.close()
         detached.second?.close()
+        // Not under the lock: the recorder reads the device and delivers the last typed text through deviceInputSink.
+        finishingInput?.finish()
         videoTimeline?.stop()
         return mutableSnapshot.value
     }
@@ -615,6 +718,17 @@ class TestStepRecordingSession internal constructor(
                 warn("The last screen context could not be read before recording stopped; those steps keep fewer screen details.")
             }
         }
+        val tailDrained = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { tailDone.await(tailDrainTimeoutMs, TimeUnit.MILLISECONDS) }.getOrDefault(false)
+        }
+        if (!tailDrained) {
+            deviceInput?.close()
+            synchronized(lock) {
+                tailPending = false
+                refreshPending()
+                warn("The last input on the device could not be read before recording stopped; it may be missing from the steps.")
+            }
+        }
         val videoDrained = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             videoTimeline?.awaitFinished(VIDEO_DRAIN_TIMEOUT_MS) ?: true
         }
@@ -632,6 +746,7 @@ class TestStepRecordingSession internal constructor(
 
     override fun close() {
         stop()
+        deviceInput?.close()
         videoTimeline?.close()
         disposed.set(true)
         probeDisposed.set(true)
@@ -639,6 +754,8 @@ class TestStepRecordingSession internal constructor(
         probeWorker.shutdownNow()
         queuedScreenshots.updateAndGet { (it - discarded).coerceAtLeast(0) }
         synchronized(lock) {
+            tailPending = false
+            tailDone.countDown()
             resetProbeFlags()
             mutableSnapshot.value = mutableSnapshot.value.copy(pendingSnapshots = 0)
         }
@@ -765,32 +882,61 @@ class TestStepRecordingSession internal constructor(
     }
 
     private fun key(keycode: Int, frame: MirrorFrame?, nowMs: Long) {
-        val label = when (keycode) {
-            3 -> "Home"
-            KEYCODE_BACK -> "Back"
-            KEYCODE_TAB -> "Tab"
-            KEYCODE_ENTER -> "Enter"
-            KEYCODE_DELETE -> "Delete"
-            KEYCODE_ESCAPE -> "Escape"
-            KEYCODE_UP -> "Up"
-            KEYCODE_DOWN -> "Down"
-            KEYCODE_LEFT -> "Left"
-            KEYCODE_RIGHT -> "Right"
-            else -> "Android key $keycode"
-        }
+        val label = KEY_LABELS[keycode] ?: "Android key $keycode"
         if (label.startsWith("Android key")) warn("Key code $keycode has no friendly label; review this recorded action.")
         val kind = if (keycode == KEYCODE_BACK) RecordedInputKind.BACK else RecordedInputKind.KEY
-        add("Press $label", "Android key input was sent through the device mirror.", frame, kind, nowMs)
+        add("Press $label", "Android key input was ${channel()}.", frame, kind, nowMs)
+    }
+
+    private fun addSystem(action: String, kind: RecordedInputKind, frame: MirrorFrame?, nowMs: Long) {
+        add(action, "This system control was ${channel()}.", frame, kind, nowMs)
     }
 
     private fun recordText(text: String, frame: MirrorFrame?, nowMs: Long, pasted: Boolean = false) {
+        val action = boundedTextAction(if (pasted) PASTE_TEXT_PREFIX else ENTER_TEXT_PREFIX, text)
+        val context = when {
+            inputSource == InputSource.DEVICE -> "Text was typed on a keyboard attached to the device or emulator (adb getevent)."
+            pasted -> "Pasted text was sent through the device mirror."
+            else -> "Text was entered through the device mirror."
+        }
+        add(action, context, frame, RecordedInputKind.TEXT, nowMs)
+    }
+
+    private fun boundedTextAction(prefix: String, text: String): String {
         val bounded = text.take(MAX_RECORDED_TEXT)
         val suffix = if (text.length > MAX_RECORDED_TEXT) " (recorded only the first $MAX_RECORDED_TEXT of ${text.length} characters)" else ""
         if (suffix.isNotEmpty()) warn("Text input was truncated in the draft: ${text.length} characters received, first $MAX_RECORDED_TEXT retained.")
-        val prefix = if (pasted) "Paste" else "Enter"
-        val context = if (pasted) "Pasted text was sent through the device mirror." else "Text was entered through the device mirror."
-        add("$prefix text: $bounded$suffix", context, frame, RecordedInputKind.TEXT, nowMs)
+        return "$prefix$bounded$suffix"
     }
+
+    /**
+     * The row for a burst typed on the on-screen keyboard. It carries no key position: the keyboard's taps never reach [touch]. The
+     * text is the field's content after the burst minus what the last screen state before it showed (see [typedTextDelta]); a
+     * password field gives only the mask, and so does a field that an earlier screen state showed to be a password.
+     */
+    private fun keyboardTextLocked(reading: KeyboardTextReading, startMs: Long, endMs: Long) {
+        inputSource = InputSource.DEVICE
+        val baseline = baselineField(startMs)
+        val password = reading.password || baseline?.password == true
+        val field = reading.fieldLabel?.let { " into '${it.take(MAX_FIELD_LABEL_CHARS)}'" }.orEmpty()
+        val text = reading.text
+        val action = when {
+            password -> ENTER_TEXT_PREFIX + MASKED_TEXT
+            text == null -> KEYBOARD_UNREAD_ACTION
+            else -> typedTextDelta(baseline?.text, text)?.let { boundedTextAction(ENTER_TEXT_PREFIX, it) }
+                ?: CLEAR_FIELD_ACTION.takeIf { text.isEmpty() && !baseline?.text.isNullOrEmpty() }
+        } ?: return
+        val context = when {
+            password -> "Typed in a password field on the on-screen keyboard$field; the text and the key positions are not recorded."
+            text == null -> "Typed on the on-screen keyboard$field; the field text could not be read, and key positions are not recorded."
+            else -> "Typed on the on-screen keyboard$field; the text was read from the field's UI hierarchy and key positions are not recorded."
+        }
+        add(action, context, null, RecordedInputKind.TEXT, endMs, startMs = startMs)
+    }
+
+    /** The focused field of the last screen state that finished at or before [beforeMs], as that state showed it. */
+    private fun baselineField(beforeMs: Long): FocusedField? =
+        screenStates.values.filter { it.finishedAt <= beforeMs && it.nodes.isNotEmpty() }.maxByOrNull { it.seq }?.let { focusedFieldOf(it.nodes) }
 
     @Suppress("LongParameterList") // One row's raw input facts, all set together.
     private fun add(
@@ -809,11 +955,15 @@ class TestStepRecordingSession internal constructor(
             return
         }
         val index = current.steps.size
+        val fromDevice = inputSource == InputSource.DEVICE
         val screenshotContext = when {
             frame != null -> "$context UI hierarchy isn't exposed by the mirror; the raw mirror preview has uncertain acquisition timing."
+            screencap != null && fromDevice ->
+                "$context A raw input preview is read through adb after the action, with its acquisition interval recorded."
             screencap != null ->
                 "$context UI hierarchy isn't exposed by the mirror; a raw input preview is read through adb after the action, " +
                     "with its acquisition interval recorded."
+            fromDevice -> "$context Screenshot frame unavailable."
             else -> "$context Screenshot frame unavailable; UI hierarchy isn't exposed by the mirror."
         }
         val recorded = RecordedTestStep(
@@ -826,6 +976,8 @@ class TestStepRecordingSession internal constructor(
             inputStartMs = startMs,
         )
         publishRows(current.steps + recorded)
+        // A row that arrives after stop (the device recorder's last typed text) gets no new probe or image; the screen was read before.
+        if (!current.active) return
         requestProbe(settleDelayMs)
         when {
             frame != null -> scheduleSnapshot(recorded.id, fromAdb = false) { snapshotEncoder(frame) }
@@ -952,7 +1104,7 @@ class TestStepRecordingSession internal constructor(
 
     private fun probePending(): Int = synchronized(probeLock) { if (probeRunning) 1 else 0 }
 
-    private fun pendingCount(): Int = queuedScreenshots.get() + probePending()
+    private fun pendingCount(): Int = queuedScreenshots.get() + probePending() + if (tailPending) 1 else 0
 
     private fun refreshPending() = synchronized(lock) {
         mutableSnapshot.value = mutableSnapshot.value.copy(pendingSnapshots = pendingCount())
@@ -1142,21 +1294,18 @@ class TestStepRecordingSession internal constructor(
         const val PROBE_DRAIN_TIMEOUT_MS = 8_000L
         const val MAX_STATE_IMAGE_BYTES = 48L * 1024 * 1024
         const val MAX_GESTURE_SAMPLES = 8
+        const val DUPLICATE_WINDOW_MS = 50L
+        const val DUPLICATE_TOUCH_TOLERANCE_PX = 4
+        const val TAIL_DRAIN_TIMEOUT_MS = 12_000L
+        const val MAX_FIELD_LABEL_CHARS = 60
+        const val KEYBOARD_UNREAD_ACTION = "Type text on the on-screen keyboard"
+        const val CLEAR_FIELD_ACTION = "Clear the text field"
         const val ENTER_TEXT_PREFIX = "Enter text: "
         const val PASTE_TEXT_PREFIX = "Paste text: "
         const val MASKED_TEXT = "••••"
         const val DELETE_ACTION = "Press Delete"
         const val REWRITE_HINT_CAPTION = "Recorded input (hint; prefer what is on screen)"
         const val PROBE_FAILED_WARNING = "The screen context (UI hierarchy) could not be read through adb; steps keep coordinates and images only."
-        const val KEYCODE_BACK = 4
-        const val KEYCODE_TAB = 61
-        const val KEYCODE_ENTER = 66
-        const val KEYCODE_DELETE = 67
-        const val KEYCODE_ESCAPE = 111
-        const val KEYCODE_UP = 19
-        const val KEYCODE_DOWN = 20
-        const val KEYCODE_LEFT = 21
-        const val KEYCODE_RIGHT = 22
     }
 }
 

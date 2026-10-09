@@ -130,7 +130,7 @@ class TestDeviceSessionTest {
 
         assertEquals("BACK", runBlocking { lane.pressKey("back") })
         assertEquals(listOf("input", "keyevent", "KEYCODE_BACK"), runner.shellCommands.last())
-        assertFailsWith<IllegalArgumentException> { runBlocking { lane.pressKey("POWER") } }
+        assertFailsWith<IllegalArgumentException> { runBlocking { lane.pressKey("SLEEP") } }
 
         runBlocking { lane.inputText("hello world") }
         assertEquals(listOf("input", "text", "hello%sworld"), runner.shellCommands.last())

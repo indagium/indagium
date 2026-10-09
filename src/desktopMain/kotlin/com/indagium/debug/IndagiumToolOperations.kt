@@ -2522,9 +2522,9 @@ internal fun requireSafeAndroidInputText(text: String) {
 private const val MAX_ANDROID_INPUT_TEXT_CHARS = 300
 private val SAFE_ANDROID_INPUT_TEXT = Regex("[A-Za-z0-9][A-Za-z0-9_.,:/@+ -]{0,299}")
 
-/** `device_key`'s allowlist: navigation/editing/media keys with no destructive or system-wide
- *  effect. Deliberately excludes POWER/SLEEP — those can lock or shut down the device out from
- *  under the capture. */
+/** The key allowlist shared by `device_key` and the test lane's `press_key`: navigation, editing, volume and media keys, and POWER
+ *  (a recorded test step can press the power button, and a lane replays it). SLEEP and other keys that switch the device off
+ *  stay out; POWER only toggles the screen. */
 internal val DEVICE_KEY_CODES: Map<String, String> = mapOf(
     "BACK" to "KEYCODE_BACK",
     "HOME" to "KEYCODE_HOME",
@@ -2543,6 +2543,10 @@ internal val DEVICE_KEY_CODES: Map<String, String> = mapOf(
     "MENU" to "KEYCODE_MENU",
     "SEARCH" to "KEYCODE_SEARCH",
     "WAKEUP" to "KEYCODE_WAKEUP",
+    "POWER" to "KEYCODE_POWER",
+    "VOLUME_MUTE" to "KEYCODE_VOLUME_MUTE",
+    "APP_SWITCH" to "KEYCODE_APP_SWITCH",
+    "MEDIA_PLAY_PAUSE" to "KEYCODE_MEDIA_PLAY_PAUSE",
 )
 
 /** Strict Android reverse-domain package id: at least two dot-separated segments, each starting

@@ -62,9 +62,15 @@ import com.indagium.source.SourceIndexer
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
+import com.indagium.testing.authoring.AdbDeviceInputEnvironment
+import com.indagium.testing.authoring.DeviceInputPreflight
+import com.indagium.testing.authoring.DeviceInputRecorder
+import com.indagium.testing.authoring.GETEVENT_STREAM_COMMAND
 import com.indagium.testing.authoring.RecordedVideoTimeline
+import com.indagium.testing.authoring.RecordingAdb
 import com.indagium.testing.authoring.RecordingScreenProbe
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.authoring.preflightDeviceInput
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
@@ -205,6 +211,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 internal fun mkRmap(data: List<LogEntry>): Map<Int, LogEntry> = EntryIdMap(data)
 
@@ -1995,32 +2002,65 @@ class AppState(
         }.distinct()
     }
 
+    /**
+     * Starts a recording of [serial] for the case. Input comes from the Indagium mirror when one is live and from the device itself
+     * (adb getevent) when [input] is ready; at least one of the two is needed. Without a live mirror the recording has no video
+     * timeline and reads its screens over adb. [startupWarnings] are put on the recording. Blocking (spawns adb): not for the UI thread.
+     */
     @Suppress("ReturnCount") // Preconditions return typed messages before a mirror observer or recording session is created.
-    internal fun startTestStepRecording(serial: String, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> {
+    internal fun startTestStepRecording(
+        serial: String,
+        suiteId: String,
+        caseId: String,
+        input: DeviceInputPreflight? = null,
+        startupWarnings: List<String> = emptyList(),
+    ): StoreResult<TestStepRecordingSession> {
         laneCaptureOnDevice(serial)?.let { lane -> return StoreResult.Invalid(laneHoldsDeviceMessage(serial, lane)) }
         validateTestStepRecordingTarget(suiteId, caseId)?.let { return it }
         val mirror = synchronized(stateLock) {
             embeddedMirrorsByTab.values.firstOrNull { handle ->
                 handle.snapshot.value.deviceSerial == serial && handle.snapshot.value.state == com.indagium.capture.mirror.EmbeddedMirrorState.LIVE
             }
-        } ?: return StoreResult.Invalid("Open and connect a live mirror for this device before recording.")
+        }
+        val deviceInput = input as? DeviceInputPreflight.Ready
+        if (mirror == null && deviceInput == null) {
+            val reason = (input as? DeviceInputPreflight.Unavailable)?.reason ?: "Device input was not checked."
+            return StoreResult.Invalid(
+                "Nothing can be recorded from this device: the Indagium mirror is not connected and the device's own input cannot be " +
+                    "observed over adb ($reason) Open and connect the mirror for this device, then try again.",
+            )
+        }
         // GPU mirror paths publish no CPU pixels with an input, so the session falls back to adb on its own image worker.
         val recordingTools = captureToolsProvider(settings.captureSettings)
         val screencap = { recordingTools.readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) }
+        val recordingAdb = RecordingAdb { arguments, timeout, limit -> recordingTools.runAdb(serial, arguments, timeout, limit) }
         // The probe reads the UI hierarchy, top activity and an image over adb on the session's own worker; it never touches the mirror.
-        val probe = RecordingScreenProbe(
-            adb = { arguments, timeout, limit -> recordingTools.runAdb(serial, arguments, timeout, limit) },
-            screencap = screencap,
-        )
+        val probe = RecordingScreenProbe(adb = recordingAdb, screencap = screencap)
+        val recorder = AtomicReference<DeviceInputRecorder?>(null)
         val session = TestStepRecordingSession(
             serial,
             screencap = screencap,
-            screenProbeWithScreenshot = { onScreenshot -> probe.read(onScreenshot) },
-            videoTimeline = RecordedVideoTimeline(),
+            screenProbeWithScreenshot = { onScreenshot ->
+                // Each probe also tells the device recorder the display rotation, so touches stay converted correctly.
+                probe.read(onScreenshot).also { state -> state?.rotation?.let { recorder.get()?.updateRotation(it) } }
+            },
+            videoTimeline = if (mirror != null) RecordedVideoTimeline() else null,
         )
         registerTestStepRecording(session, suiteId, caseId).let { if (it !is StoreResult.Ok) return it }
-        session.attach(MirrorInputObservers.observe(serial) { input -> session.accept(input.command, input.frame) })
-        session.attachVideoSubscription(mirror.observeVideoPackets(requireNotNull(session.videoTimeline)::offer))
+        startupWarnings.forEach(session::addWarning)
+        session.attach(MirrorInputObservers.observe(serial) { observed -> session.accept(observed.command, observed.frame) })
+        if (mirror != null) session.attachVideoSubscription(mirror.observeVideoPackets(requireNotNull(session.videoTimeline)::offer))
+        if (deviceInput != null) {
+            val started = DeviceInputRecorder(
+                plan = deviceInput,
+                startStream = { recordingTools.startAdb(serial, GETEVENT_STREAM_COMMAND) },
+                environment = AdbDeviceInputEnvironment(recordingAdb),
+                sink = session.deviceInputSink,
+            )
+            recorder.set(started)
+            session.attachDeviceInput(started)
+            started.start()
+        }
         return StoreResult.Ok(session)
     }
 
@@ -2062,10 +2102,27 @@ class AppState(
         val captureResult = chooseAuthoringCapture(serial, device)
         captureResult.failureOrNull()?.let { return it }
         val (tabId, _) = (captureResult as StoreResult.Ok).value
-        awaitAuthoringMirror(tabId, serial)?.let { return StoreResult.Invalid(it) }
+        // The mirror is optional: without it the recording still observes the device's own input and has no video timeline.
+        val mirrorProblem = awaitAuthoringMirror(tabId, serial)
         currentCoroutineContext().ensureActive()
-        detachEmbeddedMirror(tabId)
-        return startTestStepRecording(serial, suiteId, caseId)
+        if (mirrorProblem == null) detachEmbeddedMirror(tabId)
+        val input = withContext(Dispatchers.IO) { preflightTestStepRecordingInput(serial) }
+        currentCoroutineContext().ensureActive()
+        val warnings = buildList {
+            mirrorProblem?.let {
+                add("${it.trimEnd('.')}. Recording continues without the mirror: no video timeline, and screens are read with adb screenshots.")
+            }
+            (input as? DeviceInputPreflight.Unavailable)?.let {
+                add("${it.reason} Only input sent through the Indagium mirror is recorded; taps on the device itself are not.")
+            }
+        }
+        return withContext(Dispatchers.IO) { startTestStepRecording(serial, suiteId, caseId, input, warnings) }
+    }
+
+    /** Looks at what input the device can report over adb (see [preflightDeviceInput]); blocking, so call it off the UI thread. */
+    private fun preflightTestStepRecordingInput(serial: String): DeviceInputPreflight {
+        val tools = captureToolsProvider(settings.captureSettings)
+        return preflightDeviceInput { arguments, timeout, limit -> tools.runAdb(serial, arguments, timeout, limit) }
     }
 
     private fun recordingPreparationProblem(

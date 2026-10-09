@@ -181,6 +181,13 @@ class CaptureTools(
         outputLimitBytes: Int = DEFAULT_CAPTURE_COMMAND_OUTPUT_LIMIT,
     ): CaptureCommandResult = runner.run(adbSpec(serial, arguments), timeout = timeout, outputLimitBytes = outputLimitBytes)
 
+    /**
+     * Starts a long-running adb command (for example `shell getevent -lt`) and returns the running process without waiting for it;
+     * stderr is merged into stdout. The caller owns the process: reading its output and closing it, which stops it and every descendant.
+     */
+    fun startAdb(serial: String?, arguments: List<String>): RunningCaptureProcess =
+        runner.start(adbSpec(serial, arguments).copy(redirectErrorStream = true))
+
     /** Reads `ro.build.version.sdk` once — the "keep sound on the device" Android-13+ gate (see
      *  [captureAudioPlan]) — with the same plain synchronous shape as this class's other
      *  single-property probes. Null on any failure (timeout, non-zero exit, unparsable output)

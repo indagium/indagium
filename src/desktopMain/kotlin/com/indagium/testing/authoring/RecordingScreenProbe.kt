@@ -13,7 +13,21 @@ import java.time.Duration
 // input to a device. Everything is best effort: any part may be missing and the caller keeps what did arrive.
 
 /** The kind of device input a recorded row came from. */
-enum class RecordedInputKind { TAP, LONG_PRESS, SWIPE, KEY, TEXT, BACK }
+enum class RecordedInputKind {
+    TAP,
+    LONG_PRESS,
+    SWIPE,
+    KEY,
+    TEXT,
+    BACK,
+
+    // Appended last: system controls the device recorder or a mirror command turns into rows.
+    NOTIFICATIONS,
+    QUICK_SETTINGS,
+    CLOSE_PANELS,
+    ROTATE,
+    SCREEN_ON,
+}
 
 /** One sampled touch position in mirror coordinates, with the mirror screen size they refer to. */
 data class RecordedPoint(val x: Int, val y: Int, val screenWidth: Int, val screenHeight: Int)
@@ -56,6 +70,8 @@ data class RecordingScreenState(
     val screenshotJpeg: ByteArray? = null,
     val screenshotStartedAt: Long? = null,
     val screenshotFinishedAt: Long? = null,
+    /** The display rotation (0..3 quarter turns) the UI dump reported; null when the dump did not say. */
+    val rotation: Int? = null,
 ) {
     fun ref(): RecordingScreenRef = RecordingScreenRef(seq, packageName, activity)
 
@@ -128,6 +144,7 @@ class RecordingScreenProbe(
             screenshotJpeg = screenshot,
             screenshotStartedAt = screenshotStartedAt,
             screenshotFinishedAt = screenshotFinishedAt,
+            rotation = tree?.rotation,
         )
     }
 
