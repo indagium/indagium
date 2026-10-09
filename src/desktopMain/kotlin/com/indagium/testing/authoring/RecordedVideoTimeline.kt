@@ -104,7 +104,32 @@ internal class RecordedVideoTimeline(
         val ageMs: Long,
     )
 
-    private data class SelectedFrame(val ptsUs: Long, val sessionMs: Long)
+    /** The chosen frame of one request; [frame] is a deep copy the caller owns and must close. */
+    private class SelectedFrame(val ptsUs: Long, val sessionMs: Long, val frame: Frame)
+
+    /**
+     * The grabbers one storyboard uses: each segment file is opened once and reused by every frame request in it (a request only
+     * seeks), instead of being opened and probed again for every frame.
+     */
+    private class SegmentGrabbers : Closeable {
+        private val open = HashMap<File, FFmpegFrameGrabber>()
+
+        fun forSegment(segment: Segment): FFmpegFrameGrabber = open[segment.file] ?: run {
+            val grabber = FFmpegFrameGrabber(segment.file).apply { setVideoOption("threads", "2") }
+            try {
+                grabber.start(false)
+            } catch (failure: Exception) {
+                releaseGrabber(grabber)
+                throw failure
+            }
+            grabber.also { open[segment.file] = it }
+        }
+
+        override fun close() {
+            open.values.forEach(::releaseGrabber)
+            open.clear()
+        }
+    }
 
     internal val storageDirectory = Files.createTempDirectory("indagium-recording-video-").toFile()
     private val sessionStartedAtMs = wallClockMs()
@@ -306,36 +331,41 @@ internal class RecordedVideoTimeline(
 
     private fun decodeFrames(requests: List<FrameRequest>, sensitive: List<LongRange>): List<DecodedFrame>? = runCatching {
         val availableSegments = segments.toList()
-        requests.take(MAX_STORYBOARD_FRAMES)
-            .mapNotNull { request -> decodeRequest(request, availableSegments, sensitive) }
-            .distinctBy { it.actualMs to it.inputNumber }
+        SegmentGrabbers().use { grabbers ->
+            requests.take(MAX_STORYBOARD_FRAMES)
+                .mapNotNull { request -> decodeRequest(request, availableSegments, sensitive, grabbers) }
+                .distinctBy { it.actualMs to it.inputNumber }
+        }
     }.getOrNull()
 
     private fun decodeRequest(
         request: FrameRequest,
         availableSegments: List<Segment>,
         sensitive: List<LongRange>,
+        grabbers: SegmentGrabbers,
     ): DecodedFrame? {
         val segment = segmentForTime(availableSegments, request.requestedMs, request.preferPredecessor) ?: return null
         val localTargetMs = (request.requestedMs - segment.startElapsedMs).coerceAtLeast(0L)
         val seekPtsUs = seekKeyframe(segment, localTargetMs)
-        val selected = selectFrame(segment, seekPtsUs, localTargetMs, request) ?: return null
-        val wallMs = sessionStartedAtMs + selected.sessionMs
-        if (sensitive.any { wallMs in it }) return null
-        val relation = actualRelation(request, selected.sessionMs) ?: return null
-        val image = copySelectedFrame(segment, seekPtsUs, localTargetMs, selected.ptsUs) ?: return null
-        val ageMs = when (relation) {
-            "before" -> request.requestedMs - selected.sessionMs
-            else -> selected.sessionMs - request.requestedMs
+        val selected = selectFrame(grabbers.forSegment(segment), segment, seekPtsUs, localTargetMs, request) ?: return null
+        return selected.frame.use { frame ->
+            val wallMs = sessionStartedAtMs + selected.sessionMs
+            if (sensitive.any { wallMs in it }) return@use null
+            val relation = actualRelation(request, selected.sessionMs) ?: return@use null
+            val image = Java2DFrameConverter().convert(frame)?.let(::copyImage) ?: return@use null
+            val ageMs = when (relation) {
+                "before" -> request.requestedMs - selected.sessionMs
+                else -> selected.sessionMs - request.requestedMs
+            }
+            DecodedFrame(
+                image,
+                request.requestedMs,
+                selected.sessionMs,
+                relation,
+                request.inputNumber,
+                ageMs.coerceAtLeast(0L),
+            )
         }
-        return DecodedFrame(
-            image,
-            request.requestedMs,
-            selected.sessionMs,
-            relation,
-            request.inputNumber,
-            ageMs.coerceAtLeast(0L),
-        )
     }
 
     private fun seekKeyframe(segment: Segment, localTargetMs: Long): Long =
@@ -345,17 +375,20 @@ internal class RecordedVideoTimeline(
             ?: segment.packetMappings.firstOrNull { it.keyFrame }?.segmentPtsUs
             ?: 0L
 
+    /**
+     * Seeks the already open [grabber] to [seekPtsUs] and scans forward once, keeping a copy of the frame the request selects (a
+     * predecessor request only knows its frame after passing it), so the frame is never decoded a second time.
+     */
     private fun selectFrame(
+        grabber: FFmpegFrameGrabber,
         segment: Segment,
         seekPtsUs: Long,
         localTargetMs: Long,
         request: FrameRequest,
     ): SelectedFrame? {
-        val grabber = FFmpegFrameGrabber(segment.file).apply { setVideoOption("threads", "2") }
-        return try {
-            grabber.start(false)
-            grabber.setTimestamp(seekPtsUs)
-            var selected: SelectedFrame? = null
+        grabber.setTimestamp(seekPtsUs)
+        var selected: SelectedFrame? = null
+        try {
             var count = 0
             var scanning = true
             while (scanning && count < MAX_DECODED_FRAMES_PER_REQUEST) {
@@ -367,44 +400,17 @@ internal class RecordedVideoTimeline(
                     val actualUs = frameTimestamp(frame, grabber, localTargetMs)
                     if (actualUs >= 0L) {
                         val actualMs = mappedTimestamp(segment, actualUs)
-                        if (request.selects(actualMs)) selected = SelectedFrame(actualUs, actualMs)
+                        if (request.selects(actualMs)) {
+                            selected?.frame?.close()
+                            selected = SelectedFrame(actualUs, actualMs, frame.clone())
+                        }
                         if (request.finishedScanning(actualMs, selected != null)) scanning = false
                     }
                 }
             }
-            selected
+            return selected.also { selected = null }
         } finally {
-            closeGrabber(grabber)
-        }
-    }
-
-    private fun copySelectedFrame(segment: Segment, seekPtsUs: Long, localTargetMs: Long, selectedPtsUs: Long): BufferedImage? {
-        val grabber = FFmpegFrameGrabber(segment.file).apply { setVideoOption("threads", "2") }
-        return try {
-            grabber.start(false)
-            grabber.setTimestamp(seekPtsUs)
-            val converter = Java2DFrameConverter()
-            var selected: BufferedImage? = null
-            var count = 0
-            var scanning = true
-            while (scanning && count < MAX_DECODED_FRAMES_PER_REQUEST) {
-                val frame = grabber.grabImage()
-                if (frame == null) {
-                    scanning = false
-                } else {
-                    count++
-                    val actualUs = frameTimestamp(frame, grabber, localTargetMs)
-                    if (actualUs == selectedPtsUs) {
-                        selected = converter.convert(frame)?.let(::copyImage)
-                        scanning = false
-                    } else if (actualUs > selectedPtsUs) {
-                        scanning = false
-                    }
-                }
-            }
-            selected
-        } finally {
-            closeGrabber(grabber)
+            selected?.frame?.close()
         }
     }
 
@@ -414,11 +420,6 @@ internal class RecordedVideoTimeline(
     private fun mappedTimestamp(segment: Segment, ptsUs: Long): Long =
         nearestMapping(segment.packetMappings, ptsUs)?.sessionElapsedMs
             ?: (segment.startElapsedMs + ptsUs / MICROS_PER_MILLI)
-
-    private fun closeGrabber(grabber: FFmpegFrameGrabber) {
-        runCatching { grabber.stop() }
-        runCatching { grabber.release() }
-    }
 
     private fun FrameRequest.selects(actualMs: Long): Boolean = when {
         preferPredecessor -> actualMs <= requestedMs
@@ -807,4 +808,9 @@ internal class RecordedVideoTimeline(
         const val SEGMENT_EDGE_TOLERANCE_MS = 120L
         const val DRAIN_TIMEOUT_MS = 10_000L
     }
+}
+
+private fun releaseGrabber(grabber: FFmpegFrameGrabber) {
+    runCatching { grabber.stop() }
+    runCatching { grabber.release() }
 }
