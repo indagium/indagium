@@ -3,7 +3,6 @@ package com.indagium.testing.authoring
 import com.indagium.capture.CaptureCommandResult
 import com.indagium.testing.device.MAX_UI_DUMP_BYTES
 import com.indagium.testing.device.UI_DUMP_COMMAND
-import com.indagium.testing.device.UI_DUMP_TIMEOUT_SECONDS
 import com.indagium.testing.device.UiNode
 import com.indagium.testing.device.parseUiAutomatorDump
 import java.time.Duration
@@ -96,7 +95,8 @@ fun interface RecordingAdb {
 
 /**
  * Reads the screen once through adb. Never throws and never blocks the caller beyond the bounded commands; a part that
- * fails is left out. [read] returns null only when nothing at all could be read.
+ * fails is left out. [read] returns null only when nothing at all could be read. The order is the image (delivered at once, so a
+ * slow command cannot age it), the top activity, then the hierarchy, the one read that can hang; each has its own short timeout.
  */
 class RecordingScreenProbe(
     private val adb: RecordingAdb,
@@ -129,9 +129,11 @@ class RecordingScreenProbe(
             }
         }
 
+        // The top activity first: it is fast and names the app even when the hierarchy cannot be read. While a video plays,
+        // `uiautomator dump` waits for the screen to go idle and hangs until its timeout, so it comes last and gets a short one.
         val startedAt = clock()
-        val tree = readTree()
         val activity = if (Thread.currentThread().isInterrupted) null else readTopActivity()
+        val tree = if (Thread.currentThread().isInterrupted) null else readTree()
         val finishedAt = clock()
         val packageName = activity?.first ?: tree?.packageName?.takeIf(String::isNotBlank)
         if (tree == null && activity == null && screenshot == null) return null
@@ -152,18 +154,27 @@ class RecordingScreenProbe(
     }
 
     private fun readTree() = runCatching {
-        adb.run(UI_DUMP_COMMAND, Duration.ofSeconds(UI_DUMP_TIMEOUT_SECONDS), MAX_UI_DUMP_BYTES)
+        adb.run(UI_DUMP_COMMAND, Duration.ofSeconds(RECORDING_UI_DUMP_TIMEOUT_SECONDS), MAX_UI_DUMP_BYTES)
     }.getOrNull()?.takeUnless { it.timedOut }?.let { parseUiAutomatorDump(it.stdoutText()) }
 
     private fun readTopActivity(): Pair<String, String>? = runCatching {
-        adb.run(ACTIVITY_DUMP_COMMAND, Duration.ofSeconds(ACTIVITY_DUMP_TIMEOUT_SECONDS), MAX_ACTIVITY_DUMP_BYTES)
+        adb.run(ACTIVITY_DUMP_COMMAND, Duration.ofSeconds(RECORDING_ACTIVITY_TIMEOUT_SECONDS), MAX_ACTIVITY_DUMP_BYTES)
     }.getOrNull()?.takeIf { !it.timedOut && it.exitCode == 0 }?.let { parseTopActivity(it.stdoutText()) }
 
     private fun readScreenshotBytes(): ByteArray? = screencap?.let { capture -> runCatching(capture).getOrNull() }
 }
 
 private val ACTIVITY_DUMP_COMMAND = listOf("shell", "dumpsys", "activity", "activities")
-private const val ACTIVITY_DUMP_TIMEOUT_SECONDS = 5L
+
+/** How long the recorder waits for the top activity; it answers in a fraction of a second on a healthy device. */
+internal const val RECORDING_ACTIVITY_TIMEOUT_SECONDS = 3L
+
+/**
+ * How long the recorder waits for a UI hierarchy. Much shorter than the lane's [com.indagium.testing.device.UI_DUMP_TIMEOUT_SECONDS]:
+ * a test step may wait for the screen to settle, a recording may not, because one hung dump (a video is playing) holds the single
+ * probe worker and every input recorded meanwhile would share the next probe. A timed-out dump keeps the activity and the image.
+ */
+internal const val RECORDING_UI_DUMP_TIMEOUT_SECONDS = 3L
 private const val MAX_ACTIVITY_DUMP_BYTES = 2 * 1024 * 1024
 private const val MAX_ELEMENT_LABEL_CHARS = 80
 

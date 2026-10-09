@@ -243,6 +243,7 @@ internal class TestStepDraftService(
         appendLine("Return exactly {\"steps\":[{\"action\":\"...\",\"expected\":\"...\"}]}; no markdown or prose.")
         appendLine("Use only these fields: action, expected, timeoutMs, retries, maxToolCalls, onFailure, checks, examples.")
         appendLine("Do not create golden image references, script checks or device-state checks. Prefer concise, observable actions and expected results.")
+        appendLine("$STABLE_EXPECTED_RULE $STABLE_EXPECTED_DRAFT_REMEDY")
         appendLine("Suite: ${suite.name.take(MAX_CONTEXT_NAME_CHARS)}")
         appendLine("Suite instructions: ${suite.instructions.take(MAX_CONTEXT_INSTRUCTIONS_CHARS)}")
         appendLine("Target package: ${suite.targetPackage.take(MAX_CONTEXT_NAME_CHARS)}")

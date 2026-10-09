@@ -221,6 +221,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     @Volatile private var lastAttemptShot: Shot? = null
 
+    /**
+     * The screen the current attempt started from: the end-of-step screenshot of the step (or failed attempt) before it, which the
+     * lane already holds for its own judge. Nothing else is more reliable: it is the very state the device was left in, taken by the
+     * run itself, and costs no extra capture. Null for the first step of a case and after a step that kept no screenshot.
+     */
+    @Volatile private var attemptStartShot: Shot? = null
+
     @Volatile private var lastAttemptChecks: List<CheckResult> = emptyList()
 
     /** Ended / Moved notifications for whoever drives this sequence. Unbounded: a sender never waits. */
@@ -459,6 +466,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         attemptTranscriptOffset = env.transcript?.sizeBytes ?: 0L
         attemptStartNanos = env.nanoTime()
         toolCalls.set(0)
+        attemptStartShot = lastAttemptShot
         lastAttemptShot = null
         lastAttemptChecks = emptyList()
         observations.clear()
@@ -785,6 +793,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?): JudgeEvidence {
         val start = attemptLogOffset
         val logFile = env.session.readLogFile
+        val startShot = attemptStartShot
         val lane = JudgeLaneEvidence(
             label = JUDGE_LANE_LABEL,
             laneId = "",
@@ -792,6 +801,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             screenshot = { shot.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
             log = { offset, limit -> withContext(Dispatchers.IO) { readStepLogSlice(logFile, start, logEnd, offset, limit) } },
             logBytes = logEnd?.minus(start),
+            startScreenshot = { startShot?.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
         )
         return JudgeEvidence(spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane))
     }
@@ -879,6 +889,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!isCurrentLocked(evaluation)) return Flow.End
         val result = evaluation.result.copy(issueRequested = issue)
         recorded += result
+        // A skipped step did nothing to the device: the next step starts from the screen this one started from.
+        if (result.status == StepStatus.SKIPPED) lastAttemptShot = lastAttemptShot ?: attemptStartShot
         env.listener.stepRecorded(result)
         afterRecord?.invoke()
         return when (flow) {

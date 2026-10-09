@@ -439,11 +439,12 @@ step's screenshot, the log window around it).
 
 An optional **judge** (`judgeProfileId` + `judgeMode`) is a separate, *blind* AI run (any profile kind, started
 like a lane's agent) with its own judge-only tools: `get_step_brief` (action, expected result, the judge checks,
-the automatic check results, example captions; never the agent's claim or observation), `get_step_screenshot`,
+the automatic check results, example captions; never the agent's claim or observation), `get_step_screenshot` (`moment`
+`start`|`end`, default `end`),
 `get_example`, `read_step_log` and `submit_verdict` (`pass`|`fail`|`inconclusive`, reasoning, classification
 `app_defect`|`agent_or_step_problem`|`unknown`, optional `suggestedStepFix` `{ action?, expected?, note? }`). Its first
 message already carries what those evidence tools return (the brief, a log excerpt, the reference texts and, as images,
-each lane's final screenshot and the golden screenshots), so it normally answers at once and the tools are for extras. It has
+the screen the step started from, each lane's final screenshot and the golden screenshots), so it normally answers at once and the tools are for extras. It has
 a budget of 4 evidence calls (8 when it must fetch images itself; submitting is free) and 60 seconds, and runs inline inside `finish_step`. `judgeMode`
 `every_step` judges every step after its automatic checks; `failures_only` judges steps whose automatic checks
 failed or that the agent reported as `fail`/`blocked`, and every step that has a `screenJudge`/`askJudge` check.

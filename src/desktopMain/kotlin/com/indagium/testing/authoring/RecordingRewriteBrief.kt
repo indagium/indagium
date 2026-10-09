@@ -24,6 +24,7 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "- Generalize actions to the person's stated test goal. Keep an exact video, song, or item title only when the case goal, " +
         "preconditions, or the person's note explicitly makes that exact item relevant; a title merely visible during navigation is " +
         "not a reason to turn a generic 'play a video' goal into a title-specific test.\n" +
+        "- $STABLE_EXPECTED_RULE $STABLE_EXPECTED_REWRITE_REMEDY\n" +
         "- Treat setup gestures as part of the semantic action when they only reveal controls for the next gesture. For example, " +
         "a tap that reveals playback controls followed by a tap on Pause is one 'Pause playback' step covering both inputs, unless " +
         "revealing the controls is itself part of the stated goal.\n" +
@@ -218,6 +219,7 @@ private val OUTPUT_CONTRACT = """
       create a separate "Reveal controls" step unless revealing them is itself the goal.
       For playback controls, use observed paused/play indicators or other stable state evidence; never write an expected result
       from elapsed playback time or the time at which an incidental ad happened to end.
+    - $STABLE_EXPECTED_RULE $STABLE_EXPECTED_REWRITE_REMEDY
     - optional defaults to false. Use true only for a conditional action that may not be available in every run (for example,
       "Skip the ad if a Skip ad button appears"). condition must say when to perform it. Its expected may be blank when there is no
       stable result to assert. If an ad and skip affordance are observed, preserve that dismissal as its own conditional step.

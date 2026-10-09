@@ -25,6 +25,10 @@ internal const val LANE_SYSTEM_PROMPT =
         "difference. Use blocked when you cannot do the action at all. For an optional step, inspect for its stated condition first; " +
         "if absent, do not perform the action and finish as skipped with what you checked. If present, perform it and report pass/fail normally. " +
         "Never skip a required step or claim something you did not observe.\n" +
+        "- Stay in the state the previous steps produced: do not navigate away, relaunch the app or restart the flow unless the step " +
+        "says so. If the expected result cannot be reached from the current state after a couple of reasonable attempts, or it seems " +
+        "to depend on content you cannot control (an ad, a particular video or item, picture-in-picture, the network), do not force it: " +
+        "call finish_step with status fail and describe what is on screen.\n" +
         "- finish_step answers with the next step, with a request to redo the step, or with the end of the case. When the case " +
         "is over, stop calling tools and reply with one short sentence.\n" +
         "- take_screenshot shows the screen; tap and swipe use the pixels of the latest screenshot; dump_ui_tree lists the " +

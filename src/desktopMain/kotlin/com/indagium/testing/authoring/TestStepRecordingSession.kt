@@ -692,7 +692,7 @@ class TestStepRecordingSession internal constructor(
                 expected = actionsAndExpected[index].second,
                 optional = optional,
                 condition = condition,
-                reviewReason = row.reviewReason.takeIf { actionsAndExpected[index].second.isBlank() },
+                reviewReason = reviewReasonAfterEdit(row.reviewReason, actionsAndExpected[index].second, optional),
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
             performerEdits[row.id]?.applyTo(updated) ?: updated
