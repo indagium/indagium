@@ -38,6 +38,7 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.model.AiUsageStats
 import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
+import com.indagium.testing.authoring.INCIDENTAL_EXPECTED_WARNING
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
@@ -613,7 +614,11 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 row.contextHint()?.let { TestsHint("Screen context: $it") }
                 row.screenContext?.let { TestsHint(it) }
                 row.reviewReason?.let {
-                    if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
+                    when {
+                        row.expected.isBlank() -> TestsErrorText("Review required: $it")
+                        it == INCIDENTAL_EXPECTED_WARNING -> AppText(it, color = tc.warn, fontSize = 9.sp)
+                        else -> TestsHint("Recording note: $it")
+                    }
                 }
                 row.screenshotJpeg?.let { bytes ->
                     val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"

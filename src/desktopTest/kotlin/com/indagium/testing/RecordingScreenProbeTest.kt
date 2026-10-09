@@ -3,6 +3,8 @@
 package com.indagium.testing
 
 import com.indagium.capture.CaptureCommandResult
+import com.indagium.testing.authoring.RECORDING_ACTIVITY_TIMEOUT_SECONDS
+import com.indagium.testing.authoring.RECORDING_UI_DUMP_TIMEOUT_SECONDS
 import com.indagium.testing.authoring.RecordedPoint
 import com.indagium.testing.authoring.RecordingAdb
 import com.indagium.testing.authoring.RecordingScreenProbe
@@ -12,11 +14,13 @@ import com.indagium.testing.authoring.TappedElement
 import com.indagium.testing.authoring.parseTopActivity
 import com.indagium.testing.authoring.resolveTappedElement
 import com.indagium.testing.device.UI_DUMP_COMMAND
+import com.indagium.testing.device.UI_DUMP_TIMEOUT_SECONDS
 import com.indagium.testing.device.UiNode
 import com.indagium.testing.device.parseUiAutomatorDump
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.time.Duration
 import javax.imageio.ImageIO
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,6 +28,8 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+private const val HANG_STAND_IN_MS = 50L
 
 /** Synthetic uiautomator XML and dumpsys text only; no device, no real log. */
 class RecordingScreenProbeTest {
@@ -137,8 +143,53 @@ class RecordingScreenProbeTest {
         assertTrue(state.nodes.any { it.text == "Search" })
         val image = ImageIO.read(ByteArrayInputStream(assertNotNull(state.screenshotJpeg)))
         assertEquals(20, image.width)
-        assertEquals(listOf("screenshot", "delivered", "hierarchy", "activity"), order)
-        assertEquals(listOf(UI_DUMP_COMMAND, listOf("shell", "dumpsys", "activity", "activities")), calls)
+        assertEquals(listOf("screenshot", "delivered", "activity", "hierarchy"), order)
+        assertEquals(listOf(listOf("shell", "dumpsys", "activity", "activities"), UI_DUMP_COMMAND), calls)
+    }
+
+    @Test
+    fun theActivityIsReadBeforeTheHierarchyAndTheHierarchyGetsTheShortRecordingTimeout() {
+        val readings = mutableListOf<Pair<String, Duration>>()
+        val adb = RecordingAdb { arguments, timeout, _ ->
+            readings += (if (arguments == UI_DUMP_COMMAND) "hierarchy" else "activity") to timeout
+            if (arguments == UI_DUMP_COMMAND) result(dump) else result(dumpsysApi31)
+        }
+
+        assertNotNull(RecordingScreenProbe(adb).read())
+
+        assertEquals(listOf("activity", "hierarchy"), readings.map { it.first })
+        val hierarchyTimeout = readings.single { it.first == "hierarchy" }.second
+        assertEquals(Duration.ofSeconds(RECORDING_UI_DUMP_TIMEOUT_SECONDS), hierarchyTimeout)
+        assertTrue(hierarchyTimeout < Duration.ofSeconds(UI_DUMP_TIMEOUT_SECONDS), "the lane's 20 s wait would hold the probe worker for a whole video")
+        assertTrue(readings.single { it.first == "activity" }.second <= Duration.ofSeconds(RECORDING_ACTIVITY_TIMEOUT_SECONDS))
+    }
+
+    @Test
+    fun aHangingHierarchyDumpKeepsThePackageActivityAndImageAndCostsOnlyTheShortTimeout() {
+        // While a video plays `uiautomator dump` never sees an idle screen. The fake honours the timeout it is given, like the real
+        // runner, but scaled down so the test is quick, and answers that it timed out.
+        val calls = mutableListOf<String>()
+        val adb = RecordingAdb { arguments, timeout, _ ->
+            if (arguments == UI_DUMP_COMMAND) {
+                calls += "hierarchy(hangs)"
+                assertEquals(Duration.ofSeconds(RECORDING_UI_DUMP_TIMEOUT_SECONDS), timeout)
+                Thread.sleep(HANG_STAND_IN_MS)
+                result("", exit = -1, timedOut = true)
+            } else {
+                calls += "activity"
+                result(dumpsysApi31)
+            }
+        }
+        val delivered = mutableListOf<RecordingScreenshotEvidence>()
+
+        val state = assertNotNull(RecordingScreenProbe(adb, screencap = ::png).read { delivered += it })
+
+        assertEquals(listOf("activity", "hierarchy(hangs)"), calls, "the activity was read before the dump could hang")
+        assertEquals("com.example.shop", state.packageName)
+        assertEquals(".checkout.CheckoutActivity", state.activity)
+        assertTrue(state.nodes.isEmpty())
+        assertNotNull(state.screenshotJpeg)
+        assertEquals(1, delivered.size, "the image reached the caller before the slow read")
     }
 
     @Test

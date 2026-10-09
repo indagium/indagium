@@ -415,7 +415,7 @@ internal fun buildRewrittenRows(
             script = step.script,
             manualCompletion = step.manualCompletion,
             stateChanges = sources.flatMap { it.row.stateChanges }.distinct(),
-            reviewReason = if (unclearGesture != null && byAgent) unclearGestureReason(unclearGesture) else step.reviewReason,
+            reviewReason = rewrittenReviewReason(step, unclearGesture, byAgent),
             screenshotSource = screen?.source,
             screenshotAcquiredAtMs = screen?.acquiredAtMs,
             screenshotAcquisitionFinishedAtMs = screen?.acquisitionFinishedAtMs,
@@ -423,6 +423,16 @@ internal fun buildRewrittenRows(
             screenshotVerifiedMoment = screen?.let { "after" },
         )
     }
+
+/**
+ * Why a rewritten row needs a look: an unclear gesture, else the AI's own reason, else - a flag, never a refusal - the warning that the
+ * expected result may name content that changes between runs. Null for a step the AI explained nothing about and nothing flags.
+ */
+private fun rewrittenReviewReason(step: ProposedStep, unclearGesture: RewriteInput?, byAgent: Boolean): String? = when {
+    unclearGesture != null && byAgent -> unclearGestureReason(unclearGesture)
+    step.reviewReason == null && byAgent -> incidentalExpectedWarning(step.expected, step.optional)
+    else -> step.reviewReason
+}
 
 /** The first tap or long press among [sources] with neither a resolved target nor inspected video nor a trustworthy before screenshot. */
 private fun unclearGestureIn(sources: List<RewriteInput>, videoInspectedInputs: Set<Int>): RewriteInput? = sources.firstOrNull { input ->

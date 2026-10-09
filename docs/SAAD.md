@@ -3608,7 +3608,7 @@ library, or other lanes.
 **Blindness guarantee.** The judge's input is a `JudgeEvidence`
 (`testing/run/JudgeEvidence.kt:39`), which has **no field** for what the agent claimed or observed — it
 holds the step's action and expected text, the judge checks, the *deterministic* check results, the
-screenshot taken when the step ended, the step's log byte range, and the examples. No prompt, tool
+screenshot taken when the step ended, the screen the step started from, the step's log byte range, and the examples. No prompt, tool
 result or transcript line built from it can leak the claim, because the data is not there to leak
 (`JudgePrompts.kt` builds its words only from the suite's own text). `deterministicOnly` additionally
 removes the results of the judge checks themselves from what the judge may see. Check details and log rows travel inside an
@@ -3630,14 +3630,32 @@ Everything either judge says goes to `judge.jsonl`.
 it (`buildJudgeBrief`, `testing/run/JudgeBrief.kt`). That is what `get_step_brief` returns (`judgeBriefMap`: the step, the
 judge checks, the lanes' automatic check results and their details inside the `untrusted_data` envelope), a log excerpt per lane
 (what `read_step_log` returns by default: 60 rows, 30 per lane for a comparison, halved until at most 12,000 characters so its
-`nextOffset` stays true), the texts of the reference logs and the images: each lane's screen at the end of the step, then
-the golden screenshots (at most `JUDGE_MAX_ATTACHED_IMAGES` = 6 and 6 MB; the encoders are the existing bounded ones, and
+`nextOffset` stays true), the texts of the reference logs and the images: each lane's screen at the start of the step, then its
+screen at the end of the step, then the golden screenshots (at most `JUDGE_MAX_ATTACHED_IMAGES` = 6 and 6 MB; the encoders are the existing bounded ones, and
 whatever does not fit is named with the tool that fetches it). The closing line is "All the evidence is above or attached.
 Call submit_verdict now. Use read_step_log only to read a different range of the log." The first message is built from
 `JudgeEvidence` alone, so it is exactly as blind as the tools; the tools stay for extras. A judge so briefed answers in
 one model turn instead of four or five. `judge.jsonl` gets a `judge_brief` line (`evidenceUpFront`, `images`, `promptChars`,
 `briefMs`, `toolBudget`), `judge_finished` a trailing `briefMs`. If the brief cannot be put together (a log that fails to
 read) the judge starts with the old pointer to `get_step_brief` and the larger budget (`judge_brief_failed`).
+
+**The start screen.** A step such as "scroll the feed" cannot be judged from its end screen alone. `JudgeLaneEvidence.startScreenshot`
+(appended last, nullable: null means this kind of evidence has none, as for a comparison, and the judge is told nothing about one) is
+the screen the step began from, labelled "Screen at the start of the step". `StepSequence` takes it from what it already holds:
+`attemptStartShot` is the previous step's (or failed attempt's) end-of-step screenshot, set in `startAttemptLocked`. That is the
+most reliable source: the lane stores only end-of-step screens (`lanes/*/screens/<prefix>-sN-aM.png`), the agent's own
+`take_screenshot` images are never kept, and the end of the step before is the very state the device was left in, captured by the run,
+at no extra adb call. A skipped step passes its own start screen on. The first step of a case has none ("is not available"). The start
+screen is attached before the end screen and both before any golden, so the image cap never costs the pair. `get_step_screenshot`
+takes `moment` = `start` | `end` (default `end`) for the fetch path. The judge stays blind: the start screen is device state, not a claim.
+
+**Classification of luck-dependent steps.** `JUDGE_CHANCE_CLASSIFICATION_RULE` (`JudgePrompts.kt`, in both system prompts and both
+submit tool descriptions): when the expected result needs content or device state that depends on chance or the environment (ads, a
+particular video, picture-in-picture or background behaviour, the network, timing) and the app otherwise behaved sensibly, the judge
+classifies `agent_or_step_problem`, not `app_defect`, and gives a `suggestedStepFix` with a stable rewording. The lane prompt
+(`LANE_SYSTEM_PROMPT`) has the matching rule for the agent: stay in the state the previous steps produced, and when the expected
+result cannot be reached after a couple of reasonable attempts or depends on content it cannot control, call `finish_step` with
+`fail` and describe the screen instead of relaunching the app or restarting the flow.
 
 **Images with the first message, per agent kind** (`AgentSegmentRequest.images`, appended last). The capability is one function,
 `AiProviderKind.acceptsImagesUpFront()` (`ai/AgentImageSupport.kt`), read through `LaneAgent.acceptsImagesUpFront`; a kind that
@@ -3982,8 +4000,12 @@ or leaving the editor cancels an in-flight preparation. Stopping/reviewing the r
 stop its capture, so a later same-device lane can borrow it.
 
 **Screen-context probe.** With a `screenProbe` set (`AppState.startTestStepRecording`), a single separate
-worker (`RecordingScreenProbe`) captures the screenshot first, then reads the UI hierarchy
-(`uiautomator dump`, shared with `TestDeviceSession`) and top activity (`dumpsys activity activities`).
+worker (`RecordingScreenProbe`) captures the screenshot first, then reads the top activity (`dumpsys activity activities`, 3 s)
+and then the UI hierarchy (`uiautomator dump`, shared with `TestDeviceSession`, but with the recording's own 3 s timeout
+`RECORDING_UI_DUMP_TIMEOUT_SECONDS`, not the lane's 20 s). The order matters while a video plays: the dump waits for an idle screen
+and hangs until its timeout, and it used to run before the activity read, so the package and activity were delayed or lost and the
+single probe worker was held for 20+ s while later inputs coalesced into one probe. Now the cheap reads come first, a timed-out dump
+keeps the package, activity and image, and one probe takes at most the screencap plus two 3 s waits.
 The screenshot's acquisition interval brackets only screenshot capture; JPEG encoding is outside that
 interval. A session-owned callback retains this image before the slower hierarchy/activity commands
 finish, so it can survive a drain timeout. The complete probe has its own interval. One probe runs and
@@ -3991,6 +4013,18 @@ one latest-wins request waits (including the initial probe and the probe ~800 ms
 ADB preview capture also records a separate acquisition interval. A mirror frame is retained as a raw
 input preview, but its presentation timestamp is not mapped to wall time and cannot establish before or
 after evidence.
+
+**Expected results of a rewrite.** The rewrite (and the step draft) prompt carries one rule, `STABLE_EXPECTED_RULE`
+(`authoring/ExpectedResultRules.kt`): an expected result is the stable, intended outcome of the action, never incidental or
+nondeterministic content (ads, specific titles/channels, varying counts, timestamps, notifications, picture-in-picture or
+background playback, animations, recommendation content); such content goes into `notes` or a separate optional step with a
+condition (a draft, which has neither, leaves it out). As a backstop `buildRewrittenRows` runs `incidentalExpectedWarning`, a
+small constant list of regular expressions, over each AI step's expected text and, on a match, sets the row's existing
+`reviewReason` to `INCIDENTAL_EXPECTED_WARNING` ("Check this expected result: it may depend on content that changes between
+runs.") - a flag, never a rejection, and not for an optional step (an ad skip is the one place an ad belongs) or a step the AI already
+explained. `updateReviewedSteps` re-evaluates that warning against the edited text (`reviewReasonAfterEdit`), so rewording the
+result clears it. The review panel shows it in the warning colour. The "Recorded input (hint ...)" reference example of a rewritten
+step lists each input with its `stateChanges` ("device changes after it: Wi-Fi turned off"), like the rewrite brief.
 
 **Recorded video timeline.** A recording subscribes to the selected mirror's existing H.264 packet observer. Shared-recording
 and standalone mirrors tee packets before decode, so native GPU and CPU/Compose paths use the same compressed stream without

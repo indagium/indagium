@@ -10,8 +10,8 @@ import java.io.File
 
 // The evidence a judge may look at for one step. BLIND by construction: there is no field for what the agent claimed or
 // reported, so no tool, prompt or transcript line built from this can leak it. A lane's evidence is its deterministic
-// check results, the screenshot taken when the step ended and the log rows written during the step. A single-step judge
-// has one lane; a comparison judge one per lane that took part.
+// check results, the screenshot taken when the step ended, the screen it started from and the log rows written during the
+// step. A single-step judge has one lane; a comparison judge one per lane that took part.
 
 private const val JUDGE_LOG_CHUNK_BYTES = 256 * 1024
 internal const val JUDGE_LOG_DEFAULT_ROWS = 60
@@ -26,7 +26,18 @@ internal class StepLogSlice(val rows: List<String>, val nextOffset: Long, val mo
 /** An image for the model: JPEG or PNG [bytes]. */
 internal class JudgeImage(val bytes: ByteArray, val mimeType: String)
 
-/** One lane's evidence. [label] is what the judge calls the lane ("Lane 1"); [screenshot] and [log] return null when none was kept. */
+/** What the judge calls the screen at the end of a step (and the message of its screenshot tool result). */
+internal const val END_SCREEN_LABEL = "The screen when the step ended"
+
+/** What the judge calls the screen at the start of a step; it is what the step began from, so an action like a scroll can be compared. */
+internal const val START_SCREEN_LABEL = "Screen at the start of the step"
+
+/**
+ * One lane's evidence. [label] is what the judge calls the lane ("Lane 1"); [screenshot], [startScreenshot] and [log] return null
+ * when none was kept. [startScreenshot] is the screen the step began from (the end of the step or attempt before it); it is itself null
+ * when this kind of evidence has no start screen at all (a comparison is built from the screens kept on disk), so the judge is not told
+ * about one. Appended last so existing constructions keep their meaning.
+ */
 internal class JudgeLaneEvidence(
     val label: String,
     val laneId: String,
@@ -34,6 +45,7 @@ internal class JudgeLaneEvidence(
     val screenshot: suspend () -> JudgeImage?,
     val log: suspend (offset: Long, limit: Int) -> StepLogSlice?,
     val logBytes: Long?,
+    val startScreenshot: (suspend () -> JudgeImage?)? = null,
 )
 
 internal class JudgeEvidence(

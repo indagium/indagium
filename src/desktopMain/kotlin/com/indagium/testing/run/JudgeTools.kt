@@ -35,7 +35,8 @@ internal val JUDGE_FREE_TOOL_NAMES: Set<String> = setOf(SUBMIT_VERDICT_TOOL, SUB
 
 private const val MAX_REASONING_CHARS = 2_000
 private const val MAX_FIX_TEXT_CHARS = 1_000
-private const val SCREENSHOT_MESSAGE = "The screen when the step ended"
+private const val MOMENT_START = "start"
+private const val MOMENT_END = "end"
 private val VERDICT_NAMES = listOf("pass", "fail", "inconclusive")
 private val CLASSIFICATION_NAMES = listOf("app_defect", "agent_or_step_problem", "unknown")
 
@@ -99,16 +100,30 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
 
     private fun screenshotTool() = JudgeTool(IndagiumToolDescriptor(
         "get_step_screenshot",
-        "See the screen as it was when the step ended. With several lanes, pass lane (as named in the brief).",
-        schema("lane" to "string", descriptions = mapOf("lane" to "The lane to look at (needed when there is more than one).")),
+        "See the screen as it was when the step ended (moment \"$MOMENT_END\", the default) or as it was when the step started " +
+            "(moment \"$MOMENT_START\": the screen the step began from, when one was kept). With several lanes, pass lane (as named in the brief).",
+        schema(
+            "lane" to "string", "moment" to "string",
+            enums = mapOf("moment" to listOf(MOMENT_START, MOMENT_END)),
+            descriptions = mapOf(
+                "lane" to "The lane to look at (needed when there is more than one).",
+                "moment" to "start: the screen at the start of the step. end: the screen when it ended (default).",
+            ),
+        ),
     )) { args ->
         val lane = laneFor(args)
-        val image = lane.screenshot()
+        val start = when (args.string("moment")?.trim()?.lowercase()) {
+            null, "", MOMENT_END -> false
+            MOMENT_START -> true
+            else -> throw ToolArgException("moment must be \"$MOMENT_START\" or \"$MOMENT_END\".")
+        }
+        val provider = if (start) lane.startScreenshot else lane.screenshot
+        val image = provider?.invoke()
         if (image == null) {
-            mapOf("error" to "No screenshot was kept for ${lane.label}.")
+            mapOf("error" to "No screenshot was kept for the ${if (start) "start of the step" else "end of the step"} of ${lane.label}.")
         } else {
             mapOf(
-                "message" to "$SCREENSHOT_MESSAGE (${lane.label})",
+                "message" to "${if (start) START_SCREEN_LABEL else END_SCREEN_LABEL} (${lane.label})",
                 "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
                 "mimeType" to image.mimeType,
             )
@@ -166,7 +181,7 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
         "Submit your verdict on the step. Call it exactly once. pass: the evidence shows the expected result. fail: the evidence " +
             "contradicts it. inconclusive: the evidence cannot show either. Give the reasoning, who is to blame (app_defect: the app " +
             "misbehaves; agent_or_step_problem: the tester did the wrong thing or the step is unclear or outdated; unknown) and, only " +
-            "when the step as written is likely wrong, suggestedStepFix.",
+            "when the step as written is likely wrong, suggestedStepFix. $JUDGE_CHANCE_CLASSIFICATION_RULE",
         schema(
             "verdict" to "string", "reasoning" to "string", "classification" to "string", "suggestedStepFix" to "object",
             required = listOf("verdict", "reasoning"),
@@ -186,7 +201,8 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
         SUBMIT_COMPARISON_TOOL,
         "Submit your conclusion on a step the lanes disagreed on. Call it exactly once. verdicts maps every lane (as named in the brief) " +
             "to pass, fail or inconclusive, judged on that lane's own evidence. explanation says why the lanes differ; classification " +
-            "says who is to blame (app_defect, agent_or_step_problem, unknown); suggestedStepFix only when the step is likely wrong.",
+            "says who is to blame (app_defect, agent_or_step_problem, unknown); suggestedStepFix only when the step is likely wrong. " +
+            JUDGE_CHANCE_CLASSIFICATION_RULE,
         schema(
             "verdicts" to "object", "explanation" to "string", "classification" to "string", "suggestedStepFix" to "object",
             required = listOf("verdicts", "explanation"),

@@ -21,6 +21,7 @@ import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
@@ -108,6 +109,19 @@ class RecordingRewriteExternalTest {
         assertFalse("script-setup" in prompt, "a script limited to setup and teardown is never offered to a step")
         assertTrue("\"kind\"" in prompt && "usb.devices: " in prompt && "manualCompletion" in prompt, prompt)
         assertTrue("[EXTERNAL EVENT]" in request!!.systemPrompt && "never invent a script" in request!!.systemPrompt, request!!.systemPrompt)
+    }
+
+    @Test
+    fun theHintOfARewrittenStepKeepsTheDeviceChangesItsInputCaused() {
+        val session = session()
+
+        assertIs<StoreResult.Ok<RecordingRewrite>>(rewrite(session, answer("""{"action":"Plug in","expected":"","kind":"manual","sourceInputs":[2]}""")))
+
+        val steps = session.toTestSteps()
+        val hint = steps[0].examples.filterIsInstance<StepExample.ReferenceLog>().single { it.caption == "Recorded input (hint; prefer what is on screen)" }
+        assertTrue("device changes after it: Wi-Fi turned off" in hint.text, hint.text)
+        val externalHints = steps[1].examples.filterIsInstance<StepExample.ReferenceLog>()
+        assertTrue(externalHints.isEmpty(), "an external event is a manual step: $externalHints")
     }
 
     @Test

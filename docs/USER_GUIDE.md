@@ -1453,6 +1453,10 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    they can have no expected result and are skipped without failing the case when absent. The AI's notes (for example an
    input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The picture
    of the screen after a step can be used as an expected screenshot, but only if you tick it.
+   The AI is told to write expected results that stay true on every run, not what happened to be on screen while you
+   recorded (an ad, a video title, a view count, a timestamp, a notification, picture-in-picture). When an expected result
+   still mentions something like that, the step shows "Check this expected result: it may depend on content that changes
+   between runs." - a warning only; reword the result, or ignore it if you are sure.
 4. **Undo rewrite** brings back the recorded rows exactly; **Rewrite again** always starts from them. Nothing is
    added to the case until you press **Apply recorded steps**. It stays disabled until every required step has an expected
    result and every optional step has a condition.
@@ -1516,8 +1520,10 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   happens before the run starts. If such a judge errors or is inconclusive, the check is unresolved and the step is
   **Blocked** (then retries and the selected failure policy apply). A deterministic check failure remains **Fail**.
   Steps without explicit judge checks keep optional-judge behavior. The judge sees the
-  step's expected result, the screenshot taken when the step ended, the log lines written during it and the
-  automatic check results — **never what the agent claimed**. It can turn a pass into a fail but never a fail
+  step's expected result, the screen the step started from, the screenshot taken when the step ended, the log lines
+  written during it and the automatic check results — **never what the agent claimed**. A step whose expected result
+  depends on chance (an ad, a particular video, picture-in-picture) is reported as a problem with the step, with a more
+  stable wording suggested, rather than as an app defect. It can turn a pass into a fail but never a fail
   into a pass. Where lanes ended a step differently, it also compares their evidence and explains why. The judge
   has its own model and reasoning-effort pickers.
 - **Recording** — what every lane records, with the same controls as *Before start* on a new live capture

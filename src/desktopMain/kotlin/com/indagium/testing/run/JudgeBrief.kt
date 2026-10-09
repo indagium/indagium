@@ -9,12 +9,12 @@ import java.util.Base64
 
 // The first message of a judge. It carries everything the evidence tools return (the brief with the check results, an excerpt of
 // the log, the texts of the reference examples) and, where the agent can take images with its first message, the screenshots as
-// images: the screen at the end of the step (per lane) and the golden screenshots. A judge so briefed answers in one model turn
+// images: the screen the step started from and the screen at its end (per lane) and the golden screenshots. A judge so briefed answers in one model turn
 // instead of asking for each piece with a tool call (see JudgeService). It is built from [JudgeEvidence] alone, so it is as blind
 // as the tools are: no claim, observation or status of the agent can be in it. Untrusted text (check details and log rows came
 // from the device or the app) travels in the same untrusted_data envelope the tools put it in.
 
-/** At most this many images go with the first message: the lanes' screens first, then golden screenshots in step order. */
+/** At most this many images go with the first message: the lanes' start and end screens first, then golden screenshots in step order. */
 internal const val JUDGE_MAX_ATTACHED_IMAGES = 6
 
 /** The images of one first message add up to at most this many bytes (before base64); one that would pass it is fetched with its tool. */
@@ -64,8 +64,14 @@ internal suspend fun buildJudgeBrief(
     if (!attachImages) return JudgeBrief(fetchPrompt, emptyList(), fetchPrompt, needsTools = true)
 
     val attachment = ImageAttachment()
+    // Each lane's start screen goes before its end screen, and both before any golden image, so the cap never costs the judge
+    // the before/after pair of the step.
     for (lane in evidence.lanes) {
-        val label = "The screen when the step ended (${lane.label})"
+        lane.startScreenshot?.let { start ->
+            val label = "$START_SCREEN_LABEL (${lane.label})"
+            attachment.add(start(), label, "$label is not attached; call get_step_screenshot with lane \"${lane.label}\" and moment \"start\".")
+        }
+        val label = "$END_SCREEN_LABEL (${lane.label})"
         attachment.add(lane.screenshot(), label, "$label is not attached; call get_step_screenshot with lane \"${lane.label}\".")
     }
     for (example in evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>()) {
@@ -121,7 +127,12 @@ private class ImageAttachment {
 private fun fetchSection(evidence: JudgeEvidence): String = buildString {
     append("\n\nThe images are NOT attached. Get them with these tools:")
     evidence.lanes.forEach { lane ->
-        append("\n- The screen when the step ended (").append(lane.label).append("): get_step_screenshot with lane \"").append(lane.label).append("\".")
+        if (lane.startScreenshot != null) {
+            append("\n- ").append(START_SCREEN_LABEL).append(" (").append(lane.label).append("): get_step_screenshot with lane \"")
+            append(lane.label).append("\" and moment \"start\".")
+        }
+        append("\n- ").append(END_SCREEN_LABEL).append(" (").append(lane.label).append("): get_step_screenshot with lane \"")
+        append(lane.label).append("\".")
     }
     evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>().forEach { example ->
         append("\n- Reference screenshot ").append(example.id).append(": ").append(example.caption.ifBlank { "(no caption)" })
