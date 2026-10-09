@@ -6,12 +6,10 @@ import com.indagium.debug.ToolArgException
 import com.indagium.debug.ToolArgs
 import com.indagium.debug.asObject
 import com.indagium.debug.schema
-import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepFix
-import com.indagium.testing.script.untrustedData
 import kotlinx.coroutines.CompletableDeferred
 import java.util.Base64
 
@@ -21,8 +19,14 @@ import java.util.Base64
 // BLIND: nothing here can return the agent's claim or observation, because the evidence has no such field.
 // Check details and log rows came from the device or a script and travel inside an untrusted_data envelope.
 
-const val JUDGE_TOOL_CALL_BUDGET = 8
-const val COMPARISON_TOOL_CALL_BUDGET = 12
+/**
+ * The evidence tool calls of a judge whose first message carries the evidence (see JudgeBrief): extras only, such as another range
+ * of the log. [JUDGE_FETCH_TOOL_CALL_BUDGET] is for a judge that has to fetch images with tools, as before the evidence came up front.
+ */
+const val JUDGE_TOOL_CALL_BUDGET = 4
+const val COMPARISON_TOOL_CALL_BUDGET = 6
+const val JUDGE_FETCH_TOOL_CALL_BUDGET = 8
+const val COMPARISON_FETCH_TOOL_CALL_BUDGET = 12
 internal const val SUBMIT_VERDICT_TOOL = "submit_verdict"
 internal const val SUBMIT_COMPARISON_TOOL = "submit_comparison"
 
@@ -91,47 +95,7 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
         "Read what the step asks for: its action, the expected result, the judge checks you must answer, the reference examples " +
             "(ids and captions) and, per lane, the results of the automatic checks. Start here.",
         schema(),
-    )) { _ -> briefMap() }
-
-    private fun briefMap(): Map<String, Any?> {
-        val laneMaps = evidence.lanes.map { lane ->
-            buildMap<String, Any?> {
-                put("lane", lane.label)
-                put("automaticChecks", deterministicChecksMap(lane.deterministic))
-                put("logBytes", lane.logBytes)
-            }
-        }
-        val details = evidence.lanes.map { lane ->
-            val details = lane.deterministic.filter { it.detail.isNotBlank() }.map { mapOf("checkId" to it.checkId, "detail" to it.detail) }
-            mapOf("lane" to lane.label, "details" to details)
-        }
-        return buildMap {
-            put("case", evidence.caseName)
-            put("stepNumber", evidence.stepNumber)
-            put("stepCount", evidence.stepCount)
-            put("action", evidence.action)
-            put("expected", evidence.expected)
-            put(
-                "judgeChecks",
-                evidence.judgeChecks.map { check ->
-                    buildMap<String, Any?> {
-                        put("checkId", check.checkId)
-                        put("kind", check.kind)
-                        put("question", check.text)
-                        check.exampleId?.let { put("compareWithExample", it) }
-                    }
-                },
-            )
-            put("examples", evidence.examples.map { mapOf("exampleId" to it.id, "kind" to exampleKind(it), "caption" to it.caption) })
-            put("lanes", laneMaps)
-            putAll(untrustedData("automatic_check_details", mapOf("lanes" to details)))
-        }
-    }
-
-    private fun deterministicChecksMap(results: List<CheckResult>): List<Map<String, Any?>> =
-        results.map { mapOf("checkId" to it.checkId, "kind" to it.kind, "result" to it.status.name.lowercase()) }
-
-    private fun exampleKind(example: StepExample): String = if (example is StepExample.GoldenScreenshot) "goldenScreenshot" else "referenceLog"
+    )) { _ -> judgeBriefMap(evidence) }
 
     private fun screenshotTool() = JudgeTool(IndagiumToolDescriptor(
         "get_step_screenshot",
@@ -159,7 +123,7 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
         val id = args.requiredString("exampleId")
         when (val example = evidence.examples.firstOrNull { it.id == id }) {
             null -> mapOf("error" to "No example '$id' in this step; the examples are ${evidence.examples.joinToString(", ") { it.id }.ifBlank { "(none)" }}.")
-            is StepExample.ReferenceLog -> mapOf("caption" to example.caption, "text" to example.text)
+            is StepExample.ReferenceLog -> referenceLogResult(example)
             is StepExample.GoldenScreenshot -> goldenResult(example)
         }
     }
@@ -191,8 +155,7 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
         if (slice == null) {
             mapOf("error" to "No log was kept for ${lane.label}.")
         } else {
-            mapOf("count" to slice.rows.size, "nextOffset" to slice.nextOffset, "more" to slice.more, "totalBytes" to slice.totalBytes) +
-                untrustedData("logcat", mapOf("rows" to slice.rows))
+            judgeLogResult(slice)
         }
     }
 

@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayInputStream
@@ -61,6 +62,64 @@ class ClaudeCodeClientTest {
         val permissionModeIndex = command.indexOf("--permission-mode")
         assertTrue(permissionModeIndex >= 0)
         assertEquals("bypassPermissions", command[permissionModeIndex + 1])
+    }
+
+    @Test
+    fun aRequestWithImagesReadsItsPromptFromStreamJsonInputInsteadOfAnArgument() {
+        val withImages = ClaudeCodeClient.buildCommand(ClaudeCodeRequest(prompt = "Judge the step", images = listOf(LlmImage("c2NyZWVu", "image/jpeg"))))
+        val index = withImages.indexOf("--input-format")
+        assertTrue(index >= 0 && withImages[index + 1] == "stream-json", withImages.toString())
+        assertTrue("Judge the step" !in withImages, "the prompt travels on standard input: $withImages")
+        assertTrue("--print" in withImages && "--output-format" in withImages)
+
+        val plain = ClaudeCodeClient.buildCommand(ClaudeCodeRequest(prompt = "Judge the step"))
+        assertTrue("--input-format" !in plain)
+        assertEquals("Judge the step", plain.last(), "without images the prompt argument is as it always was")
+    }
+
+    @Test
+    fun theStreamJsonUserMessageCarriesTheTextThenOneBase64BlockPerImage() {
+        val line = ClaudeCodeClient.userMessageLine("Judge the step", listOf(LlmImage("c2NyZWVu", "image/jpeg"), LlmImage("b3RoZXI=")))
+
+        assertTrue(line.endsWith("\n") && line.count { it == '\n' } == 1, "one JSON line")
+        val root = Json.parseToJsonElement(line).jsonObject
+        assertEquals("user", root["type"]!!.jsonPrimitive.content)
+        val message = root["message"]!!.jsonObject
+        assertEquals("user", message["role"]!!.jsonPrimitive.content)
+        val content = message["content"]!!.jsonArray
+        assertEquals(listOf("text", "image", "image"), content.map { it.jsonObject["type"]!!.jsonPrimitive.content })
+        assertEquals("Judge the step", content[0].jsonObject["text"]!!.jsonPrimitive.content)
+        val first = content[1].jsonObject["source"]!!.jsonObject
+        assertEquals("base64", first["type"]!!.jsonPrimitive.content)
+        assertEquals("image/jpeg", first["media_type"]!!.jsonPrimitive.content)
+        assertEquals("c2NyZWVu", first["data"]!!.jsonPrimitive.content)
+        assertEquals("image/png", content[2].jsonObject["source"]!!.jsonObject["media_type"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun aRequestWithImagesWritesTheUserMessageToStandardInputAndClosesIt() = runBlocking {
+        val process = InputCapturingProcess("""{"type":"result","subtype":"success","result":"Done","session_id":"s1"}""")
+        val factory = FakeFactory(process)
+
+        val events = ClaudeCodeClient(factory).stream(ClaudeCodeRequest("Judge the step", images = listOf(LlmImage("c2NyZWVu", "image/jpeg")))).toList()
+
+        assertTrue(events.any { it is ClaudeCodeEvent.Final }, events.toString())
+        assertTrue(process.inputClosed.await(2, TimeUnit.SECONDS), "standard input is closed after the message")
+        val written = Json.parseToJsonElement(process.written().trim()).jsonObject
+        val content = written["message"]!!.jsonObject["content"]!!.jsonArray
+        assertEquals("Judge the step", content[0].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("c2NyZWVu", content[1].jsonObject["source"]!!.jsonObject["data"]!!.jsonPrimitive.content)
+        assertTrue("--input-format" in requireNotNull(factory.command))
+    }
+
+    @Test
+    fun aRequestWithoutImagesNeverTouchesStandardInput() = runBlocking {
+        val process = InputCapturingProcess("""{"type":"result","subtype":"success","result":"Done","session_id":"s1"}""")
+
+        ClaudeCodeClient(FakeFactory(process)).stream(ClaudeCodeRequest("Hello")).toList()
+
+        assertEquals("", process.written())
+        assertEquals(1L, process.inputClosed.count, "the input was not closed by the client")
     }
 
     @Test
@@ -254,6 +313,21 @@ class ClaudeCodeClientTest {
             this.command = command
             return process
         }
+    }
+
+    /** A finished process that records what was written to its standard input. */
+    private class InputCapturingProcess(stdoutText: String) : FakeProcess(stdoutText) {
+        private val sink = java.io.ByteArrayOutputStream()
+        val inputClosed = CountDownLatch(1)
+        override val stdin: java.io.OutputStream = object : java.io.OutputStream() {
+            override fun write(b: Int) = sink.write(b)
+
+            override fun write(b: ByteArray, off: Int, len: Int) = sink.write(b, off, len)
+
+            override fun close() = inputClosed.countDown()
+        }
+
+        fun written(): String = sink.toString(Charsets.UTF_8)
     }
 
     private open class FakeProcess(

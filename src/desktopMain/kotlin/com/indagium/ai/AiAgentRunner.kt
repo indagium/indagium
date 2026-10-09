@@ -337,6 +337,8 @@ internal class AiAgentRunner(
         confirmationTimeoutMs: Long? = null,
         /** Replaces the budget sentence of the system prompt (an AI test run is not about notes); null keeps the default. */
         budgetGuidance: ((AiRun) -> String)? = null,
+        /** Images attached to the first user message (a judge's screenshots), so the model has them before its first reply. */
+        images: List<LlmImage> = emptyList(),
     ): AiRun {
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
@@ -356,7 +358,7 @@ internal class AiAgentRunner(
         session.retain(run)
         run.job = scope.launch {
             try {
-                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort, budgetGuidance)
+                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort, budgetGuidance, images)
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
             } finally {
@@ -390,6 +392,7 @@ internal class AiAgentRunner(
         systemPrompt: String?,
         reasoningEffort: String?,
         budgetGuidance: ((AiRun) -> String)?,
+        images: List<LlmImage>,
     ) {
         val conversation = session.messages.toMutableList()
         val initialMessageCount = session.messages.size
@@ -399,7 +402,7 @@ internal class AiAgentRunner(
         // This is independent of the caller's provider: managed Codex/Claude MCP calls consume
         // the same per-run budget in AiToolExecutionCoordinator.
         conversation += LlmMessage(LlmRole.SYSTEM, budgetGuidance?.invoke(run) ?: run.toolCallBudget.initialGuidance())
-        conversation += LlmMessage(LlmRole.USER, prompt)
+        conversation += LlmMessage(LlmRole.USER, prompt, images = images)
 
         try {
             // An in-app model has no process or MCP server to start: it is ready as soon as the first request can go out.

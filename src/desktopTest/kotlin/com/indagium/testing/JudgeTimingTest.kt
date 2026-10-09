@@ -69,8 +69,8 @@ private const val CLOCK_STEP_MS = 7L
 private const val AWAIT_MS = 15_000L
 private const val POLL_MS = 20L
 
-/** The scripted judge needs three responses to its verdict; the model may start a fourth before the engine cancels the run. */
-private val MODEL_TURNS_TO_VERDICT = 3L..4L
+/** The scripted judge has its evidence in the first message: one response is its verdict; the model may start a second before the engine cancels the run. */
+private val MODEL_TURNS_TO_VERDICT = 1L..2L
 
 /** A clock that moves forward by [CLOCK_STEP_MS] every time anybody reads it, from any thread. */
 private class TickingClock : () -> Long {
@@ -167,8 +167,8 @@ class JudgeTimingTest {
         assertEquals("judge_started", written.first().text("kind"))
         val finished = written.last()
         assertEquals("judge_finished", finished.text("kind"))
-        assertTrue(finished.long("modelTurns") in MODEL_TURNS_TO_VERDICT, "brief, screenshot, verdict, and maybe one more before the cancel: $finished")
-        assertEquals(3L, finished.long("toolCalls"))
+        assertTrue(finished.long("modelTurns") in MODEL_TURNS_TO_VERDICT, "the verdict, and maybe one more before the cancel: $finished")
+        assertEquals(1L, finished.long("toolCalls"), "only submit_verdict: the evidence came with the first message")
         assertEquals("PASS", finished.text("verdict"))
         assertEquals("false", finished.text("partial"))
         val startup = assertNotNull(finished.long("startupMs"))
@@ -415,7 +415,7 @@ class JudgeTimingTest {
         assertEquals(RunStatus.PASSED, run.status, run.toString())
         val timing = assertNotNull(run.allSteps().single().judge?.timing)
         assertTrue(timing.modelTurns.toLong() in MODEL_TURNS_TO_VERDICT, timing.toString())
-        assertEquals(3, timing.toolCalls)
+        assertEquals(1, timing.toolCalls)
         assertFalse(timing.partial)
 
         val runDir = h.store.runDir(run.id)

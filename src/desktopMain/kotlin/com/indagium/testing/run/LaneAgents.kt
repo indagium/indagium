@@ -6,8 +6,10 @@ import com.indagium.ai.AiInvestigationContext
 import com.indagium.ai.AiProviderFactory
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiSession
+import com.indagium.ai.LlmImage
 import com.indagium.ai.LlmProvider
 import com.indagium.ai.ManagedMcpServerLease
+import com.indagium.ai.acceptsImagesUpFront
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
@@ -21,6 +23,7 @@ import kotlinx.coroutines.SupervisorJob
 // Code and Codex go through AccountAgentRunner, whose managed MCP server is bound to that same gateway.
 
 /** Everything one agent run needs (a lane's segment or a judge's single run). [toolCallLimit] is what is left of the case's budget; protocol tools are free. */
+@Suppress("LongParameterList") // One run request; each field is something an agent kind reads when it starts the run.
 internal class AgentSegmentRequest(
     val session: AiSession,
     val prompt: String,
@@ -35,9 +38,19 @@ internal class AgentSegmentRequest(
     val budgetGuidance: (AiRun) -> String = ::laneBudgetGuidance,
     /** What an account agent is told before the request; a judge run words its own. */
     val promptPreamble: (AiRun) -> String = ::lanePromptPreamble,
+    /**
+     * Images that go with [prompt] in the first message (a judge's screenshots). Only for an agent that [LaneAgent.acceptsImagesUpFront];
+     * the caller words [prompt] for the case that they are there.
+     */
+    val images: List<LlmImage> = emptyList(),
+    /** The request to send instead when an agent cannot attach [images] after all (Codex could not write its image files); null keeps [prompt]. */
+    val promptWithoutImages: String? = null,
 )
 
 internal interface LaneAgent : AutoCloseable {
+    /** Whether [AgentSegmentRequest.images] reach the model with the first message (see [acceptsImagesUpFront]); a judge asks before it builds its brief. */
+    val acceptsImagesUpFront: Boolean get() = true
+
     /** Starts one agent run; it ends by itself (Done / Error / Cancelled) and can be cancelled through the returned run. */
     fun start(request: AgentSegmentRequest): AiRun
 }
@@ -54,6 +67,8 @@ internal class ProviderLaneAgent(
     /** The clock of the runs this agent starts (see [AiRun]); a test injects a ticking one. */
     private val clock: () -> Long = System::currentTimeMillis,
 ) : LaneAgent {
+    override val acceptsImagesUpFront: Boolean get() = profile.kind.acceptsImagesUpFront()
+
     override fun start(request: AgentSegmentRequest): AiRun {
         val runner = AiAgentRunner(
             provider = provider,
@@ -72,6 +87,7 @@ internal class ProviderLaneAgent(
             freeTools = request.freeTools,
             confirmationTimeoutMs = request.confirmationTimeoutMs,
             budgetGuidance = request.budgetGuidance,
+            images = request.images,
         )
         run.job?.invokeOnCompletion { runner.close() }
         return run
@@ -100,6 +116,8 @@ internal fun laneAccountRunnerFactory(leaseFactory: (AiRun, IndagiumToolGateway)
 
 /** Claude Code or Codex running as the signed-in account. */
 internal class AccountLaneAgent(private val profile: AiProviderProfile, private val runners: AccountRunnerFactory) : LaneAgent {
+    override val acceptsImagesUpFront: Boolean get() = profile.kind.acceptsImagesUpFront()
+
     override fun start(request: AgentSegmentRequest): AiRun {
         val runner = runners.create(request)
         val run = runner.start(
@@ -110,6 +128,8 @@ internal class AccountLaneAgent(private val profile: AiProviderProfile, private 
             context = request.context,
             freeTools = request.freeTools,
             confirmationTimeoutMs = request.confirmationTimeoutMs,
+            images = request.images,
+            promptWithoutImages = request.promptWithoutImages,
         )
         run.job?.invokeOnCompletion { runner.close() }
         return run

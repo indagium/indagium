@@ -131,7 +131,8 @@ class JudgeBlindnessTest {
         val judge = ScriptedJudgeProvider()
         start(suite(judgedStep()), agent, judge)
 
-        val brief = judge.requests.flatMap { it.messages }.first { it.role == LlmRole.TOOL }.content.orEmpty()
+        // The evidence is in the first message now (it used to be the get_step_brief tool result).
+        val brief = judge.requests.first().messages.first { it.role == LlmRole.USER }.content.orEmpty()
         assertTrue(brief.contains("Open the app") && brief.contains("The login screen is shown"), brief)
         val questions = brief.contains("The login title is visible") && brief.contains("Does the screen look tidy?")
         assertTrue(questions, "the judge checks are the judge's questions: $brief")
@@ -346,6 +347,6 @@ class JudgeBlindnessTest {
         assertEquals(StepStatus.FAIL, settleWithJudge(StepStatus.FAIL, pass).status)
         assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.BLOCKED, pass).status)
         assertFalse(settleWithJudge(StepStatus.FAIL, unsure).inconclusive)
-        assertTrue(JUDGE_TOOL_CALL_BUDGET in 6..10, "the judge's budget is small")
+        assertTrue(JUDGE_TOOL_CALL_BUDGET in 3..6, "the budget of a judge that has its evidence is small: extras only")
     }
 }

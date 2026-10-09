@@ -2765,6 +2765,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | The step protocol, retries, `onFailure`, timeouts, cancellation, and agent restarts | `TestRunEngineTest`, `TestRunEngineAccountAgentTest`, `DeterministicChecksTest`, `LaneGatewayTest`, `TestAgentToolsTest` |
 | Lane scheduling (parallel across devices, sequential on one) and the confirmation timeout | `TestLaneSchedulingTest`, `ConfirmationGateTimeoutTest` |
 | The judge is blind, and comparison of disagreeing lanes | `JudgeBlindnessTest`, `JudgeComparisonTest` |
+| The judge's evidence and images come with its first message, for every agent kind | `JudgeEvidenceUpFrontTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
 | Run store, report actions, issue drafts, issue store, notes destination | `TestRunStoreTest`, `TestRunReportActionsTest`, `IssueDraftBuilderTest`, `IssueStoreTest`, `IssueToNotesTest`, `IssueEngineTest` |
 | Secrets stay off argv; fallback to memory; real macOS keychain round trip | `SecretStoreCommandTest`, `MacOsKeychainRoundTripTest` |
 | Tracker client (JSON and SSE, session header), issue creator, proxied tools | `TrackerMcpClientTest`, `TrackerIssueCreatorTest`, `TrackerToolsTest`, `TrackerSendTest` |
@@ -3353,7 +3354,7 @@ flowchart TB
     fin --> shot["screenshot + log range of the step"]
     shot --> det["deterministic checks<br/>logAppears · logAbsent · scriptResult"]
     det --> jq{"judge configured and<br/>mode says to ask?"}
-    jq -- yes --> jdg["blind judge, inline<br/>≤ 60 s · 8 evidence calls"]
+    jq -- yes --> jdg["blind judge, inline<br/>≤ 60 s · evidence up front"]
     jq -- no --> status
     jdg --> status["status rule (§26.7)"]
     status --> ok{"PASS?"}
@@ -3615,12 +3616,36 @@ removes the results of the judge checks themselves from what the judge may see. 
 (`StepSequence.judgeAttempt`). `shouldJudge` (`testing/run/StepJudging.kt:41`): `OFF` never;
 `EVERY_STEP` always; `FAILURES_ONLY` when a deterministic check failed, the agent claimed fail/blocked,
 or the step has a `ScreenJudge`/`AskJudge` check (those checks are `NOT_EVALUATED` without a judge).
-Budget: 8 evidence calls (`JUDGE_TOOL_CALL_BUDGET`; submitting is free) and
+Budget: 4 evidence calls (`JUDGE_TOOL_CALL_BUDGET`; submitting is free; 8 as `JUDGE_FETCH_TOOL_CALL_BUDGET` when
+images must be fetched with tools, see below) and
 `judgeTimeoutMs` = 60 s (`EngineTuning`); a judge that times out, ends without a verdict or fails
 answers `INCONCLUSIVE` with the reason — it never throws, so a flaky judge cannot break a run. When the
-lanes of a run ended a step differently, one **comparison judge** (budget 12) looks at every lane's own
+lanes of a run ended a step differently, one **comparison judge** (budget 6, fetching 12) looks at every lane's own
 evidence once all lanes are done (`compareDisagreements`, `testing/run/ComparisonRunner.kt:84`).
 Everything either judge says goes to `judge.jsonl`.
+
+**Evidence up front.** A judge does not collect its evidence with a tool call per piece: its first message carries all of
+it (`buildJudgeBrief`, `testing/run/JudgeBrief.kt`). That is what `get_step_brief` returns (`judgeBriefMap`: the step, the
+judge checks, the lanes' automatic check results and their details inside the `untrusted_data` envelope), a log excerpt per lane
+(what `read_step_log` returns by default: 60 rows, 30 per lane for a comparison, halved until at most 12,000 characters so its
+`nextOffset` stays true), the texts of the reference logs and the images: each lane's screen at the end of the step, then
+the golden screenshots (at most `JUDGE_MAX_ATTACHED_IMAGES` = 6 and 6 MB; the encoders are the existing bounded ones, and
+whatever does not fit is named with the tool that fetches it). The closing line is "All the evidence is above or attached.
+Call submit_verdict now. Use read_step_log only to read a different range of the log." The first message is built from
+`JudgeEvidence` alone, so it is exactly as blind as the tools; the tools stay for extras. A judge so briefed answers in
+one model turn instead of four or five. `judge.jsonl` gets a `judge_brief` line (`evidenceUpFront`, `images`, `promptChars`,
+`briefMs`, `toolBudget`), `judge_finished` a trailing `briefMs`. If the brief cannot be put together (a log that fails to
+read) the judge starts with the old pointer to `get_step_brief` and the larger budget (`judge_brief_failed`).
+
+**Images with the first message, per agent kind** (`AgentSegmentRequest.images`, appended last). The capability is one function,
+`AiProviderKind.acceptsImagesUpFront()` (`ai/AgentImageSupport.kt`), read through `LaneAgent.acceptsImagesUpFront`; a kind that
+cannot gets the text evidence plus a request to fetch the images with `get_step_screenshot` / `get_example` and the larger budget.
+
+| Kind | How the images travel |
+|------|-----------------------|
+| Anthropic, OpenAI-compatible, OpenAI API | `AiAgentRunner.start(images)` puts them on the first USER `LlmMessage`: image content blocks (Anthropic) or `image_url` data URLs (OpenAI). The providers already serialized user-role images. |
+| Codex | `CodexAppServerClient.startTurn(localImagePaths)` adds `{type:"localImage", path}` input items after the text item. The files are written to the run's temporary workspace (`writeAttachedImages`), which is deleted when the run ends. The `UserInput` variants in `codex app-server generate-json-schema` (checked against codex-cli 0.162) are `text`, `image` (`url` or `fileId`), `localImage` (`path`), `audio`, `localAudio`, `skill` and `mention`; `localImage` was chosen because it needs no URL form. If the files cannot be written, `AgentSegmentRequest.promptWithoutImages` is sent instead (the fetch wording). |
+| Claude Code | With images the CLI runs with `--input-format stream-json` and no prompt argument; `ClaudeCodeClient` writes one `{"type":"user","message":{"role":"user","content":[text, base64 image blocks]}}` line to the process's stdin (`ClaudeCodeProcess.stdin`) and closes it. Without images the prompt argument is unchanged. |
 
 **Timing.** `AiRun` stamps every event with its own clock at the moment `emit` takes it in
 (`AiRun.timedHistory`), and `TranscriptTail` writes each line with that stamp, so `judge.jsonl` (and a lane's

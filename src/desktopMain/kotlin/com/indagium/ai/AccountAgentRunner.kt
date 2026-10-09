@@ -59,6 +59,10 @@ internal class AccountAgentRunner(
         freeTools: Set<String> = emptySet(),
         /** A confirmation nobody answers within this many ms counts as denied; null (the sidebar) waits indefinitely. */
         confirmationTimeoutMs: Long? = null,
+        /** Images that go with [prompt] (a judge's screenshots); see [acceptsImagesUpFront]. */
+        images: List<LlmImage> = emptyList(),
+        /** The request to send instead when [images] cannot be attached (Codex could not write its image files); null keeps [prompt]. */
+        promptWithoutImages: String? = null,
     ): AiRun {
         require(profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT)
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
@@ -87,8 +91,10 @@ internal class AccountAgentRunner(
                 lease = managedMcpServerFactory(run)
                 run.emit(AiRunEvent.Status("Starting ${profile.kind.label}…"))
                 when (profile.kind) {
-                    AiProviderKind.CODEX_ACCOUNT -> runCodex(run, profile, prompt, systemPrompt, workspace, lease)
-                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(session, run, profile, prompt, systemPrompt, workspace, lease)
+                    AiProviderKind.CODEX_ACCOUNT -> {
+                        runCodex(run, profile, AccountRequest(prompt, images, promptWithoutImages), systemPrompt, workspace, lease)
+                    }
+                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(session, run, profile, prompt, images, systemPrompt, workspace, lease)
                 }
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
@@ -113,7 +119,7 @@ internal class AccountAgentRunner(
     private suspend fun runCodex(
         run: AiRun,
         profile: AiProviderProfile,
-        prompt: String,
+        request: AccountRequest,
         systemPrompt: String,
         workspace: Path,
         lease: ManagedMcpServerLease,
@@ -227,12 +233,10 @@ internal class AccountAgentRunner(
                 }
             }
             try {
+                val input = codexTurnInput(run, request, systemPrompt, workspace)
                 client.startTurn(
-                    thread.id,
-                    accountPrompt(run, systemPrompt, prompt),
-                    profile.model.takeIf(String::isNotBlank),
-                    workspace.toString(),
-                    profile.reasoningEffort.takeIf(String::isNotBlank),
+                    thread.id, input.text, profile.model.takeIf(String::isNotBlank), workspace.toString(),
+                    profile.reasoningEffort.takeIf(String::isNotBlank), input.imagePaths,
                 )
                 terminal.await()
                 run.emit(AiRunEvent.Done)
@@ -242,11 +246,27 @@ internal class AccountAgentRunner(
         }
     }
 
+    /**
+     * The text of the Codex turn and the image files that go with it. The files are written into [workspace], which is deleted when the
+     * run ends (Codex reads them as the turn starts); when they cannot be written the text is the prompt without images and a status says so.
+     */
+    @Suppress("TooGenericExceptionCaught") // Whatever stops the files from being written means "no images", never a failed run.
+    private suspend fun codexTurnInput(run: AiRun, request: AccountRequest, systemPrompt: String, workspace: Path): CodexTurnInput {
+        val paths = try {
+            writeAttachedImages(workspace, request.images).map(Path::toString)
+        } catch (failure: Exception) {
+            run.emit(AiRunEvent.Status("Could not attach the evidence images for Codex (${failure.message ?: failure::class.simpleName}); it will fetch them."))
+            emptyList()
+        }
+        return CodexTurnInput(accountPrompt(run, systemPrompt, request.promptFor(attached = paths.isNotEmpty())), paths)
+    }
+
     private suspend fun runClaude(
         session: AiSession,
         run: AiRun,
         profile: AiProviderProfile,
         prompt: String,
+        images: List<LlmImage>,
         systemPrompt: String,
         workspace: Path,
         lease: ManagedMcpServerLease,
@@ -275,6 +295,7 @@ internal class AccountAgentRunner(
                 maxTurns = maxTurns ?: maxToolRounds,
                 workingDirectory = workspace,
                 effort = profile.reasoningEffort.takeIf(String::isNotBlank),
+                images = images,
             ),
         ).collect { event ->
             when (event) {
@@ -335,6 +356,14 @@ internal class AccountAgentRunner(
             }
         }
     }
+}
+
+private class CodexTurnInput(val text: String, val imagePaths: List<String>)
+
+/** What an account run is asked: [prompt] with [images], or [promptWithoutImages] when the images cannot be attached. */
+private class AccountRequest(val prompt: String, val images: List<LlmImage>, private val promptWithoutImages: String?) {
+    /** [prompt], unless there were images and none could be [attached]. */
+    fun promptFor(attached: Boolean): String = if (images.isEmpty() || attached) prompt else promptWithoutImages ?: prompt
 }
 
 /** The sidebar's wording: the MCP budget sentence plus the rule to use only the managed MCP server's tools. */

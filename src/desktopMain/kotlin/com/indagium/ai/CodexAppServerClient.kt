@@ -172,6 +172,9 @@ class CodexAppServerException(
     val errorData: JsonElement? = null,
 ) : IllegalStateException(message)
 
+/** The `UserInput` type of an image the app-server reads from a file on this machine. */
+private const val CODEX_LOCAL_IMAGE_INPUT = "localImage"
+
 class CodexAppServerClient(
     private val process: CodexAppServerProcess,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -234,12 +237,18 @@ class CodexAppServerClient(
         resumeThread(threadId, options)
     }
 
+    /**
+     * Starts a turn on [threadId]. [localImagePaths] are image files the app-server reads and sends with the prompt: each becomes a
+     * `localImage` input item (`{type, path}`, the variant of `UserInput` in the app-server's generated JSON schema, checked against
+     * codex-cli 0.162; the other image variant, `image` with a `url`, carries no file and is not used). The files must stay until the turn ends.
+     */
     suspend fun startTurn(
         threadId: String,
         text: String,
         model: String? = null,
         cwd: String? = null,
         effort: String? = null,
+        localImagePaths: List<String> = emptyList(),
     ): CodexTurn {
         require(threadId.isNotBlank()) { "threadId must not be blank" }
         val params = buildJsonObject {
@@ -250,6 +259,12 @@ class CodexAppServerClient(
                     put("text", text)
                     put("text_elements", buildJsonArray { })
                 })
+                localImagePaths.forEach { path ->
+                    add(buildJsonObject {
+                        put("type", CODEX_LOCAL_IMAGE_INPUT)
+                        put("path", path)
+                    })
+                }
             })
             model?.let { put("model", it) }
             cwd?.let { put("cwd", it) }
