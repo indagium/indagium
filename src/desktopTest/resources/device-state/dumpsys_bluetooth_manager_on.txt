@@ -1,0 +1,60 @@
+Bluetooth Status:
+  State:         ON
+  Address:       XX:XX:XX:XX:00:01
+  Name:          sdk_gphone16k_arm64
+  Inner app:     com.google.android.bluetooth
+  Uptime:        4m 27.415265s
+
+Bluetooth Activity History:
+  TIMESTAMP          ACTION/STATE     DETAILS              
+  ------------------ ---------------- ---------------------
+  10-09 17:14:05.785 Enable           SYSTEM_BOOT (android)
+        +   88ms     BLE_TURNING_ON                        
+        + 2270ms     BLE_ON                                
+        + 2270ms     TURNING_ON                            
+        + 2421ms     ON
+
+Bluetooth crashed 0 times
+
+Ble app registered: {}
+
+BluetoothManagerService:
+  mEnable:true
+  mQuietEnable:Optional.empty
+  mEnableExternal:true
+
+
+BluetoothAdapterProperties
+  Name: sdk_gphone16k_arm64
+  Address: XX:XX:XX:XX:00:01
+  ConnectionState: STATE_DISCONNECTED
+  MaxConnectedAudioDevices: 5
+  A2dpOffloadEnabled: false
+BluetoothDeviceDiscovery
+  Discovering: false
+  DiscoveryEndMs: 0
+
+BluetoothRemoteDevices
+  Bonded devices: 0
+
+  Other devices: 0
+
+  Connected devices: 0
+
+Connection Events:
+
+BluetoothActiveDeviceManager
+  Audio mode: 0
+  Dual mode audio: false
+  Broadcasting: false
+  Pending classic active device: NULL
+  Classic device to be activated: NULL
+  Classic device not to be activated: NULL
+  A2DP:
+    Connected count: 0
+    Active: NULL
+    Fallback: NULL
+    Most recent: NULL
+  HFP:
+    Connected count: 0
+    Active: NULL

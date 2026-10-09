@@ -277,8 +277,11 @@ optional `tag`, `forMs`), `screenJudge` (`text`, optional `exampleRef` = the id 
 examples), `scriptResult` (`scriptId`, optional `args` object, `exitCode` — default 0, `null` for any —
 and `stdoutContains`), `askJudge` (`text`) and `deviceState` (`key`, `expectedRegex`, optional `withinMs` — the
 property is read repeatedly until its text matches the expression or `withinMs` is up; keys: `usb.devices`, one
-`vvvv:pppp name` line per attached host-mode USB device, and `bt.enabled`, `wifi.enabled`, `airplane` as
-`true`/`false`; an unknown key fails the check with a message that lists them). Example entries have a `type`: `goldenScreenshot`
+`vvvv:pppp name` line per attached host-mode USB device; `bt.enabled`, `wifi.enabled`, `airplane`, `mobile_data` as
+`true`/`false`; `bt.connected` (connected Bluetooth device names, best effort); `power.source` (`ac`, `usb`, `wireless`,
+`dock`, `none`); `battery.status` (`charging`, `discharging`, `not_charging`, `full`, `unknown`); `audio.devices` (wired/USB
+audio in use, best effort); `screen.awake` (`true`/`false`); `rotation` (0-3); an unknown key fails the check with a message
+that lists them). Example entries have a `type`: `goldenScreenshot`
 (`assetPath` relative to the suite's asset folder; the image itself is not uploaded over MCP) or
 `referenceLog` (`text`), with an optional `caption`. Both accept an optional `id`.
 
@@ -345,11 +348,20 @@ or recording is a separate confirmation-required call.
   image appears as a raw input preview with uncertain timing. Supplying one rowId returns that row's bounded image as
   MCP image content with source, acquisition interval, and verification metadata. It also returns `excludedSourceInputIds`,
   `latestRewriteUsage`, `rewriteSessionUsage` and `rewriteAttempts` when available.
+  While recording, a watcher reads the device's surroundings (USB, Bluetooth, power, Wi-Fi, airplane mode, mobile data, headset,
+  screen, rotation) every two seconds: a change within about three seconds after an input is listed in that row's `stateChanges`
+  (`key`, `from`, `to`, `atMs`, `text`); any other change is a row with `inputKind` `EXTERNAL`, proposed as a `MANUAL` step
+  with a prefilled `deviceState` check (`stepChecks`). Rows that are not AI steps also report `stepKind`, `script` and
+  `manualCompletion`.
   `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
-  and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in. To reorder, send every row
+  and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in. A row you added or an
+  external-event row (with its `id`) can also take `kind` (`MANUAL`, `SCRIPT`; `AGENT` only for a row you added),
+  `script` (`{ scriptId, args }`), `manualCompletion` and `checks` (replacing the row's checks); the edited step is validated
+  against the library (the script must exist, may be started from a step and take the arguments) and nothing changes on an error. To reorder, send every row
   with its `id` in the new order: any permutation of the current row ids, each exactly once, becomes the review order and
   every row keeps its evidence (without ids the rows are matched to the current order; `apply_test_recording` never reorders).
-  `insert_test_recording_row` (sessionId, index, action, optional expected) inserts a step you write before the row now at
+  `insert_test_recording_row` (sessionId, index, action, optional expected, kind, script, manualCompletion, checks) inserts a
+  step you write (an AI step unless you give `kind` `MANUAL` or `SCRIPT`, validated like `create_test_step`) before the row now at
   `index` (0 to the number of rows; the count appends) and returns its `rowId`; it has no recorded input, shows as
   `authorAdded` in `get_test_recording`, and an AI rewrite keeps it exactly as written and in place. Like the other recording
   edits it needs no approval and is refused while recording, applying or rewriting, and until snapshots drain.
@@ -367,7 +379,10 @@ or recording is a separate confirmation-required call.
   `get_recorded_video_storyboard`; typed passwords are hidden
   and never sent). `get_recorded_screen` accepts `moment: before|after` for eligible evidence or `moment: input` for a raw
   preview with source and acquisition timing; uncertain mirror timing is never verified as before/after. Every input must
-  land in exactly one step, or nothing changes. `get_recorded_video_storyboard` accepts either a 1-based `index` for an
+  land in exactly one step, or nothing changes. The provider is also shown each input's `stateChanges`, the detected
+  external events and the library scripts (id, tool name, description, parameters); it may turn an external event into a
+  `manual` step or a `script` step (a listed script with valid arguments, or a manual step with that script as an
+  automation alternative) and may add `deviceState` checks, but every other step stays an AI step. `get_recorded_video_storyboard` accepts either a 1-based `index` for an
   input-centered sequence or `startMs` plus `endMs` for a session-relative range no longer than 30 seconds. It returns a
   single MCP image content block containing up to six decoded, timestamp-labelled frames, plus frame times, ages and any
   input coverage. `get_recorded_input` reports each input's approximate session-relative `videoInputStartMs` and

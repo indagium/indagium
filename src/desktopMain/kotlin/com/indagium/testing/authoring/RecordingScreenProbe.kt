@@ -27,6 +27,9 @@ enum class RecordedInputKind {
     CLOSE_PANELS,
     ROTATE,
     SCREEN_ON,
+
+    // Appended last: a change of the device's surroundings that no input explains (a USB device plugged in, Bluetooth turned off).
+    EXTERNAL,
 }
 
 /** One sampled touch position in mirror coordinates, with the mirror screen size they refer to. */

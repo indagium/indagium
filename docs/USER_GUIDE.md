@@ -1321,8 +1321,12 @@ pairing a headset. Two more kinds of step cover them. No AI agent is started for
   the run, never the app. A manual step is not retried.
 - **Device state** is a check for any step: a property of the device must match your regular expression within a time:
   `usb.devices` (one `vvvv:pppp name` line for every USB device attached to the phone, for example `0781:5581`),
-  `bt.enabled`, `wifi.enabled` and `airplane` (`true` or `false`). Indagium asks the device with one short `adb`
-  command per reading. An unknown property fails the check and the message lists the supported ones.
+  `bt.enabled`, `wifi.enabled`, `airplane` and `mobile_data` (`true` or `false`), `bt.connected` (the connected Bluetooth
+  devices, one name per line), `power.source` (`ac`, `usb`, `wireless`, `dock` or `none` on battery), `battery.status`
+  (`charging`, `discharging`, `not_charging`, `full`), `audio.devices` (a wired or USB headset in use: `headset`,
+  `headphone`, `usb_headset`, `usb_device`), `screen.awake` (`true` while the screen is on) and `rotation` (0 to 3 quarter
+  turns). The Bluetooth and audio readings are best effort and depend on the Android version. Indagium asks the device
+  with one short `adb` command per reading. An unknown property fails the check and the message lists the supported ones.
 
 In a case that mixes kinds the lane's AI agent does its own steps; when the next step is a manual or script step the
 run does it, and the agent is started again at the following AI step with a summary of what happened. In the
@@ -1348,7 +1352,7 @@ A step can carry **checks** that are verified without trusting the agent:
 | **Script result** | a library script finishes with the exit code (and, optionally, output text) you expect |
 | **Screen judge** | the judge says the screen matches your description, optionally compared with an example |
 | **Ask the judge** | the judge answers your free-form question about the evidence with a pass |
-| **Device state** | a property of the device (`usb.devices`, `bt.enabled`, `wifi.enabled`, `airplane`) matches your regex within the time you give it |
+| **Device state** | a property of the device (`usb.devices`, `bt.enabled`, `power.source`, `screen.awake`, …) matches your regex within the time you give it |
 
 **Examples** give agents and the judge reference material: a **Golden screenshot** (a png, jpg or webp copied into
 Indagium, at most 10 MB) or a **Reference log**. The agent receives the current step's examples and can retrieve
@@ -1376,6 +1380,20 @@ Typing on the **on-screen keyboard** is never recorded as taps. While the keyboa
 focused field to know what you typed. In a password field the step reads "Enter text: ••••" and neither the text nor the
 position of any key is kept in the steps, the screen readings or the AI rewrite. If the field cannot be read, the step
 only says that text was typed. When the recording stops right after typing, the review waits a moment for the last text.
+While you record, Indagium also watches the device's surroundings every two seconds with one short `adb` command: USB
+devices attached to the phone, Bluetooth on or off and connected devices, Wi-Fi, airplane mode, mobile data, the charger,
+a wired or USB headset, the screen being on and its rotation. The first reading is only the starting point. A change that
+follows one of your inputs within about three seconds is shown on that step ("On the device after this step: Wi-Fi turned
+off"), with **Use as the expected result** to copy it. Any other change - you plug a USB stick into the phone, or Bluetooth
+goes off by itself - becomes its own step marked **DETECTED ON THE DEVICE**, proposed as a **Manual** step such as
+"Connect the USB device 'Ultra' (0781:5581) to the phone", with a *Device state* check that lets a run notice it is done.
+For such a step choose **Wait for tester**, or have a library script do it with **Run script ▾** (the script's
+arguments appear below it) or **+ New script**, which creates a script named and described after the event with a command
+that fails until you write the real one - Indagium never invents a command. A script step runs the script and then checks
+the result; **Keep manual fallback** makes it a manual step with the script as its automation alternative, so a run that
+cannot use the script waits for a tester. A detected step is never an AI step. A change that is quickly undone, or that a
+device does not report (some phones do not list Bluetooth devices or headsets), is not recorded; a warning says which
+readings the device could not give. A change that happens in the last second or two before you press Stop may be missing.
 A test run replays these steps with the lane tools `press_key` (which now also presses POWER, the volume keys, mute and
 media play/pause), `open_system_panel` (notification shade, quick settings, close) and `rotate_device`; a rotation done by a
 run is undone when the lane ends. Screenshots with a clean capture interval are labeled as verified
@@ -1420,6 +1438,10 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    frames from a known password-edit screen are withheld through a trusted screen transition or the end of the recording.
    The rewrite brief marks available screenshots and UI readings; the AI reads only evidence needed to resolve an
    uncertainty and reuses a capture shared by adjacent inputs.
+   A detected external event is kept as a step of its own: the AI may keep it as a manual step or, when a library script
+   clearly does the same thing, as a script step (or a manual step with that script as its automation alternative). It sees
+   your library scripts' names, descriptions and parameters, can only name a script that exists and takes the arguments it
+   gives, and never turns a recorded tap or key into a manual or script step.
 3. The raw taps and swipes are replaced by a few steps such as "Open YouTube", "Pause playback", or "Search for 'lofi'".
    Every input you made is inside exactly one step; **From N recorded inputs** shows which. A launcher-to-app video
    transition can support a broad action like opening that app without identifying a specific control. Exact video
@@ -1438,7 +1460,9 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
 Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", with the original taps so
 the agent that runs the case has the precise gesture when a label is ambiguous. An MCP client does the same with
 `rewrite_test_recording` and `restore_test_recording_raw`, and can reorder rows with `update_test_recording` (send every
-row id in the new order) or add one with `insert_test_recording_row`.
+row id in the new order) or add one with `insert_test_recording_row`. `get_test_recording` shows each step's `stateChanges`
+and the detected external events (`inputKind` EXTERNAL); `update_test_recording` and `insert_test_recording_row` can set a
+step's `kind` (manual or script), `script`, `manualCompletion` and `checks`.
 
 ### Scripts: your own tools for the agent
 

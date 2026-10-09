@@ -3,6 +3,7 @@ package com.indagium.testing.authoring
 import com.indagium.testing.device.MAX_UI_DUMP_BYTES
 import com.indagium.testing.device.UI_DUMP_COMMAND
 import com.indagium.testing.device.UiNode
+import com.indagium.testing.device.parseDisplayRotation
 import com.indagium.testing.device.parseUiAutomatorDump
 import java.time.Duration
 
@@ -27,7 +28,6 @@ private const val FIELD_READ_TIMEOUT_SECONDS = 8L
 private const val MAX_DEVICE_LIST_BYTES = 512 * 1024
 private const val MAX_SMALL_DUMP_BYTES = 1024 * 1024
 private const val MAX_WINDOW_DUMP_BYTES = 6 * 1024 * 1024
-private const val QUARTER_TURN_DEGREES = 90
 private const val QUARTER_TURNS = 4
 
 /** A rectangle in logical display pixels; [contains] treats the right and bottom edges as outside. */
@@ -50,15 +50,6 @@ internal fun parseWmSize(output: String): DisplayGeometry? {
     val width = chosen.groupValues[2].toIntOrNull() ?: return null
     val height = chosen.groupValues[3].toIntOrNull() ?: return null
     return if (width > 0 && height > 0) DisplayGeometry(width, height) else null
-}
-
-private val ROTATION_NAMED = Regex("\\b(?:mCurrentRotation|mRotation|rotation)=ROTATION_(0|90|180|270)\\b")
-private val ROTATION_INDEX = Regex("\\b(?:mCurrentRotation|mRotation)=([0-3])\\b")
-
-/** The display rotation in quarter turns (0..3) from `dumpsys window displays`; null when the dump names none. */
-internal fun parseDisplayRotation(output: String): Int? {
-    ROTATION_NAMED.find(output)?.let { return it.groupValues[1].toInt() / QUARTER_TURN_DEGREES }
-    return ROTATION_INDEX.find(output)?.groupValues?.get(1)?.toInt()
 }
 
 private val IME_SHOWN_TRUE = Regex("\\b(?:mInputShown|mIsInputViewShown|isInputViewShown)=true\\b")

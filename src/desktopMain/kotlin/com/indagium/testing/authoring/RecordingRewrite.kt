@@ -3,8 +3,11 @@ package com.indagium.testing.authoring
 import com.indagium.debug.parseChecks
 import com.indagium.debug.toPlainMap
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
+import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.IdAllocator
 import com.indagium.testing.store.validateStep
@@ -33,6 +36,9 @@ private const val MAX_NOTES_CHARS = 2_000
 private const val MAX_CHECKS_PER_STEP = 10
 private const val MAX_HINT_CHARS = 4_000
 private const val MAX_REVIEW_REASON_CHARS = 500
+private const val MAX_SCRIPT_ID_CHARS = 200
+private const val MAX_SCRIPT_ARGS = 20
+private const val MAX_SCRIPT_ARG_CHARS = 500
 private const val SCREEN_REF_PREFIX = "after-of-input-"
 private const val STEPS_KEY = "steps"
 
@@ -106,22 +112,43 @@ internal class ProposedStep(
     val screenInput: Int?,
     val checks: List<StepCheck>,
     val reviewReason: String?,
+    /** Who performs the step. Anything but AGENT is only valid for a step that is exactly one external event. */
+    val kind: StepKind = StepKind.AGENT,
+    val script: ScriptCall? = null,
+    val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
 )
 
 internal class RewriteProposal(val steps: List<ProposedStep>, val notes: String)
 
+/** What a rewrite answer is checked against: how many inputs were shown, which are the person's own steps, which are external events. */
+internal class RewriteExpectations(
+    val inputCount: Int,
+    /** The author-added inputs by number: each must be a step of its own whose text, optional flag and condition equal the row's. */
+    val fixedInputs: Map<Int, RecordedTestStep> = emptyMap(),
+    /**
+     * The external-event inputs by number, with the checks each one proposed: each is a step of its own that a tester or a script
+     * performs, never an AI step. An answer that gives such a step no device-state check gets the proposed ones.
+     */
+    val externalInputs: Map<Int, List<StepCheck>> = emptyMap(),
+    /** The library's scripts, which a manual or script step may name. */
+    val scripts: List<TestScript> = emptyList(),
+)
+
 /**
  * The AI's answer as a validated [RewriteProposal]. Throws [IllegalArgumentException] naming the first problem: the answer is
- * applied whole or not at all. [inputCount] is how many inputs were shown; every one must sit in exactly one step. [fixedInputs]
- * are the author-added inputs by number: each must be a step of its own whose text, optional flag and condition equal the row's.
+ * applied whole or not at all. [RewriteExpectations.inputCount] is how many inputs were shown; every one must sit in exactly one step.
  */
-internal fun parseRewriteResponse(response: String, inputCount: Int, fixedInputs: Map<Int, RecordedTestStep> = emptyMap()): RewriteProposal {
+internal fun parseRewriteResponse(response: String, inputCount: Int, fixedInputs: Map<Int, RecordedTestStep> = emptyMap()): RewriteProposal =
+    parseRewriteResponse(response, RewriteExpectations(inputCount, fixedInputs))
+
+internal fun parseRewriteResponse(response: String, expectations: RewriteExpectations): RewriteProposal {
+    val inputCount = expectations.inputCount
     val root = parseJsonObject(response)
     val rows = root[STEPS_KEY] as? JsonArray ?: throw IllegalArgumentException("The provider response must include a 'steps' array.")
     require(rows.isNotEmpty() && rows.size <= MAX_REWRITE_STEPS) { "The provider must propose between 1 and $MAX_REWRITE_STEPS steps." }
     val steps = rows.mapIndexed { index, row ->
         val obj = row as? JsonObject ?: throw IllegalArgumentException("steps[$index] must be an object.")
-        parseProposedStep(obj, index, inputCount, fixedInputs)
+        parseProposedStep(obj, index, expectations)
     }
     requireFullCoverage(steps.map { it.sourceInputs }, inputCount)
     val notes = (root["notes"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().take(MAX_NOTES_CHARS)
@@ -140,8 +167,8 @@ private fun parseJsonObject(response: String): JsonObject {
     return element as? JsonObject ?: throw IllegalArgumentException("The provider response must be a JSON object with a 'steps' array.")
 }
 
-private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int, fixedInputs: Map<Int, RecordedTestStep>): ProposedStep {
-    val where = "steps[$index]"
+private fun parseProposedStep(obj: JsonObject, index: Int, expectations: RewriteExpectations): ProposedStep {
+    val where = "$STEPS_KEY[$index]"
     val action = textField(obj, "action", where)
     val expected = textField(obj, "expected", where, allowBlank = true)
     val optionalPrimitive = obj["optional"] as? JsonPrimitive
@@ -157,18 +184,20 @@ private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int, fixe
     require(optional || condition == null) {
         "$where.condition is only valid when optional is true."
     }
-    val sources = sourceInputsOf(obj["sourceInputs"], where, inputCount)
-    val fixed = sources.firstOrNull { it in fixedInputs }
+    val sources = sourceInputsOf(obj["sourceInputs"], where, expectations.inputCount)
+    val fixed = sources.firstOrNull { it in expectations.fixedInputs }
     if (fixed != null) {
         val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
-        requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(fixedInputs[fixed]))
+        requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(expectations.fixedInputs[fixed]))
         return step
     }
-    require(expected.isNotBlank() || reviewReason != null || optional && !condition.isNullOrBlank()) {
+    val performer = performerOf(obj, where, sources, expectations)
+    require(performer.kind != StepKind.AGENT || expected.isNotBlank() || reviewReason != null || optional && !condition.isNullOrBlank()) {
         "$where.expected may be blank only for a conditional optional step or when reviewReason explains what needs review."
     }
-    val checks = checksOf(obj["checks"], where, action)
-    return ProposedStep(
+    require(performer.kind == StepKind.AGENT || !optional) { "$where: only an AI step can be optional." }
+    val checks = withProposedChecks(checksOf(obj["checks"], where), sources.singleOrNull()?.let(expectations.externalInputs::get))
+    val proposed = ProposedStep(
         action,
         expected,
         optional,
@@ -177,7 +206,86 @@ private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int, fixe
         screenInputOf(obj["expectedScreenshot"], where, sources),
         checks,
         reviewReason,
+        performer.kind,
+        performer.script,
+        performer.manualCompletion,
     )
+    val problem = validateStep(proposed.toTestStep(), expectations.scripts)
+    require(problem == null) { "$where: $problem" }
+    return proposed
+}
+
+private fun withProposedChecks(given: List<StepCheck>, proposed: List<StepCheck>?): List<StepCheck> =
+    if (proposed == null || given.any { it is StepCheck.DeviceState }) given else given + proposed
+
+private fun ProposedStep.toTestStep() = TestStep(
+    "",
+    action = action,
+    expected = expected,
+    checks = checks,
+    optional = optional,
+    condition = condition,
+    kind = kind,
+    script = script,
+    manualCompletion = manualCompletion,
+)
+
+private class Performer(val kind: StepKind, val script: ScriptCall?, val manualCompletion: ManualCompletion)
+
+/**
+ * Who performs a step: `kind` agent (default), manual or script, with the library script a script step runs (a manual step may name
+ * one as its automation alternative) and how a manual step is completed. An external event is a step of its own and is performed by a
+ * tester or a script, never by the AI agent; nothing else may be anything but an AI step.
+ */
+private fun performerOf(obj: JsonObject, where: String, sources: List<Int>, expectations: RewriteExpectations): Performer {
+    val kind = kindOf(obj["kind"], where)
+    val external = sources.filter { it in expectations.externalInputs }
+    require(external.isEmpty() || (sources.size == 1 && kind != StepKind.AGENT)) {
+        "$where covers external event input ${external.first()}, which must be a manual or script step of its own " +
+            "(kind \"manual\" or \"script\", sourceInputs [${external.first()}])."
+    }
+    require(kind == StepKind.AGENT || external.isNotEmpty()) {
+        "$where.kind \"${kind.name.lowercase()}\" is only valid for a step that is exactly one external event input."
+    }
+    val scriptId = optionalTextField(obj, "scriptId", where, MAX_SCRIPT_ID_CHARS)
+    val args = scriptArgsOf(obj["args"], where)
+    val completion = completionOf(obj["manualCompletion"], where)
+    if (kind == StepKind.AGENT) {
+        require(scriptId == null && args.isEmpty() && completion == null) {
+            "$where: scriptId, args and manualCompletion are only valid on a manual or script step."
+        }
+    }
+    require(completion == null || kind == StepKind.MANUAL) { "$where.manualCompletion is only valid on a manual step." }
+    require(scriptId != null || args.isEmpty()) { "$where.args needs a scriptId." }
+    require(kind != StepKind.SCRIPT || scriptId != null) { "$where: a script step needs a scriptId from the library." }
+    return Performer(kind, scriptId?.let { ScriptCall(it, args) }, completion ?: ManualCompletion.TESTER_OR_CHECKS)
+}
+
+private fun kindOf(element: JsonElement?, where: String): StepKind {
+    if (element == null || element is JsonNull) return StepKind.AGENT
+    val text = (element as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim().orEmpty()
+    return StepKind.entries.firstOrNull { it.name.equals(text, ignoreCase = true) }
+        ?: throw IllegalArgumentException("$where.kind must be agent, manual or script.")
+}
+
+private fun completionOf(element: JsonElement?, where: String): ManualCompletion? {
+    if (element == null || element is JsonNull) return null
+    val text = (element as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim().orEmpty()
+    return ManualCompletion.entries.firstOrNull { it.name.equals(text, ignoreCase = true) }
+        ?: throw IllegalArgumentException("$where.manualCompletion must be one of ${ManualCompletion.entries.joinToString(", ") { it.name }}.")
+}
+
+private fun scriptArgsOf(element: JsonElement?, where: String): Map<String, String> {
+    if (element == null || element is JsonNull) return emptyMap()
+    val obj = element as? JsonObject ?: throw IllegalArgumentException("$where.args must be an object of script arguments.")
+    require(obj.size <= MAX_SCRIPT_ARGS) { "$where.args may hold at most $MAX_SCRIPT_ARGS arguments." }
+    return obj.entries.associate { (name, value) ->
+        val primitive = value as? JsonPrimitive
+        require(primitive != null && primitive !is JsonNull && primitive.content.length <= MAX_SCRIPT_ARG_CHARS) {
+            "$where.args.$name must be a short string, number or boolean."
+        }
+        name to primitive.content
+    }
 }
 
 /** An author-added step comes back as its own step with the person's exact text, flags and nothing added by the AI. */
@@ -190,8 +298,10 @@ private fun requireFixedStepUnchanged(obj: JsonObject, where: String, step: Prop
     require(step.optional == row.optional && step.condition == row.condition?.trim()?.takeIf(String::isNotEmpty)) {
         "$label: optional and condition must equal the person's."
     }
-    val extras = listOf("checks", "reviewReason", "expectedScreenshot").filter { key -> !isEmptyAnswer(obj[key]) }
+    val extras = listOf("checks", "reviewReason", "expectedScreenshot", "scriptId", "args", "manualCompletion").filter { key -> !isEmptyAnswer(obj[key]) }
     require(extras.isEmpty()) { "$label: leave out ${extras.joinToString(", ")}." }
+    val kind = kindOf(obj["kind"], where)
+    require(kind == row.stepKind || obj["kind"] == null) { "$label: kind must be \"${row.stepKind.name.lowercase()}\" like the person's step." }
 }
 
 private fun isEmptyAnswer(element: JsonElement?): Boolean = when (element) {
@@ -243,8 +353,8 @@ private fun screenInputOf(element: JsonElement?, where: String, sources: List<In
     return number
 }
 
-/** Checks go through the same parser and rules as a step draft, minus everything that points outside the step. */
-private fun checksOf(element: JsonElement?, where: String, action: String): List<StepCheck> {
+/** Checks go through the same parser and rules as a step draft, minus script checks and example references; device-state checks are allowed. */
+private fun checksOf(element: JsonElement?, where: String): List<StepCheck> {
     if (element == null || element is JsonNull) return emptyList()
     require(element is JsonArray) { "$where.checks must be an array." }
     val items = element.map { requireNotNull(it as? JsonObject) { "$where.checks must hold objects." } }
@@ -252,10 +362,7 @@ private fun checksOf(element: JsonElement?, where: String, action: String): List
     // The parser's own message names the offending check (it throws an IllegalArgumentException).
     val checks = parseChecks(items.map { it.toPlainMap() }, IdAllocator(), "$where.checks")
     require(checks.none { it is StepCheck.ScriptResult }) { "$where.checks must not use script checks." }
-    require(checks.none { it is StepCheck.DeviceState }) { "$where.checks must not use device-state checks." }
     require(checks.none { it is StepCheck.ScreenJudge && it.exampleRef != null }) { "$where.checks must not reference examples." }
-    val problem = validateStep(TestStep("", action = action, checks = checks))
-    require(problem == null) { "$where: $problem" }
     return checks
 }
 
@@ -282,11 +389,10 @@ internal fun buildRewrittenRows(
         val sources = step.sourceInputs.map { inputs[it - 1] }
         // An author-added row is not rewritten: the row itself (same id, same text) stays, in the place the answer gave it.
         sources.singleOrNull()?.takeIf { it.fixed }?.let { return@map it.row }
-        val unclearGesture = sources.firstOrNull { input ->
-            input.row.kind in setOf(RecordedInputKind.TAP, RecordedInputKind.LONG_PRESS) &&
-                input.row.tappedElement == null && input.screenshot("before") == null && input.number !in videoInspectedInputs
-        }
-        val needsReview = unclearGesture != null || step.reviewReason != null
+        val unclearGesture = unclearGestureIn(sources, videoInspectedInputs)
+        val byAgent = step.kind == StepKind.AGENT
+        val needsReview = byAgent && (unclearGesture != null || step.reviewReason != null)
+        val external = sources.singleOrNull()?.takeIf { it.row.isExternalEvent }
         val rawAction = sources.joinToString("\n") { it.row.action }.take(MAX_STEP_TEXT_CHARS)
         val screenInput = step.screenInput ?: step.sourceInputs.last()
         val screen = if (needsReview) null else inputs[screenInput - 1].screenshot("after")
@@ -304,14 +410,12 @@ internal fun buildRewrittenRows(
             sourceInputIds = sources.map { it.row.id },
             sourceHint = sourceHintOf(sources),
             checks = if (needsReview) emptyList() else step.checks,
-            reviewReason = when {
-                unclearGesture != null -> {
-                    val kind = unclearGesture.row.kind?.name?.lowercase()
-                    "The recorded $kind has neither a resolved target nor trustworthy inspected video/screenshot evidence. " +
-                        "Identify the target and expected result."
-                }
-                else -> step.reviewReason
-            },
+            kind = if (external != null) RecordedInputKind.EXTERNAL else null,
+            stepKind = step.kind,
+            script = step.script,
+            manualCompletion = step.manualCompletion,
+            stateChanges = sources.flatMap { it.row.stateChanges }.distinct(),
+            reviewReason = if (unclearGesture != null && byAgent) unclearGestureReason(unclearGesture) else step.reviewReason,
             screenshotSource = screen?.source,
             screenshotAcquiredAtMs = screen?.acquiredAtMs,
             screenshotAcquisitionFinishedAtMs = screen?.acquisitionFinishedAtMs,
@@ -319,6 +423,16 @@ internal fun buildRewrittenRows(
             screenshotVerifiedMoment = screen?.let { "after" },
         )
     }
+
+/** The first tap or long press among [sources] with neither a resolved target nor inspected video nor a trustworthy before screenshot. */
+private fun unclearGestureIn(sources: List<RewriteInput>, videoInspectedInputs: Set<Int>): RewriteInput? = sources.firstOrNull { input ->
+    input.row.kind in setOf(RecordedInputKind.TAP, RecordedInputKind.LONG_PRESS) &&
+        input.row.tappedElement == null && input.screenshot("before") == null && input.number !in videoInspectedInputs
+}
+
+private fun unclearGestureReason(input: RewriteInput): String =
+    "The recorded ${input.row.kind?.name?.lowercase()} has neither a resolved target nor trustworthy inspected video/screenshot evidence. " +
+        "Identify the target and expected result."
 
 /** The raw inputs of one rewritten step, for the AI that later runs it: the precise gesture when a label is ambiguous. */
 private fun sourceHintOf(sources: List<RewriteInput>): String {
@@ -357,6 +471,10 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
         if (row.stepKind != StepKind.AGENT) append(" | performed by: ").append(row.stepKind.name.lowercase()).append(" (not an AI step)")
         return@buildString
     }
+    if (row.isExternalEvent) {
+        appendExternalEvent(this@describe, mode)
+        return@buildString
+    }
     if (mode == RewriteDescription.BRIEF) append('[').append(row.kind?.name ?: "INPUT").append("] ")
     append(row.action.take(MAX_ACTION_CHARS))
     row.tappedElement?.let { element ->
@@ -370,7 +488,26 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     append(" | before activity: ").append(row.before?.activity ?: "unavailable")
     append(" | after app: ").append(row.after?.packageName ?: "unavailable")
     append(" | after activity: ").append(row.after?.activity ?: "unavailable")
+    if (row.stateChanges.isNotEmpty()) append(" | device changes after it: ").append(stateChangesText(row.stateChanges))
     if (mode == RewriteDescription.BRIEF) appendBriefDetails(this@describe, evidenceIds)
+}
+
+private const val MAX_STATE_CHANGES_TEXT_CHARS = 400
+
+private fun stateChangesText(events: List<EnvironmentEvent>): String = events.joinToString("; ") { it.summary() }.take(MAX_STATE_CHANGES_TEXT_CHARS)
+
+/**
+ * An external event, which is not a recording of anything the person did: what was detected, the step it is proposed as (a tester or a
+ * script does it) and the device-state check that would notice it done. The AI keeps it as a step of its own.
+ */
+private fun StringBuilder.appendExternalEvent(input: RewriteInput, mode: RewriteDescription) {
+    val row = input.row
+    if (mode == RewriteDescription.BRIEF) append("[EXTERNAL EVENT] ")
+    append("detected: ").append(stateChangesText(row.stateChanges))
+    append(" | proposed step for a tester: \"").append(row.action.take(MAX_ACTION_CHARS)).append('"')
+    row.checks.filterIsInstance<StepCheck.DeviceState>().forEach { check ->
+        append(" | proposed check: ").append(check.key).append(" matches /").append(check.expectedRegex.take(MAX_ACTION_CHARS)).append('/')
+    }
 }
 
 private fun StringBuilder.appendBriefDetails(input: RewriteInput, evidenceIds: RewriteEvidenceIds?) {

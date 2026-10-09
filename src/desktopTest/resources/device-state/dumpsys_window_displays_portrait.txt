@@ -1,0 +1,25 @@
+WINDOW MANAGER DISPLAY CONTENTS (dumpsys window displays)
+  Display: mDisplayId=0 (organized)
+    init=2076x2152 390dpi mMinSizeOfResizeableTaskDp=220 cur=2076x2152 app=2076x2152 rng=2076x2076-2152x2152
+    isRemovalRequested=false mLayoutNeeded=false
+  mSetIgnoreOrientationRequest=true
+  overrideConfig={1.0 310mcc260mnc [en_US] ldltr sw852dp w852dp h883dp 390dpi lrg compactNeeded port finger qwerty/v/v dpad/v winConfig={ mBounds=Rect(0, 0 - 2076, 2152) mAppBounds=Rect(0, 0 - 2076, 2152) mMaxBounds=Rect(0, 0 - 2076, 2152) mDisplayRotation=ROTATION_0 mWindowingMode=fullscreen mActivityType=undefined mAlwaysOnTop=undefined mRotation=ROTATION_0} as.3 s.32 fontWeightAdjustment=0}
+  mHasSetIgnoreOrientationRequest=true ignoreOrientationRequest=true
+  mSleeping=false mAllSleepTokens=[]
+  mLayoutSeq=89
+  mImeWindow=Window{eb88d4f u0 InputMethod}
+  mImeLayeringTarget=Window{b630ceb u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}
+  mImeInputTarget=Window{b630ceb u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}
+  mImeControlTarget=Window{b630ceb u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}
+  ImeContainer
+    mNeedsLayer=false
+    mImeWindowToken=null
+  mImeParent=ActivityRecord{162164437 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t2}
+  mRemoteInsetsControlTarget=RemoteInsetsControlTarget{bee0363 displayId=0 requestedVisibleTypes=503 animatingTypes=0}
+  mCurrentFocus=Window{b630ceb u0 com.google.android.apps.nexuslauncher/com.google.android.apps.nexuslauncher.NexusLauncherActivity}
+  mFocusedApp=ActivityRecord{162164437 u0 com.google.android.apps.nexuslauncher/.NexusLauncherActivity t2}
+  mFixedRotationLaunchingApp=null
+
+  mHoldScreenWindow=null
+  mObscuringWindow=Window{a5dc3a6 u0 com.android.systemui.wallpapers.ImageWallpaper}
+  mLastWakeLockHoldingWindow=null

@@ -101,6 +101,7 @@ internal class RecordingRewriteTools(
         return buildMap {
             put("index", input.number)
             put("kind", row.kind?.name)
+            if (row.isExternalEvent) put("externalEvent", true)
             put("durationMs", row.durationMs)
             put("hasBeforeScreen", input.screenshot("before") != null)
             put("hasAfterScreen", input.screenshot("after") != null)
@@ -120,6 +121,7 @@ internal class RecordingRewriteTools(
                     mapOf(
                         "action" to row.action,
                         "typedNote" to row.expected.takeIf(String::isNotBlank),
+                        "deviceChanges" to row.stateChanges.map { it.summary() }.takeIf { it.isNotEmpty() },
                         "tappedElement" to row.tappedElement?.let {
                             mapOf("text" to it.text, "contentDesc" to it.contentDesc, "resourceId" to it.resourceId, "className" to it.className)
                         },

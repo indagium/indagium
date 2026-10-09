@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.device.DEVICE_STATE_KEY_HINTS
 import com.indagium.testing.device.KNOWN_DEVICE_STATE_KEYS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
@@ -103,6 +104,7 @@ internal fun ScriptCallEditor(
     optional: Boolean,
     onChange: (ScriptCall?) -> StoreResult<*>,
     onNewScript: () -> Unit,
+    chooseLabel: String = "Choose a script",
 ) {
     val ui = LocalTestsUi.current
     val scripts = ui.library.scripts
@@ -111,7 +113,7 @@ internal fun ScriptCallEditor(
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         TestsDropdown(
             selectedLabel = when {
-                call == null -> "Choose a script"
+                call == null -> chooseLabel
                 selected == null -> "(missing script)"
                 else -> selected.toolName
             },
@@ -202,6 +204,7 @@ internal fun DeviceStateCheckBody(check: StepCheck.DeviceState, enabled: Boolean
         AppText("within ms", color = tc().td, fontSize = 10.sp)
         CommitNumberField(check.withinMs, 1L, MAX_STEP_TIMEOUT_MS, { n -> onChange(check.copy(withinMs = n)) }, Modifier.width(WITHIN_FIELD_WIDTH), enabled)
     }
+    DEVICE_STATE_KEY_HINTS[check.key]?.let { TestsHint(it) }
     CommitTextField(
         check.expectedRegex,
         { text -> onChange(check.copy(expectedRegex = text)) },
@@ -300,7 +303,7 @@ internal fun RecordedRowKindEditor(session: TestStepRecordingSession, row: Recor
 }
 
 @Composable
-private fun RecordedDeviceStateChecks(row: RecordedTestStep, enabled: Boolean, edit: ((RecordedTestStep) -> RecordedTestStep) -> StoreResult<*>) {
+internal fun RecordedDeviceStateChecks(row: RecordedTestStep, enabled: Boolean, edit: ((RecordedTestStep) -> RecordedTestStep) -> StoreResult<*>) {
     TestsSectionTitle("Device-state checks (${row.checks.count { it is StepCheck.DeviceState }})") {
         AppButton("+ Add check", onClick = { edit { it.copy(checks = it.checks + newDeviceStateCheck()) } }, enabled = enabled, variant = ButtonVariant.Ghost)
     }

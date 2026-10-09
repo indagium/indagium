@@ -9,6 +9,8 @@ import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.model.AiUsageStats
 import com.indagium.model.sumAiUsage
+import com.indagium.testing.device.DEVICE_STATE_BATTERY_STATUS
+import com.indagium.testing.device.DEVICE_STATE_POWER_SOURCE
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
@@ -91,6 +93,11 @@ data class RecordedTestStep(
     val stepKind: StepKind = StepKind.AGENT,
     val script: ScriptCall? = null,
     val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
+    /**
+     * What changed on the device while recording (see [RecordingEnvironmentWatcher]). On a recorded input: the changes that followed it
+     * within a few seconds, evidence of what it did ("Wi-Fi turned off"). On a [RecordedInputKind.EXTERNAL] row: the event it stands for.
+     */
+    val stateChanges: List<EnvironmentEvent> = emptyList(),
 )
 
 /**
@@ -191,6 +198,8 @@ class TestStepRecordingSession internal constructor(
     private var subscription: Closeable? = subscription
     private var videoSubscription: Closeable? = null
     private var deviceInput: DeviceInputHandle? = null
+    private var environment: Closeable? = null
+    private var environmentEventCount = 0
     private var tailPending = false
     private val tailDone = CountDownLatch(1)
     private var inputSource = InputSource.MIRROR
@@ -338,6 +347,59 @@ class TestStepRecordingSession internal constructor(
 
     /** Adds a warning to the recording; for the setup code that learns something the session cannot (a mirror that did not start). */
     internal fun addWarning(message: String) = synchronized(lock) { warn(message) }
+
+    /** Connects the environment watcher. [stop] and [close] close it; it only ever reports while the recording is active. */
+    internal fun attachEnvironmentWatcher(watcher: Closeable) {
+        val reject = synchronized(lock) {
+            if (!mutableSnapshot.value.active || environment != null) {
+                true
+            } else { environment = watcher; false }
+        }
+        if (reject) watcher.close()
+    }
+
+    /** What the environment watcher delivers to: changes of the device's surroundings become evidence on an input or a row of their own. */
+    internal val environmentSink: EnvironmentSink = object : EnvironmentSink {
+        override fun environmentEvents(events: List<EnvironmentEvent>) = synchronized(lock) {
+            if (mutableSnapshot.value.active) environmentEventsLocked(events)
+        }
+
+        override fun environmentWarning(message: String) = synchronized(lock) {
+            if (mutableSnapshot.value.active) warn(message)
+        }
+    }
+
+    /**
+     * A change that follows a recorded input by at most [ATTRIBUTION_WINDOW_MS] is that input's evidence ([RecordedTestStep.stateChanges]);
+     * the change happened somewhere between two polls, so an input counts when the change could have been within the window after it.
+     * Any other change is an external row. A battery status that changes together with the power source is not told twice.
+     */
+    private fun environmentEventsLocked(events: List<EnvironmentEvent>) {
+        var rows = mutableSnapshot.value.steps
+        val keys = events.mapTo(HashSet()) { it.key }
+        for (event in events) {
+            if (event.key == DEVICE_STATE_BATTERY_STATUS && DEVICE_STATE_POWER_SOURCE in keys) continue
+            if (++environmentEventCount > MAX_ENVIRONMENT_EVENTS) {
+                warn("More than $MAX_ENVIRONMENT_EVENTS changes of the device's surroundings were seen; later ones are not recorded.")
+                break
+            }
+            val target = rows.indices.filter { followsInput(rows[it], event) }.maxByOrNull { rows[it].inputAtMs }
+            rows = when {
+                target != null -> rows.toMutableList().also { it[target] = it[target].withStateChange(event) }
+                event.key in EVIDENCE_ONLY_STATE_KEYS -> rows
+                rows.size >= MAX_RECORDED_STEPS -> rows.also { warn("Recording reached the $MAX_RECORDED_STEPS-step limit; stop and review the draft.") }
+                else -> rows + externalEventRow(event)
+            }
+        }
+        publishRows(rows)
+    }
+
+    private fun followsInput(row: RecordedTestStep, event: EnvironmentEvent): Boolean =
+        row.kind != null && row.kind != RecordedInputKind.EXTERNAL && !row.authorAdded && row.inputAtMs <= event.atMs &&
+            row.inputAtMs + ATTRIBUTION_WINDOW_MS >= event.sinceMs
+
+    private fun RecordedTestStep.withStateChange(event: EnvironmentEvent) =
+        copy(stateChanges = (stateChanges + event).takeLast(MAX_STATE_CHANGES_PER_ROW))
 
     /** What the device input recorder delivers to: rows are added in order, also in the short tail after [stop]. */
     internal val deviceInputSink: DeviceInputSink = object : DeviceInputSink {
@@ -606,6 +668,7 @@ class TestStepRecordingSession internal constructor(
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
         allowReorder: Boolean = false,
+        performerEdits: Map<String, RecordedPerformerEdit> = emptyMap(),
     ): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         val original = current.steps
@@ -618,11 +681,13 @@ class TestStepRecordingSession internal constructor(
         } else {
             original
         }
-        if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides)) return@synchronized false
+        if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides, performerEdits)) {
+            return@synchronized false
+        }
         val edited = old.mapIndexed { index, row ->
             val optional = optionalOverrides[row.id]?.first ?: row.optional
             val condition = if (optionalOverrides.containsKey(row.id)) optionalOverrides[row.id]?.second?.trim()?.takeIf(String::isNotEmpty) else row.condition
-            row.copy(
+            val updated = row.copy(
                 action = actionsAndExpected[index].first,
                 expected = actionsAndExpected[index].second,
                 optional = optional,
@@ -630,6 +695,7 @@ class TestStepRecordingSession internal constructor(
                 reviewReason = row.reviewReason.takeIf { actionsAndExpected[index].second.isBlank() },
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
+            performerEdits[row.id]?.applyTo(updated) ?: updated
         }
         mutableSnapshot.value = current.copy(
             steps = edited,
@@ -652,24 +718,31 @@ class TestStepRecordingSession internal constructor(
         expectedScreenshotIds: Set<String>,
         expectedRowIds: List<String>?,
         optionalOverrides: Map<String, Pair<Boolean, String?>>,
+        performerEdits: Map<String, RecordedPerformerEdit>,
     ): Boolean {
         val current = mutableSnapshot.value
         return !current.active && !applicationReserved && !current.rewriteInProgress && actionsAndExpected.size == old.size &&
             expectedScreenshotIds.all { id -> old.any { it.id == id } } &&
             optionalOverrides.keys.all { id -> old.any { it.id == id } } &&
+            performerEdits.all { (id, edit) -> old.firstOrNull { it.id == id }?.let(edit::allowedOn) == true } &&
             old.mapIndexed { index, row -> row to actionsAndExpected[index].second }.all { (row, expected) ->
                 val (optional, condition) = optionalOverrides[row.id] ?: (row.optional to row.condition)
-                recordingRowIssues(row, expected, optional, condition, requireExpected = false).isEmpty()
+                val withOptional = row.copy(optional = optional, condition = condition)
+                val effective = performerEdits[row.id]?.applyTo(withOptional) ?: withOptional
+                recordingRowIssues(effective, expected, effective.optional, effective.condition, requireExpected = false).isEmpty()
             } &&
             (expectedRowIds == null || expectedRowIds == old.map { it.id })
     }
 
     fun stop(): TestStepRecordingSnapshot {
         var finishingInput: DeviceInputHandle? = null
+        var oldEnvironment: Closeable? = null
         val detached = synchronized(lock) {
             var oldSubscription: Closeable? = null
             if (mutableSnapshot.value.active) {
                 touches.clear()
+                oldEnvironment = environment
+                environment = null
                 finishingInput = deviceInput
                 if (finishingInput == null) tailDone.countDown() else tailPending = true
                 mutableSnapshot.value = mutableSnapshot.value.copy(active = false, pendingSnapshots = pendingCount())
@@ -686,6 +759,7 @@ class TestStepRecordingSession internal constructor(
         }
         detached.first?.close()
         detached.second?.close()
+        oldEnvironment?.close()
         // Not under the lock: the recorder reads the device and delivers the last typed text through deviceInputSink.
         finishingInput?.finish()
         videoTimeline?.stop()
@@ -747,6 +821,7 @@ class TestStepRecordingSession internal constructor(
     override fun close() {
         stop()
         deviceInput?.close()
+        synchronized(lock) { environment.also { environment = null } }?.close()
         videoTimeline?.close()
         disposed.set(true)
         probeDisposed.set(true)
@@ -776,13 +851,19 @@ class TestStepRecordingSession internal constructor(
         val context = row.screenContext?.takeIf(String::isNotBlank)
         val assetPath = row.screenshotJpeg?.takeIf { row.useScreenshotAsExpected }?.let(assetPathFor)
         val screenshotSource = row.screenshotSource?.name?.lowercase()?.replace('_', ' ')
+        // Only an AI step reads examples: a manual or script step is done by a person or the run itself.
+        val byAgent = row.stepKind == StepKind.AGENT
         val examples = buildList {
             when {
+                !byAgent -> Unit
                 rewritten -> row.sourceHint?.takeIf(String::isNotBlank)?.let {
                     add(StepExample.ReferenceLog(newExampleId(), caption = REWRITE_HINT_CAPTION, text = it))
                 }
                 context != null ->
                     add(StepExample.ReferenceLog(newExampleId(), caption = "Recorded input context; see source timing", text = context))
+            }
+            if (byAgent && !rewritten && row.stateChanges.isNotEmpty()) {
+                add(StepExample.ReferenceLog(newExampleId(), caption = STATE_CHANGES_CAPTION, text = row.stateChanges.joinToString("\n") { it.summary() }))
             }
             if (assetPath != null && row.useScreenshotAsExpected) {
                 val caption = when {
@@ -1160,7 +1241,8 @@ class TestStepRecordingSession internal constructor(
 
     private fun withScreenContext(rows: List<RecordedTestStep>): Pair<List<RecordedTestStep>, List<Int>> {
         // Attachment needs chronological order; a reviewer may have moved rows, so sort by completion (a stable sort keeps list order for ties).
-        val recorded = rows.indices.filter { rows[it].kind != null }.sortedBy { rows[it].inputAtMs }
+        // An external event is not something the person did: it neither has a screen of its own nor splits the gaps between inputs.
+        val recorded = rows.indices.filter { rows[it].kind != null && rows[it].kind != RecordedInputKind.EXTERNAL }.sortedBy { rows[it].inputAtMs }
         val inputWindows = recorded.map { InputWindow(rows[it].inputStartMs, rows[it].inputAtMs) }
         val windows = screenStates.values
             .filter { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() || it.nodes.isNotEmpty() }
@@ -1294,6 +1376,9 @@ class TestStepRecordingSession internal constructor(
         const val PROBE_DRAIN_TIMEOUT_MS = 8_000L
         const val MAX_STATE_IMAGE_BYTES = 48L * 1024 * 1024
         const val MAX_GESTURE_SAMPLES = 8
+        const val ATTRIBUTION_WINDOW_MS = 3_000L
+        const val MAX_ENVIRONMENT_EVENTS = 60
+        const val MAX_STATE_CHANGES_PER_ROW = 10
         const val DUPLICATE_WINDOW_MS = 50L
         const val DUPLICATE_TOUCH_TOLERANCE_PX = 4
         const val TAIL_DRAIN_TIMEOUT_MS = 12_000L
@@ -1305,6 +1390,7 @@ class TestStepRecordingSession internal constructor(
         const val MASKED_TEXT = "••••"
         const val DELETE_ACTION = "Press Delete"
         const val REWRITE_HINT_CAPTION = "Recorded input (hint; prefer what is on screen)"
+        const val STATE_CHANGES_CAPTION = "Observed on the device after this input while recording"
         const val PROBE_FAILED_WARNING = "The screen context (UI hierarchy) could not be read through adb; steps keep coordinates and images only."
     }
 }

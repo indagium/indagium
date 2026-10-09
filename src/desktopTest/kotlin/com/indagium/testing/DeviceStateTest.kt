@@ -4,6 +4,7 @@ import com.indagium.testing.device.AdbDeviceStateReader
 import com.indagium.testing.device.DeviceShellOutput
 import com.indagium.testing.device.DeviceStateReader
 import com.indagium.testing.device.DeviceStateReading
+import com.indagium.testing.device.DeviceStateSource
 import com.indagium.testing.device.KNOWN_DEVICE_STATE_KEYS
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.device.parseDeviceState
@@ -21,6 +22,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -100,6 +102,61 @@ class DeviceStateTest {
 
         lane.deviceStateReader = DeviceStateReader { DeviceStateReading.Value("0781:5581 Ultra") }
         assertEquals(DeviceStateReading.Value("0781:5581 Ultra"), runBlocking { lane.readDeviceState("usb.devices") })
+    }
+
+    /** The real captures (and hand-built variants) a device answers each source's command with. */
+    private val answers = mapOf(
+        DeviceStateSource.USB to deviceStateFixture("dumpsys_usb_host_attached.txt"),
+        DeviceStateSource.BATTERY to deviceStateFixture("dumpsys_battery_ac.txt"),
+        DeviceStateSource.BLUETOOTH_ENABLED to "1\n",
+        DeviceStateSource.BLUETOOTH_CONNECTED to deviceStateFixture("dumpsys_bluetooth_manager_on.txt"),
+        DeviceStateSource.WIFI to "0\n",
+        DeviceStateSource.AIRPLANE to "0\n",
+        DeviceStateSource.MOBILE_DATA to "1\n",
+        DeviceStateSource.AUDIO to deviceStateFixture("dumpsys_audio_speaker.txt").replace("Devices: speaker(2)", "Devices: headset(4)"),
+        DeviceStateSource.POWER to deviceStateFixture("dumpsys_power_awake.txt").replace("mWakefulness=Awake", "mWakefulness=Asleep"),
+        DeviceStateSource.ROTATION to deviceStateFixture("dumpsys_window_displays_portrait.txt"),
+    )
+
+    private val deviceReader = AdbDeviceStateReader { command ->
+        DeviceShellOutput(0, answers.getValue(DeviceStateSource.entries.first { it.command == command }), "", timedOut = false)
+    }
+
+    @Test
+    fun theReaderKnowsEveryKeyTheRecordingCanProduceAndReadsThemWithTheSharedParsers() {
+        val texts = KNOWN_DEVICE_STATE_KEYS.associateWith { key -> assertIs<DeviceStateReading.Value>(runBlocking { deviceReader.read(key) }).text }
+
+        assertEquals(KNOWN_DEVICE_STATE_KEYS.toSet(), texts.keys)
+        assertEquals(
+            mapOf(
+                "bt.enabled" to "true", "bt.connected" to "", "wifi.enabled" to "false", "airplane" to "false", "mobile_data" to "true",
+                "power.source" to "ac", "battery.status" to "charging", "audio.devices" to "headset", "screen.awake" to "false", "rotation" to "0",
+            ),
+            texts - "usb.devices",
+        )
+        assertEquals(listOf("0781:5581 Ultra", "046d:c52b USB Receiver"), texts.getValue("usb.devices").lines())
+    }
+
+    @Test
+    fun theNewKeysAreCheckedAtRunTimeAgainstWhatTheDeviceAnswers() {
+        val subject = checks(deviceReader)
+
+        assertEquals(CheckStatus.PASS, subject.run(StepCheck.DeviceState(newCheckId(), "power.source", "ac", 0L)).status)
+        assertEquals(CheckStatus.PASS, subject.run(StepCheck.DeviceState(newCheckId(), "usb.devices", "0781:5581", 0L)).status)
+        assertEquals(CheckStatus.PASS, subject.run(StepCheck.DeviceState(newCheckId(), "audio.devices", "(?m)^headset$", 0L)).status)
+        assertEquals(CheckStatus.PASS, subject.run(StepCheck.DeviceState(newCheckId(), "usb.devices", "\\A(?![\\s\\S]*dead:beef)", 0L)).status)
+        val asleep = subject.run(StepCheck.DeviceState(newCheckId(), "screen.awake", "true", 0L))
+        assertEquals(CheckStatus.FAIL, asleep.status)
+        assertTrue(asleep.detail.contains("false"), asleep.detail)
+    }
+
+    @Test
+    fun aKeyWhoseDumpIsNotUnderstoodIsAnErrorNotAGuess() {
+        val reader = AdbDeviceStateReader { DeviceShellOutput(0, "garbage that names nothing\n", "", timedOut = false) }
+        val reading = assertIs<DeviceStateReading.Unavailable>(runBlocking { reader.read("power.source") })
+
+        assertTrue(reading.reason.contains("power.source"), reading.reason)
+        assertFalse(reading.permanent)
     }
 
     private fun checks(reader: DeviceStateReader): DeterministicChecks {
