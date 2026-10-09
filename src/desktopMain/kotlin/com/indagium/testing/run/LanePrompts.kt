@@ -1,6 +1,8 @@
 package com.indagium.testing.run
 
 import com.indagium.ai.AiRun
+import com.indagium.testing.model.StepCompletion
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestStep
@@ -91,6 +93,9 @@ internal fun lanePrompt(
         }
         append("\nCurrent step ${stepIndex + 1} of ${steps.size}")
         if (attempt > 1) append(" (attempt $attempt)")
+        if (steps.any { it.kind != StepKind.AGENT }) {
+            append(" (some steps of this case are performed by a person or by a script, not by you; they are numbered like the others)")
+        }
         append(":\n  Action: ").append(step.action.trim()).append('\n')
         if (step.expected.isNotBlank()) append("  Expected: ").append(step.expected.trim()).append('\n')
         if (step.optional) append("  Optional condition: ").append(step.condition.orEmpty().trim()).append('\n')
@@ -108,8 +113,15 @@ internal fun lanePrompt(
     }
 }
 
+private fun StepResult.performerLabel(): String = when {
+    kind == StepKind.AGENT -> ""
+    completedBy == StepCompletion.SKIPPED -> " [${kind.name.lowercase()} step, skipped]"
+    completedBy != null -> " [${kind.name.lowercase()} step, done by ${completedBy.name.lowercase()}]"
+    else -> " [${kind.name.lowercase()} step]"
+}
+
 private fun previousSummary(previous: List<StepResult>): String = previous.joinToString("\n") { result ->
-    "Step ${result.stepNumber} (${result.action.take(SUMMARY_ACTION_CHARS)}): ${result.status.name}" +
+    "Step ${result.stepNumber}${result.performerLabel()} (${result.action.take(SUMMARY_ACTION_CHARS)}): ${result.status.name}" +
         (if (result.observation.isNotBlank()) " — ${result.observation.take(SUMMARY_OBSERVATION_CHARS)}" else "")
 }
 

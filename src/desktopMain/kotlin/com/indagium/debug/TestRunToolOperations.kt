@@ -8,10 +8,13 @@ import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.summary
+import com.indagium.testing.run.ManualDecision
+import com.indagium.testing.run.ManualResolveResult
 import com.indagium.testing.run.PauseDecision
 import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.TestRunReportFormat
@@ -34,6 +37,7 @@ import kotlinx.coroutines.withContext
 // authoring tools. Every handler returns a plain Map; every expected failure is DATA, `{ "error": message }`, never an
 // exception. Everything that waits on the disk or on a run is a suspending handler so no request thread blocks.
 
+private const val MAX_MANUAL_NOTE_CHARS = 500
 private val RUN_JSON_DROPPED_KEYS = setOf("suite", "scripts", "sharedSteps")
 
 private fun usageMap(usage: AiUsageStats?): Map<String, Any?>? = usage?.let {
@@ -57,6 +61,7 @@ internal class TestRunToolOperations(private val appState: AppState) {
         "cancel_test_run" to tool { a -> cancelRun(a.requiredString("runId")) },
         "resolve_test_confirmation" to tool { a -> resolveConfirmation(a) },
         "resume_paused_step" to tool { a -> resume(a) },
+        "resolve_manual_step" to tool { a -> resolveManual(a) },
     )
 
     val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
@@ -175,7 +180,14 @@ internal class TestRunToolOperations(private val appState: AppState) {
             judgeReasoningEffort = effortOverride(a.map["judgeReasoningEffort"]),
             capture = capture,
             openLaneTabs = a.bool("openLaneTabs") ?: true,
+            manualSteps = manualStepsOf(a),
         )
+    }
+
+    /** The manual-steps option, or a refusal for an unknown one (the codec would read it as the default and hide the mistake). */
+    private fun manualStepsOf(a: ToolArgs): ManualStepsOption {
+        val raw = a.string("manualSteps")?.trim()?.takeIf { it.isNotEmpty() } ?: return ManualStepsOption.USE_SCRIPT_THEN_WAIT
+        return ManualStepsOption.parse(raw) ?: toolArgError("manualSteps must be one of ${ManualStepsOption.entries.joinToString(", ") { it.wire }}.")
     }
 
     /** A model override: absent or blank is "the profile's own model". Whether the profile accepts it is checked by the run's validation. */
@@ -228,6 +240,16 @@ internal class TestRunToolOperations(private val appState: AppState) {
             "pendingConfirmations",
             coordinator.pendingConfirmations().filter { it.runId == run.id }.map {
                 mapOf("confirmationId" to it.confirmationId, "laneId" to it.laneId, "tool" to it.toolName, "description" to it.description)
+            },
+        )
+        put(
+            "waitingLanes",
+            coordinator.waitingSteps().filter { it.runId == run.id }.map {
+                mapOf(
+                    "laneId" to it.laneId, "case" to it.wait.caseName, "stepNumber" to it.wait.stepNumber, "instructions" to it.wait.instructions,
+                    "expected" to it.wait.expected, "deviceSerial" to it.wait.deviceSerial, "completion" to it.wait.completion.name,
+                    "testerCanComplete" to it.wait.testerCanComplete, "deadlineAt" to it.wait.deadlineAtMs, "hint" to it.wait.hint,
+                )
             },
         )
         put(
@@ -331,6 +353,21 @@ internal class TestRunToolOperations(private val appState: AppState) {
             mapOf("runId" to runId, "laneId" to laneId, "decision" to decision.name.lowercase())
         } else {
             errorMap("Lane '$laneId' of run '$runId' is not paused.")
+        }
+    }
+
+    private fun resolveManual(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val laneId = a.requiredString("laneId")
+        val decision = a.enum("decision", ManualDecision.entries) ?: toolArgError("decision is required.")
+        val note = a.string("note").orEmpty()
+        if (note.length > MAX_MANUAL_NOTE_CHARS) toolArgError("note is limited to $MAX_MANUAL_NOTE_CHARS characters.")
+        return when (coordinator.resolveManualStep(runId, laneId, decision, note)) {
+            ManualResolveResult.RESOLVED -> mapOf("runId" to runId, "laneId" to laneId, "decision" to decision.name.lowercase())
+            ManualResolveResult.NO_SUCH_LANE -> errorMap("Run '$runId' has no lane '$laneId' in this session.")
+            ManualResolveResult.NOT_WAITING -> errorMap("Lane '$laneId' of run '$runId' is not waiting for a tester.")
+            ManualResolveResult.CHECKS_ONLY ->
+                errorMap("This manual step completes by its checks only; it cannot be answered done. Answer failed or skip, or wait for the checks.")
         }
     }
 

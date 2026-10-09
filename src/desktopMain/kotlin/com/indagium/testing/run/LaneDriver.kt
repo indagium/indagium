@@ -6,6 +6,7 @@ import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
 import com.indagium.ai.aiUsageFromHistory
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
@@ -26,6 +27,8 @@ private const val MIN_USAGE_POLL_INTERVAL_MS = 50L
 // Drives one StepSequence to its end.
 //   EXTERNAL lane: nothing runs; a client drives the sequence through `test_lane_tool_call` and the watchdog closes
 //   steps that outlive their timeout. The driver just waits for the sequence to end.
+//   MANUAL and SCRIPT steps are performed by the RUN, not by an agent or a client (DriverStepRunner.kt): the driver performs them whenever the
+//   sequence stands on one, before an agent segment starts and after one ends because its finish_step handed over to the run.
 //   Agent lane: one agent RUN (a segment) works through the sequence. A new segment starts when the step timed out
 //   (resuming at the next step), or when the agent failed or stopped without finishing its step (resuming at that same
 //   step, at most maxAgentRestarts times). Every new segment gets a summary of the steps already done, fenced as
@@ -51,6 +54,7 @@ internal class LaneDriver(
     private val transcript: TranscriptWriter?,
     private val confirmationTimeoutMs: Long,
     private val onAgentUsage: (segmentId: String, usage: AiUsageStats) -> Unit = { _, _ -> },
+    private val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
 ) {
     /** Runs [seq] from its first step until it ends. [case] is null for the steps of a shared-step hook. */
     suspend fun drive(seq: StepSequence, case: TestCase?, iteration: Int, budget: CaseBudget) {
@@ -61,7 +65,8 @@ internal class LaneDriver(
             coroutineScope {
                 val watchdog = launch { seq.watchdog(tuning.watchdogPollMs) }
                 try {
-                    if (agent == null) awaitEnd(seq) else agentLoop(this, seq, agent, case, iteration, budget)
+                    val driverSteps = DriverStepRunner(seq, handle, manualSteps, tuning, confirmationTimeoutMs)
+                    if (agent == null) awaitEnd(seq, driverSteps) else agentLoop(this, seq, agent, case, iteration, budget, driverSteps)
                 } finally {
                     watchdog.cancel()
                 }
@@ -71,15 +76,31 @@ internal class LaneDriver(
         }
     }
 
-    private suspend fun awaitEnd(seq: StepSequence) {
-        for (event in seq.events) if (event == SequenceEvent.Ended) return
+    private suspend fun awaitEnd(seq: StepSequence, driverSteps: DriverStepRunner) {
+        while (true) {
+            driverSteps.runPending()
+            if (seq.ended) return
+            // A client's finish_step moved the sequence onto a step the run performs, or the sequence ended.
+            if (seq.events.receive() == SequenceEvent.Ended) return
+        }
     }
 
     // ── Agent lanes ──────────────────────────────────────────────────
 
-    private suspend fun agentLoop(scope: CoroutineScope, seq: StepSequence, agent: LaneAgent, case: TestCase?, iteration: Int, budget: CaseBudget) {
+    @Suppress("LongParameterList", "LongMethod") // One loop owns the agent segments of a case and the steps the run performs between them.
+    private suspend fun agentLoop(
+        scope: CoroutineScope,
+        seq: StepSequence,
+        agent: LaneAgent,
+        case: TestCase?,
+        iteration: Int,
+        budget: CaseBudget,
+        driverSteps: DriverStepRunner,
+    ) {
         var restarts = 0
         while (true) {
+            driverSteps.runPending()
+            if (seq.ended) return
             val segment = try {
                 startSegment(scope, seq, agent, case, iteration, budget)
             } catch (invalid: IllegalArgumentException) {

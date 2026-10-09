@@ -4,6 +4,7 @@ import com.indagium.debug.parseChecks
 import com.indagium.debug.toPlainMap
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.IdAllocator
 import com.indagium.testing.store.validateStep
@@ -251,6 +252,7 @@ private fun checksOf(element: JsonElement?, where: String, action: String): List
     // The parser's own message names the offending check (it throws an IllegalArgumentException).
     val checks = parseChecks(items.map { it.toPlainMap() }, IdAllocator(), "$where.checks")
     require(checks.none { it is StepCheck.ScriptResult }) { "$where.checks must not use script checks." }
+    require(checks.none { it is StepCheck.DeviceState }) { "$where.checks must not use device-state checks." }
     require(checks.none { it is StepCheck.ScreenJudge && it.exampleRef != null }) { "$where.checks must not reference examples." }
     val problem = validateStep(TestStep("", action = action, checks = checks))
     require(problem == null) { "$where: $problem" }
@@ -352,6 +354,7 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
         append('[').append(FIXED_STEP_LABEL).append("] action: \"").append(row.action.trim()).append("\" | expected: \"")
         append(row.expected.trim()).append('"')
         if (row.optional) append(" | optional: true | condition: \"").append(row.condition?.trim().orEmpty()).append('"')
+        if (row.stepKind != StepKind.AGENT) append(" | performed by: ").append(row.stepKind.name.lowercase()).append(" (not an AI step)")
         return@buildString
     }
     if (mode == RewriteDescription.BRIEF) append('[').append(row.kind?.name ?: "INPUT").append("] ")

@@ -1295,6 +1295,43 @@ panel stacks below the editor.
 4. **When it fails** decides what happens once the retries are used up: *Stop the case*, *Continue*,
    *Create issue, continue* (a draft issue is made for you) or *Pause for me* (the run waits and you choose
    retry, continue or stop).
+5. **Who performs a step.** Open a step and choose **AI step** (the default), **Manual** or **Script** under
+   *Performed by* (see the next section). A suite that uses a manual or script step is saved in a newer file version:
+   an older Indagium opens it read-only instead of giving "plug in the USB device" to an AI agent.
+
+### Manual and script steps
+
+Some things in a test are not for an AI agent: plugging a USB device into the phone, switching a hub on or off,
+pairing a headset. Two more kinds of step cover them. No AI agent is started for either kind.
+
+- **Script.** The run itself runs a library script on this step. Pick it from the list, fill in a field for each of
+  the script's parameters, and say what you expect: an exit code (default `0`, empty for any) and, optionally, text
+  the output must contain. A non-zero exit, a timeout or an unmet expectation fails the step; then the step's other
+  checks run. **+ New script** creates a script with a placeholder command, adds it to the step and opens the script
+  editor; **Back to the step** returns you. A script that needs permission asks first (**Allow once** or **Deny**
+  on the lane's card); a refusal blocks the step and nothing runs. A script that is limited to *Setup and teardown*
+  cannot be used in a step.
+- **Manual.** The action holds the **instructions** for the tester. While a lane reaches the step it waits and the live
+  view shows **Waiting for you: ⟨instructions⟩ on ⟨device⟩** with **Done**, **Failed** and **Skip** and the time left
+  (a manual step waits up to 10 minutes by default; set **Wait up to**). *Completed by* says how the step ends:
+  **The tester confirms** (only **Done**; every check is still verified afterwards), **Its checks detect it** (the step
+  is done as soon as its *Log appears* and *Device state* checks are true; there is no **Done**), or **The tester or
+  its checks** (whichever comes first). A manual step an automation script can do instead has an optional
+  **Automation script**. If nobody answers in time the step fails as *not confirmed* and the report blames the step or
+  the run, never the app. A manual step is not retried.
+- **Device state** is a check for any step: a property of the device must match your regular expression within a time:
+  `usb.devices` (one `vvvv:pppp name` line for every USB device attached to the phone, for example `0781:5581`),
+  `bt.enabled`, `wifi.enabled` and `airplane` (`true` or `false`). Indagium asks the device with one short `adb`
+  command per reading. An unknown property fails the check and the message lists the supported ones.
+
+In a case that mixes kinds the lane's AI agent does its own steps; when the next step is a manual or script step the
+run does it, and the agent is started again at the following AI step with a summary of what happened. In the
+**Run suite** dialog a suite with manual steps shows *Manual steps*: **use the script when there is one, otherwise wait
+for the tester** (the default), **always wait for the tester**, or **skip manual steps** (they are reported as skipped
+and the case goes on). Each lane waits on its own device. Over MCP the lane's wait is `waitingLanes` in
+`get_test_run_status` and `resolve_manual_step` answers it. The report names each step's kind and how it ended (*Manual
+step · confirmed by the tester · completion: tester or checks*, *detected by its checks*, *done by a script*, *skipped*,
+*not confirmed*), and so does the Markdown export.
 
 Every list — suites, cases, steps, checks, examples, scripts — can be reordered by dragging its handle,
 with `Alt+↑` / `Alt+↓`, or with the up/down buttons. Duplicate, export and import work on whole suites
@@ -1311,6 +1348,7 @@ A step can carry **checks** that are verified without trusting the agent:
 | **Script result** | a library script finishes with the exit code (and, optionally, output text) you expect |
 | **Screen judge** | the judge says the screen matches your description, optionally compared with an example |
 | **Ask the judge** | the judge answers your free-form question about the evidence with a pass |
+| **Device state** | a property of the device (`usb.devices`, `bt.enabled`, `wifi.enabled`, `airplane`) matches your regex within the time you give it |
 
 **Examples** give agents and the judge reference material: a **Golden screenshot** (a png, jpg or webp copied into
 Indagium, at most 10 MB) or a **Reference log**. The agent receives the current step's examples and can retrieve
@@ -1352,7 +1390,10 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    arrow buttons, and use **+ Add step below** (or **+ Add step at start**) to type a step of your own. A moved step keeps
    its screenshots and video evidence. If you rewrite with AI afterwards, the steps are numbered in your order and a step
    you added is kept exactly as written and where you put it. **Undo rewrite** and **Restore removed inputs** put steps back
-   in your order; removing a step you added deletes it.
+   in your order; removing a step you added deletes it. A step you added can be an **AI step**, a **Manual** step (for
+   something a person does, such as plugging in a USB device; add *Device state* checks so a run can notice it is done)
+   or a **Script** step: choose how with *Performed by* on the step, and pick or create the script the same way as in the
+   step editor. Manual and script steps need no expected result, and a rewrite keeps them as written.
 2. Under **Rewrite with AI**, the last provider, model and reasoning effort used for a rewrite are preselected
    (initially the selected profile). The rewrite panel shows the latest attempt and session usage; known usage from a
    failed or cancelled attempt remains visible. Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
@@ -1457,6 +1498,7 @@ at the next step boundary) and **Stop**. Screenshot capture, deterministic check
 deadline. Each lane and case repeat has its own paid-call budget shared across the case's steps, retries and agent
 restarts. It counts agent and external-lane dispatch attempts, including failed executions; free protocol calls
 remain available to report the step, but exhaustion ends that case with an actionable error.
+A manual step shows a **Waiting for you** card with **Done**, **Failed** and **Skip** and a bar for the time left.
 A script that needs permission appears as a card — **Allow once** or **Deny** — and an unanswered card is
 denied after the confirmation timeout (5 minutes by default, *Settings → Testing*). A step set to *Pause for
 me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown scripts.

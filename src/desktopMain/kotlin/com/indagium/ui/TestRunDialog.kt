@@ -36,9 +36,13 @@ import com.indagium.model.AiProviderProfile
 import com.indagium.model.WorkflowAiSelection
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.run.MAX_PARALLEL_DEVICES
 import com.indagium.testing.run.StartRunResult
@@ -177,6 +181,7 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
                 LanesSection(model, { model = it }, choices, profiles, catalog, devices, deviceChoices) { refresh++ }
                 JudgeSection(model, { model = it }, choices.filterNot { it.isExternal }, profiles, catalog)
                 RecordingSection(model, { model = it })
+                if (suiteHasManualSteps(suite, ui.library)) ManualStepsSection(model.manualSteps) { model = model.copy(manualSteps = it) }
                 SettingsSection(
                     model.repeat, { model = model.copy(repeat = it) },
                     model.toolLimitText, { model = model.copy(toolLimitText = it) },
@@ -492,6 +497,29 @@ private fun SettingsSection(
     TestsFieldLabel("Evidence to keep (the log and the screen recording are part of each lane's recording, above)")
     EvidenceRow("Screenshots", evidence.screenshots) { onEvidence(evidence.copy(screenshots = !evidence.screenshots)) }
     EvidenceRow("Agent transcript", evidence.transcript) { onEvidence(evidence.copy(transcript = !evidence.transcript)) }
+}
+
+/** Whether a run of [suite] can reach a manual step: in its cases, or in a shared step its hooks use. */
+internal fun suiteHasManualSteps(suite: TestSuite, library: TestLibrary): Boolean {
+    if (suite.cases.any { case -> case.steps.any { it.kind == StepKind.MANUAL } }) return true
+    val sharedIds = (suite.setup + suite.teardown + suite.cases.flatMap { it.setup + it.teardown })
+        .filterIsInstance<HookItem.Shared>().map { it.sharedStepId }.toSet()
+    return library.sharedSteps.any { it.id in sharedIds && it.steps.any { step -> step.kind == StepKind.MANUAL } }
+}
+
+/** What the run does with the suite's manual steps (a tester does them by hand while the lane waits). */
+@Composable
+private fun ManualStepsSection(value: ManualStepsOption, onChange: (ManualStepsOption) -> Unit) {
+    TestsSectionTitle("Manual steps")
+    TestsHint(
+        "Some steps are done by a person. A lane waits for the tester at each one (a card in the live view, or resolve_manual_step) " +
+            "and fails it as not confirmed when nobody answers in time.",
+    )
+    Column(Modifier.padding(top = 6.dp)) {
+        ManualStepsOption.entries.forEach { option ->
+            CheckRow(checked = option == value, onToggle = { onChange(option) }) { AppText(option.label, color = tc().tx, fontSize = 12.sp) }
+        }
+    }
 }
 
 @Composable

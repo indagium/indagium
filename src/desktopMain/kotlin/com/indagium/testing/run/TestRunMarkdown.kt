@@ -12,6 +12,7 @@ import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.judge
 import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.modelAndEffortLabel
+import com.indagium.testing.model.performedByLine
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,6 +46,7 @@ private fun StringBuilder.step(result: StepResult) {
         .append(" — **").append(result.status.mark()).append("**")
     if (result.attempts > 1) append(" (").append(result.attempts).append(" attempts)")
     append(" · ").append(result.durationMs / MILLIS_PER_SECOND).append("s\n")
+    appendPerformer(result)
     if (result.expected.isNotBlank()) append("  - Expected: ").append(result.expected.trim()).append('\n')
     result.agentClaim?.let { append("  - Agent claimed: ").append(it).append('\n') }
     quote("Observation", result.observation)
@@ -70,6 +72,12 @@ private fun StringBuilder.step(result: StepResult) {
     if (result.issueRequested) {
         append("  - An issue was requested for this step").append(result.issueId?.let { " (draft `$it`)" }.orEmpty()).append(".\n")
     }
+}
+
+/** Who performed a manual or script step and how it ended, and whom a failure nobody judged is blamed on. */
+private fun StringBuilder.appendPerformer(result: StepResult) {
+    result.performedByLine()?.let { append("  - ").append(it).append('\n') }
+    result.classification?.let { append("  - Classification: ").append(it.name.lowercase().replace('_', ' ')).append('\n') }
 }
 
 private fun StringBuilder.appendFix(fix: StepFix, applied: Boolean, ref: String) {

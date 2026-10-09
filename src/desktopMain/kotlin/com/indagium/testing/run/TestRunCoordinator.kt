@@ -60,6 +60,9 @@ private class FinishStepCancellationException : CancellationException(
     "The lane is finishing this step; a still-running paid tool was stopped.",
 )
 
+/** What answering a manual step came to: [CHECKS_ONLY] means the step completes by its checks, so only failing or skipping it is possible. */
+enum class ManualResolveResult { RESOLVED, NO_SUCH_LANE, NOT_WAITING, CHECKS_ONLY }
+
 sealed interface StartRunResult {
     /** The run is under way. [laneIds] are the ids `test_lane_tool_call` and `resume_paused_step` take. */
     data class Started(val runId: String, val laneIds: List<String>, val warnings: List<String>) : StartRunResult
@@ -465,6 +468,19 @@ internal class TestRunCoordinator(
     /** Resumes a lane paused by a PAUSE_FOR_USER step. False when the lane is not paused. */
     fun resumePausedStep(runId: String, laneId: String, decision: PauseDecision): Boolean =
         runs[runId]?.handles?.get(laneId)?.resolvePause(decision) ?: false
+
+    /** The lanes that wait for a tester to do a manual step (the "Waiting for you" cards). */
+    fun waitingSteps(): List<WaitingLaneInfo> = runs.values.flatMap { entry ->
+        entry.handles.values.mapNotNull { handle -> handle.waitingStep()?.let { WaitingLaneInfo(handle.runId, handle.laneId, it) } }
+    }
+
+    /** Answers the manual step a lane waits on: the tester did it ([ManualDecision.DONE]), it failed, or it is skipped. */
+    fun resolveManualStep(runId: String, laneId: String, decision: ManualDecision, note: String = ""): ManualResolveResult {
+        val handle = runs[runId]?.handles?.get(laneId) ?: return ManualResolveResult.NO_SUCH_LANE
+        val waiting = handle.waitingStep() ?: return ManualResolveResult.NOT_WAITING
+        if (decision == ManualDecision.DONE && !waiting.testerCanComplete) return ManualResolveResult.CHECKS_ONLY
+        return if (handle.resolveManual(decision, note)) ManualResolveResult.RESOLVED else ManualResolveResult.NOT_WAITING
+    }
 
     /**
      * Runs a lane tool of an EXTERNAL lane (what a client driving the lane over MCP does). The tool runs against the

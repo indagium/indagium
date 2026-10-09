@@ -2,7 +2,9 @@ package com.indagium.debug
 
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
+import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
@@ -10,12 +12,14 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.TestVariable
 import com.indagium.testing.model.newStepId
+import com.indagium.testing.model.withKind
 import com.indagium.testing.store.CHECK_TYPE_NAMES
 import com.indagium.testing.store.EXAMPLE_TYPE_NAMES
 import com.indagium.testing.store.HOOK_TYPE_NAMES
@@ -24,6 +28,7 @@ import com.indagium.testing.store.decodeCheck
 import com.indagium.testing.store.decodeExample
 import com.indagium.testing.store.decodeHook
 import com.indagium.testing.store.decodeParam
+import com.indagium.testing.store.decodeScriptCall
 import com.indagium.testing.store.decodeVariable
 import kotlinx.serialization.json.JsonPrimitive
 
@@ -51,7 +56,7 @@ private fun requireNonBlank(item: Map<String, Any?>, label: String, key: String)
 
 // ── Checks and examples ──────────────────────────────────────────────
 
-private val CHECK_STRING_FIELDS = setOf("id", "type", "tag", "regex", "text", "exampleRef", "scriptId", "stdoutContains")
+private val CHECK_STRING_FIELDS = setOf("id", "type", "tag", "regex", "text", "exampleRef", "scriptId", "stdoutContains", "key", "expectedRegex")
 private val CHECK_NUMBER_FIELDS = setOf("withinMs", "forMs", "exitCode")
 
 internal fun parseChecks(items: List<Map<String, Any?>>, ids: IdAllocator, label: String = "checks"): List<StepCheck> =
@@ -62,6 +67,10 @@ internal fun parseChecks(items: List<Map<String, Any?>>, ids: IdAllocator, label
             "logAppears", "logAbsent" -> requireNonBlank(item, where, "regex")
             "screenJudge", "askJudge" -> requireNonBlank(item, where, "text")
             "scriptResult" -> requireNonBlank(item, where, "scriptId")
+            "deviceState" -> {
+                requireNonBlank(item, where, "key")
+                requireNonBlank(item, where, "expectedRegex")
+            }
         }
         decodeCheck(item.toJsonObject(), ids) ?: toolArgError("$where could not be read.")
     }
@@ -96,10 +105,15 @@ private const val EXAMPLES_KEY = "examples"
  * [base] with the supplied step fields applied. `checks` and `examples` replace the whole ordered lists.
  * The step id is never read from the arguments.
  */
-internal fun applyStepFields(args: ToolArgs, base: TestStep, label: String = "step"): TestStep {
+internal fun applyStepFields(args: ToolArgs, original: TestStep, label: String = "step"): TestStep {
+    val kind = args.enum("kind", StepKind.entries) ?: original.kind
+    // A change of kind also moves a default time allowance (a manual step waits for a person) and drops what the new kind cannot use.
+    val base = original.withKind(kind)
     val optionalFields = parseStepOptionalFields(args, base, label)
     val collections = parseStepCollections(args, base, label)
     val step = base.copy(
+        script = parseStepScript(args, base, label),
+        manualCompletion = args.enum("manualCompletion", ManualCompletion.entries) ?: base.manualCompletion,
         action = readStepAction(args, base, label),
         expected = args.string("expected") ?: base.expected,
         timeoutMs = args.long("timeoutMs") ?: base.timeoutMs,
@@ -114,6 +128,21 @@ internal fun applyStepFields(args: ToolArgs, base: TestStep, label: String = "st
     validateStepOptionalFields(step, label)
     validateStepExampleReferences(step, label)
     return step
+}
+
+private val SCRIPT_CALL_FIELDS = setOf("scriptId", "args", "exitCode", "stdoutContains")
+
+/** `script` replaces the step's script call, null (sent explicitly) clears it, and leaving it out keeps it. */
+private fun parseStepScript(args: ToolArgs, base: TestStep, label: String): ScriptCall? {
+    if (!args.hasKey("script")) return base.script
+    val raw = args.map["script"] ?: return null
+    val where = "$label.script"
+    val item = raw.asObject(where)
+    val unknown = item.keys - SCRIPT_CALL_FIELDS
+    if (unknown.isNotEmpty()) toolArgError("$where has unknown field(s): ${unknown.sorted().joinToString(", ")}.")
+    requireFieldTypes(item, where, strings = setOf("scriptId", "stdoutContains"), numbers = setOf("exitCode"), objects = setOf("args"))
+    if ((item["scriptId"] as? String).isNullOrBlank()) toolArgError("$where.scriptId is required.")
+    return decodeScriptCall(item.toJsonObject()) ?: toolArgError("$where could not be read.")
 }
 
 private data class StepOptionalFields(val optional: Boolean, val condition: String?)

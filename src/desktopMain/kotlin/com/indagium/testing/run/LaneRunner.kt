@@ -228,6 +228,7 @@ internal class LaneRunner(
         val driver = LaneDriver(
             runId, lane.id, suite, deps.tuning, agent, handle, transcript, snapshot.config.confirmationTimeoutMs,
             onAgentUsage = { segmentId, usage -> recorder?.agentUsage(segmentId, usage) },
+            manualSteps = snapshot.config.manualSteps,
         )
         val hooks = HookRunner(snapshot, env, driver) { step -> recorder?.add(step) }
         updateLane {
@@ -301,7 +302,7 @@ internal class LaneRunner(
     }
 
     private fun skipped(index: Int, step: TestStep, note: String) =
-        StepResult(step.id, index + 1, step.action, step.expected, status = StepStatus.SKIPPED, attempts = 0, startedAt = now(), note = note)
+        StepResult(step.id, index + 1, step.action, step.expected, status = StepStatus.SKIPPED, attempts = 0, startedAt = now(), note = note, kind = step.kind)
 
     @Suppress("LongParameterList")
     private suspend fun runCase(env: SequenceEnv, driver: LaneDriver, hooks: HookRunner, case: TestCase, iteration: Int, prefix: String) {
@@ -464,6 +465,8 @@ internal class LaneRunner(
         }
         return result.copy(note = listOfNotNull(result.note, "No issue draft could be created: $failure").joinToString(" "))
     }
+
+    override fun waitStateChanged() = state.touch()
 
     override suspend fun awaitUser(paused: PausedStep): PauseDecision {
         state.touch() // lets the status views notice the pause

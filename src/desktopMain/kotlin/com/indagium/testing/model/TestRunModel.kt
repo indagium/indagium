@@ -97,7 +97,29 @@ data class RunConfig(
     val capture: CaptureSettings? = null,
     /** True: each lane opens a real live capture tab for the run. False: it records the same way without a tab. */
     val openLaneTabs: Boolean = true,
+    /** What the run does with MANUAL steps. Appended last: an older run file read it as the default. */
+    val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
 )
+
+/**
+ * How a run treats MANUAL steps. USE_SCRIPT_THEN_WAIT (the default): a step with an automation script runs it, and every other manual
+ * step waits for a tester. WAIT_FOR_TESTER: every manual step waits for a tester, scripts are not used. SKIP: manual steps are not
+ * done at all; they are reported as skipped and the case goes on.
+ */
+enum class ManualStepsOption(val wire: String, val label: String) {
+    USE_SCRIPT_THEN_WAIT("use_script_then_wait", "Use the script when there is one, otherwise wait for the tester"),
+    WAIT_FOR_TESTER("wait_for_tester", "Always wait for the tester"),
+    SKIP("skip", "Skip manual steps"),
+    ;
+
+    companion object {
+        /** The option named by [text] (its wire name or its enum name, any case), or null. */
+        fun parse(text: String?): ManualStepsOption? {
+            val wanted = text?.trim().orEmpty()
+            return entries.firstOrNull { it.wire.equals(wanted, ignoreCase = true) || it.name.equals(wanted, ignoreCase = true) }
+        }
+    }
+}
 
 /** The judge mode of this config; an unknown text counts as OFF. */
 val RunConfig.judge: JudgeMode get() = JudgeMode.parse(judgeMode) ?: JudgeMode.OFF
@@ -106,6 +128,9 @@ val RunConfig.judge: JudgeMode get() = JudgeMode.parse(judgeMode) ?: JudgeMode.O
 val RunConfig.judgeActive: Boolean get() = judge != JudgeMode.OFF && !judgeProfileId.isNullOrBlank()
 
 enum class StepStatus { PASS, FAIL, BLOCKED, TIMEOUT, SKIPPED, ERROR }
+
+/** Who or what finished a step, for the report: the AI agent, the tester, the step's checks turning true, a script, or nobody (skipped). */
+enum class StepCompletion { AGENT, TESTER, CHECKS, SCRIPT, SKIPPED }
 
 enum class CaseStatus { PASS, FAIL, BLOCKED, SKIPPED, CANCELLED, ERROR }
 
@@ -156,6 +181,17 @@ data class StepResult(
     val agentError: String? = null,
     /** The draft issue the engine created for this step (CREATE_ISSUE_AND_CONTINUE), or null. Appended last: older run files decode as null. */
     val issueId: String? = null,
+    /** Who performed the step. Appended last: an older run file decodes as an AGENT step. */
+    val kind: StepKind = StepKind.AGENT,
+    /** How the step was finished; null on a result written before step kinds existed (an agent step) or that never finished. */
+    val completedBy: StepCompletion? = null,
+    /** For a MANUAL step, the completion mode the step asked for. */
+    val manualCompletion: ManualCompletion? = null,
+    /**
+     * Whom a failure is blamed on when no judge decided it: a manual step nobody confirmed is a problem of the step or the run
+     * ([JudgeClassification.AGENT_OR_STEP_PROBLEM]), never an app defect.
+     */
+    val classification: JudgeClassification? = null,
 )
 
 /** [iteration] is 1-based (a run can repeat every case). [caseId] is [SUITE_SETUP_CASE_ID] or [SUITE_TEARDOWN_CASE_ID] for the suite-level hooks. */
@@ -288,4 +324,38 @@ fun TestRun.summary(): RunSummary {
         repeat = config.repeat,
         usage = aiUsage(),
     )
+}
+
+// ── Who performed a step, in words ───────────────────────────────────
+
+/** "Manual step" / "Script step" for a step the run performed, null for one the AI agent did. */
+fun StepResult.kindLabel(): String? = when (kind) {
+    StepKind.AGENT -> null
+    StepKind.MANUAL -> "Manual step"
+    StepKind.SCRIPT -> "Script step"
+}
+
+/** How a manual or script step was finished, in a few words ("confirmed by the tester"), or null when that is not known or not applicable. */
+fun StepResult.completionLabel(): String? = when {
+    kind == StepKind.AGENT -> null
+    completedBy == StepCompletion.TESTER -> "confirmed by the tester"
+    completedBy == StepCompletion.CHECKS -> "detected by its checks"
+    completedBy == StepCompletion.SCRIPT -> "done by a script"
+    completedBy == StepCompletion.SKIPPED -> "skipped"
+    status == StepStatus.TIMEOUT && kind == StepKind.MANUAL -> "not confirmed"
+    else -> null
+}
+
+/** The completion mode a manual step asked for, in words. */
+fun ManualCompletion.label(): String = when (this) {
+    ManualCompletion.TESTER_ONLY -> "tester only"
+    ManualCompletion.CHECKS_ONLY -> "checks only"
+    ManualCompletion.TESTER_OR_CHECKS -> "tester or checks"
+}
+
+/** One line for a report: the kind, how it was completed and (manual) the completion mode; null for an AI agent step. */
+fun StepResult.performedByLine(): String? {
+    val kindText = kindLabel() ?: return null
+    val details = listOfNotNull(completionLabel(), manualCompletion?.let { "completion: ${it.label()}" })
+    return if (details.isEmpty()) kindText else "$kindText · ${details.joinToString(" · ")}"
 }

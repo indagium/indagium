@@ -3,16 +3,23 @@ package com.indagium.testing.store
 import com.indagium.debug.requireValidAndroidPackageName
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.MAX_TAG_CHARS
+import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptParam
+import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.completionChecks
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.scriptParamNameError
 import com.indagium.testing.model.scriptToolNameError
+import com.indagium.testing.script.ScriptArgsResult
+import com.indagium.testing.script.validateScriptArgs
 
 // Write-time validation for [TestLibraryStore]. Each function returns the first problem as a message
 // that is safe to show to the user, or null when the value is acceptable. Reads never validate (a file
@@ -48,7 +55,14 @@ private fun validateCheck(check: StepCheck): String? = when (check) {
     is StepCheck.LogAppears -> validateRegex(check.regex) ?: validateDuration("withinMs", check.withinMs)
     is StepCheck.LogAbsent -> validateRegex(check.regex) ?: validateDuration("forMs", check.forMs)
     is StepCheck.ScriptResult -> if (check.scriptId.isBlank()) "A script-result check needs a script." else null
+    is StepCheck.DeviceState -> validateDeviceStateCheck(check)
     is StepCheck.ScreenJudge, is StepCheck.AskJudge -> null
+}
+
+private fun validateDeviceStateCheck(check: StepCheck.DeviceState): String? = when {
+    check.key.isBlank() -> "A device-state check needs a state key, such as usb.devices."
+    runCatching { Regex(check.expectedRegex) }.isFailure -> "'${check.expectedRegex}' is not a valid regular expression."
+    else -> validateDuration("withinMs", check.withinMs)
 }
 
 private fun validateRegex(regex: String): String? = when {
@@ -60,8 +74,42 @@ private fun validateRegex(regex: String): String? = when {
 private fun validateDuration(label: String, value: Long): String? =
     if (value in 1..MAX_STEP_TIMEOUT_MS) null else "$label must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
 
-internal fun validateStep(step: TestStep): String? =
-    validateStepSettings(step) ?: validateStepCondition(step) ?: step.checks.firstNotNullOfOrNull { validateCheck(it) }
+/**
+ * The first problem with [step], or null. With [scripts] (the library's), a script the step runs must exist, may be started from a
+ * step and must accept its arguments; without it only the step's own shape is checked (a draft is checked before it has a library).
+ */
+internal fun validateStep(step: TestStep, scripts: List<TestScript>? = null): String? =
+    validateStepSettings(step) ?: validateStepCondition(step) ?: validateStepKind(step, scripts) ?: step.checks.firstNotNullOfOrNull { validateCheck(it) }
+
+private fun validateStepKind(step: TestStep, scripts: List<TestScript>?): String? {
+    val call = step.script
+    return when (step.kind) {
+        StepKind.AGENT -> if (call != null) "Only manual and script steps run a script." else null
+        StepKind.SCRIPT -> when {
+            call == null -> "A script step needs a script."
+            step.optional -> "Only an AI step can be optional."
+            else -> validateScriptCall(call, scripts)
+        }
+        StepKind.MANUAL -> when {
+            step.action.isBlank() -> "A manual step needs instructions for the tester in its action."
+            step.optional -> "Only an AI step can be optional."
+            step.manualCompletion == ManualCompletion.CHECKS_ONLY && step.completionChecks.isEmpty() ->
+                "Completing a manual step by its checks needs at least one log-appears or device-state check."
+            call != null -> validateScriptCall(call, scripts)
+            else -> null
+        }
+    }
+}
+
+private fun validateScriptCall(call: ScriptCall, scripts: List<TestScript>?): String? {
+    if (call.scriptId.isBlank()) return "A step's script needs a script id."
+    if (scripts == null) return null
+    val script = scripts.firstOrNull { it.id == call.scriptId } ?: return "Script '${call.scriptId}' is not in the library."
+    if (script.permission == ScriptPermission.SETUP_TEARDOWN_ONLY) {
+        return "Script '${script.toolName}' is limited to setup and teardown hooks; change who may start it to use it in a step."
+    }
+    return (validateScriptArgs(script, call.args) as? ScriptArgsResult.Invalid)?.message?.let { "Script '${script.toolName}': $it" }
+}
 
 private fun validateStepSettings(step: TestStep): String? = when {
     step.timeoutMs !in 1..MAX_STEP_TIMEOUT_MS -> "Step timeout must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
@@ -81,11 +129,11 @@ private fun validateStepCondition(step: TestStep): String? = when {
     else -> null
 }
 
-internal fun validateCase(case: TestCase): String? =
-    validateName("Case", case.name) ?: case.steps.firstNotNullOfOrNull { validateStep(it) }
+internal fun validateCase(case: TestCase, scripts: List<TestScript>? = null): String? =
+    validateName("Case", case.name) ?: case.steps.firstNotNullOfOrNull { validateStep(it, scripts) }
 
-internal fun validateSharedStep(shared: SharedStep): String? =
-    validateName("Shared step", shared.name) ?: shared.steps.firstNotNullOfOrNull { validateStep(it) }
+internal fun validateSharedStep(shared: SharedStep, scripts: List<TestScript>? = null): String? =
+    validateName("Shared step", shared.name) ?: shared.steps.firstNotNullOfOrNull { validateStep(it, scripts) }
 
 private fun validateParams(params: List<ScriptParam>): String? {
     if (params.map { it.name }.distinct().size != params.size) return "Parameter names must be unique within a script."

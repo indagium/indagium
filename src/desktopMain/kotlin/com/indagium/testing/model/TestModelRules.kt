@@ -99,6 +99,7 @@ fun StepCheck.withFreshId(exampleIds: Map<String, String>): StepCheck = when (th
     is StepCheck.ScreenJudge -> copy(id = newCheckId(), exampleRef = exampleRef?.let { exampleIds[it] ?: it })
     is StepCheck.ScriptResult -> copy(id = newCheckId())
     is StepCheck.AskJudge -> copy(id = newCheckId())
+    is StepCheck.DeviceState -> copy(id = newCheckId())
 }
 
 /** A deep copy with new ids for the step and everything inside it. */
@@ -127,3 +128,39 @@ fun TestSuite.withFreshIds(): TestSuite = copy(
     cases = cases.map { it.withFreshIds() },
     readOnly = false,
 )
+
+// ── Step kinds ───────────────────────────────────────────────────────
+
+/** The run (not an agent) performs this step: a MANUAL step waits for a tester, a SCRIPT step runs a script. */
+val TestStep.isDriverStep: Boolean get() = kind != StepKind.AGENT
+
+/**
+ * The checks whose truth is how a MANUAL step is noticed as done while it waits: they are read passively (a log line that appeared, a
+ * device property). Script and judge checks are evaluated once, after the step is done.
+ */
+val TestStep.completionChecks: List<StepCheck> get() = checks.filter { it is StepCheck.DeviceState || it is StepCheck.LogAppears }
+
+/** True when this step needs a build that knows step kinds: a suite file holding one is written with a newer envelope version. */
+fun TestStep.usesStepKinds(): Boolean = kind != StepKind.AGENT || checks.any { it is StepCheck.DeviceState }
+
+fun TestSuite.usesStepKinds(): Boolean = cases.any { case -> case.steps.any { it.usesStepKinds() } }
+
+/**
+ * [this] changed to [newKind]. A step that still has the default time allowance of its old kind gets the new kind's default (a manual
+ * step waits for a person: 10 minutes), and the fields that only make sense for another kind are cleared.
+ */
+fun TestStep.withKind(newKind: StepKind): TestStep {
+    if (newKind == kind) return this
+    val timeout = when {
+        newKind == StepKind.MANUAL && timeoutMs == DEFAULT_STEP_TIMEOUT_MS -> DEFAULT_MANUAL_STEP_TIMEOUT_MS
+        kind == StepKind.MANUAL && timeoutMs == DEFAULT_MANUAL_STEP_TIMEOUT_MS -> DEFAULT_STEP_TIMEOUT_MS
+        else -> timeoutMs
+    }
+    return copy(
+        kind = newKind,
+        timeoutMs = timeout,
+        script = script.takeIf { newKind != StepKind.AGENT },
+        optional = optional && newKind == StepKind.AGENT,
+        condition = condition.takeIf { newKind == StepKind.AGENT },
+    )
+}

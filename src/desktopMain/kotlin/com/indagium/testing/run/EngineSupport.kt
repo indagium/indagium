@@ -65,7 +65,12 @@ internal data class EngineTuning(
     val judgeTurnHeadroom: Int = JUDGE_TURN_HEADROOM,
     /** How many different devices run at once; lanes that share a device always run one after another. */
     val maxParallelDevices: Int = MAX_PARALLEL_DEVICES,
+    /** How often a lane that waits for a tester looks at the checks that would show the step done (and for the tester's answer). */
+    val manualPollMs: Long = MANUAL_POLL_MS,
 )
+
+/** A manual step reads its completion checks this often; a tester's answer is noticed at once. */
+const val MANUAL_POLL_MS = 1_000L
 
 /** An inline judge blocks the agent's finish_step, so it is bounded; account agents' MCP clients give up on long tool calls. */
 const val JUDGE_TIMEOUT_MS = 60_000L

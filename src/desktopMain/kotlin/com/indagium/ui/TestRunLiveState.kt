@@ -20,6 +20,7 @@ import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.driverLabel
 import com.indagium.testing.run.PausedStepInfo
 import com.indagium.testing.run.PendingTestConfirmation
+import com.indagium.testing.run.WaitingLaneInfo
 
 // UI-free state of the live view and of the report's judge columns: how a running run is laid out as one column per
 // lane, the judge feed, the consensus of a step across lanes, and what applying a suggested fix would change. Pure
@@ -55,6 +56,8 @@ internal data class LiveLaneColumn(
     val logcatPath: String?,
     val confirmations: List<PendingTestConfirmation>,
     val pause: PausedStepInfo?,
+    /** The manual step this lane waits for a tester on ("Waiting for you"), or null. */
+    val waiting: WaitingLaneInfo? = null,
     val error: String?,
     /** The draft issues the engine created on this lane so far (steps with onFailure CREATE_ISSUE_AND_CONTINUE), oldest first. */
     val issues: List<LiveIssueLine> = emptyList(),
@@ -98,7 +101,7 @@ private fun LaneToolCall.liveLine(): String = buildString {
 
 /**
  * One column per lane, in lane order. [toolCalls] gives a lane's recent tool calls (newest last); [confirmations] and
- * [pauses] are the live cards of the whole coordinator and are filtered to this run and lane here.
+ * [pauses] and [waiting] are the live cards of the whole coordinator and are filtered to this run and lane here.
  */
 internal fun liveColumns(
     run: TestRun,
@@ -106,6 +109,7 @@ internal fun liveColumns(
     toolCalls: (laneId: String) -> List<String>,
     confirmations: List<PendingTestConfirmation>,
     pauses: List<PausedStepInfo>,
+    waiting: List<WaitingLaneInfo> = emptyList(),
 ): List<LiveLaneColumn> = run.lanes.map { lane ->
     LiveLaneColumn(
         laneId = lane.laneId,
@@ -120,6 +124,7 @@ internal fun liveColumns(
         logcatPath = lane.logPath,
         confirmations = confirmations.filter { it.runId == run.id && it.laneId == lane.laneId },
         pause = pauses.firstOrNull { it.runId == run.id && it.laneId == lane.laneId },
+        waiting = waiting.firstOrNull { it.runId == run.id && it.laneId == lane.laneId },
         error = lane.error,
         issues = issueLines(lane),
     )
@@ -235,6 +240,21 @@ internal fun consensusFor(run: TestRun, row: MatrixRow.Step): ConsensusCell {
 
 /** One field a fix would change: what it says now and what it would say. */
 internal data class FixChange(val field: String, val before: String, val after: String)
+
+/** The fraction (0..1) of a manual wait that is left at [nowMs]; 1 at its start, 0 at its deadline. */
+internal fun manualWaitRemaining(startedAtMs: Long, deadlineAtMs: Long, nowMs: Long): Float {
+    val total = (deadlineAtMs - startedAtMs).coerceAtLeast(1L)
+    return ((deadlineAtMs - nowMs).coerceIn(0L, total).toFloat() / total)
+}
+
+/** "9:41" style time left, rounded up to whole seconds, never negative. */
+internal fun manualWaitClock(deadlineAtMs: Long, nowMs: Long): String {
+    val seconds = ((deadlineAtMs - nowMs).coerceAtLeast(0L) + MILLIS_PER_SECOND_LIVE - 1) / MILLIS_PER_SECOND_LIVE
+    return "%d:%02d".format(seconds / SECONDS_PER_MINUTE_LIVE, seconds % SECONDS_PER_MINUTE_LIVE)
+}
+
+private const val MILLIS_PER_SECOND_LIVE = 1_000L
+private const val SECONDS_PER_MINUTE_LIVE = 60L
 
 /** What applying [fix] to the library [step] would change; an unchanged or blank part is left out. Empty when nothing would change. */
 internal fun fixChanges(step: TestStep, fix: StepFix): List<FixChange> = buildList {

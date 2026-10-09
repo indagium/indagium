@@ -3,11 +3,13 @@ package com.indagium.ui
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
@@ -29,9 +31,11 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.judgeActive
+import com.indagium.testing.run.ManualDecision
 import com.indagium.testing.run.PauseDecision
 import com.indagium.testing.run.PausedStepInfo
 import com.indagium.testing.run.PendingTestConfirmation
+import com.indagium.testing.run.WaitingLaneInfo
 import com.indagium.testing.run.readBoundedRunArtifact
 import com.indagium.testing.run.resolveRunArtifact
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +61,7 @@ internal fun TestRunLiveView(run: TestRun, runDir: File, tick: Int) {
     val columns = remember(run, tick) {
         liveColumns(
             run, profiles, { laneId -> coordinator.recentToolCalls(run.id, laneId, LIVE_TOOL_FEED_LINES) },
-            coordinator.pendingConfirmations(), coordinator.pausedSteps(),
+            coordinator.pendingConfirmations(), coordinator.pausedSteps(), coordinator.waitingSteps(),
         )
     }
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -115,6 +119,7 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, tick:
         }
         column.issues.forEach { IssueCreatedCard(it) }
         column.confirmations.forEach { ConfirmationCard(run.id, it) }
+        column.waiting?.let { WaitingCard(run.id, it, tick) }
         column.pause?.let { PauseCard(run.id, it) }
     }
 }
@@ -233,6 +238,43 @@ private fun IssueCreatedCard(line: LiveIssueLine) {
 }
 
 private const val PAUSE_OBSERVATION_CHARS = 300
+private val WAIT_BAR_HEIGHT = 4.dp
+
+/**
+ * "Waiting for you": a manual step the lane cannot go on without. The tester does what it says on the device, then answers Done,
+ * Failed or Skip; a step that is completed by its checks only has no Done. The bar is the time left before it counts as not confirmed.
+ */
+@Composable
+private fun WaitingCard(runId: String, info: WaitingLaneInfo, tick: Int) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val coordinator = ui.state.testRunCoordinator
+    val wait = info.wait
+
+    fun answer(decision: ManualDecision) {
+        coordinator.resolveManualStep(runId, info.laneId, decision)
+        ui.reclaimFocus()
+    }
+    // tick changes about once a second while the run is live, which is when the bar and the clock need a fresh look.
+    val now = remember(tick) { System.currentTimeMillis() }
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp).background(tc.warnBg, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AppText(
+            "Waiting for you: ${wait.instructions} on ${wait.deviceSerial}",
+            color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 4,
+        )
+        if (wait.expected.isNotBlank()) AppText("Expected: ${wait.expected}", color = tc.ts, fontSize = 10.sp, maxLines = 3)
+        if (wait.hint.isNotBlank()) AppText(wait.hint, color = tc.ts, fontSize = 10.sp, maxLines = 3)
+        Box(Modifier.fillMaxWidth().height(WAIT_BAR_HEIGHT).background(tc.br, CORNER_SM)) {
+            Box(Modifier.fillMaxWidth(manualWaitRemaining(wait.startedAtMs, wait.deadlineAtMs, now)).height(WAIT_BAR_HEIGHT).background(tc.ac, CORNER_SM))
+        }
+        AppText("${manualWaitClock(wait.deadlineAtMs, now)} left · step ${wait.stepNumber} of ${wait.stepCount}", color = tc.td, fontSize = 10.sp)
+        Row(Modifier.padding(top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (wait.testerCanComplete) AppButton("Done", onClick = { answer(ManualDecision.DONE) }, variant = ButtonVariant.Primary)
+            AppButton("Failed", onClick = { answer(ManualDecision.FAILED) }, isDanger = true)
+            AppButton("Skip", onClick = { answer(ManualDecision.SKIP) })
+        }
+    }
+}
 
 @Composable
 private fun PauseCard(runId: String, paused: PausedStepInfo) {

@@ -40,6 +40,7 @@ import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.performedByLine
 import com.indagium.testing.run.StartRunResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -88,7 +89,9 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             if (step.agentError != null) TestsBadge("marked as agent error")
         }
         DetailLine("Action", step.action)
+        step.performedByLine()?.let { DetailLine("Performed by", it) }
         DetailLine("Expected", step.expected)
+        step.classification?.let { DetailLine("Classification", it.label()) }
         step.agentClaim?.let { DetailLine("Agent claimed", it) }
         if (step.observation.isNotBlank()) DetailLine("Observation (untrusted)", step.observation, mono = true)
         step.agentError?.let { DetailLine("Marked as an agent error", it) }

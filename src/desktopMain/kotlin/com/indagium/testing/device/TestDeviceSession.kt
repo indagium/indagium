@@ -41,6 +41,7 @@ import kotlin.math.roundToInt
 const val LANE_CAPTURE_DIRECTORY = "capture"
 private const val INPUT_TIMEOUT_SECONDS = 5L
 private const val LAUNCH_TIMEOUT_SECONDS = 10L
+private const val DEVICE_STATE_TIMEOUT_SECONDS = 8L
 private const val ADB_ERROR_MESSAGE_MAX_CHARS = 500
 private const val LOG_POLL_INTERVAL_MS = 100L
 private const val MAX_LOG_WAIT_MS = 10 * 60 * 1000L
@@ -112,6 +113,20 @@ internal class TestDeviceSession private constructor(
     val diagnostics: List<String> get() = capture.diagnostics
 
     fun adbTarget(): AdbScriptTarget = AdbScriptTarget(tools, serial)
+
+    /**
+     * How a device-state check reads a property of the device (see DeviceState.kt). The default runs one bounded `adb shell` per key;
+     * a richer probe, or a test, replaces it here.
+     */
+    @Volatile
+    internal var deviceStateReader: DeviceStateReader = AdbDeviceStateReader { command -> deviceShell(command) }
+
+    suspend fun readDeviceState(key: String): DeviceStateReading = deviceStateReader.read(key)
+
+    private suspend fun deviceShell(command: List<String>): DeviceShellOutput {
+        val result = adb(listOf("shell") + command, DEVICE_STATE_TIMEOUT_SECONDS)
+        return DeviceShellOutput(result.exitCode, result.stdoutText(), result.stderrText(), result.timedOut)
+    }
 
     // ── Screen ───────────────────────────────────────────────────────
 

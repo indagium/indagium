@@ -1,8 +1,9 @@
 package com.indagium.testing.authoring
 
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
+import com.indagium.testing.model.StepKind
 
-internal enum class RecordingRowIssue { ACTION, EXPECTED, CONDITION }
+internal enum class RecordingRowIssue { ACTION, EXPECTED, CONDITION, SCRIPT }
 
 /** One shared authoring rule for reviewed recording rows in UI previews, session updates and final Apply. */
 internal fun recordingRowIssues(
@@ -19,6 +20,7 @@ internal fun recordingRowIssues(
     if (hasExpectedIssue(row, expected, optional, requireExpected)) {
         add(RecordingRowIssue.EXPECTED)
     }
+    if (row.stepKind == StepKind.SCRIPT && row.script == null) add(RecordingRowIssue.SCRIPT)
 }
 
 private fun hasConditionIssue(optional: Boolean, condition: String?): Boolean = when {
@@ -29,7 +31,8 @@ private fun hasConditionIssue(optional: Boolean, condition: String?): Boolean = 
 }
 
 private fun hasExpectedIssue(row: RecordedTestStep, expected: String, optional: Boolean, requireExpected: Boolean): Boolean = when {
-    requireExpected && !optional && expected.isBlank() -> true
+    // A manual or script step is judged by what happens, not by a described screen: its expected result may stay empty.
+    requireExpected && !optional && expected.isBlank() && row.stepKind == StepKind.AGENT -> true
     optional && expected.isBlank() && !row.reviewReason.isNullOrBlank() -> true
     else -> false
 }
@@ -71,10 +74,12 @@ fun recordingApplyBlockedReason(snapshot: TestStepRecordingSnapshot): String? {
     val missingAction = issues.filter { (_, found) -> RecordingRowIssue.ACTION in found }.map { it.first }
     val missingExpected = issues.filter { (_, found) -> RecordingRowIssue.EXPECTED in found }.map { it.first }
     val missingCondition = issues.filter { (_, found) -> RecordingRowIssue.CONDITION in found }.map { it.first }
+    val missingScript = issues.filter { (_, found) -> RecordingRowIssue.SCRIPT in found }.map { it.first }
     val reasons = listOfNotNull(
         missingAction.takeIf(List<Int>::isNotEmpty)?.let { "Fill in Action for ${stepList(it)}" },
         missingExpected.takeIf(List<Int>::isNotEmpty)?.let { "Fill in Expected for ${stepList(it)}" },
         missingCondition.takeIf(List<Int>::isNotEmpty)?.let { "Add a condition for optional ${stepList(it)}" },
+        missingScript.takeIf(List<Int>::isNotEmpty)?.let { "Choose a script for ${stepList(it)}" },
     )
     return reasons.takeIf(List<String>::isNotEmpty)?.joinToString("; ", postfix = ".")
 }

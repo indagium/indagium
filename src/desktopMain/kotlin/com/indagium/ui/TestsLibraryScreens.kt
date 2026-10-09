@@ -177,15 +177,24 @@ internal fun TestsScriptsScreen() {
                 TestsLockedNotice(it)
                 Spacer(Modifier.height(10.dp))
             }
+            if (ui.view.scriptReturn != null) {
+                ScriptReturnBar(ui)
+                Spacer(Modifier.height(10.dp))
+            }
             if (selected == null) TestsHint("Create a script to edit it here.") else key(selected.id) { ScriptEditor(selected, access.editable) }
         },
     )
 }
 
 private fun createScriptAndSelect(ui: TestsUi) {
+    createPlaceholderScript(ui)?.let { ui.view.selectedScriptId = it.id }
+}
+
+/** A new library script with a placeholder command for the user to edit; null when the library refused it (the banner says why). */
+internal fun createPlaceholderScript(ui: TestsUi): TestScript? {
     val name = uniqueIdentifier(NEW_SCRIPT_BASE, ui.library.scripts.map { it.toolName })
     val result = ui.report(ui.state.createTestScript(TestScript(id = "", toolName = name, commandTemplate = NEW_SCRIPT_COMMAND)))
-    if (result is StoreResult.Ok) ui.view.selectedScriptId = result.value.id
+    return (result as? StoreResult.Ok)?.value
 }
 
 private fun importTestScriptJson(ui: TestsUi, onImported: (TestScript) -> Unit, onError: (String) -> Unit) {
@@ -201,6 +210,16 @@ private fun importTestScriptJson(ui: TestsUi, onImported: (TestScript) -> Unit, 
             },
             { onError(it.message ?: "Could not read script JSON.") },
         )
+    }
+}
+
+/** Shown while the script editor was opened from a step: the script is already that step's; this leads back to it. */
+@Composable
+private fun ScriptReturnBar(ui: TestsUi) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        TestsHint("This script was added to a step. Write its command, then return to the step.", Modifier.weight(1f))
+        AppButton("Back to the step", onClick = { ui.view.returnFromScriptEditor() }, variant = ButtonVariant.Primary)
+        AppButton("Dismiss", onClick = { ui.view.scriptReturn = null }, variant = ButtonVariant.Ghost)
     }
 }
 

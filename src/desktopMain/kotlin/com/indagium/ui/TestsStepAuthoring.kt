@@ -45,6 +45,7 @@ import com.indagium.testing.authoring.contextHint
 import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.previewLogChecks
@@ -541,12 +542,18 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                         variant = ButtonVariant.Ghost,
                     )
                 }
-                TestsLabeled("Action") {
+                if (row.authorAdded) RecordedRowKindEditor(session, row, editable)
+                TestsLabeled(if (row.stepKind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
                     CommitTextField(
                         row.action,
                         { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) },
                         enabled = editable,
-                        placeholder = if (row.authorAdded) "What the tester does" else "Recorded action",
+                        placeholder = when {
+                            row.stepKind == StepKind.MANUAL -> "What the tester should do, such as plug in the USB stick"
+                            row.stepKind == StepKind.SCRIPT -> "What the script does (shown in the report)"
+                            row.authorAdded -> "What the AI agent should do"
+                            else -> "Recorded action"
+                        },
                     )
                 }
                 TestsLabeled("Expected result") {
@@ -558,16 +565,22 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                         },
                         enabled = editable,
                         multiline = true,
-                        placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
+                        placeholder = when {
+                            row.stepKind != StepKind.AGENT -> "Optional for a manual or script step"
+                            row.optional -> "May be blank for an optional action"
+                            else -> "Required before applying"
+                        },
                     )
                 }
-                CheckRow(checked = row.optional, onToggle = {
-                    updateRecorded(session, row.id) {
-                        if (it.optional) it.copy(optional = false, condition = null)
-                        else it.copy(optional = true)
+                if (row.stepKind == StepKind.AGENT) {
+                    CheckRow(checked = row.optional, onToggle = {
+                        updateRecorded(session, row.id) {
+                            if (it.optional) it.copy(optional = false, condition = null)
+                            else it.copy(optional = true)
+                        }
+                    }, enabled = editable) {
+                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
                     }
-                }, enabled = editable) {
-                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
                 }
                 if (row.optional) {
                     TestsLabeled("Perform only when") {
@@ -664,7 +677,7 @@ private fun RecordedScreenshotPreview(bytes: ByteArray) {
     bitmap?.let { Image(it, contentDescription = "Input-time screenshot context", contentScale = ContentScale.Fit, modifier = Modifier.heightIn(max = 180.dp)) }
 }
 
-private fun updateRecorded(session: TestStepRecordingSession, rowId: String, transform: (RecordedTestStep) -> RecordedTestStep) {
+internal fun updateRecorded(session: TestStepRecordingSession, rowId: String, transform: (RecordedTestStep) -> RecordedTestStep) {
     val current = session.snapshot.value.steps.toMutableList()
     val index = current.indexOfFirst { it.id == rowId }
     if (index >= 0) {

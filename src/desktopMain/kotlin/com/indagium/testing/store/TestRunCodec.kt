@@ -9,14 +9,19 @@ import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
+import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepCompletion
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
@@ -93,6 +98,7 @@ private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
     putIfNotNull("judgeReasoningEffort", config.judgeReasoningEffort)
     config.capture?.let { put("capture", Json.parseToJsonElement(captureSettingsToJson(it))) }
     put("openLaneTabs", config.openLaneTabs)
+    put("manualSteps", config.manualSteps.name)
 }
 
 private fun checkResultToJson(check: CheckResult): JsonObject = buildJsonObject {
@@ -127,6 +133,10 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     put("judgeInconclusive", step.judgeInconclusive)
     putIfNotNull("agentError", step.agentError)
     putIfNotNull("issueId", step.issueId)
+    if (step.kind != StepKind.AGENT) put("kind", step.kind.name)
+    putIfNotNull("completedBy", step.completedBy?.name)
+    putIfNotNull("manualCompletion", step.manualCompletion?.name)
+    putIfNotNull("classification", step.classification?.name)
 }
 
 private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
@@ -243,6 +253,7 @@ private fun decodeConfig(o: JsonObject): RunConfig {
         judgeReasoningEffort = o.optStr("judgeReasoningEffort"),
         capture = (o["capture"] as? JsonObject)?.let { captureSettingsFromJson(it.toString()) },
         openLaneTabs = o.bool("openLaneTabs", true),
+        manualSteps = o.enumOr("manualSteps", ManualStepsOption.USE_SCRIPT_THEN_WAIT),
     )
 }
 
@@ -278,6 +289,10 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     judgeInconclusive = o.bool("judgeInconclusive", false),
     agentError = o.optStr("agentError"),
     issueId = o.optStr("issueId")?.takeIf { isSafeId(it) },
+    kind = o.enumOr("kind", StepKind.AGENT),
+    completedBy = o.optEnum<StepCompletion>("completedBy"),
+    manualCompletion = o.optEnum<ManualCompletion>("manualCompletion"),
+    classification = o.optEnum<JudgeClassification>("classification"),
 )
 
 private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(

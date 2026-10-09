@@ -94,6 +94,11 @@ fun testScriptUsageReferences(library: TestLibrary, scriptId: String): List<Scri
                 uses += ScriptUsageReference("allowedTool", suite.id, suite.name, case.id, case.name, label = "Allowed lane tool · ${script.toolName}")
             }
             case.steps.forEach { step ->
+                if (step.script?.scriptId == scriptId) {
+                    uses += ScriptUsageReference(
+                        "stepScript", suite.id, suite.name, case.id, case.name, stepId = step.id, label = "${step.kind.name.lowercase()} step · ${step.action}",
+                    )
+                }
                 step.checks.filterIsInstance<StepCheck.ScriptResult>().filter { it.scriptId == scriptId }.forEach { check ->
                     uses += ScriptUsageReference(
                         "scriptResult",
@@ -111,6 +116,12 @@ fun testScriptUsageReferences(library: TestLibrary, scriptId: String): List<Scri
     }
     library.sharedSteps.forEach { shared ->
         shared.steps.forEach { step ->
+            if (step.script?.scriptId == scriptId) {
+                uses += ScriptUsageReference(
+                    "sharedStepScript", sharedStepId = shared.id, sharedStepName = shared.name, stepId = step.id,
+                    label = "Shared ${step.kind.name.lowercase()} step · ${step.action}",
+                )
+            }
             step.checks.filterIsInstance<StepCheck.ScriptResult>().filter { it.scriptId == scriptId }.forEach { check ->
                 uses += ScriptUsageReference(
                     "sharedScriptResult",
