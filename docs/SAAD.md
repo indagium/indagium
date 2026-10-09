@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 152: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 153: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3924,6 +3924,22 @@ Restore removed inputs clears exclusions and returns to the complete raw review.
 state, but Apply and Rewrite explain that the person must restore inputs or keep at least one row. Removal/restoration are
 refused during recording, while screen snapshots are pending, or during rewrite/apply so screen evidence chronology cannot
 be reassigned across an excluded timing boundary.
+
+**Review order and added steps.** After Stop the reviewer can also move a row (`moveReviewedRow`; UI grip, Alt+Up/Down, the
+arrow buttons; MCP `update_test_recording` with every row id in the new order) and insert a row (`insertReviewedRow`; UI
+"Add step", MCP `insert_test_recording_row`) under the same guard as Remove (stopped, no pending snapshots, not applying or
+rewriting). `snapshot.steps` is the single source of truth for order; `rawSteps` is history and is never reordered. A moved
+row is the same object, so its screens, tapped element, gesture and video window travel with it (screen-state attachment
+sorts by completion time, so a later republish cannot scramble moved rows). `reviewedRaw` derives the raw review list in
+reviewed order: each visible row in turn, a rewritten row standing for its `sourceInputIds` in recorded order, removed rows
+anchored after the row they followed. The rewrite numbers exactly that list (minus exclusions), applyRewrite compares against
+it, and Undo rewrite / Restore removed inputs put raw rows back in it. An inserted row is `authorAdded` (no kind, no source
+inputs, no evidence): the brief lists it as "[AUTHOR STEP, keep as is]" with its full text, and `parseRewriteResponse` rejects
+any answer that merges it, moves it, changes its action/expected/optional/condition or adds checks, a review reason or an
+expected screenshot (nothing changes on rejection). The accepted row is the author row itself (same id). Removing an author row
+deletes it outright instead of excluding it, a rewrite is blocked while an added step has a blank or over-long action, and the
+video-timeline boundaries use a chronological view that skips author inputs. Moves and inserts take no per-call approval, like
+the other recording edits.
 
 **Authoring usage.** Draft and rewrite views retain latest-attempt and session totals, including known partial usage from
 failed/cancelled attempts. A draft or rewrite does not mutate the case library; applying it stores the applied usage on the

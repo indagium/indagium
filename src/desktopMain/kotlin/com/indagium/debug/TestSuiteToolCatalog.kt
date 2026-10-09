@@ -425,7 +425,9 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "update_test_recording",
         "Edit action, expected-result text and optional condition in a stopped recording preview. Send one row for every current review row; " +
-            "an optional row requires a condition and may have blank expected text. Captured images are context unless explicitly selected.",
+            "an optional row requires a condition and may have blank expected text. Captured images are context unless explicitly selected. " +
+            "To reorder, send every row with its id in the new order (any permutation of the current ids, each exactly once; rows keep " +
+            "their evidence). Without ids the rows are matched to the current order.",
         schema(
             "sessionId" to "string", "steps" to "array", required = listOf("sessionId", "steps"),
             objectArrays = mapOf(
@@ -437,15 +439,32 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         ),
     ),
     IndagiumToolDescriptor(
+        "insert_test_recording_row",
+        "Insert a step you write into a stopped recording review, before the row now at index (0 = first; the number of rows appends). " +
+            "It has no recorded input. An AI rewrite keeps it exactly as written and in place, as a step of its own. Returns the new " +
+            "rowId; edit it later with update_test_recording and delete it with remove_test_recording_steps (an inserted row is deleted, " +
+            "not kept as a removed input). Refused while recording, applying or rewriting.",
+        schema(
+            "sessionId" to "string", "index" to "integer", "action" to "string", "expected" to "string",
+            required = listOf("sessionId", "index", "action"),
+            descriptions = mapOf(
+                "index" to "Where the row goes, from 0 to the current number of rows.",
+                "action" to "What the tester does; must not be blank.",
+                "expected" to "What should happen; may be blank now but is required before apply_test_recording.",
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
         "remove_test_recording_steps",
         "Remove one or more rows from a stopped recording review. Removed raw inputs remain in immutable session history and are " +
             "excluded from Apply and future rewrites; removing a rewritten row excludes every raw input it represents. " +
-            "Use restore_test_recording_inputs to restore the full raw review.",
+            "Rows you inserted yourself are deleted outright. Use restore_test_recording_inputs to restore the full raw review.",
         schema("sessionId" to "string", "rowIds" to "array", required = listOf("sessionId", "rowIds")),
     ),
     IndagiumToolDescriptor(
         "restore_test_recording_inputs",
-        "Restore all removed recording inputs and show the full raw review again. This clears exclusions and undoes the current rewrite; " +
+        "Restore all removed recording inputs and show the full raw review again, in the current reviewed order (rows you moved or " +
+            "inserted keep their places). This clears exclusions and undoes the current rewrite; " +
             "refused while recording, applying or rewriting.",
         schema("sessionId" to "string", required = listOf("sessionId")),
     ),
@@ -490,7 +509,8 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "restore_test_recording_raw",
-        "Undo rewrite_test_recording: put the recorded (raw) rows back exactly as they were, with their ids. Refused while the " +
+        "Undo rewrite_test_recording: put the recorded (raw) rows back exactly as they were, with their ids, in the order the rewritten " +
+            "rows now have (rows you inserted stay where they are). Refused while the " +
             "recording is being rewritten or applied.",
         schema("sessionId" to "string", required = listOf("sessionId")),
     ),

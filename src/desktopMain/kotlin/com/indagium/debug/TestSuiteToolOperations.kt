@@ -2,6 +2,7 @@ package com.indagium.debug
 
 import com.indagium.edition.Edition
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.authoring.MAX_FIXED_STEP_CHARS
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.readTestScriptEnvelope
 import com.indagium.testing.authoring.testScriptSchemaPreview
@@ -357,11 +358,22 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             }.toSet()
             val rowIds = rows.mapNotNull { it["id"] as? String }.takeIf { ids -> ids.size == rows.size }
             if (rows.any { it.containsKey("id") } && rowIds == null) {
-                toolArgError("If any steps[].id is sent, send the correct id for every row in its original order.")
+                toolArgError("If any steps[].id is sent, send the correct id for every row (in the new order to reorder).")
             }
             val id = a.requiredString("sessionId")
             val optionalOverrides = recordingOptionalOverrides(rows)
             appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds, optionalOverrides).toResult { recordingMap(id, it) }
+        },
+        "insert_test_recording_row" to tool { a ->
+            val id = a.requiredString("sessionId")
+            val index = a.requiredInt("index")
+            val action = a.requiredString("action")
+            val expected = a.string("expected").orEmpty()
+            if (action.length > MAX_FIXED_STEP_CHARS || expected.length > MAX_FIXED_STEP_CHARS) {
+                toolArgError("action and expected are limited to $MAX_FIXED_STEP_CHARS characters.")
+            }
+            val row = RecordedTestStep(action = action, expected = expected, authorAdded = true)
+            appState.insertTestRecordingRow(id, index, row).toResult { recordingMap(id, it) + ("rowId" to row.id) + ("index" to index) }
         },
         "remove_test_recording_steps" to tool { a ->
             val ids = a.strings("rowIds")?.toSet() ?: toolArgError("rowIds must be an array of recording row ids.")
@@ -553,6 +565,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         val screen = row.before?.takeIf { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() } ?: row.after
         return buildMap {
             put("id", row.id)
+            if (row.authorAdded) put("authorAdded", true)
             put("action", row.action)
             put("expected", row.expected)
             put("optional", row.optional)

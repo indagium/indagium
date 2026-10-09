@@ -9,6 +9,7 @@ import com.indagium.model.AiProviderProfile
 import com.indagium.testing.Turn
 import com.indagium.testing.TurnProvider
 import com.indagium.testing.VALID_SHOP_REWRITE
+import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.recordedShopSession
 import com.indagium.testing.run.LaneAgentFactory
@@ -198,6 +199,154 @@ class RewriteRecordingToolsTest {
         assertEquals(3, session.snapshot.value.steps.size)
         assertTrue("no AI rewrite" in assertIs<StoreResult.Invalid>(state.restoreTestStepRecordingRaw(session.id)).reason)
         assertTrue(state.clearTestStepRecording(session.id))
+    }
+
+    @Test
+    fun moveAndInsertAreRefusedWhileARewriteRunsOrAnApplyHoldsTheRecording() = runBlocking<Unit> {
+        val session = record()
+        val rows = session.snapshot.value.steps
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        scripted({
+            entered.complete(Unit)
+            release.await()
+            emit(LlmStreamEvent.TextDelta(VALID_SHOP_REWRITE))
+            emit(LlmStreamEvent.Completed)
+        })
+        val running = async { state.rewriteTestStepRecording(session.id, PROFILE_ID) }
+        withTimeout(10_000) { entered.await() }
+
+        val newRow = RecordedTestStep(action = "Added")
+        assertTrue("being rewritten" in assertIs<StoreResult.Invalid>(state.moveTestRecordingRow(session.id, rows[0].id, 2)).reason)
+        assertTrue("being rewritten" in assertIs<StoreResult.Invalid>(state.insertTestRecordingRow(session.id, 0, newRow)).reason)
+        release.complete(Unit)
+        assertIs<StoreResult.Ok<*>>(withTimeout(10_000) { running.await() })
+
+        assertIs<StoreResult.Ok<*>>(state.restoreTestStepRecordingRaw(session.id))
+        assertNotNull(session.freezeReviewedSnapshotForApply())
+        assertIs<StoreResult.Invalid>(state.moveTestRecordingRow(session.id, rows[0].id, 2), "the session itself refuses while reserved for apply")
+        assertIs<StoreResult.Invalid>(state.insertTestRecordingRow(session.id, 0, newRow))
+        session.releaseApplyReservation()
+        assertEquals(rows.map { it.id }, session.snapshot.value.steps.map { it.id }, "nothing moved or added while refused")
+        assertIs<StoreResult.Ok<*>>(state.moveTestRecordingRow(session.id, rows[0].id, 2))
+        assertIs<StoreResult.Invalid>(state.moveTestRecordingRow("unknown", rows[0].id, 0))
+        assertIs<StoreResult.Invalid>(state.moveTestRecordingRow(session.id, "unknown", 0))
+        assertEquals(listOf(rows[1].id, rows[2].id, rows[0].id), session.snapshot.value.steps.map { it.id })
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun stepRows(response: Map<String, Any?>): List<Map<String, Any?>> = response["steps"] as List<Map<String, Any?>>
+
+    private fun rowEdits(rows: List<Map<String, Any?>>) = rows.map { mapOf("id" to it["id"], "action" to it["action"], "expected" to it["expected"]) }
+
+    @Test
+    fun updateTestRecordingAcceptsAnyPermutationOfTheRowIdsAsTheNewOrderAndKeepsEvidence() {
+        val session = record()
+        val rows = stepRows(call("get_test_recording", "sessionId" to session.id))
+        val ids = rows.map { it["id"] as String }
+        val order = listOf(ids[2], ids[0], ids[1])
+        val byId = rows.associateBy { it["id"] }
+
+        val reordered = call("update_test_recording", "sessionId" to session.id, "steps" to order.map { rowEdits(listOf(byId.getValue(it))).single() })
+
+        assertNull(reordered["error"], reordered.toString())
+        assertEquals(order, stepRows(reordered).map { it["id"] })
+        assertEquals(order, session.snapshot.value.steps.map { it.id })
+        assertEquals(order, stepRows(call("get_test_recording", "sessionId" to session.id)).map { it["id"] })
+        assertEquals(byId.getValue(ids[0])["tappedElement"], stepRows(reordered)[1]["tappedElement"], "the row kept its evidence")
+        assertEquals(byId.getValue(ids[2])["afterActivity"], stepRows(reordered)[0]["afterActivity"])
+
+        // The new order is also what an edit without ids and what apply are matched against.
+        val edited = call(
+            "update_test_recording",
+            "sessionId" to session.id,
+            "steps" to order.map { mapOf("action" to "edit $it", "expected" to "ok") },
+        )
+        assertNull(edited["error"], edited.toString())
+        assertEquals(order, stepRows(edited).map { it["id"] })
+        assertEquals(order.map { "edit $it" }, stepRows(edited).map { it["action"] })
+        val applyOld = call("apply_test_recording", "sessionId" to session.id, "steps" to ids.map { mapOf("id" to it, "action" to "a", "expected" to "e") })
+        assertTrue("error" in applyOld, "apply still wants the current order: $applyOld")
+    }
+
+    @Test
+    fun updateTestRecordingRefusesAnOrderThatIsNotAPermutationOfEveryCurrentRowId() {
+        val session = record()
+        val ids = session.snapshot.value.steps.map { it.id }
+
+        fun edits(vararg rowIds: String) = rowIds.map { mapOf("id" to it, "action" to "a", "expected" to "e") }
+
+        listOf(
+            edits(ids[0], ids[0], ids[1]),
+            edits(ids[0], ids[1], "other"),
+            edits(ids[0], ids[1]),
+            edits(ids[0], ids[1], ids[2], ids[0]),
+        ).forEach { steps ->
+            val result = call("update_test_recording", "sessionId" to session.id, "steps" to steps)
+            assertTrue("error" in result, result.toString())
+            assertEquals(ids, session.snapshot.value.steps.map { it.id })
+        }
+        val partialIds = call(
+            "update_test_recording",
+            "sessionId" to session.id,
+            "steps" to listOf(
+                mapOf("id" to ids[0], "action" to "a", "expected" to "e"),
+                mapOf("action" to "b", "expected" to "e"),
+                mapOf("action" to "c", "expected" to "e"),
+            ),
+        )
+        assertTrue("every row" in partialIds["error"].toString(), partialIds.toString())
+    }
+
+    @Test
+    fun insertTestRecordingRowAddsAnAuthorStepTheCallerCanEditApplyAndDeleteWithoutApproval() {
+        val session = record()
+        val ids = session.snapshot.value.steps.map { it.id }
+        assertFalse("insert_test_recording_row" in PER_CALL_APPROVAL_MCP_TOOLS)
+        assertEquals(
+            IndagiumToolActionPolicy.AUTOMATIC,
+            operations.toolGateway.actionPolicy("insert_test_recording_row", mapOf("sessionId" to session.id)),
+            "the same policy as update_test_recording",
+        )
+        assertEquals(
+            operations.toolGateway.actionPolicy("update_test_recording", mapOf("sessionId" to session.id)),
+            operations.toolGateway.actionPolicy("insert_test_recording_row", mapOf("sessionId" to session.id)),
+        )
+
+        val inserted = call("insert_test_recording_row", "sessionId" to session.id, "index" to 1, "action" to "Sign in", "expected" to "Home is shown")
+        assertNull(inserted["error"], inserted.toString())
+        val rows = stepRows(inserted)
+        assertEquals(listOf(ids[0], inserted["rowId"], ids[1], ids[2]), rows.map { it["id"] })
+        assertEquals(true, rows[1]["authorAdded"])
+        assertNull(rows[0]["authorAdded"])
+        assertEquals(1, inserted["index"])
+        assertEquals(false, inserted["rewritten"])
+        assertEquals(emptyList<String>(), inserted["excludedSourceInputIds"])
+
+        assertTrue("index" in call("insert_test_recording_row", "sessionId" to session.id, "index" to 9, "action" to "x")["error"].toString().lowercase())
+        assertTrue("action is required" in call("insert_test_recording_row", "sessionId" to session.id, "index" to 0, "action" to " ")["error"].toString())
+        assertTrue("no longer active" in call("insert_test_recording_row", "sessionId" to "unknown", "index" to 0, "action" to "x")["error"].toString())
+        val tooLong = call("insert_test_recording_row", "sessionId" to session.id, "index" to 0, "action" to "x".repeat(2_001))
+        assertTrue("limited to" in tooLong["error"].toString())
+        assertEquals(4, session.snapshot.value.steps.size)
+
+        val blankExpected = call("insert_test_recording_row", "sessionId" to session.id, "index" to 4, "action" to "Last")
+        assertNull(blankExpected["error"], blankExpected.toString())
+        assertEquals("", stepRows(blankExpected).last()["expected"], "expected may be left blank for now")
+        val removed = call("remove_test_recording_steps", "sessionId" to session.id, "rowIds" to listOf(blankExpected["rowId"]))
+        assertNull(removed["error"], removed.toString())
+        assertEquals(emptyList<String>(), removed["excludedSourceInputIds"], "an inserted row is deleted, not excluded")
+
+        val applied = call(
+            "apply_test_recording",
+            "sessionId" to session.id,
+            "steps" to rowEdits(stepRows(removed)).map { it + ("expected" to (it["expected"] as String).ifBlank { "ok" }) },
+        )
+        assertNull(applied["error"], applied.toString())
+        val steps = state.testLibrary.suite(suiteId)!!.cases.single { it.id == caseId }.steps
+        assertEquals(listOf("Sign in"), steps.filter { it.action == "Sign in" }.map { it.action })
+        assertEquals(1, steps.indexOfFirst { it.action == "Sign in" })
+        assertEquals("Home is shown", steps[1].expected)
     }
 
     @Test

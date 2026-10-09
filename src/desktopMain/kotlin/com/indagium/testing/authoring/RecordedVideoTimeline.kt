@@ -186,9 +186,10 @@ internal class RecordedVideoTimeline(
     fun sessionOffsetMs(wallClockTimestampMs: Long): Long = wallClockTimestampMs - sessionStartedAtMs
 
     /** Five decoded frames around one input; actual timestamps are checked against its input interval and neighbours. */
-    fun storyboardForInput(inputNumber: Int, inputs: List<RewriteInput>): RecordedVideoStoryboard? {
+    fun storyboardForInput(inputNumber: Int, allInputs: List<RewriteInput>): RecordedVideoStoryboard? {
         if (!finished.get()) return null
-        val index = inputNumber - 1
+        val inputs = chronologicalInputs(allInputs)
+        val index = inputs.indexOfFirst { it.number == inputNumber }
         val row = inputs.getOrNull(index)?.row ?: return null
         val sensitive = sensitiveIntervals(inputs)
         if (sensitive.any { row.inputAtMs in it || row.inputStartMs in it }) return null
@@ -258,7 +259,8 @@ internal class RecordedVideoTimeline(
     ) = inputFrameRequest(inputNumber, requestedMs, inputStart, inputEnd, previousEnd, nextStart, relation = "after")
 
     /** A time range can reveal transitions across inputs; the range is bounded to thirty seconds and six images. */
-    fun storyboardForRange(startMs: Long, endMs: Long, inputs: List<RewriteInput>): RecordedVideoStoryboard? {
+    fun storyboardForRange(startMs: Long, endMs: Long, allInputs: List<RewriteInput>): RecordedVideoStoryboard? {
+        val inputs = chronologicalInputs(allInputs)
         if (!finished.get() || startMs < 0 || endMs <= startMs || endMs - startMs > MAX_STORYBOARD_RANGE_MS) return null
         val duration = summary().durationMs
         val from = startMs.coerceAtMost(duration)
@@ -494,6 +496,13 @@ internal class RecordedVideoTimeline(
         }
     }
 
+    /**
+     * The recorded inputs in the order they happened. The numbers the AI sees follow the review order, which the reviewer may have
+     * changed, and an author-added input has no time at all; the boundaries and frame attribution below need real chronology.
+     */
+    private fun chronologicalInputs(inputs: List<RewriteInput>): List<RewriteInput> =
+        inputs.filterNot { it.fixed }.sortedBy { it.row.inputAtMs }
+
     private fun previousInputBoundary(inputs: List<RewriteInput>, index: Int): Long? =
         inputs.take(index).maxOfOrNull { it.row.inputAtMs - sessionStartedAtMs }
 
@@ -506,18 +515,18 @@ internal class RecordedVideoTimeline(
             val input = inputs[index]
             val start = input.row.inputStartMs - sessionStartedAtMs
             val end = input.row.inputAtMs - sessionStartedAtMs
-            frameOwner(index, frame.actualMs, start, end, previousInputBoundary(inputs, index), nextInputBoundary(inputs, index))
+            frameOwner(input.number, frame.actualMs, start, end, previousInputBoundary(inputs, index), nextInputBoundary(inputs, index))
         }
         owner?.let { (number, relation, age) -> frame.copy(relation = relation, inputNumber = number, ageMs = age) } ?: frame
     }
 
-    private fun frameOwner(index: Int, frameMs: Long, start: Long, end: Long, previousEnd: Long?, nextStart: Long?): Triple<Int, String, Long>? {
+    private fun frameOwner(number: Int, frameMs: Long, start: Long, end: Long, previousEnd: Long?, nextStart: Long?): Triple<Int, String, Long>? {
         val afterPrevious = previousEnd == null || frameMs > previousEnd
         val beforeNext = nextStart == null || frameMs < nextStart
         return when {
-            frameMs < start && afterPrevious && beforeNext -> Triple(index + 1, "before", start - frameMs)
-            frameMs > end && afterPrevious && beforeNext -> Triple(index + 1, "after", frameMs - end)
-            frameMs in start..end -> Triple(index + 1, "during", 0L)
+            frameMs < start && afterPrevious && beforeNext -> Triple(number, "before", start - frameMs)
+            frameMs > end && afterPrevious && beforeNext -> Triple(number, "after", frameMs - end)
+            frameMs in start..end -> Triple(number, "during", 0L)
             else -> null
         }
     }
@@ -533,7 +542,7 @@ internal class RecordedVideoTimeline(
         val after = frames.any { frame ->
             frame.actualMs > end && (nextStart == null || frame.actualMs < nextStart) && (previousEnd == null || frame.actualMs > previousEnd)
         }
-        (index + 1).takeIf { before && after }
+        input.number.takeIf { before && after }
     }
 
     private fun composeContactSheet(frames: List<DecodedFrame>): BufferedImage {

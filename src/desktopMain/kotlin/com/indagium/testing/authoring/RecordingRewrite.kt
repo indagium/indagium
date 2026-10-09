@@ -24,7 +24,10 @@ import java.util.IdentityHashMap
 
 /** At most this many steps come out of a rewrite, like a step draft. */
 internal const val MAX_REWRITE_STEPS = 20
-private const val MAX_STEP_TEXT_CHARS = 2_000
+
+/** The longest action / expected text of a step, and so of an author-added row that has to be echoed back unchanged. */
+internal const val MAX_FIXED_STEP_CHARS = 2_000
+private const val MAX_STEP_TEXT_CHARS = MAX_FIXED_STEP_CHARS
 private const val MAX_NOTES_CHARS = 2_000
 private const val MAX_CHECKS_PER_STEP = 10
 private const val MAX_HINT_CHARS = 4_000
@@ -41,13 +44,19 @@ data class RecordingRewrite(
     val usage: AiUsageStats? = null,
 )
 
-/** One recorded input as the AI sees it: [number] is 1-based, [before] / [after] the screen states the probe attached (or null). */
+/**
+ * One recorded input as the AI sees it: [number] is 1-based in review order, [before] / [after] the screen states the probe
+ * attached (or null). An author-added row is [fixed]: not a recording at all, but a step the person wrote that must come back
+ * unchanged and alone.
+ */
 internal class RewriteInput(
     val number: Int,
     val row: RecordedTestStep,
     val before: RecordingScreenState?,
     val after: RecordingScreenState?,
 ) {
+    val fixed: Boolean get() = row.authorAdded
+
     fun screenshot(moment: String): RecordingScreenshotEvidence? = when (moment.lowercase()) {
         "before" -> row.beforeScreenshot
         "after" -> row.afterScreenshot
@@ -102,15 +111,16 @@ internal class RewriteProposal(val steps: List<ProposedStep>, val notes: String)
 
 /**
  * The AI's answer as a validated [RewriteProposal]. Throws [IllegalArgumentException] naming the first problem: the answer is
- * applied whole or not at all. [inputCount] is how many inputs were shown; every one must sit in exactly one step.
+ * applied whole or not at all. [inputCount] is how many inputs were shown; every one must sit in exactly one step. [fixedInputs]
+ * are the author-added inputs by number: each must be a step of its own whose text, optional flag and condition equal the row's.
  */
-internal fun parseRewriteResponse(response: String, inputCount: Int): RewriteProposal {
+internal fun parseRewriteResponse(response: String, inputCount: Int, fixedInputs: Map<Int, RecordedTestStep> = emptyMap()): RewriteProposal {
     val root = parseJsonObject(response)
     val rows = root[STEPS_KEY] as? JsonArray ?: throw IllegalArgumentException("The provider response must include a 'steps' array.")
     require(rows.isNotEmpty() && rows.size <= MAX_REWRITE_STEPS) { "The provider must propose between 1 and $MAX_REWRITE_STEPS steps." }
     val steps = rows.mapIndexed { index, row ->
         val obj = row as? JsonObject ?: throw IllegalArgumentException("steps[$index] must be an object.")
-        parseProposedStep(obj, index, inputCount)
+        parseProposedStep(obj, index, inputCount, fixedInputs)
     }
     requireFullCoverage(steps.map { it.sourceInputs }, inputCount)
     val notes = (root["notes"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().take(MAX_NOTES_CHARS)
@@ -129,7 +139,7 @@ private fun parseJsonObject(response: String): JsonObject {
     return element as? JsonObject ?: throw IllegalArgumentException("The provider response must be a JSON object with a 'steps' array.")
 }
 
-private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int): ProposedStep {
+private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int, fixedInputs: Map<Int, RecordedTestStep>): ProposedStep {
     val where = "steps[$index]"
     val action = textField(obj, "action", where)
     val expected = textField(obj, "expected", where, allowBlank = true)
@@ -146,10 +156,16 @@ private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int): Pro
     require(optional || condition == null) {
         "$where.condition is only valid when optional is true."
     }
+    val sources = sourceInputsOf(obj["sourceInputs"], where, inputCount)
+    val fixed = sources.firstOrNull { it in fixedInputs }
+    if (fixed != null) {
+        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
+        requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(fixedInputs[fixed]))
+        return step
+    }
     require(expected.isNotBlank() || reviewReason != null || optional && !condition.isNullOrBlank()) {
         "$where.expected may be blank only for a conditional optional step or when reviewReason explains what needs review."
     }
-    val sources = sourceInputsOf(obj["sourceInputs"], where, inputCount)
     val checks = checksOf(obj["checks"], where, action)
     return ProposedStep(
         action,
@@ -161,6 +177,27 @@ private fun parseProposedStep(obj: JsonObject, index: Int, inputCount: Int): Pro
         checks,
         reviewReason,
     )
+}
+
+/** An author-added step comes back as its own step with the person's exact text, flags and nothing added by the AI. */
+private fun requireFixedStepUnchanged(obj: JsonObject, where: String, step: ProposedStep, number: Int, row: RecordedTestStep) {
+    val label = "$where covers input $number, an author-added step that must be kept as is"
+    require(step.sourceInputs == listOf(number)) { "$label: it must be a step of its own (sourceInputs [$number]), never merged with other inputs." }
+    require(step.action == row.action.trim() && step.expected == row.expected.trim()) {
+        "$label: action and expected must equal the person's text exactly."
+    }
+    require(step.optional == row.optional && step.condition == row.condition?.trim()?.takeIf(String::isNotEmpty)) {
+        "$label: optional and condition must equal the person's."
+    }
+    val extras = listOf("checks", "reviewReason", "expectedScreenshot").filter { key -> !isEmptyAnswer(obj[key]) }
+    require(extras.isEmpty()) { "$label: leave out ${extras.joinToString(", ")}." }
+}
+
+private fun isEmptyAnswer(element: JsonElement?): Boolean = when (element) {
+    null, is JsonNull -> true
+    is JsonArray -> element.isEmpty()
+    is JsonPrimitive -> element.isString && element.content.isBlank()
+    else -> false
 }
 
 private fun textField(obj: JsonObject, key: String, where: String, allowBlank: Boolean = false): String {
@@ -241,6 +278,8 @@ internal fun buildRewrittenRows(
 ): List<RecordedTestStep> =
     proposal.steps.map { step ->
         val sources = step.sourceInputs.map { inputs[it - 1] }
+        // An author-added row is not rewritten: the row itself (same id, same text) stays, in the place the answer gave it.
+        sources.singleOrNull()?.takeIf { it.fixed }?.let { return@map it.row }
         val unclearGesture = sources.firstOrNull { input ->
             input.row.kind in setOf(RecordedInputKind.TAP, RecordedInputKind.LONG_PRESS) &&
                 input.row.tappedElement == null && input.screenshot("before") == null && input.number !in videoInspectedInputs
@@ -297,6 +336,9 @@ private fun sourceHintOf(sources: List<RewriteInput>): String {
 
 internal enum class RewriteDescription { BRIEF, HINT }
 
+/** How the brief marks an author-added input; the prompt rules in RecordingRewriteBrief.kt refer to this exact label. */
+internal const val FIXED_STEP_LABEL = "AUTHOR STEP, keep as is"
+
 private const val MAX_ACTION_CHARS = 300
 
 /**
@@ -305,6 +347,13 @@ private const val MAX_ACTION_CHARS = 300
  */
 internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null): String = buildString {
     append(number).append(". ")
+    if (fixed) {
+        // Not a recording: the person wrote this step. It is shown whole (the answer must repeat it exactly), never cut to a preview.
+        append('[').append(FIXED_STEP_LABEL).append("] action: \"").append(row.action.trim()).append("\" | expected: \"")
+        append(row.expected.trim()).append('"')
+        if (row.optional) append(" | optional: true | condition: \"").append(row.condition?.trim().orEmpty()).append('"')
+        return@buildString
+    }
     if (mode == RewriteDescription.BRIEF) append('[').append(row.kind?.name ?: "INPUT").append("] ")
     append(row.action.take(MAX_ACTION_CHARS))
     row.tappedElement?.let { element ->

@@ -1348,6 +1348,11 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    removed inputs** returns to the full raw review. If all rows are removed, restore inputs or keep a row before rewriting
    or applying. The video still covers the full original timeline and can show removed actions; the rewrite is told not to
    recreate them or fold them into a retained step.
+   You can also reorder and add steps before applying: drag the **⠿** grip, press Alt+Up/Down on a focused step, or use the
+   arrow buttons, and use **+ Add step below** (or **+ Add step at start**) to type a step of your own. A moved step keeps
+   its screenshots and video evidence. If you rewrite with AI afterwards, the steps are numbered in your order and a step
+   you added is kept exactly as written and where you put it. **Undo rewrite** and **Restore removed inputs** put steps back
+   in your order; removing a step you added deletes it.
 2. Under **Rewrite with AI**, the last provider, model and reasoning effort used for a rewrite are preselected
    (initially the selected profile). The rewrite panel shows the latest attempt and session usage; known usage from a
    failed or cancelled attempt remains visible. Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
@@ -1376,7 +1381,8 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
 
 Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", with the original taps so
 the agent that runs the case has the precise gesture when a label is ambiguous. An MCP client does the same with
-`rewrite_test_recording` and `restore_test_recording_raw`.
+`rewrite_test_recording` and `restore_test_recording_raw`, and can reorder rows with `update_test_recording` (send every
+row id in the new order) or add one with `insert_test_recording_row`.
 
 ### Scripts: your own tools for the agent
 

@@ -22,6 +22,7 @@ internal const val GET_RECORDED_VIDEO_STORYBOARD_TOOL = "get_recorded_video_stor
 
 private const val MAX_UI_NODES_RETURNED = 120
 private const val PERCENT = 100L
+private const val AUTHOR_STEP_KIND = "AUTHOR_STEP"
 private val SCREEN_MOMENTS = listOf("before", "after", "input")
 private val UI_MOMENTS = listOf("before", "after")
 
@@ -89,6 +90,14 @@ internal class RecordingRewriteTools(
 
     private fun inputMap(input: RewriteInput): Map<String, Any?> {
         val row = input.row
+        if (input.fixed) {
+            return mapOf(
+                "index" to input.number,
+                "kind" to AUTHOR_STEP_KIND,
+                "fixed" to true,
+                "message" to "The person wrote this step; it has no recording, screens or video. Return it unchanged as its own step.",
+            ) + untrustedData("recorded_input", mapOf("action" to row.action, "expected" to row.expected.takeIf(String::isNotBlank)))
+        }
         return buildMap {
             put("index", input.number)
             put("kind", row.kind?.name)
@@ -234,6 +243,9 @@ internal class RecordingRewriteTools(
         val index = args.int("index")
         val start = args.long("startMs")
         val end = args.long("endMs")
+        if (index != null && inputs.getOrNull(index - 1)?.fixed == true) {
+            throw ToolArgException("Input $index is an author-added step; it has no recorded video.")
+        }
         val storyboard = when {
             index != null && start == null && end == null -> videoTimeline?.storyboardForInput(index, inputs)
             index == null && start != null && end != null -> videoTimeline?.storyboardForRange(start, end, inputs)
