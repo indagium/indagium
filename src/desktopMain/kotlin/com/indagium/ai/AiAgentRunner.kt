@@ -141,9 +141,13 @@ internal class AiRun internal constructor(
     freeTools: Set<String> = emptySet(),
     /** When set, a confirmation card nobody answered within this many milliseconds counts as denied; null waits indefinitely. */
     val confirmationTimeoutMs: Long? = null,
+    /** The clock of every timestamp this run records (events, first response, completion); a test injects a ticking one. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) {
     private val _events = MutableSharedFlow<AiRunEvent>(replay = EVENT_REPLAY, extraBufferCapacity = EVENT_BUFFER)
     private val _history = mutableListOf<AiRunEvent>()
+    private val historyTimes = mutableListOf<Long>()
+    private val _modelResponseTimes = mutableListOf<Long>()
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     internal val toolCallBudget = AiToolCallBudget(maxToolCalls, freeTools)
     internal var job: Job? = null
@@ -155,12 +159,23 @@ internal class AiRun internal constructor(
 
     @Volatile internal var deviceCaptureTabId: String = tabId
 
-    /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
+    /** Time this run was created: the start every duration of [aiRunTiming] is measured from. */
+    val createdAt: Long = clock()
+
+    /** Time of the first model-originated event (a reply or a tool call), if any yet. */
     var firstResponseAt: Long? = null
         private set
 
-    /** Wall-clock time this run reached a terminal state (done, error, or cancelled), if any yet. */
+    /** Time this run reached a terminal state (done, error, or cancelled), if any yet. */
     var completedAt: Long? = null
+        private set
+
+    /**
+     * Time the agent was ready to take its prompt, if it said so: an account agent whose process and managed MCP server are up
+     * ([markAgentReady]), or an in-app model whose first request is about to go out. Null for a run that never got there.
+     */
+    @Volatile
+    var agentReadyAt: Long? = null
         private set
 
     val events: SharedFlow<AiRunEvent> = _events.asSharedFlow()
@@ -169,21 +184,48 @@ internal class AiRun internal constructor(
     val history: List<AiRunEvent>
         get() = synchronized(_history) { _history.toList() }
 
+    /** The same events as [history], each with the time it was emitted ([clock] at the moment of [emit], not of any later read). */
+    val timedHistory: List<TimedAiRunEvent>
+        get() = synchronized(_history) { _history.mapIndexed { index, event -> TimedAiRunEvent(event, historyTimes[index]) } }
+
+    /** When each model response of this run completed, oldest first (see [markModelResponse]). */
+    val modelResponseTimes: List<Long>
+        get() = synchronized(_history) { _modelResponseTimes.toList() }
+
+    /** The run's clock now. */
+    fun now(): Long = clock()
+
+    /** The agent can take its prompt now. Only the first call counts. */
+    internal fun markAgentReady() {
+        if (agentReadyAt == null) agentReadyAt = clock()
+    }
+
+    /** One model response has completed (an in-app model's stream ended, Codex reported token usage, Claude Code finished a turn). */
+    internal fun markModelResponse() {
+        synchronized(_history) { _modelResponseTimes += clock() }
+    }
+
     /** The number of user decisions still blocking this run. */
     val pendingConfirmationCount: Int get() = confirmations.size
 
     fun isConfirmationPending(confirmationId: String): Boolean = confirmations.containsKey(confirmationId)
 
     internal suspend fun emit(event: AiRunEvent) {
-        synchronized(_history) { _history += event }
+        // Stamped under the lock that orders the history, so the times never run backwards along it.
+        val at = synchronized(_history) {
+            clock().also {
+                _history += event
+                historyTimes += it
+            }
+        }
         if (firstResponseAt == null && (
                 event is AiRunEvent.AssistantDelta || event is AiRunEvent.AgentProgress || event is AiRunEvent.ToolRequested
             )
         ) {
-            firstResponseAt = System.currentTimeMillis()
+            firstResponseAt = at
         }
         if (completedAt == null && (event is AiRunEvent.Done || event is AiRunEvent.Error || event == AiRunEvent.Cancelled)) {
-            completedAt = System.currentTimeMillis()
+            completedAt = at
         }
         _events.emit(event)
     }
@@ -199,6 +241,9 @@ internal class AiRun internal constructor(
         const val EVENT_BUFFER = 64
     }
 }
+
+/** An [AiRunEvent] with the time [AiRun.emit] took it in. */
+internal data class TimedAiRunEvent(val event: AiRunEvent, val at: Long)
 
 /** UI-neutral trace of an agent request. Task 05 renders these events in the sidebar. */
 internal sealed interface AiRunEvent {
@@ -269,6 +314,8 @@ internal class AiAgentRunner(
     private val maxToolRounds: Int = MAX_TOOL_ROUNDS,
     private val maxToolResultChars: Int = MAX_TOOL_RESULT_CHARS,
     private val onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
+    /** The clock of the runs this runner starts (see [AiRun]); a test injects a ticking one. */
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : AutoCloseable {
     init {
         require(maxToolRounds > 0) { "maxToolRounds must be positive" }
@@ -301,6 +348,7 @@ internal class AiAgentRunner(
             maxToolCalls = maxToolRounds,
             freeTools = freeTools,
             confirmationTimeoutMs = confirmationTimeoutMs,
+            clock = clock,
         )
         session.lastPrompt = prompt
         session.lastContext = context
@@ -354,6 +402,8 @@ internal class AiAgentRunner(
         conversation += LlmMessage(LlmRole.USER, prompt)
 
         try {
+            // An in-app model has no process or MCP server to start: it is ready as soon as the first request can go out.
+            run.markAgentReady()
             while (true) {
                 run.emit(AiRunEvent.Status(if (run.toolCallBudget.snapshot().totalUsed == 0) "Generating response…" else "Continuing investigation…"))
                 val assistantText = StringBuilder()
@@ -400,7 +450,10 @@ internal class AiAgentRunner(
                             }
 
                             is LlmStreamEvent.Warning -> run.emit(AiRunEvent.Status(event.message))
-                            LlmStreamEvent.Completed -> completed = true
+                            LlmStreamEvent.Completed -> {
+                                completed = true
+                                run.markModelResponse()
+                            }
                             is LlmStreamEvent.ToolCallDelta -> Unit // Provider-level detail is represented by ToolRequested below.
                             is LlmStreamEvent.Usage -> run.emit(
                                 AiRunEvent.Usage(

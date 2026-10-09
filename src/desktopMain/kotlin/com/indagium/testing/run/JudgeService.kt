@@ -4,7 +4,9 @@ import com.indagium.ai.AiInvestigationContext
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
+import com.indagium.ai.aiRunTiming
 import com.indagium.ai.aiUsageFromHistory
+import com.indagium.model.AiRunTiming
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeComparison
@@ -12,8 +14,11 @@ import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.store.TranscriptWriter
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -22,13 +27,21 @@ import kotlinx.coroutines.withTimeoutOrNull
 // launchers as the lanes (an in-app model, Claude Code or Codex), behind a judge-only gateway (JudgeTools). The run ends
 // as soon as the answer is submitted. A judge that times out, ends without answering or fails answers INCONCLUSIVE with the
 // reason in [StepJudgement.error]; it never throws, so a flaky judge cannot break a run. Everything the judge says and does
-// goes to the run's judge.jsonl, each line tagged with what it judged.
+// goes to the run's judge.jsonl, each line tagged with what it judged and stamped with the time it really happened (the run
+// stamps its events as it emits them; the file follows while the judge runs). Every judge run ends with one judge_finished line,
+// the timing breakdown of AiRunTiming, written even when the judge was cancelled, timed out or never started (partial = true).
 
 private const val ENDED_WITHOUT_ANSWER = "The judge ended without submitting a verdict."
 private const val SESSION_PREFIX = "testjudge"
 
 /** One finished judge run: its answer, or why it has none. */
-private class JudgeOutcome(val submission: JudgeSubmission?, val failure: String?, val durationMs: Long, val usage: AiUsageStats?)
+private class JudgeOutcome(
+    val submission: JudgeSubmission?,
+    val failure: String?,
+    val durationMs: Long,
+    val usage: AiUsageStats?,
+    val timing: AiRunTiming,
+)
 
 internal class JudgeService(
     private val runId: String,
@@ -68,6 +81,7 @@ internal class JudgeService(
             durationMs = outcome.durationMs,
             error = outcome.failure,
             usage = outcome.usage,
+            timing = outcome.timing,
         )
     }
 
@@ -136,18 +150,26 @@ internal class JudgeService(
             agent.start(request)
         } catch (failure: Exception) {
             session.deleteClaudeCodeWorkspace()
-            return JudgeOutcome(null, "The judge could not start: ${failure.message ?: failure::class.simpleName}", wallClock() - started, null)
+            val elapsed = wallClock() - started
+            val reason = "The judge could not start: ${failure.message ?: failure::class.simpleName}"
+            val timing = AiRunTiming(totalMs = elapsed, partial = true)
+            transcript?.append("judge_finished", finishedFields(label, timing, null, reason))
+            return JudgeOutcome(null, reason, elapsed, null, timing)
         }
         val tail = transcript?.let { TranscriptTail(run, it, mapOf("judge" to label)) }
+        // The file follows the run while it works, so a judge that hangs or is killed still leaves what it did up to then.
+        val tailJob = tail?.let { CoroutineScope(Dispatchers.IO + SupervisorJob()).launch { it.follow(tuning.transcriptPollMs) } }
         var submission: JudgeSubmission? = null
         var failure: String? = null
         var cleanupComplete = false
         var usage: AiUsageStats? = null
+        var timing = AiRunTiming(partial = true)
         try {
             submission = awaitSubmission(run, tools)
             failure = if (submission != null) null else failureOf(run)
         } finally {
             withContext(NonCancellable) {
+                tailJob?.cancel()
                 run.cancel()
                 cleanupComplete = withTimeoutOrNull(tuning.agentCancelWaitMs) {
                     run.job?.join()
@@ -161,10 +183,29 @@ internal class JudgeService(
                     partial = !cleanupComplete || submission == null || history.any { it == AiRunEvent.Cancelled || it is AiRunEvent.Error },
                 )
                 runCatching { usage?.let(onUsage) }
+                timing = aiRunTiming(run, answerToolNames = JUDGE_FREE_TOOL_NAMES, partial = !cleanupComplete || submission == null)
+                transcript?.append("judge_finished", finishedFields(label, timing, submission, failure))
             }
         }
-        return JudgeOutcome(submission, failure, wallClock() - started, usage)
+        return JudgeOutcome(submission, failure, wallClock() - started, usage, timing)
     }
+
+    /** The `judge_finished` line: [AiRunTiming] flat, plus how long winding the agent down took after the verdict and what was decided. */
+    private fun finishedFields(label: String, timing: AiRunTiming, submission: JudgeSubmission?, error: String?): Map<String, Any?> = linkedMapOf(
+        "judge" to label,
+        "startupMs" to timing.startupMs,
+        "firstResponseMs" to timing.firstResponseMs,
+        "modelTurns" to timing.modelTurns,
+        "toolCalls" to timing.toolCalls,
+        "verdictMs" to timing.verdictMs,
+        "totalMs" to timing.totalMs,
+        "inputTokens" to timing.inputTokens,
+        "outputTokens" to timing.outputTokens,
+        "partial" to timing.partial,
+        "cleanupMs" to timing.verdictMs?.let { (timing.totalMs - it).coerceAtLeast(0L) },
+        "verdict" to (submission?.verdict?.name ?: submission?.laneVerdicts?.entries?.joinToString(",") { "${it.key}=${it.value.name}" }),
+        "error" to error,
+    )
 
     /** The submitted answer, or null when the judge's run ended without one or [EngineTuning.judgeTimeoutMs] passed. */
     private suspend fun awaitSubmission(run: AiRun, tools: JudgeTools): JudgeSubmission? {

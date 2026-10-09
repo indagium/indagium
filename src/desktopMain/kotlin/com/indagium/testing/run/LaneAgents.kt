@@ -48,13 +48,19 @@ internal fun interface LaneAgentFactory {
 }
 
 /** An in-app model over HTTP (OpenAI-compatible or Anthropic). The provider is shared by the lane's runs and closed with the lane. */
-internal class ProviderLaneAgent(private val provider: LlmProvider, private val profile: AiProviderProfile) : LaneAgent {
+internal class ProviderLaneAgent(
+    private val provider: LlmProvider,
+    private val profile: AiProviderProfile,
+    /** The clock of the runs this agent starts (see [AiRun]); a test injects a ticking one. */
+    private val clock: () -> Long = System::currentTimeMillis,
+) : LaneAgent {
     override fun start(request: AgentSegmentRequest): AiRun {
         val runner = AiAgentRunner(
             provider = provider,
             toolGateway = request.gateway,
             scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
             maxToolRounds = request.toolCallLimit,
+            clock = clock,
         )
         val run = runner.start(
             session = request.session,

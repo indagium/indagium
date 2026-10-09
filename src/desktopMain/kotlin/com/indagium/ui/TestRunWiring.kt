@@ -5,9 +5,12 @@ import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
 import com.indagium.ai.ManagedMcpServerLease
+import com.indagium.ai.aiRunTiming
 import com.indagium.ai.aiUsageFromHistory
 import com.indagium.ai.defaultAiProviderFactory
+import com.indagium.ai.logSummary
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.debug.AppLogger
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.testing.authoring.RewriteGeneration
 import com.indagium.testing.authoring.rewriteBudgetGuidance
@@ -196,6 +199,9 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
             run?.let { activeRun ->
                 val successful = activeRun.history.any { it == AiRunEvent.Done }
                 request.onUsage(aiUsageFromHistory(activeRun.history, partial = !successful))
+                // Where the time of a rewrite or a draft went, in the same terms as a judge's judge_finished line.
+                val timing = aiRunTiming(activeRun, partial = !successful).logSummary()
+                AppLogger.info(AGENT_TIMING_LOG_COMPONENT, "${request.wording.sessionPrefix} (${profile.displayName}, ${profile.model}): $timing")
             }
         }
         session.deleteClaudeCodeWorkspace()
@@ -209,6 +215,7 @@ internal fun finalAnswerText(history: List<AiRunEvent>): String {
     return history.drop(lastTool + 1).filterIsInstance<AiRunEvent.AssistantDelta>().joinToString("") { it.text }
 }
 
+private const val AGENT_TIMING_LOG_COMPONENT = "test-agent-timing"
 private const val TEST_STEP_DRAFT_TIMEOUT_MS = 120_000L
 private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
 private const val AGENT_USAGE_POLL_INTERVAL_MS = 120L
