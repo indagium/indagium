@@ -1360,10 +1360,25 @@ The case editor has four authoring helpers. **Draft with AI** remembers its own 
 device until you choose **Apply**. The preview shows the latest attempt's tool/token usage and the authoring-session
 total; after Apply, the case keeps accumulated creation usage in its editor. Older and manually authored cases show usage
 as unavailable. **Record from device** discovers connected devices each time you start. Choose one
-when several are available; Indagium starts or reuses its capture, connects the embedded mirror, and keeps the Tests
-workspace in front while it connects. The capture remains live after recording stops so you can reuse it for a run.
-It observes accepted input, then converts taps, swipes, keys and text into a reviewable ordered draft. It never injects
-input. Unsupported gestures are called out. Screenshots with a clean capture interval are labeled as verified
+when several are available; Indagium starts or reuses its capture, tries to connect the embedded mirror, and keeps the Tests
+workspace in front while it prepares. The capture remains live after recording stops so you can reuse it for a run.
+Use the device or emulator window directly, or the Indagium mirror: Indagium watches the device's own input over adb
+(`getevent`), so taps, swipes, the Power, volume, Back, Home and Recents buttons, a hardware or emulator-host keyboard and
+the on-screen keyboard are recorded whether or not the mirror is used, and the mirror's own input is recorded too.
+Opening the notification shade or quick settings, rotating the device and turning the screen on from the mirror's toolbar
+become steps as well. The mirror is optional: if it cannot connect, the recording continues with adb screenshots, has no
+video timeline, and a warning says so. If the device does not let adb read its input events, a warning says that only the
+mirror's input is recorded; recording is refused only when neither source works. Everything is converted into a
+reviewable ordered draft; the recorder never injects input. Unsupported gestures are called out.
+
+Typing on the **on-screen keyboard** is never recorded as taps. While the keyboard is up, touches on it are folded into one
+**Enter text** step, written after you stop typing, hide the keyboard or do something else: Indagium reads the text of the
+focused field to know what you typed. In a password field the step reads "Enter text: ••••" and neither the text nor the
+position of any key is kept in the steps, the screen readings or the AI rewrite. If the field cannot be read, the step
+only says that text was typed. When the recording stops right after typing, the review waits a moment for the last text.
+A test run replays these steps with the lane tools `press_key` (which now also presses POWER, the volume keys, mute and
+media play/pause), `open_system_panel` (notification shade, quick settings, close) and `rotate_device`; a rotation done by a
+run is undone when the lane ends. Screenshots with a clean capture interval are labeled as verified
 before/after evidence; a mirror preview with uncertain timing is still available as a raw
 preview but is not treated as either side automatically. An AI rewrite can leave a step for review when it cannot identify
 a tap target or expected result; fill the expected result before applying. Captured images become expected-reference
@@ -1380,7 +1395,7 @@ interval separate from the full UI/activity probe: a fast image can still be use
 input, but it will not be labeled with that later app or activity. The app/activity before and after an input are reported
 separately and may be unavailable. A slow swipe keeps its duration. To get steps a person can read:
 
-1. **Record from device**, perform the test on the mirror, then **Stop and review**. Wait for the bounded screen snapshots
+1. **Record from device**, perform the test on the device, the emulator window or the mirror, then **Stop and review**. Wait for the bounded screen snapshots
    to finish before removing inputs. Use **Remove** to exclude an unnecessary raw row or rewritten step; removing a
    rewritten step excludes every input it represents. The source history and evidence stay in the session, and **Restore
    removed inputs** returns to the full raw review. If all rows are removed, restore inputs or keep a row before rewriting

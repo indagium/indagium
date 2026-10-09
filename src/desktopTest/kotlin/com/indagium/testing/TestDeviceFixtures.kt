@@ -54,6 +54,9 @@ internal class ScriptedAdbRunner(
     var uiDump: String = fixtureUiDump(),
 ) : CaptureProcessRunner {
     val logcat = StreamingFakeProcess()
+
+    /** The long-running `getevent -lt` stream a test feeds. */
+    val getevent = StreamingFakeProcess()
     val specs = CopyOnWriteArrayList<CaptureProcessSpec>()
     val shellCommands = CopyOnWriteArrayList<List<String>>()
 
@@ -62,6 +65,10 @@ internal class ScriptedAdbRunner(
 
     @Volatile
     var shellStdout = ""
+
+    /** Answers a shell command (the arguments after `shell`) with its own output and exit code; null falls back to [shellStdout]. */
+    @Volatile
+    var shellResponder: ((List<String>) -> CompletedFakeProcess?)? = null
 
     /** Optional blocking seam for proving a caller's coroutine cancellation interrupts screenshot capture. */
     @Volatile
@@ -77,9 +84,11 @@ internal class ScriptedAdbRunner(
                 CompletedFakeProcess(png)
             }
             "uiautomator" in command -> CompletedFakeProcess(uiDump)
+            "getevent" in command && "-lt" in command -> getevent
             else -> {
-                shellCommands += command.dropWhile { it != "shell" }.drop(1)
-                CompletedFakeProcess(shellStdout, code = shellExitCode)
+                val arguments = command.dropWhile { it != "shell" }.drop(1)
+                shellCommands += arguments
+                shellResponder?.invoke(arguments) ?: CompletedFakeProcess(shellStdout, code = shellExitCode)
             }
         }
     }

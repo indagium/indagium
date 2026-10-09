@@ -1644,16 +1644,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "device_key",
-        "Press one allowlisted Android key. $EXTERNAL_APPROVAL_NOTE",
+        "Press one allowlisted Android key: navigation, D-pad, volume, mute, media play/pause, recents and POWER (toggles the screen). $EXTERNAL_APPROVAL_NOTE",
         schema(
             "tabId" to "string", "key" to "string", required = listOf("tabId", "key"),
-            enums = mapOf(
-                "key" to listOf(
-                    "BACK", "HOME", "RECENTS", "ENTER", "DEL", "TAB", "ESCAPE",
-                    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_CENTER",
-                    "VOLUME_UP", "VOLUME_DOWN", "MENU", "SEARCH", "WAKEUP",
-                ),
-            ),
+            enums = mapOf("key" to DEVICE_KEY_CODES.keys.toList()),
         ),
     ),
     McpTool(

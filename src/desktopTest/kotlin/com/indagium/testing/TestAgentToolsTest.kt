@@ -96,7 +96,7 @@ class TestAgentToolsTest {
         assertEquals(BUILT_IN_NAMES, lane.names().toSet(), "built-in lane tools match the names scripts may not take")
         val global = MCP_TOOLS.map { it.name }.toSet()
         assertTrue(lane.names().none { it in global }, "no lane tool is a global tool: ${lane.names().filter { it in global }}")
-        assertEquals(15, lane.names().size)
+        assertEquals(17, lane.names().size)
     }
 
     @Test
@@ -193,7 +193,7 @@ class TestAgentToolsTest {
         assertEquals(true, tap["ok"])
         assertEquals(listOf(listOf("input", "tap", "0", "0")), runner.shellCommands.toList())
         assertTrue(lane.call("tap", "x" to 100000, "y" to 0)["error"].toString().contains("inside"))
-        assertTrue(lane.call("press_key", "key" to "POWER")["error"].toString().contains("Supported keys"))
+        assertTrue(lane.call("press_key", "key" to "SLEEP")["error"].toString().contains("Supported keys"))
         assertTrue(lane.call("input_text", "text" to "a; reboot")["error"].toString().isNotEmpty())
         assertTrue(lane.call("open_url", "url" to "file:///etc/passwd")["error"].toString().contains("http"))
         assertTrue(lane.call("tap", "x" to "left", "y" to 1)["error"].toString().contains("whole number"))

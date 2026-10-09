@@ -25,8 +25,8 @@ val RESERVED_SCRIPT_PARAM_NAMES: Set<String> = setOf(
 
 /** Names of the built-in lane tools; a script tool may not shadow them. */
 val RESERVED_SCRIPT_TOOL_NAMES: Set<String> = setOf(
-    "get_current_step", "dump_ui_tree", "take_screenshot", "tap", "swipe", "press_key", "input_text",
-    "launch_app", "open_url", "wait_for_log", "read_log_since_step", "report_observation", "finish_step",
+    "get_current_step", "dump_ui_tree", "take_screenshot", "tap", "swipe", "press_key", "open_system_panel", "rotate_device",
+    "input_text", "launch_app", "open_url", "wait_for_log", "read_log_since_step", "report_observation", "finish_step",
     "list_step_examples", "get_step_example",
 )
 

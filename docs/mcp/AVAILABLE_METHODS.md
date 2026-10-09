@@ -140,8 +140,8 @@ at once; further requests return an error until one finishes.
   poll `get_capture_operation_status` until it completes before starting another capture.
 - `get_device_screen` returns a transient image of the live screen (never saved); `device_tap` and
   `device_swipe` take pixel coordinates measured in that same image and map them to the physical
-  device automatically. `device_key` presses one allowlisted key (navigation, D-pad, volume, and
-  similar — no POWER/SLEEP). `device_text` enters bounded plain text into the focused field.
+  device automatically. `device_key` presses one allowlisted key (navigation, D-pad, volume and mute,
+  media play/pause, recents, and `POWER`, which only toggles the screen — no SLEEP). `device_text` enters bounded plain text into the focused field.
   `device_launch_app` starts an installed app by package name; `list_device_apps` looks one up
   first (optional `query` substring filter, `includeSystem` to include likely system packages).
   `device_open_url` opens an http/https URL in the device's default handler.
@@ -333,7 +333,10 @@ or recording is a separate confirmation-required call.
   messages and the default wait duration. `insert_log_checks` (stepId, edited checks or text, optional index)
   inserts the reviewed checks with fresh IDs.
 - `start_test_recording` (suiteId, caseId, deviceSerial) asynchronously validates the case and connected device, then starts or
-  reuses the configured local capture and connects its embedded mirror before observing accepted input; it never injects input.
+  reuses the configured local capture and tries to connect its embedded mirror. Input is observed from the device itself over
+  adb `getevent` (touches, buttons, Power and volume keys, a hardware or emulator-host keyboard, the on-screen keyboard as one
+  typed-text row) and from the Indagium mirror when it is live; the mirror is optional (without it there is no video timeline
+  and a warning says so), and the call is refused only when neither source can be observed. It never injects input.
   A different-device capture or a lane claim is reported instead of being stopped or replaced. Stopping the recording ends input
   observation but leaves the capture live for review or a later same-device test lane. `get_test_recording` (sessionId, optional rowId) returns the preview, video timeline
   availability/duration/gaps/cap warning, and warnings; each row reports `durationMs`, `tappedElement`, legacy `package`/`activity`, and explicit `beforeApp`,
@@ -521,7 +524,7 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   cancellation. Evidence paths must remain inside the run; unsafe, missing and oversized files are refused.
 - `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
   runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `tap`, `swipe`, `press_key`,
-  `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
+  `open_system_panel`, `rotate_device`, `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
   `finish_step`, or a script tool) against the lane's current step, behind the same per-step tool-call cap an
   agent has. Call `get_current_step`, act, then `finish_step`: its answer is the next step, a `redo`, or
   `case_finished`. A screenshot comes back as MCP image content. Text from the device or a script is inside an

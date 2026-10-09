@@ -48,8 +48,11 @@ data class UiTreeParse(
     val totalNodes: Int,
     val truncated: Boolean,
     val packageName: String = "",
+    /** The display rotation in quarter turns (0..3) the dump's `<hierarchy rotation="N">` attribute names; null when absent. */
+    val rotation: Int? = null,
 )
 
+private val HIERARCHY_ROTATION = Regex("<hierarchy\\b[^>]*\\brotation=\"([0-3])\"")
 private val NODE_TAG = Regex("<node((?:\\s+[\\w:.-]+=\"[^\"]*\")*)\\s*/?>")
 private val ATTRIBUTE = Regex("([\\w:.-]+)=\"([^\"]*)\"")
 private val BOUNDS = Regex("\\[(-?\\d+),(-?\\d+)]\\[(-?\\d+),(-?\\d+)]")
@@ -80,7 +83,8 @@ fun parseUiAutomatorDump(output: String, maxNodes: Int = MAX_UI_TREE_NODES): UiT
         if (kept.size < maxNodes) kept += node else truncated = true
     }
     if (total == 0) return null
-    return UiTreeParse(screenWidth, screenHeight, kept, total, truncated, rootPackage)
+    val rotation = HIERARCHY_ROTATION.find(output, start)?.groupValues?.get(1)?.toIntOrNull()
+    return UiTreeParse(screenWidth, screenHeight, kept, total, truncated, rootPackage, rotation)
 }
 
 private fun nodeFrom(attrs: Map<String, String>): UiNode? {

@@ -89,13 +89,16 @@ class DeviceAiToolValidationTest {
     }
 
     @Test
-    fun deviceKeyAllowlistExcludesPowerAndSleepButCoversNavigationAndVolume() {
+    fun deviceKeyAllowlistCoversNavigationVolumeMediaAndPowerButNotSleep() {
         assertEquals("KEYCODE_BACK", DEVICE_KEY_CODES["BACK"])
         assertEquals("KEYCODE_DEL", DEVICE_KEY_CODES["DEL"])
         assertEquals("KEYCODE_DPAD_CENTER", DEVICE_KEY_CODES["DPAD_CENTER"])
         assertEquals("KEYCODE_VOLUME_UP", DEVICE_KEY_CODES["VOLUME_UP"])
         assertEquals("KEYCODE_WAKEUP", DEVICE_KEY_CODES["WAKEUP"])
-        assertTrue("POWER" !in DEVICE_KEY_CODES)
+        assertEquals("KEYCODE_POWER", DEVICE_KEY_CODES["POWER"])
+        assertEquals("KEYCODE_VOLUME_MUTE", DEVICE_KEY_CODES["VOLUME_MUTE"])
+        assertEquals("KEYCODE_APP_SWITCH", DEVICE_KEY_CODES["APP_SWITCH"])
+        assertEquals("KEYCODE_MEDIA_PLAY_PAUSE", DEVICE_KEY_CODES["MEDIA_PLAY_PAUSE"])
         assertTrue("SLEEP" !in DEVICE_KEY_CODES)
     }
 
