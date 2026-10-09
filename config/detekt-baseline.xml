@@ -4,7 +4,6 @@
   <CurrentIssues>
     <ID>ComplexCondition:AppState.kt$AppState$tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()</ID>
     <ID>ComplexCondition:CaptureStrip.kt$includeVideo &amp;&amp; session?.settings?.recordVideo == true &amp;&amp; (session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() &lt;= 0L)</ID>
-    <ID>CyclomaticComplexMethod:AccountAgentRunner.kt$AccountAgentRunner$private suspend fun runCodex( run: AiRun, profile: AiProviderProfile, request: AccountRequest, systemPrompt: String, workspace: Path, lease: ManagedMcpServerLease, )</ID>
     <ID>CyclomaticComplexMethod:App.kt$private fun handleGlobalKey( ev: KeyEvent, state: AppState, onFocusPanel: (KeyboardPanel) -&gt; Unit, onFocusFilterSearch: (SearchScope) -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:AutosaveCodec.kt$internal fun settingsFromToken(token: String): AppSettings?</ID>
     <ID>CyclomaticComplexMethod:ClaudeCodeClient.kt$ClaudeCodeClient$fun stream(request: ClaudeCodeRequest): Flow&lt;ClaudeCodeEvent&gt;</ID>

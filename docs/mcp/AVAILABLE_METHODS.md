@@ -456,7 +456,8 @@ ended a step differently (status or judge
 verdict), one comparison judge (budget 12) looks at every lane's own evidence once all lanes are done and
 stores a comparison (`comparisons[]`: a verdict per lane, classification, explanation, `suggestedStepFix`) in the
 report. What the judges said is in `judge.jsonl` next to `run.json`, each line stamped with the time it happened and
-each judge run closed by a `judge_finished` line with its timing breakdown.
+each judge run closed by a `judge_finished` line with its timing breakdown (and `hostReused`: whether a Codex-account judge took
+over the Codex process an earlier judge of its lane had started). No tool or report field changed.
 
 - `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
   1..500, `evidence` `{ video, screenshots, logcat, transcript }`, `judgeProfileId` and `judgeMode`

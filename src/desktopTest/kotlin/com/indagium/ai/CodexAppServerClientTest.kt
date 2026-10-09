@@ -58,6 +58,23 @@ class CodexAppServerClientTest {
     }
 
     @Test
+    fun onlyAFaultOfTheConnectionItselfIsFlaggedAsATransportFault() = runBlocking {
+        val process = FakeProcess { }
+
+        CodexAppServerClient(process).use { client ->
+            process.notify("this is not json")
+            process.notify("""{"id":99,"result":{}}""")
+            process.notify("""{"method":"error","params":{"message":"The model is overloaded; retrying"}}""")
+            withTimeout(2_000) {
+                while (client.events.replayCache.count { it is CodexAppServerEvent.ProtocolError } < 3) kotlinx.coroutines.yield()
+            }
+            val faults = client.events.replayCache.filterIsInstance<CodexAppServerEvent.ProtocolError>()
+
+            assertEquals(listOf(true, true, false), faults.map { it.transportFault }, faults.toString())
+        }
+    }
+
+    @Test
     fun initializesStartsAndStreamsTurnLifecycle() = runBlocking {
         lateinit var process: FakeProcess
         process = FakeProcess { line ->
