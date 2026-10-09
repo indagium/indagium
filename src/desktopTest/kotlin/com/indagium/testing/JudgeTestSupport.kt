@@ -17,6 +17,7 @@ import com.indagium.testing.run.LaneAgentFactory
 import com.indagium.testing.run.LaneDeviceOpener
 import com.indagium.testing.run.ProviderLaneAgent
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -104,7 +105,7 @@ internal class AutoAgentProvider(
 }
 
 /** What a judge was asked, read from the judge prompt. [lanes] are the lane labels of a comparison. */
-internal data class JudgeAsk(val comparison: Boolean, val stepNumber: Int, val lanes: List<String>)
+internal data class JudgeAsk(val comparison: Boolean, val stepNumber: Int, val lanes: List<String>, val evidenceAttached: Boolean = false)
 
 /** What the scripted judge submits. [laneVerdicts] (label to verdict) is used by a comparison. */
 internal data class JudgeAnswer(
@@ -116,7 +117,8 @@ internal data class JudgeAnswer(
 )
 
 /**
- * A judge model: looks at the brief, then at a screenshot, then submits what [answer] says. Stateless (it counts the tool
+ * A judge model. Told in its first message that all the evidence is attached, it submits what [answer] says at once (one model
+ * turn); told to fetch something, it looks at the brief, then at a screenshot, then submits. Stateless (it counts the tool
  * results in the request) so it can serve several judge runs at once. Keeps every request for the blindness checks.
  */
 internal class ScriptedJudgeProvider(private val answer: (JudgeAsk) -> JudgeAnswer = { JudgeAnswer() }) : LlmProvider {
@@ -130,19 +132,29 @@ internal class ScriptedJudgeProvider(private val answer: (JudgeAsk) -> JudgeAnsw
         val prompt = request.messages.first { it.role == LlmRole.USER }.content.orEmpty()
         val number = Regex("step (\\d+) of").find(prompt)?.groupValues?.get(1)?.toInt() ?: 0
         val lanes = Regex("\\((Lane [^)]*)\\)").find(prompt)?.groupValues?.get(1)?.split(", ").orEmpty()
-        return JudgeAsk(prompt.startsWith("Compare"), number, lanes)
+        return JudgeAsk(prompt.startsWith("Compare"), number, lanes, evidenceAttached = "All the evidence is above or attached" in prompt)
     }
 
     override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
         requests += request.copy(messages = request.messages.toList())
         val ask = askOf(request)
-        when (request.messages.count { it.role == LlmRole.TOOL }) {
+        val toolResults = request.messages.count { it.role == LlmRole.TOOL }
+        when {
+            ask.evidenceAttached && toolResults == 0 -> emit(submission(ask, answer(ask)))
+            ask.evidenceAttached -> emit(LlmStreamEvent.TextDelta("Submitted."))
+            else -> emitFetchingScript(ask, toolResults)
+        }
+        emit(LlmStreamEvent.Completed)
+    }
+
+    /** The judge of a first message without the evidence: brief, screenshot, verdict. */
+    private suspend fun FlowCollector<LlmStreamEvent>.emitFetchingScript(ask: JudgeAsk, toolResults: Int) {
+        when (toolResults) {
             0 -> emit(call("get_step_brief"))
             1 -> emit(call("get_step_screenshot", buildJsonObject { if (ask.comparison) put("lane", ask.lanes.first()) }))
             2 -> emit(submission(ask, answer(ask)))
             else -> emit(LlmStreamEvent.TextDelta("Submitted."))
         }
-        emit(LlmStreamEvent.Completed)
     }
 
     private fun submission(ask: JudgeAsk, answer: JudgeAnswer): LlmStreamEvent.ToolCall {

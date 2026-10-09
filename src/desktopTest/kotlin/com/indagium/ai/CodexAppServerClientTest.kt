@@ -132,6 +132,48 @@ class CodexAppServerClientTest {
     }
 
     @Test
+    fun startTurnSendsEachLocalImageAsALocalImageItemAfterTheText() = runBlocking {
+        lateinit var process: FakeProcess
+        var input: kotlinx.serialization.json.JsonArray? = null
+        process = FakeProcess { line ->
+            val message = Json.parseToJsonElement(line).jsonObject
+            if (message["method"]?.jsonPrimitive?.content == "turn/start") {
+                input = message["params"]!!.jsonObject["input"]!!.jsonArray
+                process.respond("""{"id":${message["id"]},"result":{"turn":{"id":"turn-1","threadId":"thread-1","status":{"type":"inProgress"}}}}""")
+            }
+        }
+
+        CodexAppServerClient(process).use { client ->
+            client.startTurn("thread-1", "Judge this step", localImagePaths = listOf("/work/evidence-1.jpg", "/work/evidence-2.png"))
+        }
+
+        val items = requireNotNull(input)
+        assertEquals(listOf("text", "localImage", "localImage"), items.map { it.jsonObject["type"]!!.jsonPrimitive.content })
+        assertEquals("Judge this step", items[0].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("/work/evidence-1.jpg", items[1].jsonObject["path"]!!.jsonPrimitive.content)
+        assertEquals("/work/evidence-2.png", items[2].jsonObject["path"]!!.jsonPrimitive.content)
+        Unit
+    }
+
+    @Test
+    fun startTurnWithoutImagesSendsOnlyTheTextItem() = runBlocking {
+        lateinit var process: FakeProcess
+        var input: kotlinx.serialization.json.JsonArray? = null
+        process = FakeProcess { line ->
+            val message = Json.parseToJsonElement(line).jsonObject
+            if (message["method"]?.jsonPrimitive?.content == "turn/start") {
+                input = message["params"]!!.jsonObject["input"]!!.jsonArray
+                process.respond("""{"id":${message["id"]},"result":{"turn":{"id":"turn-1","threadId":"thread-1","status":{"type":"inProgress"}}}}""")
+            }
+        }
+
+        CodexAppServerClient(process).use { client -> client.startTurn("thread-1", "Hello") }
+
+        assertEquals(1, requireNotNull(input).size)
+        Unit
+    }
+
+    @Test
     fun startThreadSendsStructuredApprovalPolicy() = runBlocking {
         lateinit var process: FakeProcess
         process = FakeProcess { line ->

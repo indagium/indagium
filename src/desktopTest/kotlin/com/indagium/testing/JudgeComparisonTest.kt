@@ -118,7 +118,8 @@ class JudgeComparisonTest {
 
         val comparisonRequests = judge.requests.filter { r -> r.messages.first { it.role == LlmRole.USER }.content.orEmpty().startsWith("Compare") }
         assertTrue(comparisonRequests.isNotEmpty(), "a comparison judge ran")
-        val brief = comparisonRequests.flatMap { it.messages }.first { it.role == LlmRole.TOOL }.content.orEmpty()
+        // The evidence of every lane is in the first message now (it used to be the get_step_brief tool result).
+        val brief = comparisonRequests.first().messages.first { it.role == LlmRole.USER }.content.orEmpty()
         assertTrue(brief.contains("Lane 1") && brief.contains("Lane 2"), "the brief holds evidence of both lanes: $brief")
         assertTrue(
             comparisonRequests.any { r -> r.messages.any { it.images.isNotEmpty() } },

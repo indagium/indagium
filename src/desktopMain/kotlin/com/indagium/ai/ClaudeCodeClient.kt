@@ -12,6 +12,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.put
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.nio.file.NoSuchFileException
 import java.nio.file.Path
 
@@ -32,6 +34,9 @@ interface ClaudeCodeProcess {
     val stdout: InputStream
     val stderr: InputStream
     val isAlive: Boolean
+
+    /** The process's standard input; null for a process that takes none. Only a request with images writes to it (see [ClaudeCodeRequest.images]). */
+    val stdin: OutputStream? get() = null
 
     fun waitFor(): Int
 
@@ -65,6 +70,12 @@ data class ClaudeCodeRequest(
     val maxTurns: Int? = null,
     val workingDirectory: Path? = null,
     val effort: String? = null,
+    /**
+     * Images that travel with [prompt]. The CLI takes them only as content blocks of a stream-json user message, so with images
+     * the prompt is not a command-line argument: the process is started with `--input-format stream-json` and the one user
+     * message is written to its standard input, which is then closed. Without images the prompt argument is unchanged.
+     */
+    val images: List<LlmImage> = emptyList(),
 )
 
 /** Token accounting the CLI's terminal `"result"` line reports for the whole run so far. */
@@ -249,6 +260,9 @@ class ClaudeCodeClient(
         val stderr = async(Dispatchers.IO) {
             runCatching { process.stderr.bufferedReader().use { it.readText() } }.getOrDefault("")
         }
+        if (request.images.isNotEmpty()) {
+            launch(Dispatchers.IO) { sendUserMessage(process, request)?.let { trySend(it) } }
+        }
         val parser = ClaudeCodeStreamParser()
         val reader = launch(Dispatchers.IO) {
             var finalSeen = false
@@ -314,7 +328,49 @@ class ClaudeCodeClient(
         }
     }
 
+    /** Writes the stream-json user message of [request] to the process and closes its input; the event to report when that fails. */
+    @Suppress("TooGenericExceptionCaught") // A process that dies or refuses its input is reported as one Claude Code error, whatever the cause.
+    private fun sendUserMessage(process: ClaudeCodeProcess, request: ClaudeCodeRequest): ClaudeCodeEvent.Error? {
+        val input = process.stdin
+            ?: return ClaudeCodeEvent.Error(ClaudeCodeErrorKind.ProcessStart, "Claude Code was started without an input to send the images to.")
+        return try {
+            input.use { it.write(userMessageLine(request.prompt, request.images).toByteArray(Charsets.UTF_8)) }
+            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            ClaudeCodeEvent.Error(ClaudeCodeErrorKind.Process, "Could not send the request to Claude Code: ${error.message ?: error::class.simpleName}.")
+        }
+    }
+
     companion object {
+        /**
+         * The one line `--input-format stream-json` reads: a user message whose content is the [prompt] text followed by one base64
+         * image block per image (the Messages API content-block shape).
+         */
+        fun userMessageLine(prompt: String, images: List<LlmImage>): String = buildJsonObject {
+            put("type", "user")
+            put("message", buildJsonObject {
+                put("role", "user")
+                put("content", buildJsonArray {
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", prompt)
+                    })
+                    images.forEach { image ->
+                        add(buildJsonObject {
+                            put("type", "image")
+                            put("source", buildJsonObject {
+                                put("type", "base64")
+                                put("media_type", image.mimeType)
+                                put("data", image.base64)
+                            })
+                        })
+                    }
+                })
+            })
+        }.toString() + "\n"
+
         fun buildCommand(request: ClaudeCodeRequest, executable: String = "claude"): List<String> = buildList {
             add(executable)
             add("--print")
@@ -347,7 +403,12 @@ class ClaudeCodeClient(
             request.effort?.takeIf { it.isNotBlank() }?.let { addAll(listOf("--effort", it)) }
             request.maxTurns?.let { addAll(listOf("--max-turns", it.toString())) }
             request.sessionId?.takeIf { it.isNotBlank() }?.let { addAll(listOf("--resume", it)) }
-            add(request.prompt)
+            if (request.images.isEmpty()) {
+                add(request.prompt)
+            } else {
+                // The prompt and the images go to standard input as one stream-json user message (see ClaudeCodeRequest.images).
+                addAll(listOf("--input-format", "stream-json"))
+            }
         }
 
         fun generateMcpConfig(servers: Map<String, ClaudeCodeMcpServer>): String = buildJsonObject {
@@ -377,6 +438,7 @@ private class JvmClaudeCodeProcess(private val process: Process) : ClaudeCodePro
     override val stdout: InputStream = process.inputStream
     override val stderr: InputStream = process.errorStream
     override val isAlive: Boolean get() = process.isAlive
+    override val stdin: OutputStream = process.outputStream
 
     override fun waitFor(): Int = process.waitFor()
 

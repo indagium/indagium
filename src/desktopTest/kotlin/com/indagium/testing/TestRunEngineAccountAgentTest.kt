@@ -27,6 +27,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -45,12 +46,12 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 private const val AWAIT_MS = 20_000L
-private const val INITIALIZE_REQUEST =
+internal const val INITIALIZE_REQUEST =
     """{"jsonrpc":"2.0","id":1,"method":"initialize","params":""" +
         """{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"""
 
 /** A fake agent's MCP client: what Claude Code or Codex would do against the lane's private endpoint. */
-private class FakeAgentMcp(private val url: String, private val token: String) {
+internal class FakeAgentMcp(private val url: String, private val token: String) {
     private val http = HttpClient.newHttpClient()
     private var session: String? = null
 
@@ -76,7 +77,12 @@ private class FakeAgentMcp(private val url: String, private val token: String) {
         post("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"$name","arguments":$arguments}}""").body()
 }
 
-private class ScriptedClaudeProcess(private val body: () -> String) : ClaudeCodeProcess {
+internal class ScriptedClaudeProcess(
+    private val stdinSink: OutputStream? = null,
+    private val body: () -> String,
+) : ClaudeCodeProcess {
+    override val stdin: OutputStream? get() = stdinSink
+
     override val stdout: InputStream = object : InputStream() {
         private val bytes by lazy { (body() + "\n").toByteArray() }
         private val stream by lazy { ByteArrayInputStream(bytes) }
@@ -100,7 +106,7 @@ private class ScriptedClaudeProcess(private val body: () -> String) : ClaudeCode
     override fun destroyForcibly() = destroy()
 }
 
-private class ScriptedCodexProcess(private val onWrite: (ScriptedCodexProcess, String) -> Unit) : CodexAppServerProcess {
+internal class ScriptedCodexProcess(private val onWrite: (ScriptedCodexProcess, String) -> Unit) : CodexAppServerProcess {
     private val output = LinkedBlockingQueue<String>()
 
     @Volatile private var alive = true
