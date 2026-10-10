@@ -9,6 +9,23 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * What an apply does beyond inserting the reviewed steps at an index (all optional; the default is the plain insert).
+ * - [recordingRef] is stamped on every step made ([com.indagium.testing.model.TestStep.recordingRef]).
+ * - [replaceStepIds] replaces those steps, in place, instead of inserting (see [planReplacement]).
+ * - [afterApplied] runs once the steps are in the library, still on the IO thread and while the reviewed rows are frozen; it saves the
+ *   recording's evidence and returns warnings for the person. It must not throw for an expected problem.
+ */
+internal class RecordingApplyOptions(
+    val recordingRef: String? = null,
+    val replaceStepIds: List<String>? = null,
+    val afterApplied: ((snapshot: TestStepRecordingSnapshot, inserted: List<TestStep>) -> List<String>)? = null,
+)
+
+/** Replaces the steps [replacedIds] of a case with [steps] in one write; see TestLibraryStore.replaceSteps. */
+internal typealias ReplaceStepsWithUsage = (caseId: String, replacedIds: List<String>, steps: List<TestStep>, usage: AiUsageStats?) ->
+StoreResult<List<TestStep>>
+
 /** Shared UI/MCP apply path for a stopped recording. Asset imports are staged and removed if insertion fails. */
 internal class TestStepRecordingApplyService(
     private val preflight: (suiteId: String, caseId: String) -> StoreResult<Unit>,
@@ -17,15 +34,18 @@ internal class TestStepRecordingApplyService(
     private val insertSteps: (caseId: String, steps: List<TestStep>, index: Int?) -> StoreResult<List<TestStep>>,
     private val insertStepsWithUsage: (caseId: String, steps: List<TestStep>, index: Int?, usage: AiUsageStats?) -> StoreResult<List<TestStep>> =
         { targetCaseId, steps, insertion, _ -> insertSteps(targetCaseId, steps, insertion) },
+    /** Replaces steps of a case with new ones in one write (TestLibraryStore.replaceSteps); null when the caller cannot replace. */
+    private val replaceStepsWithUsage: ReplaceStepsWithUsage? = null,
 ) {
     private val applyingSessionIds = ConcurrentHashMap.newKeySet<String>()
 
-    @Suppress("CyclomaticComplexMethod", "ThrowsCount", "TooGenericExceptionCaught")
+    @Suppress("CyclomaticComplexMethod", "ThrowsCount", "TooGenericExceptionCaught", "LongMethod")
     suspend fun apply(
         session: TestStepRecordingSession,
         suiteId: String,
         caseId: String,
         index: Int? = null,
+        options: RecordingApplyOptions = RecordingApplyOptions(),
     ): StoreResult<List<TestStep>> {
         if (!applyingSessionIds.add(session.id)) return StoreResult.Invalid("This recording is already being applied.")
         var frozeSnapshot = false
@@ -64,8 +84,21 @@ internal class TestStepRecordingApplyService(
                             temporary.delete()
                         }
                     }
-                    when (val inserted = insertStepsWithUsage(caseId, steps, index, snapshot.rewriteUsagePending)) {
-                        is StoreResult.Ok -> inserted.also { session.markRewriteUsageApplied(snapshot.rewriteAttemptCount) }
+                    val stamped = options.recordingRef?.let { ref -> steps.map { it.copy(recordingRef = ref) } } ?: steps
+                    val replaced = options.replaceStepIds
+                    val outcome = when {
+                        replaced == null -> insertStepsWithUsage(caseId, stamped, index, snapshot.rewriteUsagePending)
+                        replaceStepsWithUsage == null -> StoreResult.Invalid("Replacing the steps of a recording is not available here.")
+                        else -> replaceStepsWithUsage.invoke(caseId, replaced, stamped, snapshot.rewriteUsagePending)
+                    }
+                    when (val inserted = outcome) {
+                        is StoreResult.Ok -> {
+                            session.markRewriteUsageApplied(snapshot.rewriteAttemptCount)
+                            // The steps are in the library now: whatever the evidence save does, the applied screenshots must stay.
+                            val warnings = runCatching { options.afterApplied?.invoke(snapshot, inserted.value).orEmpty() }
+                                .getOrElse { listOf("The recording's evidence was not saved: ${it.message ?: it::class.simpleName}") }
+                            if (warnings.isEmpty()) inserted else StoreResult.Ok(inserted.value, inserted.warnings + warnings)
+                        }
                         else -> {
                             copied.forEach { resolveImage(suiteId, it)?.delete() }
                             inserted

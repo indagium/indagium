@@ -49,7 +49,8 @@ private fun RewriteInput.touchesPassword(): Boolean =
 
 /** The rewrite's view of which inputs and screenshots are password-sensitive; see [rewriteSensitiveIntervals]. */
 internal class RewriteSensitivity(inputs: List<RewriteInput>) {
-    private val intervals = rewriteSensitiveIntervals(inputs.filterNot { it.fixed }, Long.MAX_VALUE)
+    /** The wall-clock windows in which the screen may show a password (empty when no input touched one); see [rewriteSensitiveIntervals]. */
+    val windows: List<LongRange> = rewriteSensitiveIntervals(inputs.filterNot { it.fixed }, Long.MAX_VALUE)
 
     /** True for an input that typed a hidden password or whose own time lies in a sensitive window: it gets no image and no screen text. */
     fun inputWithheld(input: RewriteInput): Boolean =
@@ -61,5 +62,8 @@ internal class RewriteSensitivity(inputs: List<RewriteInput>) {
         return times.any(::inWindow)
     }
 
-    private fun inWindow(wallClockMs: Long): Boolean = intervals.any { wallClockMs in it }
+    /** True when the time span [startMs]..[endMs] touches a sensitive window. */
+    fun spanWithheld(startMs: Long, endMs: Long): Boolean = windows.any { startMs <= it.last && endMs >= it.first }
+
+    private fun inWindow(wallClockMs: Long): Boolean = windows.any { wallClockMs in it }
 }

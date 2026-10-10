@@ -565,6 +565,16 @@ private fun testing() = listOf(
         listOf("test run", "allow", "deny", "confirm", "wait", "timeout"),
     ),
     entry(
+        SettingsSection.Testing, "Keep recording evidence with recorded cases",
+        "Save the screenshots, screen readings and video of an applied recording beside the case so Rewrite with AI can run on it again.",
+        listOf("record", "recording", "rewrite", "reopen", "video", "password", "privacy", "disk", "storage", "evidence"),
+    ),
+    entry(
+        SettingsSection.Testing, "Stored recording evidence",
+        "How much disk the stored recordings of the Test suites folder use, and a button that deletes them.",
+        listOf("record", "recording", "delete", "disk", "space", "size", "clean", "evidence", "storage"),
+    ),
+    entry(
         SettingsSection.Testing, "Edition",
         "The edition and its limits on test suites and cases; development builds can switch it.",
         listOf("free", "premium", "unlimited", "limits", "suites", "cases", "friends"),

@@ -219,6 +219,9 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     if (step.kind != StepKind.AGENT) put("kind", step.kind.name)
     step.script?.let { put("script", scriptCallToJson(it)) }
     if (step.kind == StepKind.MANUAL) put("manualCompletion", step.manualCompletion.name)
+    // Appended last, and only when set. It links a step to evidence stored beside the suite; an older build ignores it (and drops it if it
+    // saves the suite), which loses only the link, so the envelope version stays: see the version policy above.
+    step.recordingRef?.let { put("recordingRef", it) }
 }
 
 internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
@@ -395,6 +398,7 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep {
         kind = kind,
         script = (o["script"] as? JsonObject)?.let { decodeScriptCall(it) },
         manualCompletion = o.enumOr("manualCompletion", ManualCompletion.TESTER_OR_CHECKS),
+        recordingRef = o.optStr("recordingRef")?.takeIf { isSafeId(it) },
     )
 }
 

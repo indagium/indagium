@@ -66,6 +66,8 @@ internal fun testingSettingsJson(testing: TestingSettings): JsonObject = buildJs
         },
     )
     put("confirmationTimeoutMinutes", testing.confirmationTimeoutMinutes)
+    // Appended last; written only when on, so a default settings document is byte-identical to what earlier builds wrote.
+    if (testing.keepRecordingEvidence) put("keepRecordingEvidence", true)
 }
 
 internal fun testingSettingsFromJson(element: JsonElement?): TestingSettings {
@@ -83,6 +85,7 @@ internal fun testingSettingsFromJson(element: JsonElement?): TestingSettings {
         ),
         confirmationTimeoutMinutes = ((o["confirmationTimeoutMinutes"] as? JsonPrimitive)?.intOrNull ?: TestingSettings().confirmationTimeoutMinutes)
             .coerceIn(MIN_CONFIRMATION_TIMEOUT_MINUTES, MAX_CONFIRMATION_TIMEOUT_MINUTES),
+        keepRecordingEvidence = o.flag("keepRecordingEvidence", false),
     )
 }
 

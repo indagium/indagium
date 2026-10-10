@@ -80,6 +80,7 @@ import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.recordingRefs
 import com.indagium.testing.model.withFreshId
 import com.indagium.testing.run.TestRunCoordinator
 import com.indagium.testing.store.DEFAULT_TEST_ISSUES_FOLDER_NAME
@@ -1987,6 +1988,16 @@ class AppState(
             resolveImage = ::testGoldenImageFile,
             insertSteps = ::createTestSteps,
             insertStepsWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
+            replaceStepsWithUsage = { caseId, replacedIds, steps, usage -> testStoreOp { replaceSteps(caseId, replacedIds, steps, usage) } },
+        )
+    }
+
+    /** Saves, reads and deletes the evidence of applied recordings in the Test suites folder ("Keep recording evidence with recorded cases"). */
+    internal val recordingEvidenceService by lazy {
+        com.indagium.testing.authoring.RecordingEvidenceService(
+            files = { testLibraryStore.evidence },
+            clearRefs = { ids -> testStoreOp { clearRecordingRefs(ids) } },
+            unlinkSteps = { ids -> testStoreOp { clearRecordingRefsOfSteps(ids) } },
         )
     }
 
@@ -2217,9 +2228,15 @@ class AppState(
     }
 
     /** Makes [session] the app's one recording, for the case [caseId] of [suiteId]; refused while another recording exists. */
-    internal fun registerTestStepRecording(session: TestStepRecordingSession, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> =
+    internal fun registerTestStepRecording(
+        session: TestStepRecordingSession,
+        suiteId: String,
+        caseId: String,
+        deviceBound: Boolean = true,
+    ): StoreResult<TestStepRecordingSession> =
         synchronized(stateLock) {
-            val lane = laneCaptureSerials[session.deviceSerial]
+            // A reopened recording has no device behind it, so a test lane holding the device it was recorded on is no obstacle.
+            val lane = laneCaptureSerials[session.deviceSerial].takeIf { deviceBound }
             if (lane != null) {
                 StoreResult.Invalid(laneHoldsDeviceMessage(session.deviceSerial, lane))
             } else {
@@ -2347,6 +2364,13 @@ class AppState(
             }
         }
 
+    /**
+     * Applies a stopped recording to its case. A recording reopened from stored evidence replaces the steps it made before, in place;
+     * when those steps were deleted or moved ([com.indagium.testing.authoring.planReplacement] cannot tell which to replace) it is
+     * refused with the reason, and [insertAsNew] adds the steps as new ones at [index] instead. With "Keep recording evidence with
+     * recorded cases" on, a recording made just now also saves its evidence; a reopened one always updates what it stored.
+     */
+    @Suppress("ReturnCount") // Each refusal returns its own message before the recording is touched.
     internal suspend fun applyTestStepRecording(
         sessionId: String,
         edited: List<Pair<String, String>>,
@@ -2354,6 +2378,7 @@ class AppState(
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
+        insertAsNew: Boolean = false,
     ): StoreResult<List<TestStep>> {
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
@@ -2365,16 +2390,112 @@ class AppState(
             active to selectedTarget
         }
         val result = try {
+            val options = when (val prepared = recordingApplyOptions(session, target, insertAsNew)) {
+                is StoreResult.Ok -> prepared.value
+                is StoreResult.Invalid -> return prepared
+                is StoreResult.NotFound -> return prepared
+                is StoreResult.LimitReached -> return prepared
+            }
             if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides)) {
                 return StoreResult.Invalid("Stop recording and send one edited action/result pair and valid screenshot choices in the original row order.")
             }
             session.stopAndDrain()
-            testStepRecordingApplyService.apply(session, target.first, target.second, index)
+            testStepRecordingApplyService.apply(session, target.first, target.second, index, options)
         } finally {
             synchronized(testStepRecordingLock) { recordingApplications.remove(sessionId) }
         }
         if (result is StoreResult.Ok) clearTestStepRecording(sessionId)
         return result
+    }
+
+    /** What applying [session] does about its evidence and, for a reopened recording, about the steps it made before. */
+    private fun recordingApplyOptions(
+        session: TestStepRecordingSession,
+        target: Pair<String, String>,
+        insertAsNew: Boolean,
+    ): StoreResult<com.indagium.testing.authoring.RecordingApplyOptions> {
+        val reopened = session.reopened
+        if (reopened == null) {
+            val keep = settings.testing.keepRecordingEvidence
+            val options = if (keep) recordingEvidenceService.optionsForNewRecording(session, target.first, target.second)
+            else com.indagium.testing.authoring.RecordingApplyOptions()
+            return StoreResult.Ok(options)
+        }
+        val case = testLibrary.findCase(target.second)?.case ?: return StoreResult.NotFound("case", target.second)
+        val plan = com.indagium.testing.authoring.planReplacement(case, reopened.producedStepIds)
+        val options = when {
+            plan is com.indagium.testing.authoring.ReplacementPlan.Replace && !insertAsNew ->
+                recordingEvidenceService.optionsForReopened(session, reopened, target.first, plan.stepIds, plan.stepIds)
+            plan is com.indagium.testing.authoring.ReplacementPlan.Ambiguous && !insertAsNew ->
+                return StoreResult.Invalid("${plan.reason} Choose \"Insert as new steps\" to add them as new steps instead; the old ones stay.")
+            else -> recordingEvidenceService.optionsForReopened(
+                session, reopened, target.first, null, reopened.producedStepIds.filter { id -> case.steps.any { it.id == id } },
+            )
+        }
+        return StoreResult.Ok(options)
+    }
+
+    /**
+     * How applying the reopened recording [sessionId] would change the case: which steps it replaces, or why it cannot tell. Null for a
+     * recording made just now. Cheap and lock-free enough for the review panel to ask on every change of the case.
+     */
+    internal fun reopenedReplacementPlan(sessionId: String): com.indagium.testing.authoring.ReplacementPlan? {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return null
+        val reopened = session.reopened ?: return null
+        val case = testStepRecordingTarget?.second?.let { testLibrary.findCase(it)?.case }
+            ?: return com.indagium.testing.authoring.ReplacementPlan.Ambiguous("The case this recording belongs to is no longer available.")
+        return com.indagium.testing.authoring.planReplacement(case, reopened.producedStepIds)
+    }
+
+    /** The stored recordings of [caseId] whose evidence is on disk (blocking: a file check per recording; not for the UI thread). */
+    internal fun storedRecordingIds(caseId: String): List<String> {
+        val location = testLibrary.findCase(caseId) ?: return emptyList()
+        return location.case.recordingRefs().filter { recordingEvidenceService.exists(location.suite.id, it) }
+    }
+
+    /**
+     * Reopens the stored recording [recordingId] of [caseId] (the only one when null) as a stopped recording in the review panel; no
+     * device is needed or touched. Refused while another recording exists, for a case that is read-only or locked, and when the files
+     * cannot be read. Blocking disk reads run on the IO dispatcher.
+     */
+    @Suppress("ReturnCount") // Preconditions return typed messages before any file is read.
+    internal suspend fun reopenTestStepRecording(caseId: String, recordingId: String? = null): StoreResult<TestStepRecordingSession> {
+        val location = testLibrary.findCase(caseId) ?: return StoreResult.NotFound("case", caseId)
+        val suiteId = location.suite.id
+        if (testStepRecordingSession != null) return StoreResult.Invalid("Stop or review the current recording before reopening another.")
+        validateTestStepRecordingTarget(suiteId, caseId)?.let { return it }
+        val stored = withContext(Dispatchers.IO) { storedRecordingIds(caseId) }
+        val chosen = when {
+            recordingId != null -> recordingId
+            stored.size == 1 -> stored.single()
+            stored.isEmpty() -> return StoreResult.Invalid(
+                "This case has no stored recording evidence. Turn on \"Keep recording evidence with recorded cases\" (Settings > Testing) " +
+                    "before applying a recording.",
+            )
+            else -> return StoreResult.Invalid("This case has ${stored.size} stored recordings; choose one of: ${stored.joinToString(", ")}.")
+        }
+        val loaded = withContext(Dispatchers.IO) { recordingEvidenceService.load(suiteId, chosen) }
+        val recording = when (loaded) {
+            is StoreResult.Ok -> loaded.value
+            is StoreResult.NotFound -> return StoreResult.NotFound("stored recording", chosen)
+            is StoreResult.Invalid -> return loaded
+            is StoreResult.LimitReached -> return loaded
+        }
+        if (recording.recording.caseId != caseId) return StoreResult.Invalid("Stored recording '$chosen' belongs to a different case.")
+        val session = withContext(Dispatchers.IO) { com.indagium.testing.authoring.restoreRecordingSession(recording) }
+        return registerTestStepRecording(session, suiteId, caseId, deviceBound = false)
+    }
+
+    /** How many recordings are stored in the Test suites folder and how much disk they use (blocking; IO thread). */
+    internal fun storedRecordingUsage(): com.indagium.testing.store.RecordingEvidenceUsage = recordingEvidenceService.usage()
+
+    /**
+     * Deletes every stored recording of the Test suites folder and the links of the steps to them ("Delete stored recording evidence").
+     * Refused while a recording is open in the review panel, because a reopened one still reads its video from those files.
+     */
+    internal fun deleteStoredRecordingEvidence(): StoreResult<com.indagium.testing.store.RecordingEvidenceUsage> {
+        if (testStepRecordingSession != null) return StoreResult.Invalid("Finish or discard the open recording first.")
+        return StoreResult.Ok(recordingEvidenceService.deleteAll())
     }
 
     internal fun isTestStepRecordingApplying(sessionId: String): Boolean = synchronized(testStepRecordingLock) {
@@ -2479,6 +2600,9 @@ class AppState(
     fun exportTestSuite(suiteId: String): StoreResult<String> = testLibraryStore.exportSuite(suiteId)
 
     fun testSuiteRequiresExternalAssets(suiteId: String): Boolean = testLibraryStore.suiteRequiresExternalAssets(suiteId)
+
+    /** Whether any step of the suite has stored recording evidence, which an export leaves out. */
+    fun testSuiteHasRecordingEvidence(suiteId: String): Boolean = testLibraryStore.suiteHasRecordingEvidence(suiteId)
 
     fun exportTestSuiteToFile(suiteId: String, destination: File): StoreResult<File> =
         testLibraryStore.exportSuiteToFile(suiteId, destination)

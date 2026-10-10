@@ -314,7 +314,8 @@ private fun suiteTools(): List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "export_test_suite",
         "Export a suite as a self-contained indagium-test-suite file. Without `path` the file's text is returned; with an " +
-            "absolute `path` it is written there (an existing file is only replaced when overwrite is true). " +
+            "absolute `path` it is written there (an existing file is only replaced when overwrite is true). Stored recording evidence " +
+            "(see reopen_test_recording) is never part of an export. " +
             "Asks for confirmation inside Indagium's AI panel.",
         schema(
             "suiteId" to "string", "path" to "string", "overwrite" to "boolean",
@@ -504,6 +505,19 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         schema("suiteId" to "string", "caseId" to "string", "deviceSerial" to "string", required = listOf("suiteId", "caseId", "deviceSerial")),
     ),
     IndagiumToolDescriptor(
+        "reopen_test_recording",
+        "Reopen the recording evidence saved with a case (the setting \"Keep recording evidence with recorded cases\") as a STOPPED recording " +
+            "and return its sessionId; no device is needed. Its rows, screen readings, screenshots and video (when one was stored; never when a " +
+            "password was typed) are restored, so get_test_recording, update_test_recording, rewrite_test_recording and the other recording " +
+            "tools work unchanged. apply_test_recording then REPLACES the steps that recording made, in place (insertAsNew adds new steps " +
+            "instead when those steps were deleted or moved). discard_test_recording leaves the stored files untouched. get_test_suite lists " +
+            "each case's stored `recordings`. Asks for confirmation.",
+        schema(
+            "caseId" to "string", "recordingId" to "string", required = listOf("caseId"),
+            descriptions = mapOf("recordingId" to "Optional when the case has exactly one stored recording."),
+        ),
+    ),
+    IndagiumToolDescriptor(
         "get_test_recording",
         "Read the current recording preview and its warnings. Screen snapshots are bounded. Each row also carries best-effort " +
             "screen context that an adb probe read while recording: tappedElement (what a tap landed on), package, activity and " +
@@ -578,9 +592,14 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         "Apply a stopped, edited recording preview to its original target case. Send every action and expected result; " +
             "an optional row requires a condition and may have blank expected text. " +
             "Input-time screen snapshots are not expected-result oracles unless useScreenshotAsExpected is explicitly true. " +
-            "Assets are staged and removed if insertion fails. Asks for confirmation.",
+            "Assets are staged and removed if insertion fails. A recording reopened with reopen_test_recording replaces the steps it made " +
+            "(index is ignored); if they were deleted, moved or mixed with other steps the call is refused with the reason, and " +
+            "insertAsNew=true inserts the steps at index instead (the old ones stay). With \"Keep recording evidence with recorded cases\" on, " +
+            "a new recording also saves its evidence. Asks for confirmation.",
         schema(
-            "sessionId" to "string", "steps" to "array", "index" to "integer", required = listOf("sessionId", "steps"),
+            "sessionId" to "string", "steps" to "array", "index" to "integer", "insertAsNew" to "boolean",
+            required = listOf("sessionId", "steps"),
+            descriptions = mapOf("insertAsNew" to "Only for a reopened recording whose earlier steps cannot be replaced: insert the steps as new ones."),
             objectArrays = mapOf(
                 "steps" to ObjectArrayItemSchema(
                     RECORDING_STEP_FIELDS,

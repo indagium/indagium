@@ -4377,6 +4377,50 @@ for changed steps. MCP: `improve_test_case` (in `PER_CALL_APPROVAL_MCP_TOOLS` an
 profile, like `draft_test_steps`, because it sends steps, screenshots and judge text to a provider) and
 `apply_test_case_improvement` (`CONFIRMATION_REQUIRED`, writes the library).
 
+### 26.14 Keeping a recording's evidence
+
+A recording's screen readings, screenshots and video are session-only (§26.12). The opt-in setting **Keep recording evidence with
+recorded cases** (`TestingSettings.keepRecordingEvidence`, default off, JSON settings form only - never the frozen positional
+decoder) saves them when a recording is applied, so the full AI rewrite can be run again on the saved case.
+
+**Layout** (`store/RecordingEvidenceFiles.kt`, inside the Test suites folder next to the golden screenshots):
+`assets/<suiteId>/recordings/<recordingId>/` holds `recording.json`, `screens/<sha256-prefix>.jpg` (content-addressed, so a shared
+screenshot is stored once) and, only when allowed, `video/timeline-<n>.mkv` plus `video/timeline.jsonl` (the packet index of
+`RecordedVideoTimeline`, copied as written). Paths come only from fixed names and a `isSafeId` id; a symlinked `assets`, suite or
+`recordings` folder is refused.
+
+**Envelope** (`authoring/RecordingEvidenceCodec.kt`): `{"format":"indagium-test-recording","version":1,...}` with the case id, device
+serial, times, `stepIds` (the library steps the recording produced), `privacy` (`passwordSensitive`, windows, counts, a statement),
+`video` (stored or why not, plus the figures a timeline needs), `rewrite` (applied, notes, exclusions), `rows` (the reviewed rows),
+`rawRows` (the recorded rows an AI rewrite replaced), `screenStates` (hierarchy nodes; a password field's text is blank), `probeScreenshots`,
+`warnings`, `notices`. Reads are tolerant; a newer version is refused (not half read). The suite file version stays 2/3: the
+append-last field `TestStep.recordingRef` (written only when set) is ignored by older builds, which loses only the link, not data an
+older build could hand to the wrong actor (the reason the version is bumped for step kinds).
+
+**Privacy** (`sanitizeEvidence`): the rewrite's own rule (`RewriteSensitivity`, §26.12) decides. If any input touched a password
+field, the video is **never** stored, inputs and screenshots inside the sensitive windows lose their images, and a screen reading inside
+a window keeps only its time span, app and one blank password marker node (so the windows are found again when the recording is
+reopened). The file and the review say so. **Size cap** `MAX_RECORDING_EVIDENCE_BYTES` = 200 MB per recording: over it the video is left
+out (warning), then the images.
+
+**Writes** (`RecordingEvidenceSaver`) build a staging folder and publish it with one rename (`RecordingEvidenceFiles.publish`); an
+update of a reopened recording rewrites only `recording.json` atomically. They run on the IO dispatcher inside
+`TestStepRecordingApplyService`'s `afterApplied` callback, after the steps are in the library and while the reviewed rows are frozen;
+no `stateLock` or store lock is held. A failed save clears the link again and only warns. Deleting runs on `RecordingCleanup`'s single
+background thread.
+
+**Lifecycle.** The step link is `TestStep.recordingRef` (per-step provenance survives reorders and deletes; a case-level list would not
+say which steps). Deleting a case or suite deletes its recordings; moving a case to another suite moves them; duplicating a case, step or
+suite, and exporting or importing a suite, drop the link (an export names no evidence). `TestLibraryStore.replaceSteps` replaces the
+produced steps in one edit and refuses a block that is not all there, together and in order (`planReplacement`); then *Insert as new
+steps* adds them and unlinks the old ones. Settings > Testing shows the disk used and **Delete stored recording evidence**.
+
+**Reopen** (`RecordingReopen.kt`): `restoreRecordingSession` builds a stopped `TestStepRecordingSession` (`loadStopped`, worker threads shut
+down, snapshot `reopened`) and opens the video with `RecordedVideoTimeline.openStored`, a read-only timeline whose files are never written
+or deleted (`close()` is a no-op); `AppState.registerTestStepRecording(deviceBound = false)` skips the lane-device check. UI: *Rewrite with AI
+from saved recording* on the case. MCP: `reopen_test_recording` (`CONFIRMATION_REQUIRED` and `PER_CALL_APPROVAL_MCP_TOOLS`, like
+`start_test_recording`), `apply_test_recording.insertAsNew`, and `recordings` on each case of `get_test_suite`.
+
 ---
 
 ## Related documents

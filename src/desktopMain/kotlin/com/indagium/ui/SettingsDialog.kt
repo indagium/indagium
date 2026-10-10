@@ -494,7 +494,7 @@ private fun openProjectRepository() {
  *  inline error (surfaced when a Save attempt from within the dialog fails validation), and a
  *  caller-supplied row of [DialogActionButton]s. */
 @Composable
-private fun SettingsConfirmDialog(
+internal fun SettingsConfirmDialog(
     title: String,
     message: String,
     onDismissRequest: () -> Unit,

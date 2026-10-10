@@ -385,6 +385,14 @@ or recording is a separate confirmation-required call.
   `discard_test_recording`, and `apply_test_recording` stop/drain, discard without library mutation, or apply the reviewed
   preview at an optional index to its original case. An empty review cannot be applied or rewritten. Rewrites use only
   retained inputs even if the full video timeline shows removed actions.
+  `reopen_test_recording` (caseId, optional recordingId) reopens the evidence saved with a case (Settings > Testing > "Keep recording
+  evidence with recorded cases") as a stopped recording and returns its `sessionId`: the stored rows, screen readings, screenshots and
+  video (a recording in which a password was typed has no video and no screens from that time) are restored without a device, so
+  `get_test_recording`, `update_test_recording`, `rewrite_test_recording` and the other recording tools work unchanged. It needs the case's
+  only stored recording or a `recordingId` (`get_test_suite` lists each case's `recordings`). Applying it with `apply_test_recording`
+  replaces the steps it made, in place; when they were deleted, moved or mixed with other steps the call is refused with the reason and
+  `insertAsNew=true` inserts the steps at `index` instead. `discard_test_recording` leaves the stored files untouched. It asks for
+  confirmation like `start_test_recording`. `export_test_suite` never includes stored recording evidence and says so in `recordingEvidence`.
   `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note, scope) asks a configured profile to
   turn a stopped recording into readable steps. `scope` is `needs_review` (the default once a rewrite exists) or `all`: after
   an earlier rewrite, `needs_review` keeps every rewritten step that has no `reviewReason` (or whose text you edited) exactly as

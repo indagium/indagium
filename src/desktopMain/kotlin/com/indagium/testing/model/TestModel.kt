@@ -214,6 +214,12 @@ data class TestStep(
     val script: ScriptCall? = null,
     /** MANUAL only: how the step is completed. */
     val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
+    /**
+     * The id of the stored recording evidence this step was applied from ("Keep recording evidence with recorded cases"), appended last;
+     * null for every other step. Never exported or copied with the step (see [withoutRecordingRef]); the evidence itself lives under
+     * the Test suites folder (testing/authoring/RecordingEvidence.kt).
+     */
+    val recordingRef: String? = null,
 )
 
 /**

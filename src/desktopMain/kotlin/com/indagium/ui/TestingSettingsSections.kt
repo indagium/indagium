@@ -38,6 +38,8 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.edition.Edition
 import com.indagium.model.AiProviderProfile
+import com.indagium.testing.authoring.MAX_RECORDING_EVIDENCE_BYTES
+import com.indagium.testing.authoring.megabytesText
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.MAX_CONFIRMATION_TIMEOUT_MINUTES
@@ -45,9 +47,13 @@ import com.indagium.testing.model.MAX_TRACKER_PROMPT_CHARS
 import com.indagium.testing.model.MIN_CONFIRMATION_TIMEOUT_MINUTES
 import com.indagium.testing.model.TestingSettings
 import com.indagium.testing.model.TrackerSettings
+import com.indagium.testing.store.RecordingEvidenceUsage
+import com.indagium.testing.store.StoreResult
 import com.indagium.testing.tracker.checkAuthHeaderName
 import com.indagium.testing.tracker.checkTrackerUrl
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // Settings > Testing (the defaults a new test run starts from, the edition) and Settings > Issue tracker (the MCP server issues
 // are filed in, how to authenticate, which AI profile files them and the prompt that says how). The tracker's access token is
@@ -61,6 +67,7 @@ private val NUMBER_FIELD_WIDTH = 72.dp
 private val MENU_WIDTH = 320.dp
 private val PROMPT_MIN_HEIGHT = 96.dp
 private val PROMPT_MAX_HEIGHT = 240.dp
+private const val BYTES_PER_MB = 1024L * 1024L
 private const val DEFAULT_PROMPT_HINT = "Project key ABC, issue type Bug, label found-by-indagium; put the steps to reproduce in the description."
 
 /** "Free (1 suite, 5 cases per suite)" or "Unlimited": what an edition allows, for Settings > Testing. */
@@ -188,6 +195,8 @@ internal fun TestingSettingsSection(state: AppState) {
             }
         }
         CompactSetting("Confirmation timeout (minutes)") { ConfirmationTimeout(state, testing) }
+        CompactSetting("Keep recording evidence with recorded cases") { KeepRecordingEvidence(state, testing) }
+        CompactSetting("Stored recording evidence") { StoredRecordingEvidence(state) }
         CompactSetting("Edition") {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppText("Current edition: ${editionSummary(edition)}", color = tc.tx, fontSize = 12.sp)
@@ -254,6 +263,73 @@ private fun ConfirmationTimeout(state: AppState, testing: TestingSettings) {
                 "($MIN_CONFIRMATION_TIMEOUT_MINUTES to $MAX_CONFIRMATION_TIMEOUT_MINUTES).",
             color = tc().td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.weight(1f),
         )
+    }
+}
+
+@Composable
+private fun KeepRecordingEvidence(state: AppState, testing: TestingSettings) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        OnOff(testing.keepRecordingEvidence) { on -> updateTesting(state) { it.copy(keepRecordingEvidence = on) } }
+        AppText(
+            "When on, applying a recording also saves its screenshots, screen readings and video beside the case, so Rewrite with AI can " +
+                "be run again on the saved case. A recording in which a password was typed keeps no video and no screens from that time. " +
+                "One recording takes at most ${MAX_RECORDING_EVIDENCE_BYTES / BYTES_PER_MB} MB (the video is left out first). " +
+                "Suite exports never include it.",
+            color = tc().td, fontSize = 10.sp, maxLines = 5,
+        )
+    }
+}
+
+/** How much disk the stored recordings of the Test suites folder use, and the button that deletes them (after a confirmation). */
+@Composable
+private fun StoredRecordingEvidence(state: AppState) {
+    val tc = tc()
+    val scope = rememberCoroutineScope()
+    val folder = state.activeTestFolders().first
+    var usage by remember { mutableStateOf<RecordingEvidenceUsage?>(null) }
+    var refresh by remember { mutableStateOf(0) }
+    var confirming by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(folder.path, refresh, state.testLibrary) { usage = withContext(Dispatchers.IO) { state.storedRecordingUsage() } }
+    val current = usage
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText(
+            when {
+                current == null -> "Measuring…"
+                current.recordings == 0 -> "No recording evidence is stored in ${folder.path}."
+                else -> "${current.recordings} stored recording(s), ${megabytesText(current.bytes)} in ${folder.path}."
+            },
+            color = tc.tx, fontSize = 12.sp, maxLines = 2,
+        )
+        AppButton(
+            "Delete stored recording evidence",
+            onClick = { confirming = true },
+            enabled = (current?.recordings ?: 0) > 0,
+            variant = ButtonVariant.Secondary,
+        )
+        status?.let { AppText(it, color = tc.td, fontSize = 10.sp, maxLines = 3) }
+    }
+    if (confirming) {
+        SettingsConfirmDialog(
+            title = "Delete stored recording evidence?",
+            message = "This removes ${current?.recordings ?: 0} stored recording(s) (${megabytesText(current?.bytes ?: 0L)}) from the Test suites " +
+                "folder. The recorded steps stay in their cases, but Rewrite with AI can no longer be run from the saved recording. " +
+                "This can't be undone.",
+            onDismissRequest = { confirming = false },
+        ) {
+            DialogActionButton("Delete", active = true, danger = true) {
+                confirming = false
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) { state.deleteStoredRecordingEvidence() }
+                    status = when (result) {
+                        is StoreResult.Ok -> "Deleted ${result.value.recordings} stored recording(s) (${megabytesText(result.value.bytes)})."
+                        else -> result.userMessage()
+                    }
+                    refresh++
+                }
+            }
+            DialogActionButton("Cancel", active = false) { confirming = false }
+        }
     }
 }
 
