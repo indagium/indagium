@@ -2,10 +2,18 @@
 
 package com.indagium.testing.authoring
 
+import com.indagium.capture.mirror.MirrorControlCommand
+import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.capture.mirror.MirrorVideoPacket
+import com.indagium.debug.AppLogger
 import com.indagium.debug.toCallToolResult
+import com.indagium.testing.SHOP_CASE_ID
+import com.indagium.testing.SHOP_SUITE_ID
+import com.indagium.testing.shopLibrary
+import com.indagium.testing.store.StoreResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import kotlinx.coroutines.runBlocking
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24
 import org.bytedeco.javacv.FFmpegFrameRecorder
@@ -328,6 +336,98 @@ class RecordedVideoTimelineTest {
         val deadline = System.nanoTime() + CLEANUP_WAIT_NS
         while (directory.exists() && System.nanoTime() < deadline) Thread.yield()
         assertFalse(directory.exists(), "temporary video directory should be deleted by the cleanup worker")
+    }
+
+    private fun finishedTimeline(fixture: EncodedScenes): RecordedVideoTimeline {
+        val wall = AtomicLong(BASE_WALL_MS)
+        val monotonic = AtomicLong(BASE_NANOS)
+        val timeline = RecordedVideoTimeline(wallClockMs = wall::get, monotonicNanos = monotonic::get)
+        timeline.offer(packet(fixture.config, BASE_WALL_MS - 60_000, BASE_NANOS - 60_000_000_000, 0, config = true))
+        fixture.samples.forEachIndexed { index, sample ->
+            val elapsed = listOf(-60_000L, 100L, 250L, 400L, 800L)[index]
+            timeline.offer(
+                packet(sample.data, BASE_WALL_MS + elapsed, BASE_NANOS + elapsed * NANOS_PER_MS, (index + 1).toLong(), keyFrame = sample.keyFrame),
+            )
+        }
+        wall.set(BASE_WALL_MS + 1_000)
+        monotonic.set(BASE_NANOS + 1_000 * NANOS_PER_MS)
+        timeline.stop()
+        assertTrue(timeline.awaitFinished(15_000), "video remux worker should drain")
+        return timeline
+    }
+
+    @Test
+    fun stillsAtHoldsTheLatestFrameAtOrBeforeEachTimeIncludingAStaticPreRoll() {
+        val timeline = finishedTimeline(syntheticScenes)
+        try {
+            val stills = assertNotNull(timeline.stillsAt(listOf(-30_000L, 120L, 500L, 5_000L), inputRows(BASE_WALL_MS)))
+
+            assertEquals(listOf(-60_000L, 100L, 400L, 800L), stills.map { it?.sessionMs }, "the latest decoded frame at or before each time")
+            val colors = stills.map { still -> assertNotNull(still).image.getRGB(5, 200) }
+            assertEquals(4, colors.distinct().size, "four different scenes: launcher, home, paused, settled")
+            assertEquals(BASE_WALL_MS + 100, timeline.wallClockOfSessionMs(100))
+            assertEquals(100L, timeline.sessionOffsetMs(timeline.wallClockOfSessionMs(100)))
+            assertNull(timeline.stillsAt(emptyList(), inputRows(BASE_WALL_MS)))
+        } finally {
+            timeline.close()
+        }
+    }
+
+    @Test
+    fun stillsAtIsNullForAnUnfinishedTimelineAndWithholdsFramesInAPasswordWindow() {
+        val running = RecordedVideoTimeline()
+        try {
+            assertNull(running.stillsAt(listOf(0L), inputRows(BASE_WALL_MS)), "nothing is decoded before the video is finished")
+        } finally {
+            running.close()
+        }
+        val timeline = finishedTimeline(syntheticScenes)
+        val masked = RewriteInput(
+            1,
+            RecordedTestStep(action = "Enter text: ••••", kind = RecordedInputKind.TEXT, inputAtMs = BASE_WALL_MS + 100, inputStartMs = BASE_WALL_MS + 100),
+            null,
+            null,
+        )
+        try {
+            val stills = assertNotNull(timeline.stillsAt(listOf(250L, 800L), listOf(masked)))
+            assertEquals(listOf(null, null), stills.map { it?.sessionMs }, "frames after the last password input stay withheld until the recording stops")
+        } finally {
+            timeline.close()
+        }
+    }
+
+    @Test
+    fun theRewriteServiceTakesItsEvidenceFromTheRecordedVideoAndSaysSoInTheLog() {
+        val logFile = File.createTempFile("rewrite-video-log", ".log")
+        AppLogger.configure(enabled = true, path = logFile.absolutePath)
+        val timeline = finishedTimeline(syntheticScenes)
+        val session = TestStepRecordingSession("fixture-device", videoTimeline = timeline)
+        try {
+            fun touch(action: MirrorTouchAction) =
+                MirrorControlCommand.Touch(action = action, pointerId = 1, x = 50, y = 50, screenWidth = 100, screenHeight = 100)
+            session.accept(touch(MirrorTouchAction.DOWN), nowMs = BASE_WALL_MS)
+            session.accept(touch(MirrorTouchAction.UP), nowMs = BASE_WALL_MS + 50)
+            session.accept(touch(MirrorTouchAction.DOWN), nowMs = BASE_WALL_MS + 300)
+            session.accept(touch(MirrorTouchAction.UP), nowMs = BASE_WALL_MS + 350)
+            runBlocking { session.stopAndDrain() }
+            var seen: RewriteGeneration? = null
+            val answer = """{"steps":[{"action":"Open YouTube","expected":"YouTube is open","sourceInputs":[1]},""" +
+                """{"action":"Pause playback","expected":"The player is paused","sourceInputs":[2]}]}"""
+            val service = RecordingRewriteService({ shopLibrary() }, { _, _ -> StoreResult.Ok(Unit) }, { request -> seen = request; answer })
+
+            val result = runBlocking { service.rewrite(session, SHOP_SUITE_ID, SHOP_CASE_ID, "p", null, null, "") }
+
+            assertIs<StoreResult.Ok<RecordingRewrite>>(result)
+            val request = assertNotNull(seen)
+            assertEquals(1, assertNotNull(request.attachment).images.size, "two inputs, both from the video, on one sheet")
+            assertTrue("recorded video" in request.prompt, request.prompt)
+            val line = logFile.readLines().single { "rewrite_brief" in it }
+            assertTrue("source=video" in line && "settledAfter=2/2" in line && "lockedSteps=0" in line, line)
+        } finally {
+            AppLogger.configure(enabled = false, path = null)
+            session.close()
+            logFile.delete()
+        }
     }
 
     private fun inputRows(base: Long): List<RewriteInput> = listOf(

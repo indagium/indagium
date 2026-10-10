@@ -2387,7 +2387,8 @@ class AppState(
 
     /**
      * Rewrites a stopped recording into readable steps through an AI profile. Refused while the recording is being applied or
-     * rewritten; the AI call itself runs with no lock held, and an apply or edit that arrives meanwhile is refused instead.
+     * rewritten; the AI call itself runs with no lock held, and an apply or edit that arrives meanwhile is refused instead. After an
+     * earlier rewrite, [scope] says whether the steps nobody flagged are kept as they are (needs review; the default) or rewritten too.
      */
     internal suspend fun rewriteTestStepRecording(
         sessionId: String,
@@ -2395,6 +2396,7 @@ class AppState(
         model: String? = null,
         reasoningEffort: String? = null,
         note: String = "",
+        scope: com.indagium.testing.authoring.RewriteScope? = null,
     ): StoreResult<com.indagium.testing.authoring.RecordingRewrite> {
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId }
@@ -2407,7 +2409,7 @@ class AppState(
             active to selectedTarget
         }
         try {
-            return testRecordingRewriteService.rewrite(session, target.first, target.second, profileId, model, reasoningEffort, note)
+            return testRecordingRewriteService.rewrite(session, target.first, target.second, profileId, model, reasoningEffort, note, scope)
         } finally {
             synchronized(testStepRecordingLock) { recordingRewrites.remove(sessionId) }
         }

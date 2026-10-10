@@ -126,6 +126,9 @@ data class TestStepRecordingSnapshot(
     val rewriteInProgress: Boolean = false,
 )
 
+/** The rows an AI rewrite starts from and the rewritten [accepted] rows of an earlier rewrite that may be kept as they are. */
+internal class RewriteSource(val rows: List<RecordedTestStep>, val accepted: List<RecordedTestStep>)
+
 /** Where an accepted input came from: a command the Indagium mirror sent, or an event the device itself produced (adb getevent). */
 internal enum class InputSource { MIRROR, DEVICE }
 
@@ -528,6 +531,16 @@ class TestStepRecordingSession internal constructor(
      * author-added row is a fixed input the rewrite must keep as is.
      */
     internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) { rewriteRowsOf(mutableSnapshot.value) }
+
+    /**
+     * What an AI rewrite starts from, read in one step: the [RewriteSource.rows] (see [rewriteRows]) and, after an earlier rewrite, the
+     * rewritten rows the person can be taken to have accepted ([RecordedTestStep.isAcceptedRewriteStep]): the next rewrite may keep
+     * those exactly as they are.
+     */
+    internal fun rewriteSource(): RewriteSource = synchronized(lock) {
+        val current = mutableSnapshot.value
+        RewriteSource(rewriteRowsOf(current), if (current.rewriteApplied) current.steps.filter { it.isAcceptedRewriteStep() } else emptyList())
+    }
 
     private fun rewriteRowsOf(current: TestStepRecordingSnapshot): List<RecordedTestStep> =
         reviewedRaw(current).filterNot { it.id in current.excludedSourceInputIds }

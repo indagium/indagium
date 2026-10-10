@@ -39,6 +39,9 @@ internal data class RecordedVideoFrameInfo(
     val ageMs: Long,
 )
 
+/** One decoded frame of the recorded video; [sessionMs] is the session-timeline time of the frame that was actually decoded. */
+internal class RecordedVideoStill(val image: BufferedImage, val sessionMs: Long)
+
 internal data class RecordedVideoStoryboard(
     val imageBase64: String,
     val mimeType: String,
@@ -211,6 +214,32 @@ internal class RecordedVideoTimeline(
 
     /** Approximate host-time offset in the session timeline for a recorded input wall-clock timestamp. */
     fun sessionOffsetMs(wallClockTimestampMs: Long): Long = wallClockTimestampMs - sessionStartedAtMs
+
+    /** The wall-clock time of a session-timeline offset; the inverse of [sessionOffsetMs]. */
+    fun wallClockOfSessionMs(sessionOffsetMs: Long): Long = sessionStartedAtMs + sessionOffsetMs
+
+    /**
+     * The picture the video held at each of [sessionTimesMs] (session offsets, clamped to the video): the latest decoded frame at or
+     * before it, so a static screen that produced no packets is still shown. An entry is null where the video cannot show one
+     * (no segment, a password-sensitive window, a decode failure); the whole result is null when the video is not finished or the
+     * decoder failed. Frames are decoded one at a time on the caller's thread, never on the UI thread.
+     */
+    fun stillsAt(sessionTimesMs: List<Long>, allInputs: List<RewriteInput>): List<RecordedVideoStill?>? {
+        if (!finished.get() || sessionTimesMs.isEmpty()) return null
+        val sensitive = sensitiveIntervals(chronologicalInputs(allInputs))
+        val duration = summary().durationMs
+        return synchronized(storyboardLock) {
+            runCatching {
+                val availableSegments = segments.toList()
+                SegmentGrabbers().use { grabbers ->
+                    sessionTimesMs.map { time ->
+                        val request = FrameRequest(time.coerceIn(0L, duration), "still", preferPredecessor = true)
+                        decodeRequest(request, availableSegments, sensitive, grabbers)?.let { RecordedVideoStill(it.image, it.actualMs) }
+                    }
+                }
+            }.getOrNull()
+        }
+    }
 
     /** Five decoded frames around one input; actual timestamps are checked against its input interval and neighbours. */
     fun storyboardForInput(inputNumber: Int, allInputs: List<RewriteInput>): RecordedVideoStoryboard? {

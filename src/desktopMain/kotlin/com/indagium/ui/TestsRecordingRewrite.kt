@@ -22,9 +22,11 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.RewriteScope
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.TestStepRecordingSnapshot
 import com.indagium.testing.authoring.contextHint
+import com.indagium.testing.authoring.isAcceptedRewriteStep
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.Job
@@ -37,6 +39,30 @@ import kotlinx.coroutines.launch
 private val NOTE_MIN_HEIGHT = 44.dp
 private val NOTE_MAX_HEIGHT = 110.dp
 private val PROFILE_MENU_WIDTH = 280.dp
+
+/**
+ * What the rewrite button says and does. After a rewrite, the steps nobody flagged for review stay as they are in the next one: when
+ * there are such steps and others that need review, [primaryLabel] rewrites only the latter ([primaryScope]) and [allLabel] offers
+ * to rewrite every step again; otherwise there is one button and it rewrites every step.
+ */
+internal class RewriteButtonPlan(val primaryLabel: String, val primaryScope: RewriteScope?, val allLabel: String?, val keptSteps: Int, val reviewSteps: Int)
+
+internal const val REWRITE_REVIEW_LABEL = "Rewrite steps that need review"
+internal const val REWRITE_ALL_AGAIN_LABEL = "Rewrite all again"
+
+internal fun rewriteButtonPlan(snapshot: TestStepRecordingSnapshot, rewriting: Boolean): RewriteButtonPlan {
+    val rewritten = if (snapshot.rewriteApplied) snapshot.steps.filter { !it.authorAdded && it.sourceInputIds.isNotEmpty() } else emptyList()
+    val kept = rewritten.count { it.isAcceptedRewriteStep() }
+    val review = rewritten.size - kept
+    val keeps = kept > 0 && review > 0
+    val label = when {
+        rewriting -> "Rewriting…"
+        keeps -> REWRITE_REVIEW_LABEL
+        snapshot.rewriteApplied -> "Rewrite again"
+        else -> "Rewrite"
+    }
+    return RewriteButtonPlan(label, RewriteScope.NEEDS_REVIEW.takeIf { keeps }, REWRITE_ALL_AGAIN_LABEL.takeIf { keeps && !rewriting }, kept, review)
+}
 
 @Composable
 internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: TestCase, snapshot: TestStepRecordingSnapshot, locked: Boolean) {
@@ -114,6 +140,7 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
         if (snapshot.rewriteAttemptCount > 1) TestsHint("Rewrite session total (${snapshot.rewriteAttemptCount} attempts) · ${usage.summaryLabel()}")
     }
     Spacer(Modifier.height(8.dp))
+    val plan = rewriteButtonPlan(snapshot, rewriting)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
         if (snapshot.rewriteApplied) {
             AppButton(
@@ -134,35 +161,52 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             )
         }
         if (rewriting) AppButton("Cancel", onClick = { job?.cancel() }, variant = ButtonVariant.Ghost)
-        HintedButton(
-            when {
-                rewriting -> "Rewriting…"
-                snapshot.rewriteApplied -> "Rewrite again"
-                else -> "Rewrite"
-            },
-            onClick = {
-                val chosen = profile ?: return@HintedButton
+        val ready = !busy && !blocked && snapshot.steps.isNotEmpty() && profile != null
+        val notReadyHint = when {
+            snapshot.steps.isEmpty() -> "Restore removed inputs or keep at least one step before rewriting."
+            profile == null -> "Configure a provider profile in Settings first."
+            blocked -> "Waiting for ${snapshot.pendingSnapshots} screen snapshot(s) to finish."
+            else -> "A rewrite or an apply is already running."
+        }
+        val start = { scope: RewriteScope? ->
+            val chosen = profile
+            if (chosen != null) {
                 rewriting = true
                 error = null
                 job = ui.scope.launch {
                     try {
                         val result = ui.state.rewriteTestStepRecording(
-                            session.id, chosen.id, selection.modelId, selection.reasoningEffort, note,
+                            session.id, chosen.id, selection.modelId, selection.reasoningEffort, note, scope,
                         )
                         if (result !is StoreResult.Ok) error = result.userMessage()
                     } finally {
                         rewriting = false
                     }
                 }
-            },
-            enabled = !busy && !blocked && snapshot.steps.isNotEmpty() && profile != null,
-            disabledHint = when {
-                snapshot.steps.isEmpty() -> "Restore removed inputs or keep at least one step before rewriting."
-                profile == null -> "Configure a provider profile in Settings first."
-                blocked -> "Waiting for ${snapshot.pendingSnapshots} screen snapshot(s) to finish."
-                else -> "A rewrite or an apply is already running."
-            },
+            }
+        }
+        plan.allLabel?.let { label ->
+            HintedButton(
+                label,
+                onClick = { start(RewriteScope.ALL) },
+                enabled = ready,
+                disabledHint = notReadyHint,
+                variant = ButtonVariant.Secondary,
+            )
+        }
+        HintedButton(
+            plan.primaryLabel,
+            onClick = { start(plan.primaryScope) },
+            enabled = ready,
+            disabledHint = notReadyHint,
             variant = ButtonVariant.Primary,
+        )
+    }
+    if (plan.primaryScope != null) {
+        Spacer(Modifier.height(6.dp))
+        TestsHint(
+            "${plan.keptSteps} accepted step(s) stay exactly as they are; only the ${plan.reviewSteps} step(s) marked for review are rewritten.",
+            maxLines = 3,
         )
     }
     if (snapshot.rewriteApplied && snapshot.rewriteNotes.isNotBlank()) {

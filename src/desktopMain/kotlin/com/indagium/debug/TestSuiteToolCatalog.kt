@@ -552,14 +552,19 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "screen elements the recorder stored, so screenshots, screen text and typed text (passwords are hidden) go to the provider. " +
             "The rewritten rows replace the recording's rows for review; the raw rows are kept (restore_test_recording_raw returns " +
             "them) and nothing is added to the library until apply_test_recording. Every remaining input is covered by exactly one " +
-            "step; an invalid answer changes nothing. Asks for approval for a remote provider.",
+            "step; an invalid answer changes nothing. Called again after a rewrite, it keeps the steps nobody flagged for review exactly as " +
+            "they are (only the flagged ones are rewritten) unless scope is \"all\". Asks for approval for a remote provider.",
         schema(
             "sessionId" to "string", "profileId" to "string", "model" to "string", "reasoningEffort" to "string", "note" to "string",
+            "scope" to "string",
             required = listOf("sessionId", "profileId"),
+            enums = mapOf("scope" to listOf("needs_review", "all")),
             descriptions = mapOf(
                 "model" to MODEL_OVERRIDE_NOTE,
                 "reasoningEffort" to EFFORT_OVERRIDE_NOTE,
                 "note" to "Optional: what the test is about, in the user's words (up to 1000 characters).",
+                "scope" to "Optional, for a rewrite after an earlier one: needs_review (the default when a rewrite exists) keeps every rewritten " +
+                    "step without a reviewReason, or whose text you edited, unchanged and rewrites only the others; all rewrites every step again.",
             ),
         ),
     ),

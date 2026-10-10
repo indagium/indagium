@@ -1457,7 +1457,11 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    recorded (an ad, a video title, a view count, a timestamp, a notification, picture-in-picture). When an expected result
    still mentions something like that, the step shows "Check this expected result: it may depend on content that changes
    between runs." - a warning only; reword the result, or ignore it if you are sure.
-4. **Undo rewrite** brings back the recorded rows exactly; **Rewrite again** always starts from them. Nothing is
+4. **Undo rewrite** brings back the recorded rows exactly. After a rewrite, the steps that are not marked for review
+   (and any you edited) are kept exactly as they are: **Rewrite steps that need review** rewrites only the marked ones,
+   and **Rewrite all again** starts over from the recorded inputs. When the recording has a video, the AI looks at
+   the video frames just before each input and the settled screen after it, so a loading screen right after a tap is
+   not taken for the result. Nothing is
    added to the case until you press **Apply recorded steps**. It stays disabled until every required step has an expected
    result and every optional step has a condition.
 

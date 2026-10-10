@@ -21,6 +21,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.longOrNull
 import java.util.IdentityHashMap
+import kotlin.math.max
 
 // What an AI rewrite of a recording is made of: the numbered inputs the AI is shown, the JSON it must answer with, the checks
 // that answer must pass, and the review rows built from it. Nothing here talks to a model or to a device; the service
@@ -52,15 +53,23 @@ data class RecordingRewrite(
 )
 
 /**
+ * An accepted step of an earlier rewrite that the next one must return unchanged. [inputs] are the 1-based numbers of the
+ * recorded inputs it covers (consecutive, ascending) and [step] is the exact row, kept as is when the answer returns it.
+ */
+internal class LockedRewriteStep(val inputs: List<Int>, val step: RecordedTestStep)
+
+/**
  * One recorded input as the AI sees it: [number] is 1-based in review order, [before] / [after] the screen states the probe
  * attached (or null). An author-added row is [fixed]: not a recording at all, but a step the person wrote that must come back
- * unchanged and alone.
+ * unchanged and alone. An input covered by an accepted step of an earlier rewrite has that step as its [locked] group: the group
+ * must come back unchanged as one step.
  */
 internal class RewriteInput(
     val number: Int,
     val row: RecordedTestStep,
     val before: RecordingScreenState?,
     val after: RecordingScreenState?,
+    val locked: LockedRewriteStep? = null,
 ) {
     val fixed: Boolean get() = row.authorAdded
 
@@ -98,9 +107,60 @@ internal class RewriteEvidenceIds(inputs: List<RewriteInput>) {
 
 /** The inputs of [rows], numbered from 1, each with the stored screen states its row points to ([screenState] looks one up). */
 internal fun rewriteInputsOf(rows: List<RecordedTestStep>, screenState: (Int) -> RecordingScreenState?): List<RewriteInput> =
+    rewriteInputsOf(rows, emptyList(), screenState)
+
+/** The inputs of [rows] as above; an input that belongs to one of the [locked] steps carries that step. */
+internal fun rewriteInputsOf(
+    rows: List<RecordedTestStep>,
+    locked: List<LockedRewriteStep>,
+    screenState: (Int) -> RecordingScreenState?,
+): List<RewriteInput> =
     rows.mapIndexed { index, row ->
-        RewriteInput(index + 1, row, row.before?.let { screenState(it.seq) }, row.after?.let { screenState(it.seq) })
+        RewriteInput(
+            index + 1, row, row.before?.let { screenState(it.seq) }, row.after?.let { screenState(it.seq) },
+            locked.firstOrNull { index + 1 in it.inputs },
+        )
     }
+
+/** Which steps of an earlier rewrite the next one may touch. */
+internal enum class RewriteScope {
+    /** Only the steps that still need review are rewritten; every accepted step is kept as it is. */
+    NEEDS_REVIEW,
+
+    /** Every step is rewritten from the recorded inputs; nothing is kept. */
+    ALL,
+    ;
+
+    companion object {
+        /** The scope named by an MCP argument; null for an absent or blank one, an [IllegalArgumentException] for an unknown one. */
+        fun parse(text: String?): RewriteScope? {
+            val clean = text?.trim()?.takeIf(String::isNotEmpty) ?: return null
+            return entries.firstOrNull { it.name.equals(clean, ignoreCase = true) }
+                ?: throw IllegalArgumentException("scope must be needs_review or all (got '$clean').")
+        }
+    }
+}
+
+/**
+ * True for a row of an applied rewrite that the person can be taken to have accepted: it stands for recorded inputs, nobody typed it
+ * in, and no review reason is left on it (an edit that fills in the expected result ends the reason, see [reviewReasonAfterEdit]).
+ */
+internal fun RecordedTestStep.isAcceptedRewriteStep(): Boolean =
+    !authorAdded && sourceInputIds.isNotEmpty() && reviewReason == null &&
+        max(action.length, expected.length) <= MAX_FIXED_STEP_CHARS && action.isNotBlank()
+
+/**
+ * The [accepted] rewritten rows as locked groups over [rows] (the rewrite's raw inputs in order). A row whose recorded inputs are not
+ * all there as consecutive inputs (one was removed) cannot be kept as it is and is left out: it is rewritten with the rest.
+ */
+internal fun lockedRewriteStepsOf(rows: List<RecordedTestStep>, accepted: List<RecordedTestStep>): List<LockedRewriteStep> {
+    val numberById = rows.withIndex().associate { (index, row) -> row.id to index + 1 }
+    return accepted.mapNotNull { step ->
+        val numbers = step.sourceInputIds.mapNotNull { numberById[it] }
+        val consecutive = numbers.size == step.sourceInputIds.size && numbers.zipWithNext().all { (a, b) -> b == a + 1 }
+        if (consecutive) LockedRewriteStep(numbers, step) else null
+    }
+}
 
 /** One step the AI proposed. [screenInput] is the input whose after-image is the step's expected-screenshot candidate (null: the last one). */
 internal class ProposedStep(
@@ -132,6 +192,8 @@ internal class RewriteExpectations(
     val externalInputs: Map<Int, List<StepCheck>> = emptyMap(),
     /** The library's scripts, which a manual or script step may name. */
     val scripts: List<TestScript> = emptyList(),
+    /** The accepted steps of an earlier rewrite: each must come back unchanged as one step covering exactly its inputs. */
+    val lockedSteps: List<LockedRewriteStep> = emptyList(),
 )
 
 /**
@@ -189,6 +251,11 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
     if (fixed != null) {
         val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
         requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(expectations.fixedInputs[fixed]))
+        return step
+    }
+    expectations.lockedSteps.firstOrNull { group -> sources.any { it in group.inputs } }?.let { group ->
+        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
+        requireLockedStepUnchanged(obj, where, step, group)
         return step
     }
     val performer = performerOf(obj, where, sources, expectations)
@@ -304,6 +371,23 @@ private fun requireFixedStepUnchanged(obj: JsonObject, where: String, step: Prop
     require(kind == row.stepKind || obj["kind"] == null) { "$label: kind must be \"${row.stepKind.name.lowercase()}\" like the person's step." }
 }
 
+/** An accepted step comes back as one step over exactly its inputs, with the text, flags and kind it already has and nothing added. */
+private fun requireLockedStepUnchanged(obj: JsonObject, where: String, step: ProposedStep, group: LockedRewriteStep) {
+    val row = group.step
+    val label = "$where covers input(s) ${rewriteNumberRanges(group.inputs)}, a locked step the person already accepted that must be kept as is"
+    require(step.sourceInputs == group.inputs) {
+        "$label: it must be one step with sourceInputs ${group.inputs}, never merged with other inputs, split or dropped."
+    }
+    require(step.action == row.action.trim() && step.expected == row.expected.trim()) { "$label: action and expected must equal the locked text exactly." }
+    require(step.optional == row.optional && step.condition == row.condition?.trim()?.takeIf(String::isNotEmpty)) {
+        "$label: optional and condition must equal the locked step's."
+    }
+    val extras = listOf("checks", "reviewReason", "expectedScreenshot", "scriptId", "args", "manualCompletion").filter { key -> !isEmptyAnswer(obj[key]) }
+    require(extras.isEmpty()) { "$label: leave out ${extras.joinToString(", ")}." }
+    val kind = kindOf(obj["kind"], where)
+    require(kind == row.stepKind || obj["kind"] == null) { "$label: kind must be \"${row.stepKind.name.lowercase()}\" like the locked step." }
+}
+
 private fun isEmptyAnswer(element: JsonElement?): Boolean = when (element) {
     null, is JsonNull -> true
     is JsonArray -> element.isEmpty()
@@ -389,6 +473,8 @@ internal fun buildRewrittenRows(
         val sources = step.sourceInputs.map { inputs[it - 1] }
         // An author-added row is not rewritten: the row itself (same id, same text) stays, in the place the answer gave it.
         sources.singleOrNull()?.takeIf { it.fixed }?.let { return@map it.row }
+        // So is an accepted step of an earlier rewrite (the answer was validated to return exactly its inputs): the same row stays.
+        sources.first().locked?.let { return@map it.step }
         val unclearGesture = unclearGestureIn(sources, videoInspectedInputs)
         val byAgent = step.kind == StepKind.AGENT
         val needsReview = byAgent && (unclearGesture != null || step.reviewReason != null)
@@ -465,6 +551,9 @@ internal enum class RewriteDescription { BRIEF, HINT }
 /** How the brief marks an author-added input; the prompt rules in RecordingRewriteBrief.kt refer to this exact label. */
 internal const val FIXED_STEP_LABEL = "AUTHOR STEP, keep as is"
 
+/** How the brief marks the inputs of an accepted step of an earlier rewrite; the prompt rules refer to this exact label. */
+internal const val LOCKED_STEP_LABEL = "LOCKED STEP, keep as is"
+
 private const val MAX_ACTION_CHARS = 300
 
 /**
@@ -473,13 +562,20 @@ private const val MAX_ACTION_CHARS = 300
  * line of a recorded input (the screen text and the image references of [RewriteEvidence.lineExtra]).
  */
 internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null, extra: String = ""): String = buildString {
+    val group = locked.takeIf { mode == RewriteDescription.BRIEF }
+    if (group != null) {
+        // One line for the whole accepted step, at its first input; the other inputs of it have no line of their own.
+        if (number != group.inputs.first()) return@buildString
+        append(rewriteNumberRanges(group.inputs)).append(". [").append(LOCKED_STEP_LABEL).append("] covers input(s) ")
+        append(rewriteNumberRanges(group.inputs)).append(" | ")
+        appendWrittenStep(group.step)
+        return@buildString
+    }
     append(number).append(". ")
     if (fixed) {
         // Not a recording: the person wrote this step. It is shown whole (the answer must repeat it exactly), never cut to a preview.
-        append('[').append(FIXED_STEP_LABEL).append("] action: \"").append(row.action.trim()).append("\" | expected: \"")
-        append(row.expected.trim()).append('"')
-        if (row.optional) append(" | optional: true | condition: \"").append(row.condition?.trim().orEmpty()).append('"')
-        if (row.stepKind != StepKind.AGENT) append(" | performed by: ").append(row.stepKind.name.lowercase()).append(" (not an AI step)")
+        append('[').append(FIXED_STEP_LABEL).append("] ")
+        appendWrittenStep(row)
         return@buildString
     }
     if (row.isExternalEvent) {
@@ -502,6 +598,13 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     if (row.stateChanges.isNotEmpty()) append(" | device changes after it: ").append(stateChangesText(row.stateChanges))
     if (mode == RewriteDescription.BRIEF) appendBriefDetails(this@describe, evidenceIds)
     append(extra)
+}
+
+/** A step as the answer must repeat it: the whole text (never cut to a preview), the optional flag and condition, and who performs it. */
+private fun StringBuilder.appendWrittenStep(row: RecordedTestStep) {
+    append("action: \"").append(row.action.trim()).append("\" | expected: \"").append(row.expected.trim()).append('"')
+    if (row.optional) append(" | optional: true | condition: \"").append(row.condition?.trim().orEmpty()).append('"')
+    if (row.stepKind != StepKind.AGENT) append(" | performed by: ").append(row.stepKind.name.lowercase()).append(" (not an AI step)")
 }
 
 private const val MAX_STATE_CHANGES_TEXT_CHARS = 400
