@@ -503,6 +503,12 @@ private fun consensusColor(tone: ConsensusTone): Color = when (tone) {
 private fun ReportMatrix(run: TestRun, selection: StepSelection?, filters: Set<TestRunReportFilter>, onSelect: (StepSelection?) -> Unit) {
     val tc = tc()
     val rows = remember(run, filters) { filterReportRows(run, filters) }
+    val ui = LocalTestsUi.current
+    val improvable = remember(run, ui.library) {
+        val live = run.status == RunStatus.QUEUED || run.status == RunStatus.RUNNING
+        if (live) emptySet() else improvableCaseIds(run).filter { ui.library.findCase(it) != null }.toSet()
+    }
+    val onImprove: (String) -> Unit = { caseId -> ui.view.improveDialog = ImproveStepsTarget(run.suite.id, caseId, run.id) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("CASE / STEP", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
         val profiles = LocalTestsUi.current.state.settings.aiProviderProfiles
@@ -528,7 +534,7 @@ private fun ReportMatrix(run: TestRun, selection: StepSelection?, filters: Set<T
     if (rows.isEmpty()) TestsHint("Nothing to show yet.")
     rows.forEach { row ->
         when (row) {
-            is MatrixRow.Case -> CaseMatrixRow(row)
+            is MatrixRow.Case -> CaseMatrixRow(row, improvable = row.caseId in improvable, onImprove = { onImprove(row.caseId) })
             is MatrixRow.Step -> StepMatrixRow(row, consensusFor(run, row), selection, onSelect)
         }
     }
@@ -536,17 +542,21 @@ private fun ReportMatrix(run: TestRun, selection: StepSelection?, filters: Set<T
 
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun CaseMatrixRow(row: MatrixRow.Case) {
+private fun CaseMatrixRow(row: MatrixRow.Case, improvable: Boolean, onImprove: () -> Unit) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().padding(top = 8.dp).heightIn(min = ROW_HEIGHT),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        AppText(
-            row.name + if (row.iteration > 1) " (run ${row.iteration})" else "",
-            color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        )
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppText(
+                row.name + if (row.iteration > 1) " (run ${row.iteration})" else "",
+                color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (improvable && row.iteration == 1) AppButton("Improve these steps with AI", onClick = onImprove, variant = ButtonVariant.Ghost)
+        }
         row.cells.forEach { cell ->
             Box(Modifier.width(STATUS_COLUMN)) {
                 if (cell.present) StatusChip(cell.status.label(), caseColor(cell.status)) else AppText("—", color = tc.td, fontSize = 11.sp)

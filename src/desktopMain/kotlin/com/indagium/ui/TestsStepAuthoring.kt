@@ -93,6 +93,12 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
     TestsSectionTitle("Step authoring")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         HintedButton("Draft steps with AI", onClick = { draftOpen = true }, enabled = editable, disabledHint = "This case is read-only.")
+        HintedButton(
+            "Improve steps with AI",
+            onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
+            enabled = improveBlockedReason(case, editable) == null,
+            disabledHint = improveBlockedReason(case, editable),
+        )
         if (authoringDevices.size > 1) {
             TestsDropdown(
                 selectedLabel = authoringDevices.firstOrNull { it.serial == selectedAuthoringSerial }?.let(::recordingDeviceLabel)

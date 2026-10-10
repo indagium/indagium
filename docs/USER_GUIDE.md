@@ -1472,6 +1472,20 @@ row id in the new order) or add one with `insert_test_recording_row`. `get_test_
 and the detected external events (`inputKind` EXTERNAL); `update_test_recording` and `insert_test_recording_row` can set a
 step's `kind` (manual or script), `script`, `manualCompletion` and `checks`.
 
+### Improving the steps of a saved case
+
+A saved case cannot be rewritten from a recording any more (its screens are temporary), but it can be improved. On the case
+screen press **Improve steps with AI** (next to *Draft steps with AI*); on a finished run's report a case with failed,
+blocked, timed-out or unjudged steps also has **Improve these steps with AI**, which uses that run as the evidence.
+Choose the provider, model and reasoning effort, optionally say what should be improved, and read the line that says what
+will be sent, for example "Latest run 2026-10-10 18:20 · 4 screenshots · 2 judge suggestions": the steps and the suite and case
+text, the golden screenshots, and from the run each step's screenshots and the judge's reasoning and suggested fixes (never what
+the agent itself claimed). **Generate preview** changes nothing. The review shows each step as it is now and as it would
+become, the reason, and a warning when an expected result may depend on content that changes between runs. Tick the steps to
+apply (the changed ones start ticked), edit the new text if you want, and press **Apply selected**. Steps are never added,
+removed or reordered, and a manual or script step only gets new wording. If you edit the case meanwhile, the preview is refused
+and you generate a new one. An MCP client does the same with `improve_test_case` and `apply_test_case_improvement`.
+
 ### Scripts: your own tools for the agent
 
 A **script** is a shell command that agents can call as a tool, such as "reset the app's database" or "fetch

@@ -66,6 +66,9 @@ internal class TestsViewState {
     /** Non-null while the run dialog is open. */
     var runDialog: RunDialogTarget? by mutableStateOf(null)
 
+    /** Non-null while the "Improve steps with AI" dialog is open. */
+    var improveDialog: ImproveStepsTarget? by mutableStateOf(null)
+
     /** The run whose report the Runs screen shows; null shows the list of runs. */
     var selectedRunId: String? by mutableStateOf(null)
 

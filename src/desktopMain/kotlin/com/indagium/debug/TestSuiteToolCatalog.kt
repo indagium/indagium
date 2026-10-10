@@ -452,6 +452,50 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         ),
     ),
     IndagiumToolDescriptor(
+        "improve_test_case",
+        "Ask an existing provider profile to improve the wording of the SAVED steps of a case. It sends the steps, the suite and case " +
+            "text, the golden screenshots and, from the case's latest finished run (or the run you name), each step's status, the end " +
+            "and start screenshots, the judge's verdict, reasoning and suggested fix (never the agent's own claims) to the provider. It " +
+            "returns one entry per existing step, in order, with the new action, expected, optional, condition and a reason (\"unchanged\" " +
+            "when nothing changes); steps are never added, removed or reordered, and a manual or script step keeps its kind, script and " +
+            "settings. This only returns a short-lived preview; it never changes the library or controls a device. Call " +
+            "apply_test_case_improvement only after reviewing it. Asks for approval for a remote provider.",
+        schema(
+            "caseId" to "string", "profileId" to "string", "model" to "string", "reasoningEffort" to "string", "note" to "string",
+            "runId" to "string",
+            required = listOf("caseId", "profileId"),
+            descriptions = mapOf(
+                "model" to MODEL_OVERRIDE_NOTE,
+                "reasoningEffort" to EFFORT_OVERRIDE_NOTE,
+                "note" to "Optional: what should be improved, in the user's words (up to 1000 characters).",
+                "runId" to "Optional: a finished run (get_test_run_status / list_test_runs) to use as evidence instead of the case's latest run.",
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "apply_test_case_improvement",
+        "Apply a reviewed improvement preview to its case. Send one entry per step of the preview, in its order, with the (edited) " +
+            "texts; `accept` lists the stepIds to write (default: every step the entries change). Only accepted steps that really change " +
+            "are written, in one library write; a proposed checks change is applied as proposed for an accepted step. The preview is " +
+            "one-use and refused when the case's steps changed since it was made, or the case or its suite is locked.",
+        schema(
+            "proposalId" to "string", "steps" to "array", "accept" to "array",
+            required = listOf("proposalId", "steps"),
+            objectArrays = mapOf(
+                "steps" to ObjectArrayItemSchema(
+                    props = listOf("stepId" to "string", "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string"),
+                    required = listOf("stepId", "action", "expected"),
+                    descriptions = mapOf(
+                        "stepId" to "The step's id, as in the preview.",
+                        "optional" to "Defaults to the preview's value.",
+                        "condition" to "Defaults to the preview's value; required when optional is true.",
+                    ),
+                ),
+            ),
+            descriptions = mapOf("accept" to "Optional: the stepIds to apply; the others stay as they are."),
+        ),
+    ),
+    IndagiumToolDescriptor(
         "start_test_recording",
         "Start or reuse a local capture for the selected connected device, try to connect its embedded mirror, and begin a review-only " +
             "recording session. Input is observed from the device itself over adb getevent (touches, buttons, Power and volume keys, " +

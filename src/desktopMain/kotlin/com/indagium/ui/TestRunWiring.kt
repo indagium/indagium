@@ -12,6 +12,10 @@ import com.indagium.ai.logSummary
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.debug.AppLogger
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.testing.authoring.IMPROVE_BUDGET_GUIDANCE
+import com.indagium.testing.authoring.IMPROVE_PROMPT_PREAMBLE
+import com.indagium.testing.authoring.ImproveGeneration
+import com.indagium.testing.authoring.ImproveRunSource
 import com.indagium.testing.authoring.RewriteAttachment
 import com.indagium.testing.authoring.RewriteGeneration
 import com.indagium.testing.authoring.rewriteBudgetGuidance
@@ -76,6 +80,8 @@ internal class AgentTextWording(
     val empty: String,
     val budgetGuidance: (AiRun) -> String = ::laneBudgetGuidance,
     val promptPreamble: (AiRun) -> String = ::lanePromptPreamble,
+    /** What the log says when the agent takes no images and runs the attachment's fallback prompt. */
+    val noImagesNote: String = "rewrite_brief: this agent takes no images; the tools fetch the evidence",
 )
 
 /** One agent run whose answer is text: the profile ([model] / [reasoningEffort] replace its own), the words, its tools and its limits. */
@@ -156,6 +162,37 @@ internal suspend fun AppState.generateRecordingRewrite(request: RewriteGeneratio
     ),
 )
 
+private val STEP_IMPROVE_WORDING = AgentTextWording(
+    sessionPrefix = "test-step-improve",
+    failure = "The provider could not improve the steps",
+    unfinished = "The provider did not finish the improvement request.",
+    empty = "The provider returned no improvement.",
+    budgetGuidance = { IMPROVE_BUDGET_GUIDANCE },
+    promptPreamble = { IMPROVE_PROMPT_PREAMBLE },
+    noImagesNote = "improve_brief: this agent takes no images; the improvement works from the text evidence",
+)
+
+/**
+ * Improves the saved steps of a case through an existing profile with an empty MCP gateway and no host tools or device session: the
+ * evidence (and its screenshots, when the agent takes images) is in the request, so a single model turn answers.
+ */
+internal suspend fun AppState.generateTestCaseImprove(request: ImproveGeneration): String = runAgentForText(
+    AgentTextRequest(
+        profileId = request.profileId,
+        model = request.model,
+        reasoningEffort = request.effort,
+        prompt = request.prompt,
+        systemPrompt = request.systemPrompt,
+        gateway = IndagiumToolGateway(emptyList(), emptyMap()),
+        toolCallLimit = 1,
+        maxTurns = 2,
+        timeoutMs = TEST_CASE_IMPROVE_TIMEOUT_MS,
+        wording = STEP_IMPROVE_WORDING,
+        onUsage = request.onUsage,
+        attachment = request.attachment,
+    ),
+)
+
 /**
  * Runs one agent through the lane launchers (an in-app model over HTTP, or Claude Code / Codex as the signed-in account, which
  * reach [AgentTextRequest.gateway] through the managed MCP lease) and returns what it answered after its last tool call. Cancelling
@@ -176,7 +213,7 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
     val attached = attachment?.takeIf { agent.acceptsImagesUpFront && it.images.isNotEmpty() }
     val fallback = attachment?.takeIf { attached == null }
     if (fallback != null) {
-        AppLogger.info(AGENT_TIMING_LOG_COMPONENT, "rewrite_brief: this agent takes no images; the tools fetch the evidence")
+        AppLogger.info(AGENT_TIMING_LOG_COMPONENT, request.wording.noImagesNote)
     }
     try {
         val activeRun = agent.start(
@@ -240,6 +277,9 @@ private const val AGENT_USAGE_POLL_INTERVAL_MS = 120L
 /** A little longer than the service's own timeout (180 s), so the service answers first with its message. */
 private const val RECORDING_REWRITE_TIMEOUT_MS = 190_000L
 
+/** Same margin over the improvement service's own 180 s. */
+private const val TEST_CASE_IMPROVE_TIMEOUT_MS = 190_000L
+
 /** Builds the app's coordinator. [baseDir] is where run folders go; [onChanged] is called after every change of a run. */
 internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, baseDir: () -> File, onChanged: () -> Unit): TestRunCoordinator {
     val openDevice = overrides.openDevice ?: ProductionLaneOpener(this)
@@ -282,4 +322,13 @@ private suspend fun AppState.productionDeviceProblem(serial: String): String? = 
     } catch (failure: Exception) {
         "Could not list the connected devices: ${failure.message ?: failure::class.simpleName}"
     }
+}
+
+/** Where an improvement of a saved case finds the runs of its suite: this launch's runs and the stored ones, through the coordinator. */
+internal fun AppState.improveRunSource(): ImproveRunSource = object : ImproveRunSource {
+    override suspend fun summaries(suiteId: String) = testRunCoordinator.listRunSummariesForSuite(suiteId)
+
+    override suspend fun load(runId: String) = testRunCoordinator.loadRun(runId)
+
+    override fun runDir(runId: String): File = testRunCoordinator.runDir(runId)
 }

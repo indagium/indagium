@@ -101,7 +101,7 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // Test-suite authoring: deletes and file import/export ask first; set_edition is a development
     // switch that changes what the whole feature allows, so an in-app AI run must never flip it unasked.
     "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite",
-    "import_test_script", "export_test_script", "apply_test_step_draft", "set_edition",
+    "import_test_script", "export_test_script", "apply_test_step_draft", "apply_test_case_improvement", "set_edition",
     // try_test_script runs a user-authored shell command on the computer or the device.
     "try_test_script",
     // Starting a run (or re-running a step) drives devices and may run scripts; cancelling one stops work in progress;

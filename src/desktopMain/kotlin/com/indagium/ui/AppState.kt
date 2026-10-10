@@ -2626,6 +2626,19 @@ class AppState(
             insertWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
         )
     }
+    internal val testCaseImproveService by lazy {
+        com.indagium.testing.authoring.TestCaseImproveService(
+            library = { testLibrary },
+            preflight = ::recordingTargetPreflight,
+            generate = { request -> generateTestCaseImprove(request) },
+            runs = improveRunSource(),
+            goldenFile = ::testGoldenImageFile,
+            applyChanges = { caseId, changes, usage -> testStoreOp { updateSteps(caseId, changes, usage) } },
+            acceptsImagesUpFront = { profileId ->
+                normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == profileId }?.kind?.acceptsImagesUpFront() ?: true
+            },
+        )
+    }
     private val testRunCoordinatorDelegate = lazy {
         createTestRunCoordinator(testRunOverrides, { activeTestRunsDir }, ::syncTestRuns)
     }

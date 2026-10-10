@@ -217,7 +217,7 @@ internal fun parseRewriteResponse(response: String, expectations: RewriteExpecta
     return RewriteProposal(steps, notes)
 }
 
-private fun parseJsonObject(response: String): JsonObject {
+internal fun parseJsonObject(response: String): JsonObject {
     val clean = response.trim().removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
     val element = runCatching { Json.parseToJsonElement(clean) }.recoverCatching {
         // Chatter around the object (an agent's remark before or after) is tolerated; anything else is not JSON.
@@ -388,14 +388,14 @@ private fun requireLockedStepUnchanged(obj: JsonObject, where: String, step: Pro
     require(kind == row.stepKind || obj["kind"] == null) { "$label: kind must be \"${row.stepKind.name.lowercase()}\" like the locked step." }
 }
 
-private fun isEmptyAnswer(element: JsonElement?): Boolean = when (element) {
+internal fun isEmptyAnswer(element: JsonElement?): Boolean = when (element) {
     null, is JsonNull -> true
     is JsonArray -> element.isEmpty()
     is JsonPrimitive -> element.isString && element.content.isBlank()
     else -> false
 }
 
-private fun textField(obj: JsonObject, key: String, where: String, allowBlank: Boolean = false): String {
+internal fun textField(obj: JsonObject, key: String, where: String, allowBlank: Boolean = false): String {
     val text = (obj[key] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
     require(text != null && (allowBlank || text.isNotBlank())) {
         "$where.$key must be ${if (allowBlank) "a string" else "a non-blank string"}."
@@ -404,7 +404,7 @@ private fun textField(obj: JsonObject, key: String, where: String, allowBlank: B
     return text
 }
 
-private fun optionalTextField(obj: JsonObject, key: String, where: String, maxChars: Int): String? {
+internal fun optionalTextField(obj: JsonObject, key: String, where: String, maxChars: Int): String? {
     if (!obj.containsKey(key)) return null
     val value = obj[key]
     if (value == null || value is JsonNull) return null
@@ -438,7 +438,7 @@ private fun screenInputOf(element: JsonElement?, where: String, sources: List<In
 }
 
 /** Checks go through the same parser and rules as a step draft, minus script checks and example references; device-state checks are allowed. */
-private fun checksOf(element: JsonElement?, where: String): List<StepCheck> {
+internal fun checksOf(element: JsonElement?, where: String): List<StepCheck> {
     if (element == null || element is JsonNull) return emptyList()
     require(element is JsonArray) { "$where.checks must be an array." }
     val items = element.map { requireNotNull(it as? JsonObject) { "$where.checks must hold objects." } }

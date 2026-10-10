@@ -29,11 +29,14 @@ private const val APPROVAL_INSTRUCTION_PREVIEW_CHARS = 180
 // built-in lane tool such as tap needs no approval: the run itself was approved, and the lane's device is the one named
 // in that approval).
 
+// draft_test_steps, rewrite_test_recording and improve_test_case hand the case (and, for the last, a run's screenshots and the judge's text)
+// to an AI provider; the dialog names the profile, its destination and the bounded context. They return a preview only.
 // send_issue_to_tracker, and create_issue_from_step when its destination is the tracker, hand the issue text and evidence to an AI
 // agent and an external service (ExternalTrackerApproval.kt); create_issue_from_step with any other destination needs no approval.
 internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf(
     "try_test_script", "run_test_suite", "rerun_test_step", "rerun_failed_test_cases", "test_lane_tool_call",
-    "draft_test_steps", "rewrite_test_recording", "import_test_script", "export_test_script", "start_test_recording", "apply_test_recording",
+    "draft_test_steps", "improve_test_case", "rewrite_test_recording", "import_test_script", "export_test_script", "start_test_recording",
+    "apply_test_recording",
     "export_test_run_report", "collect_android_bugreport", "export_issue_step_clip", "create_issue_from_step", "send_issue_to_tracker",
 )
 
@@ -45,6 +48,7 @@ internal suspend fun describePerCallApproval(appState: AppState, toolName: Strin
         "rerun_test_step" -> describeRerunStepCall(appState, arguments, clientName)
         "rerun_failed_test_cases" -> describeRerunFailedCall(appState, arguments, clientName)
         "draft_test_steps" -> describeDraftStepCall(appState, arguments, clientName)
+        "improve_test_case" -> describeImproveCaseCall(appState, arguments, clientName)
         "rewrite_test_recording" -> describeRewriteRecordingCall(appState, arguments, clientName)
         "import_test_script" -> describeScriptImportCall(arguments, clientName)
         "export_test_script" -> describeScriptExportCall(appState, arguments, clientName)
@@ -84,6 +88,38 @@ private fun describeDraftStepCall(appState: AppState, arguments: Map<String, Any
         ),
         allowLabel = "Generate preview",
         declinedMessage = "The user declined to send this test context to the configured provider; no draft was generated.",
+    )
+}
+
+@Suppress("ReturnCount") // Fail-closed argument checks each return an actionable refusal.
+private fun describeImproveCaseCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
+    val profileId = arguments["profileId"] as? String ?: return null
+    val profile = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId } ?: return null
+    val caseId = arguments["caseId"] as? String ?: return null
+    val location = appState.testLibrary.findCase(caseId) ?: return null
+    val destination = remoteDestination(profile) ?: return null
+    val model = (arguments["model"] as? String)?.takeIf(String::isNotBlank)
+    val runId = (arguments["runId"] as? String)?.takeIf(String::isNotBlank)
+    val note = (arguments["note"] as? String)?.takeIf(String::isNotBlank)
+    return ExternalActionDetails(
+        title = "Send a test case and its run evidence to an AI provider?",
+        summary =
+            "$clientName wants to improve the wording of the steps of '${location.case.name}'. The provider receives the steps, the suite " +
+                "and case text, the golden screenshots and, from the latest run of the case (or the run it names), each step's status, " +
+                "screenshots and the judge's verdict, reasoning and suggested fix; it returns a preview only and does not edit the library " +
+                "or control a device.",
+        fields = listOfNotNull(
+            "Provider" to "${profile.displayName} · ${profile.kind.label}",
+            model?.let { "Model" to it },
+            "Destination" to destination,
+            "Suite and case" to "${location.suite.name} / ${location.case.name}",
+            "Steps" to "${location.case.steps.size} saved step(s)",
+            "Run evidence" to (runId ?: "The case's latest finished run, if any"),
+            note?.let { "Request" to it.clip(APPROVAL_INSTRUCTION_PREVIEW_CHARS) },
+            "Changes" to "Preview only; applying the accepted steps requires a separate action",
+        ),
+        allowLabel = "Generate preview",
+        declinedMessage = "The user declined to send this test case to the configured provider; no improvement was generated.",
     )
 }
 

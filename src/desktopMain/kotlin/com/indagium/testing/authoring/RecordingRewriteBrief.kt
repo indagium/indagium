@@ -192,7 +192,7 @@ private fun scriptLine(script: TestScript): String {
             .take(MAX_SCRIPT_LINE_CHARS)
 }
 
-private fun chunks(lines: List<String>): List<String> {
+internal fun chunks(lines: List<String>): List<String> {
     val chunks = ArrayList<String>()
     val current = StringBuilder()
     for (line in lines) {

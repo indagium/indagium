@@ -2,10 +2,14 @@ package com.indagium.debug
 
 import com.indagium.edition.Edition
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.authoring.ImproveEvidenceSummary
+import com.indagium.testing.authoring.ImproveStepEdit
+import com.indagium.testing.authoring.ImproveStepProposal
 import com.indagium.testing.authoring.MAX_FIXED_STEP_CHARS
 import com.indagium.testing.authoring.RecordedInputKind
 import com.indagium.testing.authoring.RecordedPerformerEdit
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.TestCaseImproveProposal
 import com.indagium.testing.authoring.performerEditable
 import com.indagium.testing.authoring.readTestScriptEnvelope
 import com.indagium.testing.authoring.summary
@@ -92,6 +96,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         },
         "try_test_script" to suspendTool { a -> tryScript(a) },
         "draft_test_steps" to suspendTool { a -> draftSteps(a) },
+        "improve_test_case" to suspendTool { a -> improveCase(a) },
         "rewrite_test_recording" to suspendTool { a -> rewriteRecording(a) },
         "import_test_script" to suspendTool { a -> importScript(a) },
         "export_test_script" to suspendTool { a -> exportScript(a) },
@@ -342,6 +347,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         },
         "insert_log_checks" to tool { a -> insertLogChecks(a) },
         "apply_test_step_draft" to tool { a -> applyStepDraft(a) },
+        "apply_test_case_improvement" to tool { a -> applyCaseImprovement(a) },
         "get_test_recording" to tool { a ->
             val id = a.requiredString("sessionId")
             val rowId = a.string("rowId")
@@ -507,6 +513,101 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 usageResultMap(draft.latestUsage)?.let { "latestUsage" to it },
                 usageResultMap(draft.creationUsage)?.let { "creationUsage" to it },
             ).toMap()
+        }
+    }
+
+    private suspend fun improveCase(a: ToolArgs): Map<String, Any?> {
+        val result = appState.testCaseImproveService.create(
+            caseId = a.requiredString("caseId"),
+            profileId = a.requiredString("profileId"),
+            note = a.string("note").orEmpty(),
+            model = a.string("model"),
+            effort = a.string("reasoningEffort"),
+            runId = a.string("runId")?.takeIf(String::isNotBlank),
+        )
+        return result.toResult { proposal -> improvementMap(proposal) }
+    }
+
+    private fun improvementMap(proposal: TestCaseImproveProposal): Map<String, Any?> = buildMap {
+        put("proposalId", proposal.id)
+        put("suiteId", proposal.suiteId)
+        put("caseId", proposal.caseId)
+        put("profileId", proposal.profileId)
+        put("runId", proposal.runId)
+        put("evidence", evidenceMap(proposal.evidence))
+        put("changedSteps", proposal.steps.count { it.changed })
+        put("steps", proposal.steps.map(::improvedStepMap))
+        usageResultMap(proposal.usage)?.let { put("latestUsage", it) }
+    }
+
+    private fun evidenceMap(evidence: ImproveEvidenceSummary): Map<String, Any?> = mapOf(
+        "runId" to evidence.runId,
+        "runCreatedAt" to evidence.runCreatedAt,
+        "runStatus" to evidence.runStatus,
+        "lane" to evidence.laneNumber,
+        "repeat" to evidence.iteration,
+        "stepsWithResults" to evidence.stepsWithResults,
+        "problemSteps" to evidence.problemSteps,
+        "runScreenshots" to evidence.runScreenshots,
+        "goldenScreenshots" to evidence.goldenScreenshots,
+        "judgeSuggestions" to evidence.judgeSuggestions,
+        "imagesLeftOut" to evidence.leftOut,
+    )
+
+    private fun improvedStepMap(step: ImproveStepProposal): Map<String, Any?> = buildMap {
+        put("stepId", step.stepId)
+        put("number", step.number)
+        put("kind", step.previous.kind.name)
+        put("changed", step.changed)
+        put("action", step.action)
+        put("expected", step.expected)
+        put("optional", step.optional)
+        put("condition", step.condition)
+        put("reason", step.reason)
+        put(
+            "previous",
+            mapOf(
+                "action" to step.previous.action,
+                "expected" to step.previous.expected,
+                "optional" to step.previous.optional,
+                "condition" to step.previous.condition,
+            ),
+        )
+        step.incidentalWarning?.let { put("incidentalWarning", it) }
+        if (step.checks != step.previous.checks) put("checks", stepToJson(step.proposed).toPlainMap()["checks"])
+    }
+
+    private fun applyCaseImprovement(a: ToolArgs): Map<String, Any?> {
+        val proposalId = a.requiredString("proposalId")
+        val proposal = appState.testCaseImproveService.peek(proposalId)
+            ?: return errorMap("This improvement expired or was already applied. Generate a new one.")
+        val rows = a.objects("steps") ?: toolArgError("steps is required; send the reviewed preview.")
+        val edits = rows.mapIndexed { index, row ->
+            val id = row["stepId"] as? String ?: toolArgError("steps[$index].stepId must be a string.")
+            val proposed = proposal.steps.firstOrNull { it.stepId == id }
+            val optional = if (row.containsKey("optional") && row["optional"] != null) {
+                row["optional"] as? Boolean ?: toolArgError("steps[$index].optional must be true or false.")
+            } else {
+                proposed?.optional ?: false
+            }
+            val rawCondition = row["condition"]
+            val condition = when {
+                !row.containsKey("condition") -> proposed?.condition.takeIf { optional }
+                rawCondition == null -> null
+                rawCondition is String -> rawCondition.takeIf { it.isNotBlank() }
+                else -> toolArgError("steps[$index].condition must be a string.")
+            }
+            ImproveStepEdit(
+                stepId = id,
+                action = row["action"] as? String ?: toolArgError("steps[$index].action must be a string."),
+                expected = row["expected"] as? String ?: toolArgError("steps[$index].expected must be a string."),
+                optional = optional,
+                condition = condition,
+            )
+        }
+        val accept = a.strings("accept")?.toSet()
+        return appState.testCaseImproveService.apply(proposalId, edits, accept).toResult { updated ->
+            mapOf("proposalId" to proposalId, "caseId" to proposal.caseId, "steps" to updated.map(::stepResult), "stepIds" to updated.map { it.id })
         }
     }
 
