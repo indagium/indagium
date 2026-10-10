@@ -3,6 +3,7 @@ package com.indagium.debug
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
@@ -48,8 +49,12 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "caseToolCallLimit" to "integer", "evidence" to "object", "judgeProfileId" to "string", "judgeMode" to "string",
             "judgeModel" to "string", "judgeReasoningEffort" to "string", "capture" to "object", "openLaneTabs" to "boolean",
             "manualSteps" to "string",
+            "judgeInconclusivePolicy" to "string",
             required = listOf("suiteId", "lanes"),
-            enums = mapOf("manualSteps" to ManualStepsOption.entries.map { it.wire }),
+            enums = mapOf(
+                "manualSteps" to ManualStepsOption.entries.map { it.wire },
+                "judgeInconclusivePolicy" to JudgeInconclusivePolicy.entries.map { it.wire },
+            ),
             descriptions = mapOf(
                 "suiteId" to "Id of the suite (list_test_suites).",
                 "caseIds" to "Only these cases (default: every case of the suite).",
@@ -73,6 +78,8 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "script when it has one, otherwise wait for a tester), ${ManualStepsOption.WAIT_FOR_TESTER.wire} (always wait for a " +
                     "tester) or ${ManualStepsOption.SKIP.wire} (report manual steps as skipped and go on). A waiting lane is listed in " +
                     "get_test_run_status; answer it with resolve_manual_step.",
+                "judgeInconclusivePolicy" to "What a new run does when the separate judge cannot decide: block (default), or keep_agent_pass. " +
+                    "Explicit ScreenJudge and AskJudge checks remain blocked when inconclusive.",
             ),
             objectArrays = mapOf("lanes" to LANE_ITEM_SCHEMA),
         ),

@@ -1,13 +1,19 @@
 package com.indagium.testing.authoring
 
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestStep
 
 // Reopening a recording whose evidence was kept: the stored rows, screen readings, screenshots and video come back as a STOPPED
 // TestStepRecordingSession, with no device behind it, so the review panel, the AI rewrite, editing, reordering and applying work exactly
 // as they do on a recording made just now. Reading the stored files never changes them; discarding the reopened recording leaves them be.
 
 /** The stored recording a reopened session came from, kept so applying it can replace the steps it produced and update what is stored. */
-internal class ReopenedRecording(val stored: StoredRecording, val notes: List<String>) {
+internal class ReopenedRecording(
+    val stored: StoredRecording,
+    val notes: List<String>,
+    /** Exact step values when reopened; replacement compares them atomically before changing the library. */
+    val baselineSteps: List<TestStep> = emptyList(),
+) {
     val recordingId: String get() = stored.recordingId
 
     /** The ids of the library steps the recording produced when it was last applied, in order. */
@@ -33,11 +39,11 @@ internal class ReopenedRecording(val stored: StoredRecording, val notes: List<St
  * A stopped session with the contents of [loaded]. Its video, when it has one, is opened read-only from the stored segments, so
  * [TestStepRecordingSession.close] on it never deletes anything.
  */
-internal fun restoreRecordingSession(loaded: LoadedRecording): TestStepRecordingSession {
+internal fun restoreRecordingSession(loaded: LoadedRecording, baselineSteps: List<TestStep> = emptyList()): TestStepRecordingSession {
     val timeline = loaded.video?.let(RecordedVideoTimeline::openStored)
     val notes = loaded.notes + if (loaded.video != null && timeline == null) listOf(VIDEO_UNUSABLE_NOTE) else emptyList()
     val session = TestStepRecordingSession(loaded.recording.deviceSerial, videoTimeline = timeline)
-    session.loadStopped(loaded.recording, ReopenedRecording(loaded.recording, notes))
+    session.loadStopped(loaded.recording, ReopenedRecording(loaded.recording, notes, baselineSteps.toList()))
     return session
 }
 

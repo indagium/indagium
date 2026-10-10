@@ -9,6 +9,7 @@ import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
@@ -100,6 +101,7 @@ internal data class RunDialogModel(
     val judgeModelWasDiscovered: Boolean = false,
     /** What the run does with manual steps; the dialog only offers the choice when the suite has some. */
     val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
+    val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
 ) {
     /** Every lane row, first lane first. */
     fun allLanes(): List<LaneDraft> =
@@ -190,6 +192,7 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             capture = capture,
             openLaneTabs = openLaneTabs,
             manualSteps = manualSteps,
+            judgeInconclusivePolicy = judgeInconclusivePolicy,
         ),
     )
 }
@@ -228,6 +231,7 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
         capture = config.capture ?: capture,
         openLaneTabs = config.openLaneTabs,
         manualSteps = config.manualSteps,
+        judgeInconclusivePolicy = config.judgeInconclusivePolicy,
     )
 }
 

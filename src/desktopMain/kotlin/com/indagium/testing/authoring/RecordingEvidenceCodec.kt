@@ -3,6 +3,7 @@ package com.indagium.testing.authoring
 import com.indagium.testing.device.MAX_UI_TREE_NODES
 import com.indagium.testing.device.UiNode
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.store.IdAllocator
 import com.indagium.testing.store.bool
@@ -261,6 +262,10 @@ private fun rowJson(row: RecordedTestStep, images: RecordingImageStore): JsonObj
     put("stepKind", row.stepKind.name)
     row.script?.let { put("script", scriptCallToJson(it)) }
     put("manualCompletion", row.manualCompletion.name)
+    if (row.intent != StepIntent.PERFORM_ACTION) put("intent", row.intent.wire)
+    row.precondition?.let { put("precondition", it) }
+    put("humanReviewed", row.humanReviewed)
+    put("modelSupported", row.modelSupported)
     if (row.stateChanges.isNotEmpty()) put("stateChanges", buildJsonArray { row.stateChanges.forEach { add(eventJson(it)) } })
 }
 
@@ -446,5 +451,9 @@ private fun decodeRow(o: JsonObject, context: DecodeContext): RecordedTestStep {
         script = (o["script"] as? JsonObject)?.let { decodeScriptCall(it) },
         manualCompletion = o.enumOr("manualCompletion", ManualCompletion.TESTER_OR_CHECKS),
         stateChanges = o.objects("stateChanges").take(MAX_STATE_CHANGES).map(::decodeEvent),
+        intent = StepIntent.parse(o.optStr("intent")) ?: StepIntent.PERFORM_ACTION,
+        precondition = o.optStr("precondition"),
+        humanReviewed = o.bool("humanReviewed", false),
+        modelSupported = o.bool("modelSupported", false),
     )
 }

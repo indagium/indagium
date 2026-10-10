@@ -58,6 +58,7 @@ internal fun comparisonEvidence(runDir: File, target: ComparisonTarget): JudgeEv
             laneId = laneStep.lane.laneId,
             deterministic = deterministicOnly(result.checks),
             screenshot = { loadScreenshot(runDir, result.screenshotPath) },
+            startScreenshot = { loadScreenshot(runDir, result.startScreenshotPath) },
             log = { offset, limit -> logFile?.let { withContext(Dispatchers.IO) { readStepLogSlice(it, start, end, offset, limit) } } },
             logBytes = if (start != null && end != null) end - start else null,
         )
@@ -71,6 +72,8 @@ internal fun comparisonEvidence(runDir: File, target: ComparisonTarget): JudgeEv
         judgeChecks = judgeChecksOf(target.step),
         examples = target.step.examples,
         lanes = lanes,
+        intent = target.step.intent,
+        precondition = target.step.precondition,
     )
 }
 

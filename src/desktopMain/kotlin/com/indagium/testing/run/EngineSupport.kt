@@ -220,13 +220,20 @@ internal class CaseBudget(private val limit: Int) {
     fun limit(): Int = limit
 
     @Synchronized
-    fun tryDispatch(): Boolean {
-        if (used >= limit) {
+    fun tryDispatch(count: Int = 1): Boolean {
+        require(count > 0)
+        if (count > limit - used) {
             wasExceeded = true
             return false
         }
-        used++
+        used += count
         return true
+    }
+
+    @Synchronized
+    fun releaseDispatch(count: Int) {
+        require(count >= 0)
+        used = (used - count).coerceAtLeast(0)
     }
 
     @Synchronized

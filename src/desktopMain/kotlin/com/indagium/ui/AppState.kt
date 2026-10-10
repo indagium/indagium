@@ -1988,7 +1988,9 @@ class AppState(
             resolveImage = ::testGoldenImageFile,
             insertSteps = ::createTestSteps,
             insertStepsWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
-            replaceStepsWithUsage = { caseId, replacedIds, steps, usage -> testStoreOp { replaceSteps(caseId, replacedIds, steps, usage) } },
+            replaceStepsWithUsage = { caseId, replacedIds, steps, usage, baseline ->
+                testStoreOp { replaceSteps(caseId, replacedIds, steps, usage, baseline) }
+            },
         )
     }
 
@@ -2482,7 +2484,8 @@ class AppState(
             is StoreResult.LimitReached -> return loaded
         }
         if (recording.recording.caseId != caseId) return StoreResult.Invalid("Stored recording '$chosen' belongs to a different case.")
-        val session = withContext(Dispatchers.IO) { com.indagium.testing.authoring.restoreRecordingSession(recording) }
+        val baseline = location.case.steps.filter { it.id in recording.recording.stepIds }
+        val session = withContext(Dispatchers.IO) { com.indagium.testing.authoring.restoreRecordingSession(recording, baseline) }
         return registerTestStepRecording(session, suiteId, caseId, deviceBound = false)
     }
 

@@ -3,6 +3,7 @@ package com.indagium.testing.authoring
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
@@ -64,10 +65,20 @@ internal data class ImproveStepProposal(
     val condition: String?,
     val checks: List<StepCheck>,
     val reason: String,
+    val intent: StepIntent = previous.intent,
+    val precondition: String? = previous.precondition,
 ) {
     /** The saved step with this proposal applied. */
     val proposed: TestStep
-        get() = previous.copy(action = action, expected = expected, optional = optional, condition = condition, checks = checks)
+        get() = previous.copy(
+            action = action,
+            expected = expected,
+            optional = optional,
+            condition = condition,
+            checks = checks,
+            intent = intent,
+            precondition = precondition,
+        )
 
     val changed: Boolean get() = proposed != previous
 
@@ -175,6 +186,7 @@ internal fun parseImproveResponse(response: String, steps: List<TestStep>, scrip
     }
 }
 
+@Suppress("ThrowsCount") // Reject invalid fixed fields at their JSON path so a malformed improvement cannot alter step semantics.
 private fun parseImprovedStep(obj: JsonObject, index: Int, old: TestStep, scripts: List<TestScript>): ImproveStepProposal {
     val where = "$STEPS_KEY[$index]"
     val id = (obj[STEP_ID_KEY] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()
@@ -186,6 +198,22 @@ private fun parseImprovedStep(obj: JsonObject, index: Int, old: TestStep, script
     val kind = obj["kind"]
     require(isEmptyAnswer(kind) || (kind as? JsonPrimitive)?.contentOrNull?.trim().equals(old.kind.name, ignoreCase = true)) {
         "$where.kind cannot change in an improvement (this is a ${old.kind.name.lowercase()} step)."
+    }
+    val intent = obj["intent"]?.let { element ->
+        val wire = (element as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw IllegalArgumentException("$where.intent must be \"${old.intent.wire}\".")
+        StepIntent.parse(wire)?.takeIf { it == old.intent }
+            ?: throw IllegalArgumentException("$where.intent is fixed at \"${old.intent.wire}\" during wording improvement.")
+    } ?: old.intent
+    val precondition = if (obj.containsKey("precondition")) {
+        val value = obj["precondition"]
+        when {
+            value == null || value is JsonNull -> null
+            value is JsonPrimitive && value.isString -> value.content.takeIf(String::isNotBlank)
+            else -> throw IllegalArgumentException("$where.precondition must be a string or null.")
+        }.also { require(it == old.precondition) { "$where.precondition is fixed during wording improvement." } }
+    } else {
+        old.precondition
     }
     val action = textField(obj, "action", where)
     val expected = textField(obj, "expected", where, allowBlank = true)
@@ -203,7 +231,7 @@ private fun parseImprovedStep(obj: JsonObject, index: Int, old: TestStep, script
     } catch (invalid: IllegalArgumentException) {
         throw IllegalArgumentException("$where: ${invalid.message}", invalid)
     }
-    return ImproveStepProposal(old.id, index + 1, old, step.action, step.expected, step.optional, step.condition, step.checks, reason)
+    return ImproveStepProposal(old.id, index + 1, old, step.action, step.expected, step.optional, step.condition, step.checks, reason, intent, precondition)
 }
 
 private fun optionalFlag(element: JsonElement?, where: String): Boolean? {

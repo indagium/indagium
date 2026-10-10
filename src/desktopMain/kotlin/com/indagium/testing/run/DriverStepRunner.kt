@@ -102,7 +102,13 @@ internal class DriverStepRunner(
         if (script.permission == ScriptPermission.ASK && !confirmed(script)) {
             return ScriptOutcome(LaneStepStatus.BLOCKED, "running '${script.toolName}' was not allowed (declined, or not answered in time).")
         }
-        return withTimeoutOrNull(step.timeoutMs) { execute(step, script, call) }
+        // Consent can take an arbitrary amount of time. Start the step's single action/check
+        // allowance immediately before the script; finishDriverStep keeps its remaining time.
+        seq.resetStepTimer()
+        return withTimeoutOrNull(step.timeoutMs) {
+            seq.beforeDeviceMutation()
+            execute(step, script, call)
+        }
     }
 
     private suspend fun execute(step: TestStep, script: TestScript, call: ScriptCall): ScriptOutcome {
@@ -171,6 +177,7 @@ internal class DriverStepRunner(
     }
 
     private suspend fun waitForTester(step: TestStep, scriptHint: String) {
+        seq.beforeDeviceMutation()
         val completion = step.manualCompletion
         val watched = if (completion == ManualCompletion.TESTER_ONLY) emptyList() else step.completionChecks
         val startedNanos = env.nanoTime()

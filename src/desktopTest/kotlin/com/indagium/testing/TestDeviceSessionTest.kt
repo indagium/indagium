@@ -1,10 +1,14 @@
 package com.indagium.testing
 
 import com.indagium.debug.mapDisplayedScreenCoordinatesToDevice
+import com.indagium.testing.device.DeviceInputAction
 import com.indagium.testing.device.LogAbsentResult
 import com.indagium.testing.device.LogWaitResult
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.device.parseUiAutomatorDump
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.concurrent.thread
@@ -118,6 +122,70 @@ class TestDeviceSessionTest {
         val result = runBlocking { lane.tap(10, 20) }
         assertEquals(2, result.deviceCoordinates.size)
         assertTrue(runner.specs.any { "screencap" in it.command })
+    }
+
+    @Test
+    fun inputSequenceValidatesAllActionsThenRunsInOrderWithOneFinalScreenshot() = runBlocking {
+        val lane = open()
+        val start = lane.screenshot()
+        val beforeShots = runner.specs.count { "screencap" in it.command }
+        val result = lane.performInputSequence(
+            listOf(
+                DeviceInputAction.Tap(10, 20),
+                DeviceInputAction.Key("BACK", delayMs = 5),
+                DeviceInputAction.Swipe(20, 30, 40, 50, 350),
+            ),
+        )
+
+        assertEquals(listOf("tap", "press_key", "swipe"), result.actions.map { it.action })
+        assertTrue(result.actions.all { it.succeeded })
+        assertNotNull(result.finalScreen)
+        val (tapX, tapY) = mapDisplayedScreenCoordinatesToDevice(10, 20, start.space)
+        val (x1, y1) = mapDisplayedScreenCoordinatesToDevice(20, 30, start.space)
+        val (x2, y2) = mapDisplayedScreenCoordinatesToDevice(40, 50, start.space)
+        assertEquals(listOf("input", "tap", tapX.toString(), tapY.toString()), runner.shellCommands[0])
+        assertEquals(listOf("input", "keyevent", "KEYCODE_BACK"), runner.shellCommands[1])
+        assertEquals(listOf("input", "swipe", x1.toString(), y1.toString(), x2.toString(), y2.toString(), "350"), runner.shellCommands[2])
+        assertEquals(beforeShots + 1, runner.specs.count { "screencap" in it.command }, "only the final frame is captured inside the sequence")
+        assertEquals(start.space, result.finalScreen.space)
+    }
+
+    @Test
+    fun inputSequenceRejectsAnyInvalidCoordinateBeforeDispatchingTheFirstAction() {
+        val lane = open()
+        val space = runBlocking { lane.screenshot() }.space
+
+        assertFailsWith<IllegalArgumentException> {
+            runBlocking {
+                lane.performInputSequence(
+                    listOf(DeviceInputAction.Tap(1, 1), DeviceInputAction.Tap(space.imageWidth, 1)),
+                )
+            }
+        }
+
+        assertTrue(runner.shellCommands.isEmpty(), "validation covers the full batch before the first device mutation")
+    }
+
+    @Test
+    fun cancellationDuringSequenceDelayKeepsTheDispatchedActionOnceAndReportsNextIndex() = runBlocking {
+        val lane = open()
+        val actionRecorded = CompletableDeferred<Unit>()
+        val actions = mutableListOf<Int>()
+        val interrupted = mutableListOf<Pair<Int, String>>()
+        val task = launch {
+            lane.performInputSequence(
+                listOf(DeviceInputAction.Tap(10, 20, delayMs = 1_000), DeviceInputAction.Key("BACK")),
+                onActionResult = { index, _ -> actions += index; actionRecorded.complete(Unit) },
+                onInterrupted = { index, reason -> interrupted += index to reason },
+            )
+        }
+        actionRecorded.await()
+        task.cancelAndJoin()
+
+        assertEquals(listOf(1), actions)
+        assertEquals(2, interrupted.single().first)
+        assertTrue(interrupted.single().second.contains("during the delay"))
+        assertEquals(1, runner.shellCommands.count { it.firstOrNull() == "input" })
     }
 
     @Test

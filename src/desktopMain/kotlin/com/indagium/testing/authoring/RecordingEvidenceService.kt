@@ -63,6 +63,7 @@ internal class RecordingEvidenceService(
     ): RecordingApplyOptions = RecordingApplyOptions(
         recordingRef = reopened.recordingId,
         replaceStepIds = replaceStepIds,
+        replaceStepBaseline = reopened.baselineSteps.takeIf { replaceStepIds != null },
         afterApplied = { snapshot, inserted ->
             if (replaceStepIds == null) unlinkSteps(replacedStepIds.toSet())
             val evidence = session.evidence().withSnapshot(snapshot)

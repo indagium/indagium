@@ -28,6 +28,7 @@ internal class RewriteAttachment(
     val fallbackPrompt: String,
     val fallbackToolCallLimit: Int,
     val fallbackMaxTurns: Int,
+    val visualMoments: Map<Int, Set<String>> = emptyMap(),
 )
 
 /** Everything one agent run for a rewrite needs; [model] / [effort] replace the profile's own when given. */
@@ -43,6 +44,8 @@ internal data class RewriteGeneration(
     val onUsage: (AiUsageStats) -> Unit = {},
     /** The evidence images that go with [prompt]; null when the prompt stands alone (no evidence, or an agent that takes no images). */
     val attachment: RewriteAttachment? = null,
+    /** Called by the lane runner with only video evidence actually attached to the model request. */
+    val onVisualEvidenceDelivered: (Map<Int, Set<String>>) -> Unit = {},
 )
 
 /** What the first message of one rewrite is made of. [video] is the recorded video when it can show frames. */
@@ -103,6 +106,7 @@ internal class RecordingRewriteService(
         }
         val inputs = rewriteInputsOf(rows, locks, session::screenState)
         val rewriteTools = RecordingRewriteTools(inputs, session.videoTimeline)
+        var deliveredVisualMoments: Map<Int, Set<String>> = emptyMap()
         val timeline = session.videoTimeline
         val videoSummary = timeline?.summary()
         val fullLimit = rewriteToolCallLimit(inputs.size, videoSummary?.available == true)
@@ -116,6 +120,13 @@ internal class RecordingRewriteService(
             toolCallLimit = fullLimit,
             maxTurns = fullLimit + REWRITE_TURN_HEADROOM,
             onUsage = session::updateRewriteUsage,
+            onVisualEvidenceDelivered = {
+                deliveredVisualMoments = it
+                AppLogger.info(
+                    REWRITE_TIMING_LOG_COMPONENT,
+                    "rewrite_evidence_delivery: initialVisualMoments=${visualCoverageLabel(it)} inputs=${inputs.size}",
+                )
+            },
         )
         val context = RewriteContext(suite, case, note, inputs, videoSummary, library().scripts, timeline?.takeIf { videoSummary?.available == true })
         if (!session.beginRewriteUsageAttempt()) return StoreResult.Invalid("The recording changed while the rewrite was starting.")
@@ -125,7 +136,18 @@ internal class RecordingRewriteService(
                 generate(withEvidence(plain, context))
             }
             val proposal = parseRewriteResponse(response, rewriteExpectations(inputs, library().scripts))
-            val rewritten = buildRewrittenRows(proposal, inputs, rewriteTools.videoInspectedInputs())
+            val visualCoverage = mergeVideoMoments(deliveredVisualMoments, rewriteTools.visualInspectedMoments())
+            AppLogger.info(
+                REWRITE_TIMING_LOG_COMPONENT,
+                "rewrite_evidence_coverage: deliveredAndFetchedVisualMoments=${visualCoverageLabel(visualCoverage)} " +
+                    "deliveredInputs=${deliveredVisualMoments.keys.sorted()} fetchedInputs=${rewriteTools.visualInspectedMoments().keys.sorted()}",
+            )
+            val rewritten = buildRewrittenRows(
+                proposal,
+                inputs,
+                emptySet(),
+                visualCoverage,
+            )
             if (!session.applyRewrite(rows.map { it.id }, rewritten, proposal.notes)) {
                 return StoreResult.Invalid("The recording changed while it was being rewritten; nothing was applied. Rewrite it again.")
             }
@@ -184,9 +206,15 @@ internal class RecordingRewriteService(
             prompt = context.prompt(evidence, attachImages = true),
             toolCallLimit = limit,
             maxTurns = limit + REWRITE_TURN_HEADROOM,
-            attachment = RewriteAttachment(evidence.llmImages(), fetchPrompt, toolCallLimit, maxTurns),
+            attachment = RewriteAttachment(evidence.llmImages(), fetchPrompt, toolCallLimit, maxTurns, evidence.visualMoments),
+            onVisualEvidenceDelivered = onVisualEvidenceDelivered,
         )
     }
+
+    private fun visualCoverageLabel(coverage: Map<Int, Set<String>>): String =
+        coverage.toSortedMap().entries.joinToString(prefix = "{", postfix = "}") { (input, moments) ->
+            "$input:${moments.sorted().joinToString(",")}"
+        }
 
     /**
      * The video as a source of pictures: a storyboard of a wall-clock window (clamped to the start of the video) and the frame held at
@@ -197,7 +225,11 @@ internal class RecordingRewriteService(
             val start = timeline.sessionOffsetMs(startWallMs).coerceAtLeast(0L)
             val end = timeline.sessionOffsetMs(endWallMs)
             return timeline.storyboardForRange(start, end, inputs)?.let { sheet ->
-                runCatching { RewriteVideoSheet(Base64.getDecoder().decode(sheet.imageBase64), sheet.mimeType) }.getOrNull()
+                val moments = sheet.frames.mapNotNull { frame ->
+                    val number = frame.inputNumber ?: return@mapNotNull null
+                    number to frame.relation.lowercase().takeIf { it == "before" || it == "after" }
+                }.filter { it.second != null }.groupBy({ it.first }, { it.second!! }).mapValues { (_, values) -> values.toSet() }
+                runCatching { RewriteVideoSheet(Base64.getDecoder().decode(sheet.imageBase64), sheet.mimeType, moments) }.getOrNull()
             }
         }
 
@@ -215,7 +247,10 @@ internal class RecordingRewriteService(
     }
 }
 
-/** What the answer for [inputs] is checked against: the person's own and the accepted steps, the external events with their checks, the scripts. */
+private fun mergeVideoMoments(first: Map<Int, Set<String>>, second: Map<Int, Set<String>>): Map<Int, Set<String>> =
+    (first.keys + second.keys).associateWith { number -> first[number].orEmpty() + second[number].orEmpty() }
+
+/** What the answer for [inputs] is checked against: the person's own and preserved steps, the external events with their checks, the scripts. */
 internal fun rewriteExpectations(inputs: List<RewriteInput>, scripts: List<TestScript>) = RewriteExpectations(
     inputCount = inputs.size,
     fixedInputs = inputs.filter { it.fixed }.associate { it.number to it.row },
@@ -224,7 +259,7 @@ internal fun rewriteExpectations(inputs: List<RewriteInput>, scripts: List<TestS
     lockedSteps = inputs.mapNotNull { it.locked }.distinct(),
 )
 
-/** Which accepted steps of an earlier rewrite the next one keeps, or why it cannot run. */
+/** Which preserved steps of an earlier rewrite the next one keeps, or why it cannot run. */
 private sealed interface KeptSteps {
     class Kept(val locks: List<LockedRewriteStep>) : KeptSteps
 
@@ -232,12 +267,23 @@ private sealed interface KeptSteps {
 }
 
 /**
- * The accepted steps ([accepted], rewritten rows nobody flagged) a rewrite of [rows] keeps as they are. [RewriteScope.ALL] keeps none.
+ * The supported or human-reviewed steps ([accepted], rewritten rows nobody flagged) a rewrite of [rows] keeps as they are. [RewriteScope.ALL] keeps none.
  * An unspecified scope keeps them unless every recorded input is covered by one: then there is nothing to rewrite but everything, which
- * is what it does. Asking for [RewriteScope.NEEDS_REVIEW] then is refused, so a model is not paid to return what is already accepted.
+ * is what it does. Asking for [RewriteScope.NEEDS_REVIEW] then is refused, so a model is not paid to return preserved rows again.
  */
 private fun keptSteps(rows: List<RecordedTestStep>, accepted: List<RecordedTestStep>, scope: RewriteScope?): KeptSteps {
-    val locks = if (scope == RewriteScope.ALL) emptyList() else lockedRewriteStepsOf(rows, accepted)
+    if (scope == RewriteScope.ALL) return KeptSteps.Kept(emptyList())
+    val allLocks = lockedRewriteStepsOf(rows, accepted)
+    val covered = allLocks.flatMapTo(HashSet()) { it.inputs }
+    val openInputs = rows.indices.filter { index ->
+        !rows[index].authorAdded && index + 1 !in covered
+    }.map { it + 1 }.toSet()
+    // On a partial retry, keep distant model-supported rows stable but let the rewrite reconsider one autogenerated helper
+    // immediately beside each unresolved group. Human-reviewed and author-written rows always remain fixed.
+    val helperInputs = openInputs.flatMapTo(HashSet()) { input -> listOf(input - 1, input + 1) }
+    val locks = allLocks.filterNot { lock ->
+        !lock.step.humanReviewed && !lock.step.authorAdded && lock.inputs.any { it in helperInputs }
+    }
     val open = rows.count { !it.authorAdded } - locks.sumOf { it.inputs.size }
     return when {
         locks.isEmpty() || open > 0 -> KeptSteps.Kept(locks)
@@ -247,4 +293,4 @@ private fun keptSteps(rows: List<RecordedTestStep>, accepted: List<RecordedTestS
 }
 
 private const val NOTHING_NEEDS_REVIEW =
-    "Every rewritten step is already accepted, so nothing needs review. Ask for scope \"all\" to rewrite them all again."
+    "Every recorded step is currently supported and preserved, so no step needs review. Ask for scope \"all\" to rewrite them all again."

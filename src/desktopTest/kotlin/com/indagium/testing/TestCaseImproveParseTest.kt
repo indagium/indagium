@@ -6,6 +6,7 @@ import com.indagium.testing.authoring.isImprovableCheck
 import com.indagium.testing.authoring.mergeProposedChecks
 import com.indagium.testing.authoring.parseImproveResponse
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.TestStep
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -131,6 +132,38 @@ class TestCaseImproveParseTest {
     fun textThatOnlyDiffersInItsEdgesStaysExactlyAsSavedSoTheStepIsNotChanged() {
         val padded = unchanged().also { it[0] = entry(steps[0], action = "  Open the app  ", expected = "Home is visible ") }
         assertTrue(parse(answer(padded)).none { it.changed })
+    }
+
+    @Test
+    fun aWordingImprovementCarriesIntentAndPreconditionWithoutChangingEither() {
+        val configured = steps.mapIndexed { index, step ->
+            if (index == 0) step.copy(intent = StepIntent.ENSURE_STATE, precondition = "Playback is active") else step
+        }
+        val entries = configured.mapIndexed { index, step ->
+            if (index == 0) {
+                entry(
+                    step,
+                    extra = ""","intent":"ensure_state","precondition":"Playback is active"""",
+                    action = "Confirm the home screen is visible",
+                    expected = "The home screen is shown",
+                    reason = "Clearer state goal",
+                )
+            } else {
+                entry(step, extra = ""","intent":"${step.intent.wire}","precondition":null""")
+            }
+        }
+
+        val improved = parseImproveResponse(answer(entries), configured, scripts).first()
+
+        assertEquals(StepIntent.ENSURE_STATE, improved.intent)
+        assertEquals("Playback is active", improved.precondition)
+        assertEquals("Confirm the home screen is visible", improved.action)
+        val changedIntent = entries.toMutableList().also {
+            it[0] = it[0].replace("ensure_state", "perform_action")
+        }
+        assertTrue("intent is fixed" in assertFailsWith<IllegalArgumentException> {
+            parseImproveResponse(answer(changedIntent), configured, scripts)
+        }.message.orEmpty())
     }
 
     @Test

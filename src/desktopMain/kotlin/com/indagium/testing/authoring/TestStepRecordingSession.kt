@@ -15,6 +15,7 @@ import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.moveById
@@ -98,6 +99,13 @@ data class RecordedTestStep(
      * within a few seconds, evidence of what it did ("Wi-Fi turned off"). On a [RecordedInputKind.EXTERNAL] row: the event it stands for.
      */
     val stateChanges: List<EnvironmentEvent> = emptyList(),
+    /** The model's proposed playback semantics, kept distinct from the reviewer's explicit review. */
+    val intent: StepIntent = StepIntent.PERFORM_ACTION,
+    val precondition: String? = null,
+    /** True only after a person edits/reviews this row; model support alone does not lock it in a partial rewrite. */
+    val humanReviewed: Boolean = false,
+    /** True when the rewrite had adequate evidence for the row; kept separate from explicit human review. */
+    val modelSupported: Boolean = false,
 )
 
 /**
@@ -460,12 +468,30 @@ class TestStepRecordingSession internal constructor(
     fun replaceSteps(steps: List<RecordedTestStep>): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         if (applicationReserved || current.active || current.rewriteInProgress || steps.map { it.id } != current.steps.map { it.id }) return@synchronized false
+        val oldById = current.steps.associateBy { it.id }
+        val reviewed = steps.take(MAX_RECORDED_STEPS).map { proposed ->
+            val old = oldById.getValue(proposed.id)
+            val changed = reviewedContent(old) != reviewedContent(proposed)
+            if (!changed) old else proposed.copy(
+                humanReviewed = true,
+                reviewReason = if (old.action != proposed.action || old.expected != proposed.expected || old.optional != proposed.optional) {
+                    reviewReasonAfterEdit(old.reviewReason, proposed.expected, proposed.optional)
+                } else {
+                    old.reviewReason
+                },
+            )
+        }
         mutableSnapshot.value = current.copy(
-            steps = steps.take(MAX_RECORDED_STEPS),
-            rawSteps = current.rawSteps?.let { syncRawReviewRows(it, current.steps, steps) },
+            steps = reviewed,
+            rawSteps = current.rawSteps?.let { syncRawReviewRows(it, current.steps, reviewed) },
         )
         true
     }
+
+    private fun reviewedContent(row: RecordedTestStep): List<Any?> = listOf(
+        row.action, row.expected, row.optional, row.condition, row.useScreenshotAsExpected, row.checks,
+        row.stepKind, row.script, row.manualCompletion, row.intent, row.precondition,
+    )
 
     /**
      * Removes reviewed rows without discarding their recorded source inputs or evidence. An author-added row has no recorded input,
@@ -721,15 +747,23 @@ class TestStepRecordingSession internal constructor(
         val edited = old.mapIndexed { index, row ->
             val optional = optionalOverrides[row.id]?.first ?: row.optional
             val condition = if (optionalOverrides.containsKey(row.id)) optionalOverrides[row.id]?.second?.trim()?.takeIf(String::isNotEmpty) else row.condition
+            val action = actionsAndExpected[index].first
+            val expected = actionsAndExpected[index].second
             val updated = row.copy(
-                action = actionsAndExpected[index].first,
-                expected = actionsAndExpected[index].second,
+                action = action,
+                expected = expected,
                 optional = optional,
                 condition = condition,
-                reviewReason = reviewReasonAfterEdit(row.reviewReason, actionsAndExpected[index].second, optional),
+                reviewReason = if (action != row.action || expected != row.expected || optional != row.optional) {
+                    reviewReasonAfterEdit(row.reviewReason, expected, optional)
+                } else {
+                    row.reviewReason
+                },
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
-            performerEdits[row.id]?.applyTo(updated) ?: updated
+            val withPerformer = performerEdits[row.id]?.applyTo(updated) ?: updated
+            val changed = reviewedContent(row) != reviewedContent(withPerformer)
+            withPerformer.copy(humanReviewed = row.humanReviewed || changed)
         }
         mutableSnapshot.value = current.copy(
             steps = edited,
@@ -759,11 +793,23 @@ class TestStepRecordingSession internal constructor(
             expectedScreenshotIds.all { id -> old.any { it.id == id } } &&
             optionalOverrides.keys.all { id -> old.any { it.id == id } } &&
             performerEdits.all { (id, edit) -> old.firstOrNull { it.id == id }?.let(edit::allowedOn) == true } &&
-            old.mapIndexed { index, row -> row to actionsAndExpected[index].second }.all { (row, expected) ->
+            old.mapIndexed { index, row -> row to actionsAndExpected[index] }.all { (row, text) ->
                 val (optional, condition) = optionalOverrides[row.id] ?: (row.optional to row.condition)
-                val withOptional = row.copy(optional = optional, condition = condition)
-                val effective = performerEdits[row.id]?.applyTo(withOptional) ?: withOptional
-                recordingRowIssues(effective, expected, effective.optional, effective.condition, requireExpected = false).isEmpty()
+                val action = text.first
+                val expected = text.second
+                val withText = row.copy(action = action, expected = expected, optional = optional, condition = condition)
+                val withReview = withText.copy(
+                    reviewReason = if (action != row.action || expected != row.expected || optional != row.optional) {
+                        reviewReasonAfterEdit(row.reviewReason, expected, optional)
+                    } else {
+                        row.reviewReason
+                    },
+                )
+                val effective = performerEdits[row.id]?.applyTo(withReview) ?: withReview
+                // An unresolved row may remain unchanged while the reviewer edits a neighbor. Keep its review issue
+                // for Apply to report, but don't reject the bulk edit; field/action/condition/script rules still apply.
+                recordingRowIssues(effective, expected, effective.optional, effective.condition, requireExpected = false)
+                    .none { it == RecordingRowIssue.ACTION || it == RecordingRowIssue.CONDITION || it == RecordingRowIssue.SCRIPT }
             } &&
             (expectedRowIds == null || expectedRowIds == old.map { it.id })
     }
@@ -918,6 +964,8 @@ class TestStepRecordingSession internal constructor(
             examples = examples,
             optional = row.optional,
             condition = row.condition,
+            intent = row.intent,
+            precondition = row.precondition,
             script = row.script,
             manualCompletion = row.manualCompletion,
         ).withKind(row.stepKind)

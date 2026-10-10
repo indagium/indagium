@@ -37,6 +37,8 @@ private const val MAX_REASONING_CHARS = 2_000
 private const val MAX_FIX_TEXT_CHARS = 1_000
 private const val MOMENT_START = "start"
 private const val MOMENT_END = "end"
+private const val MOMENT_SAMPLE_PREFIX = "sample_"
+private val SAMPLE_MOMENTS = (1..3).map { "$MOMENT_SAMPLE_PREFIX$it" }
 private val VERDICT_NAMES = listOf("pass", "fail", "inconclusive")
 private val CLASSIFICATION_NAMES = listOf("app_defect", "agent_or_step_problem", "unknown")
 
@@ -100,30 +102,47 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
 
     private fun screenshotTool() = JudgeTool(IndagiumToolDescriptor(
         "get_step_screenshot",
-        "See the screen as it was when the step ended (moment \"$MOMENT_END\", the default) or as it was when the step started " +
-            "(moment \"$MOMENT_START\": the screen the step began from, when one was kept). With several lanes, pass lane (as named in the brief).",
+        "See the screen as it was when the step ended (moment \"$MOMENT_END\", the default), when it started (moment \"$MOMENT_START\"), " +
+            "or at one of the timestamped playback samples (moment sample_1 through sample_3). With several lanes, pass lane (as named in the brief).",
         schema(
             "lane" to "string", "moment" to "string",
-            enums = mapOf("moment" to listOf(MOMENT_START, MOMENT_END)),
+            enums = mapOf("moment" to listOf(MOMENT_START, MOMENT_END) + SAMPLE_MOMENTS),
             descriptions = mapOf(
                 "lane" to "The lane to look at (needed when there is more than one).",
-                "moment" to "start: the screen at the start of the step. end: the screen when it ended (default).",
+                "moment" to "start: initial screen. end: final screen (default). sample_1..sample_3: " +
+                    "timestamped playback verification samples listed in the brief.",
             ),
         ),
     )) { args ->
         val lane = laneFor(args)
-        val start = when (args.string("moment")?.trim()?.lowercase()) {
-            null, "", MOMENT_END -> false
-            MOMENT_START -> true
-            else -> throw ToolArgException("moment must be \"$MOMENT_START\" or \"$MOMENT_END\".")
+        val moment = args.string("moment")?.trim()?.lowercase().orEmpty().ifBlank { MOMENT_END }
+        val start = moment == MOMENT_START
+        val sampleNumber = SAMPLE_MOMENTS.indexOf(moment).takeIf { it >= 0 }?.plus(1)
+        if (!start && moment != MOMENT_END && sampleNumber == null) {
+            throw ToolArgException("moment must be start, end, or one of ${SAMPLE_MOMENTS.joinToString()}.")
         }
-        val provider = if (start) lane.startScreenshot else lane.screenshot
+        val sample = sampleNumber?.let { number -> lane.samples.firstOrNull { it.number == number } }
+        val provider = when {
+            start -> lane.startScreenshot
+            sample != null -> sample.screenshot
+            sampleNumber != null -> null
+            else -> lane.screenshot
+        }
         val image = provider?.invoke()
         if (image == null) {
-            mapOf("error" to "No screenshot was kept for the ${if (start) "start of the step" else "end of the step"} of ${lane.label}.")
+            val momentDescription = when {
+                sample != null -> "playback sample ${sample.number}"
+                start -> "the start of the step"
+                else -> "the end of the step"
+            }
+            mapOf("error" to "No screenshot was kept for $momentDescription of ${lane.label}.")
         } else {
             mapOf(
-                "message" to "${if (start) START_SCREEN_LABEL else END_SCREEN_LABEL} (${lane.label})",
+                "message" to when {
+                    start -> "$START_SCREEN_LABEL (${lane.label})"
+                    sample != null -> "Playback sample ${sample.number}, captured at ${sample.capturedAtMs} ms (${lane.label})"
+                    else -> "$END_SCREEN_LABEL (${lane.label})"
+                },
                 "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
                 "mimeType" to image.mimeType,
             )

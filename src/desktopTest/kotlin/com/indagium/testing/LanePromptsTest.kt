@@ -1,5 +1,6 @@
 package com.indagium.testing
 
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestVariable
@@ -23,14 +24,17 @@ class LanePromptsTest {
     }
 
     @Test
-    fun theAgentIsToldToFailAStepItCannotReachInsteadOfRestartingTheFlow() {
+    fun theAgentIsToldToUseBoundedRecoveryAndBlockWhenAnEnvironmentPreventsTheStep() {
         val prompt = LANE_SYSTEM_PROMPT
         assertTrue("Stay in the state the previous steps produced" in prompt, prompt)
         assertTrue("do not navigate away, relaunch the app or restart the flow unless the step says so" in prompt, prompt)
-        assertTrue("after a couple of reasonable attempts" in prompt, prompt)
-        listOf("an ad", "a particular video", "picture-in-picture").forEach { assertTrue(it in prompt, "names '$it': $prompt") }
-        assertTrue("call finish_step with status fail and describe what is on screen" in prompt, prompt)
-        assertTrue("pass only when what you see matches what is expected" in prompt, "the pass rule is unchanged")
+        assertTrue("permitted recovery attempts" in prompt, prompt)
+        listOf("ad", "specific").forEach { assertTrue(it in prompt, "names '$it': $prompt") }
+        assertTrue("Use blocked when an environmental prerequisite remains unavailable" in prompt, prompt)
+        assertTrue("Limit incidental UI-recovery waits to two per step" in prompt, prompt)
+        assertTrue("Never weaken a transition into a state-only check" in prompt, prompt)
+        assertTrue("use fail for an observed mismatch" in prompt.lowercase(), prompt)
+        assertTrue("Use pass only when evidence matches the expected result" in prompt, prompt)
     }
 
     @Test
@@ -51,5 +55,28 @@ class LanePromptsTest {
         assertTrue(resumed.contains("Current step 2 of 2 (attempt 2)") && resumed.contains("Do TWO"), resumed)
         assertTrue(resumed.contains("<untrusted_data source=\"step_results\">") && resumed.contains("FAIL"), resumed)
         assertEquals(1, Regex("</untrusted_data>").findAll(resumed).count(), resumed)
+    }
+
+    @Test
+    fun currentStepPromptPreservesStateVersusTransitionIntentAndPrecondition() {
+        val suite = suiteOf(caseOf("Playback", step("Ensure playback is paused").copy(
+            intent = StepIntent.ENSURE_STATE,
+            precondition = "The player is open",
+        ), step("Pause playback").copy(
+            intent = StepIntent.PERFORM_ACTION,
+            precondition = "Playback is active",
+        )))
+        val case = suite.cases.single()
+
+        val ensure = lanePrompt(suite, case, case.name, case.steps, 0, 1, emptyList(), setup = false)
+        val transition = lanePrompt(suite, case, case.name, case.steps, 1, 1, emptyList(), setup = false)
+
+        assertTrue("Intent: ensure_state" in ensure && "already true, finish PASS without toggling" in ensure, ensure)
+        assertTrue("Required precondition: The player is open" in ensure, ensure)
+        assertTrue("Intent: perform_action" in transition && "verify the specified transition, not just the destination state" in transition, transition)
+        assertTrue("Required precondition: Playback is active" in transition, transition)
+        assertTrue("control's position is already known in the same stable layout" in ensure, ensure)
+        assertTrue("reveal the controls and press that control in one sequence" in ensure, ensure)
+        assertTrue("never batch an unknown target or across a layout change" in ensure, ensure)
     }
 }

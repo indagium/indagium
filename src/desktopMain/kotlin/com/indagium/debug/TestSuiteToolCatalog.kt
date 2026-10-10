@@ -7,6 +7,7 @@ import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.store.CHECK_TYPE_NAMES
 import com.indagium.testing.store.EXAMPLE_TYPE_NAMES
@@ -23,6 +24,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 private val ON_FAILURE_NAMES = OnFailure.entries.map { it.name }
 private val STEP_KIND_NAMES = StepKind.entries.map { it.name }
 private val MANUAL_COMPLETION_NAMES = ManualCompletion.entries.map { it.name }
+private val STEP_INTENT_NAMES = StepIntent.entries.map { it.wire }
 private val SCRIPT_TARGET_NAMES = ScriptTarget.entries.map { it.name }
 private val SCRIPT_PERMISSION_NAMES = ScriptPermission.entries.map { it.name }
 private val SCRIPT_PARAM_TYPE_NAMES = ScriptParamType.entries.map { it.name }
@@ -102,9 +104,10 @@ private val STEP_ITEM_SCHEMA = ObjectArrayItemSchema(
         "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
         "timeoutMs" to "integer", "retries" to "integer", "onFailure" to "string", "maxToolCalls" to "integer",
         "checks" to "array", "examples" to "array", "kind" to "string", "script" to "object", "manualCompletion" to "string",
+        "intent" to "string", "precondition" to "string",
     ),
     required = listOf("action"),
-    enums = mapOf("onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
+    enums = mapOf("onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES, "intent" to STEP_INTENT_NAMES),
     descriptions = mapOf(
         "kind" to STEP_KIND_DESCRIPTION,
         "script" to STEP_SCRIPT_DESCRIPTION,
@@ -112,6 +115,8 @@ private val STEP_ITEM_SCHEMA = ObjectArrayItemSchema(
         "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
         "action" to "What the tester does, required.",
         "expected" to "What should happen; may be blank only for an optional step with a condition.",
+        "intent" to "perform_action (default): verify that this step caused a transition. ensure_state: pass when the goal already holds, without toggling it.",
+        "precondition" to "Optional state that must hold before a perform_action step; establish it before acting. Send null to clear an existing value.",
         "optional" to "True when the step may be skipped if condition is absent; defaults to false.",
         "condition" to "For optional steps, the visible condition that must be present before performing it; required when optional is true.",
         "timeoutMs" to "Step timeout, 1..3600000 (default 60000).",
@@ -200,8 +205,12 @@ private val STEP_FIELD_PROPS = listOf(
     "action" to "string", "expected" to "string", "optional" to "boolean", "condition" to "string",
     "timeoutMs" to "integer", "retries" to "integer", "maxToolCalls" to "integer",
     "onFailure" to "string", "checks" to "array", "examples" to "array", "kind" to "string", "script" to "object", "manualCompletion" to "string",
+    "intent" to "string", "precondition" to "string",
 )
-private val STEP_ENUMS = mapOf("onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES)
+private val STEP_ENUMS = mapOf(
+    "onFailure" to ON_FAILURE_NAMES, "kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES,
+    "intent" to STEP_INTENT_NAMES,
+)
 private val STEP_OBJECT_ARRAYS = mapOf("checks" to CHECK_ITEM_SCHEMA, "examples" to EXAMPLE_ITEM_SCHEMA)
 private val STEP_FIELD_DESCRIPTIONS = mapOf(
     "kind" to STEP_KIND_DESCRIPTION,
@@ -210,6 +219,8 @@ private val STEP_FIELD_DESCRIPTIONS = mapOf(
     "maxToolCalls" to "Lane-tool call budget for the step, 1..100 (default 15).",
     "action" to "What the tester does.",
     "expected" to "What should happen; may be blank only for an optional step with a condition.",
+    "intent" to "perform_action (default): verify that this step caused a transition. ensure_state: pass when the goal already holds, without toggling it.",
+    "precondition" to "Optional state that must hold before a perform_action step; establish it before acting. Send null to clear an existing value.",
     "optional" to "True when the step may be skipped if condition is absent; defaults to false.",
     "condition" to "For optional steps, the visible condition that must be present before performing it; required when optional is true.",
     "timeoutMs" to "Step timeout, 1..3600000 (default 60000).",

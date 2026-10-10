@@ -58,6 +58,10 @@ private fun StringBuilder.step(result: StepResult) {
     result.judge?.let { judge -> appendJudge(judge, result.judgeInconclusive) }
     result.agentError?.let { append("  - Marked as an agent error: ").append(it.trim().replace('\n', ' ')).append('\n') }
     result.screenshotPath?.let { append("  - Screenshot: `").append(it).append("`\n") }
+    result.startScreenshotPath?.let { append("  - Start screenshot: `").append(it).append("`\n") }
+    result.sampleScreenshotPaths.forEachIndexed { index, path ->
+        append("  - Playback sample ").append(index + 1).append(" screenshot: `").append(path).append("`\n")
+    }
     if (result.logStartOffset != null && result.logEndOffset != null) {
         append("  - Log bytes ").append(result.logStartOffset).append("–").append(result.logEndOffset).append('\n')
     }

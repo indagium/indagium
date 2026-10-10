@@ -42,6 +42,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 
 // Owns every AI test run of this launch (the lanes of a run work in parallel across devices; see TestRunEngine). start()
 // validates, freezes the suite into a TestRun and launches the engine on the coordinator's OWN scope (SupervisorJob + IO),
@@ -59,6 +60,14 @@ private const val MAX_FINISHED_RUNS_IN_MEMORY = 20
 private class FinishStepCancellationException : CancellationException(
     "The lane is finishing this step; a still-running paid tool was stopped.",
 )
+
+private sealed interface DeviceReservationAttempt {
+    data object Reserved : DeviceReservationAttempt
+
+    data class Busy(val errors: List<String>) : DeviceReservationAttempt
+
+    data class AwaitCleanup(val jobs: List<Job>, val errors: List<String>) : DeviceReservationAttempt
+}
 
 /** What answering a manual step came to: [CHECKS_ONLY] means the step completes by its checks, so only failing or skipping it is possible. */
 enum class ManualResolveResult { RESOLVED, NO_SUCH_LANE, NOT_WAITING, CHECKS_ONLY }
@@ -212,14 +221,52 @@ internal class TestRunCoordinator(
         }
         if (problems.isNotEmpty() || suite == null) return StartRunResult.Rejected(problems, validation.limit)
         val runId = newRunId()
-        val busy = synchronized(registryLock) {
-            val taken = config.lanes.map { it.deviceSerial }.distinct().filter { it in devicesInUse }
-            if (taken.isEmpty()) config.lanes.forEach { devicesInUse[it.deviceSerial] = runId }
-            taken.map { "Device $it is already used by run ${devicesInUse[it]}." }
-        }
+        val busy = reserveDevices(runId, config.lanes.map { it.deviceSerial }.distinct())
         if (busy.isNotEmpty()) return StartRunResult.Rejected(busy)
         launchRun(runId, suite, library, config, validation, profiles)
         return StartRunResult.Started(runId, config.lanes.map { it.id }, validation.warnings)
+    }
+
+    /**
+     * A finished snapshot can be published just before the coordinator finishes draining calls and releases the device. Wait briefly
+     * for that terminal owner's job, then recheck and reserve under the registry lock. Active owners are refused immediately.
+     */
+    private suspend fun reserveDevices(runId: String, serials: List<String>): List<String> {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(COORDINATOR_CLOSE_WAIT_MS)
+        while (true) {
+            when (val attempt = tryReserveDevices(runId, serials)) {
+                DeviceReservationAttempt.Reserved -> return emptyList()
+                is DeviceReservationAttempt.Busy -> return attempt.errors
+                is DeviceReservationAttempt.AwaitCleanup -> {
+                    val remainingNanos = deadline - System.nanoTime()
+                    if (remainingNanos <= 0L) return attempt.errors
+                    val remainingMs = TimeUnit.NANOSECONDS.toMillis(remainingNanos).coerceAtLeast(1L)
+                    val cleanupFinished = withTimeoutOrNull(remainingMs) {
+                        attempt.jobs.joinAll()
+                        true
+                    } ?: false
+                    if (!cleanupFinished) return attempt.errors
+                }
+            }
+        }
+    }
+
+    private fun tryReserveDevices(runId: String, serials: List<String>): DeviceReservationAttempt = synchronized(registryLock) {
+        val taken = serials.mapNotNull { serial -> devicesInUse[serial]?.let { serial to it } }
+        if (taken.isEmpty()) {
+            serials.forEach { devicesInUse[it] = runId }
+            return@synchronized DeviceReservationAttempt.Reserved
+        }
+        val errors = taken.map { (serial, owner) -> "Device $serial is already used by run $owner." }
+        val owners = taken.map { it.second }.distinct()
+        val cleanupJobs = owners.mapNotNull { owner ->
+            runs[owner]?.takeIf { it.state.current.isFinished }?.job?.takeUnless { it.isCompleted }
+        }
+        if (owners.isNotEmpty() && cleanupJobs.size == owners.size) {
+            DeviceReservationAttempt.AwaitCleanup(cleanupJobs, errors)
+        } else {
+            DeviceReservationAttempt.Busy(errors)
+        }
     }
 
     @Suppress("LongParameterList")

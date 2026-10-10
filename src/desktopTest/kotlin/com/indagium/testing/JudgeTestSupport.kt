@@ -16,6 +16,7 @@ import com.indagium.testing.model.TestRun
 import com.indagium.testing.run.LaneAgentFactory
 import com.indagium.testing.run.LaneDeviceOpener
 import com.indagium.testing.run.ProviderLaneAgent
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
@@ -121,7 +122,11 @@ internal data class JudgeAnswer(
  * turn); told to fetch something, it looks at the brief, then at a screenshot, then submits. Stateless (it counts the tool
  * results in the request) so it can serve several judge runs at once. Keeps every request for the blindness checks.
  */
-internal class ScriptedJudgeProvider(private val answer: (JudgeAsk) -> JudgeAnswer = { JudgeAnswer() }) : LlmProvider {
+internal class ScriptedJudgeProvider(
+    private val responseDelayMs: Long = 0L,
+    private val onStarted: () -> Unit = {},
+    private val answer: (JudgeAsk) -> JudgeAnswer = { JudgeAnswer() },
+) : LlmProvider {
     val requests = CopyOnWriteArrayList<LlmRequest>()
 
     override val capabilities = ProviderCapabilities(streaming = true, toolCalls = true, modelDiscovery = false)
@@ -137,6 +142,8 @@ internal class ScriptedJudgeProvider(private val answer: (JudgeAsk) -> JudgeAnsw
 
     override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
         requests += request.copy(messages = request.messages.toList())
+        onStarted()
+        if (responseDelayMs > 0L) delay(responseDelayMs)
         val ask = askOf(request)
         val toolResults = request.messages.count { it.role == LlmRole.TOOL }
         when {

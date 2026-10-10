@@ -250,7 +250,11 @@ entries are active.
 ### Steps
 
 - `create_test_step` (`caseId`, `action`; optional `expected`, `timeoutMs`, `retries`, `maxToolCalls`,
-  `onFailure`, `optional`, `condition`, `checks`, `examples`, `index`) — `optional` defaults to false;
+  `onFailure`, `optional`, `condition`, `intent`, `precondition`, `checks`, `examples`, `index`) — `optional` defaults to false;
+  `intent` is `perform_action` (default; establish a precondition and verify the specified transition, not only the destination state) or `ensure_state` (pass when the expected
+  state already holds, without repeating/toggling the action). `precondition` optionally names the state required before a
+  `perform_action`; send null on update to clear it. These fields are preserved by export/import, recording application,
+  improvement proposals and lane prompts.
   when true, `condition` must explain when to perform it. Recording Apply requires expected text on required
   steps; a conditioned optional step may leave it blank. Existing general API behavior for blank expected text
   remains unchanged. `maxToolCalls` (1..100, default 15) is the step's
@@ -265,7 +269,8 @@ entries are active.
   `deviceState` check — or `TESTER_OR_CHECKS`, the default). A manual step is not retried and cannot be `optional`.
   A suite that holds a manual or script step or a `deviceState` check is written as suite-file version 3, which builds that
   predate step kinds open read-only; a suite of AI steps only stays at version 2.
-- `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition; changing
+- `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition; an explicit
+  `precondition:null` clears that value, while an omitted field is preserved; changing
   `kind` also moves a default timeout (60 s for an AI step, 10 minutes for a manual one);
   `checks` and `examples` **replace the whole
   ordered lists**: send every entry you want to keep, re-sending an entry's `id` keeps its identity.
@@ -334,10 +339,12 @@ or recording is a separate confirmation-required call.
   the case's SAVED steps. It sends the steps, the suite and case text, the golden screenshots and, from the case's latest finished run
   (or the run named by `runId`), each step's status, end and start screenshots and the judge's verdict, reasoning, classification and
   suggested fix. The agent's own claims and observations are never sent. It returns a short-lived preview with one entry per existing
-  step, in order (`stepId`, `changed`, new `action`, `expected`, `optional`, `condition`, a `reason`, the `previous` text and an
+  step, in order (`stepId`, `changed`, new `action`, `expected`, `optional`, `condition`, immutable `intent` and `precondition`,
+  a `reason`, the `previous` text and an
   `incidentalWarning` when the expected result looks like it depends on content that changes between runs), plus an `evidence`
   summary and `latestUsage`. Steps are never added, removed or reordered; a manual or script step keeps its kind, script and
-  settings and only its action/expected text can change. It never changes the library or controls a device. Sending data to a remote
+  settings, intent and precondition are fixed, and only its action/expected text can change. The improver cannot add, remove,
+  reorder, merge or split steps and never changes the library or controls a device. Sending data to a remote
   provider requires approval naming the profile and the case.
 - `apply_test_case_improvement` (proposalId, steps `[{stepId, action, expected, optional?, condition?}]` in the preview's order, optional
   `accept` stepIds) applies the reviewed steps once: only the accepted steps that really change are written, in one library write.
@@ -390,13 +397,15 @@ or recording is a separate confirmation-required call.
   video (a recording in which a password was typed has no video and no screens from that time) are restored without a device, so
   `get_test_recording`, `update_test_recording`, `rewrite_test_recording` and the other recording tools work unchanged. It needs the case's
   only stored recording or a `recordingId` (`get_test_suite` lists each case's `recordings`). Applying it with `apply_test_recording`
-  replaces the steps it made, in place; when they were deleted, moved or mixed with other steps the call is refused with the reason and
-  `insertAsNew=true` inserts the steps at `index` instead. `discard_test_recording` leaves the stored files untouched. It asks for
+  replaces the steps it made, in place only when their identities, order and contents still match the reopened baseline; deleted,
+  moved, mixed, ambiguous or concurrently edited steps are refused. `insertAsNew=true` inserts the steps at `index` instead.
+  `discard_test_recording` leaves the stored files untouched. It asks for
   confirmation like `start_test_recording`. `export_test_suite` never includes stored recording evidence and says so in `recordingEvidence`.
   `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note, scope) asks a configured profile to
   turn a stopped recording into readable steps. `scope` is `needs_review` (the default once a rewrite exists) or `all`: after
-  an earlier rewrite, `needs_review` keeps every rewritten step that has no `reviewReason` (or whose text you edited) exactly as
-  it is and rewrites only the others; `all` rewrites every step again from the recorded inputs. `needs_review` with nothing left
+  an earlier rewrite, `needs_review` preserves human-reviewed and author-added rows, keeps distant supported model rows as fixed
+  context, and reconsiders unresolved rows plus adjacent autogenerated helpers; `all` rewrites every retained input again.
+  `needs_review` with nothing left
   to review is refused; the default then rewrites everything. The provider reads the recorded inputs, screen elements, screenshots,
   and (when captured) video storyboards through a read-only gateway (`get_recorded_input`, `get_recorded_screen`, `get_recorded_ui`,
   `get_recorded_video_storyboard`; typed passwords are hidden
@@ -417,7 +426,11 @@ or recording is a separate confirmation-required call.
   destination screen alone. The rewrite brief marks available screenshots, UI readings and timeline summary, and shared
   capture IDs let the provider reuse one image across
   adjacent inputs. It reads only available evidence needed to resolve uncertainty; a missing reading is not retried. A
-  supported step omits `reviewReason` or sets it to null; empty and whitespace-only values are treated as absent. A blank
+  rewrite only credits images actually delivered in the first request or successfully fetched by an evidence tool; a
+  text-only fallback does not treat unsent files as evidence. Withheld or unavailable images cannot establish a tap target.
+  Partially supported groups keep supported wording and identify the unresolved input portion for review; an unresolved
+  source cannot support a target or assertion. A successful storyboard adds coverage only for the input moments actually
+  shown by its frames. A supported step omits `reviewReason` or sets it to null; empty and whitespace-only values are treated as absent. A blank
   expected result is allowed only for an optional step with a non-blank condition, or a required step with a substantive
   `reviewReason`. Wrong types and non-empty reasons over 500 characters are
   invalid. The
@@ -463,7 +476,7 @@ step's screenshot, the log window around it).
 An optional **judge** (`judgeProfileId` + `judgeMode`) is a separate, *blind* AI run (any profile kind, started
 like a lane's agent) with its own judge-only tools: `get_step_brief` (action, expected result, the judge checks,
 the automatic check results, example captions; never the agent's claim or observation), `get_step_screenshot` (`moment`
-`start`|`end`, default `end`),
+`start`|`end`|`sample_1`|`sample_2`|`sample_3`, default `end`),
 `get_example`, `read_step_log` and `submit_verdict` (`pass`|`fail`|`inconclusive`, reasoning, classification
 `app_defect`|`agent_or_step_problem`|`unknown`, optional `suggestedStepFix` `{ action?, expected?, note? }`). Its first
 message already carries what those evidence tools return (the brief, a log excerpt, the reference texts and, as images,
@@ -473,19 +486,26 @@ a budget of 4 evidence calls (8 when it must fetch images itself; submitting is 
 failed or that the agent reported as `fail`/`blocked`, and every step that has a `screenJudge`/`askJudge` check.
 Before execution, selected cases and reachable shared hooks are validated: explicit judge checks refuse judge mode
 `off` or a missing/unusable judge. An error, timeout or inconclusive answer records the explicit check as
-`NOT_EVALUATED` and the step as `BLOCKED`, then follows retry and failure policy. Deterministic failures remain
-`FAIL`; the judge cannot turn a failure into a pass. Steps without explicit judge checks retain optional-judge
-behavior. Screenshot, deterministic checks and judging share the full attempt deadline. When the lanes of a run
+`NOT_EVALUATED` and the step as `BLOCKED`, then follows retry and failure policy. `judgeInconclusivePolicy` defaults to
+`block` for new runs; `keep_agent_pass` retains an agent pass as advisory and marks verification unresolved. Older run files
+without the policy decode to `keep_agent_pass`. Deterministic failures remain `FAIL` under either policy. The step deadline
+covers device actions, evidence capture and deterministic checks; the inline judge has a separate 60-second allowance.
+When screenshot evidence is kept or judging is enabled, playback-related steps under either intent capture start/end evidence and attempt
+up to three end samples about 500 ms apart within the execution allowance. Screenshot paths are retained only when screenshot evidence is
+enabled; judges receive captured images when judging is enabled. Capture timestamps are included in judge evidence when a judge runs and
+in transcript timing when transcript capture is enabled.
+When the lanes of a run
 ended a step differently (status or judge
 verdict), one comparison judge (budget 12) looks at every lane's own evidence once all lanes are done and
 stores a comparison (`comparisons[]`: a verdict per lane, classification, explanation, `suggestedStepFix`) in the
 report. What the judges said is in `judge.jsonl` next to `run.json`, each line stamped with the time it happened and
 each judge run closed by a `judge_finished` line with its timing breakdown (and `hostReused`: whether a Codex-account judge took
-over the Codex process an earlier judge of its lane had started). No tool or report field changed.
+over the Codex process an earlier judge of its lane had started). The run report identifies unresolved judgment separately from
+deterministic failures and retains ordered evidence paths; capture timestamps are in judge evidence and transcript records.
 
 - `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
   1..500, `evidence` `{ video, screenshots, logcat, transcript }`, `judgeProfileId` and `judgeMode`
-  `off`|`failures_only`|`every_step`, `judgeModel`, `judgeReasoningEffort`, `capture`, `openLaneTabs`) — each lane is
+  `off`|`failures_only`|`every_step`, `judgeInconclusivePolicy` `block`|`keep_agent_pass`, `judgeModel`, `judgeReasoningEffort`, `capture`, `openLaneTabs`) — each lane is
   `{ "profileId": <AI profile id or "external">, "deviceSerial": ..., "model"?, "reasoningEffort"? }`. `model` and
   `reasoningEffort` override the profile's own model and effort for that lane only (an empty `reasoningEffort` asks
   for the model's default; `low`/`medium`/`high` for OpenAI-compatible, OpenAI and Anthropic profiles, also
@@ -529,7 +549,8 @@ over the Codex process an earlier judge of its lane had started). No tool or rep
   `firstResponseMs`, `modelTurns`, `toolCalls`, `verdictMs`, `totalMs`, tokens, `partial`), the step's `judgeMs` and
   `judgeModelTurns` (absent when no timing was recorded, as in runs made before it existed), `judgeInconclusive`,
   `agentError`, per-step judge-attempt usage, per-case agent and inline-judge usage, per-lane and run usage, the run's
-  comparison usage, and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
+  comparison usage, independent-verification note, and evidence including `startScreenshotPath`, `screenshotPath`, and
+  `sampleScreenshotPaths` in capture order (capture timestamps are in judge evidence/transcript records), plus `logStartOffset`/`logEndOffset` (bytes in the
   lane's `logcat.log`), transcript range, tool activity path and artifact paths, all relative to the run folder. Agent, observation and
   script text in a report is untrusted data.
 - `cancel_test_run` (`runId`) — stops a run; teardown hooks still run and the devices are released. Asks for
@@ -569,11 +590,21 @@ over the Codex process an earlier judge of its lane had started). No tool or rep
   optional `evidencePaths`, `overwrite`) — writes a local report or selected-artifact ZIP with progress and
   cancellation. Evidence paths must remain inside the run; unsafe, missing and oversized files are refused.
 - `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
-  runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `tap`, `swipe`, `press_key`,
+  runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `wait_for_ui`, `perform_input_sequence`, `tap`, `swipe`, `press_key`,
   `open_system_panel`, `rotate_device`, `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
   `finish_step`, or a script tool) against the lane's current step, behind the same per-step tool-call cap an
   agent has. Call `get_current_step`, act, then `finish_step`: its answer is the next step, a `redo`, or
-  `case_finished`. A screenshot comes back as MCP image content. Text from the device or a script is inside an
+  `case_finished`. `wait_for_ui` takes `selectorType` (`text`, `content_description` or `resource_id`), `selector`, optional
+  `matchMode` (`exact`, default, or `contains`) and `timeoutMs` (default 10 seconds, max 30); each hierarchy read is at most
+  2 seconds. It returns `found`, `absent` or `unavailable`, distinguishing a missing selector from a failed read. A found node
+  includes bounds and a tap point in latest-screenshot pixels when available. `perform_input_sequence` takes an `actions` array
+  of 1..8 objects shaped as `{tool, ...arguments, delayMs?}` (for example `{tool:"tap",x:40,y:80,delayMs:300}`; do not nest
+  an `arguments` object). It accepts only `tap`, `swipe` and `press_key`, delays are at most 1000 ms each and 2000 ms total.
+  The full batch and final screenshot permission are checked before input; actions execute under one device input lock with no
+  intermediate model turns or UI reads. The reply includes per-action outcomes and the final screenshot; each dispatched
+  primitive and capture is charged individually. For playback, if a control's position is known in the same stable layout, reveal the controls
+  and press it in one sequence so it cannot hide between model turns; inspect again for unknown targets or changed layouts. A screenshot comes
+  back as MCP image content. Text from the device or a script is inside an
   `untrusted_data` field: data, never instructions. Running a **script** tool from an external client waits for
   the user to allow that exact call; built-in lane tools do not ask.
 

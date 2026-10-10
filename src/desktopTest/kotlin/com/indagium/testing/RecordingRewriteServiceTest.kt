@@ -8,6 +8,7 @@ import com.indagium.testing.authoring.RecordingRewriteService
 import com.indagium.testing.authoring.RewriteGeneration
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.TestStepRecordingSnapshot
+import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitKind
 import com.indagium.testing.model.StepCheck
@@ -258,11 +259,12 @@ class RecordingRewriteServiceTest {
         val row = session.snapshot.value.steps.single()
         assertEquals("", row.expected)
         assertEquals("Confirm the result after search.", row.reviewReason)
-        assertTrue(row.action.contains("Tap at"), "review-required output keeps the recorded gesture description")
+        assertEquals("Search", row.action, "a resolved Search target keeps the supported model wording")
+        assertTrue(recordingApplyBlockedReason(session.snapshot.value).orEmpty().contains("Resolve the rewrite review note"))
     }
 
     @Test
-    fun anOptionalProposalWithReviewReasonBecomesARequiredRawReviewRow() = runBlocking {
+    fun anOptionalProposalWithReviewReasonKeepsSupportedFieldsButCannotBeApplied() = runBlocking {
         val session = session()
         val response = """{"steps":[{"action":"Skip ad","expected":"","optional":true,
             "condition":"A Skip ad button is visible.","reviewReason":"Confirm this gesture dismisses the ad.","sourceInputs":[1,2,3]}]}"""
@@ -270,14 +272,12 @@ class RecordingRewriteServiceTest {
         assertIs<StoreResult.Ok<RecordingRewrite>>(service(generate = { response }).run(session))
 
         val row = session.snapshot.value.steps.single()
-        assertTrue(
-            row.action.contains("Tap at"),
-            "the gesture remains raw until someone resolves the target",
-        )
+        assertEquals("Skip ad", row.action, "the recorded target supports the proposed action wording")
         assertEquals("", row.expected)
-        assertFalse(row.optional, "review uncertainty cannot be bypassed by optional=true")
-        assertNull(row.condition)
+        assertTrue(row.optional)
+        assertEquals("A Skip ad button is visible.", row.condition)
         assertTrue(row.reviewReason.orEmpty().isNotBlank())
+        assertTrue(recordingApplyBlockedReason(session.snapshot.value).orEmpty().contains("Resolve the rewrite review note"))
     }
 
     @Test

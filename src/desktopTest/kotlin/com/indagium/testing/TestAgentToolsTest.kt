@@ -4,6 +4,7 @@ import com.indagium.debug.IMAGE_RESULT_TOOL_NAMES
 import com.indagium.debug.IndagiumToolActionPolicy
 import com.indagium.debug.MCP_TOOLS
 import com.indagium.debug.toCallToolResult
+import com.indagium.testing.device.DeviceInputActionResult
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
 import com.indagium.testing.model.ScriptParam
@@ -13,6 +14,7 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.newScriptId
+import com.indagium.testing.run.InputSequenceCallbacks
 import com.indagium.testing.run.LANE_FREE_TOOL_NAMES
 import com.indagium.testing.run.LaneStepBrief
 import com.indagium.testing.run.LaneStepStatus
@@ -27,6 +29,9 @@ import com.indagium.testing.script.ScriptRunContext
 import com.indagium.testing.script.TestScriptRunner
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -40,6 +45,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private val BUILT_IN_NAMES = RESERVED_SCRIPT_TOOL_NAMES
@@ -66,6 +72,8 @@ class TestAgentToolsTest {
         allowed: Set<String>? = null,
         examples: List<StepExample> = emptyList(),
         scriptRunner: TestScriptRunner = TestScriptRunner(hostShell = listOf("/bin/sh", "-c")),
+        onSequenceBudgetReleased: (reserved: Int, consumed: Int) -> Unit = { _, _ -> },
+        onSequenceAction: (index: Int, result: DeviceInputActionResult) -> Unit = { _, _ -> },
     ): LaneTools {
         val lane = runBlocking { openFixtureSession(runner, laneDir) }.also { session = it }
         return buildLaneTools(
@@ -79,6 +87,10 @@ class TestAgentToolsTest {
                 scriptRunner = scriptRunner,
                 allowedTools = allowed,
                 currentExamples = { examples },
+                inputSequence = InputSequenceCallbacks(
+                    releaseBudget = { _, reserved, consumed -> onSequenceBudgetReleased(reserved, consumed) },
+                    onAction = { _, index, result -> onSequenceAction(index, result) },
+                ),
             ),
         )
     }
@@ -96,7 +108,7 @@ class TestAgentToolsTest {
         assertEquals(BUILT_IN_NAMES, lane.names().toSet(), "built-in lane tools match the names scripts may not take")
         val global = MCP_TOOLS.map { it.name }.toSet()
         assertTrue(lane.names().none { it in global }, "no lane tool is a global tool: ${lane.names().filter { it in global }}")
-        assertEquals(17, lane.names().size)
+        assertEquals(19, lane.names().size)
     }
 
     @Test
@@ -183,6 +195,130 @@ class TestAgentToolsTest {
         assertEquals(listOf(LaneStepStatus.PASS to "Home screen visible"), callbacks.finishes)
         assertTrue(lane.call("finish_step", "status" to "maybe", "observation" to "x")["error"].toString().contains("status must be one of"))
         assertTrue(lane.call("report_observation")["error"].toString().contains("text is required"))
+    }
+
+    @Test
+    fun inputSequenceRefusesTheWholeBatchWhenALaterPrimitiveIsNotAllowed() {
+        val lane = tools(allowed = setOf("tap", "take_screenshot", "perform_input_sequence"))
+
+        val result = lane.call(
+            "perform_input_sequence",
+            "actions" to listOf(
+                mapOf("tool" to "tap", "x" to 10, "y" to 20),
+                mapOf("tool" to "press_key", "key" to "BACK"),
+            ),
+        )
+
+        assertTrue(result["error"].toString().contains("not allowed"), result.toString())
+        assertTrue(runner.shellCommands.isEmpty(), "the earlier valid tap must not reach adb")
+    }
+
+    @Test
+    fun aBatchRequiresItsFinalScreenshotPermissionBeforeAnyInput() {
+        val lane = tools(allowed = setOf("tap", "perform_input_sequence"))
+
+        val result = lane.call(
+            "perform_input_sequence",
+            "actions" to listOf(mapOf("tool" to "tap", "x" to 10, "y" to 20)),
+        )
+
+        assertTrue(result["error"].toString().contains("take_screenshot"), result.toString())
+        assertTrue(runner.shellCommands.isEmpty(), "the final capture permission is validated before the batch starts")
+    }
+
+    @Test
+    fun failedAndCancelledBatchesRefundOnlyUndispatchedPrimitiveAndCaptureReservations() = runBlocking {
+        val releases = mutableListOf<Pair<Int, Int>>()
+        val dispatched = mutableListOf<Int>()
+        val lane = tools(
+            allowed = setOf("tap", "press_key", "take_screenshot", "perform_input_sequence"),
+            onSequenceBudgetReleased = { reserved, consumed -> releases += reserved to consumed },
+            onSequenceAction = { index, _ -> dispatched += index },
+        )
+        runner.shellExitCode = 1
+
+        val failed = lane.call(
+            "perform_input_sequence",
+            "actions" to listOf(
+                mapOf("tool" to "tap", "x" to 10, "y" to 20),
+                mapOf("tool" to "press_key", "key" to "BACK"),
+                mapOf("tool" to "tap", "x" to 20, "y" to 30),
+            ),
+        )
+        assertTrue(failed["error"].toString().contains("failed"), failed.toString())
+        assertEquals(listOf(1), dispatched)
+        assertEquals(4 to 2, releases.last(), "one action and the final capture were charged; two undispatched actions were refunded")
+
+        runner.shellExitCode = 0
+        val actionObserved = CompletableDeferred<Unit>()
+        val cancellableLane = tools(
+            allowed = setOf("tap", "press_key", "take_screenshot", "perform_input_sequence"),
+            onSequenceBudgetReleased = { reserved, consumed -> releases += reserved to consumed },
+            onSequenceAction = { _, _ -> actionObserved.complete(Unit) },
+        )
+        val task = launch {
+            cancellableLane.gateway.executeSuspending(
+                "perform_input_sequence",
+                mapOf("actions" to listOf(
+                    mapOf("tool" to "tap", "x" to 10, "y" to 20, "delayMs" to 1_000),
+                    mapOf("tool" to "press_key", "key" to "BACK"),
+                )),
+            )
+        }
+        actionObserved.await()
+        task.cancelAndJoin()
+        assertEquals(3 to 1, releases.last(), "cancellation during the delay charges only the dispatched tap")
+    }
+
+    @Test
+    fun waitForUiDistinguishesFoundAbsentAndUnavailableAndReturnsScreenshotCoordinates() {
+        val lane = tools(allowed = setOf("wait_for_ui"))
+        val found = lane.call("wait_for_ui", "selectorType" to "text", "selector" to "Sign & go", "timeoutMs" to 500)
+        assertEquals("found", found["status"])
+        assertEquals("latest-screenshot-pixels", found["coordinateSpace"])
+        val foundData = found["untrusted_data"].toString()
+        assertTrue(foundData.contains("tapX") && foundData.contains("bounds"), foundData)
+
+        runner.uiDump = fixtureUiDump()
+        val absent = lane.call("wait_for_ui", "selectorType" to "text", "selector" to "Never here", "timeoutMs" to 100)
+        assertEquals("absent", absent["status"])
+
+        runner.uiDumpExitCode = 1
+        val unavailable = lane.call("wait_for_ui", "selectorType" to "text", "selector" to "Never here", "timeoutMs" to 50)
+        assertEquals("unavailable", unavailable["status"])
+        assertTrue((unavailable["unavailableReads"] as Number).toInt() > 0, unavailable.toString())
+    }
+
+    @Test
+    fun waitForUiFindsASelectorThatAppearsDuringTheBoundedWait() {
+        val lane = tools(allowed = setOf("wait_for_ui"))
+        val updater = Thread {
+            Thread.sleep(100)
+            runner.uiDump = fixtureUiDump().replace("Sign &amp; go", "Continue")
+        }.apply { start() }
+
+        val found = lane.call("wait_for_ui", "selectorType" to "text", "selector" to "Continue", "timeoutMs" to 1_200)
+        updater.join()
+
+        assertEquals("found", found["status"], found.toString())
+        assertTrue((found["elapsedMs"] as Number).toLong() in 1..1_200, found.toString())
+        assertTrue(runner.specs.count { "uiautomator" in it.command } >= 2, "the selector is polled until it appears")
+        val match = found["untrusted_data"].toString()
+        assertTrue(match.contains("Continue"), match)
+    }
+
+    @Test
+    fun aFoundUiSelectorIsKeptWhenColdCoordinateCaptureExhaustsTheWaitDeadline() {
+        val lane = tools(allowed = setOf("wait_for_ui"))
+        runner.beforeScreenshot = { Thread.sleep(1_000) }
+
+        val found = lane.call("wait_for_ui", "selectorType" to "text", "selector" to "Sign & go", "timeoutMs" to 100)
+
+        assertEquals("found", found["status"], found.toString())
+        assertEquals("unavailable", found["coordinateSpace"], found.toString())
+        val data = found["untrusted_data"] as Map<*, *>
+        assertTrue(data["coordinateDetail"].toString().contains("selector matched", ignoreCase = true), found.toString())
+        assertNull(data["tapX"])
     }
 
     @Test

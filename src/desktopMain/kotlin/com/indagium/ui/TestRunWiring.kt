@@ -100,6 +100,7 @@ internal class AgentTextRequest(
     val onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
     /** Images that go with [prompt] when the agent takes them; otherwise the run is the attachment's fallback (see [runAgentForText]). */
     val attachment: RewriteAttachment? = null,
+    val onVisualEvidenceDelivered: (Map<Int, Set<String>>) -> Unit = {},
 )
 
 private val STEP_DRAFT_WORDING = AgentTextWording(
@@ -159,6 +160,7 @@ internal suspend fun AppState.generateRecordingRewrite(request: RewriteGeneratio
         wording = RECORDING_REWRITE_WORDING,
         onUsage = request.onUsage,
         attachment = request.attachment,
+        onVisualEvidenceDelivered = request.onVisualEvidenceDelivered,
     ),
 )
 
@@ -212,6 +214,7 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
     val attachment = request.attachment
     val attached = attachment?.takeIf { agent.acceptsImagesUpFront && it.images.isNotEmpty() }
     val fallback = attachment?.takeIf { attached == null }
+    if (attached == null) request.onVisualEvidenceDelivered(emptyMap())
     if (fallback != null) {
         AppLogger.info(AGENT_TIMING_LOG_COMPONENT, request.wording.noImagesNote)
     }
@@ -231,6 +234,9 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
                 promptPreamble = request.wording.promptPreamble,
                 images = attached?.images.orEmpty(),
                 promptWithoutImages = attachment?.fallbackPrompt,
+                onImagesDelivered = { delivered ->
+                    request.onVisualEvidenceDelivered(if (delivered) attached?.visualMoments.orEmpty() else emptyMap())
+                },
             ),
         )
         run = activeRun

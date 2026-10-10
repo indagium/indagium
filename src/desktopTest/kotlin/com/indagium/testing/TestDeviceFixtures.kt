@@ -51,7 +51,7 @@ internal fun fixtureUiDump(width: Int = FIXTURE_DEVICE_WIDTH, height: Int = FIXT
  */
 internal class ScriptedAdbRunner(
     var png: ByteArray = fixturePng(),
-    var uiDump: String = fixtureUiDump(),
+    @Volatile var uiDump: String = fixtureUiDump(),
 ) : CaptureProcessRunner {
     val logcat = StreamingFakeProcess()
 
@@ -62,6 +62,9 @@ internal class ScriptedAdbRunner(
 
     @Volatile
     var shellExitCode = 0
+
+    @Volatile
+    var uiDumpExitCode = 0
 
     @Volatile
     var shellStdout = ""
@@ -83,7 +86,7 @@ internal class ScriptedAdbRunner(
                 beforeScreenshot?.invoke()
                 CompletedFakeProcess(png)
             }
-            "uiautomator" in command -> CompletedFakeProcess(uiDump)
+            "uiautomator" in command -> CompletedFakeProcess(uiDump, code = uiDumpExitCode)
             "getevent" in command && "-lt" in command -> getevent
             else -> {
                 val arguments = command.dropWhile { it != "shell" }.drop(1)

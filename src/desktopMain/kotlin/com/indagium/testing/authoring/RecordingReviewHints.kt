@@ -3,7 +3,7 @@ package com.indagium.testing.authoring
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.StepKind
 
-internal enum class RecordingRowIssue { ACTION, EXPECTED, CONDITION, SCRIPT }
+internal enum class RecordingRowIssue { ACTION, EXPECTED, CONDITION, SCRIPT, REVIEW }
 
 /** One shared authoring rule for reviewed recording rows in UI previews, session updates and final Apply. */
 internal fun recordingRowIssues(
@@ -13,6 +13,7 @@ internal fun recordingRowIssues(
     condition: String? = row.condition,
     requireExpected: Boolean = true,
 ): Set<RecordingRowIssue> = buildSet {
+    if (!row.reviewReason.isNullOrBlank() && row.reviewReason != INCIDENTAL_EXPECTED_WARNING) add(RecordingRowIssue.REVIEW)
     if (row.action.isBlank()) add(RecordingRowIssue.ACTION)
     if (hasConditionIssue(optional, condition)) {
         add(RecordingRowIssue.CONDITION)
@@ -75,11 +76,13 @@ fun recordingApplyBlockedReason(snapshot: TestStepRecordingSnapshot): String? {
     val missingExpected = issues.filter { (_, found) -> RecordingRowIssue.EXPECTED in found }.map { it.first }
     val missingCondition = issues.filter { (_, found) -> RecordingRowIssue.CONDITION in found }.map { it.first }
     val missingScript = issues.filter { (_, found) -> RecordingRowIssue.SCRIPT in found }.map { it.first }
+    val needsReview = issues.filter { (_, found) -> RecordingRowIssue.REVIEW in found }.map { it.first }
     val reasons = listOfNotNull(
         missingAction.takeIf(List<Int>::isNotEmpty)?.let { "Fill in Action for ${stepList(it)}" },
         missingExpected.takeIf(List<Int>::isNotEmpty)?.let { "Fill in Expected for ${stepList(it)}" },
         missingCondition.takeIf(List<Int>::isNotEmpty)?.let { "Add a condition for optional ${stepList(it)}" },
         missingScript.takeIf(List<Int>::isNotEmpty)?.let { "Choose a script for ${stepList(it)}" },
+        needsReview.takeIf(List<Int>::isNotEmpty)?.let { "Resolve the rewrite review note for ${stepList(it)}" },
     )
     return reasons.takeIf(List<String>::isNotEmpty)?.joinToString("; ", postfix = ".")
 }

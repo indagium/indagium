@@ -81,8 +81,8 @@ internal class TestRunEngine(
     /** The run's judge, or null when none is configured or it could not be prepared (then a warning says so and the run goes on without). */
     private fun prepareJudge(snapshot: TestRun): JudgeService? {
         val config = snapshot.config
-        val make = deps.judgeAgent
-        if (!config.judgeActive || make == null) return null
+        if (!config.judgeActive) return null
+        val make = deps.judgeAgent ?: return withoutJudge("no judge agent factory is available")
         val agent = try {
             make()
         } catch (refused: IllegalStateException) {
