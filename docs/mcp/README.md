@@ -97,8 +97,9 @@ The same server exposes shared authoring, run, report and issue-evidence service
 [the AI test-suite method index](AVAILABLE_METHODS.md#ai-test-suites) for exact schemas and limits.
 Common workflows include:
 
-- Browse suites and cases, edit steps, or use **draft_test_steps** for a validated preview. Applying a
-  draft is a separate reviewed operation; inserting shared steps and pasted log checks also supports
+- Browse suites and cases, edit steps, or use **draft_test_steps** (new steps) or **improve_test_case** (better wording for the saved
+  steps, using the latest run's evidence) for a validated preview. Applying a
+  draft or improvement is a separate reviewed operation; inserting shared steps and pasted log checks also supports
   preview, edit and insert at an explicit position.
 - Use **start_test_recording** only on an already-open live mirror to observe accepted input. Retrieve
   one row's bounded input-time image when needed, edit the ordered actions/expected results, then

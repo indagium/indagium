@@ -49,6 +49,9 @@ private const val SUITE_READ_ONLY_REASON =
     "This suite was saved by a newer version of Indagium and is read-only here. Update Indagium to change it."
 private const val DEFAULT_IMPORTED_SUITE_NAME = "Imported suite"
 
+/** One step of [TestLibraryStore.updateSteps]: [to] replaces the stored step only while the stored step still equals [from]. */
+data class StepChange(val from: TestStep, val to: TestStep)
+
 /**
  * The persisted library of test suites, scripts and shared steps, kept under [rootDir]:
  * `library.json` (suite order, scripts, shared steps) and one `suites/<id>.json` per suite.
@@ -401,6 +404,33 @@ class TestLibraryStore(
                 CaseEdit.Done(case.copy(steps = case.steps.map { if (it.id == stepId) updated else it }), updated)
             }
         }
+
+    /**
+     * Replaces several steps of one case in a single write (one `updatedAt`, one file). Each [StepChange.to] takes the place of its
+     * [StepChange.from] only while the stored step still equals it: a step edited meanwhile fails the whole call and nothing is
+     * written. [creationUsage] is added to the case's AI usage, like [createSteps] does for steps an AI drafted.
+     */
+    fun updateSteps(caseId: String, changes: List<StepChange>, creationUsage: AiUsageStats? = null): StoreResult<List<TestStep>> {
+        if (changes.isEmpty()) return StoreResult.Invalid("At least one step change is required.")
+        return editCase(caseId) { lib, case ->
+            val replacements = LinkedHashMap<String, TestStep>()
+            for (change in changes) {
+                val id = change.from.id
+                val current = case.steps.firstOrNull { it.id == id }
+                val updated = change.to.copy(id = id)
+                val problem = when {
+                    current == null -> "Step '$id' is no longer in this case; nothing was changed."
+                    current != change.from -> "Step '$id' was edited after the change was proposed; nothing was changed."
+                    replacements.containsKey(id) -> "Step '$id' appears twice in the change."
+                    else -> validateStep(updated, lib.scripts)
+                }
+                if (problem != null) return@editCase CaseEdit.Fail(problem)
+                replacements[id] = updated
+            }
+            val usage = if (creationUsage == null) case.creationUsage else sumAiUsage(listOf(case.creationUsage, creationUsage))
+            CaseEdit.Done(case.copy(steps = case.steps.map { replacements[it.id] ?: it }, creationUsage = usage), replacements.values.toList())
+        }
+    }
 
     fun deleteStep(stepId: String): StoreResult<Unit> =
         editStep(stepId) { _, case, _ -> CaseEdit.Done(case.copy(steps = case.steps.filterNot { it.id == stepId }), Unit) }

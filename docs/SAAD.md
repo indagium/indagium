@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 154: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 156: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3161,7 +3161,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RewriteEvidence.kt`, `RewriteVideoEvidence.kt`, `RewriteSettledAfter.kt`, `RewriteSensitivity.kt`, `ContactSheet.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestCaseImprove.kt`, `TestCaseImproveEvidence.kt`, `TestCaseImproveBrief.kt`, `TestCaseImproveService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RewriteEvidence.kt`, `RewriteVideoEvidence.kt`, `RewriteSettledAfter.kt`, `RewriteSensitivity.kt`, `ContactSheet.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -3824,8 +3824,8 @@ There are two audiences, with two gates:
   `export_test_suite`, `set_edition`, `try_test_script`, `run_test_suite`, `cancel_test_run`,
   `rerun_test_step`, `apply_step_fix`, `delete_issue`, `send_issue_to_tracker`. A call is also raised
   to `CONFIRMATION_REQUIRED` *per call* when its arguments send data to an external service
-  (`create_issue_from_step` with `destination: tracker`, `draft_test_steps` and `rewrite_test_recording`
-  with a remote provider, `sendsToExternalService`). Inside a
+  (`create_issue_from_step` with `destination: tracker`, `draft_test_steps`, `improve_test_case` and
+  `rewrite_test_recording` with a remote provider, `sendsToExternalService`). Inside a
   run, an **`ASK` script** becomes a confirmation card through the lane gateway's
   `extraConfirmationRequired` (names only known at run time); `AUTO` scripts run without asking.
   `ManagedMcpRunRegistry.register` gives a lane's managed endpoint its **own**
@@ -3835,7 +3835,7 @@ There are two audiences, with two gates:
   Indagium's own AI panel; an external client holding the control token would otherwise run any
   command a script holds with nobody asked. The set (`debug/ExternalToolApproval.kt:22`) is
   `try_test_script`, `run_test_suite`, `rerun_test_step`, `rerun_failed_test_cases`,
-  `test_lane_tool_call`, `draft_test_steps`, `rewrite_test_recording`, `start_test_recording`,
+  `test_lane_tool_call`, `draft_test_steps`, `improve_test_case`, `rewrite_test_recording`, `start_test_recording`,
   `apply_test_recording`, `import_test_script`, `export_test_script`, `export_test_run_report`,
   `collect_android_bugreport`, `export_issue_step_clip`, `create_issue_from_step`,
   `send_issue_to_tracker`. Each call opens a dialog describing *that exact
@@ -4318,6 +4318,64 @@ before. **Privacy.** A remote rewrite sends screenshots, screen text and typed t
 profile's provider, so `rewrite_test_recording` is in `PER_CALL_APPROVAL_MCP_TOOLS` and raised to
 `CONFIRMATION_REQUIRED` for a remote profile exactly like `draft_test_steps`; `restore_test_recording_raw`
 sends nothing and is not gated.
+
+### 26.13 Improving the steps of a saved case
+
+"Improve steps with AI" (`authoring/TestCaseImproveService.kt`, dialog in `ui/TestsStepImprove.kt`, state in
+`ui/TestsStepImproveState.kt`) rewrites the wording of the steps a case already has. A recording rewrite cannot do that:
+its screens and video are temporary and deleted when the recording is applied. The improver therefore works from what is
+stored: the case's steps (action, expected, kind, optional/condition, checks, examples including the "Recorded input (hint ...)"
+reference logs), the suite name, instructions and target package, the case name, goal and preconditions, the golden screenshots,
+an optional note, and the **latest finished run of the case** (or the run the caller names).
+
+**Evidence (`TestCaseImproveEvidence.kt`).** `pickImproveRun` reads the suite's run summaries (cheap), loads runs newest first
+(at most `IMPROVE_MAX_RUNS_SCANNED` = 30) and takes the first finished run with step results of the case; an explicit `runId`
+must be finished and contain the case. Of several lanes and repeats, `occurrenceOf` picks the one with the most problem steps. Per
+step the plan keeps its status, attempts, the judge's verdict, reasoning, classification and `suggestedFix`, the deterministic check
+results, a person's `agentError` note, the end-of-step screenshot, and the start screenshot (the previous result's end screenshot;
+one image is attached once and introduced under both names). A step edited after the run is marked and keeps the text it ran as.
+`ImproveStepEvidence` has **no field** for the agent's claim or observation, so, like the judge (§26.7), nothing built from it can
+leak them. Images are chosen by count first (problem steps' start/end screens, then up to `IMPROVE_MAX_GOLDEN_IMAGES` golden
+screenshots, then other end screens, `IMPROVE_MAX_ATTACHED_IMAGES` in all) and by bytes while loading
+(`IMPROVE_MAX_ATTACHED_IMAGE_BYTES`, each through `boundedJudgeImage`); what the limits leave out is named in the prompt. The
+screens a run kept are read through `readBoundedRunArtifact`, so a path cannot leave the run folder.
+
+**Request (`TestCaseImproveBrief.kt`).** The suite/case/step text and the note are the user's own and sit in the plain part; the
+judge's reasoning and suggested fix, check details, a person's note, and the reference logs (their hints came from the device) are
+fenced with `fenceUntrusted` in chunks of at most 5000 characters. The evidence is in the first message with the screenshots as
+images (`AgentSegmentRequest.images`, `acceptsImagesUpFront`); there are **no tools** (`runAgentForText` with an empty gateway, one
+model turn expected), and an agent that takes no images runs the same request without them (`RewriteAttachment.fallbackPrompt`:
+"NOT attached and you have no tool"). The system prompt carries `STABLE_EXPECTED_RULE` and `STABLE_EXPECTED_DRAFT_REMEDY`, says
+steps are never added, removed, reordered, merged or split, that a step blamed on an app defect is left alone, and that a
+manual or script step only gets new words. Timing goes to the app log as `improve_brief: ...` (evidence, images, prompt size,
+brief time) and the existing `test-agent-timing` line with the `test-step-improve` prefix.
+
+**Answer and validation (`TestCaseImprove.kt`).** `parseImproveResponse` is strict: exactly one entry per existing step, in order,
+each naming its `stepId`; `kind`, `script`, `scriptId`, `args`, `manualCompletion`, `examples` and the timeout/retry/failure settings
+may not change (an echoed `kind` is accepted when equal); every entry has a `reason` ("unchanged" when nothing changes). One rule set,
+`improvedStepOf`, serves the model's answer and the reviewed edit: text equal to the saved text is kept byte for byte, an optional
+step needs a condition, only AI steps can be optional or have checks changed, and an AI step's expected result may be blank only
+when optional (or already blank). A model-sent `checks` array replaces only the *improvable* checks (`askJudge`, `screenJudge`
+without an example, `logAppears`, `logAbsent`); script, device-state and example-bound checks always stay, and a check id is kept
+only for the same kind of check that had it. `incidentalExpectedWarning` flags (never rejects) an AI step's expected result that
+looks incidental.
+
+**Proposal and apply.** `create` runs the edit-lock preflight (read-only library or suite, Free-edition lock) *before* any paid
+call, allows one generation per case at a time, and keeps the validated proposal for 30 minutes (at most 16). Nothing is written.
+`apply(proposalId, edits, accept)` takes one reviewed edit per step in the proposal's order, revalidates each accepted step with
+`improvedStepOf`, and writes the accepted steps that really change through `TestLibraryStore.updateSteps` in **one** case edit (one
+`updatedAt`, one file write; the generation's usage is added to the case's `creationUsage`, like a draft's). `updateSteps` is a
+compare-and-set: each `StepChange.from` must still equal the stored step, otherwise nothing is written. Before that the service
+refuses (and drops) a proposal whose case steps differ from those it was made for. A refusal the person can fix (a lock that is
+lifted later, an invalid edit, nothing selected) keeps the proposal; a spent, expired or stale one is gone.
+
+**Surfaces.** UI: the *Improve steps with AI* button beside *Draft steps with AI*, and *Improve these steps with AI* on a case row
+of a finished run report that has failed, blocked, timed-out, errored or unjudged steps (`improvableCaseIds`); both open
+`TestStepImproveDialog` with the profile, model and effort pickers (workflow key `testCaseImprove`), the evidence line (for example
+"Latest run 2026-10-10 18:20 · 4 screenshots · 2 judge suggestions"), and a per-step diff with an *Apply this step* box that is on
+for changed steps. MCP: `improve_test_case` (in `PER_CALL_APPROVAL_MCP_TOOLS` and raised to `CONFIRMATION_REQUIRED` for a remote
+profile, like `draft_test_steps`, because it sends steps, screenshots and judge text to a provider) and
+`apply_test_case_improvement` (`CONFIRMATION_REQUIRED`, writes the library).
 
 ---
 

@@ -15,6 +15,7 @@ import kotlinx.serialization.json.put
 internal object AiWorkflow {
     const val TEST_STEP_DRAFT = "testStepDraft"
     const val RECORDING_REWRITE = "recordingRewrite"
+    const val TEST_CASE_IMPROVE = "testCaseImprove"
     const val TEST_RUN_LANE = "testRunLane"
     const val TEST_RUN_JUDGE = "testRunJudge"
 }

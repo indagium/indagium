@@ -231,7 +231,7 @@ data class TestCase(
     val teardown: List<HookItem> = emptyList(),
     val steps: List<TestStep> = emptyList(),
     val allowedTools: Set<String>? = null,
-    /** Usage of AI-created steps, kept only when the reviewed draft is applied; absent on manual/legacy cases. */
+    /** Usage of AI-created or AI-improved steps, kept only when the reviewed result is applied; absent on manual/legacy cases. */
     val creationUsage: AiUsageStats? = null,
 )
 

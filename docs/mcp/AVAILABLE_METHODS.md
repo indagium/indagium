@@ -330,6 +330,18 @@ or recording is a separate confirmation-required call.
   accumulated applied usage.
 - `apply_test_step_draft` (draftId, edited steps, optional index) applies the reviewed steps once and
   revalidates them against the current case and edition limits.
+- `improve_test_case` (caseId, profileId, optional model, reasoningEffort, note, runId) asks a configured profile to improve the wording of
+  the case's SAVED steps. It sends the steps, the suite and case text, the golden screenshots and, from the case's latest finished run
+  (or the run named by `runId`), each step's status, end and start screenshots and the judge's verdict, reasoning, classification and
+  suggested fix. The agent's own claims and observations are never sent. It returns a short-lived preview with one entry per existing
+  step, in order (`stepId`, `changed`, new `action`, `expected`, `optional`, `condition`, a `reason`, the `previous` text and an
+  `incidentalWarning` when the expected result looks like it depends on content that changes between runs), plus an `evidence`
+  summary and `latestUsage`. Steps are never added, removed or reordered; a manual or script step keeps its kind, script and
+  settings and only its action/expected text can change. It never changes the library or controls a device. Sending data to a remote
+  provider requires approval naming the profile and the case.
+- `apply_test_case_improvement` (proposalId, steps `[{stepId, action, expected, optional?, condition?}]` in the preview's order, optional
+  `accept` stepIds) applies the reviewed steps once: only the accepted steps that really change are written, in one library write.
+  The preview is refused when the case's steps changed since it was made or the case or suite is locked/read-only.
 - `insert_shared_steps` (caseId, sharedStepId, optional index) deep-copies the sequence at the selected
   position with fresh IDs and resolves golden assets through the suite asset service.
 - `preview_log_checks` (text) parses Android logcat into editable LogAppears checks with regex-escaped literal

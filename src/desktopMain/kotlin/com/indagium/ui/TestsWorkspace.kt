@@ -111,6 +111,7 @@ internal fun TestsWorkspace(state: AppState) {
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true)) { } }
             state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false)) { } }
             view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
+            view.improveDialog?.let { target -> TestStepImproveDialog(target) { view.improveDialog = null } }
             view.issueDialog?.let { target -> IssueDraftDialog(target) { view.issueDialog = null } }
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                 if (maxWidth < NARROW_BREAKPOINT) {
