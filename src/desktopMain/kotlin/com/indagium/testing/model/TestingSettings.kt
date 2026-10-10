@@ -40,6 +40,11 @@ data class TestingSettings(
     val defaultJudgeMode: String = JudgeMode.OFF.wire,
     val evidence: EvidenceFlags = EvidenceFlags(),
     val confirmationTimeoutMinutes: Int = (DEFAULT_CONFIRMATION_TIMEOUT_MS / MILLIS_PER_MINUTE).toInt(),
+    /**
+     * "Keep recording evidence with recorded cases": applying a recording also saves its rows, screen readings, screenshots and (when no
+     * password was typed) its video beside the case, so the full AI rewrite can be run again later. Off by default; appended last.
+     */
+    val keepRecordingEvidence: Boolean = false,
 ) {
     val judgeMode: JudgeMode get() = JudgeMode.parse(defaultJudgeMode) ?: JudgeMode.OFF
 

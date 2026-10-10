@@ -55,13 +55,23 @@ internal data class RecordedVideoStoryboard(
  * approximate host-time anchor, stores source PTS separately, and starts each reconnect/config
  * epoch in a separate MKV segment so timestamps and dimensions are never silently mixed.
  */
-internal class RecordedVideoTimeline(
-    private val maxDurationMs: Long = MAX_DURATION_MS,
-    private val maxBytes: Long = MAX_VIDEO_BYTES,
-    private val maxQueueBytes: Long = MAX_QUEUE_BYTES,
-    private val wallClockMs: () -> Long = System::currentTimeMillis,
-    private val monotonicNanos: () -> Long = System::nanoTime,
+internal class RecordedVideoTimeline private constructor(
+    private val maxDurationMs: Long,
+    private val maxBytes: Long,
+    private val maxQueueBytes: Long,
+    private val wallClockMs: () -> Long,
+    private val monotonicNanos: () -> Long,
+    /** Set for a timeline opened from stored evidence: finished, read-only, and its files are never written or deleted. */
+    private val stored: StoredVideoTimeline?,
 ) : Closeable {
+    constructor(
+        maxDurationMs: Long = MAX_DURATION_MS,
+        maxBytes: Long = MAX_VIDEO_BYTES,
+        maxQueueBytes: Long = MAX_QUEUE_BYTES,
+        wallClockMs: () -> Long = System::currentTimeMillis,
+        monotonicNanos: () -> Long = System::nanoTime,
+    ) : this(maxDurationMs, maxBytes, maxQueueBytes, wallClockMs, monotonicNanos, null)
+
     private sealed interface Work {
         data class Packet(val packet: MirrorVideoPacket) : Work
     }
@@ -136,28 +146,28 @@ internal class RecordedVideoTimeline(
         }
     }
 
-    internal val storageDirectory = Files.createTempDirectory("indagium-recording-video-").toFile()
-    private val sessionStartedAtMs = wallClockMs()
+    internal val storageDirectory = stored?.directory ?: Files.createTempDirectory("indagium-recording-video-").toFile()
+    private val sessionStartedAtMs = stored?.sessionStartedAtMs ?: wallClockMs()
     private val sessionStartedAtNanos = monotonicNanos()
-    private val indexFile = File(storageDirectory, "timeline.jsonl")
+    private val indexFile = File(storageDirectory, INDEX_FILE_NAME)
     private val queue = ArrayBlockingQueue<Work>(MAX_QUEUE_PACKETS)
     private val queuedBytes = AtomicLong(0)
-    private val accepting = AtomicBoolean(true)
-    private val stopRequested = AtomicBoolean(false)
-    private val finished = AtomicBoolean(false)
+    private val accepting = AtomicBoolean(stored == null)
+    private val stopRequested = AtomicBoolean(stored != null)
+    private val finished = AtomicBoolean(stored != null)
     private val deleteRequested = AtomicBoolean(false)
     private val cleanupStarted = AtomicBoolean(false)
-    private val writtenPackets = AtomicLong(0)
-    private val stoppedDurationMs = AtomicLong(-1L)
-    private val stoppedWallClockMs = AtomicLong(-1L)
-    private val gapCounter = AtomicLong(0)
+    private val writtenPackets = AtomicLong(stored?.packetCount ?: 0)
+    private val stoppedDurationMs = AtomicLong(stored?.stoppedDurationMs ?: -1L)
+    private val stoppedWallClockMs = AtomicLong(stored?.stoppedWallClockMs ?: -1L)
+    private val gapCounter = AtomicLong(stored?.gapCount?.toLong() ?: 0)
     private val storyboardLock = Any()
 
-    @Volatile private var warning: String? = null
+    @Volatile private var warning: String? = stored?.warning
 
     @Volatile private var lastGlobalElapsedMs = 0L
 
-    // Writer state is touched only by [worker].
+    // Writer state is touched only by [worker]; a stored timeline has no writer and its segments are filled in once, below.
     private val segments = ArrayList<Segment>()
     private var currentWriter: StreamingMkvWriter? = null
     private var currentIndex: BufferedWriter? = null
@@ -171,9 +181,28 @@ internal class RecordedVideoTimeline(
     private var lastSegmentPtsUs = -1L
     private var lastPacketAtNanos: Long? = null
     private var lastConnectionEpoch: Long? = null
-    private val capped = AtomicBoolean(false)
+    private val capped = AtomicBoolean(stored?.capReached == true)
 
-    private val worker = Thread(::writePackets, "recorded-video-timeline").apply { isDaemon = true; start() }
+    // A stored timeline never starts its writer: nothing is offered, written or deleted, and [awaitFinished] returns at once.
+    private val worker = Thread(::writePackets, "recorded-video-timeline").apply { isDaemon = true; if (stored == null) start() }
+
+    init {
+        stored?.let { restored -> segments += restored.segments.map { it.toSegment() } }
+    }
+
+    /** True when this timeline was opened from stored evidence: its files belong to the stored recording and are left alone. */
+    internal val isStored: Boolean get() = stored != null
+
+    private fun StoredVideoSegment.toSegment() = Segment(
+        file = File(storageDirectory, fileName),
+        epoch = connectionEpoch,
+        startElapsedMs = startElapsedMs,
+        startAtNanos = mappings.firstOrNull()?.receivedAtNanos ?: 0L,
+        endElapsedMs = endElapsedMs,
+        packetMappings = mappings.mapTo(ArrayList()) {
+            PacketTimestampMapping(it.segmentPtsUs, it.sessionElapsedMs, it.receivedAtMs, it.receivedAtNanos, it.sourcePtsUs, it.keyFrame)
+        },
+    )
 
     /** Called on the stream pump. It only reserves/enqueues bounded memory and never does disk or decoder work. */
     fun offer(packet: MirrorVideoPacket) {
@@ -187,6 +216,7 @@ internal class RecordedVideoTimeline(
     }
 
     fun stop() {
+        if (stored != null) return
         accepting.set(false)
         stopRequested.set(true)
         freezeDuration()
@@ -746,6 +776,8 @@ internal class RecordedVideoTimeline(
 
     /** Close is called on UI/discard paths; signal and defer file deletion without waiting for writer/decoder work. */
     override fun close() {
+        // Stored evidence is the stored recording's: discarding a reopened recording must leave every file where it is.
+        if (stored != null) return
         stop()
         deleteRequested.set(true)
         if (finished.get()) scheduleCleanup()
@@ -759,28 +791,61 @@ internal class RecordedVideoTimeline(
         }, "recorded-video-cleanup").apply { isDaemon = true; start() }
     }
 
-    private companion object {
-        const val NANOS_PER_MILLI = 1_000_000L
-        const val MICROS_PER_MILLI = 1_000L
-        const val MAX_DURATION_MS = 10 * 60 * 1_000L
-        const val MAX_VIDEO_BYTES = 128L * 1024 * 1024
-        const val MAX_QUEUE_BYTES = 8L * 1024 * 1024
-        const val MAX_QUEUE_PACKETS = 180
-        const val MAX_GAP_NANOS = 1_500_000_000L
-        const val MAX_SIDE_WINDOW_MS = 5_000L
-        const val MIN_SIDE_WINDOW_MS = 50L
-        const val BEFORE_SAMPLE_OFFSET_MS = 450L
-        const val EARLY_SAMPLE_MS = 180L
-        const val MIDDLE_SAMPLE_MS = 900L
-        const val LATE_SAMPLE_MS = 2_000L
-        const val SETTLED_SAMPLE_MS = 4_000L
-        const val MAX_STORYBOARD_RANGE_MS = 30_000L
-        const val RANGE_FRAME_COUNT = 6
-        const val MAX_STORYBOARD_FRAMES = 6
-        const val MAX_DECODED_FRAMES_PER_REQUEST = 240
-        const val MAX_WRITTEN_PACKETS = 40_000L
-        const val SEGMENT_EDGE_TOLERANCE_MS = 120L
-        const val DRAIN_TIMEOUT_MS = 10_000L
+    /**
+     * What a saved copy of this finished timeline needs: the segment files and their packet index to copy, and the figures
+     * [StoredVideoTimeline] restores. Null while the timeline is running, when it has no usable segment, or when it is itself a stored one.
+     */
+    internal fun exportForStorage(): VideoStorageExport? {
+        if (stored != null || !finished.get()) return null
+        val files = segments.map { it.file }.filter { it.isFile && it.length() > 0L }
+        if (files.isEmpty()) return null
+        return VideoStorageExport(
+            segmentFiles = files,
+            indexFile = indexFile.takeIf { it.isFile },
+            sessionStartedAtMs = sessionStartedAtMs,
+            stoppedDurationMs = summary().durationMs,
+            stoppedWallClockMs = stoppedWallClockMs.get(),
+            gapCount = gapCounter.get().coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            capReached = capped.get(),
+            warning = warning,
+            packetCount = writtenPackets.get(),
+        )
+    }
+
+    internal companion object {
+        /** The packet index file next to the segments, in a live timeline's temporary folder and in stored evidence alike. */
+        const val INDEX_FILE_NAME = "timeline.jsonl"
+
+        /** Opens a finished timeline from stored files, read-only; null when no segment of [stored] is usable. */
+        fun openStored(stored: StoredVideoTimeline): RecordedVideoTimeline? {
+            val usable = stored.segments.filter { File(stored.directory, it.fileName).let { file -> file.isFile && file.length() > 0L } }
+            if (usable.isEmpty()) return null
+            return RecordedVideoTimeline(
+                MAX_DURATION_MS, MAX_VIDEO_BYTES, MAX_QUEUE_BYTES, System::currentTimeMillis, System::nanoTime, stored.copy(segments = usable),
+            )
+        }
+
+        private const val NANOS_PER_MILLI = 1_000_000L
+        private const val MICROS_PER_MILLI = 1_000L
+        private const val MAX_DURATION_MS = 10 * 60 * 1_000L
+        private const val MAX_VIDEO_BYTES = 128L * 1024 * 1024
+        private const val MAX_QUEUE_BYTES = 8L * 1024 * 1024
+        private const val MAX_QUEUE_PACKETS = 180
+        private const val MAX_GAP_NANOS = 1_500_000_000L
+        private const val MAX_SIDE_WINDOW_MS = 5_000L
+        private const val MIN_SIDE_WINDOW_MS = 50L
+        private const val BEFORE_SAMPLE_OFFSET_MS = 450L
+        private const val EARLY_SAMPLE_MS = 180L
+        private const val MIDDLE_SAMPLE_MS = 900L
+        private const val LATE_SAMPLE_MS = 2_000L
+        private const val SETTLED_SAMPLE_MS = 4_000L
+        private const val MAX_STORYBOARD_RANGE_MS = 30_000L
+        private const val RANGE_FRAME_COUNT = 6
+        private const val MAX_STORYBOARD_FRAMES = 6
+        private const val MAX_DECODED_FRAMES_PER_REQUEST = 240
+        private const val MAX_WRITTEN_PACKETS = 40_000L
+        private const val SEGMENT_EDGE_TOLERANCE_MS = 120L
+        private const val DRAIN_TIMEOUT_MS = 10_000L
     }
 }
 

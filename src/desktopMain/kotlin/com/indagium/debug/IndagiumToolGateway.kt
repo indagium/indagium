@@ -107,7 +107,7 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // Starting a run (or re-running a step) drives devices and may run scripts; cancelling one stops work in progress;
     // apply_step_fix rewrites a step of the user's library.
     "run_test_suite", "cancel_test_run", "rerun_test_step", "rerun_failed_test_cases", "export_test_run_report",
-    "collect_android_bugreport", "export_issue_step_clip", "apply_step_fix", "start_test_recording", "apply_test_recording",
+    "collect_android_bugreport", "export_issue_step_clip", "apply_step_fix", "start_test_recording", "reopen_test_recording", "apply_test_recording",
     // delete_issue removes a stored issue and its copied evidence for good. send_issue_to_tracker (and create_issue_from_step with
     // destination tracker, see sendsToExternalService) hands the issue text and evidence to an AI agent and an external tracker.
     "delete_issue", "send_issue_to_tracker",

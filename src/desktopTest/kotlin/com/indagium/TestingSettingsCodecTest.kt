@@ -40,6 +40,16 @@ class TestingSettingsCodecTest {
     }
 
     @Test
+    fun keepRecordingEvidenceIsOffByDefaultInJsonOnlyAndRoundTripsWhenOn() {
+        val off = AppSettings().settingsJson()
+        assertFalse("keepRecordingEvidence" in off, "a default document is unchanged")
+        assertFalse(settingsFromJson(off)!!.testing.keepRecordingEvidence)
+        val on = AppSettings(testing = testing.copy(keepRecordingEvidence = true)).settingsJson()
+        assertTrue(settingsFromJson(on)!!.testing.keepRecordingEvidence)
+        assertFalse(settingsFromJson("""{"testing":{"keepRecordingEvidence":"yes"}}""")!!.testing.keepRecordingEvidence, "a mistyped value reads as off")
+    }
+
+    @Test
     fun missingKeysFallBackToTheDefaults() {
         val decoded = settingsFromJson("{}")!!
 

@@ -40,6 +40,8 @@ import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.INCIDENTAL_EXPECTED_WARNING
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.ReopenedRecordingInfo
+import com.indagium.testing.authoring.ReplacementPlan
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.contextHint
@@ -89,6 +91,11 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
     DisposableEffect(suiteId, case.id) {
         onDispose { recordingPreparationJob?.cancel() }
     }
+    // Recordings whose evidence is kept on disk ("Keep recording evidence with recorded cases"); the check is a file lookup, so off the UI thread.
+    val storedRecordings by produceState(emptyList<String>(), case.id, case.steps.map { it.recordingRef }) {
+        value = withContext(Dispatchers.IO) { ui.state.storedRecordingIds(case.id) }
+    }
+    var reopening by remember(suiteId, case.id) { mutableStateOf(false) }
 
     TestsSectionTitle("Step authoring")
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -144,6 +151,29 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
         )
         if (preparingRecording) {
             AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
+        }
+        storedRecordings.forEachIndexed { position, recordingId ->
+            val busy = ui.state.testStepRecordingSession != null
+            HintedButton(
+                if (storedRecordings.size == 1) "Rewrite with AI from saved recording" else "Rewrite with AI from saved recording ${position + 1}",
+                onClick = {
+                    if (reopening) return@HintedButton
+                    reopening = true
+                    ui.scope.launch {
+                        try {
+                            recordError = ui.state.reopenTestStepRecording(case.id, recordingId).takeIf { it !is StoreResult.Ok }?.userMessage()
+                        } finally {
+                            reopening = false
+                        }
+                    }
+                },
+                enabled = editable && !reopening && !busy && !preparingRecording,
+                disabledHint = when {
+                    !editable -> "This case is read-only."
+                    busy -> "Finish or discard the open recording first."
+                    else -> "Opening the saved recording."
+                },
+            )
         }
         if (shared.isNotEmpty()) {
             TestsDropdown(
@@ -485,19 +515,63 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     // Moving, adding and removing rows also wait for the screen snapshots, like Remove always did.
     val reviewEditable = editable && snapshot.pendingSnapshots == 0
     val applyBlockedReason = recordingApplyBlockedReason(snapshot)
+    val reopened = snapshot.reopened
+    // What applying a reopened recording does to the steps it made earlier; recomputed whenever the case changes.
+    val replacement = remember(case.steps.map { it.id }, session.id) { ui.state.reopenedReplacementPlan(session.id) }
+    val keepEvidence = ui.state.settings.testing.keepRecordingEvidence && reopened == null
+
+    fun applyRecorded(insertAsNew: Boolean) {
+        working = true
+        ui.scope.launch {
+            try {
+                val reviewed = session.snapshot.value.steps
+                when (val result = ui.state.applyTestStepRecording(
+                    session.id,
+                    reviewed.map { it.action to it.expected },
+                    case.steps.indexOfFirst { it.id == ui.view.expandedStepId }.takeIf { it >= 0 }?.plus(1),
+                    reviewed.filter { it.useScreenshotAsExpected }.map { it.id }.toSet(),
+                    reviewed.map { it.id },
+                    reviewed.associate { it.id to (it.optional to it.condition) },
+                    insertAsNew,
+                )) {
+                    is StoreResult.Ok -> { ui.report(result); onDismiss() }
+                    else -> error = result.userMessage()
+                }
+            } finally {
+                working = false
+            }
+        }
+    }
 
     fun addRecordedStep(at: Int) {
         error = ui.state.insertTestRecordingRow(session.id, at, RecordedTestStep(action = "")).takeIf { it !is StoreResult.Ok }?.userMessage()
         ui.reclaimFocus()
     }
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
-        AppText(if (snapshot.active) "Recording device input…" else "Review recorded steps", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(5.dp))
-        TestsHint(
-            "Device ${session.deviceSerial}. Use the device or emulator window directly, or the Indagium mirror. " +
-                "Taps, swipes, buttons, panels, rotation and typing are observed, and so are changes to USB, Bluetooth, power and the like; " +
-                "this recorder never sends input to the device.",
+        AppText(
+            when {
+                snapshot.active -> "Recording device input…"
+                reopened != null -> "Review saved recording"
+                else -> "Review recorded steps"
+            },
+            color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
         )
+        Spacer(Modifier.height(5.dp))
+        if (reopened != null) {
+            ReopenedRecordingNotes(reopened, replacement)
+        } else {
+            TestsHint(
+                "Device ${session.deviceSerial}. Use the device or emulator window directly, or the Indagium mirror. " +
+                    "Taps, swipes, buttons, panels, rotation and typing are observed, and so are changes to USB, Bluetooth, power and the like; " +
+                    "this recorder never sends input to the device.",
+            )
+            if (keepEvidence) {
+                TestsHint(
+                    "Keep recording evidence is on: applying also saves this recording's screenshots and screen readings beside the case, " +
+                        "and its video unless a password was typed (Settings > Testing).",
+                )
+            }
+        }
         if (snapshot.active) {
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
@@ -654,35 +728,39 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
             if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id) && !rewriting, variant = ButtonVariant.Ghost)
+                val insertInstead = reopened != null && replacement is ReplacementPlan.Ambiguous
                 HintedButton(
-                    if (working) "Applying…" else "Apply recorded steps",
-                    onClick = {
-                        working = true
-                        ui.scope.launch {
-                            try {
-                                val reviewed = session.snapshot.value.steps
-                                when (val result = ui.state.applyTestStepRecording(
-                                    session.id,
-                                    reviewed.map { it.action to it.expected },
-                                    case.steps.indexOfFirst { it.id == ui.view.expandedStepId }.takeIf { it >= 0 }?.plus(1),
-                                    reviewed.filter { it.useScreenshotAsExpected }.map { it.id }.toSet(),
-                                    reviewed.map { it.id },
-                                    reviewed.associate { it.id to (it.optional to it.condition) },
-                                )) {
-                                    is StoreResult.Ok -> { ui.report(result); onDismiss() }
-                                    else -> error = result.userMessage()
-                                }
-                            } finally {
-                                working = false
-                            }
-                        }
+                    when {
+                        working -> "Applying…"
+                        insertInstead -> "Insert as new steps"
+                        reopened != null -> "Apply and replace steps"
+                        else -> "Apply recorded steps"
                     },
+                    onClick = { applyRecorded(insertAsNew = insertInstead) },
                     enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && !rewriting && applyBlockedReason == null,
                     disabledHint = applyBlockedReason ?: if (rewriting) "The recording is being rewritten." else "This recording is being applied.",
                     variant = ButtonVariant.Primary,
                 )
             }
         }
+    }
+}
+
+/** What a reopened recording says about itself: where it came from, what was left out, and which steps applying it replaces. */
+@Composable
+private fun ReopenedRecordingNotes(info: ReopenedRecordingInfo, replacement: ReplacementPlan?) {
+    val tc = tc()
+    TestsHint(
+        "Reopened from the evidence saved on ${java.time.Instant.ofEpochMilli(info.createdAtMs)} " +
+            "(${if (info.videoStored) "with video" else "without video"}). No device is needed. Rewrite with AI, edit and reorder work as " +
+            "for a new recording.",
+    )
+    info.notes.forEach { AppText(it, color = tc.warn, fontSize = 9.sp) }
+    when (replacement) {
+        is ReplacementPlan.Replace ->
+            TestsHint("Applying replaces the ${replacement.stepIds.size} step(s) this recording made, in place. Discarding changes nothing.")
+        is ReplacementPlan.Ambiguous -> TestsErrorText("${replacement.reason} You can insert the reviewed steps as new steps instead; the old ones stay.")
+        null -> Unit
     }
 }
 

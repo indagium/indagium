@@ -31,6 +31,7 @@ import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.previewLogChecks
+import com.indagium.testing.model.recordingRefs
 import com.indagium.testing.script.ScriptRunOutcome
 import com.indagium.testing.script.scriptArgsFromToolValues
 import com.indagium.testing.script.toToolResult
@@ -94,6 +95,14 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 mapOf("sessionId" to it.id, "suiteId" to suiteId, "caseId" to caseId, "deviceSerial" to it.deviceSerial, "active" to true)
             }
         },
+        "reopen_test_recording" to suspendTool { a ->
+            val caseId = a.requiredString("caseId")
+            appState.reopenTestStepRecording(caseId, a.string("recordingId")).toResult { session ->
+                val suiteId = appState.testStepRecordingTarget?.first
+                mapOf("sessionId" to session.id, "suiteId" to suiteId, "caseId" to caseId, "active" to false, "reopened" to true) +
+                    recordingMap(session.id, session.snapshot.value)
+            }
+        },
         "try_test_script" to suspendTool { a -> tryScript(a) },
         "draft_test_steps" to suspendTool { a -> draftSteps(a) },
         "improve_test_case" to suspendTool { a -> improveCase(a) },
@@ -126,6 +135,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 expectedScreens,
                 rowIds,
                 optionalOverrides,
+                insertAsNew = a.bool("insertAsNew") == true,
             ).toResult { inserted ->
                 mapOf(
                     "sessionId" to a.requiredString("sessionId"),
@@ -266,6 +276,9 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                     if (appState.testSuiteRequiresExternalAssets(id)) {
                         put("warning", "This metadata-only export requires the suite's external golden screenshot files; the image files are not embedded.")
                     }
+                    if (appState.testSuiteHasRecordingEvidence(id)) {
+                        put("recordingEvidence", "Stored recording evidence (video, screenshots) is not part of the export.")
+                    }
                 }
             }
         }
@@ -282,6 +295,9 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                     put("bytes", it.length())
                     if (appState.testSuiteRequiresExternalAssets(id)) {
                         put("warning", "This export requires the suite's external golden screenshot files; the image files are not embedded.")
+                    }
+                    if (appState.testSuiteHasRecordingEvidence(id)) {
+                        put("recordingEvidence", "Stored recording evidence (video, screenshots) is not part of the export.")
                     }
                 }
             }
@@ -658,6 +674,20 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             usageResultMap(snapshot.rewriteUsageTotal)?.let { put("rewriteSessionUsage", it) }
             put("rewriteAttempts", snapshot.rewriteAttemptCount)
             put("rewriteInProgress", snapshot.rewriteInProgress)
+            snapshot.reopened?.let { info ->
+                put(
+                    "reopened",
+                    mapOf(
+                        "recordingId" to info.recordingId,
+                        "createdAt" to info.createdAtMs,
+                        "updatedAt" to info.updatedAtMs,
+                        "passwordSensitive" to info.passwordSensitive,
+                        "videoStored" to info.videoStored,
+                        "replacesStepCount" to info.producedStepCount,
+                        "notes" to info.notes,
+                    ),
+                )
+            }
             if (snapshot.rewriteApplied) put("rewriteNotes", snapshot.rewriteNotes)
             put("steps", snapshot.steps.map(::recordingStepMap))
             snapshot.videoTimeline?.let { timeline ->
@@ -996,7 +1026,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         val limits = appState.editionService.limits()
         val activeCases = activeCaseIds(lib, limits)
         val map = suiteToJson(suite).toPlainMap()
-        map["cases"] = suite.cases.map { caseMap(it, locked = it.id !in activeCases) }
+        map["cases"] = suite.cases.map { caseMap(it, locked = it.id !in activeCases, suiteId = suite.id) }
         map["locked"] = suite.id !in activeSuiteIds(lib, limits)
         map["readOnly"] = suite.readOnly
         return map
@@ -1007,8 +1037,17 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         return suiteMap(lib, lib.suite(suite.id) ?: suite)
     }
 
-    private fun caseMap(case: TestCase, locked: Boolean): MutableMap<String, Any?> {
+    private fun caseMap(case: TestCase, locked: Boolean, suiteId: String? = null): MutableMap<String, Any?> {
         val map = caseToJson(case).toPlainMap()
+        // Recording evidence kept with the case (reopen_test_recording); listed only when the files are really there.
+        if (suiteId != null) {
+            val stored = case.recordingRefs().filter { appState.recordingEvidenceService.exists(suiteId, it) }
+            if (stored.isNotEmpty()) {
+                map["recordings"] = stored.map { id ->
+                    mapOf("recordingId" to id, "stepCount" to case.steps.count { it.recordingRef == id })
+                }
+            }
+        }
         if (!map.containsKey("allowedTools")) map["allowedTools"] = null
         map["locked"] = locked
         return map
@@ -1018,7 +1057,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
     private fun caseResult(case: TestCase): Map<String, Any?> {
         val lib = library
         val location = lib.findCase(case.id) ?: return caseMap(case, locked = false)
-        val map = caseMap(location.case, isCaseLocked(lib, case.id, appState.editionService.limits()))
+        val map = caseMap(location.case, isCaseLocked(lib, case.id, appState.editionService.limits()), location.suite.id)
         map["suiteId"] = location.suite.id
         map["index"] = location.index
         return map

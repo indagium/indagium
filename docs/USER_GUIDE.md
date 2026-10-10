@@ -1661,6 +1661,24 @@ reaches the AI model or its process. The issue text and the evidence it uploads 
 and are sent to the tracker, so the dialog says so first. An issue that was already created is not sent again
 unless you ask for another one.
 
+### Keeping a recording's evidence
+
+By default a recording's screenshots, screen readings and video are temporary: applying the steps deletes them. Turn on
+**Settings → Testing → Keep recording evidence with recorded cases** and applying a recording also saves that evidence in
+the **Test suites folder** (under `assets/<suite>/recordings/`), so the full **Rewrite with AI** can be run again later.
+
+- **Reopen:** on a case with saved evidence, press **Rewrite with AI from saved recording** (several saved recordings are
+  numbered). It opens the normal review, with no device needed: rewrite, edit, reorder and apply work as for a new recording.
+  **Discard** leaves the saved files untouched.
+- **Apply replaces:** applying a reopened recording replaces the steps it made before, in place. If you deleted or moved those
+  steps, Indagium says why it cannot tell which to replace and offers **Insert as new steps** (the old steps stay).
+- **Privacy:** if a password was typed while recording, **no video is saved** and the screenshots and screen text from the time
+  a password could be on screen are left out (the file says so, and the review shows a note). The typed text itself is always hidden.
+- **Size:** one recording takes at most 200 MB. Over that, the video is left out first (with a warning), then the screenshots.
+- **Copies and exports:** duplicating a case or suite, and exporting or importing a suite, never carry the evidence; deleting a
+  case or suite deletes its saved recordings. Settings shows the disk the saved recordings use and **Delete stored recording
+  evidence** (after a confirmation) removes them all.
+
 ### Editions and limits
 
 The **Free** edition allows **1 suite with 5 cases**. Everything past the limit (in the order you keep them) is
@@ -1676,7 +1694,7 @@ unpackaged build or with `-Dindagium.dev=true`.
 Everything above — authoring previews, script import/schema/usage, runs and comparisons, report export, and issue
 evidence — is also available through shared MCP services; see [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md#ai-test-suites).
 An external client asks for approval for each MCP operation whose catalog marks it as confirmation-required or
-per-call gated, including script execution, test runs, recording start, report/evidence export and tracker delivery.
+per-call gated, including script execution, test runs, recording start and reopening a saved recording, report/evidence export and tracker delivery.
 Drafting with a remote provider also discloses the selected profile and bounded suite/case context before approval.
 
 ---

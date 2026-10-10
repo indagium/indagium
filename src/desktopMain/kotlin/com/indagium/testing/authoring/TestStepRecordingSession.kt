@@ -124,6 +124,22 @@ data class TestStepRecordingSnapshot(
     val rewriteUsagePending: AiUsageStats? = null,
     val rewriteAttemptCount: Int = 0,
     val rewriteInProgress: Boolean = false,
+    /** Set on a recording reopened from stored evidence (no device, no live input); null on a recording made just now. */
+    val reopened: ReopenedRecordingInfo? = null,
+)
+
+/** What the review panel and the MCP tools say about the stored recording a reopened session came from. */
+data class ReopenedRecordingInfo(
+    val recordingId: String,
+    val createdAtMs: Long,
+    val updatedAtMs: Long,
+    /** A password was typed while recording: the video was not stored, and screenshots from the sensitive windows were left out. */
+    val passwordSensitive: Boolean,
+    val videoStored: Boolean,
+    /** How many library steps applying this recording replaces (the steps it produced). */
+    val producedStepCount: Int,
+    /** Why the video or screenshots are missing, and anything else worth telling the person, in words. */
+    val notes: List<String> = emptyList(),
 )
 
 /** The rows an AI rewrite starts from and the rewritten [accepted] rows of an earlier rewrite that may be kept as they are. */
@@ -206,6 +222,11 @@ class TestStepRecordingSession internal constructor(
     private var tailPending = false
     private val tailDone = CountDownLatch(1)
     private var inputSource = InputSource.MIRROR
+
+    /** Set once by [loadStopped] when this session was reopened from stored evidence; null for a recording made just now. */
+    @Volatile
+    internal var reopened: ReopenedRecording? = null
+        private set
 
     /** How long [stopAndDrain] waits for the device input recorder's last rows; tests shorten it. */
     internal var tailDrainTimeoutMs: Long = TAIL_DRAIN_TIMEOUT_MS
@@ -1242,6 +1263,42 @@ class TestStepRecordingSession internal constructor(
 
     /** A stored probe state, for the review panel and later tools; null for an unknown [seq]. */
     fun screenState(seq: Int): RecordingScreenState? = synchronized(lock) { screenStates[seq] }
+
+    /** What is saved with the recording ("Keep recording evidence"): the review state, the screen readings and screenshots, the video. */
+    internal fun evidence(): SessionEvidence = synchronized(lock) {
+        SessionEvidence(mutableSnapshot.value, screenStates.values.toList(), probeScreenshots.toList(), videoTimeline, deviceSerial)
+    }
+
+    /**
+     * Turns this fresh session into the stopped recording [stored] describes (see [restoreRecordingSession]): the reviewed rows, the raw
+     * rows an AI rewrite replaced, the screen readings and screenshots. It never reads a device; the worker threads are shut down as after
+     * [stop] so nothing more can arrive.
+     */
+    internal fun loadStopped(stored: StoredRecording, from: ReopenedRecording) {
+        synchronized(lock) {
+            stored.screenStates.forEach { screenStates[it.seq] = it }
+            probeScreenshots += stored.probeScreenshots
+            nextStateSeq = (screenStates.keys.maxOrNull() ?: 0) + 1
+            stateImageBytes = screenStates.values.sumOf { (it.screenshotJpeg?.size ?: 0).toLong() } + probeScreenshots.sumOf { it.jpeg.size.toLong() }
+            mutableSnapshot.value = TestStepRecordingSnapshot(
+                active = false,
+                steps = stored.rows.take(MAX_RECORDED_STEPS),
+                warnings = (stored.warnings + from.notes).distinct().takeLast(MAX_RECORDED_WARNINGS),
+                rawSteps = stored.rawRows,
+                rewriteNotes = if (stored.rewriteApplied) stored.rewriteNotes else "",
+                videoTimeline = videoTimeline?.summary(),
+                excludedSourceInputIds = stored.excludedSourceInputIds,
+                rewriteApplied = stored.rewriteApplied,
+                reopened = from.info(),
+            )
+            reopened = from
+            touches.clear()
+            probeStopped.countDown()
+            tailDone.countDown()
+            screenshotWorker.shutdown()
+            probeWorker.shutdown()
+        }
+    }
 
     /** Publishes [rows] with their before/after states, tapped element and password masking recomputed from the stored states. */
     private fun publishRows(rows: List<RecordedTestStep>) {

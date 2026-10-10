@@ -404,7 +404,7 @@ class TestRunToolsGatewayTest {
         assertTrue(importApproval.summary.contains("does not run the script"))
         assertNotNull(exportApproval)
         assertTrue(exportApproval.fields.any { it.first == "Destination" && it.second == destination })
-        for (tool in listOf("import_test_script", "export_test_script", "start_test_recording", "apply_test_recording")) {
+        for (tool in listOf("import_test_script", "export_test_script", "start_test_recording", "reopen_test_recording", "apply_test_recording")) {
             assertTrue(tool in PER_CALL_APPROVAL_MCP_TOOLS, "$tool needs external per-call approval")
             assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy(tool))
         }

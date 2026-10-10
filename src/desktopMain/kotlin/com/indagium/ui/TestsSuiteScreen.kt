@@ -519,6 +519,11 @@ private fun exportSuiteToChosenFile(ui: TestsUi, suite: TestSuite) {
         } else {
             ""
         }
-        ui.info("Exported \"${suite.name}\" to ${file.name}.$assetNote")
+        val evidenceNote = if (ui.state.testSuiteHasRecordingEvidence(suite.id)) {
+            " Stored recording evidence (video, screenshots) is not included."
+        } else {
+            ""
+        }
+        ui.info("Exported \"${suite.name}\" to ${file.name}.$assetNote$evidenceNote")
     }
 }

@@ -36,7 +36,7 @@ private const val APPROVAL_INSTRUCTION_PREVIEW_CHARS = 180
 internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf(
     "try_test_script", "run_test_suite", "rerun_test_step", "rerun_failed_test_cases", "test_lane_tool_call",
     "draft_test_steps", "improve_test_case", "rewrite_test_recording", "import_test_script", "export_test_script", "start_test_recording",
-    "apply_test_recording",
+    "reopen_test_recording", "apply_test_recording",
     "export_test_run_report", "collect_android_bugreport", "export_issue_step_clip", "create_issue_from_step", "send_issue_to_tracker",
 )
 
@@ -53,6 +53,7 @@ internal suspend fun describePerCallApproval(appState: AppState, toolName: Strin
         "import_test_script" -> describeScriptImportCall(arguments, clientName)
         "export_test_script" -> describeScriptExportCall(appState, arguments, clientName)
         "start_test_recording" -> describeRecordingStartCall(appState, arguments, clientName)
+        "reopen_test_recording" -> describeRecordingReopenCall(appState, arguments, clientName)
         "apply_test_recording" -> describeRecordingApplyCall(appState, arguments, clientName)
         "export_test_run_report" -> describeReportExportCall(arguments, clientName)
         "collect_android_bugreport" -> describeBugreportCall(appState, arguments, clientName)
@@ -237,6 +238,31 @@ private fun describeRecordingStartCall(appState: AppState, arguments: Map<String
     )
 }
 
+/** Reopening a saved recording reads its stored screenshots, screen text and video back into a review the client can then read; it needs no device. */
+@Suppress("ReturnCount") // Fail-closed argument checks each return an actionable refusal.
+private fun describeRecordingReopenCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
+    val caseId = arguments["caseId"] as? String ?: return null
+    val location = appState.testLibrary.findCase(caseId) ?: return null
+    if (location.suite.readOnly || appState.testLibrary.readOnly) return null
+    when (decide(appState.testLibrary, LimitOperation.EditCase(location.suite.id, caseId), appState.editionService.limits())) {
+        is LimitDecision.Refused -> return null
+        else -> Unit
+    }
+    return ExternalActionDetails(
+        title = "Reopen a saved recording?",
+        summary =
+            "$clientName wants to reopen the recording evidence saved for '${location.suite.name} / ${location.case.name}' as a review. " +
+                "Its stored screenshots, screen text and video become readable through the recording tools; no device is used and nothing is " +
+                "changed until the steps are applied.",
+        fields = listOf(
+            "Target case" to location.case.name,
+            "Recording" to ((arguments["recordingId"] as? String)?.takeIf(String::isNotBlank) ?: "The case's only stored recording"),
+        ),
+        allowLabel = "Reopen recording",
+        declinedMessage = "The user declined to reopen the saved recording.",
+    )
+}
+
 @Suppress("CyclomaticComplexMethod", "ReturnCount") // Validate the whole reviewed snapshot before confirmation.
 private fun describeRecordingApplyCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
     val sessionId = arguments["sessionId"] as? String ?: return null
@@ -265,7 +291,11 @@ private fun describeRecordingApplyCall(appState: AppState, arguments: Map<String
         fields = listOf(
             "Actions" to actions.take(8).joinToString("\n").ifBlank { "(none)" }.let { if (actions.size > 8) "$it\n+ ${actions.size - 8} more" else it },
             "Expected screenshot choices" to "$usingImages reviewed input-time image(s)",
-            "Library change" to "Adds steps at the requested position; no device action is performed",
+            "Library change" to if (snapshot.reopened != null) {
+                "Replaces the steps this saved recording made (or inserts new ones when insertAsNew is true); no device action is performed"
+            } else {
+                "Adds steps at the requested position; no device action is performed"
+            },
         ),
         allowLabel = "Apply reviewed steps",
         declinedMessage = "The user declined to apply the recording; the test library was not changed.",

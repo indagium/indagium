@@ -129,6 +129,20 @@ fun TestSuite.withFreshIds(): TestSuite = copy(
     readOnly = false,
 )
 
+// ── Recording evidence references ───────────────────────────────────
+
+/** The step without its link to stored recording evidence: what a copy, an import and an export carry (the evidence stays where it is). */
+fun TestStep.withoutRecordingRef(): TestStep = if (recordingRef == null) this else copy(recordingRef = null)
+
+fun TestCase.withoutRecordingRefs(): TestCase =
+    if (steps.none { it.recordingRef != null }) this else copy(steps = steps.map { it.withoutRecordingRef() })
+
+fun TestSuite.withoutRecordingRefs(): TestSuite =
+    if (cases.none { case -> case.steps.any { it.recordingRef != null } }) this else copy(cases = cases.map { it.withoutRecordingRefs() })
+
+/** The distinct recording ids the steps of this case point at, in step order. */
+fun TestCase.recordingRefs(): List<String> = steps.mapNotNull { it.recordingRef }.distinct()
+
 // ── Step kinds ───────────────────────────────────────────────────────
 
 /** The run (not an agent) performs this step: a MANUAL step waits for a tester, a SCRIPT step runs a script. */

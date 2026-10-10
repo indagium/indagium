@@ -111,6 +111,8 @@ class SettingsSearchTest {
         assertTrue("Test connection" in labels("connect"), labels("connect").toString())
         assertTrue("Default judge" in labels("judge"), labels("judge").toString())
         assertTrue("Edition" in labels("suites"), labels("suites").toString())
+        assertTrue("Keep recording evidence with recorded cases" in labels("recording evidence"), labels("recording evidence").toString())
+        assertTrue("Stored recording evidence" in labels("delete disk"), labels("delete disk").toString())
         assertTrue(searchSettings("token", all - SettingsSection.IssueTracker).none { it.section == SettingsSection.IssueTracker })
         // The existing crash-detection section keeps its own entry.
         assertTrue(SETTINGS_SEARCH_INDEX.any { it.section == SettingsSection.Issues && it.label == "Custom issue categories" })

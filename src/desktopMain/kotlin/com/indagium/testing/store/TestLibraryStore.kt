@@ -25,7 +25,10 @@ import com.indagium.testing.model.newSharedStepId
 import com.indagium.testing.model.newStepId
 import com.indagium.testing.model.newSuiteId
 import com.indagium.testing.model.normalizeTags
+import com.indagium.testing.model.recordingRefs
 import com.indagium.testing.model.withFreshIds
+import com.indagium.testing.model.withoutRecordingRef
+import com.indagium.testing.model.withoutRecordingRefs
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -71,7 +74,11 @@ class TestLibraryStore(
     private val limits: () -> EditionLimits = { EditionLimits.UNLIMITED },
     private val clock: () -> Long = System::currentTimeMillis,
     private val copyAsset: (File, File) -> Unit = { source, target -> Files.copy(source.toPath(), target.toPath()) },
+    /** Where the removal of a deleted case's or suite's stored recordings runs; tests pass an inline runner. */
+    private val cleanup: (() -> Unit) -> Unit = RecordingCleanup::run,
 ) {
+    /** The recordings stored beside this library's golden screenshots (see [RecordingEvidenceFiles]). */
+    val evidence = RecordingEvidenceFiles(rootDir)
     private val suitesDir = File(rootDir, TEST_SUITES_DIR_NAME)
     private val libraryFile = File(rootDir, TEST_LIBRARY_FILE_NAME)
     private val lock = Any()
@@ -125,7 +132,7 @@ class TestLibraryStore(
         libraryFileRejection(lib)?.let { return@mutate it }
         if (lib.suite(suiteId) == null) return@mutate notFound("suite", suiteId)
         Outcome.Apply(lib.copy(suites = lib.suites.filterNot { it.id == suiteId }), Unit, Dirty(setOf(suiteId), libraryFile = true))
-    }
+    }.also { if (it is StoreResult.Ok) cleanup { evidence.deleteSuite(suiteId) } }
 
     /** A deep copy with new ids, placed right after the original. */
     @Suppress("CyclomaticComplexMethod", "ReturnCount", "TooGenericExceptionCaught") // Stage, revalidate, publish and clean copied assets on refusal.
@@ -141,7 +148,8 @@ class TestLibraryStore(
         readOnlySuiteRejection(source)?.let { return it.result }
         refusal(decide(initial, LimitOperation.DuplicateSuite(suiteId), lim))?.let { return it.result }
         val now = clock()
-        val copy = source.withFreshIds().copy(name = copyName(source.name), createdAt = now, updatedAt = now)
+        // The copy does not share the original's stored recording evidence: a link would make two cases own one folder.
+        val copy = source.withFreshIds().withoutRecordingRefs().copy(name = copyName(source.name), createdAt = now, updatedAt = now)
         val staged = stageSuiteAssets(initial, source, copy.id)
         if (staged.error != null) return StoreResult.Invalid(staged.error)
 
@@ -209,7 +217,8 @@ class TestLibraryStore(
         val snapshot = state.value
         val suite = snapshot.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
         val assets = referencedGoldenPaths(snapshot, suite).isNotEmpty()
-        return StoreResult.Ok(encodeSuiteFile(suite, externalAssetsRequired = assets))
+        // Stored recording evidence is never part of an export; the links to it would only dangle in the file.
+        return StoreResult.Ok(encodeSuiteFile(suite.withoutRecordingRefs(), externalAssetsRequired = assets))
     }
 
     /** Whether a metadata-only suite export needs its external golden image files to remain usable. */
@@ -218,6 +227,10 @@ class TestLibraryStore(
             val snapshot = state.value
             snapshot.suite(suiteId)?.let { referencedGoldenPaths(snapshot, it).isNotEmpty() } == true
         }
+
+    /** Whether any step of the suite points at stored recording evidence (which an export leaves out). */
+    fun suiteHasRecordingEvidence(suiteId: String): Boolean =
+        state.value.suite(suiteId)?.cases?.any { case -> case.steps.any { it.recordingRef != null } } == true
 
     fun exportSuiteToFile(suiteId: String, destination: File): StoreResult<File> {
         val text = when (val exported = exportSuite(suiteId)) {
@@ -250,7 +263,7 @@ class TestLibraryStore(
             val warnings = mutableListOf<String>()
             (decision as? LimitDecision.AllowedWithWarning)?.let { warnings += it.warning }
             val now = clock()
-            val base = decoded.suite.withFreshIds()
+            val base = decoded.suite.withFreshIds().withoutRecordingRefs()
             val suite = base.copy(name = base.name.ifBlank { DEFAULT_IMPORTED_SUITE_NAME }, createdAt = now, updatedAt = now)
             danglingReferenceWarning(lib, suite)?.let { warnings += it }
             Outcome.Apply(lib.copy(suites = lib.suites + suite), suite, Dirty(setOf(suite.id), libraryFile = true), warnings)
@@ -303,13 +316,17 @@ class TestLibraryStore(
             SuiteEdit.Done(suite.copy(cases = suite.cases.map { if (it.id == caseId) updated else it }), updated)
         }
 
-    /** Deleting is always allowed, even for a locked case. */
-    fun deleteCase(caseId: String): StoreResult<Unit> =
-        editSuite(
+    /** Deleting is always allowed, even for a locked case. Its stored recording evidence goes with it. */
+    fun deleteCase(caseId: String): StoreResult<Unit> {
+        val before = state.value.findCase(caseId)
+        val known = before?.case?.recordingRefs().orEmpty()
+        return editSuite(
             locate = { lib -> lib.findCase(caseId)?.suite },
             notFound = StoreResult.NotFound("case", caseId),
             operation = { null },
         ) { _, suite -> SuiteEdit.Done(suite.copy(cases = suite.cases.filterNot { it.id == caseId }), Unit) }
+            .also { if (it is StoreResult.Ok && before != null) cleanup { evidence.deleteCase(before.suite.id, caseId, known) } }
+    }
 
     /** A deep copy with new ids, placed right after the original. */
     fun duplicateCase(caseId: String): StoreResult<TestCase> =
@@ -319,7 +336,7 @@ class TestLibraryStore(
             operation = { LimitOperation.DuplicateCase(it.id, caseId) },
         ) { _, suite ->
             val index = suite.cases.indexOfFirst { it.id == caseId }
-            val copy = suite.cases[index].withFreshIds().let { it.copy(name = copyName(it.name)) }
+            val copy = suite.cases[index].withFreshIds().withoutRecordingRefs().let { it.copy(name = copyName(it.name)) }
             val cases = suite.cases.toMutableList().apply { add(index + 1, copy) }
             SuiteEdit.Done(suite.copy(cases = cases), copy)
         }
@@ -330,6 +347,16 @@ class TestLibraryStore(
      */
     fun moveCase(caseId: String, toIndex: Int, toSuiteId: String? = null): StoreResult<TestCase> {
         val lim = limits()
+        val before = state.value.findCase(caseId)
+        return moveCaseInLibrary(caseId, toIndex, toSuiteId, lim).also { moved ->
+            // The case's stored recordings live under its suite: they follow it into the other suite (a rename, so done inline).
+            if (moved is StoreResult.Ok && before != null && toSuiteId != null && toSuiteId != before.suite.id) {
+                evidence.moveCase(before.suite.id, toSuiteId, caseId, before.case.recordingRefs())
+            }
+        }
+    }
+
+    private fun moveCaseInLibrary(caseId: String, toIndex: Int, toSuiteId: String?, lim: EditionLimits): StoreResult<TestCase> {
         return mutate { lib ->
             val from = lib.findCase(caseId) ?: return@mutate notFound("case", caseId)
             if (toSuiteId == null || toSuiteId == from.suite.id) return@mutate reorderCaseOutcome(lib, from, toIndex)
@@ -432,13 +459,63 @@ class TestLibraryStore(
         }
     }
 
+    /**
+     * Replaces the steps [replacedIds] of the case with [steps] in one write, at the place the replaced ones had. The replaced steps
+     * must all still be in the case, next to each other and in the order given: any other state is refused and nothing changes (the
+     * caller offers [createSteps] instead). The new steps get fresh ids; [creationUsage] is added like [createSteps] does.
+     */
+    fun replaceSteps(caseId: String, replacedIds: List<String>, steps: List<TestStep>, creationUsage: AiUsageStats? = null): StoreResult<List<TestStep>> {
+        if (steps.isEmpty()) return StoreResult.Invalid("At least one step is required.")
+        if (replacedIds.isEmpty()) return StoreResult.Invalid("At least one step to replace is required.")
+        val copies = steps.map { it.withFreshIds() }
+        return editCase(caseId) { lib, case ->
+            val first = case.steps.indexOfFirst { it.id == replacedIds.first() }
+            val block = if (first < 0) emptyList() else case.steps.drop(first).take(replacedIds.size).map { it.id }
+            if (block != replacedIds) {
+                return@editCase CaseEdit.Fail("The steps this recording made were moved, edited out or mixed with other steps, so they cannot be replaced.")
+            }
+            copies.forEachIndexed { index, step ->
+                val problem = validateEntityId("Step", step.id) ?: validateStep(step, lib.scripts)
+                if (problem != null) return@editCase CaseEdit.Fail("Step ${index + 1}: $problem")
+            }
+            val updated = case.steps.take(first) + copies + case.steps.drop(first + replacedIds.size)
+            val usage = if (creationUsage == null) case.creationUsage else sumAiUsage(listOf(case.creationUsage, creationUsage))
+            CaseEdit.Done(case.copy(steps = updated, creationUsage = usage), copies)
+        }
+    }
+
+    /**
+     * Clears the link to stored recording evidence from every step that points at one of [recordingIds] (the evidence was deleted).
+     * Suites saved by a newer version are left alone. Returns how many steps lost their link.
+     */
+    fun clearRecordingRefs(recordingIds: Set<String>): StoreResult<Int> = clearRecordingRefsWhere { it.recordingRef in recordingIds }
+
+    /** Clears the link of the steps [stepIds] only (their recording now stands for other steps). Returns how many lost their link. */
+    fun clearRecordingRefsOfSteps(stepIds: Set<String>): StoreResult<Int> =
+        clearRecordingRefsWhere { it.recordingRef != null && it.id in stepIds }
+
+    private fun clearRecordingRefsWhere(matches: (TestStep) -> Boolean): StoreResult<Int> = mutate { lib ->
+        var cleared = 0
+        val dirty = LinkedHashSet<String>()
+        val suites = lib.suites.map { suite ->
+            if (suite.readOnly || suite.cases.none { case -> case.steps.any(matches) }) return@map suite
+            dirty += suite.id
+            suite.copy(
+                cases = suite.cases.map { case ->
+                    case.copy(steps = case.steps.map { step -> if (matches(step)) step.withoutRecordingRef().also { cleared++ } else step })
+                },
+            )
+        }
+        Outcome.Apply(lib.copy(suites = suites), cleared, Dirty(dirty))
+    }
+
     fun deleteStep(stepId: String): StoreResult<Unit> =
         editStep(stepId) { _, case, _ -> CaseEdit.Done(case.copy(steps = case.steps.filterNot { it.id == stepId }), Unit) }
 
     /** A copy with new ids, placed right after the original. */
     fun duplicateStep(stepId: String): StoreResult<TestStep> =
         editStep(stepId) { _, case, old ->
-            val copy = old.withFreshIds()
+            val copy = old.withFreshIds().withoutRecordingRef()
             val index = case.steps.indexOfFirst { it.id == stepId }
             CaseEdit.Done(case.copy(steps = case.steps.toMutableList().apply { add(index + 1, copy) }), copy)
         }
