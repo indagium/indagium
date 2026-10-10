@@ -93,6 +93,7 @@ class RecordingRewriteUpFrontTest {
         assertEquals(tools, request.gateway.tools.map { it.name }, "the tools stay for close-ups")
         val line = logFile.readLines().single { "rewrite_brief" in it }
         assertTrue("evidenceUpFront=true" in line && "images=2" in line && "toolBudget=6" in line && "promptChars=" in line && "briefMs=" in line, line)
+        assertTrue("source=screenshots" in line && "settledAfter=1/3" in line && "lockedSteps=0" in line, line)
     }
 
     @Test

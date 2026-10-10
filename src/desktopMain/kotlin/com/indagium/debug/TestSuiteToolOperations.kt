@@ -510,6 +510,13 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         }
     }
 
+    private fun parseRewriteScope(text: String?) =
+        try {
+            com.indagium.testing.authoring.RewriteScope.parse(text)
+        } catch (problem: IllegalArgumentException) {
+            toolArgError(problem.message ?: "scope must be needs_review or all.")
+        }
+
     private suspend fun rewriteRecording(a: ToolArgs): Map<String, Any?> {
         val id = a.requiredString("sessionId")
         val rewrite = appState.rewriteTestStepRecording(
@@ -518,6 +525,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             model = a.string("model"),
             reasoningEffort = a.string("reasoningEffort"),
             note = a.string("note").orEmpty(),
+            scope = parseRewriteScope(a.string("scope")),
         )
         return rewrite.toResult { done ->
             val snapshot = (appState.testStepRecordingSnapshot(id) as? StoreResult.Ok)?.value

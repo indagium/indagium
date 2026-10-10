@@ -23,6 +23,7 @@ internal const val GET_RECORDED_VIDEO_STORYBOARD_TOOL = "get_recorded_video_stor
 private const val MAX_UI_NODES_RETURNED = 120
 private const val PERCENT = 100L
 private const val AUTHOR_STEP_KIND = "AUTHOR_STEP"
+private const val LOCKED_STEP_KIND = "LOCKED_STEP"
 private val SCREEN_MOMENTS = listOf("before", "after", "input")
 private val UI_MOMENTS = listOf("before", "after")
 
@@ -95,6 +96,16 @@ internal class RecordingRewriteTools(
 
     private fun inputMap(input: RewriteInput): Map<String, Any?> {
         val row = input.row
+        input.locked?.let { group ->
+            return mapOf(
+                "index" to input.number,
+                "kind" to LOCKED_STEP_KIND,
+                "locked" to true,
+                "coveredInputs" to group.inputs,
+                "message" to "The person already accepted the step that covers inputs ${rewriteNumberRanges(group.inputs)}; there is nothing to " +
+                    "inspect. Return it unchanged as one step covering exactly those inputs.",
+            ) + untrustedData("recorded_input", mapOf("action" to group.step.action, "expected" to group.step.expected.takeIf(String::isNotBlank)))
+        }
         if (input.fixed) {
             return mapOf(
                 "index" to input.number,
@@ -252,6 +263,9 @@ internal class RecordingRewriteTools(
         val end = args.long("endMs")
         if (index != null && inputs.getOrNull(index - 1)?.fixed == true) {
             throw ToolArgException("Input $index is an author-added step; it has no recorded video.")
+        }
+        if (index != null && inputs.getOrNull(index - 1)?.locked != null) {
+            throw ToolArgException("Input $index belongs to a step the person already accepted; it stays as it is.")
         }
         val storyboard = when {
             index != null && start == null && end == null -> videoTimeline?.storyboardForInput(index, inputs)

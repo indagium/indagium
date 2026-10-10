@@ -459,6 +459,36 @@ class RewriteRecordingToolsTest {
         assertEquals("Recorded input (hint; prefer what is on screen)", hint.caption)
     }
 
+    @Test
+    fun theScopeArgumentKeepsTheAcceptedStepsOrRewritesEverythingAgain() {
+        val session = record()
+        val flagged = """{"steps":[{"action":"Search for 'lofi'","expected":"The search field shows 'lofi'","sourceInputs":[1,2]},""" +
+            """{"action":"Press Enter","expected":"","sourceInputs":[3],"reviewReason":"Confirm the result."}]}"""
+        val resolved = """{"steps":[{"action":"Search for 'lofi'","expected":"The search field shows 'lofi'","sourceInputs":[1,2]},""" +
+            """{"action":"Submit the search","expected":"Results for 'lofi' are listed","sourceInputs":[3]}]}"""
+        val provider = scripted(answer(flagged), answer(resolved), answer(VALID_SHOP_REWRITE))
+        val descriptor = operations.toolGateway.tools.single { it.name == "rewrite_test_recording" }
+        assertTrue("scope" in descriptor.schema.toString() && "needs_review" in descriptor.schema.toString(), descriptor.schema.toString())
+
+        assertNull(call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID)["error"])
+        val second = call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID)
+        assertNull(second["error"], second.toString())
+        val kept = provider.requests[1].messages.joinToString("\n") { it.content.orEmpty() }
+        assertTrue("[LOCKED STEP, keep as is] covers input(s) 1-2" in kept && "3. [KEY] Press Enter" in kept, kept)
+        assertEquals(listOf("Search for 'lofi'", "Submit the search"), (second["steps"] as List<*>).map { (it as Map<*, *>)["action"] })
+
+        val nothing = call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID, "scope" to "needs_review")
+        assertTrue("nothing needs review" in nothing["error"].toString(), nothing.toString())
+        val unknown = call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID, "scope" to "some")
+        assertTrue("needs_review or all" in unknown["error"].toString(), unknown.toString())
+        assertEquals(2, provider.requests.size, "neither refusal reached the model")
+
+        val all = call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID, "scope" to "all")
+        assertNull(all["error"], all.toString())
+        val everything = provider.requests[2].messages.joinToString("\n") { it.content.orEmpty() }
+        assertTrue("1. [TAP]" in everything && "covers input(s)" !in everything, everything)
+    }
+
     // ── Approval ─────────────────────────────────────────────────────
 
     @Test

@@ -46,6 +46,11 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "as 'Skip the ad' with condition 'A skippable ad and its Skip ad control are visible'. Its expected value may be blank if " +
         "there is no stable result to assert. Never merge it with a required action such as Pause playback. Do not mark an unresolved " +
         "tap optional to avoid review.\n" +
+        "- A loading, splash or transition screen right after an action is not that action's result: an app shows its splash for a " +
+        "moment before its content, and a page shows a spinner before it loads. Judge the result from the settled evidence: the " +
+        "frame captioned settled, the screen shown when the next input began, or a later screen. Tapping an app icon and then seeing " +
+        "that app is 'Open <app>'. Before giving up on an input, look at its video storyboard with get_recorded_video_storyboard " +
+        "when the video is available. Use reviewReason only when the evidence, video included, genuinely cannot tell what happened.\n" +
         "- Use evidence tools only when the brief is insufficient and the needed reading is available. You have a small tool budget.\n" +
         "- When the request says screenshots are attached, they arrive with it as images, introduced in order (\"Image 3: ...\"), and " +
         "each input line says which images show it and lists the screen elements near the touch. Read them before anything else and " +
@@ -54,6 +59,8 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "it like any input without evidence.\n" +
         "- A numbered input marked [$FIXED_STEP_LABEL] is a step the person wrote, not a recording. Return it unchanged as its own " +
         "step; never reword, merge, move, split or drop it.\n" +
+        "- A line marked [$LOCKED_STEP_LABEL] is a step the person already accepted from an earlier rewrite, shown with the inputs it " +
+        "covers. Return it unchanged as one step covering exactly those inputs; never reword, merge, split, move or drop it.\n" +
         "- Rows of kind NOTIFICATIONS, QUICK_SETTINGS, CLOSE_PANELS, ROTATE and SCREEN_ON, and key rows such as Power, Volume up, " +
         "Volume down, Mute, Recents or Play/Pause, are real actions on the device: keep each as its own step in plain words (for " +
         "example 'Open the notification shade'). A test agent replays them with its press_key, open_system_panel and rotate_device tools.\n" +
@@ -118,6 +125,7 @@ internal fun rewritePrompt(
             "Evidence can show explicitly removed actions; do not recreate them or fold them into a retained step. " +
             "Inputs marked [$FIXED_STEP_LABEL] are the person's own steps and stay exactly as written.",
     )
+    if (inputs.any { it.locked != null }) appendLine(LOCKED_STEPS_INSTRUCTION)
     timeline?.let { video ->
         appendLine(
             "Recorded video: ${if (video.available) "available" else "unavailable"}; finished=${video.finished}; " +
@@ -147,9 +155,14 @@ internal fun rewritePrompt(
     )
     val evidenceIds = RewriteEvidenceIds(inputs)
     val lines = inputs.map { it.describe(RewriteDescription.BRIEF, evidenceIds, evidence?.lineExtra(it.number, attachImages).orEmpty()) }
+        .filter(String::isNotEmpty)
     chunks(lines).forEach { appendLine(fenceUntrusted("recorded_inputs", it)) }
     appendScriptLibrary(scripts)
 }
+
+private val LOCKED_STEPS_INSTRUCTION =
+    "Lines marked [$LOCKED_STEP_LABEL] are steps from an earlier rewrite that the person already accepted. Each stays exactly as " +
+        "written, as one step covering exactly the inputs it names; only the other inputs are rewritten, around the locked steps."
 
 private const val CLOSE_UP_INSTRUCTION =
     "Answer from the attached evidence. The evidence tools are for close-ups only and their budget is small; give the JSON object as " +
@@ -205,6 +218,10 @@ private val OUTPUT_CONTRACT = """
     - sourceInputs lists the 1-based numbers of the recorded inputs a step covers. The lists must be ascending, consecutive, must not
       overlap, and together must cover EVERY input exactly once, in order. If an input looks accidental keep it inside a step and say
       so in notes; never drop it.
+    - A line marked [$LOCKED_STEP_LABEL] is a step the person already accepted; it names the inputs it covers. Answer it as one step
+      whose sourceInputs are exactly those inputs, and copy its action, expected, optional and condition (and kind, when it is not an
+      AI step) EXACTLY as shown. Give it no checks, no reviewReason, no scriptId or args, and a null expectedScreenshot. Never merge it
+      with other inputs, split it, reword it or drop it; the other inputs are rewritten around it. It counts toward the step limit.
     - An input marked [$FIXED_STEP_LABEL] is a step the person wrote. Answer it as its own step with sourceInputs holding only its
       number, and copy its action, expected, optional and condition EXACTLY as shown (the same characters). Give it no checks, no
       reviewReason and a null expectedScreenshot. Never merge it with other inputs, reword it or move it; recorded inputs before and
@@ -213,6 +230,9 @@ private val OUTPUT_CONTRACT = """
       eligible post-input evidence or an inspected, timestamped video transition. A transition from launcher to YouTube can support
       the broad action "Open YouTube"; it cannot identify a specific control. If a tap/long-press remains unresolved, keep its
       recorded gesture description, set expected to "", and explain what needs checking in reviewReason.
+      A loading, splash or transition screen right after an action is not its result: use the settled frame, the next input's
+      before screen or a later screen. Seeing an app after tapping its icon supports "Open <app>". Use reviewReason only when the
+      evidence, video included, cannot tell what happened.
       Follow the case goal rather than incidental content: use an exact video/title only when the goal, preconditions, or the person's
       note explicitly asks for that exact item. Otherwise describe a generic selection/playback action even if a title is visible.
       If one tap only reveals controls and the next tap pauses playback, merge both inputs into one "Pause playback" step; do not

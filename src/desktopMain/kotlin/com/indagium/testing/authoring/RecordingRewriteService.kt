@@ -82,6 +82,7 @@ internal class RecordingRewriteService(
         model: String?,
         effort: String?,
         note: String,
+        scope: RewriteScope? = null,
     ): StoreResult<RecordingRewrite> {
         if (note.length > MAX_REWRITE_NOTE_CHARS) return StoreResult.Invalid("The note is limited to $MAX_REWRITE_NOTE_CHARS characters.")
         session.rewriteBlockedReason()?.let { return StoreResult.Invalid(it) }
@@ -94,8 +95,13 @@ internal class RecordingRewriteService(
         if (eligibility !is StoreResult.Ok) return eligibility.propagate()
         val suite = library().suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
         val case = suite.cases.firstOrNull { it.id == caseId } ?: return StoreResult.NotFound("case", caseId)
-        val rows = session.rewriteRows()
-        val inputs = rewriteInputsOf(rows, session::screenState)
+        val source = session.rewriteSource()
+        val rows = source.rows
+        val locks = when (val kept = keptSteps(rows, source.accepted, scope)) {
+            is KeptSteps.Refused -> return StoreResult.Invalid(kept.reason)
+            is KeptSteps.Kept -> kept.locks
+        }
+        val inputs = rewriteInputsOf(rows, locks, session::screenState)
         val rewriteTools = RecordingRewriteTools(inputs, session.videoTimeline)
         val timeline = session.videoTimeline
         val videoSummary = timeline?.summary()
@@ -159,6 +165,9 @@ internal class RecordingRewriteService(
         AppLogger.info(
             REWRITE_TIMING_LOG_COMPONENT,
             "rewrite_brief: evidenceUpFront=${result.attachment != null} kind=${evidence?.kind ?: "none"} " +
+                "source=${evidence?.source?.name?.lowercase() ?: "none"} " +
+                "settledAfter=${evidence?.settledAfterInputs ?: 0}/${evidence?.consideredInputs ?: 0} " +
+                "lockedSteps=${context.inputs.mapNotNull { it.locked }.distinct().size} " +
                 "images=${result.attachment?.images?.size ?: 0} notAttached=${evidence?.notAttached?.size ?: 0} " +
                 "promptChars=${result.prompt.length} briefMs=${(System.nanoTime() - started) / NANOS_PER_MILLI} " +
                 "toolBudget=${result.toolCallLimit} inputs=${context.inputs.size}",
@@ -179,12 +188,24 @@ internal class RecordingRewriteService(
         )
     }
 
-    /** The video as a source of contact sheets: a storyboard of the wall-clock window, clamped to the start of the video. */
-    private fun videoSheets(timeline: RecordedVideoTimeline, inputs: List<RewriteInput>) = RewriteVideoSheets { startWallMs, endWallMs ->
-        val start = timeline.sessionOffsetMs(startWallMs).coerceAtLeast(0L)
-        val end = timeline.sessionOffsetMs(endWallMs)
-        timeline.storyboardForRange(start, end, inputs)?.let { sheet ->
-            runCatching { RewriteVideoSheet(Base64.getDecoder().decode(sheet.imageBase64), sheet.mimeType) }.getOrNull()
+    /**
+     * The video as a source of pictures: a storyboard of a wall-clock window (clamped to the start of the video) and the frame held at
+     * each of some wall-clock times. Both decode on the caller's thread, which is an IO thread (see [withEvidence]).
+     */
+    private fun videoSheets(timeline: RecordedVideoTimeline, inputs: List<RewriteInput>) = object : RewriteVideoSheets {
+        override fun sheet(startWallMs: Long, endWallMs: Long): RewriteVideoSheet? {
+            val start = timeline.sessionOffsetMs(startWallMs).coerceAtLeast(0L)
+            val end = timeline.sessionOffsetMs(endWallMs)
+            return timeline.storyboardForRange(start, end, inputs)?.let { sheet ->
+                runCatching { RewriteVideoSheet(Base64.getDecoder().decode(sheet.imageBase64), sheet.mimeType) }.getOrNull()
+            }
+        }
+
+        override fun frames(wallClockMs: List<Long>): List<RewriteVideoFrame?> {
+            val stills = timeline.stillsAt(wallClockMs.map(timeline::sessionOffsetMs), inputs).orEmpty()
+            return wallClockMs.indices.map { index ->
+                stills.getOrNull(index)?.let { RewriteVideoFrame(it.image, timeline.wallClockOfSessionMs(it.sessionMs), it.sessionMs) }
+            }
         }
     }
 
@@ -194,10 +215,36 @@ internal class RecordingRewriteService(
     }
 }
 
-/** What the answer for [inputs] is checked against: the person's own steps, the external events with their proposed checks, the library's scripts. */
+/** What the answer for [inputs] is checked against: the person's own and the accepted steps, the external events with their checks, the scripts. */
 internal fun rewriteExpectations(inputs: List<RewriteInput>, scripts: List<TestScript>) = RewriteExpectations(
     inputCount = inputs.size,
     fixedInputs = inputs.filter { it.fixed }.associate { it.number to it.row },
-    externalInputs = inputs.filter { !it.fixed && it.row.isExternalEvent }.associate { it.number to it.row.checks },
+    externalInputs = inputs.filter { !it.fixed && it.locked == null && it.row.isExternalEvent }.associate { it.number to it.row.checks },
     scripts = scripts,
+    lockedSteps = inputs.mapNotNull { it.locked }.distinct(),
 )
+
+/** Which accepted steps of an earlier rewrite the next one keeps, or why it cannot run. */
+private sealed interface KeptSteps {
+    class Kept(val locks: List<LockedRewriteStep>) : KeptSteps
+
+    class Refused(val reason: String) : KeptSteps
+}
+
+/**
+ * The accepted steps ([accepted], rewritten rows nobody flagged) a rewrite of [rows] keeps as they are. [RewriteScope.ALL] keeps none.
+ * An unspecified scope keeps them unless every recorded input is covered by one: then there is nothing to rewrite but everything, which
+ * is what it does. Asking for [RewriteScope.NEEDS_REVIEW] then is refused, so a model is not paid to return what is already accepted.
+ */
+private fun keptSteps(rows: List<RecordedTestStep>, accepted: List<RecordedTestStep>, scope: RewriteScope?): KeptSteps {
+    val locks = if (scope == RewriteScope.ALL) emptyList() else lockedRewriteStepsOf(rows, accepted)
+    val open = rows.count { !it.authorAdded } - locks.sumOf { it.inputs.size }
+    return when {
+        locks.isEmpty() || open > 0 -> KeptSteps.Kept(locks)
+        scope == RewriteScope.NEEDS_REVIEW -> KeptSteps.Refused(NOTHING_NEEDS_REVIEW)
+        else -> KeptSteps.Kept(emptyList())
+    }
+}
+
+private const val NOTHING_NEEDS_REVIEW =
+    "Every rewritten step is already accepted, so nothing needs review. Ask for scope \"all\" to rewrite them all again."

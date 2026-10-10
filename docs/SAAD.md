@@ -2766,7 +2766,8 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Lane scheduling (parallel across devices, sequential on one) and the confirmation timeout | `TestLaneSchedulingTest`, `ConfirmationGateTimeoutTest` |
 | The judge is blind, and comparison of disagreeing lanes | `JudgeBlindnessTest`, `JudgeComparisonTest` |
 | The judge's evidence and images come with its first message, for every agent kind | `JudgeEvidenceUpFrontTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
-| The rewrite's screenshots, contact sheets and screen text come with its first message; password windows never | `RecordingRewriteEvidenceTest`, `RecordingRewriteUpFrontTest` |
+| The rewrite's screenshots, video contact sheets (before and settled frames) and screen text come with its first message; password windows never | `RecordingRewriteEvidenceTest`, `RecordingRewriteVideoEvidenceTest`, `RecordingRewriteUpFrontTest` |
+| Rewrite again keeps the accepted steps unchanged (locked groups, scope, buttons) | `RecordingRewriteLockedStepsTest`, `RewriteRecordingToolsTest` |
 | Run store, report actions, issue drafts, issue store, notes destination | `TestRunStoreTest`, `TestRunReportActionsTest`, `IssueDraftBuilderTest`, `IssueStoreTest`, `IssueToNotesTest`, `IssueEngineTest` |
 | Secrets stay off argv; fallback to memory; real macOS keychain round trip | `SecretStoreCommandTest`, `MacOsKeychainRoundTripTest` |
 | Tracker client (JSON and SSE, session header), issue creator, proxied tools | `TrackerMcpClientTest`, `TrackerIssueCreatorTest`, `TrackerToolsTest`, `TrackerSendTest` |
@@ -3160,7 +3161,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RewriteEvidence.kt`, `RewriteSensitivity.kt`, `ContactSheet.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `DeviceInputRecorder.kt`, `DeviceInputEnvironment.kt`, `GeteventParsers.kt`, `GeteventKeys.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RewriteEvidence.kt`, `RewriteVideoEvidence.kt`, `RewriteSettledAfter.kt`, `RewriteSensitivity.kt`, `ContactSheet.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -4212,7 +4213,18 @@ refuse while it is set), then calls the service with **no lock held**:
    The brief numbers only retained raw inputs. The video still covers the complete timeline and may show removed actions;
    it explicitly tells the model not to recreate those actions or fold them into retained steps.
    **Evidence up front** (`RewriteEvidence.kt`, `buildRewriteEvidence`). The brief attaches the images the tools would
-   fetch, so a rewrite can answer in one or two model turns. For a recording whose distinct before/after screenshots fit
+   fetch, so a rewrite can answer in one or two model turns. **With a usable video the evidence comes from the video**
+   (`RewriteVideoEvidence.kt`): per input the frame held just before it (`REWRITE_VIDEO_BEFORE_MS`) and its *settled after*
+   frame (`settledAtMs`: the last frame before the next input in time starts, minus `REWRITE_NEXT_INPUT_GUARD_MS`, or
+   `REWRITE_SETTLE_MS` = 2 s after the input when that comes first, so a splash or loading screen right after a tap is not
+   mistaken for the result), decoded by `RecordedVideoTimeline.stillsAt` (the latest frame at or before each time, password
+   windows withheld) through `RewriteVideoSheets.frames`, three inputs per sheet with both frames, then six per sheet with the
+   settled one, at most ten JPEG sheets. A cell the video cannot show falls back to the stored screenshot of that moment, so
+   screenshots only fill gaps; a video that shows nothing leaves the screenshot behaviour below. **Without a video** (and for
+   those gaps) the "after" is chosen by `settledAfterOf` (`RewriteSettledAfter.kt`): the input's own after screenshot, unless it
+   was taken less than `REWRITE_SETTLE_MS` after the input and the next input's before screenshot is a later look; an input whose only
+   look is that early one carries a caution in its line, and the screen text of the next input's before reading is added when the
+   after reading was that early. For a recording whose distinct before/after screenshots fit
    (`REWRITE_MAX_ATTACHED_IMAGES` = 10, 8 MB), each is attached once, labelled in order ("Image 3: input 2 after, input 3
    before"; a capture shared by two adjacent inputs is attached once). A longer recording is covered by contact sheets, every
    input on exactly one sheet: three inputs per sheet with before and after, then six per sheet with one screen each, at most
@@ -4230,8 +4242,18 @@ refuse while it is set), then calls the service with **no lock held**:
    from the agent), or no image could be built, the prompt lists the tools that fetch the screens (the screen text stays) and
    the budget is the full one; so it is when some inputs have no image (limits reached). Building the evidence runs on
    `Dispatchers.IO` inside the rewrite's timeout and never fails the rewrite. The app log (`test-agent-timing`) gets a
-   `rewrite_brief:` line (`evidenceUpFront`, `kind`, `images`, `notAttached`, `promptChars`, `briefMs`, `toolBudget`, `inputs`).
-   Tests: `RecordingRewriteEvidenceTest`, `RecordingRewriteUpFrontTest`.
+   `rewrite_brief:` line (`evidenceUpFront`, `kind`, `source=video|screenshots|mixed|none`, `settledAfter=N/M` inputs with a
+   settled after look, `lockedSteps`, `images`, `notAttached`, `promptChars`, `briefMs`, `toolBudget`, `inputs`).
+   Tests: `RecordingRewriteEvidenceTest`, `RecordingRewriteVideoEvidenceTest`, `RecordingRewriteUpFrontTest`, `RecordedVideoTimelineTest`.
+   **Rewrite again keeps accepted steps** (`RewriteScope`, `LockedRewriteStep`). After a rewrite, every rewritten row without a
+   `reviewReason` (an edit that fills in the expected result ends the reason; a removed row is gone) is *accepted*
+   (`RecordedTestStep.isAcceptedRewriteStep`). The next rewrite (default scope `needs_review`, or `all` to ignore this) turns each
+   accepted row whose source inputs are all present and consecutive into a locked group (`TestStepRecordingSession.rewriteSource`,
+   `lockedRewriteStepsOf`): the brief shows one `[LOCKED STEP, keep as is]` line per group (no lines, images or tools for its
+   inputs), `parseRewriteResponse` requires it back as one step over exactly its inputs with the same action, expected, optional,
+   condition and kind and nothing added (the author-row rule, `requireLockedStepUnchanged`), and `buildRewrittenRows` keeps the very
+   same row. Only the flagged rows are rewritten. With nothing left to review the default rewrites everything and an explicit
+   `needs_review` is refused before any model call. Test: `RecordingRewriteLockedStepsTest`.
 3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action; expected result must be
    non-blank unless `reviewReason` explains what needs review (a null, missing, empty or whitespace-only
    reason is treated as absent when expected is present; a blank expected requires either an optional step with a
@@ -4253,7 +4275,8 @@ refuse while it is set), then calls the service with **no lock held**:
    `rawSteps` (refused if the recording is being applied or its recorded rows changed). Each new row keeps
    `sourceInputIds`; its candidate expected screenshot is an eligible after-image of its last (or named)
    source input and is **off** until the reviewer ticks it. Rows marked for review preserve the original
-   gesture description and have no generated expectation or checks until edited. Re-running always starts from `rawSteps`;
+   gesture description and have no generated expectation or checks until edited. Re-running starts from `rawSteps` (the
+   accepted rows are kept as locked groups unless `scope` is `all`, see *Rewrite again keeps accepted steps*);
    `restoreRaw` (UI "Undo rewrite", MCP `restore_test_recording_raw`) puts them back with their ids.
 
 **Review deletion.** After Stop and a complete screenshot/probe drain, Remove can exclude a raw row or rewritten row. The

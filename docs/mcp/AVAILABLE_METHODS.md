@@ -373,8 +373,11 @@ or recording is a separate confirmation-required call.
   `discard_test_recording`, and `apply_test_recording` stop/drain, discard without library mutation, or apply the reviewed
   preview at an optional index to its original case. An empty review cannot be applied or rewritten. Rewrites use only
   retained inputs even if the full video timeline shows removed actions.
-  `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note) asks a configured profile to
-  turn a stopped recording into readable steps. The provider reads the recorded inputs, screen elements, screenshots,
+  `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note, scope) asks a configured profile to
+  turn a stopped recording into readable steps. `scope` is `needs_review` (the default once a rewrite exists) or `all`: after
+  an earlier rewrite, `needs_review` keeps every rewritten step that has no `reviewReason` (or whose text you edited) exactly as
+  it is and rewrites only the others; `all` rewrites every step again from the recorded inputs. `needs_review` with nothing left
+  to review is refused; the default then rewrites everything. The provider reads the recorded inputs, screen elements, screenshots,
   and (when captured) video storyboards through a read-only gateway (`get_recorded_input`, `get_recorded_screen`, `get_recorded_ui`,
   `get_recorded_video_storyboard`; typed passwords are hidden
   and never sent). `get_recorded_screen` accepts `moment: before|after` for eligible evidence or `moment: input` for a raw
