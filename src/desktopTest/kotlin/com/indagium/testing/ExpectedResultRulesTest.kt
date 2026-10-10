@@ -13,6 +13,7 @@ import com.indagium.testing.authoring.TestStepDraftService
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.incidentalExpectedWarning
 import com.indagium.testing.authoring.looksIncidental
+import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.authoring.reviewReasonAfterEdit
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
@@ -141,7 +142,8 @@ class ExpectedResultRulesTest {
             {"action":"Submit the search","expected":"Results for 'lofi' are listed","sourceInputs":[3]}
         ]}"""
 
-        val rows = rewrite(answer).snapshot.value.steps
+        val snapshot = rewrite(answer).snapshot.value
+        val rows = snapshot.steps
 
         assertEquals("A sponsored result is listed first", rows[0].expected, "kept as the AI wrote it")
         assertEquals(INCIDENTAL_EXPECTED_WARNING, rows[0].reviewReason)
@@ -155,11 +157,16 @@ class ExpectedResultRulesTest {
             {"action":"Submit the search","expected":"A notification is shown","sourceInputs":[3],"reviewReason":"Confirm what appears."}
         ]}"""
 
-        val rows = rewrite(answer).snapshot.value.steps
+        val snapshot = rewrite(answer).snapshot.value
+        val rows = snapshot.steps
 
         assertNull(rows[0].reviewReason)
         assertEquals("Confirm what appears.", rows[1].reviewReason, "the AI's own reason wins over the generic warning")
-        assertEquals("", rows[1].expected, "a step that needs review has its expected result left for the reviewer, as before")
+        assertEquals("A notification is shown", rows[1].expected, "the model's supported wording stays visible for review")
+        assertTrue(
+            recordingApplyBlockedReason(snapshot).orEmpty().contains("Resolve the rewrite review note"),
+            "the note still prevents applying an unresolved proposal",
+        )
     }
 
     @Test

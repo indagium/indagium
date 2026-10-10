@@ -10,6 +10,7 @@ import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeClassification
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
@@ -99,6 +100,7 @@ private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
     config.capture?.let { put("capture", Json.parseToJsonElement(captureSettingsToJson(it))) }
     put("openLaneTabs", config.openLaneTabs)
     put("manualSteps", config.manualSteps.name)
+    put("judgeInconclusivePolicy", config.judgeInconclusivePolicy.wire)
 }
 
 private fun checkResultToJson(check: CheckResult): JsonObject = buildJsonObject {
@@ -121,6 +123,8 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     put("observation", step.observation)
     put("checks", buildJsonArray { step.checks.forEach { add(checkResultToJson(it)) } })
     putIfNotNull("screenshotPath", step.screenshotPath)
+    putIfNotNull("startScreenshotPath", step.startScreenshotPath)
+    if (step.sampleScreenshotPaths.isNotEmpty()) put("sampleScreenshotPaths", buildJsonArray { step.sampleScreenshotPaths.forEach { add(JsonPrimitive(it)) } })
     putIfNotNull("logStartOffset", step.logStartOffset)
     putIfNotNull("logEndOffset", step.logEndOffset)
     putIfNotNull("transcriptStartOffset", step.transcriptStartOffset)
@@ -259,6 +263,8 @@ private fun decodeConfig(o: JsonObject): RunConfig {
         capture = (o["capture"] as? JsonObject)?.let { captureSettingsFromJson(it.toString()) },
         openLaneTabs = o.bool("openLaneTabs", true),
         manualSteps = o.enumOr("manualSteps", ManualStepsOption.USE_SCRIPT_THEN_WAIT),
+        judgeInconclusivePolicy = o.optStr("judgeInconclusivePolicy")?.let(JudgeInconclusivePolicy::parse)
+            ?: if (o["judgeInconclusivePolicy"] == null) JudgeInconclusivePolicy.KEEP_AGENT_PASS else JudgeInconclusivePolicy.BLOCK,
     )
 }
 
@@ -282,6 +288,8 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     observation = o.str("observation"),
     checks = o.objects("checks").map { decodeCheckResult(it) },
     screenshotPath = o.optStr("screenshotPath"),
+    startScreenshotPath = o.optStr("startScreenshotPath"),
+    sampleScreenshotPaths = o.strings("sampleScreenshotPaths"),
     logStartOffset = o.optLong("logStartOffset"),
     logEndOffset = o.optLong("logEndOffset"),
     transcriptStartOffset = o.optLong("transcriptStartOffset"),

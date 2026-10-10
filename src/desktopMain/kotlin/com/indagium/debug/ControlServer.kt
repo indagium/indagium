@@ -10,6 +10,7 @@ import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.LogLevel
 import com.indagium.model.RuleTarget
+import com.indagium.testing.script.untrustedData
 import com.indagium.ui.AppState
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
@@ -658,7 +659,7 @@ private const val EXTERNAL_APPROVAL_NOTE =
 // [SCREEN_IMAGE_TOOL_NAMES] are the ones among them that also get a leading text block with the
 // screenshot's dimensions and coordinate contract (a test lane's take_screenshot is one of them, and so is
 // test_lane_tool_call, which hands back a lane tool's result unchanged: only a screenshot has an imageBase64).
-internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot", "test_lane_tool_call")
+internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot", "perform_input_sequence", "test_lane_tool_call")
 
 // A test judge's evidence tools (get_step_screenshot, get_example) return images too, for Claude Code and Codex judges that
 // reach the judge-only gateway over the managed MCP server; so does a recording rewrite's get_recorded_screen.
@@ -684,11 +685,41 @@ internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: S
     val content = buildList {
         savedReferenceContent(toolName, fields)?.let(::add)
         screenImageContext(toolName, fields)?.let(::add)
+        if (fields["actions"] is List<*>) add(inputSequenceMetadata(fields))
         if (toolName == "get_recorded_screen") add(recordedScreenMetadata(fields))
         if (toolName == "get_recorded_video_storyboard") add(recordedVideoMetadata(fields))
         add(ImageContent(data = imageBase64, mimeType = mimeType))
     }
     return CallToolResult(content = content)
+}
+
+private fun inputSequenceMetadata(fields: Map<*, *>): TextContent {
+    val actions = (fields["actions"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+    val summary = actions.joinToString("; ") { action ->
+        val index = action["actionIndex"]?.toString() ?: "?"
+        val tool = action["tool"]?.toString() ?: "input"
+        val status = if (action["succeeded"] == true) "succeeded" else "failed"
+        val duration = action["durationMs"]?.let { ", ${it}ms" }.orEmpty()
+        "action $index $tool $status$duration"
+    }
+    val error = fields["error"]?.toString()?.takeIf(String::isNotBlank)
+    val duration = fields["durationMs"]?.let { " Total duration: ${it}ms." }.orEmpty()
+    val interrupted = fields["finalScreenshotAttempted"]?.let { " Final screenshot attempted: $it." }.orEmpty()
+    return TextContent(buildString {
+        append("Input sequence results: ")
+        append(summary.ifBlank { "no primitive result was returned" })
+        append(duration).append(interrupted)
+        val observations = buildMap<String, Any?> {
+            put("actionDetails", actions.mapNotNull { action ->
+                val detail = action["detail"]?.toString()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                mapOf("actionIndex" to action["actionIndex"], "detail" to detail)
+            })
+            if (error != null) put("error", error)
+        }
+        if (observations.values.any { value -> value != null && value != emptyList<Any>() }) {
+            append(" ").append(untrustedData("device_input_sequence", observations))
+        }
+    })
 }
 
 private fun recordedVideoMetadata(fields: Map<*, *>): TextContent {

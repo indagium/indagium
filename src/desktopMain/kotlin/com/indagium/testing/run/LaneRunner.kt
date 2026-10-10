@@ -23,6 +23,7 @@ import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.judge
+import com.indagium.testing.model.judgeActive
 import com.indagium.testing.store.LaneToolActivityWriter
 import com.indagium.testing.store.TEST_RUN_TRANSCRIPT_FILE_NAME
 import com.indagium.testing.store.TranscriptWriter
@@ -219,6 +220,8 @@ internal class LaneRunner(
             wallClock = deps.wallClock,
             judge = judge,
             judgeMode = snapshot.config.judge,
+            judgeInconclusivePolicy = snapshot.config.judgeInconclusivePolicy,
+            judgeRequested = snapshot.config.judgeActive,
             pauseGate = deps.pauseGate,
             suiteId = suite.id,
             goldenImage = deps.goldenImage,
@@ -361,7 +364,16 @@ internal class LaneRunner(
                 iteration = iteration,
             ),
         )
-        driver.drive(sequence, case, iteration, budget)
+        try {
+            driver.drive(sequence, case, iteration, budget)
+        } catch (cancelled: CancellationException) {
+            // A cancellation during independent judgment must not discard the finish_step report already
+            // committed to the sequence. Preserve the current result before the case is finalized.
+            withContext(NonCancellable) {
+                sequence.abort(StepStatus.ERROR, "The run was cancelled while this step was being evaluated.")
+            }
+            throw cancelled
+        }
         val results = sequence.results()
         owner.addAll(case.steps.drop(results.size).mapIndexed { i, step -> skipped(results.size + i, step, STOPPED_NOTE) })
         owner.finish(

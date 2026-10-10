@@ -7,7 +7,12 @@ import java.nio.file.Path
 // how what it reports becomes the events of its AiRun.
 
 /** What an account run is asked: [prompt] with [images], or [promptWithoutImages] when the images cannot be attached. */
-internal class AccountRequest(val prompt: String, val images: List<LlmImage>, private val promptWithoutImages: String?) {
+internal class AccountRequest(
+    val prompt: String,
+    val images: List<LlmImage>,
+    private val promptWithoutImages: String?,
+    val onImagesDelivered: (Boolean) -> Unit = {},
+) {
     /** [prompt], unless there were images and none could be [attached]. */
     fun promptFor(attached: Boolean): String = if (images.isEmpty() || attached) prompt else promptWithoutImages ?: prompt
 }
@@ -38,6 +43,7 @@ internal suspend fun codexTurnInput(
         run.emit(AiRunEvent.Status("Could not attach the evidence images for Codex (${failure.message ?: failure::class.simpleName}); it will fetch them."))
         emptyList()
     }
+    if (request.images.isNotEmpty()) request.onImagesDelivered(paths.isNotEmpty())
     return CodexTurnInput(accountPromptText(systemPrompt, preamble, request.promptFor(attached = paths.isNotEmpty())), paths)
 }
 

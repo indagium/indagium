@@ -4,6 +4,7 @@ import com.indagium.debug.DEVICE_KEY_CODES
 import com.indagium.debug.IndagiumToolDescriptor
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.debug.MCP_TOOLS
+import com.indagium.debug.ObjectArrayItemSchema
 import com.indagium.debug.SWIPE_DURATION_MAX_MS
 import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.ToolArgException
@@ -11,10 +12,14 @@ import com.indagium.debug.ToolArgs
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.debug.schema
 import com.indagium.model.LogEntry
+import com.indagium.testing.device.DeviceInputAction
+import com.indagium.testing.device.DeviceInputActionResult
 import com.indagium.testing.device.LogWaitResult
 import com.indagium.testing.device.SystemPanel
 import com.indagium.testing.device.TestDeviceSession
+import com.indagium.testing.device.UiNode
 import com.indagium.testing.device.UiTreeNodeView
+import com.indagium.testing.device.UiTreeRead
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
@@ -31,6 +36,11 @@ import com.indagium.testing.script.scriptArgsFromToolValues
 import com.indagium.testing.script.toToolResult
 import com.indagium.testing.script.untrustedData
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ThreadContextElement
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
@@ -46,10 +56,31 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 const val LANE_MAX_WAIT_FOR_LOG_MS = 30_000L
 const val LANE_DEFAULT_WAIT_FOR_LOG_MS = 10_000L
+const val LANE_DEFAULT_WAIT_FOR_UI_MS = 10_000L
+const val LANE_MAX_WAIT_FOR_UI_MS = 30_000L
+const val LANE_UI_READ_TIMEOUT_MS = 2_000L
+internal const val MAX_UI_RECOVERY_ATTEMPTS = 2
 private const val DEFAULT_LOG_READ_LIMIT = 100
 private const val MAX_LOG_ROW_MESSAGE_CHARS = 1_000
 private const val DEFAULT_SWIPE_DURATION_MS = 350
 private const val SCREEN_MIME_TYPE = "image/jpeg"
+private const val MAX_INPUT_SEQUENCE_ACTIONS = 8
+private const val MAX_INPUT_SEQUENCE_DELAY_MS = 2_000L
+private const val MAX_INPUT_SEQUENCE_ACTION_DELAY_MS = 1_000L
+private const val NANOS_PER_MILLISECOND = 1_000_000L
+private const val UI_WAIT_POLL_INTERVAL_MS = 250L
+
+private val INPUT_SEQUENCE_ACTION_SCHEMA = ObjectArrayItemSchema(
+    props = listOf("tool" to "string", "x" to "integer", "y" to "integer", "x1" to "integer", "y1" to "integer",
+        "x2" to "integer", "y2" to "integer", "durationMs" to "integer", "key" to "string", "delayMs" to "integer"),
+    required = listOf("tool"),
+    enums = mapOf("tool" to listOf("tap", "swipe", "press_key")),
+    descriptions = mapOf(
+        "tool" to "Only tap, swipe, or press_key are allowed.",
+        "delayMs" to "Optional delay after this primitive, 0..1000 ms; all delays together at most 2000 ms.",
+        "durationMs" to "swipe only; between the lane's allowed swipe duration limits.",
+    ),
+)
 
 /** The tools every lane has: the three that carry the step protocol. They stay available whatever a case allows. */
 internal val LANE_PROTOCOL_TOOL_NAMES: Set<String> = setOf("get_current_step", "report_observation", "finish_step")
@@ -78,7 +109,32 @@ internal data class LaneStepBrief(
     val availableExampleTools: List<String> = emptyList(),
     val optional: Boolean = false,
     val condition: String? = null,
+    val intent: String = "perform_action",
+    val precondition: String? = null,
+    internal val dispatchEpoch: Long = 0L,
 )
+
+/** Immutable attempt identity carried through an admitted tool, including work that completes after a timeout. */
+internal data class LaneStepIdentity(val stepId: String, val attempt: Int, val epoch: Long)
+
+private val laneDispatchIdentity = ThreadLocal<LaneStepIdentity?>()
+
+internal class LaneDispatchIdentityElement(
+    private val identity: LaneStepIdentity,
+) : ThreadContextElement<LaneStepIdentity?>,
+    kotlin.coroutines.AbstractCoroutineContextElement(Key) {
+    companion object Key : kotlin.coroutines.CoroutineContext.Key<LaneDispatchIdentityElement>
+
+    override fun updateThreadContext(context: kotlin.coroutines.CoroutineContext): LaneStepIdentity? {
+        val previous = laneDispatchIdentity.get()
+        laneDispatchIdentity.set(identity)
+        return previous
+    }
+
+    override fun restoreThreadContext(context: kotlin.coroutines.CoroutineContext, oldState: LaneStepIdentity?) {
+        laneDispatchIdentity.set(oldState)
+    }
+}
 
 internal data class LaneStepExampleBrief(val exampleId: String, val kind: String, val caption: String)
 
@@ -113,6 +169,16 @@ internal class RecordingLaneCallbacks : LaneCallbacks {
  * `wait_for_log` and `read_log_since_step`); [allowedTools] null allows every tool, otherwise only those names
  * plus the protocol tools.
  */
+internal class InputSequenceCallbacks(
+    val releaseBudget: suspend (identity: LaneStepIdentity?, reservedCost: Int, consumedCost: Int) -> Unit = { _, _, _ -> },
+    val onAction: (identity: LaneStepIdentity?, actionIndex: Int, result: DeviceInputActionResult) -> Unit = { _, _, _ -> },
+    val onCapture: (identity: LaneStepIdentity?) -> Unit = {},
+    val onInterrupted: (identity: LaneStepIdentity?, nextActionIndex: Int, reason: String) -> Unit = { _, _, _ -> },
+    val onFinished: (identity: LaneStepIdentity?, durationMs: Long, consumedCost: Int) -> Unit = { _, _, _ -> },
+    val dispatchIdentity: () -> LaneStepIdentity? = { laneDispatchIdentity.get() },
+    val remainingExecutionMs: suspend (LaneStepIdentity?) -> Long? = { null },
+)
+
 internal class LaneToolContext(
     val session: TestDeviceSession,
     val currentStep: () -> LaneStepBrief?,
@@ -124,6 +190,7 @@ internal class LaneToolContext(
     val allowedTools: Set<String>? = null,
     val currentExamples: () -> List<StepExample> = { emptyList() },
     val loadGoldenImage: suspend (StepExample.GoldenScreenshot) -> ByteArray? = { null },
+    val inputSequence: InputSequenceCallbacks = InputSequenceCallbacks(),
 )
 
 /** [skippedScripts] maps the tool name of each script that was NOT offered to the reason. */
@@ -293,6 +360,8 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "expected" to step.expected,
                 "optional" to step.optional,
                 "condition" to step.condition,
+                "intent" to step.intent,
+                "precondition" to step.precondition,
                 "attempt" to step.attempt,
             ) + step.exampleMetadata()
         },
@@ -401,6 +470,8 @@ private fun uiNodeMap(view: UiTreeNodeView): Map<String, Any?> = buildMap {
 }
 
 private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
+    inputSequenceTool(context),
+    waitForUiTool(context),
     LaneTool(
         IndagiumToolDescriptor(
             "tap",
@@ -508,6 +579,265 @@ private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
         },
     ),
 )
+
+private fun inputSequenceTool(context: LaneToolContext): LaneTool =
+    LaneTool(
+        IndagiumToolDescriptor(
+            "perform_input_sequence",
+            "Perform 1 to 8 ordered tap, swipe or press_key actions under one device-input lock, then take a final screenshot. " +
+                "Use only for short sequences whose targets are already known and whose layout is stable; do not request intermediate screen reads.",
+            schema(
+                "actions" to "array", required = listOf("actions"),
+                objectArrays = mapOf("actions" to INPUT_SEQUENCE_ACTION_SCHEMA),
+                descriptions = mapOf(
+                    "actions" to "Ordered objects shaped as {tool, arguments..., delayMs?}: tap uses x/y, swipe uses x1/y1/x2/y2, " +
+                        "and press_key uses key. Example: [{tool: tap, x: 40, y: 80, delayMs: 300}, {tool: press_key, key: BACK}]. " +
+                        "Do not nest an arguments object.",
+                ),
+            ),
+        ),
+        guarded { args ->
+            val parsed = parseInputSequence(args.map, context.allowedTools)
+            val reservedCost = parsed.size + 1
+            val identity = context.inputSequence.dispatchIdentity()
+            var consumedCost = 0
+            val startedNanos = System.nanoTime()
+            val observedActions = ArrayList<Map<String, Any?>>()
+            var finalCaptureAttempted = false
+            try {
+                val allowedMs = context.inputSequence.remainingExecutionMs(identity) ?: LANE_MAX_WAIT_FOR_UI_MS
+                val result = withTimeoutOrNull(allowedMs) {
+                    context.session.performInputSequence(
+                        parsed,
+                        onActionResult = { index, action ->
+                            consumedCost++
+                            observedActions += mapOf("actionIndex" to index) + inputActionResultMap(action)
+                            context.inputSequence.onAction(identity, index, action)
+                        },
+                        onFinalCaptureAttempted = {
+                            consumedCost++
+                            finalCaptureAttempted = true
+                            context.inputSequence.onCapture(identity)
+                        },
+                        onInterrupted = { nextIndex, reason -> context.inputSequence.onInterrupted(identity, nextIndex, reason) },
+                    )
+                }
+                val durationMs = ((System.nanoTime() - startedNanos) / NANOS_PER_MILLISECOND).coerceAtLeast(0L)
+                if (result == null) {
+                    return@guarded mapOf(
+                        "error" to "The step execution allowance expired during the input sequence.",
+                        "actions" to observedActions,
+                        "finalScreenshotAttempted" to finalCaptureAttempted,
+                        "durationMs" to durationMs,
+                    )
+                }
+                val actionFailure = result.actions.firstOrNull { !it.succeeded }
+                when {
+                    actionFailure != null -> mapOf("error" to actionFailure.detail, "actions" to observedActions,
+                        "durationMs" to result.durationMs) + finalScreenshotMap(result.finalScreen)
+                    result.finalScreen == null -> mapOf("error" to (result.finalScreenFailure ?: "The final screenshot could not be captured."),
+                        "actions" to observedActions, "durationMs" to result.durationMs)
+                    else -> mapOf("actions" to observedActions, "durationMs" to result.durationMs) + finalScreenshotMap(result.finalScreen)
+                }
+            } finally {
+                val durationMs = ((System.nanoTime() - startedNanos) / NANOS_PER_MILLISECOND).coerceAtLeast(0L)
+                context.inputSequence.onFinished(identity, durationMs, consumedCost)
+                withContext(NonCancellable) { context.inputSequence.releaseBudget(identity, reservedCost, consumedCost) }
+            }
+        },
+    )
+
+private fun waitForUiTool(context: LaneToolContext): LaneTool =
+    LaneTool(
+        IndagiumToolDescriptor(
+            "wait_for_ui",
+            "Wait for visible UI text, content description or resource id. Each read is capped at 2 seconds; unavailable reads are " +
+                "reported separately from a successful tree where the selector is absent.",
+            schema(
+                "selectorType" to "string", "selector" to "string", "timeoutMs" to "integer",
+                "matchMode" to "string",
+                required = listOf("selectorType", "selector"),
+                enums = mapOf("selectorType" to listOf("text", "content_description", "resource_id")),
+                descriptions = mapOf("matchMode" to "exact by default; contains only when explicitly requested."),
+            ),
+        ),
+        guarded { args -> waitForUi(context.session, args) },
+    )
+
+/** Full syntactic and allowlist validation, also called by the sequence budget guard before any batch is admitted. */
+internal fun parseInputSequence(arguments: Map<String, Any?>, allowedTools: Set<String>?): List<DeviceInputAction> {
+    val items = ToolArgs(arguments).objects("actions")
+        ?: invalidLaneToolArguments("actions must be an array of action objects.")
+    requireLaneToolArgument(items.size in 1..MAX_INPUT_SEQUENCE_ACTIONS) {
+        "An input sequence must contain 1 to $MAX_INPUT_SEQUENCE_ACTIONS actions."
+    }
+    requireLaneToolArgument(allowedTools == null || "take_screenshot" in allowedTools) {
+        "perform_input_sequence also requires 'take_screenshot' for its final capture, which is not allowed for this case."
+    }
+    val result = items.mapIndexed { index, item ->
+        val where = "actions[${index + 1}]"
+        val args = ToolArgs(item)
+        val tool = args.requiredString("tool").trim().lowercase()
+        requireLaneToolArgument(tool in setOf("tap", "swipe", "press_key")) {
+            "$where.tool must be tap, swipe, or press_key."
+        }
+        requireLaneToolArgument(allowedTools == null || tool in allowedTools) {
+            "$where uses '$tool', which is not allowed for this case."
+        }
+        val delayMs = args.long("delayMs") ?: 0L
+        requireLaneToolArgument(delayMs in 0L..MAX_INPUT_SEQUENCE_ACTION_DELAY_MS) {
+            "$where.delayMs must be between 0 and $MAX_INPUT_SEQUENCE_ACTION_DELAY_MS."
+        }
+        when (tool) {
+            "tap" -> DeviceInputAction.Tap(args.requiredInt("x"), args.requiredInt("y"), delayMs)
+            "swipe" -> DeviceInputAction.Swipe(
+                args.requiredInt("x1"), args.requiredInt("y1"),
+                args.requiredInt("x2"), args.requiredInt("y2"),
+                args.int("durationMs") ?: DEFAULT_SWIPE_DURATION_MS, delayMs,
+            )
+            else -> DeviceInputAction.Key(args.requiredString("key"), delayMs)
+        }
+    }
+    requireLaneToolArgument(result.sumOf { it.delayMs } <= MAX_INPUT_SEQUENCE_DELAY_MS) {
+        "An input sequence may wait at most $MAX_INPUT_SEQUENCE_DELAY_MS ms in total."
+    }
+    return result
+}
+
+private inline fun requireLaneToolArgument(valid: Boolean, message: () -> String) {
+    if (!valid) throw ToolArgException(message())
+}
+
+private fun invalidLaneToolArguments(message: String): Nothing = throw ToolArgException(message)
+
+private fun inputActionResultMap(result: DeviceInputActionResult): Map<String, Any?> =
+    mapOf("tool" to result.action, "succeeded" to result.succeeded, "detail" to result.detail, "durationMs" to result.durationMs)
+
+private fun finalScreenshotMap(screen: com.indagium.testing.device.SessionScreenshot?): Map<String, Any?> =
+    screen?.let {
+        mapOf(
+            "imageBase64" to Base64.getEncoder().encodeToString(it.image.bytes),
+            "mimeType" to SCREEN_MIME_TYPE,
+            "width" to it.image.width,
+            "height" to it.image.height,
+            "coordinateSpace" to "returned-image-pixels",
+        )
+    }.orEmpty()
+
+private data class UiWaitRequest(val type: String, val selector: String, val timeoutMs: Long, val matchMode: String)
+
+private class UiWaitProgress {
+    var successfulRead: Boolean = false
+    var unavailableReads: Int = 0
+    var lastUnavailable: String = "The UI tree could not be read."
+}
+
+private fun uiWaitRequest(args: ToolArgs): UiWaitRequest {
+    val type = args.requiredString("selectorType").trim().lowercase()
+    requireLaneToolArgument(type in setOf("text", "content_description", "resource_id")) {
+        "selectorType must be text, content_description, or resource_id."
+    }
+    val selector = args.requiredString("selector").trim()
+    requireLaneToolArgument(selector.isNotEmpty()) { "selector must not be blank." }
+    val timeoutMs = args.long("timeoutMs") ?: LANE_DEFAULT_WAIT_FOR_UI_MS
+    requireLaneToolArgument(timeoutMs in 1..LANE_MAX_WAIT_FOR_UI_MS) {
+        "timeoutMs must be between 1 and $LANE_MAX_WAIT_FOR_UI_MS."
+    }
+    val mode = args.string("matchMode")?.trim()?.lowercase() ?: "exact"
+    requireLaneToolArgument(mode in setOf("exact", "contains")) { "matchMode must be exact or contains." }
+    return UiWaitRequest(type, selector, timeoutMs, mode)
+}
+
+private suspend fun waitForUi(session: TestDeviceSession, args: ToolArgs): Map<String, Any?> =
+    pollForUi(session, uiWaitRequest(args))
+
+private suspend fun pollForUi(session: TestDeviceSession, request: UiWaitRequest): Map<String, Any?> {
+    val started = System.nanoTime()
+    val progress = UiWaitProgress()
+    while (true) {
+        val remaining = request.timeoutMs - elapsedMilliseconds(started)
+        if (remaining <= 0L) return uiWaitResult(request, progress, elapsedMilliseconds(started))
+        when (val reading = session.readUiTreeBounded(minOf(LANE_UI_READ_TIMEOUT_MS, remaining))) {
+            is UiTreeRead.Available -> {
+                progress.successfulRead = true
+                val match = reading.tree.nodes.firstOrNull { it.matches(request) }
+                if (match != null) return uiWaitFound(session, request, reading, match, started)
+            }
+            is UiTreeRead.Unavailable -> {
+                progress.unavailableReads++
+                progress.lastUnavailable = reading.reason
+            }
+        }
+        val afterRead = elapsedMilliseconds(started)
+        val afterReadRemaining = request.timeoutMs - afterRead
+        if (afterReadRemaining <= 0L) return uiWaitResult(request, progress, afterRead)
+        delay(minOf(UI_WAIT_POLL_INTERVAL_MS, afterReadRemaining))
+    }
+}
+
+private fun UiNode.matches(request: UiWaitRequest): Boolean {
+    val value = when (request.type) {
+        "text" -> text
+        "content_description" -> contentDesc
+        else -> resourceId
+    }
+    return if (request.matchMode == "exact") value.equals(request.selector, ignoreCase = true)
+    else value.contains(request.selector, ignoreCase = true)
+}
+
+private suspend fun uiWaitFound(
+    session: TestDeviceSession,
+    request: UiWaitRequest,
+    reading: UiTreeRead.Available,
+    node: UiNode,
+    started: Long,
+): Map<String, Any?> {
+    // Keep a possible cold screenshot read within the same wall-clock wait budget.
+    val mappingRemaining = request.timeoutMs - elapsedMilliseconds(started)
+    val mapped = if (mappingRemaining > 0L) {
+        withTimeoutOrNull(mappingRemaining) { session.mapUiNodeToScreenshot(node, reading.tree.screenWidth, reading.tree.screenHeight) }
+    } else {
+        null
+    }
+    return mapOf(
+        "status" to "found",
+        "selectorType" to request.type,
+        "selector" to request.selector,
+        "matchMode" to request.matchMode,
+        "elapsedMs" to elapsedMilliseconds(started),
+        "coordinateSpace" to if (mapped != null) "latest-screenshot-pixels" else "unavailable",
+    ) + untrustedData(
+        "ui_selector_match",
+        mapOf(
+            "text" to node.text,
+            "contentDescription" to node.contentDesc,
+            "resourceId" to node.resourceId,
+            "clickable" to node.clickable,
+            "enabled" to node.enabled,
+            "bounds" to mapped?.bounds,
+            "tapX" to mapped?.tapX,
+            "tapY" to mapped?.tapY,
+            "coordinateDetail" to if (mapped == null) "The selector matched, but screenshot coordinates were unavailable before the wait deadline." else null,
+        ),
+    )
+}
+
+private fun uiWaitResult(request: UiWaitRequest, progress: UiWaitProgress, elapsedMs: Long): Map<String, Any?> = mapOf(
+    "status" to if (progress.successfulRead) "absent" else "unavailable",
+    "selectorType" to request.type,
+    "selector" to request.selector,
+    "matchMode" to request.matchMode,
+    "elapsedMs" to elapsedMs,
+    "unavailableReads" to progress.unavailableReads,
+    "detail" to if (progress.successfulRead) {
+        "The selector was absent in successfully read trees; ${progress.unavailableReads} read(s) unavailable."
+    } else {
+        progress.lastUnavailable
+    },
+)
+
+private fun elapsedMilliseconds(startedNanos: Long): Long =
+    ((System.nanoTime() - startedNanos) / NANOS_PER_MILLISECOND).coerceAtLeast(0L)
 
 private fun logTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(

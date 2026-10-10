@@ -3,8 +3,10 @@ package com.indagium.testing
 import com.indagium.ai.LlmRole
 import com.indagium.edition.EditionLimits
 import com.indagium.testing.model.CheckStatus
+import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.JudgeClassification
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.RunConfig
@@ -24,7 +26,9 @@ import com.indagium.testing.model.newHookId
 import com.indagium.testing.model.newSharedStepId
 import com.indagium.testing.model.newStepId
 import com.indagium.testing.run.JUDGE_TOOL_CALL_BUDGET
+import com.indagium.testing.run.LaneAgentFactory
 import com.indagium.testing.run.LaneStepStatus
+import com.indagium.testing.run.ProviderLaneAgent
 import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.settleWithJudge
 import com.indagium.testing.run.shouldJudge
@@ -35,12 +39,16 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private const val AWAIT_MS = 15_000L
@@ -77,6 +85,7 @@ class JudgeBlindnessTest {
         judge: ScriptedJudgeProvider,
         mode: JudgeMode = JudgeMode.EVERY_STEP,
         judgeProfileId: String? = JUDGE_PROFILE_ID,
+        inconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
         tuning: com.indagium.testing.run.EngineTuning = FAST_TUNING,
     ): Pair<RunHarness, TestRun> {
         val h = RunHarness(
@@ -89,7 +98,9 @@ class JudgeBlindnessTest {
             harness = it
             current.set(it)
         }
-        val config: RunConfig = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(judgeProfileId = judgeProfileId, judgeMode = mode.wire)
+        val config: RunConfig = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = judgeProfileId, judgeMode = mode.wire, judgeInconclusivePolicy = inconclusivePolicy,
+        )
         val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
         return h to runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
     }
@@ -211,10 +222,164 @@ class JudgeBlindnessTest {
         assertEquals(listOf(CheckStatus.NOT_EVALUATED, CheckStatus.NOT_EVALUATED), checked.checks.map { it.status })
         assertTrue(checked.note.orEmpty().contains("explicit judge checks remain unresolved", ignoreCase = true), checked.note.orEmpty())
 
-        val (_, optionalRun) = start(suite(step("No explicit judge check")), AutoAgentProvider(listOf("pass" to "fine")), judge)
+        val (_, optionalRun) = start(
+            suite(step("No explicit judge check")), AutoAgentProvider(listOf("pass" to "fine")), judge,
+            inconclusivePolicy = JudgeInconclusivePolicy.KEEP_AGENT_PASS,
+        )
         val optional = optionalRun.steps().single()
         assertEquals(StepStatus.PASS, optional.status)
         assertTrue(optional.judgeInconclusive)
+    }
+
+    @Test
+    fun aSlowJudgeCanFinishAfterTheStepExecutionAllowanceAndStillJudgeTheStep() {
+        val timeoutMs = 900L
+        val (_, run) = start(
+            suite(step("Confirm the home screen", timeoutMs = timeoutMs, retries = 0)),
+            AutoAgentProvider(listOf("pass" to "The home screen is visible.")),
+            ScriptedJudgeProvider(
+                responseDelayMs = timeoutMs + 400,
+                answer = { JudgeAnswer(verdict = "pass", reasoning = "The home screen is visible in the evidence.") },
+            ),
+        )
+
+        val result = run.steps().single()
+        assertEquals(StepStatus.PASS, result.status, result.toString())
+        assertEquals(JudgeVerdict.PASS, assertNotNull(result.judge).verdict)
+        assertTrue(result.judge.durationMs >= timeoutMs, result.judge.toString())
+    }
+
+    @Test
+    fun retryFeedbackKeepsTheFailedCheckAndIndependentJudgeReasoning() {
+        val runStep = step("Pause playback", "The player is paused", retries = 1).copy(
+            intent = com.indagium.testing.model.StepIntent.PERFORM_ACTION,
+            precondition = "Playback is active",
+            checks = listOf(screenJudge),
+        )
+        val runSuite = suite(runStep)
+        val agent = TurnProvider(
+            listOf(
+                toolTurn("tap", """{"x":500,"y":600}"""),
+                finishTurn("pass", "I pressed Pause, but the judge's frame still showed active playback."),
+                toolTurn("take_screenshot"),
+                toolTurn("tap", """{"x":500,"y":600}"""),
+                finishTurn("pass", "After inspecting that playback remained active, I pressed Pause again and verified the active-to-paused transition."),
+                textTurn,
+            ),
+        )
+        val judgmentCount = AtomicInteger()
+        val judge = ScriptedJudgeProvider(answer = {
+            if (judgmentCount.getAndIncrement() == 0) {
+                JudgeAnswer("fail", "unknown", "The first frame still shows active playback.")
+            } else {
+                JudgeAnswer("pass", "unknown", "The retry evidence shows playback paused.")
+            }
+        })
+        val h = RunHarness(
+            libraryOf(runSuite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(runSuite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+        val result = run.steps().single()
+        val retryRequest = agent.requests[2]
+        val retryReply = retryRequest.messages.last { it.role == LlmRole.TOOL }.content.orEmpty()
+
+        assertEquals(StepStatus.PASS, result.status, result.toString())
+        assertEquals(2, result.attempts)
+        assertEquals(
+            2,
+            h.adb.shellCommands.count { it.firstOrNull() == "input" },
+            "the judge found the precondition still held, so the retry safely performed the transition again",
+        )
+        assertEquals(2, judgmentCount.get(), "each attempt is judged before the retry is offered")
+        assertTrue(retryReply.contains("I pressed Pause") && retryReply.contains("active playback"), retryReply)
+        assertTrue(retryReply.contains("failedChecks"), retryReply)
+        assertTrue(retryReply.contains("The first frame still shows active playback"), retryReply)
+        assertTrue(retryReply.contains("Inspect the current screen before acting"), retryReply)
+    }
+
+    @Test
+    fun cancelDuringJudgmentWithoutTranscriptStillKeepsSubmittedReport() {
+        val submitted = "I saw the loaded home screen before verification."
+        val finalObservation = "The home screen is visible after loading."
+        val runSuite = suite(step("Confirm the home screen", timeoutMs = 10_000, retries = 0))
+        val judgeStarted = CountDownLatch(1)
+        val judge = ScriptedJudgeProvider(responseDelayMs = 5_000, onStarted = judgeStarted::countDown)
+        val agent = TurnProvider(
+            listOf(
+                toolTurn("report_observation", """{"text":"$submitted"}"""),
+                finishTurn("pass", finalObservation),
+                textTurn,
+            ),
+        )
+        val h = RunHarness(
+            libraryOf(runSuite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(runSuite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            evidence = EvidenceFlags(transcript = false),
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        assertTrue(judgeStarted.await(AWAIT_MS, TimeUnit.MILLISECONDS), "the step report is submitted before the slow judge starts")
+        assertTrue(h.coordinator.cancel(started.runId))
+        val cancelled = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val result = cancelled.steps().single()
+        assertEquals(StepStatus.ERROR, result.status, result.toString())
+        assertEquals("pass", result.agentClaim)
+        assertTrue(result.observation.contains(submitted), result.observation)
+        assertTrue(result.observation.contains(finalObservation), result.observation)
+        assertNull(cancelled.lanes.single().transcriptPath, "this run deliberately disabled transcript capture")
+    }
+
+    @Test
+    fun judgeStartupFailureUsesTheSelectedInconclusivePolicy() {
+        val runSuite = suite(step("Confirm the home screen", retries = 0))
+        val agent = AutoAgentProvider(listOf("pass" to "The home screen is visible."))
+        val factory = LaneAgentFactory { chosen, _ ->
+            check(chosen.id != JUDGE_PROFILE_ID) { "simulated judge startup failure" }
+            ProviderLaneAgent(agent, chosen)
+        }
+        val h = RunHarness(
+            libraryOf(runSuite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = factory,
+        ).also { harness = it }
+
+        fun runWith(policy: JudgeInconclusivePolicy): StepResult {
+            val config = h.config(runSuite, agentLane(LANE_A_PROFILE_ID)).copy(
+                judgeProfileId = JUDGE_PROFILE_ID,
+                judgeMode = JudgeMode.EVERY_STEP.wire,
+                judgeInconclusivePolicy = policy,
+            )
+            val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+            val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+            assertTrue(run.warnings.any { it.contains("simulated judge startup failure") }, run.warnings.toString())
+            return run.steps().single()
+        }
+
+        val blocked = runWith(JudgeInconclusivePolicy.BLOCK)
+        assertEquals(StepStatus.BLOCKED, blocked.status, blocked.toString())
+        assertTrue(blocked.judgeInconclusive)
+        assertTrue(assertNotNull(blocked.judge).error.orEmpty().contains("could not be prepared"), blocked.judge.toString())
+        assertTrue(blocked.note.orEmpty().contains("Verification remains unresolved"), blocked.note.orEmpty())
+
+        val kept = runWith(JudgeInconclusivePolicy.KEEP_AGENT_PASS)
+        assertEquals(StepStatus.PASS, kept.status, kept.toString())
+        assertTrue(kept.judgeInconclusive)
+        assertTrue(kept.note.orEmpty().contains("retained by policy"), kept.note.orEmpty())
     }
 
     @Test
@@ -254,7 +419,10 @@ class JudgeBlindnessTest {
     @Test
     fun anInconclusiveJudgeKeepsTheAgentsClaimAndMarksTheResult() {
         val judge = ScriptedJudgeProvider { JudgeAnswer("inconclusive", "unknown", "The screenshot is blank.") }
-        val (_, run) = start(suite(step("Open the app")), AutoAgentProvider(listOf("pass" to "ok")), judge)
+        val (_, run) = start(
+            suite(step("Open the app")), AutoAgentProvider(listOf("pass" to "ok")), judge,
+            inconclusivePolicy = JudgeInconclusivePolicy.KEEP_AGENT_PASS,
+        )
 
         val result = run.steps().single()
         assertEquals(StepStatus.PASS, result.status)
@@ -294,7 +462,10 @@ class JudgeBlindnessTest {
             agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to AutoAgentProvider(listOf("pass" to "ok")), JUDGE_PROFILE_ID to mute)),
         ).also { harness = it }
         val suiteUnderTest = h.library.suites.single()
-        val config = h.config(suiteUnderTest, agentLane(LANE_A_PROFILE_ID)).copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire)
+        val config = h.config(suiteUnderTest, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeInconclusivePolicy = JudgeInconclusivePolicy.KEEP_AGENT_PASS,
+        )
         val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
         val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
 
@@ -342,7 +513,8 @@ class JudgeBlindnessTest {
         assertEquals(StepStatus.FAIL, settleWithJudge(StepStatus.PASS, fail).status)
         assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, pass).status)
         assertTrue(settleWithJudge(StepStatus.PASS, unsure).inconclusive)
-        assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, unsure).status)
+        assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.PASS, unsure).status)
+        assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, unsure, inconclusivePolicy = JudgeInconclusivePolicy.KEEP_AGENT_PASS).status)
         assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.PASS, unsure, requiresVerdict = true).status)
         assertEquals(StepStatus.FAIL, settleWithJudge(StepStatus.FAIL, pass).status)
         assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.BLOCKED, pass).status)

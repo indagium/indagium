@@ -20,11 +20,17 @@ internal class RecordingApplyOptions(
     val recordingRef: String? = null,
     val replaceStepIds: List<String>? = null,
     val afterApplied: ((snapshot: TestStepRecordingSnapshot, inserted: List<TestStep>) -> List<String>)? = null,
+    val replaceStepBaseline: List<TestStep>? = null,
 )
 
 /** Replaces the steps [replacedIds] of a case with [steps] in one write; see TestLibraryStore.replaceSteps. */
-internal typealias ReplaceStepsWithUsage = (caseId: String, replacedIds: List<String>, steps: List<TestStep>, usage: AiUsageStats?) ->
-StoreResult<List<TestStep>>
+internal typealias ReplaceStepsWithUsage = (
+    caseId: String,
+    replacedIds: List<String>,
+    steps: List<TestStep>,
+    usage: AiUsageStats?,
+    baseline: List<TestStep>?,
+) -> StoreResult<List<TestStep>>
 
 /** Shared UI/MCP apply path for a stopped recording. Asset imports are staged and removed if insertion fails. */
 internal class TestStepRecordingApplyService(
@@ -89,7 +95,7 @@ internal class TestStepRecordingApplyService(
                     val outcome = when {
                         replaced == null -> insertStepsWithUsage(caseId, stamped, index, snapshot.rewriteUsagePending)
                         replaceStepsWithUsage == null -> StoreResult.Invalid("Replacing the steps of a recording is not available here.")
-                        else -> replaceStepsWithUsage.invoke(caseId, replaced, stamped, snapshot.rewriteUsagePending)
+                        else -> replaceStepsWithUsage.invoke(caseId, replaced, stamped, snapshot.rewriteUsagePending, options.replaceStepBaseline)
                     }
                     when (val inserted = outcome) {
                         is StoreResult.Ok -> {

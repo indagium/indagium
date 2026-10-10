@@ -62,6 +62,8 @@ internal class AccountAgentRunner(
         images: List<LlmImage> = emptyList(),
         /** The request to send instead when [images] cannot be attached (Codex could not write its image files); null keeps [prompt]. */
         promptWithoutImages: String? = null,
+        /** Called once when initial images are attached, or when a Codex image-write fallback drops them. */
+        onImagesDelivered: (Boolean) -> Unit = {},
     ): AiRun {
         require(profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT)
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
@@ -91,9 +93,9 @@ internal class AccountAgentRunner(
                 run.emit(AiRunEvent.Status("Starting ${profile.kind.label}…"))
                 when (profile.kind) {
                     AiProviderKind.CODEX_ACCOUNT -> {
-                        runCodex(run, profile, AccountRequest(prompt, images, promptWithoutImages), systemPrompt, workspace, lease)
+                        runCodex(run, profile, AccountRequest(prompt, images, promptWithoutImages, onImagesDelivered), systemPrompt, workspace, lease)
                     }
-                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(session, run, profile, prompt, images, systemPrompt, workspace, lease)
+                    AiProviderKind.CLAUDE_CODE_ACCOUNT -> runClaude(session, run, profile, prompt, images, systemPrompt, workspace, lease, onImagesDelivered)
                 }
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
@@ -163,9 +165,11 @@ internal class AccountAgentRunner(
         systemPrompt: String,
         workspace: Path,
         lease: ManagedMcpServerLease,
+        onImagesDelivered: (Boolean) -> Unit,
     ) {
         var sawDelta = false
         var completed = false
+        var imageDeliveryReported = false
         // Claude Code's print-mode protocol has no per-item id like Codex's app-server events, so
         // interim narration between tool calls (the "Let me start by...", "Now let me..." bursts)
         // would otherwise land in the same AssistantDelta stream as the true final answer, glued
@@ -191,6 +195,10 @@ internal class AccountAgentRunner(
                 images = images,
             ),
         ).collect { event ->
+            if (!imageDeliveryReported && images.isNotEmpty() && event !is ClaudeCodeEvent.Error) {
+                onImagesDelivered(true)
+                imageDeliveryReported = true
+            }
             when (event) {
                 is ClaudeCodeEvent.TextDelta -> {
                     sawDelta = true

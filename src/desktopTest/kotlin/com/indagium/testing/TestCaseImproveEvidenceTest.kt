@@ -22,6 +22,7 @@ import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepFix
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
@@ -181,6 +182,22 @@ class TestCaseImproveEvidenceTest {
 
         assertTrue("The first result is an ad" in assertNotNull(plan.steps.getValue(STEP_SEARCH).textAtRun))
         assertNull(plan.steps.getValue(STEP_OPEN).textAtRun)
+    }
+
+    @Test
+    fun improvementBriefCarriesStepIntentAndPrecondition() {
+        val run = failedRun()
+        val steps = improveSteps().map { step ->
+            if (step.id == STEP_OPEN) step.copy(intent = StepIntent.ENSURE_STATE, precondition = "The player is active") else step
+        }
+        val suite = improveSuite(steps)
+        val case = suite.cases.single()
+        val plan = buildImproveEvidencePlan(case, run.occurrenceOf(IMPROVE_CASE_ID), runDirOf(run.id)) { null }
+
+        val prompt = improvePrompt(suite, case, "clarify playback", plan, ImproveImages.NONE, attachImages = false)
+
+        assertTrue("intent: ensure_state" in prompt, prompt)
+        assertTrue("precondition: The player is active" in prompt, prompt)
     }
 
     // ── The images ───────────────────────────────────────────────────

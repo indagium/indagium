@@ -37,7 +37,9 @@ internal fun availableRunArtifactPaths(run: TestRun, runDir: File): List<String>
     val candidates = linkedSetOf<String>()
     run.lanes.forEach laneLoop@{ lane ->
         candidates += listOfNotNull(lane.logPath, lane.transcriptPath, lane.toolActivityPath)
-        candidates += lane.cases.flatMap { it.steps }.mapNotNull { it.screenshotPath }
+        candidates += lane.cases.flatMap { it.steps }.flatMap { step ->
+            listOfNotNull(step.screenshotPath, step.startScreenshotPath) + step.sampleScreenshotPaths
+        }
         val captureRoot = File(root, "lanes/${lane.laneId}/capture")
         val containedCaptureRoot = runCatching { captureRoot.canonicalFile }.getOrNull() ?: return@laneLoop
         if (!containedCaptureRoot.path.startsWith(root.path + File.separator)) return@laneLoop

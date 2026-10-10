@@ -6,6 +6,7 @@ import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
@@ -70,6 +71,7 @@ internal class RewriteInput(
     val before: RecordingScreenState?,
     val after: RecordingScreenState?,
     val locked: LockedRewriteStep? = null,
+    val nextInputStartMs: Long? = null,
 ) {
     val fixed: Boolean get() = row.authorAdded
 
@@ -118,7 +120,7 @@ internal fun rewriteInputsOf(
     rows.mapIndexed { index, row ->
         RewriteInput(
             index + 1, row, row.before?.let { screenState(it.seq) }, row.after?.let { screenState(it.seq) },
-            locked.firstOrNull { index + 1 in it.inputs },
+            locked.firstOrNull { index + 1 in it.inputs }, rows.getOrNull(index + 1)?.inputStartMs,
         )
     }
 
@@ -146,7 +148,8 @@ internal enum class RewriteScope {
  * in, and no review reason is left on it (an edit that fills in the expected result ends the reason, see [reviewReasonAfterEdit]).
  */
 internal fun RecordedTestStep.isAcceptedRewriteStep(): Boolean =
-    !authorAdded && sourceInputIds.isNotEmpty() && reviewReason == null &&
+    !authorAdded && sourceInputIds.isNotEmpty() && (humanReviewed || modelSupported) &&
+        (reviewReason == null || reviewReason == INCIDENTAL_EXPECTED_WARNING) &&
         max(action.length, expected.length) <= MAX_FIXED_STEP_CHARS && action.isNotBlank()
 
 /**
@@ -163,6 +166,7 @@ internal fun lockedRewriteStepsOf(rows: List<RecordedTestStep>, accepted: List<R
 }
 
 /** One step the AI proposed. [screenInput] is the input whose after-image is the step's expected-screenshot candidate (null: the last one). */
+@Suppress("LongParameterList") // These fields mirror the rewrite JSON contract and stay adjacent while it is being validated.
 internal class ProposedStep(
     val action: String,
     val expected: String,
@@ -176,6 +180,8 @@ internal class ProposedStep(
     val kind: StepKind = StepKind.AGENT,
     val script: ScriptCall? = null,
     val manualCompletion: ManualCompletion = ManualCompletion.TESTER_OR_CHECKS,
+    val intent: StepIntent = StepIntent.PERFORM_ACTION,
+    val precondition: String? = null,
 )
 
 internal class RewriteProposal(val steps: List<ProposedStep>, val notes: String)
@@ -240,6 +246,14 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
     }
     val condition = optionalTextField(obj, "condition", where, MAX_STEP_TEXT_CHARS)
     val reviewReason = optionalTextField(obj, "reviewReason", where, MAX_REVIEW_REASON_CHARS)
+    val intent = if (obj.containsKey("intent")) {
+        val rawIntent = (obj["intent"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: throw IllegalArgumentException("$where.intent must be perform_action or ensure_state.")
+        StepIntent.parse(rawIntent) ?: throw IllegalArgumentException("$where.intent must be perform_action or ensure_state.")
+    } else {
+        StepIntent.PERFORM_ACTION
+    }
+    val precondition = optionalTextField(obj, "precondition", where, MAX_STEP_TEXT_CHARS)
     require(!optional || !condition.isNullOrBlank()) {
         "$where.condition must explain when to perform an optional step."
     }
@@ -249,12 +263,12 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
     val sources = sourceInputsOf(obj["sourceInputs"], where, expectations.inputCount)
     val fixed = sources.firstOrNull { it in expectations.fixedInputs }
     if (fixed != null) {
-        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
+        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason, intent = intent, precondition = precondition)
         requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(expectations.fixedInputs[fixed]))
         return step
     }
     expectations.lockedSteps.firstOrNull { group -> sources.any { it in group.inputs } }?.let { group ->
-        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason)
+        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason, intent = intent, precondition = precondition)
         requireLockedStepUnchanged(obj, where, step, group)
         return step
     }
@@ -276,6 +290,8 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
         performer.kind,
         performer.script,
         performer.manualCompletion,
+        intent,
+        precondition,
     )
     val problem = validateStep(proposed.toTestStep(), expectations.scripts)
     require(problem == null) { "$where: $problem" }
@@ -295,6 +311,8 @@ private fun ProposedStep.toTestStep() = TestStep(
     kind = kind,
     script = script,
     manualCompletion = manualCompletion,
+    intent = intent,
+    precondition = precondition,
 )
 
 private class Performer(val kind: StepKind, val script: ScriptCall?, val manualCompletion: ManualCompletion)
@@ -365,6 +383,9 @@ private fun requireFixedStepUnchanged(obj: JsonObject, where: String, step: Prop
     require(step.optional == row.optional && step.condition == row.condition?.trim()?.takeIf(String::isNotEmpty)) {
         "$label: optional and condition must equal the person's."
     }
+    require(step.intent == row.intent && step.precondition == row.precondition?.trim()?.takeIf(String::isNotEmpty)) {
+        "$label: intent and precondition must equal the person's."
+    }
     val extras = listOf("checks", "reviewReason", "expectedScreenshot", "scriptId", "args", "manualCompletion").filter { key -> !isEmptyAnswer(obj[key]) }
     require(extras.isEmpty()) { "$label: leave out ${extras.joinToString(", ")}." }
     val kind = kindOf(obj["kind"], where)
@@ -374,13 +395,17 @@ private fun requireFixedStepUnchanged(obj: JsonObject, where: String, step: Prop
 /** An accepted step comes back as one step over exactly its inputs, with the text, flags and kind it already has and nothing added. */
 private fun requireLockedStepUnchanged(obj: JsonObject, where: String, step: ProposedStep, group: LockedRewriteStep) {
     val row = group.step
-    val label = "$where covers input(s) ${rewriteNumberRanges(group.inputs)}, a locked step the person already accepted that must be kept as is"
+    val provenance = if (row.humanReviewed) "human-reviewed" else "model-supported"
+    val label = "$where covers input(s) ${rewriteNumberRanges(group.inputs)}, a preserved $provenance step that must be kept unchanged"
     require(step.sourceInputs == group.inputs) {
         "$label: it must be one step with sourceInputs ${group.inputs}, never merged with other inputs, split or dropped."
     }
     require(step.action == row.action.trim() && step.expected == row.expected.trim()) { "$label: action and expected must equal the locked text exactly." }
     require(step.optional == row.optional && step.condition == row.condition?.trim()?.takeIf(String::isNotEmpty)) {
         "$label: optional and condition must equal the locked step's."
+    }
+    require(step.intent == row.intent && step.precondition == row.precondition?.trim()?.takeIf(String::isNotEmpty)) {
+        "$label: intent and precondition must equal the locked step's."
     }
     val extras = listOf("checks", "reviewReason", "expectedScreenshot", "scriptId", "args", "manualCompletion").filter { key -> !isEmptyAnswer(obj[key]) }
     require(extras.isEmpty()) { "$label: leave out ${extras.joinToString(", ")}." }
@@ -464,71 +489,110 @@ private fun requireFullCoverage(groups: List<List<Int>>, inputCount: Int) {
 }
 
 /** The review rows for [proposal]: new ids, one row per proposed step, with its after-image as an opt-in expected-screenshot candidate. */
+@Suppress("UNUSED_PARAMETER") // Per-input booleans are not moment-specific; only delivered/fetched before coverage can establish a target.
 internal fun buildRewrittenRows(
     proposal: RewriteProposal,
     inputs: List<RewriteInput>,
     videoInspectedInputs: Set<Int> = emptySet(),
-): List<RecordedTestStep> =
-    proposal.steps.map { step ->
-        val sources = step.sourceInputs.map { inputs[it - 1] }
-        // An author-added row is not rewritten: the row itself (same id, same text) stays, in the place the answer gave it.
-        sources.singleOrNull()?.takeIf { it.fixed }?.let { return@map it.row }
-        // So is an accepted step of an earlier rewrite (the answer was validated to return exactly its inputs): the same row stays.
-        sources.first().locked?.let { return@map it.step }
-        val unclearGesture = unclearGestureIn(sources, videoInspectedInputs)
-        val byAgent = step.kind == StepKind.AGENT
-        val needsReview = byAgent && (unclearGesture != null || step.reviewReason != null)
-        val external = sources.singleOrNull()?.takeIf { it.row.isExternalEvent }
-        val rawAction = sources.joinToString("\n") { it.row.action }.take(MAX_STEP_TEXT_CHARS)
-        val screenInput = step.screenInput ?: step.sourceInputs.last()
-        val screen = if (needsReview) null else inputs[screenInput - 1].screenshot("after")
-        RecordedTestStep(
-            action = if (needsReview) rawAction else step.action,
-            expected = if (needsReview) "" else step.expected,
-            optional = !needsReview && step.optional,
-            condition = step.condition.takeUnless { needsReview },
-            screenshotJpeg = screen?.jpeg,
-            screenshotFromAdb = screen?.source != null && screen.source != RecordingScreenshotSource.MIRROR_INPUT,
-            before = sources.first().row.before,
-            after = sources.last().row.after,
-            inputAtMs = sources.last().row.inputAtMs,
-            inputStartMs = sources.first().row.inputStartMs,
-            sourceInputIds = sources.map { it.row.id },
-            sourceHint = sourceHintOf(sources),
-            checks = if (needsReview) emptyList() else step.checks,
-            kind = if (external != null) RecordedInputKind.EXTERNAL else null,
-            stepKind = step.kind,
-            script = step.script,
-            manualCompletion = step.manualCompletion,
-            stateChanges = sources.flatMap { it.row.stateChanges }.distinct(),
-            reviewReason = rewrittenReviewReason(step, unclearGesture, byAgent),
-            screenshotSource = screen?.source,
-            screenshotAcquiredAtMs = screen?.acquiredAtMs,
-            screenshotAcquisitionFinishedAtMs = screen?.acquisitionFinishedAtMs,
-            screenshotTimingUncertain = screen?.timingUncertain ?: true,
-            screenshotVerifiedMoment = screen?.let { "after" },
-        )
+    videoInspectedMoments: Map<Int, Set<String>> = emptyMap(),
+): List<RecordedTestStep> {
+    val sensitivity = RewriteSensitivity(inputs)
+    val safeVideoMoments = videoInspectedMoments.filterKeys { number ->
+        inputs.getOrNull(number - 1)?.let { !it.evidenceWithheld(sensitivity) } == true
     }
+    return proposal.steps.map { step -> buildRewrittenRow(step, inputs, safeVideoMoments, sensitivity) }
+}
+
+private fun buildRewrittenRow(
+    step: ProposedStep,
+    inputs: List<RewriteInput>,
+    safeVideoMoments: Map<Int, Set<String>>,
+    sensitivity: RewriteSensitivity,
+): RecordedTestStep {
+    val sources = step.sourceInputs.map { inputs[it - 1] }
+    // Preserve author rows and previously validated groups byte-for-byte when the model returns them unchanged.
+    sources.singleOrNull()?.takeIf { it.fixed }?.let { return it.row }
+    sources.first().locked?.let { return it.step }
+    val unclearGestures = sources.filter { source -> unclearGestureIn(listOf(source), safeVideoMoments, sensitivity) != null }
+    val unclearGesture = unclearGestures.firstOrNull()
+    val byAgent = step.kind == StepKind.AGENT
+    val blockingModelReason = step.reviewReason?.takeUnless { it == INCIDENTAL_EXPECTED_WARNING }
+    val needsReview = byAgent && (unclearGesture != null || blockingModelReason != null)
+    val fullyUnresolved = unclearGestures.size == sources.size && sources.isNotEmpty()
+    val external = sources.singleOrNull()?.takeIf { it.row.isExternalEvent }
+    val rawAction = sources.joinToString("\n") { it.row.action }.take(MAX_STEP_TEXT_CHARS)
+    val screenInput = step.screenInput ?: step.sourceInputs.last()
+    val screenInputRow = inputs[screenInput - 1]
+    val screen = if (needsReview) null else screenInputRow.screenshot("after")?.takeUnless {
+        sensitivity.screenshotWithheld(it, screenInputRow.row.inputAtMs)
+    }
+    return RecordedTestStep(
+        action = if (fullyUnresolved) rawAction else step.action,
+        expected = if (fullyUnresolved) "" else step.expected,
+        optional = step.optional && !fullyUnresolved,
+        condition = step.condition.takeUnless { fullyUnresolved },
+        screenshotJpeg = screen?.jpeg,
+        screenshotFromAdb = screen?.source != null && screen.source != RecordingScreenshotSource.MIRROR_INPUT,
+        before = sources.first().row.before,
+        after = sources.last().row.after,
+        inputAtMs = sources.last().row.inputAtMs,
+        inputStartMs = sources.first().row.inputStartMs,
+        sourceInputIds = sources.map { it.row.id },
+        sourceHint = sourceHintOf(sources),
+        checks = if (fullyUnresolved) emptyList() else step.checks,
+        kind = if (external != null) RecordedInputKind.EXTERNAL else null,
+        stepKind = step.kind,
+        script = step.script,
+        manualCompletion = step.manualCompletion,
+        intent = step.intent,
+        precondition = step.precondition,
+        modelSupported = byAgent && unclearGesture == null && blockingModelReason == null && step.action.isNotBlank(),
+        stateChanges = sources.flatMap { it.row.stateChanges }.distinct(),
+        reviewReason = rewrittenReviewReason(step, unclearGestures, byAgent),
+        screenshotSource = screen?.source,
+        screenshotAcquiredAtMs = screen?.acquiredAtMs,
+        screenshotAcquisitionFinishedAtMs = screen?.acquisitionFinishedAtMs,
+        screenshotTimingUncertain = screen?.timingUncertain ?: true,
+        screenshotVerifiedMoment = screen?.let { "after" },
+    )
+}
 
 /**
  * Why a rewritten row needs a look: an unclear gesture, else the AI's own reason, else - a flag, never a refusal - the warning that the
  * expected result may name content that changes between runs. Null for a step the AI explained nothing about and nothing flags.
  */
-private fun rewrittenReviewReason(step: ProposedStep, unclearGesture: RewriteInput?, byAgent: Boolean): String? = when {
-    unclearGesture != null && byAgent -> unclearGestureReason(unclearGesture)
+private fun rewrittenReviewReason(step: ProposedStep, unclearGestures: List<RewriteInput>, byAgent: Boolean): String? = when {
+    unclearGestures.isNotEmpty() && byAgent -> unclearGestures.joinToString(" ") { unclearGestureReason(it) }
     step.reviewReason == null && byAgent -> incidentalExpectedWarning(step.expected, step.optional)
     else -> step.reviewReason
 }
 
 /** The first tap or long press among [sources] with neither a resolved target nor inspected video nor a trustworthy before screenshot. */
-private fun unclearGestureIn(sources: List<RewriteInput>, videoInspectedInputs: Set<Int>): RewriteInput? = sources.firstOrNull { input ->
+private fun unclearGestureIn(
+    sources: List<RewriteInput>,
+    videoInspectedMoments: Map<Int, Set<String>>,
+    sensitivity: RewriteSensitivity,
+): RewriteInput? = sources.firstOrNull { input ->
     input.row.kind in setOf(RecordedInputKind.TAP, RecordedInputKind.LONG_PRESS) &&
-        input.row.tappedElement == null && input.screenshot("before") == null && input.number !in videoInspectedInputs
+        (input.evidenceWithheld(sensitivity) || input.row.tappedElement == null && !input.hasResolvedBeforeTarget(sensitivity)) &&
+        !(videoInspectedMoments[input.number]?.contains("before") ?: false)
+}
+
+private fun RewriteInput.evidenceWithheld(sensitivity: RewriteSensitivity): Boolean =
+    sensitivity.inputWithheld(this) || before?.let { sensitivity.spanWithheld(it.startedAt, it.finishedAt) } == true
+
+private fun RewriteInput.hasResolvedBeforeTarget(sensitivity: RewriteSensitivity): Boolean {
+    if (evidenceWithheld(sensitivity)) return false
+    val state = before ?: return false
+    val point = row.gesturePath.lastOrNull() ?: return false
+    return resolveTappedElement(state, point)?.let { element ->
+        element.text.isNotBlank() || element.contentDesc.isNotBlank() || element.resourceId.isNotBlank()
+    } == true
 }
 
 private fun unclearGestureReason(input: RewriteInput): String =
-    "The recorded ${input.row.kind?.name?.lowercase()} has neither a resolved target nor trustworthy inspected video/screenshot evidence. " +
-        "Identify the target and expected result."
+    "Input ${input.number}: the recorded ${input.row.kind?.name?.lowercase()} has neither a resolved target nor trustworthy inspected " +
+        "before video/screenshot evidence. Identify its target and verify the result."
 
 /** The raw inputs of one rewritten step, for the AI that later runs it: the precise gesture when a label is ambiguous. */
 private fun sourceHintOf(sources: List<RewriteInput>): String {
@@ -551,8 +615,8 @@ internal enum class RewriteDescription { BRIEF, HINT }
 /** How the brief marks an author-added input; the prompt rules in RecordingRewriteBrief.kt refer to this exact label. */
 internal const val FIXED_STEP_LABEL = "AUTHOR STEP, keep as is"
 
-/** How the brief marks the inputs of an accepted step of an earlier rewrite; the prompt rules refer to this exact label. */
-internal const val LOCKED_STEP_LABEL = "LOCKED STEP, keep as is"
+/** How the brief marks inputs of a preserved step from an earlier rewrite; the prompt rules refer to this exact label. */
+internal const val LOCKED_STEP_LABEL = "PRESERVED STEP, keep as is"
 
 private const val MAX_ACTION_CHARS = 300
 
@@ -562,15 +626,7 @@ private const val MAX_ACTION_CHARS = 300
  * line of a recorded input (the screen text and the image references of [RewriteEvidence.lineExtra]).
  */
 internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null, extra: String = ""): String = buildString {
-    val group = locked.takeIf { mode == RewriteDescription.BRIEF }
-    if (group != null) {
-        // One line for the whole accepted step, at its first input; the other inputs of it have no line of their own.
-        if (number != group.inputs.first()) return@buildString
-        append(rewriteNumberRanges(group.inputs)).append(". [").append(LOCKED_STEP_LABEL).append("] covers input(s) ")
-        append(rewriteNumberRanges(group.inputs)).append(" | ")
-        appendWrittenStep(group.step)
-        return@buildString
-    }
+    if (appendPreservedRewriteGroup(mode, this@describe)) return@buildString
     append(number).append(". ")
     if (fixed) {
         // Not a recording: the person wrote this step. It is shown whole (the answer must repeat it exactly), never cut to a preview.
@@ -591,6 +647,10 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
         if (element.className.isNotBlank()) append(" class=").append(element.className.substringAfterLast('.'))
     }
     if (row.kind == RecordedInputKind.LONG_PRESS) row.durationMs?.let { append(" | held ").append(it).append(" ms") }
+    nextInputStartMs?.let { next ->
+        val gap = (next - row.inputAtMs).coerceAtLeast(0L)
+        append(" | gap before next input: ").append(gap).append(" ms")
+    }
     append(" | before app: ").append(row.before?.packageName ?: "unavailable")
     append(" | before activity: ").append(row.before?.activity ?: "unavailable")
     append(" | after app: ").append(row.after?.packageName ?: "unavailable")
@@ -600,9 +660,23 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     append(extra)
 }
 
+private fun StringBuilder.appendPreservedRewriteGroup(mode: RewriteDescription, input: RewriteInput): Boolean {
+    val group = input.locked?.takeIf { mode == RewriteDescription.BRIEF } ?: return false
+    // One line for the whole preserved step, at its first input; the other inputs have no line of their own.
+    if (input.number != group.inputs.first()) return true
+    val numbers = rewriteNumberRanges(group.inputs)
+    append(numbers).append(". [").append(LOCKED_STEP_LABEL).append("] covers input(s) ")
+    append(numbers).append(" | provenance: ")
+    append(if (group.step.humanReviewed) "human-reviewed" else "model-supported").append(" | ")
+    appendWrittenStep(group.step)
+    return true
+}
+
 /** A step as the answer must repeat it: the whole text (never cut to a preview), the optional flag and condition, and who performs it. */
 private fun StringBuilder.appendWrittenStep(row: RecordedTestStep) {
     append("action: \"").append(row.action.trim()).append("\" | expected: \"").append(row.expected.trim()).append('"')
+    append(" | intent: ").append(row.intent.name.lowercase())
+    row.precondition?.let { append(" | precondition: \"").append(it.trim()).append('"') }
     if (row.optional) append(" | optional: true | condition: \"").append(row.condition?.trim().orEmpty()).append('"')
     if (row.stepKind != StepKind.AGENT) append(" | performed by: ").append(row.stepKind.name.lowercase()).append(" (not an AI step)")
 }

@@ -24,7 +24,7 @@ internal const val IMPROVE_SYSTEM_PROMPT =
         "change any library, and you must not claim to have done so.\n" +
         "- Answer with exactly one entry for each existing step, in the same order, naming its stepId. In this version you can never add, " +
         "remove, reorder, merge or split steps.\n" +
-        "- Keep what the author meant: the same intent and the same behaviour under test. Improve clarity only: an action that is vague " +
+        "- Keep what the author meant: the same intent, precondition and behaviour under test. Improve clarity only: an action that is vague " +
         "or ambiguous, an expected result that is too weak to verify, too specific, or that does not match what the screens and the " +
         "judge's reasoning show the app does when it works. Do not rewrite for style.\n" +
         "- When nothing needs to improve, copy the step exactly and write \"$UNCHANGED_REASON\" as its reason.\n" +
@@ -65,10 +65,11 @@ private const val MAX_REFERENCE_LOG_TOTAL_CHARS = 12_000
 private const val TIME_PATTERN = "yyyy-MM-dd HH:mm"
 
 private const val OUTPUT_CONTRACT = """Answer with exactly one JSON object and no markdown or prose:
-{"steps":[{"stepId":"step-...","action":"...","expected":"...","optional":false,"condition":null,"reason":"..."}]}
+{"steps":[{"stepId":"step-...","intent":"perform_action","precondition":null,"action":"...","expected":"...","optional":false,"condition":null,"reason":"..."}]}
 Rules:
 - steps holds exactly one entry for each existing step, in the order listed, and each stepId is copied exactly.
   Never add, remove, reorder, merge or split steps.
+- Copy intent and precondition exactly as listed. They describe execution semantics and cannot be changed by a wording improvement.
 - action is what the tester does; expected is what must be true afterwards. Copy a text exactly when you do not change it.
 - optional and condition: copy them as listed unless the evidence shows the step should be conditional. An optional step needs a condition that
   says when to perform it; only a step the AI agent performs can be optional. expected may be blank only on an optional step (or where it is blank now).
@@ -145,6 +146,7 @@ private fun imagesSection(images: ImproveImages, attach: Boolean, plan: ImproveE
 private fun stepLine(number: Int, step: TestStep, images: ImproveImages): String = buildString {
     append(number).append(". id=").append(step.id)
     append(" | performed by: ").append(performerLabel(step.kind))
+    append(" | intent: ").append(step.intent.wire).append(" | precondition: ").append(step.precondition ?: "(none)")
     append(" | action: \"").append(step.action.trim()).append("\" | expected: \"").append(step.expected.trim()).append('"')
     if (step.optional) append(" | optional: true | condition: \"").append(step.condition?.trim().orEmpty()).append('"')
     val improvable = step.checks.filter(::isImprovableCheck)

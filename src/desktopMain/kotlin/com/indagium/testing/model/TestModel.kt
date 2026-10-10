@@ -30,6 +30,7 @@ const val DEFAULT_SCRIPT_EXIT_CODE = 0
 /** A manual step waits for a person, so its default time allowance is long. */
 const val DEFAULT_MANUAL_STEP_TIMEOUT_MS = 10 * 60 * 1000L
 const val DEFAULT_DEVICE_STATE_WITHIN_MS = 10_000L
+const val MAX_STEP_PRECONDITION_CHARS = 2_000
 
 fun newPrefixedId(prefix: String): String = prefix + UUID.randomUUID()
 
@@ -60,6 +61,18 @@ enum class OnFailure { STOP_CASE, CONTINUE, CREATE_ISSUE_AND_CONTINUE, PAUSE_FOR
  * the run itself runs a library script; no AI agent is involved.
  */
 enum class StepKind { AGENT, MANUAL, SCRIPT }
+
+/** Whether a step changes the device or checks that its desired state already holds. */
+enum class StepIntent(val wire: String) {
+    PERFORM_ACTION("perform_action"),
+    ENSURE_STATE("ensure_state");
+
+    companion object {
+        fun parse(text: String?): StepIntent? = entries.firstOrNull {
+            it.wire.equals(text?.trim(), ignoreCase = true) || it.name.equals(text?.trim(), ignoreCase = true)
+        }
+    }
+}
 
 /**
  * How a MANUAL step is completed. TESTER_ONLY: only the tester's Done. CHECKS_ONLY: only its completion checks (log-appears and
@@ -220,6 +233,10 @@ data class TestStep(
      * the Test suites folder (testing/authoring/RecordingEvidence.kt).
      */
     val recordingRef: String? = null,
+    /** perform_action requires a transition; ensure_state passes when its goal is already true. */
+    val intent: StepIntent = StepIntent.PERFORM_ACTION,
+    /** Optional state that must hold before perform_action is attempted. */
+    val precondition: String? = null,
 )
 
 /**

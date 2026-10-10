@@ -346,6 +346,8 @@ internal class AiAgentRunner(
         budgetGuidance: ((AiRun) -> String)? = null,
         /** Images attached to the first user message (a judge's screenshots), so the model has them before its first reply. */
         images: List<LlmImage> = emptyList(),
+        /** Called after a successful first provider response confirms it received the user message and its images. */
+        onImagesDelivered: (Boolean) -> Unit = {},
     ): AiRun {
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
@@ -365,7 +367,7 @@ internal class AiAgentRunner(
         session.retain(run)
         run.job = scope.launch {
             try {
-                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort, budgetGuidance, images)
+                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort, budgetGuidance, images, onImagesDelivered)
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
             } finally {
@@ -400,9 +402,11 @@ internal class AiAgentRunner(
         reasoningEffort: String?,
         budgetGuidance: ((AiRun) -> String)?,
         images: List<LlmImage>,
+        onImagesDelivered: (Boolean) -> Unit,
     ) {
         val conversation = session.messages.toMutableList()
         val initialMessageCount = session.messages.size
+        var imageDeliveryReported = false
         if (conversation.isEmpty() && !systemPrompt.isNullOrBlank()) {
             conversation += LlmMessage(LlmRole.SYSTEM, systemPrompt)
         }
@@ -490,6 +494,11 @@ internal class AiAgentRunner(
                 if (!completed) {
                     run.emit(AiRunEvent.Error("Model stream ended before completion."))
                     return
+                }
+
+                if (!imageDeliveryReported && images.isNotEmpty()) {
+                    onImagesDelivered(true)
+                    imageDeliveryReported = true
                 }
 
                 if (toolCalls.isEmpty()) {

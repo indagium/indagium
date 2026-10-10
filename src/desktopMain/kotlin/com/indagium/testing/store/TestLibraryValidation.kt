@@ -2,6 +2,7 @@ package com.indagium.testing.store
 
 import com.indagium.debug.requireValidAndroidPackageName
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
+import com.indagium.testing.model.MAX_STEP_PRECONDITION_CHARS
 import com.indagium.testing.model.MAX_TAG_CHARS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
@@ -116,6 +117,9 @@ private fun validateStepSettings(step: TestStep): String? = when {
     step.retries !in 0..MAX_STEP_RETRIES -> "Step retries must be between 0 and $MAX_STEP_RETRIES."
     step.maxToolCalls !in MIN_STEP_MAX_TOOL_CALLS..MAX_STEP_MAX_TOOL_CALLS ->
         "Step max tool calls must be between $MIN_STEP_MAX_TOOL_CALLS and $MAX_STEP_MAX_TOOL_CALLS."
+    step.precondition != null && step.precondition.isBlank() -> "Step precondition must not be blank."
+    step.precondition != null && step.precondition.length > MAX_STEP_PRECONDITION_CHARS ->
+        "Step precondition is longer than $MAX_STEP_PRECONDITION_CHARS characters."
     step.checks.map { it.id }.distinct().size != step.checks.size -> "Check ids must be unique within a step."
     step.examples.map { it.id }.distinct().size != step.examples.size -> "Example ids must be unique within a step."
     else -> null

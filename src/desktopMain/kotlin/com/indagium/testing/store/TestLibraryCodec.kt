@@ -29,6 +29,7 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
@@ -222,6 +223,8 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     // Appended last, and only when set. It links a step to evidence stored beside the suite; an older build ignores it (and drops it if it
     // saves the suite), which loses only the link, so the envelope version stays: see the version policy above.
     step.recordingRef?.let { put("recordingRef", it) }
+    if (step.intent != StepIntent.PERFORM_ACTION) put("intent", step.intent.wire)
+    step.precondition?.let { put("precondition", it) }
 }
 
 internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
@@ -399,6 +402,8 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep {
         script = (o["script"] as? JsonObject)?.let { decodeScriptCall(it) },
         manualCompletion = o.enumOr("manualCompletion", ManualCompletion.TESTER_OR_CHECKS),
         recordingRef = o.optStr("recordingRef")?.takeIf { isSafeId(it) },
+        intent = StepIntent.parse(o.optStr("intent")) ?: StepIntent.PERFORM_ACTION,
+        precondition = o.optStr("precondition"),
     )
 }
 

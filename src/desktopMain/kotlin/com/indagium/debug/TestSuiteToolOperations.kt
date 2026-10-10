@@ -577,6 +577,8 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         put("changed", step.changed)
         put("action", step.action)
         put("expected", step.expected)
+        put("intent", step.intent.wire)
+        put("precondition", step.precondition)
         put("optional", step.optional)
         put("condition", step.condition)
         put("reason", step.reason)
@@ -587,6 +589,8 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 "expected" to step.previous.expected,
                 "optional" to step.previous.optional,
                 "condition" to step.previous.condition,
+                "intent" to step.intent.wire,
+                "precondition" to step.precondition,
             ),
         )
         step.incidentalWarning?.let { put("incidentalWarning", it) }

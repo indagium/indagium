@@ -48,9 +48,13 @@ internal class RecordingRewriteTools(
     private val videoTimeline: RecordedVideoTimeline? = null,
 ) {
     private val evidenceIds = RewriteEvidenceIds(inputs)
-    private val inspectedInputs = ConcurrentHashMap.newKeySet<Int>()
+    private val inspectedMoments = ConcurrentHashMap<Int, Set<String>>()
 
-    fun videoInspectedInputs(): Set<Int> = inspectedInputs.toSet()
+    fun videoInspectedMoments(): Map<Int, Set<String>> = inspectedMoments.toMap()
+
+    fun visualInspectedMoments(): Map<Int, Set<String>> = inspectedMoments.toMap()
+
+    fun videoInspectedInputs(): Set<Int> = inspectedMoments.keys.toSet()
 
     val gateway: IndagiumToolGateway by lazy {
         val tools = buildList {
@@ -102,9 +106,20 @@ internal class RecordingRewriteTools(
                 "kind" to LOCKED_STEP_KIND,
                 "locked" to true,
                 "coveredInputs" to group.inputs,
-                "message" to "The person already accepted the step that covers inputs ${rewriteNumberRanges(group.inputs)}; there is nothing to " +
-                    "inspect. Return it unchanged as one step covering exactly those inputs.",
-            ) + untrustedData("recorded_input", mapOf("action" to group.step.action, "expected" to group.step.expected.takeIf(String::isNotBlank)))
+                "humanReviewed" to group.step.humanReviewed,
+                "modelSupported" to group.step.modelSupported,
+                "reviewProvenance" to if (group.step.humanReviewed) "human_reviewed" else "model_supported",
+                "message" to "This preserved step covers inputs ${rewriteNumberRanges(group.inputs)}. " +
+                    "Return it unchanged as one step covering exactly those inputs.",
+            ) + untrustedData(
+                "recorded_input",
+                mapOf(
+                    "action" to group.step.action,
+                    "expected" to group.step.expected.takeIf(String::isNotBlank),
+                    "intent" to group.step.intent.name.lowercase(),
+                    "precondition" to group.step.precondition,
+                ),
+            )
         }
         if (input.fixed) {
             return mapOf(
@@ -112,7 +127,15 @@ internal class RecordingRewriteTools(
                 "kind" to AUTHOR_STEP_KIND,
                 "fixed" to true,
                 "message" to "The person wrote this step; it has no recording, screens or video. Return it unchanged as its own step.",
-            ) + untrustedData("recorded_input", mapOf("action" to row.action, "expected" to row.expected.takeIf(String::isNotBlank)))
+            ) + untrustedData(
+                "recorded_input",
+                mapOf(
+                    "action" to row.action,
+                    "expected" to row.expected.takeIf(String::isNotBlank),
+                    "intent" to row.intent.name.lowercase(),
+                    "precondition" to row.precondition,
+                ),
+            )
         }
         return buildMap {
             put("index", input.number)
@@ -190,6 +213,9 @@ internal class RecordingRewriteTools(
             }
             mapOf("error" to message)
         } else {
+            if (moment == "before" || moment == "after") {
+                inspectedMoments.compute(input.number) { _, current -> (current.orEmpty() + moment).toSet() }
+            }
             val label = when {
                 moment == "input" && evidence.timingUncertain -> "Uncertain raw input preview for input ${input.number}"
                 moment == "input" -> "Raw input preview for input ${input.number}; acquisition interval recorded"
@@ -265,7 +291,7 @@ internal class RecordingRewriteTools(
             throw ToolArgException("Input $index is an author-added step; it has no recorded video.")
         }
         if (index != null && inputs.getOrNull(index - 1)?.locked != null) {
-            throw ToolArgException("Input $index belongs to a step the person already accepted; it stays as it is.")
+            throw ToolArgException("Input $index belongs to a preserved step; it stays as it is.")
         }
         val storyboard = when {
             index != null && start == null && end == null -> videoTimeline?.storyboardForInput(index, inputs)
@@ -275,7 +301,11 @@ internal class RecordingRewriteTools(
         if (storyboard == null) {
             mapOf("error" to "No decoded video frames are available for that input or time range.")
         } else {
-            inspectedInputs.addAll(storyboard.coveredInputs)
+            storyboard.frames.forEach { frame ->
+                val number = frame.inputNumber ?: return@forEach
+                val moment = frame.relation.lowercase().takeIf { it in setOf("before", "after") } ?: return@forEach
+                inspectedMoments.compute(number) { _, current -> (current.orEmpty() + moment).toSet() }
+            }
             mapOf(
                 "message" to storyboard.message,
                 "inputWindowMs" to index?.let { number ->

@@ -12,6 +12,7 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
@@ -122,6 +123,12 @@ internal fun applyStepFields(args: ToolArgs, original: TestStep, label: String =
         onFailure = args.enum("onFailure", OnFailure.entries) ?: base.onFailure,
         optional = optionalFields.optional,
         condition = optionalFields.condition,
+        intent = if (args.hasKey("intent")) {
+            StepIntent.parse(args.string("intent")) ?: toolArgError("$label.intent must be perform_action or ensure_state.")
+        } else {
+            base.intent
+        },
+        precondition = if (args.hasKey("precondition")) args.string("precondition") else base.precondition,
         checks = collections.checks,
         examples = collections.examples,
     )

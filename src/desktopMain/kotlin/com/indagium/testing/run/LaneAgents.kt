@@ -48,6 +48,8 @@ internal class AgentSegmentRequest(
     val images: List<LlmImage> = emptyList(),
     /** The request to send instead when an agent cannot attach [images] after all (Codex could not write its image files); null keeps [prompt]. */
     val promptWithoutImages: String? = null,
+    /** Called only at the provider/account boundary that confirms whether initial images reached the turn. */
+    val onImagesDelivered: (Boolean) -> Unit = {},
 )
 
 internal interface LaneAgent : AutoCloseable {
@@ -98,6 +100,7 @@ internal class ProviderLaneAgent(
             confirmationTimeoutMs = request.confirmationTimeoutMs,
             budgetGuidance = request.budgetGuidance,
             images = request.images,
+            onImagesDelivered = request.onImagesDelivered,
         )
         run.job?.invokeOnCompletion { runner.close() }
         return run
@@ -150,6 +153,7 @@ internal class AccountLaneAgent(private val profile: AiProviderProfile, private 
             confirmationTimeoutMs = request.confirmationTimeoutMs,
             images = request.images,
             promptWithoutImages = request.promptWithoutImages,
+            onImagesDelivered = request.onImagesDelivered,
         )
         run.job?.invokeOnCompletion { runner.close() }
         return run

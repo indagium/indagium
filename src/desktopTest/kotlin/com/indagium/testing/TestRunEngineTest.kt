@@ -6,12 +6,14 @@ import com.indagium.ai.LlmToolCall
 import com.indagium.edition.EditionLimits
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckStatus
+import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
@@ -29,6 +31,7 @@ import org.junit.Assume.assumeFalse
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -151,6 +154,160 @@ class TestRunEngineTest {
         assertEquals("No Skip ad button was visible", result.steps.first().observation)
         val prompt = h.provider.requests.first().messages.joinToString("\n") { it.content.orEmpty() }
         assertTrue("Optional condition: A visible Skip ad button appears." in prompt, prompt)
+    }
+
+    @Test
+    fun aVisibleSkippableAdCanBeDismissedBeforeTheRequiredPlaybackAction() {
+        val optionalAd = step("Dismiss the ad if its Skip control is visible", expected = "The ad is dismissed").copy(
+            optional = true,
+            condition = "A visible Skip ad control is present.",
+        )
+        val suite = suiteOf(caseOf("Watch video", optionalAd, step("Pause playback", "Playback is paused")))
+        val h = harness(
+            suite,
+            listOf(
+                finishTurn("pass", "The visible Skip ad control was tapped and the ad closed."),
+                finishTurn("pass", "The required video is paused."),
+                textTurn,
+            ),
+        )
+
+        val run = h.runToEnd(suite)
+        val results = run.caseResult("Watch video").steps
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(listOf(StepStatus.PASS, StepStatus.PASS), results.map { it.status })
+        assertTrue(results.first().observation.contains("visible Skip ad control"), results.first().observation)
+        assertTrue(h.provider.requests.first().messages.joinToString("\\n") { it.content.orEmpty() }.contains("Optional condition:"))
+    }
+
+    @Test
+    fun anAlreadySatisfiedEnsureStateCanPassWithoutTogglingTheDevice() {
+        val ensurePaused = step("Ensure playback is paused", "Playback is paused")
+            .copy(intent = StepIntent.ENSURE_STATE, precondition = "The player is open")
+        val ensurePlaying = step("Ensure playback is playing", "Playback is playing")
+            .copy(intent = StepIntent.ENSURE_STATE, precondition = "The player is open")
+        val suite = suiteOf(caseOf("Already in either playback state", ensurePaused, ensurePlaying))
+        val h = harness(
+            suite,
+            listOf(
+                toolTurn("take_screenshot"), finishTurn("pass", "The player already shows its paused state."),
+                toolTurn("take_screenshot"), finishTurn("pass", "The player already shows active playback."), textTurn,
+            ),
+        )
+
+        val run = h.runToEnd(suite)
+        val results = run.caseResult("Already in either playback state").steps
+
+        assertEquals(listOf(StepStatus.PASS, StepStatus.PASS), results.map { it.status }, run.toString())
+        assertEquals(StepIntent.ENSURE_STATE, ensurePaused.intent)
+        assertEquals(0, h.adb.shellCommands.count { it.firstOrNull() == "input" }, "checking either existing playback state does not toggle it")
+        val prompts = h.provider.requests.map { request -> request.messages.joinToString("\\n") { it.content.orEmpty() } }
+        assertTrue(prompts.any { "Ensure playback is paused" in it && "already true, finish PASS without toggling" in it }, prompts.toString())
+        assertTrue(prompts.any { "Ensure playback is playing" in it && "already true, finish PASS without toggling" in it }, prompts.toString())
+    }
+
+    @Test
+    fun aFailedTransitionCheckRedoesWithPriorEvidenceAndLetsTheAgentInspectBeforeRetrying() {
+        val pausePlayback = step(
+            "Pause playback",
+            "Playback changes from playing to paused",
+            retries = 1,
+            checks = listOf(logAppears("Playback changed from playing to paused", withinMs = 100)),
+        ).copy(intent = StepIntent.PERFORM_ACTION, precondition = "Playback is active")
+        val resumePlayback = step(
+            "Start playback",
+            "Playback changes from paused to playing",
+            checks = listOf(logAppears("Playback changed from paused to playing", withinMs = 100)),
+        ).copy(intent = StepIntent.PERFORM_ACTION, precondition = "Playback is paused")
+        val suite = suiteOf(caseOf("Pause and resume safely", pausePlayback, resumePlayback))
+        val h = harness(
+            suite,
+            listOf(
+                toolTurn("tap", """{"x":500,"y":600}"""),
+                finishTurn("pass", "I tapped Pause; the player is transitioning but its transition event has not arrived yet."),
+                toolTurn("take_screenshot"),
+                finishTurn("pass", "The delayed event confirms my earlier action changed playback from playing to paused.", before = {
+                    h().emitLog("Playback changed from playing to paused")
+                }),
+                toolTurn("tap", """{"x":500,"y":600}"""),
+                finishTurn("pass", "With the paused precondition established, I started playback and observed the playing transition.", before = {
+                    h().emitLog("Playback changed from paused to playing")
+                }),
+                textTurn,
+            ),
+        )
+
+        val run = h.runToEnd(suite)
+        val results = run.caseResult("Pause and resume safely").steps
+        val retryRequest = h.provider.requests[2]
+        val redoReply = retryRequest.messages.last { it.role == LlmRole.TOOL }.content.orEmpty()
+        val retryPrompt = retryRequest.messages.joinToString("\\n") { it.content.orEmpty() }
+
+        assertEquals(listOf(StepStatus.PASS, StepStatus.PASS), results.map { it.status }, run.toString())
+        assertEquals(listOf(2, 1), results.map { it.attempts })
+        assertEquals(
+            2,
+            h.adb.shellCommands.count { it.firstOrNull() == "input" },
+            "the first transition is verified after inspection; the following step performs the reverse transition",
+        )
+        assertTrue(redoReply.contains("verification failed") && redoReply.contains("failedChecks"), redoReply)
+        assertTrue(redoReply.contains("I tapped Pause") && redoReply.contains("Playback changed from playing to paused"), redoReply)
+        assertTrue("Inspect the screen before acting" in retryPrompt && "Required precondition: Playback is active" in retryPrompt, retryPrompt)
+        assertTrue("verify the specified transition" in retryPrompt && "Never weaken a transition" in retryPrompt, retryPrompt)
+    }
+
+    @Test
+    fun twoUnavailableUiWaitsExhaustRecoveryAndTheEnvironmentalStepCanBeBlocked() {
+        val suite = suiteOf(caseOf("Unavailable content", step("Wait for the required video", "The video is available", maxToolCalls = 4)))
+        val h = RunHarness(TestLibrary(suites = listOf(suite))).also { harness = it }
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(h.config(suite, externalLane())) })
+        val laneId = h.coordinator.run(started.runId)!!.lanes.single().laneId
+        awaitTrue("external lane step becomes active") { h.coordinator.run(started.runId)?.lanes?.single()?.currentStepAction != null }
+
+        fun wait() = runBlocking {
+            h.coordinator.laneToolCall(
+                started.runId,
+                laneId,
+                "wait_for_ui",
+                mapOf("selectorType" to "text", "selector" to "Required video", "timeoutMs" to 50),
+            )
+        }
+        val first = wait()
+        val second = wait()
+        val refused = wait()
+        val finish = runBlocking {
+            h.coordinator.laneToolCall(
+                started.runId,
+                laneId,
+                "finish_step",
+                mapOf("status" to "blocked", "observation" to "Required video content remained unavailable after both waits."),
+            )
+        }
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        assertTrue(first.toString().contains("absent"), first.toString())
+        assertTrue(second.toString().contains("absent"), second.toString())
+        assertTrue(refused.toString().contains("bounded UI-recovery attempts"), refused.toString())
+        assertTrue(finish.toString().contains("case_finished"), finish.toString())
+        assertEquals(CaseStatus.BLOCKED, run.caseResult("Unavailable content").status, run.toString())
+        assertEquals(2, h.adb.specs.count { "uiautomator" in it.command }, "the refused third wait never reads the device")
+    }
+
+    @Test
+    fun anUnskippableAdBlocksTheRequiredStepWithoutSubstitutingContent() {
+        val suite = suiteOf(caseOf("Unskippable ad", step("Wait for the required video", "The requested video is playing")))
+        val h = harness(suite, listOf(finishTurn("blocked", "Only an unskippable ad is visible; the requested video is unavailable."), textTurn))
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Unskippable ad").steps.single()
+        val prompt = h.provider.requests.first().messages.joinToString("\\n") { it.content.orEmpty() }
+
+        assertEquals(StepStatus.BLOCKED, result.status, result.toString())
+        assertTrue(result.observation.contains("unskippable ad"), result.observation)
+        assertEquals(0, h.adb.shellCommands.count { it.firstOrNull() == "input" }, "the lane does not bypass the ad or switch to other content")
+        assertTrue("dismiss only a visible, skippable ad" in prompt, prompt)
+        assertTrue("report blocked" in prompt && "Never bypass a tested condition" in prompt, prompt)
     }
 
     @Test
@@ -556,8 +713,7 @@ class TestRunEngineTest {
         val slowCheck = StepCheck.LogAppears(com.indagium.testing.model.newCheckId(), regex = "never-arrives", withinMs = 10_000)
         val first = step("Check output", onFailure = OnFailure.CONTINUE, timeoutMs = 700, checks = listOf(firstCheck, slowCheck))
         val suite = suiteOf(caseOf("Deadline", first, step("Continue after timeout", timeoutMs = 3_000)))
-        // A timed-out finish is followed by a scripted stale-agent response, then a fresh response
-        // for the next step's replacement segment.
+        // A timed-out finish is followed by a scripted stale-agent response, then a fresh response for the next step.
         val h = harness(suite, listOf(finishTurn("pass"), finishTurn("pass"), finishTurn("pass"), textTurn), scripts = listOf(script))
         val run = h.runToEnd(suite)
         val result = run.caseResult("Deadline").steps
@@ -569,6 +725,37 @@ class TestRunEngineTest {
         val screenshot = assertNotNull(result.first().screenshotPath)
         assertTrue(File(h.store.runDir(run.id), screenshot).isFile, "screenshot evidence completed before the deadline")
         assertEquals(RunStatus.FAILED, run.status, run.toString())
+    }
+
+    @Test
+    fun timeoutDuringChecksWithoutTranscriptKeepsSubmittedClaimAndObservations() {
+        val script = hostScript("check_output", "printf ready")
+        val completed = StepCheck.ScriptResult(com.indagium.testing.model.newCheckId(), script.id, exitCode = 0, stdoutContains = "ready")
+        val slow = StepCheck.LogAppears(com.indagium.testing.model.newCheckId(), regex = "never-arrives", withinMs = 10_000)
+        val first = step("Check output", onFailure = OnFailure.STOP_CASE, timeoutMs = 700, checks = listOf(completed, slow))
+        val suite = suiteOf(caseOf("Deadline report", first))
+        val h = harness(
+            suite,
+            listOf(
+                toolTurn("report_observation", """{"text":"Observation reported before verification"}"""),
+                finishTurn("pass", "Final finish_step observation"),
+                textTurn,
+            ),
+            scripts = listOf(script),
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking {
+            h.coordinator.start(h.config(suite).copy(evidence = EvidenceFlags(transcript = false)))
+        })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+        val result = run.caseResult("Deadline report").steps.single()
+
+        assertEquals(StepStatus.TIMEOUT, result.status, run.toString())
+        assertEquals(com.indagium.testing.model.CheckStatus.PASS, result.checks.first().status)
+        assertEquals(com.indagium.testing.model.CheckStatus.NOT_EVALUATED, result.checks.last().status)
+        assertEquals("pass", result.agentClaim)
+        assertTrue(result.observation.contains("Observation reported before verification"), result.observation)
+        assertTrue(result.observation.contains("Final finish_step observation"), result.observation)
+        assertNull(run.lanes.single().transcriptPath, "submitted reports survive without transcript capture")
     }
 
     @Test
@@ -649,6 +836,69 @@ class TestRunEngineTest {
         val restartPrompt = h.provider.requests[2].messages.filter { it.role == LlmRole.SYSTEM }.joinToString("\n") { it.content.orEmpty() }
         assertTrue(restartPrompt.contains("strict 1-call budget"), restartPrompt)
         assertTrue(restartPrompt.contains("0 paid dispatches remain"), restartPrompt)
+    }
+
+    @Test
+    fun exactInputSequenceBudgetStillAllowsFreeFinishStep() {
+        val suite = suiteOf(caseOf("Exact batch budget", step("Tap once", maxToolCalls = 2)))
+        val h = RunHarness(TestLibrary(suites = listOf(suite))).also { harness = it }
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(h.config(suite, externalLane(), toolLimit = 2)) })
+        val laneId = h.coordinator.run(started.runId)!!.lanes.single().laneId
+        awaitTrue("external lane step becomes active") { h.coordinator.run(started.runId)?.lanes?.single()?.currentStepAction != null }
+
+        val sequence = runBlocking {
+            h.coordinator.laneToolCall(
+                started.runId, laneId, "perform_input_sequence",
+                mapOf("actions" to listOf(mapOf("tool" to "tap", "x" to 10, "y" to 20))),
+            )
+        }
+        val finish = runBlocking {
+            h.coordinator.laneToolCall(started.runId, laneId, "finish_step", mapOf("status" to "pass", "observation" to "The screen is ready."))
+        }
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        assertTrue(sequence.toString().contains("imageBase64"), "the batch returns the final screenshot: $sequence")
+        assertTrue(finish.toString().contains("case_finished"), "free finish_step remains available at the exact batch limit: $finish")
+        assertEquals(CaseStatus.PASS, run.caseResult("Exact batch budget").status, run.toString())
+        assertEquals(1, h.adb.shellCommands.count { it.getOrNull(0) == "input" })
+    }
+
+    @Test
+    fun playbackStepsKeepTimestampedSamplesInBothIntentModesWhenJudgingIsOff() {
+        val ensure = step("Ensure video playback is paused", "The player shows paused").copy(intent = StepIntent.ENSURE_STATE)
+        val transition = step("Pause video playback", "Playback changes from playing to paused").copy(intent = StepIntent.PERFORM_ACTION)
+        val suite = suiteOf(caseOf("Playback evidence", ensure, transition))
+        val h = harness(suite, listOf(finishTurn("pass", "paused"), finishTurn("pass", "paused"), textTurn))
+
+        val run = h.runToEnd(suite)
+        val steps = run.caseResult("Playback evidence").steps
+
+        assertEquals(listOf(StepStatus.PASS, StepStatus.PASS), steps.map { it.status }, run.toString())
+        assertTrue(steps.all { it.sampleScreenshotPaths.size == 3 }, steps.toString())
+        assertTrue(steps.all { it.startScreenshotPath != null }, steps.toString())
+        assertTrue(steps.all { "no independent judge was requested" in it.note.orEmpty() }, steps.toString())
+        assertTrue(steps.all { stepResult -> stepResult.sampleScreenshotPaths.all { File(h.store.runDir(run.id), it).isFile } })
+        val transcript = File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)).readText()
+        assertTrue(transcript.contains("startCapturedAtMs") && transcript.contains("playbackSamples"), transcript)
+    }
+
+    @Test
+    fun playbackSamplesCapturedBeforeExecutionDeadlineRemainInTimeoutEvidence() {
+        val playback = step("Ensure video playback is paused", "The player is paused", timeoutMs = 900)
+            .copy(intent = StepIntent.ENSURE_STATE)
+        val suite = suiteOf(caseOf("Partial playback evidence", playback))
+        val h = harness(suite, listOf(finishTurn("pass", "The player looks paused"), textTurn))
+        val screenshotNumber = AtomicInteger()
+        h.adb.beforeScreenshot = {
+            if (screenshotNumber.incrementAndGet() == 3) Thread.sleep(1_500)
+        }
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Partial playback evidence").steps.single()
+
+        assertEquals(StepStatus.TIMEOUT, result.status, run.toString())
+        assertEquals(1, result.sampleScreenshotPaths.size, result.toString())
+        assertTrue(File(h.store.runDir(run.id), result.sampleScreenshotPaths.single()).isFile)
     }
 
     @Test

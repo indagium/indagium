@@ -10,6 +10,8 @@ import com.indagium.debug.toCallToolResult
 import com.indagium.testing.SHOP_CASE_ID
 import com.indagium.testing.SHOP_SUITE_ID
 import com.indagium.testing.shopLibrary
+import com.indagium.testing.shopNode
+import com.indagium.testing.shopState
 import com.indagium.testing.store.StoreResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
@@ -88,7 +90,39 @@ class RecordedVideoTimelineTest {
                     """{"action":"Pause playback","expected":"The player shows its paused state","sourceInputs":[2]}]}""",
                 inputCount = 2,
             )
-            val rows = buildRewrittenRows(proposal, inputs, tools.videoInspectedInputs())
+            val attachedEvidence = buildRewriteEvidence(
+                inputs,
+                video = object : RewriteVideoSheets {
+                    override fun sheet(startWallMs: Long, endWallMs: Long): RewriteVideoSheet? = null
+
+                    override fun frames(wallClockMs: List<Long>): List<RewriteVideoFrame?> {
+                        val stills = timeline.stillsAt(wallClockMs.map(timeline::sessionOffsetMs), inputs).orEmpty()
+                        return wallClockMs.indices.map { index ->
+                            stills.getOrNull(index)?.let { RewriteVideoFrame(it.image, timeline.wallClockOfSessionMs(it.sessionMs), it.sessionMs) }
+                        }
+                    }
+                },
+            )
+            assertTrue(attachedEvidence.images.any { it.videoFrames > 0 }, "the first request must contain real video frames")
+            var deliveredMoments: Map<Int, Set<String>> = emptyMap()
+            val deliveryTools = RecordingRewriteTools(inputs, timeline)
+            val request = RewriteGeneration(
+                profileId = "fixture",
+                model = null,
+                effort = null,
+                prompt = "attached video evidence",
+                systemPrompt = "",
+                gateway = deliveryTools.gateway,
+                toolCallLimit = 0,
+                maxTurns = 0,
+                attachment = RewriteAttachment(attachedEvidence.llmImages(), "", 0, 0, attachedEvidence.visualMoments),
+                onVisualEvidenceDelivered = { deliveredMoments = it },
+            )
+            assertTrue(deliveryTools.visualInspectedMoments().isEmpty(), "initial attachment coverage must not depend on a tool call")
+            request.onVisualEvidenceDelivered(request.attachment!!.visualMoments)
+            assertTrue(deliveryTools.visualInspectedMoments().isEmpty(), "the accepted before frame was not fetched through a tool")
+            assertTrue(deliveredMoments[2]?.contains("before") == true, "input 2's actual delivered before frame must count")
+            val rows = buildRewrittenRows(proposal, inputs, videoInspectedMoments = deliveredMoments)
             assertEquals(listOf("Open YouTube", "Pause playback"), rows.map { it.action })
             assertEquals(listOf("The YouTube app is showing", "The player shows its paused state"), rows.map { it.expected })
             assertTrue(rows.all { it.reviewReason == null }, rows.map { it.reviewReason }.toString())
@@ -102,6 +136,50 @@ class RecordedVideoTimelineTest {
         } finally {
             timeline.close()
         }
+    }
+
+    @Test
+    fun passwordSensitiveTapTargetsStayUnresolvedEvenWhenRowsOrVideoMetadataNameThem() {
+        val before = shopState(
+            7_100,
+            7_300,
+            ".LoginActivity",
+            byteArrayOf(1, 2, 3),
+            shopNode(
+                100, 100, 700, 220, text = "Password", resourceId = "com.example.shop:id/password",
+                className = "android.widget.EditText", password = true, focused = true,
+            ),
+            shopNode(100, 250, 700, 370, text = "Continue", resourceId = "com.example.shop:id/continue", className = "android.widget.Button"),
+        )
+        val row = RecordedTestStep(
+            action = "Tap the Continue button",
+            kind = RecordedInputKind.TAP,
+            gesturePath = listOf(RecordedPoint(400, 300, 1_000, 2_000)),
+            before = before.ref(),
+            tappedElement = TappedElement("Continue", "", "com.example.shop:id/continue", "android.widget.Button"),
+            inputStartMs = 9_000,
+            inputAtMs = 9_100,
+            afterScreenshot = RecordingScreenshotEvidence(
+                byteArrayOf(4, 5, 6), RecordingScreenshotSource.SCREEN_PROBE, 9_050, 9_150, timingUncertain = false,
+            ),
+        )
+        val input = RewriteInput(1, row, before, null)
+        val proposal = parseRewriteResponse(
+            """{"steps":[{"action":"Continue account sign-in","expected":"The account page is open","sourceInputs":[1]}]}""",
+            inputCount = 1,
+        )
+
+        val rewritten = buildRewrittenRows(
+            proposal,
+            listOf(input),
+            videoInspectedMoments = mapOf(1 to setOf("before", "after")),
+        ).single()
+
+        assertEquals("Tap the Continue button", rewritten.action)
+        assertEquals("", rewritten.expected)
+        assertTrue(rewritten.reviewReason.orEmpty().contains("Input 1"))
+        assertFalse(rewritten.modelSupported)
+        assertNull(rewritten.screenshotJpeg, "withheld imagery cannot become an expected screenshot")
     }
 
     @Test

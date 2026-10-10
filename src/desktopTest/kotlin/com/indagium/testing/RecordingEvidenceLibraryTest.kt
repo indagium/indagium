@@ -1,7 +1,15 @@
 package com.indagium.testing
 
+import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.RecordingImageStore
 import com.indagium.testing.authoring.ReplacementPlan
+import com.indagium.testing.authoring.StoredPrivacy
+import com.indagium.testing.authoring.StoredRecording
+import com.indagium.testing.authoring.StoredVideoInfo
+import com.indagium.testing.authoring.decodeStoredRecording
+import com.indagium.testing.authoring.encodeStoredRecording
 import com.indagium.testing.authoring.planReplacement
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.StoreResult
@@ -52,6 +60,49 @@ class RecordingEvidenceLibraryTest {
         assertNull(decodeSuiteFile(old).getOrThrow().suite.cases.single().steps.single().recordingRef)
         val unsafe = encodeSuiteFile(suite).replace("\"rec-1\"", "\"../x\"")
         assertNull(decodeSuiteFile(unsafe).getOrThrow().suite.cases.single().steps.single().recordingRef, "an unsafe id is not kept")
+    }
+
+    @Test
+    fun retainedRecordingRowsRoundTripPlaybackSemanticsAndReviewProvenance() {
+        val images = object : RecordingImageStore {
+            override fun put(bytes: ByteArray) = ""
+
+            override fun get(ref: String): ByteArray? = null
+        }
+        val row = RecordedTestStep(
+            id = "recorded-row",
+            action = "Keep the video paused",
+            expected = "Playback remains paused",
+            intent = StepIntent.ENSURE_STATE,
+            precondition = "Playback is active",
+            humanReviewed = true,
+            modelSupported = true,
+        )
+        val recording = StoredRecording(
+            recordingId = "recording-1",
+            caseId = "case-1",
+            deviceSerial = "emulator-5554",
+            createdAtMs = 1L,
+            updatedAtMs = 2L,
+            stepIds = listOf("step-1"),
+            rows = listOf(row),
+            rawRows = null,
+            rewriteApplied = true,
+            rewriteNotes = "",
+            excludedSourceInputIds = emptySet(),
+            screenStates = emptyList(),
+            probeScreenshots = emptyList(),
+            warnings = emptyList(),
+            privacy = StoredPrivacy(),
+            video = StoredVideoInfo(stored = false),
+        )
+
+        val reopened = decodeStoredRecording(encodeStoredRecording(recording, images), images).getOrThrow()
+
+        assertEquals(StepIntent.ENSURE_STATE, reopened.rows.single().intent)
+        assertEquals("Playback is active", reopened.rows.single().precondition)
+        assertTrue(reopened.rows.single().humanReviewed)
+        assertTrue(reopened.rows.single().modelSupported)
     }
 
     @Test
@@ -125,6 +176,19 @@ class RecordingEvidenceLibraryTest {
         assertIs<StoreResult.Invalid>(gap)
         assertIs<StoreResult.Invalid>(store.replaceSteps(case.id, listOf("step-gone"), listOf(plainStep("q"))))
         assertEquals(listOf("x", "y", "z", "c"), store.library.value.findCase(case.id)!!.case.steps.map { it.action }, "nothing changed")
+    }
+
+    @Test
+    fun replacingStepsRejectsSameIdContentChangedAfterRecordingWasReopened() {
+        val (_, originalCase) = suiteWithRecording()
+        val baseline = originalCase.steps.take(2)
+        val ids = baseline.map { it.id }
+        store.updateStep(ids.first()) { it.copy(action = "Edited after reopen") }.ok()
+
+        val result = store.replaceSteps(originalCase.id, ids, listOf(plainStep("replacement")), expectedBaseline = baseline)
+
+        assertIs<StoreResult.Invalid>(result)
+        assertEquals("Edited after reopen", store.library.value.findCase(originalCase.id)!!.case.steps.first().action)
     }
 
     @Test

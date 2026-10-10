@@ -464,7 +464,13 @@ class TestLibraryStore(
      * must all still be in the case, next to each other and in the order given: any other state is refused and nothing changes (the
      * caller offers [createSteps] instead). The new steps get fresh ids; [creationUsage] is added like [createSteps] does.
      */
-    fun replaceSteps(caseId: String, replacedIds: List<String>, steps: List<TestStep>, creationUsage: AiUsageStats? = null): StoreResult<List<TestStep>> {
+    fun replaceSteps(
+        caseId: String,
+        replacedIds: List<String>,
+        steps: List<TestStep>,
+        creationUsage: AiUsageStats? = null,
+        expectedBaseline: List<TestStep>? = null,
+    ): StoreResult<List<TestStep>> {
         if (steps.isEmpty()) return StoreResult.Invalid("At least one step is required.")
         if (replacedIds.isEmpty()) return StoreResult.Invalid("At least one step to replace is required.")
         val copies = steps.map { it.withFreshIds() }
@@ -473,6 +479,10 @@ class TestLibraryStore(
             val block = if (first < 0) emptyList() else case.steps.drop(first).take(replacedIds.size).map { it.id }
             if (block != replacedIds) {
                 return@editCase CaseEdit.Fail("The steps this recording made were moved, edited out or mixed with other steps, so they cannot be replaced.")
+            }
+            if (expectedBaseline != null && (expectedBaseline.map { it.id } != replacedIds ||
+                    case.steps.drop(first).take(replacedIds.size) != expectedBaseline)) {
+                return@editCase CaseEdit.Fail("One or more steps changed after the recording was reopened; review the case again before replacing them.")
             }
             copies.forEachIndexed { index, step ->
                 val problem = validateEntityId("Step", step.id) ?: validateStep(step, lib.scripts)

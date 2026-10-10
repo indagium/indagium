@@ -240,8 +240,13 @@ internal class TestStepDraftService(
 
     private fun promptFor(suite: TestSuite, case: com.indagium.testing.model.TestCase, instruction: String): String = buildString {
         appendLine("Draft Android QA test steps as JSON only. Do not call tools, control devices, or change any library.")
-        appendLine("Return exactly {\"steps\":[{\"action\":\"...\",\"expected\":\"...\"}]}; no markdown or prose.")
-        appendLine("Use only these fields: action, expected, timeoutMs, retries, maxToolCalls, onFailure, checks, examples.")
+        appendLine("Return exactly {\"steps\":[{\"action\":\"...\",\"expected\":\"...\",\"intent\":\"ensure_state\"}]}; no markdown or prose.")
+        appendLine("Use only these fields: action, expected, intent, precondition, timeoutMs, retries, maxToolCalls, onFailure, checks, examples.")
+        appendLine(
+            "Set intent explicitly on every step. Use ensure_state for ordinary playback goals: if the expected state already " +
+                "holds, pass without toggling it. Use perform_action for control or transition tests. Add precondition when a " +
+                "transition needs a known starting state.",
+        )
         appendLine("Do not create golden image references, script checks or device-state checks. Prefer concise, observable actions and expected results.")
         appendLine("$STABLE_EXPECTED_RULE $STABLE_EXPECTED_DRAFT_REMEDY")
         appendLine("Suite: ${suite.name.take(MAX_CONTEXT_NAME_CHARS)}")

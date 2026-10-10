@@ -73,6 +73,15 @@ internal suspend fun buildJudgeBrief(
         }
         val label = "$END_SCREEN_LABEL (${lane.label})"
         attachment.add(lane.screenshot(), label, "$label is not attached; call get_step_screenshot with lane \"${lane.label}\".")
+        lane.samples.forEach { sample ->
+            val sampleLabel = "Playback sample ${sample.number} at ${sample.capturedAtMs} ms (${lane.label})"
+            attachment.add(
+                sample.screenshot(),
+                sampleLabel,
+                "$sampleLabel is not attached; call get_step_screenshot with lane \"${lane.label}\" " +
+                    "and moment \"sample_${sample.number}\".",
+            )
+        }
     }
     for (example in evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>()) {
         val label = "Reference screenshot ${example.id}: ${example.caption.ifBlank { "(no caption)" }}"
@@ -133,6 +142,11 @@ private fun fetchSection(evidence: JudgeEvidence): String = buildString {
         }
         append("\n- ").append(END_SCREEN_LABEL).append(" (").append(lane.label).append("): get_step_screenshot with lane \"")
         append(lane.label).append("\".")
+        lane.samples.forEach { sample ->
+            append("\n- Playback sample ").append(sample.number).append(" at ").append(sample.capturedAtMs).append(" ms (")
+                .append(lane.label).append("): get_step_screenshot with lane \"").append(lane.label)
+                .append("\" and moment \"sample_").append(sample.number).append("\".")
+        }
     }
     evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>().forEach { example ->
         append("\n- Reference screenshot ").append(example.id).append(": ").append(example.caption.ifBlank { "(no caption)" })
@@ -177,6 +191,11 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
             put("lane", lane.label)
             put("automaticChecks", deterministicChecksMap(lane.deterministic))
             put("logBytes", lane.logBytes)
+            put("startScreenshotCapturedAtMs", lane.startScreenshotCapturedAtMs)
+            put("endScreenshotCapturedAtMs", lane.screenshotCapturedAtMs)
+            if (lane.samples.isNotEmpty()) {
+                put("playbackSamples", lane.samples.map { mapOf("moment" to "sample_${it.number}", "capturedAtMs" to it.capturedAtMs) })
+            }
         }
     }
     val details = evidence.lanes.map { lane ->
@@ -189,6 +208,8 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
         put("stepCount", evidence.stepCount)
         put("action", evidence.action)
         put("expected", evidence.expected)
+        put("intent", evidence.intent.wire)
+        put("precondition", evidence.precondition)
         put(
             "judgeChecks",
             evidence.judgeChecks.map { check ->

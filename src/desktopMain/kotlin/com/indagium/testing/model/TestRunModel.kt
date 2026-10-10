@@ -99,7 +99,18 @@ data class RunConfig(
     val openLaneTabs: Boolean = true,
     /** What the run does with MANUAL steps. Appended last: an older run file read it as the default. */
     val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
+    /** How a new run treats a missing judge verdict when judging was requested. */
+    val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
 )
+
+enum class JudgeInconclusivePolicy(val wire: String) {
+    BLOCK("block"),
+    KEEP_AGENT_PASS("keep_agent_pass");
+
+    companion object {
+        fun parse(text: String?): JudgeInconclusivePolicy? = entries.firstOrNull { it.wire.equals(text?.trim(), ignoreCase = true) }
+    }
+}
 
 /**
  * How a run treats MANUAL steps. USE_SCRIPT_THEN_WAIT (the default): a step with an automation script runs it, and every other manual
@@ -192,6 +203,10 @@ data class StepResult(
      * ([JudgeClassification.AGENT_OR_STEP_PROBLEM]), never an app defect.
      */
     val classification: JudgeClassification? = null,
+    /** Actual screen captured before this attempt's first device mutation; relative to the run folder. */
+    val startScreenshotPath: String? = null,
+    /** Timestamped playback-related evidence frames in capture order; relative to the run folder. */
+    val sampleScreenshotPaths: List<String> = emptyList(),
 )
 
 /** [iteration] is 1-based (a run can repeat every case). [caseId] is [SUITE_SETUP_CASE_ID] or [SUITE_TEARDOWN_CASE_ID] for the suite-level hooks. */

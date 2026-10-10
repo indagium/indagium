@@ -89,11 +89,18 @@ private fun sheetOf(group: List<ShownInput>, pairs: Boolean, video: RewriteVideo
     val frames = video.frames(wishes)
     var cursor = 0
     val sheet = SheetCells()
+    val videoMoments = LinkedHashMap<Int, Set<String>>()
+    val visualMoments = LinkedHashMap<Int, Set<String>>()
     for (item in group) {
         val beforeFrame = if (pairs) frames.getOrNull(cursor++) else null
         val afterFrame = frames.getOrNull(cursor++)
         val after = afterCell(item, afterFrame, pairs)
+        videoMoments[item.input.number] = buildSet {
+            if (beforeFrame != null) add("before")
+            if (after?.fromVideo == true) add("after")
+        }
         val itemCells = listOfNotNull(if (pairs) beforeCell(item, beforeFrame) else null, after?.let { it.cell to it.fromVideo })
+        visualMoments[item.input.number] = itemCells.map { it.first.relation }.toSet()
         sheet.add(item.input.number, itemCells, after?.settled == true, after?.settled == true && after.fromVideo)
     }
     if (sheet.cells.isEmpty()) return null
@@ -102,7 +109,10 @@ private fun sheetOf(group: List<ShownInput>, pairs: Boolean, video: RewriteVideo
         "bottom, captioned with the input number and the video time (a caption saying screenshot is a stored screenshot where the video " +
         "had no frame)"
     val image = encodeSheet(sheet.cells)?.let {
-        RewriteImage(label, sheet.shown, it, JPEG_MIME, videoFrames = sheet.videoCells, storedScreens = sheet.screenCells)
+        RewriteImage(
+            label, sheet.shown, it, JPEG_MIME, videoFrames = sheet.videoCells, storedScreens = sheet.screenCells,
+            videoMoments = videoMoments, visualMoments = visualMoments,
+        )
     }
     return image?.let { VideoSheet(it, sheet.shown, sheet.settled, sheet.videoSettled) }
 }

@@ -23,6 +23,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -331,6 +334,55 @@ class TestRunToolsGatewayTest {
         val again = call("run_test_suite", "suiteId" to suiteId, "lanes" to listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL)))
         assertEquals(null, again["error"], again.toString())
         call("cancel_test_run", "runId" to again["runId"])
+    }
+
+    @Test
+    fun startWaitsForTheTerminalRunToReleaseItsDeviceDuringCleanup() {
+        val suiteId = createSuite("Never driven")
+        val (runId, laneId) = startExternal(suiteId)
+        awaitStep(runId, laneId)
+        val screenshotEntered = CountDownLatch(1)
+        val allowScreenshotToFinish = CountDownLatch(1)
+        adb.beforeScreenshot = {
+            if (screenshotEntered.count == 1L) {
+                screenshotEntered.countDown()
+                while (true) {
+                    val released = try {
+                        allowScreenshotToFinish.await(50, TimeUnit.MILLISECONDS)
+                    } catch (_: InterruptedException) {
+                        false
+                    }
+                    if (released) break
+                }
+            }
+        }
+        val screenshotCall = CompletableFuture.supplyAsync { lane(runId, laneId, "take_screenshot") }
+        var retryRunId: String? = null
+        try {
+            assertTrue(screenshotEntered.await(AWAIT_MS, TimeUnit.MILLISECONDS), "the external screenshot call entered the held cleanup")
+            assertEquals(true, call("cancel_test_run", "runId" to runId)["cancelling"])
+            awaitStatus(runId, "CANCELLED")
+
+            val startInvoked = CountDownLatch(1)
+            val retryStart = CompletableFuture.supplyAsync {
+                startInvoked.countDown()
+                call("run_test_suite", "suiteId" to suiteId, "lanes" to listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL)))
+            }
+            assertTrue(startInvoked.await(AWAIT_MS, TimeUnit.MILLISECONDS))
+            Thread.sleep(100)
+            assertFalse(retryStart.isDone, "start waits while the terminal run still drains its external call")
+
+            allowScreenshotToFinish.countDown()
+            val retry = retryStart.get(AWAIT_MS, TimeUnit.MILLISECONDS)
+            assertEquals(null, retry["error"], retry.toString())
+            retryRunId = retry["runId"] as String
+            assertNotNull(retryRunId)
+        } finally {
+            allowScreenshotToFinish.countDown()
+            adb.beforeScreenshot = null
+            runCatching { screenshotCall.get(AWAIT_MS, TimeUnit.MILLISECONDS) }
+            retryRunId?.let { call("cancel_test_run", "runId" to it) }
+        }
     }
 
     @Test

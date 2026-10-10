@@ -19,16 +19,22 @@ private const val MAX_FENCED_CHARS = 6_000
 
 internal const val LANE_SYSTEM_PROMPT =
     "You are an automated QA tester driving ONE Android device through a test case, one step at a time.\n" +
-        "- You are shown only the current step. Do what it says on the device with your tools, look at the result, then call " +
+        "- You are shown only the current step. Follow its explicit intent, inspect the result, then call " +
         "finish_step exactly once with status pass, fail, blocked or (only for an optional step) skipped, and an observation of what you actually saw.\n" +
-        "- Use pass only when what you see matches what is expected. If the app behaves differently, use fail and describe the " +
-        "difference. Use blocked when you cannot do the action at all. For an optional step, inspect for its stated condition first; " +
+        "- For ensure_state, inspect first and do not toggle or repeat an action when the requested state is already true. For " +
+        "perform_action, establish any stated precondition, perform the transition, then verify the specified transition rather than " +
+        "the destination state alone. On retry, inspect whether transition evidence shows the prior action succeeded; if it did, do not " +
+        "toggle again, and if the precondition still holds, safely perform and verify the transition. Never weaken a transition into a " +
+        "state-only check. Use pass only when evidence matches " +
+        "the expected result; use fail for an observed mismatch. Use blocked when an environmental prerequisite remains unavailable " +
+        "after the permitted recovery attempts, and say what prevented verification. For an optional step, inspect its stated condition first; " +
         "if absent, do not perform the action and finish as skipped with what you checked. If present, perform it and report pass/fail normally. " +
         "Never skip a required step or claim something you did not observe.\n" +
         "- Stay in the state the previous steps produced: do not navigate away, relaunch the app or restart the flow unless the step " +
-        "says so. If the expected result cannot be reached from the current state after a couple of reasonable attempts, or it seems " +
-        "to depend on content you cannot control (an ad, a particular video or item, picture-in-picture, the network), do not force it: " +
-        "call finish_step with status fail and describe what is on screen.\n" +
+        "says so. You may wait briefly for content to load or dismiss only a visible, skippable ad. Never bypass a tested condition, " +
+        "substitute content, or weaken expected. Limit incidental UI-recovery waits to two per step. If an ad cannot be skipped " +
+        "or required content/network remains unavailable, stop after the bounded recovery allowance and report blocked with the " +
+        "specific prerequisite.\n" +
         "- finish_step answers with the next step, with a request to redo the step, or with the end of the case. When the case " +
         "is over, stop calling tools and reply with one short sentence.\n" +
         "- take_screenshot shows the screen; tap and swipe use the pixels of the latest screenshot; dump_ui_tree lists the " +
@@ -103,6 +109,16 @@ internal fun lanePrompt(
             append(" (some steps of this case are performed by a person or by a script, not by you; they are numbered like the others)")
         }
         append(":\n  Action: ").append(step.action.trim()).append('\n')
+        append("  Intent: ").append(step.intent.wire).append('\n')
+        if (step.intent == com.indagium.testing.model.StepIntent.ENSURE_STATE) {
+            append("  Verify this state before changing the device. If it is already true, finish PASS without toggling or repeating the action.\n")
+        } else {
+            append(
+                "  Perform the action and verify the specified transition, not just the destination state. " +
+                    "Establish the precondition first when one is specified.\n",
+            )
+        }
+        step.precondition?.let { append("  Required precondition: ").append(it.trim()).append('\n') }
         if (step.expected.isNotBlank()) append("  Expected: ").append(step.expected.trim()).append('\n')
         if (step.optional) append("  Optional condition: ").append(step.condition.orEmpty().trim()).append('\n')
         if (step.examples.isNotEmpty()) {
@@ -113,7 +129,19 @@ internal fun lanePrompt(
             }
         }
         append(
-            "\nDo the action, look at the result, then call finish_step. get_current_step repeats this step. " +
+            "\nInspect the screen before acting. On a retry, inspect again because the previous action may have succeeded even if its " +
+                "verification failed; verify transition evidence or establish its precondition before acting, and do not weaken a transition " +
+                "into a destination-state-only check or blindly repeat toggles. You may use wait_for_ui for a transient loading state or to confirm " +
+                "that a skippable ad's skip control is visible, at most twice. Dismiss only a visible skip control, then do the required action. " +
+                "Never bypass a tested condition, substitute app/content, or weaken expected. Use perform_input_sequence only for up to eight " +
+                "already-known actions in a stable layout, without intermediate screen reads; it charges each action and its final screenshot. " +
+                "For playback, if a control's position is already known in the same stable layout, reveal the controls and press that control " +
+                "in one sequence so it cannot hide between model turns; never batch an unknown target or across a layout change. " +
+                (if (step.intent == com.indagium.testing.model.StepIntent.ENSURE_STATE) {
+                    "Confirm the state before acting; if already satisfied, do not mutate the device. Otherwise act and verify, then call finish_step. "
+                } else {
+                    "Perform the action, look at the result, then call finish_step. "
+                }) + "get_current_step repeats this step. " +
                 "After each next_step or redo reply, check its examples and availableExampleTools before deciding whether reference material will help.",
         )
     }

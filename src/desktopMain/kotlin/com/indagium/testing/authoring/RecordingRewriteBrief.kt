@@ -51,6 +51,10 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "frame captioned settled, the screen shown when the next input began, or a later screen. Tapping an app icon and then seeing " +
         "that app is 'Open <app>'. Before giving up on an input, look at its video storyboard with get_recorded_video_storyboard " +
         "when the video is available. Use reviewReason only when the evidence, video included, genuinely cannot tell what happened.\n" +
+        "- Input lines include elapsed gaps before the next input. Use those gaps with the video timestamps to distinguish waiting for " +
+        "content to settle from an immediate follow-up gesture; never turn a wait into a required action unless the case goal says so.\n" +
+        "- Set intent to ensure_state for ordinary playback goals: if playback is already paused/playing as requested, verify and pass " +
+        "without toggling it. Use perform_action only for an explicit control/transition test, and include precondition when its start state matters.\n" +
         "- Use evidence tools only when the brief is insufficient and the needed reading is available. You have a small tool budget.\n" +
         "- When the request says screenshots are attached, they arrive with it as images, introduced in order (\"Image 3: ...\"), and " +
         "each input line says which images show it and lists the screen elements near the touch. Read them before anything else and " +
@@ -58,9 +62,10 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "look, a video storyboard). Do not fetch what is attached. An input whose line says its evidence is withheld has none; treat " +
         "it like any input without evidence.\n" +
         "- A numbered input marked [$FIXED_STEP_LABEL] is a step the person wrote, not a recording. Return it unchanged as its own " +
-        "step; never reword, merge, move, split or drop it.\n" +
-        "- A line marked [$LOCKED_STEP_LABEL] is a step the person already accepted from an earlier rewrite, shown with the inputs it " +
-        "covers. Return it unchanged as one step covering exactly those inputs; never reword, merge, split, move or drop it.\n" +
+        "step, including its intent and precondition; never reword, merge, move, split or drop it.\n" +
+        "- A line marked [$LOCKED_STEP_LABEL] is preserved from an earlier rewrite, with its human-reviewed or model-supported " +
+        "provenance and covered inputs. Return it unchanged as one step covering exactly those inputs, including its intent and " +
+        "precondition; never reword, merge, split, move or drop it.\n" +
         "- Rows of kind NOTIFICATIONS, QUICK_SETTINGS, CLOSE_PANELS, ROTATE and SCREEN_ON, and key rows such as Power, Volume up, " +
         "Volume down, Mute, Recents or Play/Pause, are real actions on the device: keep each as its own step in plain words (for " +
         "example 'Open the notification shade'). A test agent replays them with its press_key, open_system_panel and rotate_device tools.\n" +
@@ -161,8 +166,9 @@ internal fun rewritePrompt(
 }
 
 private val LOCKED_STEPS_INSTRUCTION =
-    "Lines marked [$LOCKED_STEP_LABEL] are steps from an earlier rewrite that the person already accepted. Each stays exactly as " +
-        "written, as one step covering exactly the inputs it names; only the other inputs are rewritten, around the locked steps."
+    "Lines marked [$LOCKED_STEP_LABEL] are preserved steps from an earlier rewrite; provenance identifies human-reviewed " +
+        "versus model-supported text. Each stays exactly as written, as one step covering exactly the inputs it names; only the " +
+        "other inputs are rewritten, around the preserved steps."
 
 private const val CLOSE_UP_INSTRUCTION =
     "Answer from the attached evidence. The evidence tools are for close-ups only and their budget is small; give the JSON object as " +
@@ -212,18 +218,18 @@ private val DEVICE_STATE_CONTRACT = DEVICE_STATE_KEY_HINTS.entries.joinToString(
 
 private val OUTPUT_CONTRACT = """
     Answer with exactly one JSON object and no markdown or prose:
-    {"steps":[{"action":"...","expected":"...","optional":false,"condition":null,"sourceInputs":[1,2],"expectedScreenshot":"after-of-input-2","checks":[]}],"notes":"..."}
+    {"steps":[{"action":"...","expected":"...","intent":"perform_action","precondition":null,"optional":false,"condition":null,"sourceInputs":[1,2],"expectedScreenshot":"after-of-input-2","checks":[]}],"notes":"..."}
     Rules:
     - At most $MAX_REWRITE_STEPS steps. Merge inputs that make one logical action (a tap on a field, typing, Enter = "Search for 'lofi'").
     - sourceInputs lists the 1-based numbers of the recorded inputs a step covers. The lists must be ascending, consecutive, must not
       overlap, and together must cover EVERY input exactly once, in order. If an input looks accidental keep it inside a step and say
       so in notes; never drop it.
-    - A line marked [$LOCKED_STEP_LABEL] is a step the person already accepted; it names the inputs it covers. Answer it as one step
-      whose sourceInputs are exactly those inputs, and copy its action, expected, optional and condition (and kind, when it is not an
+    - A line marked [$LOCKED_STEP_LABEL] is a preserved step with review provenance; it names the inputs it covers. Answer it as one step
+      whose sourceInputs are exactly those inputs, and copy its action, expected, intent, precondition, optional and condition (and kind, when it is not an
       AI step) EXACTLY as shown. Give it no checks, no reviewReason, no scriptId or args, and a null expectedScreenshot. Never merge it
       with other inputs, split it, reword it or drop it; the other inputs are rewritten around it. It counts toward the step limit.
     - An input marked [$FIXED_STEP_LABEL] is a step the person wrote. Answer it as its own step with sourceInputs holding only its
-      number, and copy its action, expected, optional and condition EXACTLY as shown (the same characters). Give it no checks, no
+      number, and copy its action, expected, intent, precondition, optional and condition EXACTLY as shown (the same characters). Give it no checks, no
       reviewReason and a null expectedScreenshot. Never merge it with other inputs, reword it or move it; recorded inputs before and
       after it are rewritten around it. It counts toward the step limit.
     - action is what the tester does ("Open YouTube", "Tap Search"). expected is what must be visible afterwards, supported by

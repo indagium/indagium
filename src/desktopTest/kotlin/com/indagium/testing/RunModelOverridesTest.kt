@@ -7,6 +7,7 @@ import com.indagium.capture.effectiveMirrorMode
 import com.indagium.edition.EditionLimits
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
@@ -209,13 +210,14 @@ class RunModelOverridesTest {
         assertEquals(capture.copy(adbPath = capture.adbPath), decoded.capture)
         assertEquals(CaptureMirrorMode.DISABLED, decoded.capture?.effectiveMirrorMode)
 
-        val newerKeys = setOf("model", "reasoningEffort", "judgeModel", "judgeReasoningEffort", "openLaneTabs", "capture")
+        val newerKeys = setOf("model", "reasoningEffort", "judgeModel", "judgeReasoningEffort", "openLaneTabs", "capture", "judgeInconclusivePolicy")
         val old = dropKeys(Json.parseToJsonElement(encodeRunFile(run)), newerKeys)
         val oldConfig = decodeRunFile(old.toString()).getOrThrow().config
         assertNull(oldConfig.lanes[0].model)
         assertNull(oldConfig.judgeModel)
         assertNull(oldConfig.capture)
         assertEquals(true, oldConfig.openLaneTabs, "an older run file had a lane tab for nobody: the default stays on")
+        assertEquals(JudgeInconclusivePolicy.KEEP_AGENT_PASS, oldConfig.judgeInconclusivePolicy, "old run files preserve their advisory judge behavior")
     }
 
     @Test

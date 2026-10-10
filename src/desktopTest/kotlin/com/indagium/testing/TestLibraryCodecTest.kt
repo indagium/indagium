@@ -7,6 +7,7 @@ import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.store.TEST_LIBRARY_BASE_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_BASE_FILE_VERSION
@@ -74,6 +75,19 @@ class TestLibraryCodecTest {
         )
         assertTrue(decoded.suite.setup[0] is HookItem.Script)
         assertTrue(decoded.suite.setup[1] is HookItem.Shared)
+    }
+
+    @Test
+    fun playbackIntentAndPreconditionRoundTripInSuiteFiles() {
+        val original = fullSuite()
+        val firstCase = original.cases.first()
+        val playbackStep = firstCase.steps.first().copy(
+            intent = StepIntent.ENSURE_STATE,
+            precondition = "Playback is currently active",
+        )
+        val suite = original.copy(cases = listOf(firstCase.copy(steps = listOf(playbackStep) + firstCase.steps.drop(1))) + original.cases.drop(1))
+
+        assertEquals(suite, decodeSuiteFile(encodeSuiteFile(suite)).getOrThrow().suite)
     }
 
     @Test

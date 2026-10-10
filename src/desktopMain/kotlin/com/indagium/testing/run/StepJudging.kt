@@ -2,6 +2,7 @@ package com.indagium.testing.run
 
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.StepCheck
@@ -12,15 +13,16 @@ import com.indagium.testing.model.TestStep
 // How a judge's verdict is woven into a step's result, and when a judge is asked at all. Pure functions, so the rules
 // are testable without a run.
 //
-// FINAL STEP STATUS (a judge is configured):
+// FINAL STEP STATUS (a judgment is requested):
 //   1. The base status is the one without a judge: PASS when the agent claimed pass and no check failed, BLOCKED when it
 //      claimed blocked, FAIL otherwise. A deterministic failure (a log, script or judge check that failed) is therefore FAIL,
 //      and a judge can never turn a failure, a block or a timeout into a pass.
-//   2. Only a base PASS is revisited: a judge verdict of FAIL makes it FAIL; INCONCLUSIVE keeps PASS only when judging
-//      was optional. Explicit judge checks become BLOCKED until a judge supplies a verdict.
+//   2. Only a base PASS is revisited: a judge verdict of FAIL makes it FAIL; INCONCLUSIVE becomes BLOCKED under the
+//      configured BLOCK policy or keeps PASS as advisory under KEEP_AGENT_PASS. An unavailable requested judge is inconclusive;
+//      explicit judge checks always require a verdict.
 //   3. The step's ScreenJudge and AskJudge checks, NOT_EVALUATED without a judge, take the judge's verdict (PASS or FAIL);
 //      an inconclusive judge leaves them NOT_EVALUATED with the reason in their detail.
-//   No judge: exactly the base status, judge checks NOT_EVALUATED.
+//   When no judgment is requested, the base status stands and judge checks are NOT_EVALUATED.
 
 private const val DETAIL_REASONING_CHARS = 300
 
@@ -47,6 +49,7 @@ internal fun hasJudgeChecks(step: TestStep): Boolean = step.checks.any { it is S
 /** Whether the judge is asked about an attempt. A step with judge checks always needs it: nothing else can answer them. */
 internal fun shouldJudge(mode: JudgeMode, step: TestStep, claim: LaneStepStatus, deterministicFailed: Boolean): Boolean {
     if (claim == LaneStepStatus.SKIPPED || step.optional && step.expected.isBlank() && step.checks.isEmpty()) return false
+    if (hasJudgeChecks(step)) return true
     return when (mode) {
         JudgeMode.OFF -> false
         JudgeMode.EVERY_STEP -> true
@@ -54,12 +57,20 @@ internal fun shouldJudge(mode: JudgeMode, step: TestStep, claim: LaneStepStatus,
     }
 }
 
-internal fun settleWithJudge(base: StepStatus, judgement: StepJudgement?, requiresVerdict: Boolean = false): JudgedStatus {
+internal fun settleWithJudge(
+    base: StepStatus,
+    judgement: StepJudgement?,
+    requiresVerdict: Boolean = false,
+    inconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
+): JudgedStatus {
     if (base != StepStatus.PASS) return JudgedStatus(base, inconclusive = false)
     if (judgement == null) return JudgedStatus(if (requiresVerdict) StepStatus.BLOCKED else base, inconclusive = false)
     return when (judgement.verdict) {
         JudgeVerdict.FAIL -> JudgedStatus(StepStatus.FAIL, inconclusive = false)
-        JudgeVerdict.INCONCLUSIVE -> JudgedStatus(if (requiresVerdict) StepStatus.BLOCKED else base, inconclusive = true)
+        JudgeVerdict.INCONCLUSIVE -> JudgedStatus(
+            if (requiresVerdict || inconclusivePolicy == JudgeInconclusivePolicy.BLOCK) StepStatus.BLOCKED else base,
+            inconclusive = true,
+        )
         JudgeVerdict.PASS -> JudgedStatus(base, inconclusive = false)
     }
 }

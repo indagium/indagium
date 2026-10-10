@@ -2,11 +2,13 @@ package com.indagium.testing.run
 
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.device.DeviceInputAction
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeClassification
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneToolCall
@@ -23,6 +25,7 @@ import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.isDriverStep
 import com.indagium.testing.script.ScriptRunContext
 import com.indagium.testing.script.TestScriptRunner
+import com.indagium.testing.script.untrustedData
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +71,9 @@ internal const val CASE_BUDGET_EXHAUSTED_NOTE = "The case tool-call budget was e
 // timer never fires while a step is being finished and a second finish_step cannot start in parallel.
 
 private const val NANOS_PER_MILLI = 1_000_000L
+private const val PLAYBACK_SAMPLE_COUNT = 3
+private const val PLAYBACK_SAMPLE_INTERVAL_MS = 500L
+private val PLAYBACK_RELEVANCE = Regex("\\b(play(?:back|ing|ed)?|pause(?:d)?|video|stream(?:ing)?|media)\\b", RegexOption.IGNORE_CASE)
 private const val SCREENSHOT_EXTENSION = "png"
 private const val DRIVER_STEP_MESSAGE =
     "The app is performing this step itself (a manual or script step); wait for the next step before using device or script tools."
@@ -164,6 +170,9 @@ internal class SequenceEnv(
     /** The lane's judge, or null. */
     val judge: StepJudge? = null,
     val judgeMode: JudgeMode = JudgeMode.OFF,
+    val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
+    /** True when the run requested a judge, even if startup failed before a [judge] instance became available. */
+    val judgeRequested: Boolean = false,
     val pauseGate: RunPauseGate? = null,
     val suiteId: String = "",
     val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
@@ -172,7 +181,7 @@ internal class SequenceEnv(
 )
 
 /** What a step's screenshot became: the file kept as evidence (relative to the run folder) and the image the judge looks at. */
-private class Shot(val path: String?, val jpeg: ByteArray?)
+private class Shot(val path: String?, val jpeg: ByteArray?, val capturedAtMs: Long)
 
 private class Evaluation(
     val step: TestStep,
@@ -182,6 +191,18 @@ private class Evaluation(
     val stepIndex: Int,
     val attemptNumber: Int,
 )
+
+private class ActionEvidence(
+    val shot: Shot,
+    val samples: List<Shot>,
+    val checks: List<CheckResult>,
+    val automaticFailed: Boolean,
+    val logEnd: Long?,
+    val evidenceNanos: Long,
+    val checksNanos: Long,
+)
+
+private data class JudgementOutcome(val judgement: StepJudgement?, val durationNanos: Long?)
 
 /**
  * What the run learned performing a MANUAL or SCRIPT step. [claim] is the verdict before the checks (PASS: it was done, FAIL: it
@@ -196,7 +217,15 @@ internal class DriverReport(
     val note: String? = null,
 )
 
-private data class ToolAdmission(val refusal: String?, val paid: Boolean, val activity: LaneToolCall?)
+private data class ToolAdmission(
+    val refusal: String?,
+    val paid: Boolean,
+    val activity: LaneToolCall?,
+    val identity: LaneStepIdentity?,
+    val reservedCost: Int = 0,
+)
+
+private data class AdmittedToolResult(val value: Any?)
 
 private sealed interface Flow {
     data object End : Flow
@@ -208,6 +237,7 @@ private sealed interface Flow {
 
 internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec) : LaneCallbacks {
     private val mutex = Mutex()
+    private val deviceMutationLock = Mutex()
     private val finishing = AtomicBoolean(false)
     private val epoch = AtomicLong(0)
     private val toolCalls = AtomicInteger(0)
@@ -218,6 +248,17 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     /** Paid gateway handlers admitted for the current step and still executing. Guarded by [mutex]. */
     private var activePaidDispatches = 0
+    private var uiRecoveryAttempts = 0
+    private var startCaptureAttempted = false
+    private var previousAttemptFailure: Map<String, Any?>? = null
+
+    @Volatile private var submittedReportStepId: String? = null
+
+    @Volatile private var submittedReportAttempt = 0
+
+    @Volatile private var submittedReportClaim: String? = null
+
+    @Volatile private var submittedReportObservation: String? = null
 
     @Volatile private var lastAttemptShot: Shot? = null
 
@@ -227,6 +268,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
      * run itself, and costs no extra capture. Null for the first step of a case and after a step that kept no screenshot.
      */
     @Volatile private var attemptStartShot: Shot? = null
+
+    @Volatile private var attemptPlaybackSamples: List<Shot> = emptyList()
 
     @Volatile private var lastAttemptChecks: List<CheckResult> = emptyList()
 
@@ -273,6 +316,45 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 loadGoldenImage = { example ->
                     withContext(Dispatchers.IO) { readBoundedExampleAsset(env.goldenFile(env.suiteId, example.assetPath)) }
                 },
+                inputSequence = InputSequenceCallbacks(
+                    releaseBudget = { identity, reserved, consumed ->
+                        val unused = (reserved - consumed).coerceAtLeast(0)
+                        if (unused > 0) {
+                            spec.caseBudget?.releaseDispatch(unused)
+                            mutex.withLock {
+                                if (identity != null && isCurrentLocked(identity)) {
+                                    toolCalls.updateAndGet { current -> (current - unused).coerceAtLeast(0) }
+                                }
+                            }
+                        }
+                    },
+                    onAction = { identity, actionIndex, action ->
+                        env.transcript?.append(
+                            "input_sequence_action",
+                            mapOf("step" to identity?.stepId, "attempt" to identity?.attempt, "epoch" to identity?.epoch,
+                                "actionIndex" to actionIndex,
+                                "tool" to action.action, "succeeded" to action.succeeded, "detail" to action.detail),
+                        )
+                    },
+                    onCapture = { identity ->
+                        env.transcript?.append("input_sequence_capture_started", mapOf(
+                            "step" to identity?.stepId, "attempt" to identity?.attempt, "epoch" to identity?.epoch,
+                        ))
+                    },
+                    onInterrupted = { identity, nextActionIndex, reason ->
+                        env.transcript?.append("input_sequence_interrupted", mapOf(
+                            "step" to identity?.stepId, "attempt" to identity?.attempt, "epoch" to identity?.epoch,
+                            "nextActionIndex" to nextActionIndex, "reason" to reason,
+                        ))
+                    },
+                    onFinished = { identity, durationMs, consumedCost ->
+                        env.transcript?.append("input_sequence_finished", mapOf(
+                            "step" to identity?.stepId, "attempt" to identity?.attempt, "epoch" to identity?.epoch,
+                            "durationMs" to durationMs, "consumedCost" to consumedCost,
+                        ))
+                    },
+                    remainingExecutionMs = ::remainingExecutionMs,
+                ),
             ),
         )
     }
@@ -321,6 +403,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             allowedExampleTools,
             optional = step.optional,
             condition = step.condition,
+            intent = step.intent.wire,
+            precondition = step.precondition,
+            dispatchEpoch = epoch.get(),
         )
     }
 
@@ -331,6 +416,18 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     suspend fun currentAttemptIdentity(): Pair<String, Int>? = mutex.withLock {
         if (!active || ended) null else spec.steps.getOrNull(index)?.id?.let { it to attempt }
+    }
+
+    private fun isCurrentLocked(identity: LaneStepIdentity): Boolean =
+        active && !ended && epoch.get() == identity.epoch && attempt == identity.attempt &&
+            spec.steps.getOrNull(index)?.id == identity.stepId
+
+    private suspend fun isCurrent(identity: LaneStepIdentity?): Boolean =
+        identity != null && mutex.withLock { isCurrentLocked(identity) }
+
+    private suspend fun remainingExecutionMs(identity: LaneStepIdentity?): Long = mutex.withLock {
+        if (identity == null || !isCurrentLocked(identity)) return@withLock 0L
+        (spec.steps[index].timeoutMs - elapsedMs()).coerceAtLeast(0L)
     }
 
     /** The lane tools behind the sequence's guard: the per-step call cap and, for an agent run, its epoch. */
@@ -348,10 +445,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return executeAdmittedTool(admission, initial, execute)
     }
 
+    @Suppress("CyclomaticComplexMethod") // Budget, identity and timeout checks must be admitted atomically under the sequence lock.
     private suspend fun admitToolLocked(tool: String, arguments: Map<String, Any?>, runEpoch: Long?): ToolAdmission {
         var paidDispatch = false
+        var reservedCost = 0
         var activity: LaneToolCall? = null
         val argumentsPreview = laneToolPreview(arguments)
+        var plannedDurationMs = 0L
         val refusal = when {
             runEpoch != null && runEpoch != epoch.get() -> REPLACED_RUN_MESSAGE
             ended -> overMessage()
@@ -361,17 +461,44 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 when {
                     step == null -> null
                     step.isDriverStep -> DRIVER_STEP_MESSAGE
-                    tool in LANE_PROTOCOL_TOOL_NAMES ->
-                        if (toolCalls.get() >= step.maxToolCalls) STEP_BUDGET_EXHAUSTED_MESSAGE else null
                     finishing.get() || awaitingUser -> "The step is finishing or paused; wait for the next step before using device or script tools."
+                    tool in LANE_PROTOCOL_TOOL_NAMES && tool != FINISH_STEP_TOOL && toolCalls.get() >= step.maxToolCalls ->
+                        STEP_BUDGET_EXHAUSTED_MESSAGE
+                    tool in LANE_PROTOCOL_TOOL_NAMES -> null
+                    elapsedMs() >= step.timeoutMs -> "The step execution allowance has expired; do not start another tool call."
                     toolCalls.get() >= step.maxToolCalls -> STEP_BUDGET_EXHAUSTED_MESSAGE
+                    tool == "wait_for_ui" && uiRecoveryAttempts >= MAX_UI_RECOVERY_ATTEMPTS ->
+                        "This step already used its $MAX_UI_RECOVERY_ATTEMPTS bounded UI-recovery attempts."
                     else -> {
-                        toolCalls.incrementAndGet()
-                        if (spec.caseBudget?.tryDispatch() == false) {
-                            toolCalls.decrementAndGet()
+                        val cost = if (tool == "perform_input_sequence") {
+                            try {
+                                val actions = parseInputSequence(arguments, spec.allowedTools)
+                                plannedDurationMs = actions.sumOf { action ->
+                                    action.delayMs + ((action as? DeviceInputAction.Swipe)?.durationMs ?: 0)
+                                }
+                                if (plannedDurationMs > (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)) {
+                                    return ToolAdmission(
+                                        "The requested input sequence durations exceed this step's remaining execution allowance.",
+                                        false, null, null,
+                                    )
+                                }
+                                actions.size + 1
+                            } catch (invalid: IllegalArgumentException) {
+                                return ToolAdmission(invalid.message ?: "Invalid input sequence.", false, null, null)
+                            }
+                        } else {
+                            1
+                        }
+                        reservedCost = cost
+                        if (toolCalls.addAndGet(cost) > step.maxToolCalls) {
+                            toolCalls.addAndGet(-cost)
+                            STEP_BUDGET_EXHAUSTED_MESSAGE
+                        } else if (spec.caseBudget?.tryDispatch(cost) == false) {
+                            toolCalls.addAndGet(-cost)
                             withContext(NonCancellable) { abortLocked(StepStatus.ERROR, CASE_BUDGET_EXHAUSTED_NOTE) }
                             CASE_BUDGET_EXHAUSTED_MESSAGE
                         } else {
+                            if (tool == "wait_for_ui") uiRecoveryAttempts++
                             activePaidDispatches++
                             paidDispatch = true
                             null
@@ -394,10 +521,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 )
             }
         }
-        return ToolAdmission(refusal, paidDispatch, activity)
+        val identity = activity?.let { LaneStepIdentity(it.stepId, it.attempt, epoch.get()) }
+        return ToolAdmission(refusal, paidDispatch, activity, identity, if (paidDispatch) reservedCost else 0)
     }
 
-    @Suppress("TooGenericExceptionCaught") // Admitted gateway tools can throw provider/host-specific failures; record them and rethrow.
+    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod") // Preserve identity, refunds and failure status across suspending dispatch.
     private suspend fun executeAdmittedTool(
         admission: ToolAdmission,
         initial: LaneToolCall?,
@@ -405,12 +533,74 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     ): Any? {
         val startNanos = env.nanoTime()
         var completed = initial
+        var executionStarted = false
+        var reservationRefunded = false
         return try {
-            execute().also { result ->
+            val tool = initial?.toolName.orEmpty()
+            val identity = admission.identity
+            if (!admission.paid) {
+                val result = execute()
+                completed = initial?.completed(
+                    if (laneToolResultError(result) == null) LaneToolCallStatus.SUCCEEDED else LaneToolCallStatus.FAILED,
+                    laneToolPreview(result), elapsedMs(startNanos),
+                )
+                return result
+            }
+
+            suspend fun refundUnstarted() {
+                if (!executionStarted && !reservationRefunded) {
+                    reservationRefunded = true
+                    refundStaleAdmission(admission)
+                }
+            }
+            val remainingMs = remainingExecutionMs(identity)
+            val enforceAttemptDeadline = tool == "perform_input_sequence" || tool == "wait_for_ui"
+
+            suspend fun executeWithinAdmission(): AdmittedToolResult {
+                val value = if (mutatesDevice(tool)) {
+                    deviceMutationLock.withLock {
+                        if (!isCurrent(identity)) {
+                            refundUnstarted()
+                            mapOf("error" to "This step attempt ended before the device action could start; inspect the current step.")
+                        } else {
+                            ensureAttemptStartShot(identity)
+                            if (!isCurrent(identity)) {
+                                refundUnstarted()
+                                mapOf("error" to "This step attempt ended before the device action could start; inspect the current step.")
+                            } else {
+                                executionStarted = true
+                                if (identity == null) execute() else withContext(LaneDispatchIdentityElement(identity)) { execute() }
+                            }
+                        }
+                    }
+                } else {
+                    executionStarted = true
+                    if (identity == null) execute() else withContext(LaneDispatchIdentityElement(identity)) { execute() }
+                }
+                return AdmittedToolResult(value)
+            }
+            val outcome = if (remainingMs <= 0L) {
+                null
+            } else if (enforceAttemptDeadline) {
+                withTimeoutOrNull(remainingMs) { executeWithinAdmission() }
+            } else {
+                executeWithinAdmission()
+            }
+            val result = if (outcome == null) {
+                refundUnstarted()
+                mapOf("error" to "The step execution allowance expired before this tool completed.")
+            } else {
+                outcome.value
+            }
+            result.also { result ->
                 val status = if (laneToolResultError(result) == null) LaneToolCallStatus.SUCCEEDED else LaneToolCallStatus.FAILED
                 completed = initial?.completed(status, laneToolPreview(result), elapsedMs(startNanos))
             }
         } catch (cancelled: CancellationException) {
+            if (admission.paid && !executionStarted && !reservationRefunded) {
+                reservationRefunded = true
+                withContext(NonCancellable) { refundStaleAdmission(admission) }
+            }
             completed = initial?.completed(LaneToolCallStatus.CANCELLED, "Cancelled while the tool was running.", elapsedMs(startNanos))
             throw cancelled
         } catch (failure: Exception) {
@@ -425,6 +615,17 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 if (admission.paid) mutex.withLock { activePaidDispatches = (activePaidDispatches - 1).coerceAtLeast(0) }
                 completed?.let { call -> runCatching { env.listener.toolCallFinished(call) } }
             }
+        }
+    }
+
+    /** Refund an admission that became stale while waiting for the device lock, without touching a later step's cap. */
+    private suspend fun refundStaleAdmission(admission: ToolAdmission) {
+        val unused = admission.reservedCost
+        if (unused <= 0) return
+        spec.caseBudget?.releaseDispatch(unused)
+        val identity = admission.identity ?: return
+        mutex.withLock {
+            if (isCurrentLocked(identity)) toolCalls.updateAndGet { current -> (current - unused).coerceAtLeast(0) }
         }
     }
 
@@ -457,6 +658,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         attempt = 1
         attemptNotes.clear()
         firstAttemptWallMs = env.wallClock()
+        previousAttemptFailure = null
+        submittedReportStepId = null
+        submittedReportAttempt = 0
+        submittedReportClaim = null
+        submittedReportObservation = null
         startAttemptLocked()
     }
 
@@ -466,12 +672,66 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         attemptTranscriptOffset = env.transcript?.sizeBytes ?: 0L
         attemptStartNanos = env.nanoTime()
         toolCalls.set(0)
-        attemptStartShot = lastAttemptShot
+        attemptStartShot = null
+        attemptPlaybackSamples = emptyList()
+        startCaptureAttempted = false
+        uiRecoveryAttempts = 0
         lastAttemptShot = null
         lastAttemptChecks = emptyList()
         observations.clear()
+        submittedReportStepId = null
+        submittedReportAttempt = 0
+        submittedReportClaim = null
+        submittedReportObservation = null
         active = true
         env.listener.stepStarted(index + 1, spec.steps[index].action, attempt)
+    }
+
+    private fun mutatesDevice(tool: String): Boolean = tool in setOf(
+        "tap", "swipe", "press_key", "open_system_panel", "rotate_device", "input_text", "launch_app", "open_url", "perform_input_sequence",
+    ) || env.scripts.any { it.toolName == tool }
+
+    /** Capture the actual current screen immediately before the attempt's first device mutation. */
+    suspend fun beforeDeviceMutation() {
+        deviceMutationLock.withLock { ensureAttemptStartShot() }
+    }
+
+    @Suppress("CyclomaticComplexMethod") // Start capture validates attempt identity across a suspended device read.
+    private suspend fun ensureAttemptStartShot(identity: LaneStepIdentity? = null, stateLocked: Boolean = false) {
+        suspend fun markCaptureStarted(): Pair<Int, Int>? {
+            if (identity != null && !isCurrentLocked(identity)) return null
+            if (startCaptureAttempted) return null
+            startCaptureAttempted = true
+            return index to attempt
+        }
+        val capturedFor = (if (stateLocked) markCaptureStarted() else mutex.withLock { markCaptureStarted() }) ?: return
+        if (!env.evidence.screenshots && env.judge == null) return
+
+        suspend fun resetCaptureFlag() {
+            if (index == capturedFor.first && attempt == capturedFor.second && (identity == null || isCurrentLocked(identity))) {
+                startCaptureAttempted = false
+            }
+        }
+        val captured = try {
+            val current = env.session.screenshot()
+            val capturedAtMs = env.wallClock()
+            val path = if (env.evidence.screenshots) saveScreenshot(current.png, "start", capturedFor.first, capturedFor.second) else null
+            Shot(path, current.image.bytes.takeIf { env.judge != null }, capturedAtMs)
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                if (stateLocked) resetCaptureFlag() else mutex.withLock { resetCaptureFlag() }
+            }
+            throw cancelled
+        } catch (_: Exception) {
+            null
+        }
+
+        fun saveCaptured() {
+            val stillSameAttempt = index == capturedFor.first && attempt == capturedFor.second &&
+                (identity == null || isCurrentLocked(identity))
+            if (stillSameAttempt) attemptStartShot = captured
+        }
+        if (stateLocked) saveCaptured() else mutex.withLock { saveCaptured() }
     }
 
     private fun endLocked() {
@@ -481,6 +741,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     private fun elapsedMs(): Long = (env.nanoTime() - attemptStartNanos) / NANOS_PER_MILLI
+
+    private fun playbackRelated(step: TestStep): Boolean =
+        PLAYBACK_RELEVANCE.containsMatchIn(listOfNotNull(step.action, step.expected, step.precondition).joinToString(" "))
 
     // ── Steps the run performs itself ────────────────────────────────
 
@@ -494,10 +757,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     suspend fun finishDriverStep(report: DriverReport) {
         val evaluation = mutex.withLock {
             val step = driverStep ?: return@withLock null
-            // Waiting used the step's time allowance; evaluating its checks (and their windows) gets a fresh one.
-            resetStepTimer()
-            val completed = withTimeoutOrNull(step.timeoutMs) { evaluateLocked(report.claim, report.observation, report) }
-            completed ?: timeoutEvaluationLocked(step.id, index, attempt, verifyDeadline = false)
+            // A script's action and deterministic checks share the step allowance. User confirmation
+            // and manual waiting have their own boundary, so their post-confirmation checks start fresh.
+            if (report.completion != StepCompletion.SCRIPT) resetStepTimer()
+            val completed = evaluateLocked(report.claim, report.observation, report)
+            completed ?: timeoutEvaluationLocked(step.id, index, attempt, verifyDeadline = false, submittedObservation = report.observation)
         } ?: return
         decideFlow(evaluation)
     }
@@ -530,7 +794,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     // ── LaneCallbacks ────────────────────────────────────────────────
 
     override fun reportObservation(text: String) {
-        if (active) observations += text.take(MAX_OBSERVATION_CHARS)
+        if (active) {
+            val bounded = text.take(MAX_OBSERVATION_CHARS)
+            observations += bounded
+            env.transcript?.append("step_observation", mapOf("step" to spec.steps.getOrNull(index)?.id, "attempt" to attempt, "text" to bounded))
+        }
     }
 
     @Suppress("ReturnCount") // Distinct protocol guards refuse without settling a stale step.
@@ -540,10 +808,6 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         try {
             if (mutex.withLock { activePaidDispatches > 0 }) {
                 return mapOf("error" to "A device or script tool is still running; wait for its result before finishing the step.")
-            }
-            if (spec.caseBudget?.exhausted() == true) {
-                withContext(NonCancellable) { abort(StepStatus.ERROR, CASE_BUDGET_EXHAUSTED_NOTE) }
-                return mapOf("result" to "case_finished", "error" to CASE_BUDGET_EXHAUSTED_NOTE, "message" to overMessage())
             }
             var timedOut = false
             var skipRefusal: String? = null
@@ -561,12 +825,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 }
                 val stepIndex = index
                 val attemptNumber = attempt
-                val remaining = (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)
-                val completed = withTimeoutOrNull(remaining) {
-                    if (status == LaneStepStatus.SKIPPED) skippedEvaluationLocked(step, observation) else evaluateLocked(status, observation)
-                }
+                val completed = if (status == LaneStepStatus.SKIPPED) skippedEvaluationLocked(step, observation) else evaluateLocked(status, observation)
                 if (completed == null) timedOut = true
-                completed ?: timeoutEvaluationLocked(step.id, stepIndex, attemptNumber, verifyDeadline = false)
+                completed ?: timeoutEvaluationLocked(
+                    step.id, stepIndex, attemptNumber, verifyDeadline = false,
+                    submittedClaim = status.name.lowercase(), submittedObservation = observation,
+                )
             }
             skipRefusal?.let { return mapOf("error" to it) }
             val currentEvaluation = evaluation ?: return mapOf("error" to "No step is active.")
@@ -653,9 +917,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             }
         Flow.Redo -> mapOf(
             "result" to "redo",
-            "message" to "Attempt ${attempt - 1} did not pass. Redo this step from its current screen state (attempt $attempt).",
+            "message" to "Attempt ${attempt - 1} did not pass. Inspect the current screen before acting because the previous action may " +
+                "have succeeded even if verification failed. Do not blindly repeat a toggle. This is attempt $attempt.",
             "step" to stepMap(),
-        )
+        ) + previousAttemptFailure?.let { untrustedData("previous_attempt_result", it) }.orEmpty()
     }
 
     private fun stepMap(): Map<String, Any?> {
@@ -665,6 +930,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             "stepCount" to brief.stepCount,
             "action" to brief.action,
             "expected" to brief.expected,
+            "intent" to brief.intent,
+            "precondition" to brief.precondition,
             "optional" to brief.optional,
             "condition" to brief.condition,
             "attempt" to brief.attempt,
@@ -686,26 +953,140 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!active || ended) return null
         val step = spec.steps[index]
         val evaluationStart = env.nanoTime()
-        val shot = captureScreenshot()
-        val evidenceDone = env.nanoTime()
+        val submittedObservation = (observations + observation).filter(String::isNotBlank).joinToString("\n").take(MAX_OBSERVATION_CHARS)
+        submittedReportStepId = step.id
+        submittedReportAttempt = attempt
+        submittedReportClaim = claimText(claim, driver)
+        submittedReportObservation = submittedObservation
+        env.transcript?.append(
+            "step_report_submitted",
+            mapOf(
+                "step" to step.id,
+                "stepNumber" to index + 1,
+                "attempt" to attempt,
+                "source" to if (driver == null) "agent" else "driver",
+                "claim" to claim.name.lowercase(),
+                "observation" to submittedObservation,
+                "finalObservation" to observation.take(MAX_OBSERVATION_CHARS),
+                "reportedObservations" to observations.toList(),
+            ),
+        )
+        val remaining = (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)
+        val actionEvidence = collectActionEvidence(step, driver, evaluationStart, remaining) ?: return null
+        val judgeOutcome = evaluateJudgement(step, claim, driver, actionEvidence)
+        appendStepTiming(
+            step,
+            actionEvidence.evidenceNanos,
+            actionEvidence.checksNanos,
+            judgeOutcome.durationNanos,
+        )
+        return settleEvaluation(step, claim, driver, submittedObservation, actionEvidence, judgeOutcome.judgement)
+    }
+
+    private suspend fun collectActionEvidence(
+        step: TestStep,
+        driver: DriverReport?,
+        evaluationStart: Long,
+        remainingMs: Long,
+    ): ActionEvidence? = withTimeoutOrNull(remainingMs) {
+        if (!startCaptureAttempted) ensureAttemptStartShot(stateLocked = true)
         lastAttemptChecks = emptyList()
-        val automatic = checks.evaluateAll(driver?.checks ?: step.checks, attemptLogOffset) { result -> lastAttemptChecks = lastAttemptChecks + result }
+        attemptPlaybackSamples = emptyList()
+        val samples = mutableListOf<Shot>()
+        if (playbackRelated(step) && (env.judge != null || env.evidence.screenshots)) {
+            repeat(PLAYBACK_SAMPLE_COUNT) { sampleIndex ->
+                if (sampleIndex > 0) delay(PLAYBACK_SAMPLE_INTERVAL_MS)
+                samples += captureScreenshot("sample-${sampleIndex + 1}")
+                // Keep every successful sample immediately. If the next delay/capture reaches the
+                // execution deadline, timeout and retry evidence still retain the frames already taken.
+                attemptPlaybackSamples = samples.toList()
+            }
+        }
+        val shot = samples.lastOrNull() ?: captureScreenshot()
+        val evidenceDone = env.nanoTime()
+        val checksStarted = env.nanoTime()
+        val automatic = checks.evaluateAll(driver?.checks ?: step.checks, attemptLogOffset) { result ->
+            lastAttemptChecks = lastAttemptChecks + result
+        }
         val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
-        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
         val checksDone = env.nanoTime()
-        val judgement = if (judgeable(step, driver)) judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd) else null
-        val judgeDone = env.nanoTime()
-        appendStepTiming(step, evidenceDone - evaluationStart, checksDone - evidenceDone, judgement?.let { judgeDone - checksDone })
-        val results = applyJudgementToChecks(automatic, judgement)
+        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
+        ActionEvidence(
+            shot,
+            samples.toList(),
+            automatic,
+            automaticFailed,
+            logEnd,
+            evidenceDone - evaluationStart,
+            checksDone - checksStarted,
+        )
+    }
+
+    private suspend fun evaluateJudgement(
+        step: TestStep,
+        claim: LaneStepStatus,
+        driver: DriverReport?,
+        evidence: ActionEvidence,
+    ): JudgementOutcome {
+        val requested = judgeable(step, driver) && shouldJudge(env.judgeMode, step, claim, evidence.automaticFailed)
+        if (!requested || (!env.judgeRequested && env.judge == null)) return JudgementOutcome(null, null)
+        val started = env.nanoTime()
+        val judgement = if (env.judgeRequested && env.judge == null) {
+            StepJudgement(
+                verdict = JudgeVerdict.INCONCLUSIVE,
+                judgedAt = env.wallClock(),
+                error = "The configured judge could not be prepared; independent verification is unavailable.",
+            )
+        } else {
+            withTimeoutOrNull(JUDGE_TIMEOUT_MS) {
+                judgeAttempt(step, claim, evidence.checks, evidence.automaticFailed, evidence.shot, evidence.logEnd, evidence.samples)
+            } ?: StepJudgement(
+                verdict = JudgeVerdict.INCONCLUSIVE,
+                judgedAt = env.wallClock(),
+                error = "The judge did not answer within ${JUDGE_TIMEOUT_MS / 1_000} s.",
+            )
+        }
+        judgement.error?.let { attemptNotes += "The judge could not finish: $it" }
+        return JudgementOutcome(judgement, env.nanoTime() - started)
+    }
+
+    private suspend fun settleEvaluation(
+        step: TestStep,
+        claim: LaneStepStatus,
+        driver: DriverReport?,
+        submittedObservation: String,
+        actionEvidence: ActionEvidence,
+        judgement: StepJudgement?,
+    ): Evaluation {
+        val results = applyJudgementToChecks(actionEvidence.checks, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val base = deterministicBaseStatus(claim, failed.isNotEmpty())
-        val settled = settleWithJudge(base, judgement, requiresVerdict = hasJudgeChecks(step))
+        val settled = settleWithJudge(
+            base,
+            judgement,
+            requiresVerdict = hasJudgeChecks(step),
+            inconclusivePolicy = env.judgeInconclusivePolicy,
+        )
         if (judgement != null && base == StepStatus.PASS && settled.status == StepStatus.FAIL) {
             attemptNotes += "The judge failed a step the agent reported as passed."
         }
-        val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
         val unresolved = hasJudgeChecks(step) && (judgement == null || judgement.verdict == JudgeVerdict.INCONCLUSIVE)
-        val result = buildResult(step, settled.status, claimText(claim, driver), reported, results, shot.path, logEnd, judgement, settled.inconclusive, driver)
+        val verificationNote = when {
+            judgement?.verdict == JudgeVerdict.PASS -> "Independent judge confirmed the expected result."
+            judgement?.verdict == JudgeVerdict.INCONCLUSIVE && settled.status == StepStatus.PASS ->
+                "Independent judgment was inconclusive; the agent's pass was retained by policy. Verification remains unresolved."
+            judgement?.verdict == JudgeVerdict.INCONCLUSIVE && settled.status == StepStatus.BLOCKED ->
+                "Independent judgment was inconclusive; the run policy blocks this pass. Verification remains unresolved."
+            judgement == null && settled.status == StepStatus.PASS ->
+                "Passed by the agent and deterministic checks; no independent judge was requested."
+            else -> null
+        }
+        val result = buildResult(
+            step, settled.status, claimText(claim, driver), submittedObservation, results, actionEvidence.shot.path, actionEvidence.logEnd, judgement,
+            settled.inconclusive, driver, startScreenshotPath = attemptStartShot?.path,
+            sampleScreenshotPaths = actionEvidence.samples.mapNotNull { it.path },
+        )
+            .let { result -> result.copy(note = listOfNotNull(result.note, verificationNote).joinToString(" ").ifBlank { null }) }
             .let {
                 if (!unresolved) it else it.copy(
                     note = listOfNotNull(
@@ -718,10 +1099,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return Evaluation(step, settled.status, result, failed.map { it.checkId }, index, attempt)
     }
 
-    /**
-     * Where finish_step's wait went, in the lane transcript next to the finish_step tool call: taking the screenshot, running the
-     * deterministic checks (and reading the log end), and the judge (null when none judged). The agent is blocked for their sum.
-     */
+    /** Execution evidence/check work shares the step allowance; the independent judge duration is recorded separately. */
     private fun appendStepTiming(step: TestStep, evidenceNanos: Long, checksNanos: Long, judgeNanos: Long?) {
         val transcript = env.transcript ?: return
         val evidenceMs = evidenceNanos / NANOS_PER_MILLI
@@ -733,10 +1111,18 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 "step" to step.id,
                 "stepNumber" to index + 1,
                 "attempt" to attempt,
+                "intent" to step.intent.wire,
                 "evidenceCaptureMs" to evidenceMs,
                 "deterministicChecksMs" to checksMs,
                 "judgeMs" to judgeMs,
                 "totalMs" to evidenceMs + checksMs + (judgeMs ?: 0L),
+                "startCapturedAtMs" to attemptStartShot?.capturedAtMs,
+                "endCapturedAtMs" to lastAttemptShot?.capturedAtMs,
+                "playbackEvidenceRequired" to playbackRelated(step),
+                "playbackSampleCount" to attemptPlaybackSamples.size,
+                "playbackSamples" to attemptPlaybackSamples.mapIndexed { sampleIndex, shot ->
+                    mapOf("moment" to "sample_${sampleIndex + 1}", "capturedAtMs" to shot.capturedAtMs, "screenshotPath" to shot.path)
+                },
             ),
         )
     }
@@ -767,12 +1153,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         automaticFailed: Boolean,
         shot: Shot,
         logEnd: Long?,
+        samples: List<Shot>,
     ): StepJudgement? {
         val judge = env.judge ?: return null
         if (!shouldJudge(env.judgeMode, step, claim, automaticFailed)) return null
         val site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt)
         val judgement = try {
-            val evidence = judgeEvidence(step, automatic, shot, logEnd)
+            val evidence = judgeEvidence(step, automatic, shot, logEnd, samples)
             if (judge is UsageReportingStepJudge) {
                 judge.judge(site, evidence, env.listener::judgeUsage)
             } else {
@@ -786,11 +1173,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 error = "The judge failed: ${failure.message ?: failure::class.simpleName}",
             )
         }
-        judgement.error?.let { attemptNotes += "The judge could not finish: $it" }
         return judgement
     }
 
-    private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?): JudgeEvidence {
+    private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?, samples: List<Shot>): JudgeEvidence {
         val start = attemptLogOffset
         val logFile = env.session.readLogFile
         val startShot = attemptStartShot
@@ -802,10 +1188,19 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             log = { offset, limit -> withContext(Dispatchers.IO) { readStepLogSlice(logFile, start, logEnd, offset, limit) } },
             logBytes = logEnd?.minus(start),
             startScreenshot = { startShot?.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
+            startScreenshotCapturedAtMs = startShot?.capturedAtMs,
+            screenshotCapturedAtMs = shot.capturedAtMs,
+            samples = samples.mapIndexed { index, sample ->
+                JudgeScreenshotSample(index + 1, sample.capturedAtMs) { sample.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } }
+            },
         )
-        return JudgeEvidence(spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane))
+        return JudgeEvidence(
+            spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane),
+            step.intent, step.precondition,
+        )
     }
 
+    @Suppress("LongParameterList") // Preserve each independent source needed to build a saved step result without a mutable builder.
     private suspend fun buildResult(
         step: TestStep,
         status: StepStatus,
@@ -817,6 +1212,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         judgement: StepJudgement? = null,
         judgeInconclusive: Boolean = false,
         driver: DriverReport? = null,
+        startScreenshotPath: String? = attemptStartShot?.path,
+        sampleScreenshotPaths: List<String> = emptyList(),
     ): StepResult {
         val logEnd = knownLogEnd ?: runCatching { env.session.logMarker() }.getOrNull()
         return StepResult(
@@ -843,6 +1240,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             kind = step.kind,
             completedBy = driver?.completion,
             manualCompletion = step.manualCompletion.takeIf { step.kind == StepKind.MANUAL },
+            startScreenshotPath = startScreenshotPath,
+            sampleScreenshotPaths = sampleScreenshotPaths,
         )
     }
 
@@ -851,23 +1250,24 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
      * (which needs it even when screenshots are not kept as evidence). Never fails the step.
      */
     @Suppress("TooGenericExceptionCaught") // Evidence is best effort: whatever adb throws must not decide a step's outcome.
-    private suspend fun captureScreenshot(): Shot {
+    private suspend fun captureScreenshot(suffix: String? = null): Shot {
         val keep = env.evidence.screenshots
-        if (!keep && env.judge == null) return Shot(null, null)
+        if (!keep && env.judge == null) return Shot(null, null, env.wallClock())
         return try {
             val shot = env.session.screenshot()
-            val path = if (keep) saveScreenshot(shot.png) else null
-            Shot(path, shot.image.bytes.takeIf { env.judge != null }).also { lastAttemptShot = it }
+            val path = if (keep) saveScreenshot(shot.png, suffix) else null
+            Shot(path, shot.image.bytes.takeIf { env.judge != null }, env.wallClock()).also { lastAttemptShot = it }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
             attemptNotes += "Screenshot failed: ${failure.message ?: failure::class.simpleName}."
-            Shot(null, null)
+            Shot(null, null, env.wallClock())
         }
     }
 
-    private fun saveScreenshot(png: ByteArray): String {
-        val file = File(File(env.laneDir, SCREENS_DIR), "${spec.evidencePrefix}-s${index + 1}-a$attempt.$SCREENSHOT_EXTENSION")
+    private fun saveScreenshot(png: ByteArray, suffix: String? = null, stepIndex: Int = index, attemptNumber: Int = attempt): String {
+        val tagged = suffix?.let { "-$it" }.orEmpty()
+        val file = File(File(env.laneDir, SCREENS_DIR), "${spec.evidencePrefix}-s${stepIndex + 1}-a$attemptNumber$tagged.$SCREENSHOT_EXTENSION")
         file.parentFile?.mkdirs()
         file.writeBytes(png)
         return file.relativeTo(env.runDir).invariantSeparatorsPath
@@ -877,6 +1277,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     private suspend fun retryLocked(evaluation: Evaluation): Flow {
         if (!isCurrentLocked(evaluation)) return Flow.End
+        previousAttemptFailure = recordRetryEvidence(evaluation, "automatic")
         attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}" +
             (if (evaluation.failedChecks.isNotEmpty()) " (a check failed)" else "") + "."
         attempt++
@@ -925,6 +1326,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             if (!isCurrentLocked(evaluation)) return@withLock Flow.End
             when (decision) {
                 PauseDecision.RETRY -> {
+                    previousAttemptFailure = recordRetryEvidence(evaluation, "user_requested")
                     attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}; the user asked for another attempt."
                     attempt++
                     startAttemptLocked()
@@ -934,6 +1336,40 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 PauseDecision.STOP -> settleLocked(evaluation, Flow.End, issue = false)
             }
         }
+    }
+
+    /** Keeps each failed attempt in the saved lane transcript, with bounded references instead of nested StepResult copies. */
+    private fun recordRetryEvidence(evaluation: Evaluation, retryReason: String): Map<String, Any?> {
+        val result = evaluation.result
+        val failures = result.checks.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
+        val entry = mapOf(
+            "step" to evaluation.step.id,
+            "stepNumber" to evaluation.stepIndex + 1,
+            "attempt" to evaluation.attemptNumber,
+            "retryReason" to retryReason,
+            "status" to result.status.name.lowercase(),
+            "agentClaim" to result.agentClaim,
+            "observation" to result.observation.take(MAX_OBSERVATION_CHARS),
+            "failedChecks" to failures.map { mapOf("checkId" to it.checkId, "kind" to it.kind, "detail" to it.detail.take(MAX_OBSERVATION_CHARS)) },
+            "judge" to result.judge?.let {
+                mapOf(
+                    "verdict" to it.verdict.name.lowercase(),
+                    "reasoning" to it.reasoning.take(MAX_OBSERVATION_CHARS),
+                    "error" to it.error,
+                )
+            },
+            "screenshotPath" to result.screenshotPath,
+            "startScreenshotPath" to result.startScreenshotPath,
+            "sampleScreenshotPaths" to result.sampleScreenshotPaths,
+            "logStartOffset" to result.logStartOffset,
+            "logEndOffset" to result.logEndOffset,
+            "transcriptStartOffset" to result.transcriptStartOffset,
+            "transcriptEndOffset" to result.transcriptEndOffset,
+            "durationMs" to elapsedMs(),
+            "capturedAt" to env.wallClock(),
+        )
+        env.transcript?.append("step_attempt", entry)
+        return entry
     }
 
     // ── Watchdog ─────────────────────────────────────────────────────
@@ -979,17 +1415,27 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         expectedIndex: Int,
         expectedAttempt: Int,
         verifyDeadline: Boolean,
+        submittedClaim: String? = null,
+        submittedObservation: String? = null,
     ): Evaluation? {
         if (!active || ended || index != expectedIndex || attempt != expectedAttempt) return null
         val step = spec.steps.getOrNull(index) ?: return null
         if (step.id != expectedStepId || (verifyDeadline && elapsedMs() < step.timeoutMs)) return null
+        val hasCurrentSubmittedReport = submittedReportStepId == expectedStepId && submittedReportAttempt == expectedAttempt
         val screenshotPath = lastAttemptShot?.path
-        val reported = observations.joinToString("\n").ifBlank { TIMEOUT_OBSERVATION }
+        val explicitObservation = submittedObservation?.let { (observations + it).filter(String::isNotBlank).joinToString("\n") }
+        val reportObservation = explicitObservation ?: submittedReportObservation.takeIf { hasCurrentSubmittedReport }
+        val reported = (reportObservation ?: observations.joinToString("\n")).ifBlank { TIMEOUT_OBSERVATION }
+        val reportClaim = submittedClaim ?: submittedReportClaim.takeIf { hasCurrentSubmittedReport }
         val completedIds = lastAttemptChecks.mapTo(HashSet()) { it.checkId }
         val pending = step.checks.filterNot { it.id in completedIds }.map { check ->
             CheckResult(check.id, check.kindName(), CheckStatus.NOT_EVALUATED, "Evaluation stopped when the step deadline expired.", 0)
         }
-        val result = buildResult(step, StepStatus.TIMEOUT, null, reported, lastAttemptChecks + pending, screenshotPath, knownLogEnd = lastKnownLogEnd)
+        val result = buildResult(
+            step, StepStatus.TIMEOUT, reportClaim, reported, lastAttemptChecks + pending, screenshotPath,
+            knownLogEnd = lastKnownLogEnd, startScreenshotPath = attemptStartShot?.path,
+            sampleScreenshotPaths = attemptPlaybackSamples.mapNotNull { it.path },
+        )
             .copy(note = (attemptNotes + "The step timed out after ${step.timeoutMs} ms.").joinToString(" "))
         return Evaluation(step, StepStatus.TIMEOUT, result, emptyList(), expectedIndex, expectedAttempt)
     }
@@ -1048,8 +1494,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (ended) return
         val step = spec.steps.getOrNull(index)
         if (active && step != null) {
+            val hasCurrentSubmittedReport = submittedReportStepId == step.id && submittedReportAttempt == attempt
+            val reportObservation = submittedReportObservation.takeIf { hasCurrentSubmittedReport }
+                ?: observations.joinToString("\n")
             val result = buildResult(
-                step, status, null, observations.joinToString("\n"), emptyList(), null, knownLogEnd = lastKnownLogEnd,
+                step, status, submittedReportClaim.takeIf { hasCurrentSubmittedReport }, reportObservation, lastAttemptChecks,
+                lastAttemptShot?.path, knownLogEnd = lastKnownLogEnd, startScreenshotPath = attemptStartShot?.path,
+                sampleScreenshotPaths = attemptPlaybackSamples.mapNotNull { it.path },
             ).copy(note = note)
             recorded += result
             env.listener.stepRecorded(result)

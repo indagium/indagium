@@ -51,9 +51,10 @@ class RecordingRewriteApplyTest {
         }
         assertEquals(
             listOf(
-                "1. Tap at (54%, 31%) | element: \"Search\" id=search_button class=Button | before app: $SHOP_PACKAGE " +
+                "1. Tap at (54%, 31%) | element: \"Search\" id=search_button class=Button | gap before next input: 460 ms | before app: $SHOP_PACKAGE " +
                     "| before activity: .HomeActivity | after app: unavailable | after activity: unavailable",
-                "2. Enter text: lofi | before app: unavailable | before activity: unavailable | after app: unavailable | after activity: unavailable",
+                "2. Enter text: lofi | gap before next input: 1000 ms | before app: unavailable | " +
+                    "before activity: unavailable | after app: unavailable | after activity: unavailable",
             ),
             steps[0].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines(),
         )
@@ -208,12 +209,13 @@ class RecordingRewriteApplyTest {
         assertIs<StoreResult.Ok<RecordingRewrite>>(rewrite.rewrite(session, SHOP_SUITE_ID, SHOP_CASE_ID, "p", null, null, ""))
 
         val row = session.snapshot.value.steps.single()
+        assertTrue(row.reviewReason?.contains("resolved target") == true)
         assertEquals("Tap at (54%, 31%)", row.action)
         assertEquals("", row.expected)
         assertFalse(row.optional, "an unresolved gesture cannot bypass review by being marked optional")
         assertNull(row.condition)
-        assertTrue(row.reviewReason?.contains("resolved target") == true)
-        assertTrue(row.reviewReason?.contains("trustworthy inspected video/screenshot evidence") == true)
+        assertTrue(row.reviewReason.contains("resolved target"))
+        assertTrue(row.reviewReason.contains("inspected before video/screenshot evidence"))
         assertTrue(row.checks.isEmpty())
         assertNull(row.screenshotJpeg)
         assertTrue(recordingApplyBlockedReason(session.snapshot.value).orEmpty().contains("Expected"))

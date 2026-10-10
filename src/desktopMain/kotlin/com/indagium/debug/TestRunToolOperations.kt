@@ -4,6 +4,7 @@ import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
@@ -182,7 +183,15 @@ internal class TestRunToolOperations(private val appState: AppState) {
             capture = capture,
             openLaneTabs = a.bool("openLaneTabs") ?: true,
             manualSteps = manualStepsOf(a),
+            judgeInconclusivePolicy = judgeInconclusivePolicyOf(a),
         )
+    }
+
+    private fun judgeInconclusivePolicyOf(a: ToolArgs): JudgeInconclusivePolicy {
+        val raw = a.string("judgeInconclusivePolicy")?.trim()?.takeIf { it.isNotEmpty() }
+            ?: return JudgeInconclusivePolicy.BLOCK
+        return JudgeInconclusivePolicy.parse(raw)
+            ?: toolArgError("judgeInconclusivePolicy must be block or keep_agent_pass.")
     }
 
     /** The manual-steps option, or a refusal for an unknown one (the codec would read it as the default and hide the mistake). */

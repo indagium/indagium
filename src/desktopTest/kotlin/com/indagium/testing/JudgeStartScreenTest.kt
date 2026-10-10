@@ -188,7 +188,7 @@ class JudgeStartScreenTest {
     }.toByteArray()
 
     @Test
-    fun theJudgeOfALaterStepGetsTheScreenTheStepBeforeEndedOn() {
+    fun theJudgeGetsAnAttemptFreshStartScreenInsteadOfAStalePreviousEnd() {
         val suite = suiteOf(caseOf("Feed", step("Open the feed"), step("Scroll the feed")))
         val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass", reasoning = "It matches.") }
         // The device shows a different screen each time the agent finishes a step.
@@ -215,11 +215,10 @@ class JudgeStartScreenTest {
         val firstMessages = judge.requests.filter { r -> r.messages.none { it.role == LlmRole.TOOL } }.map { r -> r.messages.first { it.role == LlmRole.USER } }
         assertEquals(2, firstMessages.size, "one judge per step")
         val (first, second) = firstMessages
-        assertEquals(1, first.images.size, "the first step has no screen before it: only its end screen")
-        assertContains(first.content.orEmpty(), "$START_SCREEN_LABEL (Lane) is not available.")
+        assertEquals(2, first.images.size, "even the first attempt has a start capture immediately before verification")
+        assertContains(first.content.orEmpty(), "1. $START_SCREEN_LABEL (Lane)\n2. The screen when the step ended (Lane)")
         assertEquals(2, second.images.size)
         assertContains(second.content.orEmpty(), "1. $START_SCREEN_LABEL (Lane)\n2. The screen when the step ended (Lane)")
-        assertEquals(first.images.single().base64, second.images[0].base64, "step 2 starts where step 1 ended")
-        assertNotEquals(second.images[0].base64, second.images[1].base64, "and the device changed during step 2")
+        assertNotEquals(first.images[1].base64, second.images[0].base64, "the second attempt captures its current screen instead of reusing the prior end")
     }
 }

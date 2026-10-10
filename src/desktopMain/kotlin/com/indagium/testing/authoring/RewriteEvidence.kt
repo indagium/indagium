@@ -68,10 +68,16 @@ internal class RewriteImage(
     val mimeType: String,
     val videoFrames: Int = 0,
     val storedScreens: Int = 0,
+    val videoMoments: Map<Int, Set<String>> = emptyMap(),
+    val visualMoments: Map<Int, Set<String>> = videoMoments,
 )
 
 /** A picture of the video around a window of wall-clock time; [bytes] are an image of [mimeType]. */
-internal class RewriteVideoSheet(val bytes: ByteArray, val mimeType: String)
+internal class RewriteVideoSheet(
+    val bytes: ByteArray,
+    val mimeType: String,
+    val visualMoments: Map<Int, Set<String>> = emptyMap(),
+)
 
 /** One frame of the recorded video: the video shows it at [frameWallMs] (wall clock), which is [sessionMs] into the recording. */
 internal class RewriteVideoFrame(val image: BufferedImage, val frameWallMs: Long, val sessionMs: Long)
@@ -110,6 +116,13 @@ internal class RewriteEvidence(
     val consideredInputs: Int = 0,
     val settledAfterInputs: Int = 0,
 ) {
+    val videoMoments: Map<Int, Set<String>> get() = images.flatMap { it.videoMoments.entries }
+        .groupBy({ it.key }, { it.value }).mapValues { (_, moments) -> moments.flatten().toSet() }
+
+    /** Input/moment pairs shown in attached images, from either a stored screen or the video. */
+    val visualMoments: Map<Int, Set<String>> get() = images.flatMap { it.visualMoments.entries }
+        .groupBy({ it.key }, { it.value }).mapValues { (_, moments) -> moments.flatten().toSet() }
+
     /** Where the pictures came from: the recorded video, stored screenshots, or both. */
     val source: RewriteEvidenceSource
         get() {
@@ -261,7 +274,10 @@ private fun screenshotEvidence(
     val images = shots.mapIndexed { index, shot ->
         val label = shot.uses.joinToString(", ") { (number, moment) -> "input $number $moment" }
         shot.uses.forEach { (number, moment) -> refs.getOrPut(number, ::ArrayList) += "Image ${index + 1} ($moment)" }
-        RewriteImage(label, shot.uses.map { it.first }.distinct(), shot.evidence.jpeg, JPEG_MIME, storedScreens = 1)
+        RewriteImage(
+            label, shot.uses.map { it.first }.distinct(), shot.evidence.jpeg, JPEG_MIME, storedScreens = 1,
+            visualMoments = shot.uses.groupBy({ it.first }, { it.second }).mapValues { (_, moments) -> moments.toSet() },
+        )
     }
     return RewriteEvidence(
         RewriteEvidenceKind.SCREENSHOTS, images, emptyList(), refs.mapValues { it.value.joinToString(", ") }, screenText, withheld, cautions,
@@ -309,13 +325,19 @@ private fun sheetFor(group: List<ShownInput>, pairs: Boolean, video: RewriteVide
     val clip = if (video != null && end - start <= REWRITE_VIDEO_MAX_RANGE_MS) video.sheet(start, end) else null
     if (clip != null) {
         val label = "video storyboard around input(s) $ranges: decoded frames in time order, captioned with their actual times and input numbers"
-        return RewriteImage(label, numbers, clip.bytes, clip.mimeType, videoFrames = 1)
+        return RewriteImage(
+            label, numbers, clip.bytes, clip.mimeType, videoFrames = 1,
+            videoMoments = clip.visualMoments, visualMoments = clip.visualMoments,
+        )
     }
-    val cells = group.flatMap { item -> sheetCells(item, pairs) }
+    val cells = group.flatMap { item -> sheetCells(item, pairs).map { cell -> item.input.number to cell } }
     if (cells.isEmpty()) return null
     val what = if (pairs) "the screen before, then after, each input" else "the screen after each input (before it when none was kept)"
     val label = "contact sheet of input(s) $ranges: $what, left to right then top to bottom, captioned with the input number"
-    return encodeSheet(cells)?.let { RewriteImage(label, numbers, it, JPEG_MIME, storedScreens = cells.size) }
+    val moments = cells.groupBy({ it.first }, { it.second.relation }).mapValues { (_, values) -> values.toSet() }
+    return encodeSheet(cells.map { it.second })?.let {
+        RewriteImage(label, numbers, it, JPEG_MIME, storedScreens = cells.size, visualMoments = moments)
+    }
 }
 
 private fun sheetCells(item: ShownInput, pairs: Boolean): List<ContactSheetCell> {

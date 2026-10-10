@@ -174,6 +174,27 @@ class TestSuiteToolsGatewayTest {
     }
 
     @Test
+    fun stepIntentAndPreconditionRoundTripThroughMcpAndPreconditionCanBeCleared() {
+        val suite = suiteNamed("Playback intent")
+        val case = caseIn(suite.id(), "Playback")
+        val created = stepIn(
+            case.id(), "Ensure the video is paused",
+            "expected" to "Playback is paused", "intent" to "ensure_state", "precondition" to "Playback is active",
+        )
+
+        assertEquals("ensure_state", created["intent"])
+        assertEquals("Playback is active", created["precondition"])
+        val stored = getSuite(suite.id()).list("cases").single().list("steps").single()
+        assertEquals("ensure_state", stored["intent"])
+        assertEquals("Playback is active", stored["precondition"])
+
+        val cleared = assertOk(call("update_test_step", "stepId" to created.id(), "precondition" to null))
+        assertFalse(cleared.containsKey("precondition"), "cleared optional fields are omitted from the response")
+        assertNull(getSuite(suite.id()).list("cases").single().list("steps").single()["precondition"])
+        assertEquals("ensure_state", cleared["intent"], "an omitted intent is preserved")
+    }
+
+    @Test
     fun updateAndDuplicateAndDeleteAcrossTheHierarchy() {
         val suite = suiteNamed("Alpha")
         val case = caseIn(suite.id(), "Login")
@@ -783,7 +804,10 @@ class TestSuiteToolsGatewayTest {
         fun schemaText(tool: String) =
             kotlinx.serialization.json.Json.encodeToString(ToolSchema.serializer(), operations.toolGateway.tools.single { it.name == tool }.schema)
         val step = schemaText("create_test_step")
-        listOf("logAppears", "screenJudge", "scriptResult", "askJudge", "goldenScreenshot", "referenceLog", "STOP_CASE", "PAUSE_FOR_USER").forEach {
+        listOf(
+            "logAppears", "screenJudge", "scriptResult", "askJudge", "goldenScreenshot",
+            "referenceLog", "STOP_CASE", "PAUSE_FOR_USER", "ensure_state", "perform_action",
+        ).forEach {
             assertTrue(step.contains("\"$it\""), "create_test_step schema should list $it")
         }
         assertTrue(step.contains("\"required\":[\"caseId\",\"action\"]"))
@@ -797,6 +821,7 @@ class TestSuiteToolsGatewayTest {
         listOf("preconditions", "setup", "teardown").forEach { assertTrue(schemaText("create_test_case").contains("\"$it\"")) }
         assertTrue(schemaText("create_test_case").contains("sharedStepId"), "case hooks use the hook item schema")
         assertTrue(schemaText("update_test_step").contains("\"maxToolCalls\""))
+        assertTrue(step.contains("\"precondition\""))
         assertEquals(56, TEST_SUITE_MCP_TOOLS.size)
         assertFalse(TEST_SUITE_MCP_TOOLS.any { it.name.startsWith("run_") }, "run tools belong to a later phase")
         val names = TEST_SUITE_MCP_TOOLS.map { it.name }.toSet()

@@ -15,6 +15,7 @@ import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
@@ -128,6 +129,17 @@ class TestRunStoreTest {
         assertEquals(run, loaded)
         val text = File(store.runDir(run.id), TEST_RUN_FILE_NAME).readText()
         assertEquals("indagium-test-run", Json.parseToJsonElement(text).jsonObject["format"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+    }
+
+    @Test
+    fun aRunSnapshotKeepsPlaybackIntentAndPrecondition() {
+        val base = sampleRun()
+        val case = base.suite.cases.first()
+        val step = case.steps.first().copy(intent = StepIntent.ENSURE_STATE, precondition = "Playback is active")
+        val suite = base.suite.copy(cases = listOf(case.copy(steps = listOf(step) + case.steps.drop(1))) + base.suite.cases.drop(1))
+        val run = base.copy(suite = suite)
+
+        assertEquals(run, decodeRunFile(encodeRunFile(run)).getOrThrow())
     }
 
     @Test

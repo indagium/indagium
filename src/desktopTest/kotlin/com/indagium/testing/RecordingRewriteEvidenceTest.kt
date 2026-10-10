@@ -155,7 +155,7 @@ class RecordingRewriteEvidenceTest {
         val marker = byteArrayOf(1, 2, 3)
         val video = RewriteVideoSheets { start, end ->
             asked += start to end
-            if (asked.size == 1) RewriteVideoSheet(marker, "image/png") else null
+            if (asked.size == 1) RewriteVideoSheet(marker, "image/png", mapOf(1 to setOf("before"), 2 to setOf("after"))) else null
         }
 
         val evidence = buildRewriteEvidence(inputs, video)
@@ -165,6 +165,7 @@ class RecordingRewriteEvidenceTest {
         assertEquals(marker.toList(), evidence.images[0].bytes.toList())
         assertEquals("image/png", evidence.images[0].mimeType)
         assertTrue(evidence.images[0].label.startsWith("video storyboard"), evidence.images[0].label)
+        assertEquals(mapOf(1 to setOf("before"), 2 to setOf("after")), evidence.videoMoments)
         assertTrue(evidence.images[1].label.startsWith("contact sheet"), "a group the video cannot show gets a composed sheet")
         assertEquals((1..12).toList(), evidence.images.flatMap { it.inputs })
         assertEquals(4, asked.size)
