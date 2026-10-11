@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
@@ -151,6 +152,35 @@ fun HoverBox(
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         content = content,
     )
+}
+
+// ── Text-input focus reporting ───────────────────────────────────────
+// A host (the Tests workspace) that routes bare keys such as ↑/↓ to its current screen must not do so while the user is
+// typing. Compose offers no "is a text field focused" query, so the shared text inputs below report their focus to
+// whichever tracker the host provides through [LocalTextInputFocusTracker] (null elsewhere: a no-op).
+
+/** The set of text inputs that currently hold focus (UI thread only). */
+internal class TextInputFocusTracker {
+    private val focused = HashSet<Any>()
+
+    /** True while at least one reporting text input has focus. */
+    val anyFocused: Boolean get() = focused.isNotEmpty()
+
+    fun update(owner: Any, hasFocus: Boolean) {
+        if (hasFocus) focused += owner else focused -= owner
+    }
+}
+
+internal val LocalTextInputFocusTracker = staticCompositionLocalOf<TextInputFocusTracker?> { null }
+
+/** A modifier for a text input that reports its focus to [LocalTextInputFocusTracker]; does nothing without one. */
+@Composable
+internal fun textInputFocusReporter(): Modifier {
+    val tracker = LocalTextInputFocusTracker.current ?: return Modifier
+    val owner = remember { Any() }
+    // A field removed while focused never sees its focus-lost callback.
+    DisposableEffect(tracker, owner) { onDispose { tracker.update(owner, false) } }
+    return Modifier.onFocusChanged { tracker.update(owner, it.hasFocus) }
 }
 
 // ── Resizable dividers ───────────────────────────────────────────────
@@ -781,6 +811,7 @@ fun InlineField(
     searchStyleClear: Boolean = false,
 ) {
     val tc = tc()
+    val focusReporter = textInputFocusReporter()
     BasicTextField(
         value = value, onValueChange = onValue,
         visualTransformation = visualTransformation,
@@ -790,6 +821,7 @@ fun InlineField(
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
         modifier = modifier
+            .then(focusReporter)
             .onPreviewKeyEvent { event ->
                 if (onCancel != null && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
                     onCancel()
@@ -858,6 +890,7 @@ fun InlineField(
 ) {
     val tc = tc()
     val text = value.text
+    val focusReporter = textInputFocusReporter()
     BasicTextField(
         value = value, onValueChange = onValue,
         visualTransformation = visualTransformation,
@@ -867,6 +900,7 @@ fun InlineField(
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
         modifier = modifier
+            .then(focusReporter)
             .onPreviewKeyEvent { event ->
                 if (onCancel != null && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
                     onCancel()
@@ -942,6 +976,7 @@ fun ScrollableTextArea(
 ) {
     val tc = tc()
     val density = LocalDensity.current
+    val focusReporter = textInputFocusReporter()
     val scroll = rememberScrollState()
     var fieldHeightPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
@@ -981,6 +1016,7 @@ fun ScrollableTextArea(
             // short text still lands at its own natural height. A fillMaxSize here (as
             // AiPromptComposer uses inside its fixed-height editor) would pin it at maxHeight.
             modifier = modifier
+                .then(focusReporter)
                 .heightIn(min = minHeight, max = maxHeight)
                 .onSizeChanged { fieldHeightPx = it.height }
                 .background(tc.bg, shape)

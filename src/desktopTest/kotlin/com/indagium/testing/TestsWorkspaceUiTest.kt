@@ -1,18 +1,25 @@
 package com.indagium.testing
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
+import androidx.compose.ui.unit.dp
 import com.indagium.edition.Edition
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.encodeSuiteFile
@@ -62,7 +69,7 @@ class TestsWorkspaceUiTest {
         rule.setContent { TestsWorkspace(state) }
 
         rule.onNodeWithText("No test suites yet. A suite groups the cases an AI agent runs against your app.").assertExists()
-        rule.onAllNodesWithText("New suite")[0].performClick()
+        rule.onNodeWithContentDescription("New suite").performClick()
         rule.waitForIdle()
 
         assertEquals(listOf("New suite"), state.testLibrary.suites.map { it.name })
@@ -124,7 +131,8 @@ class TestsWorkspaceUiTest {
         assertEquals(TestsNav.AgentExamples, state.testsView.nav)
         rule.onNodeWithText("No step examples yet. Add a golden screenshot or reference log in a step editor.").assertExists()
 
-        rule.onNodeWithText("Agent profiles").performClick()
+        rule.onNodeWithContentDescription("More suite actions").performClick()
+        rule.onNodeWithText("Agent profiles…").performClick()
         rule.waitForIdle()
         assertTrue(state.settingsOpen)
         assertEquals(com.indagium.ui.SettingsSection.AiProviders, state.requestedSettingsSection)
@@ -197,7 +205,7 @@ class TestsWorkspaceUiTest {
         assertTrue(state.editionService.setForDev(Edition.FREE))
         rule.setContent { TestsWorkspace(state) }
 
-        assertButtonDisabled("New suite")
+        rule.onNodeWithContentDescription("New suite").assertIsNotEnabled()
         rule.onAllNodesWithText("Second")[0].performClick()
         rule.waitForIdle()
 
@@ -213,5 +221,129 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Delete suite?").assertExists()
         rule.onAllNodesWithText("Delete")[1].performClick()
         rule.waitUntil(timeoutMillis = 5_000) { state.testLibrary.suite(second.id) == null }
+    }
+
+    /** The nodes with [text] inside the nav column (the centre screen can show the same names, e.g. a suite's case table). */
+    private fun navNodes(text: String) =
+        rule.onAllNodesWithText(text).fetchSemanticsNodes().filter { it.boundsInRoot.right <= state.testsView.navWidthDp }
+
+    private fun clickNav(text: String) {
+        val index = rule.onAllNodesWithText(text).fetchSemanticsNodes().indexOfFirst { it.boundsInRoot.right <= state.testsView.navWidthDp }
+        assertTrue(index >= 0, "$text should be in the nav")
+        rule.onAllNodesWithText(text)[index].performClick()
+    }
+
+    private fun libraryWithTwoSuites(): Triple<String, String, String> {
+        val alpha = (state.createTestSuite("Alpha") as StoreResult.Ok).value
+        val beta = (state.createTestSuite("Beta") as StoreResult.Ok).value
+        state.createTestCase(alpha.id, TestCase("", "Login flow"))
+        state.createTestCase(alpha.id, TestCase("", "Checkout"))
+        val tour = (state.createTestCase(beta.id, TestCase("", "Settings tour")) as StoreResult.Ok).value
+        return Triple(alpha.id, beta.id, tour.id)
+    }
+
+    @Test
+    fun expandingASuiteInTheTreeShowsItsCasesAndOpeningOneShowsTheCaseScreen() {
+        val (alphaId, betaId, tourId) = libraryWithTwoSuites()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        // The suite the workspace is on opens itself; the other stays collapsed.
+        assertTrue(navNodes("Login flow").isNotEmpty())
+        assertTrue(navNodes("Checkout").isNotEmpty())
+        assertTrue(navNodes("Settings tour").isEmpty())
+        assertTrue(alphaId in state.testsView.expandedSuiteIds)
+
+        rule.onNodeWithContentDescription("Expand Beta").performClick()
+        rule.waitForIdle()
+        assertTrue(navNodes("Settings tour").isNotEmpty())
+        assertTrue(betaId in state.testsView.expandedSuiteIds)
+        assertEquals(null, state.testsView.selectedCaseId, "the caret only expands, it does not open the suite")
+
+        clickNav("Settings tour")
+        rule.waitForIdle()
+        assertEquals(betaId, state.testsView.selectedSuiteId)
+        assertEquals(tourId, state.testsView.selectedCaseId)
+        rule.onNodeWithText("Case name").assertExists()
+
+        rule.onNodeWithContentDescription("Collapse Beta").performClick()
+        rule.waitForIdle()
+        assertTrue(navNodes("Settings tour").isEmpty())
+    }
+
+    @Test
+    fun theSearchFindsACaseUnderItsSuiteAndOpensIt() {
+        val (_, betaId, tourId) = libraryWithTwoSuites()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+        assertTrue(navNodes("Settings tour").isEmpty())
+
+        state.testsView.search = "tour"
+        rule.waitForIdle()
+        // Beta is collapsed, yet the matching case shows (its suite opens for the search); other cases are filtered out.
+        assertTrue(navNodes("Settings tour").isNotEmpty())
+        assertTrue(navNodes("Checkout").isEmpty())
+        clickNav("Settings tour")
+        rule.waitForIdle()
+        assertEquals(betaId, state.testsView.selectedSuiteId)
+        assertEquals(tourId, state.testsView.selectedCaseId)
+
+        state.testsView.search = "nothing like this"
+        rule.waitForIdle()
+        rule.onNodeWithText("No suite or case matches the search.").assertExists()
+    }
+
+    @Test
+    fun thePlusButtonCreatesAndOpensASuiteInAnExistingLibrary() {
+        libraryWithTwoSuites()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        rule.onNodeWithContentDescription("New suite").assertIsEnabled().performClick()
+        rule.waitForIdle()
+
+        val created = state.testLibrary.suites.last()
+        assertEquals("New suite", created.name)
+        assertEquals(created.id, state.testsView.selectedSuiteId)
+        assertEquals(TestsNav.Suites, state.testsView.nav)
+    }
+
+    @Test
+    fun theSuitesMenuOffersImportAndAgentProfiles() {
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        rule.onNodeWithText("Import suite…").assertDoesNotExist()
+        rule.onNodeWithContentDescription("More suite actions").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Import suite…").assertExists()
+        rule.onNodeWithText("Agent profiles…").assertExists()
+    }
+
+    @Test
+    fun theEditionBadgeAndCaseCountLiveInTheNavFooter() {
+        libraryWithTwoSuites()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        rule.onNodeWithText(state.editionService.current.value.label).assertExists()
+        rule.onNodeWithText("3 cases").assertExists()
+        rule.onNodeWithText("AI test suites").assertDoesNotExist()
+    }
+
+    @Test
+    fun aNarrowWindowHidesTheTreeBehindAToggleAndClosesItAfterAChoice() {
+        rule.setContent { Box(Modifier.size(500.dp, 700.dp)) { TestsWorkspace(state) } }
+        rule.waitForIdle()
+        rule.onNodeWithText("Scripts").assertDoesNotExist()
+
+        rule.onNodeWithContentDescription("Show navigation").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Scripts").assertExists()
+        rule.onNodeWithText("Scripts").performClick()
+        rule.waitForIdle()
+
+        assertEquals(TestsNav.Scripts, state.testsView.nav)
+        rule.onNodeWithText("Shared steps").assertDoesNotExist()
     }
 }
