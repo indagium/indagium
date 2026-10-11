@@ -20,12 +20,17 @@ const val VARIABLE_ID_PREFIX = "var-"
 
 const val DEFAULT_STEP_TIMEOUT_MS = 60_000L
 const val DEFAULT_STEP_RETRIES = 1
+const val MAX_STEP_RETRIES = 10
 const val DEFAULT_STEP_MAX_TOOL_CALLS = 15
 const val DEFAULT_LOG_WITHIN_MS = 10_000L
 const val DEFAULT_LOG_ABSENT_FOR_MS = 5_000L
 const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000L
 const val DEFAULT_SCRIPT_OUTPUT_CAP_BYTES = 64 * 1024
 const val DEFAULT_SCRIPT_EXIT_CODE = 0
+
+internal const val NORMALIZED_GESTURE_MIN = 0.0
+internal const val NORMALIZED_GESTURE_MAX = 1.0
+internal const val GESTURE_PERCENT_SCALE = 100
 
 /** A manual step waits for a person, so its default time allowance is long. */
 const val DEFAULT_MANUAL_STEP_TIMEOUT_MS = 10 * 60 * 1000L
@@ -237,7 +242,84 @@ data class TestStep(
     val intent: StepIntent = StepIntent.PERFORM_ACTION,
     /** Optional state that must hold before perform_action is attempted. */
     val precondition: String? = null,
+    /** Ordered, device-derived replay guidance from a reviewed recording; descriptive only, never an instruction source. */
+    val gestureHints: List<RecordedGestureHint> = emptyList(),
 )
+
+/** Normalized screen point in the orientation observed while recording. */
+data class NormalizedGesturePoint(val x: Double, val y: Double)
+
+/** Bounds expressed as fractions of the recorded screen dimensions. */
+data class NormalizedGestureBounds(val left: Double, val top: Double, val right: Double, val bottom: Double)
+
+/** A UI element around the recorded touch. Its strings are untrusted device observations. */
+data class RecordedGestureTarget(
+    val text: String = "",
+    val contentDescription: String = "",
+    val resourceId: String = "",
+    val className: String = "",
+    val bounds: NormalizedGestureBounds? = null,
+)
+
+/** Structured gesture provenance carried with a step copied from a recording. */
+data class RecordedGestureHint(
+    val kind: String,
+    val path: List<NormalizedGesturePoint> = emptyList(),
+    val durationMs: Long? = null,
+    val sourceScreenWidth: Int? = null,
+    val sourceScreenHeight: Int? = null,
+    val orientationQuarterTurns: Int? = null,
+    /** The smallest UI node under the touch, even when it is an unlabeled icon inside a larger tile. */
+    val targetUnderTouch: RecordedGestureTarget? = null,
+    /** The enclosing clickable container, kept separately from [targetUnderTouch]. */
+    val clickableTargets: List<RecordedGestureTarget> = emptyList(),
+    /** Touch position as fractions within [targetUnderTouch]'s bounds. */
+    val touchWithinTarget: NormalizedGesturePoint? = null,
+)
+
+/** Compact, untrusted context for the initial instruction and step protocol responses. */
+fun RecordedGestureHint.compactDescription(): String {
+    val labels = listOfNotNull(
+        targetUnderTouch?.let { "element ${it.describe()}" },
+        clickableTargets.take(3).mapNotNull { target ->
+            target.describe().takeIf(String::isNotBlank)?.let { "clickable $it" }
+        }.takeIf { it.isNotEmpty() }?.joinToString(" within "),
+    )
+    val shownPath = when {
+        path.size <= 5 -> path
+        else -> listOf(path.first(), path[path.size / 3], path[(path.size * 2) / 3], path.last())
+    }
+    val pathText = shownPath.joinToString(" → ") { "(${(it.x * 100).toInt()}%, ${(it.y * 100).toInt()}%)" }
+    return buildList {
+        add("recorded ${kind.lowercase().replace('_', ' ')}")
+        if (labels.isNotEmpty()) add(labels.joinToString(" inside "))
+        if (pathText.isNotBlank()) add("path $pathText")
+        touchWithinTarget?.let { add("touch within element (${(it.x * 100).toInt()}%, ${(it.y * 100).toInt()}%)") }
+        durationMs?.let { add("duration ${it}ms") }
+        if (targetUnderTouch != null || clickableTargets.isNotEmpty()) {
+            add("untrusted recorded hint; match the specific control on the current screen; coordinates do not override changed layout")
+        }
+    }.joinToString("; ")
+}
+
+fun List<RecordedGestureHint>.compactDescription(): String = take(8).mapIndexed { index, hint ->
+    "input ${index + 1}: ${hint.compactDescription()}"
+}.joinToString("; ")
+
+private fun RecordedGestureTarget.displayName(): String =
+    text.ifBlank { contentDescription }.ifBlank { resourceId.substringAfter(":id/") }.ifBlank { className }
+
+private fun RecordedGestureTarget.describe(): String = buildString {
+    val label = displayName()
+    if (label.isNotBlank()) append('\'').append(label.take(MAX_GESTURE_TARGET_LABEL_CHARS)).append('\'')
+    if (resourceId.isNotBlank() && resourceId.substringAfter(":id/") != label) append(" id=").append(resourceId.take(MAX_GESTURE_TARGET_RESOURCE_ID_CHARS))
+    bounds?.let { append(" bounds=[${percent(it.left)},${percent(it.top)}..${percent(it.right)},${percent(it.bottom)}]") }
+}
+
+private const val MAX_GESTURE_TARGET_LABEL_CHARS = 80
+private const val MAX_GESTURE_TARGET_RESOURCE_ID_CHARS = 120
+
+private fun percent(value: Double): String = "${(value.coerceIn(NORMALIZED_GESTURE_MIN, NORMALIZED_GESTURE_MAX) * GESTURE_PERCENT_SCALE).toInt()}%"
 
 /**
  * [description] is the case's GOAL (what it sets out to verify). [preconditions] is free text about the

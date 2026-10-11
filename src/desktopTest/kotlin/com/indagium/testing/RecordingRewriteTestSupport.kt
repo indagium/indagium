@@ -3,6 +3,7 @@
 package com.indagium.testing
 
 import com.indagium.capture.mirror.MirrorControlCommand
+import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.authoring.RecordingScreenState
@@ -12,8 +13,11 @@ import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import kotlinx.coroutines.runBlocking
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import javax.imageio.ImageIO
 import kotlin.test.assertNotNull
 
 // A synthetic recording for the rewrite tests: a shop app where the person taps "Search", types a query and presses Enter. The
@@ -22,8 +26,16 @@ import kotlin.test.assertNotNull
 internal const val SHOP_SUITE_ID = "suite-1"
 internal const val SHOP_CASE_ID = "case-1"
 internal const val SHOP_PACKAGE = "com.example.shop"
-internal val SHOP_BEFORE_IMAGE = byteArrayOf(-1, -40, 1, 1, 1)
-internal val SHOP_AFTER_IMAGE = byteArrayOf(-1, -40, 2, 2, 2)
+
+private fun shopJpeg(color: Int): ByteArray = ByteArrayOutputStream().use { output ->
+    val image = BufferedImage(2, 2, BufferedImage.TYPE_INT_RGB)
+    repeat(4) { index -> image.setRGB(index % 2, index / 2, color) }
+    check(ImageIO.write(image, "jpg", output))
+    output.toByteArray()
+}
+
+internal val SHOP_BEFORE_IMAGE = shopJpeg(0x4477aa)
+internal val SHOP_AFTER_IMAGE = shopJpeg(0xaa7744)
 
 internal fun shopLibrary(readOnly: Boolean = false) = TestLibrary(
     suites = listOf(
@@ -52,7 +64,8 @@ internal fun shopState(
     activity: String,
     image: ByteArray?,
     vararg nodes: UiNode,
-) = RecordingScreenState(0, start, finish, SHOP_PACKAGE, activity, nodes.toList(), 1000, 2000, image)
+    rotation: Int? = null,
+) = RecordingScreenState(0, start, finish, SHOP_PACKAGE, activity, nodes.toList(), 1000, 2000, image, rotation = rotation)
 
 /** Hands out [states] in call order (the last repeats), so the start probe is the first and the probe after stopping the second. */
 internal class ScriptedRecordingProbe(private val states: List<RecordingScreenState?>) {
@@ -75,15 +88,22 @@ private fun awaitState(session: TestStepRecordingSession, seq: Int) {
  * screen shows a focused password field and the text comes first, so it is hidden. Input 1 has a before screen, input 3 an after screen
  * (none of them without [images]).
  */
-internal fun recordedShopSession(typed: String = "lofi", passwordField: Boolean = false, images: Boolean = true): TestStepRecordingSession {
+internal fun recordedShopSession(
+    typed: String = "lofi",
+    passwordField: Boolean = false,
+    images: Boolean = true,
+    targetLabel: String = "Search",
+    tapFrame: MirrorFrame? = null,
+    rotation: Int? = null,
+): TestStepRecordingSession {
     val field = shopNode(
         100, 400, 900, 500, resourceId = "$SHOP_PACKAGE:id/query", className = "android.widget.EditText", password = passwordField, focused = true,
     )
-    val search = shopNode(500, 550, 700, 700, text = "Search", resourceId = "$SHOP_PACKAGE:id/search_button", className = "android.widget.Button")
+    val search = shopNode(500, 550, 700, 700, text = targetLabel, resourceId = "$SHOP_PACKAGE:id/search_button", className = "android.widget.Button")
     val results = if (passwordField) "Signed in" else "Results for $typed"
     val probe = ScriptedRecordingProbe(
         listOf(
-            shopState(0, 50, ".HomeActivity", SHOP_BEFORE_IMAGE.takeIf { images }, search, field),
+            shopState(0, 50, ".HomeActivity", SHOP_BEFORE_IMAGE.takeIf { images }, search, field, rotation = rotation),
             shopState(10_000, 10_100, ".ResultsActivity", SHOP_AFTER_IMAGE.takeIf { images }, shopNode(0, 100, 900, 200, text = results)),
         ),
     )
@@ -92,7 +112,7 @@ internal fun recordedShopSession(typed: String = "lofi", passwordField: Boolean 
     // Only the start probe is a "before" state, so a hidden password has to be typed first for the recorder to see its field.
     if (passwordField) session.accept(MirrorControlCommand.Text(typed), nowMs = 1_000)
     session.accept(touch(MirrorTouchAction.DOWN, 54, 62), nowMs = 1_500)
-    session.accept(touch(MirrorTouchAction.UP, 54, 62), nowMs = 1_540)
+    session.accept(touch(MirrorTouchAction.UP, 54, 62), tapFrame, nowMs = 1_540)
     if (!passwordField) session.accept(MirrorControlCommand.Text(typed), nowMs = 2_000)
     session.accept(MirrorControlCommand.Key(MirrorKeyAction.DOWN, 66), nowMs = 3_000)
     runBlocking { session.stopAndDrain() }

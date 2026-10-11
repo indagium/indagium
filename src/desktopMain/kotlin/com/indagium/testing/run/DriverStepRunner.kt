@@ -68,7 +68,7 @@ internal class DriverStepRunner(
     private suspend fun performScriptStep(step: TestStep) {
         val call = step.script
         if (call == null) {
-            seq.failDriverStep(DriverReport(LaneStepStatus.BLOCKED, "The step has no script.", null), StepStatus.ERROR)
+            seq.failDriverStep(DriverReport(LaneStepStatus.BLOCKED, "The step has no script.", null, retryable = false), StepStatus.ERROR)
             return
         }
         val ran = runScript(step, call)
@@ -81,11 +81,11 @@ internal class DriverStepRunner(
     }
 
     /** How a script run ended for the step: [claim] is PASS only when it ran and met every expectation. */
-    private class ScriptOutcome(val claim: LaneStepStatus, val summary: String) {
+    private class ScriptOutcome(val claim: LaneStepStatus, val summary: String, val retryable: Boolean = true) {
         fun report(label: String): DriverReport {
             val passed = claim == LaneStepStatus.PASS
             // A script that did not do its job leaves nothing to check: skip the checks' waiting windows.
-            return DriverReport(claim, "$label: $summary", StepCompletion.SCRIPT, checks = if (passed) null else emptyList())
+            return DriverReport(claim, "$label: $summary", StepCompletion.SCRIPT, checks = if (passed) null else emptyList(), retryable = retryable)
         }
     }
 
@@ -95,12 +95,12 @@ internal class DriverStepRunner(
      */
     private suspend fun runScript(step: TestStep, call: ScriptCall): ScriptOutcome? {
         val script = env.scripts.firstOrNull { it.id == call.scriptId }
-            ?: return ScriptOutcome(LaneStepStatus.BLOCKED, "script '${call.scriptId}' is not in the library.")
+            ?: return ScriptOutcome(LaneStepStatus.BLOCKED, "script '${call.scriptId}' is not in the library.", retryable = false)
         if (script.permission == ScriptPermission.SETUP_TEARDOWN_ONLY) {
-            return ScriptOutcome(LaneStepStatus.BLOCKED, "script '${script.toolName}' is limited to setup and teardown hooks.")
+            return ScriptOutcome(LaneStepStatus.BLOCKED, "script '${script.toolName}' is limited to setup and teardown hooks.", retryable = false)
         }
         if (script.permission == ScriptPermission.ASK && !confirmed(script)) {
-            return ScriptOutcome(LaneStepStatus.BLOCKED, "running '${script.toolName}' was not allowed (declined, or not answered in time).")
+            return ScriptOutcome(LaneStepStatus.BLOCKED, "running '${script.toolName}' was not allowed (declined, or not answered in time).", retryable = false)
         }
         // Consent can take an arbitrary amount of time. Start the step's single action/check
         // allowance immediately before the script; finishDriverStep keeps its remaining time.
@@ -115,7 +115,7 @@ internal class DriverStepRunner(
         val adb = if (script.target == ScriptTarget.ADB_SHELL) env.session.adbTarget() else null
         env.transcript?.append("driver_script_started", mapOf("step" to step.id, "script" to script.toolName))
         return when (val outcome = env.scriptRunner.run(script, call.args, seq.scriptContext(), adb)) {
-            is ScriptRunOutcome.Rejected -> ScriptOutcome(LaneStepStatus.FAIL, "'${script.toolName}' could not run: ${outcome.message}")
+            is ScriptRunOutcome.Rejected -> ScriptOutcome(LaneStepStatus.FAIL, "'${script.toolName}' could not run: ${outcome.message}", retryable = false)
             is ScriptRunOutcome.Finished -> judgeScript(script, call, outcome.result)
         }
     }

@@ -43,6 +43,10 @@ private const val MAX_SCRIPT_ARGS = 20
 private const val MAX_SCRIPT_ARG_CHARS = 500
 private const val SCREEN_REF_PREFIX = "after-of-input-"
 private const val STEPS_KEY = "steps"
+private const val MAX_RECORDED_TARGET_LABEL_CHARS = 80
+private const val MAX_RECORDED_TARGET_ID_CHARS = 120
+private const val MAX_RECORDED_TARGET_PREVIEW_CHARS = 400
+private const val TARGET_PERCENT_SCALE = 100
 
 /** What a finished rewrite hands back: the rows now in the session and what the AI said about its choices. */
 data class RecordingRewrite(
@@ -625,6 +629,7 @@ private const val MAX_ACTION_CHARS = 300
  * shown (it adds the screens and which images exist); HINT is what the runner of the finished step keeps. [extra] is appended to the
  * line of a recorded input (the screen text and the image references of [RewriteEvidence.lineExtra]).
  */
+@Suppress("CyclomaticComplexMethod") // One row deliberately preserves ordered action, target, timing, and screen provenance.
 internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: RewriteEvidenceIds? = null, extra: String = ""): String = buildString {
     if (appendPreservedRewriteGroup(mode, this@describe)) return@buildString
     append(number).append(". ")
@@ -646,6 +651,23 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
         if (id.isNotBlank()) append(" id=").append(id)
         if (element.className.isNotBlank()) append(" class=").append(element.className.substringAfterLast('.'))
     }
+    row.targetUnderTouch?.let { target ->
+        append(" | exact node under touch: ").append(recordedTargetText(target, row.targetScreenWidth, row.targetScreenHeight))
+        row.touchWithinTarget?.let {
+            append(" | touch within node: ").append((it.x * TARGET_PERCENT_SCALE).toInt())
+                .append("%,").append((it.y * TARGET_PERCENT_SCALE).toInt()).append('%')
+        }
+    }
+    if (row.clickableTargets.isNotEmpty()) {
+        append(" | enclosing clickable nodes, nearest first: ")
+        append(row.clickableTargets.take(3).joinToString(" > ") { recordedTargetText(it, row.targetScreenWidth, row.targetScreenHeight) })
+    }
+    val gesturePoints = row.gesturePath.mapNotNull { point ->
+        if (point.screenWidth <= 0 || point.screenHeight <= 0) null else
+            "(${point.x * TARGET_PERCENT_SCALE / point.screenWidth}%,${point.y * TARGET_PERCENT_SCALE / point.screenHeight}%)"
+    }
+    if (gesturePoints.isNotEmpty()) append(" | normalized path: ").append(gesturePoints.take(10).joinToString("->"))
+    row.targetOrientationQuarterTurns?.let { append(" | source orientation quarter turns: ").append(it) }
     if (row.kind == RecordedInputKind.LONG_PRESS) row.durationMs?.let { append(" | held ").append(it).append(" ms") }
     nextInputStartMs?.let { next ->
         val gap = (next - row.inputAtMs).coerceAtLeast(0L)
@@ -659,6 +681,17 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     if (mode == RewriteDescription.BRIEF) appendBriefDetails(this@describe, evidenceIds)
     append(extra)
 }
+
+private fun recordedTargetText(target: RecordedUiTarget, width: Int?, height: Int?): String = buildString {
+    if (target.text.isNotBlank()) append("text=\"").append(target.text.take(MAX_RECORDED_TARGET_LABEL_CHARS)).append('"')
+    if (target.contentDesc.isNotBlank()) append(" desc=\"").append(target.contentDesc.take(MAX_RECORDED_TARGET_LABEL_CHARS)).append('"')
+    if (target.resourceId.isNotBlank()) append(" id=").append(target.resourceId.take(MAX_RECORDED_TARGET_ID_CHARS))
+    if (target.className.isNotBlank()) append(" class=").append(target.className.take(MAX_RECORDED_TARGET_LABEL_CHARS))
+    if (width != null && height != null && width > 0 && height > 0) {
+        append(" bounds=[").append(target.left * TARGET_PERCENT_SCALE / width).append("%,").append(target.top * TARGET_PERCENT_SCALE / height)
+        append("%..").append(target.right * TARGET_PERCENT_SCALE / width).append("%,").append(target.bottom * TARGET_PERCENT_SCALE / height).append("%]")
+    }
+}.take(MAX_RECORDED_TARGET_PREVIEW_CHARS)
 
 private fun StringBuilder.appendPreservedRewriteGroup(mode: RewriteDescription, input: RewriteInput): Boolean {
     val group = input.locked?.takeIf { mode == RewriteDescription.BRIEF } ?: return false

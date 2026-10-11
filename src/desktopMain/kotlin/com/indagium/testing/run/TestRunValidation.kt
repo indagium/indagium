@@ -163,11 +163,7 @@ internal fun validateRun(
     var refusal: LimitDecision.Refused? = null
     val suite = library.suite(config.suiteId)
     if (suite == null) errors += "Suite '${config.suiteId}' was not found."
-    if (config.repeat !in ALLOWED_RUN_REPEATS) errors += "repeat must be one of ${ALLOWED_RUN_REPEATS.joinToString(", ")}."
-    if (config.caseToolCallLimit !in MIN_CASE_TOOL_CALL_LIMIT..MAX_CASE_TOOL_CALL_LIMIT) {
-        errors += "caseToolCallLimit must be between $MIN_CASE_TOOL_CALL_LIMIT and $MAX_CASE_TOOL_CALL_LIMIT."
-    }
-    if (config.confirmationTimeoutMs <= 0) errors += "The confirmation timeout must be positive."
+    errors += runScalarProblems(config)
     var plan = CasePlan(emptyList(), emptyList())
     if (suite != null) {
         when (val decision = decide(library, LimitOperation.RunSuite(suite.id), limits)) {
@@ -197,6 +193,18 @@ internal fun validateRun(
         errors += "Step '${config.stopAfterStepId}' is not in any of the cases to run."
     }
     return RunValidation(suite, plan, errors, warnings, refusal)
+}
+
+private fun runScalarProblems(config: RunConfig): List<String> = buildList {
+    if (config.repeat !in ALLOWED_RUN_REPEATS) add("repeat must be one of ${ALLOWED_RUN_REPEATS.joinToString(", ")}.")
+    if (config.caseRetries !in 0..2) add("caseRetries must be between 0 and 2.")
+    if (config.stepRetriesOverride?.let { it !in 0..com.indagium.testing.model.MAX_STEP_RETRIES } == true) {
+        add("stepRetriesOverride must be between 0 and ${com.indagium.testing.model.MAX_STEP_RETRIES}.")
+    }
+    if (config.caseToolCallLimit !in MIN_CASE_TOOL_CALL_LIMIT..MAX_CASE_TOOL_CALL_LIMIT) {
+        add("caseToolCallLimit must be between $MIN_CASE_TOOL_CALL_LIMIT and $MAX_CASE_TOOL_CALL_LIMIT.")
+    }
+    if (config.confirmationTimeoutMs <= 0) add("The confirmation timeout must be positive.")
 }
 
 private fun explicitJudgeCheckErrors(suite: TestSuite?, plan: CasePlan, library: TestLibrary, config: RunConfig): List<String> {

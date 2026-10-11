@@ -1,6 +1,7 @@
 package com.indagium.testing
 
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckResult
@@ -15,11 +16,13 @@ import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.VerificationState
 import com.indagium.testing.model.newRunId
 import com.indagium.testing.store.RunPersister
 import com.indagium.testing.store.TEST_RUN_FILE_NAME
@@ -264,6 +267,80 @@ class TestRunStoreTest {
         assertEquals("Tiny", tiny.suite.name)
         assertEquals(1, tiny.config.repeat)
         assertTrue(tiny.config.evidence.screenshots)
+    }
+
+    @Test
+    fun aStoredTerminalPassWithPendingCurrentOrHistoricalJudgmentCannotDecodeAsPassed() {
+        val base = sampleRun(RunStatus.PASSED)
+        val lane = base.lanes.first()
+        val case = lane.cases.single()
+        val original = case.steps.single()
+        val pendingAttempt = StepAttemptRecord(
+            caseId = case.caseId,
+            iteration = case.iteration,
+            caseAttempt = 1,
+            stepId = original.stepId,
+            attempt = 1,
+            status = StepStatus.PASS,
+            executionStatus = StepStatus.PASS,
+            verificationState = VerificationState.PENDING,
+            judgeQueueWaitMs = 27L,
+            judgmentDurationMs = 60_000L,
+        )
+        val pendingStep = original.copy(
+            status = StepStatus.PASS,
+            executionStatus = StepStatus.PASS,
+            verificationState = VerificationState.PENDING,
+            attemptHistory = listOf(pendingAttempt),
+            judgeQueueWaitMs = 27L,
+            judgmentDurationMs = 60_000L,
+        )
+        val passed = base.copy(
+            lanes = base.lanes.map { current ->
+                if (current.laneId != lane.laneId) current else current.copy(
+                    status = RunStatus.PASSED,
+                    cases = listOf(case.copy(status = CaseStatus.PASS, steps = listOf(pendingStep))),
+                )
+            },
+            status = RunStatus.PASSED,
+        )
+
+        val decoded = decodeRunFile(encodeRunFile(passed)).getOrThrow()
+
+        assertEquals(RunStatus.ERROR, decoded.status)
+        assertTrue(decoded.error.orEmpty().contains("unresolved verification"))
+        assertEquals(RunStatus.ERROR, decoded.lanes.first().status)
+        assertEquals(CaseStatus.BLOCKED, decoded.lanes.first().cases.single().status)
+        assertEquals(VerificationState.PENDING, decoded.lanes.first().cases.single().steps.single().verificationState)
+        assertEquals(27L, decoded.lanes.first().cases.single().steps.single().judgeQueueWaitMs)
+        assertEquals(60_000L, decoded.lanes.first().cases.single().steps.single().judgmentDurationMs)
+        assertEquals(27L, decoded.lanes.first().cases.single().steps.single().attemptHistory.single().judgeQueueWaitMs)
+
+        val interruptedEarlier = base.copy(
+            lanes = base.lanes.map { current ->
+                if (current.laneId != lane.laneId) current else current.copy(
+                    status = RunStatus.PASSED,
+                    cases = listOf(
+                        case.copy(
+                            status = CaseStatus.PASS,
+                            steps = listOf(original),
+                            priorAttempts = listOf(CaseAttemptRecord(
+                                caseId = case.caseId,
+                                iteration = case.iteration,
+                                attempt = 1,
+                                status = CaseStatus.PASS,
+                                steps = listOf(pendingStep.copy(attemptHistory = emptyList())),
+                            )),
+                        ),
+                    ),
+                )
+            },
+            status = RunStatus.PASSED,
+        )
+        val decodedEarlier = decodeRunFile(encodeRunFile(interruptedEarlier)).getOrThrow()
+        assertEquals(RunStatus.ERROR, decodedEarlier.status)
+        assertEquals(CaseStatus.BLOCKED, decodedEarlier.lanes.first().cases.single().status)
+        assertEquals(CaseStatus.BLOCKED, decodedEarlier.lanes.first().cases.single().priorAttempts.single().status)
     }
 
     @Test

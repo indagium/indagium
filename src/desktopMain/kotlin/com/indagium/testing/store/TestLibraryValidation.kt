@@ -3,6 +3,7 @@ package com.indagium.testing.store
 import com.indagium.debug.requireValidAndroidPackageName
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.MAX_STEP_PRECONDITION_CHARS
+import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.MAX_TAG_CHARS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ScriptCall
@@ -28,7 +29,6 @@ import com.indagium.testing.script.validateScriptArgs
 
 const val MAX_NAME_CHARS = 200
 const val MAX_STEP_TIMEOUT_MS = 60L * 60L * 1000L
-const val MAX_STEP_RETRIES = 10
 const val MIN_STEP_MAX_TOOL_CALLS = 1
 const val MAX_STEP_MAX_TOOL_CALLS = 100
 const val MAX_SCRIPT_TIMEOUT_MS = 60L * 60L * 1000L

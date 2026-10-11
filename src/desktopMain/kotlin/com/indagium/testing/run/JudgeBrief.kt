@@ -156,6 +156,11 @@ private fun fetchSection(evidence: JudgeEvidence): String = buildString {
 
 /** The text evidence, the same for both variants: the brief, the log excerpts and the reference logs. */
 private suspend fun textEvidence(evidence: JudgeEvidence): String = buildString {
+    append("Attempt identity: caseId=").append(evidence.caseId ?: "unavailable")
+        .append(", iteration=").append(evidence.iteration)
+        .append(", caseAttempt=").append(evidence.caseAttempt)
+        .append(", stepId=").append(evidence.stepId ?: "unavailable")
+        .append(", stepAttempt=").append(evidence.stepAttempt).append(".\n")
     append("\n\nStep brief (what get_step_brief returns):\n").append(clip(Json.encode(judgeBriefMap(evidence)), JUDGE_BRIEF_MAX_CHARS))
     val rows = if (evidence.isComparison) COMPARISON_BRIEF_LOG_ROWS else JUDGE_BRIEF_LOG_ROWS
     for (lane in evidence.lanes) {
@@ -204,6 +209,11 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
     }
     return buildMap {
         put("case", evidence.caseName)
+        put("caseId", evidence.caseId)
+        put("iteration", evidence.iteration)
+        put("caseAttempt", evidence.caseAttempt)
+        put("stepId", evidence.stepId)
+        put("stepAttempt", evidence.stepAttempt)
         put("stepNumber", evidence.stepNumber)
         put("stepCount", evidence.stepCount)
         put("action", evidence.action)

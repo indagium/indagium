@@ -38,6 +38,7 @@ import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.StepKind
@@ -187,6 +188,7 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
                     model.toolLimitText, { model = model.copy(toolLimitText = it) },
                     model.evidence, { model = model.copy(evidence = it) },
                 )
+                RetrySection(model, { model = it })
             }
             problem?.let {
                 Spacer(Modifier.padding(top = 8.dp))
@@ -381,6 +383,16 @@ private fun JudgeSection(
         }
     }
     if (model.judgeMode != JudgeMode.OFF) {
+        TestsLabeled("Judgment schedule") {
+            TestsDropdown(
+                selectedLabel = model.judgeTiming.label,
+                options = JudgeTiming.entries,
+                optionLabel = JudgeTiming::label,
+                onSelect = { onModel(model.copy(judgeTiming = it)) },
+                isSelected = { it == model.judgeTiming },
+                menuWidth = MENU_WIDTH,
+            )
+        }
         val selected = profileChoices.firstOrNull { it.profileId == model.judgeProfileId }
         TestsDropdown(
             selectedLabel = selected?.label ?: "Choose the judge's AI profile",
@@ -426,6 +438,44 @@ private fun JudgeSection(
                     },
                 )
             }
+        }
+    }
+}
+
+private data class StepRetryChoice(val count: Int?, val label: String)
+
+@Composable
+private fun RetrySection(model: RunDialogModel, onModel: (RunDialogModel) -> Unit) {
+    TestsSectionTitle("Retries")
+    TestsHint("Case retries start the case again after teardown, with its setup and a fresh case tool-call budget.")
+    FlowRow(
+        Modifier.padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        TestsLabeled("Additional case attempts") {
+            TestsDropdown(
+                selectedLabel = model.caseRetries.toString(),
+                options = listOf(0, 1, 2),
+                optionLabel = { it.toString() },
+                onSelect = { onModel(model.copy(caseRetries = it)) },
+                isSelected = { it == model.caseRetries },
+                menuWidth = 180.dp,
+            )
+        }
+        val retryChoices = listOf(StepRetryChoice(null, "Inherit step setting"), StepRetryChoice(0, "Disable retries")) +
+            (1..com.indagium.testing.model.MAX_STEP_RETRIES).map { count -> StepRetryChoice(count, "$count ${if (count == 1) "retry" else "retries"}") }
+        val selected = retryChoices.first { it.count == model.stepRetriesOverride }
+        TestsLabeled("Step retries") {
+            TestsDropdown(
+                selectedLabel = selected.label,
+                options = retryChoices,
+                optionLabel = StepRetryChoice::label,
+                onSelect = { onModel(model.copy(stepRetriesOverride = it.count)) },
+                isSelected = { it.count == model.stepRetriesOverride },
+                menuWidth = 220.dp,
+            )
         }
     }
 }

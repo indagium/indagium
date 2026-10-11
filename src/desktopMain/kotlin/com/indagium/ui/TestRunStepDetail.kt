@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.model.summaryLabel
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
@@ -82,16 +83,27 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
         Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
+        lane.cases.firstOrNull { it.caseId == row.caseId && it.iteration == row.iteration }
+            ?.priorAttempts?.takeIf { it.isNotEmpty() }?.let { attempts -> EarlierCaseAttempts(attempts, lane, runDir) }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(step.status.label(), stepColor(step.status))
             AppText("${step.attempts} attempt(s) · ${step.durationMs / MILLIS_PER_SECOND}s", color = tc.td, fontSize = 10.sp)
+            if (step.flaky) TestsBadge("flaky")
+            if (step.verificationState == com.indagium.testing.model.VerificationState.PENDING) TestsBadge("provisional · judge pending")
             if (step.issueId != null) TestsBadge("issue draft created") else if (step.issueRequested) TestsBadge("issue requested")
             if (step.judgeInconclusive) TestsBadge("judge inconclusive")
+            if (step.automaticRetryExcluded) TestsBadge("automatic retry unavailable")
             if (step.agentError != null) TestsBadge("marked as agent error")
         }
         DetailLine("Action", step.action)
         step.performedByLine()?.let { DetailLine("Performed by", it) }
         DetailLine("Expected", step.expected)
+        step.executionStatus?.let { if (it != step.status) DetailLine("Execution outcome", it.name.lowercase()) }
+        if (step.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
+            DetailLine("Verification", step.verificationState.name.lowercase().replace('_', ' '))
+        }
+        step.judgeQueueWaitMs?.let { DetailLine("Judge queue wait", "$it ms") }
+        step.judgmentDurationMs?.let { DetailLine("Judge duration", "$it ms") }
         step.classification?.let { DetailLine("Classification", it.label()) }
         step.agentClaim?.let { DetailLine("Agent claimed", it) }
         if (step.observation.isNotBlank()) DetailLine("Observation (untrusted)", step.observation, mono = true)
@@ -104,11 +116,79 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             }
         }
         step.judge?.let { JudgeSection(run, row, it) }
+        step.attemptHistory.forEach { attempt ->
+            Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                AppText(
+                    "Attempt ${attempt.attempt} · ${attempt.status.name.lowercase()} · " +
+                        "${attempt.retryReason.replace('_', ' ')} · ${attempt.durationMs / MILLIS_PER_SECOND}s",
+                    color = tc.ts,
+                    fontSize = 10.sp,
+                )
+                attempt.executionStatus?.let { AppText("Execution: ${it.name.lowercase()}", color = tc.td, fontSize = 9.sp) }
+                if (attempt.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
+                    AppText("Verification: ${attempt.verificationState.name.lowercase().replace('_', ' ')}", color = tc.td, fontSize = 9.sp)
+                }
+                attempt.judgeQueueWaitMs?.let { AppText("Judge queue wait: ${it}ms", color = tc.td, fontSize = 9.sp) }
+                attempt.judgmentDurationMs?.let { AppText("Judge duration: ${it}ms", color = tc.td, fontSize = 9.sp) }
+                attempt.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 9.sp) }
+                if (attempt.observation.isNotBlank()) DetailLine("Attempt observation (untrusted)", attempt.observation, mono = true)
+                attempt.judge?.let { TestsBadge("judge ${it.verdict.name.lowercase()} · ${it.usage?.summaryLabel() ?: "usage unavailable"}") }
+            }
+        }
         run.comparisons.filter { it.stepId == row.stepId && it.iteration == row.iteration && it.caseId == row.caseId }
             .forEach { ComparisonSection(run, row, it) }
         ExpectedVersusActual(run, row, step, runDir)
         StepEvidence(step, lane, runDir)
         StepActions(run, row, lane, step)
+    }
+}
+
+@Composable
+private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneResult, runDir: File) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AppText("EARLIER CASE ATTEMPTS", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        attempts.forEach { attempt ->
+            Column(Modifier.fillMaxWidth().padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    StatusChip("attempt ${attempt.attempt} · ${attempt.status.name.lowercase()}", caseColor(attempt.status))
+                    attempt.note?.takeIf { it.isNotBlank() }?.let { AppText(it, color = tc.td, fontSize = 9.sp, maxLines = 2) }
+                }
+                attempt.steps.filter { it.status != StepStatus.PASS && it.status != StepStatus.SKIPPED }.forEach { failed ->
+                    AppText("Step ${failed.stepNumber}: ${failed.status.name.lowercase()} · ${failed.action}", color = tc.ts, fontSize = 10.sp, maxLines = 2)
+                    failed.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 9.sp, maxLines = 2) }
+                    if (failed.observation.isNotBlank()) AppText("Observation (untrusted): ${failed.observation}", color = tc.td, fontSize = 9.sp, maxLines = 3)
+                    failed.checks.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }.forEach { check ->
+                        AppText("${check.status.name.lowercase()} ${check.kind}: ${check.detail}", color = tc.td, fontSize = 9.sp, maxLines = 2)
+                    }
+                    failed.judge?.let { judge ->
+                        AppText(
+                            "Judge ${judge.verdict.name.lowercase()}: ${judge.reasoning.orEmpty().ifBlank { judge.error.orEmpty() }}",
+                            color = tc.td,
+                            fontSize = 9.sp,
+                            maxLines = 3,
+                        )
+                    }
+                    val evidencePaths = listOfNotNull(failed.startScreenshotPath, failed.screenshotPath) + failed.sampleScreenshotPaths
+                    if (evidencePaths.isNotEmpty()) {
+                        val scope = LocalTestsUi.current.scope
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            evidencePaths.distinct().forEachIndexed { index, path ->
+                                val file = File(runDir, path)
+                                if (file.isFile) AppButton("Open evidence ${index + 1}", onClick = { scope.launch(Dispatchers.IO) { openFile(file) } })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        lane.transcriptPath?.let { path ->
+            val transcript = File(runDir, path)
+            if (transcript.isFile) {
+                val scope = LocalTestsUi.current.scope
+                AppButton("Open lane transcript", onClick = { scope.launch(Dispatchers.IO) { openFile(transcript) } })
+            }
+        }
     }
 }
 

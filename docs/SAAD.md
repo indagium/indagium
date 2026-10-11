@@ -3346,6 +3346,18 @@ author wrote them and whoever started the run accepted them.
 
 #### 26.5.3 The step protocol
 
+**Retry scope.** RunConfig keeps the existing inline per-step retry count unless stepRetriesOverride is set: null inherits,
+zero disables, and 1–10 is an explicit count. A positive override also retries execution timeouts when the device remains
+usable; every retry starts with fresh execution allowance, reinspection and evidence. Step attempt records keep their own
+identity, timing, claims, observations, checks, usage and evidence references independently of transcript retention.
+caseRetries defaults to zero and permits at most two additional whole-case attempts. A case retry starts only after all
+requested judgments are settled, after case teardown, then runs case setup and every step again; suite setup is unchanged.
+The full suite and run config remain frozen across attempts. Execution budget is fresh per whole-case attempt and shared by
+its step retries. Earlier failure details are passed to the next execution segment only as fenced observation data, never
+to the blind judge. Cancellation, user rejection, exhausted budgets, permanent infrastructure/configuration failures,
+inconclusive-only judgment, and manual work requiring a tester exclude automatic case retries. A recovered pass remains
+PASS and is marked flaky; all prior attempts stay in the result and usage totals.
+
 The agent (or an external client) sees **only the current step**; later steps are revealed one at a
 time by `finish_step`. `StepSequence` (`testing/run/StepSequence.kt:134`) owns the protocol:
 
@@ -3633,8 +3645,24 @@ result or transcript line built from it can leak the claim, because the data is 
 removes the results of the judge checks themselves from what the judge may see. Check details and log rows travel inside an
 `untrusted_data` envelope.
 
-**When it runs.** Inline inside `finish_step`, after the deterministic checks and screenshot
-(`StepSequence.judgeAttempt`). `shouldJudge` (`testing/run/StepJudging.kt:41`): `OFF` never;
+**When it runs.** Inline is the default: judgment happens inside finish_step after deterministic checks and screenshot
+(StepSequence.judgeAttempt). RunConfig can instead schedule ordinary judged steps after_case or background,
+independently of judgeMode. After-case evaluations begin after execution and teardown. Background evaluations enqueue as
+each step finishes and can overlap later actions. Both schedules finalize before the case outcome, issue drafts or a whole-case
+retry. Setup and teardown sequences, explicit ScreenJudge/AskJudge checks, and PAUSE_FOR_USER steps remain inline. One worker
+serializes judge work per lane, with at most two judges active across the run and an eight-item background queue per lane.
+Queue backpressure waits outside the step mutex; inline checkpoints have priority and do not wait on unreleased after-case
+jobs. The independent 60-second allowance begins when evaluation starts; queue wait is reported separately.
+
+Every deferred judge receives a frozen evidence snapshot bound to case, iteration, case attempt, semantic step and step
+attempt identity. It contains the intent/precondition/expected result/checks, bounded log range and timestamped image samples,
+but no agent claim or observation. Missing screenshots stay missing; only evidence actually discarded at the per-case bound
+forces an unavailable/inconclusive result. Results update only the exact matching historical attempt. Execution outcome and
+verification state persist separately, so a pending judgment is provisional, not a final pass. Completed evidence and
+verdicts survive cancellation; unfinished verification remains unresolved. Temporary evidence is bounded and released when
+judgment settles, including when screenshot retention is off.
+
+shouldJudge (testing/run/StepJudging.kt:41): OFF never;
 `EVERY_STEP` always; `FAILURES_ONLY` when a deterministic check failed, the agent claimed fail/blocked,
 or the step has a `ScreenJudge`/`AskJudge` check (those checks are `NOT_EVALUATED` without a judge).
 Budget: 4 evidence calls (`JUDGE_TOOL_CALL_BUDGET`; submitting is free; 8 as `JUDGE_FETCH_TOOL_CALL_BUDGET` when
@@ -4003,6 +4031,20 @@ reachable by any prompt-injected lane agent, which is why the default permission
    before Stop is lost.
 
 ### 26.12 Recording review: screen context and AI rewrite
+
+**Gesture targets and review previews.** A recorded gesture stores ordered per-input hints: kind, normalized coordinates/path,
+duration, source dimensions/orientation, the element under touch and each clickable ancestor with its own identity and bounds,
+plus touch position inside the leaf target. A semantic step that groups reveal-and-pause actions retains both hints. Device
+labels and compact hint text are fenced observations throughout authoring and playback; the agent resolves the intended
+specific control on the current screen and treats coordinates as guidance when layout or orientation changes.
+
+The authoring preview and rewrite attachment share a before/after selector: an eligible time-aligned screenshot wins, then
+a suitable recorded-video frame. Grouped actions use the screen before their first input and after their last input; quick
+helpers do not need a separate image each. Screenshot/video work stays on the existing background workers and never blocks
+between gestures. A raw input frame is a separate preview-only source; only an eligible settled after image can be selected
+as the expected screenshot after explicit review. UI/activity context and image availability have distinct messages.
+Preview provenance does not count as model delivery or evidence that an expected result occurred. Existing password-sensitive
+window exclusions apply to displayed/stored screenshots and to leaf and ancestor target labels before preview or apply.
 
 "Record from device" (`ui/TestsStepAuthoring.kt`, `TestStepRecordingSession`) turns accepted mirror input
 into review rows. The mirror carries no UI hierarchy, so the session adds its own context, and an

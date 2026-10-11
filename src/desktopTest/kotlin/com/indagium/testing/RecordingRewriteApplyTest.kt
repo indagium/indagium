@@ -19,6 +19,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -49,15 +50,14 @@ class RecordingRewriteApplyTest {
             assertEquals(HINT_CAPTION, hint.caption)
             assertTrue(step.examples.none { it is StepExample.GoldenScreenshot })
         }
-        assertEquals(
-            listOf(
-                "1. Tap at (54%, 31%) | element: \"Search\" id=search_button class=Button | gap before next input: 460 ms | before app: $SHOP_PACKAGE " +
-                    "| before activity: .HomeActivity | after app: unavailable | after activity: unavailable",
-                "2. Enter text: lofi | gap before next input: 1000 ms | before app: unavailable | " +
-                    "before activity: unavailable | after app: unavailable | after activity: unavailable",
-            ),
-            steps[0].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines(),
-        )
+        val inputHints = steps[0].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines()
+        assertEquals(2, inputHints.size)
+        assertTrue("Tap at (54%, 31%)" in inputHints[0])
+        assertTrue("exact node under touch: text=\"Search\"" in inputHints[0], inputHints[0])
+        assertTrue("touch within node: 20%,46%" in inputHints[0], inputHints[0])
+        assertTrue("normalized path: (54%,31%)" in inputHints[0], inputHints[0])
+        assertTrue("gap before next input: 460 ms" in inputHints[0], inputHints[0])
+        assertTrue("2. Enter text: lofi | gap before next input: 1000 ms" in inputHints[1])
         assertEquals(
             listOf("3. Press Enter | before app: unavailable | before activity: unavailable | after app: $SHOP_PACKAGE | after activity: .ResultsActivity"),
             steps[1].examples.filterIsInstance<StepExample.ReferenceLog>().single().text.lines(),
@@ -69,8 +69,16 @@ class RecordingRewriteApplyTest {
         val session = rewritten()
         val rows = session.snapshot.value.steps
         val saved = mutableListOf<ByteArray>()
+        val selected = assertNotNull(session.expectedScreenshotSelectionFor(rows[1].id))
 
-        assertTrue(session.updateReviewedSteps(rows.map { it.action to it.expected }, setOf(rows[1].id), rows.map { it.id }))
+        assertTrue(
+            session.updateReviewedSteps(
+                rows.map { it.action to it.expected },
+                setOf(rows[1].id),
+                rows.map { it.id },
+                expectedScreenshotSelections = mapOf(rows[1].id to selected),
+            ),
+        )
         val steps = session.toTestSteps { bytes -> saved += bytes; "assets/after-search.jpg" }
 
         assertEquals(1, saved.size, "only the ticked row is imported")
@@ -80,6 +88,29 @@ class RecordingRewriteApplyTest {
         assertEquals("assets/after-search.jpg", golden.assetPath)
         assertTrue("verified after evidence" in golden.caption, golden.caption)
         assertTrue(steps[1].examples.first() is StepExample.ReferenceLog, "the hint stays")
+    }
+
+    @Test
+    fun anAfterImageCannotBeAppliedAfterItsReviewedRowChangedDuringPreviewDecode() {
+        val session = rewritten()
+        val rows = session.snapshot.value.steps
+        val selected = assertNotNull(session.expectedScreenshotSelectionFor(rows[1].id))
+        val changedRows = rows.mapIndexed { index, row ->
+            (if (index == 1) "Edited ${row.action}" else row.action) to row.expected
+        }
+        assertTrue(session.updateReviewedSteps(changedRows))
+
+        assertFalse(
+            session.updateReviewedSteps(
+                changedRows,
+                setOf(rows[1].id),
+                rows.map { it.id },
+                expectedScreenshotSelections = mapOf(rows[1].id to selected),
+            ),
+        )
+        assertTrue(session.toTestSteps { "assets/after-search.jpg" }.all { step ->
+            step.examples.none { it is StepExample.GoldenScreenshot }
+        })
     }
 
     @Test

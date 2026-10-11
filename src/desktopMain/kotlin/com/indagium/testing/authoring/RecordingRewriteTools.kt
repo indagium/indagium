@@ -164,6 +164,14 @@ internal class RecordingRewriteTools(
                         "tappedElement" to row.tappedElement?.let {
                             mapOf("text" to it.text, "contentDesc" to it.contentDesc, "resourceId" to it.resourceId, "className" to it.className)
                         },
+                        "targetUnderTouch" to row.targetUnderTouch?.let(::recordedTargetMap),
+                        "clickableTargets" to row.clickableTargets.take(3).map(::recordedTargetMap),
+                        "targetScreen" to mapOf(
+                            "width" to row.targetScreenWidth,
+                            "height" to row.targetScreenHeight,
+                            "orientationQuarterTurns" to row.targetOrientationQuarterTurns,
+                            "touchWithinTarget" to row.touchWithinTarget?.let { mapOf("x" to it.x, "y" to it.y) },
+                        ),
                         "before" to row.before?.let { mapOf("package" to it.packageName, "activity" to it.activity) },
                         "after" to row.after?.let { mapOf("package" to it.packageName, "activity" to it.activity) },
                         "beforeApp" to (row.before?.packageName ?: "unavailable"),
@@ -181,6 +189,15 @@ internal class RecordingRewriteTools(
     } else {
         mapOf("x" to point.x * PERCENT / point.screenWidth, "y" to point.y * PERCENT / point.screenHeight)
     }
+
+    private fun recordedTargetMap(target: RecordedUiTarget): Map<String, Any?> = mapOf(
+        "text" to target.text,
+        "contentDescription" to target.contentDesc,
+        "resourceId" to target.resourceId,
+        "className" to target.className,
+        "bounds" to mapOf("left" to target.left, "top" to target.top, "right" to target.right, "bottom" to target.bottom),
+        "clickable" to target.clickable,
+    )
 
     private fun screenTool() = RewriteTool(
         IndagiumToolDescriptor(

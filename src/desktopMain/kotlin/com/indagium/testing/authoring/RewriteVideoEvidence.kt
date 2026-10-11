@@ -2,12 +2,9 @@ package com.indagium.testing.authoring
 
 import java.util.Locale
 
-// The rewrite's evidence taken from the recorded video. Per input two frames: the one held just before the input starts, and the
-// settled one after it (the last frame before the next input starts, or REWRITE_SETTLE_MS after the input when that comes first), so a
-// loading or transition screen right after the action is not mistaken for its result. They are laid out as contact sheets that cover
-// every input exactly once within the image budget. Where the video cannot show a frame (a password-sensitive window, a failed decode)
-// the stored screenshot of that moment takes its place, so the screenshots only fill gaps. A video that can show no frame at all gives
-// null and the caller builds the evidence from the screenshots alone.
+// The rewrite's visual evidence uses eligible timestamped screenshots first, then recorded-video frames for missing or uncertain
+// moments. Per input it seeks a frame just before the input starts and a settled look after it, avoiding a transition screen as the
+// expected result. Contact sheets cover each input within the image budget, and captions/provenance describe the images actually used.
 
 /** The "before" frame is the one held this long before the input starts. */
 internal const val REWRITE_VIDEO_BEFORE_MS = 100L
@@ -94,12 +91,13 @@ private fun sheetOf(group: List<ShownInput>, pairs: Boolean, video: RewriteVideo
     for (item in group) {
         val beforeFrame = if (pairs) frames.getOrNull(cursor++) else null
         val afterFrame = frames.getOrNull(cursor++)
+        val before = if (pairs) beforeCell(item, beforeFrame) else null
         val after = afterCell(item, afterFrame, pairs)
         videoMoments[item.input.number] = buildSet {
-            if (beforeFrame != null) add("before")
+            if (before?.second == true) add("before")
             if (after?.fromVideo == true) add("after")
         }
-        val itemCells = listOfNotNull(if (pairs) beforeCell(item, beforeFrame) else null, after?.let { it.cell to it.fromVideo })
+        val itemCells = listOfNotNull(before, after?.let { it.cell to it.fromVideo })
         visualMoments[item.input.number] = itemCells.map { it.first.relation }.toSet()
         sheet.add(item.input.number, itemCells, after?.settled == true, after?.settled == true && after.fromVideo)
     }
@@ -119,29 +117,34 @@ private fun sheetOf(group: List<ShownInput>, pairs: Boolean, video: RewriteVideo
 
 private fun beforeCell(item: ShownInput, frame: RewriteVideoFrame?): Pair<ContactSheetCell, Boolean>? {
     val number = item.input.number
-    if (frame != null) return ContactSheetCell(frame.image, "before", "input $number before • ${seconds(frame.sessionMs)}") to true
-    val image = item.before?.let { decodeJpeg(it.jpeg) } ?: return null
-    return ContactSheetCell(image, "before", "input $number before (screenshot)") to false
+    val selected = selectBeforeRecordingPreview(item.before, frame) ?: return null
+    val image = decodeJpeg(selected.jpeg) ?: return null
+    val fromVideo = selected.source == "recorded video frame"
+    val caption = if (fromVideo) "input $number before • ${seconds(frame?.sessionMs ?: 0L)}" else "input $number before (screenshot)"
+    return ContactSheetCell(image, "before", caption) to fromVideo
 }
 
 private class AfterCell(val cell: ContactSheetCell, val fromVideo: Boolean, val settled: Boolean)
 
+@Suppress("ReturnCount") // Each early return is a distinct unavailable/decode/fallback branch for one evidence cell.
 private fun afterCell(item: ShownInput, frame: RewriteVideoFrame?, pairs: Boolean): AfterCell? {
     val number = item.input.number
-    if (frame != null) {
-        val unchanged = frame.frameWallMs <= item.input.row.inputAtMs
-        val what = if (unchanged) "after (unchanged since ${seconds(frame.sessionMs)})" else "after (settled) • ${seconds(frame.sessionMs)}"
-        return AfterCell(ContactSheetCell(frame.image, "after", "input $number $what"), fromVideo = true, settled = true)
+    val selected = selectAfterRecordingPreview(item.after, item.afterSettled, item.input.row.inputAtMs, frame)
+    if (selected?.source == "recorded video frame") {
+        val selectedFrame = frame ?: return null
+        val unchanged = selectedFrame.frameWallMs <= item.input.row.inputAtMs
+        val what = if (unchanged) "after (unchanged since ${seconds(selectedFrame.sessionMs)})" else "after (settled) • ${seconds(selectedFrame.sessionMs)}"
+        val image = decodeJpeg(selected.jpeg) ?: return null
+        return AfterCell(ContactSheetCell(image, "after", "input $number $what"), fromVideo = true, settled = true)
     }
-    val shot = item.after
-    val image = shot?.let { decodeJpeg(it.jpeg) }
+    val image = selected?.jpeg?.let(::decodeJpeg)
     if (image != null) {
         val caption = "input $number after (screenshot${if (item.afterSettled) "" else ", early"})"
         return AfterCell(ContactSheetCell(image, "after", caption), fromVideo = false, settled = item.afterSettled)
     }
     // A sheet of one screen per input shows the screen before it when nothing of the result was kept.
     if (pairs) return null
-    val before = item.before?.let { decodeJpeg(it.jpeg) } ?: return null
+    val before = selectBeforeRecordingPreview(item.before, null)?.jpeg?.let(::decodeJpeg) ?: return null
     return AfterCell(ContactSheetCell(before, "before", "input $number before (screenshot)"), fromVideo = false, settled = false)
 }
 

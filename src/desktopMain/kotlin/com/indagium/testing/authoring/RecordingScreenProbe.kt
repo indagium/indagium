@@ -52,6 +52,21 @@ data class TappedElement(val text: String, val contentDesc: String, val resource
     fun label(): String = text.ifBlank { contentDesc }.ifBlank { resourceId.substringAfter(":id/") }.ifBlank { className }.take(MAX_ELEMENT_LABEL_CHARS)
 }
 
+/** Exact node geometry and text below a gesture, kept alongside the enclosing activation target. */
+data class RecordedUiTarget(
+    val text: String,
+    val contentDesc: String,
+    val resourceId: String,
+    val className: String,
+    val left: Int,
+    val top: Int,
+    val right: Int,
+    val bottom: Int,
+    val clickable: Boolean,
+)
+
+data class ResolvedTappedTargets(val underTouch: RecordedUiTarget, val clickableAncestors: List<RecordedUiTarget>)
+
 /** A pointer to a stored [RecordingScreenState] plus the two facts a row hint needs without a lookup. */
 data class RecordingScreenRef(val seq: Int, val packageName: String?, val activity: String?)
 
@@ -198,11 +213,10 @@ internal fun parseTopActivity(output: String): Pair<String, String>? {
 internal fun resolveTappedElement(state: RecordingScreenState, point: RecordedPoint): TappedElement? {
     if (state.nodes.isEmpty() || state.screenWidth <= 0 || state.screenHeight <= 0) return null
     if (point.screenWidth <= 0 || point.screenHeight <= 0) return null
-    if ((state.screenWidth > state.screenHeight) != (point.screenWidth > point.screenHeight)) return null // rotated between mirror and dump
+    if ((state.screenWidth > state.screenHeight) != (point.screenWidth > point.screenHeight)) return null
     val x = point.x.toLong() * state.screenWidth / point.screenWidth
     val y = point.y.toLong() * state.screenHeight / point.screenHeight
     val under = state.nodes.filter { x >= it.left && x < it.right && y >= it.top && y < it.bottom }
-    // Later nodes are drawn above earlier ones, so a tie on size goes to the later node.
     val smallest = under.withIndex().minWithOrNull(compareBy({ area(it.value) }, { -it.index }))?.value ?: return null
     val chosen = smallest.takeIf { it.hasLabel() }
         ?: under.filter { it !== smallest && it.hasLabel() && it.clickable && contains(it, smallest) }.minByOrNull(::area)
@@ -210,6 +224,24 @@ internal fun resolveTappedElement(state: RecordingScreenState, point: RecordedPo
         ?: return null
     return TappedElement(chosen.text, chosen.contentDesc, chosen.resourceId, chosen.className)
 }
+
+/** Keeps the smallest node under the touch even when its activation belongs to a labeled clickable ancestor. */
+internal fun resolveTappedTargets(state: RecordingScreenState, point: RecordedPoint): ResolvedTappedTargets? {
+    if (state.nodes.isEmpty() || state.screenWidth <= 0 || state.screenHeight <= 0) return null
+    if (point.screenWidth <= 0 || point.screenHeight <= 0) return null
+    if ((state.screenWidth > state.screenHeight) != (point.screenWidth > point.screenHeight)) return null // rotated between mirror and dump
+    val x = point.x.toLong() * state.screenWidth / point.screenWidth
+    val y = point.y.toLong() * state.screenHeight / point.screenHeight
+    val under = state.nodes.filter { x >= it.left && x < it.right && y >= it.top && y < it.bottom }
+    // Later nodes are drawn above earlier ones, so a tie on size goes to the later node.
+    val smallest = under.withIndex().minWithOrNull(compareBy({ area(it.value) }, { -it.index }))?.value ?: return null
+    val clickable = under.filter { it.clickable && contains(it, smallest) }.sortedBy(::area)
+        .ifEmpty { under.filter { it.clickable }.sortedBy(::area) }
+        .map(UiNode::toRecordedTarget)
+    return ResolvedTappedTargets(smallest.toRecordedTarget(), clickable)
+}
+
+private fun UiNode.toRecordedTarget() = RecordedUiTarget(text, contentDesc, resourceId, className, left, top, right, bottom, clickable)
 
 private fun UiNode.hasLabel() = text.isNotBlank() || contentDesc.isNotBlank() || resourceId.isNotBlank()
 

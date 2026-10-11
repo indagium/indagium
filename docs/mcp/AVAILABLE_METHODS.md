@@ -171,6 +171,26 @@ live beside the suites in the library. Order is list order everywhere, and every
 tool. Runs are started and read with the run tools (see "Running a suite" below), issues are created from
 failed steps ("Issues from failed steps") and can be filed in an issue tracker ("Issue tracker").
 
+Run execution keeps per-step attempts and automatic case attempts even when transcript retention is off. A run can override
+step retries with stepRetriesOverride (null inherits, 0 disables, 1–10 selects an explicit retry count), and caseRetries
+adds 0–2 whole-case attempts after an eligible failure. Only that case is repeated: teardown runs for each attempt, then
+case setup and the full case; suite setup remains once per run. Human-required manual steps, tester participation, user
+rejection, exhausted budgets, permanent configuration failures and a block caused only by unavailable verification prevent
+automatic retry. A recovered pass is marked flaky and its earlier failure stays in priorAttempts.
+
+Judging has an independent schedule: judgeTiming accepts inline (default), after_case or background. Ordinary steps still
+follow the selected judgeMode; deferred results show executionStatus separately from verificationState and remain provisional
+while verificationState is PENDING. After-case and background results settle before retry or case completion. Setup/teardown,
+Screen judge and Ask judge checks, and PAUSE_FOR_USER steps remain inline. Queue wait and judgment duration are reported
+separately from execution timing. The run summary reports pendingVerificationSteps and flaky.
+
+Recording review rows carry gestureHints with the observed input kind, normalized path and coordinates, duration, source
+screen geometry/orientation, the leaf under touch and its clickable ancestors. Device-provided target labels are observations.
+get_test_recording can also return previewEvidence: separate UI-context and image-availability messages, before/after/raw-input
+image provenance, and eligibleAsExpectedScreenshot. Preview images are not evidence the model received them. update_test_recording
+and apply_test_recording accept an expected screenshot only when the shared selector found an eligible settled after image;
+raw, uncertain, withheld and before images cannot be promoted.
+
 Every tool returns plain JSON and reports problems as data, never as a thrown error:
 
 - `{ "error": "Suite 'x' not found." }` for an unknown id, an invalid value or a bad argument. Argument

@@ -36,6 +36,15 @@ internal const val START_SCREEN_LABEL = "Screen at the start of the step"
 /** One timestamped playback-state sample; [screenshot] loads only this captured frame. */
 internal data class JudgeScreenshotSample(val number: Int, val capturedAtMs: Long, val screenshot: suspend () -> JudgeImage?)
 
+/** Complete identity of the execution the frozen evidence belongs to. */
+internal data class JudgeAttemptIdentity(
+    val caseId: String? = null,
+    val iteration: Int = 1,
+    val caseAttempt: Int = 1,
+    val stepId: String? = null,
+    val stepAttempt: Int = 1,
+)
+
 /**
  * One lane's evidence. [label] is what the judge calls the lane ("Lane 1"); [screenshot], [startScreenshot] and [log] return null
  * when none was kept. [startScreenshot] is the screen captured immediately before the step's first device mutation; it is itself null
@@ -66,7 +75,13 @@ internal class JudgeEvidence(
     val lanes: List<JudgeLaneEvidence>,
     val intent: StepIntent = StepIntent.PERFORM_ACTION,
     val precondition: String? = null,
+    val attemptIdentity: JudgeAttemptIdentity = JudgeAttemptIdentity(),
 ) {
+    val caseId: String? get() = attemptIdentity.caseId
+    val iteration: Int get() = attemptIdentity.iteration
+    val caseAttempt: Int get() = attemptIdentity.caseAttempt
+    val stepId: String? get() = attemptIdentity.stepId
+    val stepAttempt: Int get() = attemptIdentity.stepAttempt
     val isComparison: Boolean get() = lanes.size > 1
 
     /** The lane named [label] or having that id; the only lane when [label] is null and there is one. */

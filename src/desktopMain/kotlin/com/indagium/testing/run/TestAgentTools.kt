@@ -111,6 +111,7 @@ internal data class LaneStepBrief(
     val condition: String? = null,
     val intent: String = "perform_action",
     val precondition: String? = null,
+    val gestureHint: String? = null,
     internal val dispatchEpoch: Long = 0L,
 )
 
@@ -363,7 +364,9 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "intent" to step.intent,
                 "precondition" to step.precondition,
                 "attempt" to step.attempt,
-            ) + step.exampleMetadata()
+            ) + step.exampleMetadata() + step.gestureHint?.let {
+                untrustedData("recorded_gesture_hint", mapOf("summary" to it))
+            }.orEmpty()
         },
     ),
     LaneTool(

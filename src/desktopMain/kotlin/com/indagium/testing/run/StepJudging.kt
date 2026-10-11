@@ -27,7 +27,15 @@ import com.indagium.testing.model.TestStep
 private const val DETAIL_REASONING_CHARS = 300
 
 /** Where in a lane a judgement happens; names the judge's session and its transcript lines. */
-internal data class JudgeSite(val caseId: String, val evidencePrefix: String, val stepId: String, val stepNumber: Int, val attempt: Int)
+internal data class JudgeSite(
+    val caseId: String,
+    val evidencePrefix: String,
+    val stepId: String,
+    val stepNumber: Int,
+    val attempt: Int,
+    val iteration: Int = 1,
+    val caseAttempt: Int = 1,
+)
 
 /** Judges one step of one lane. Never throws for a judge that fails: that is an INCONCLUSIVE judgement with an error. */
 internal fun interface StepJudge {

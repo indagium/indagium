@@ -2,6 +2,7 @@ package com.indagium.testing.store
 
 import com.indagium.capture.captureSettingsFromJson
 import com.indagium.capture.captureSettingsToJson
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckResult
@@ -12,6 +13,7 @@ import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
@@ -21,11 +23,13 @@ import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepCompletion
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.VerificationState
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newLaneId
@@ -53,6 +57,13 @@ const val TEST_RUN_FILE_FORMAT = "indagium-test-run"
 const val TEST_RUN_FILE_VERSION = 1
 private const val MAX_PERSISTED_TOOL_CALLS = 300
 private const val MAX_PERSISTED_TOOL_PREVIEW_CHARS = 2_000
+private const val MAX_PERSISTED_STEP_ATTEMPT = 11
+private const val MAX_PERSISTED_CASE_ATTEMPTS = 3
+private const val MAX_PERSISTED_STEP_OBSERVATION_CHARS = 20_000
+private const val MAX_PERSISTED_CHECKS_PER_STEP = 100
+private const val MAX_PERSISTED_SAMPLE_SCREENSHOTS = 20
+private const val MAX_PERSISTED_NOTE_CHARS = 2_000
+private const val MAX_PERSISTED_STEPS_PER_CASE_ATTEMPT = 500
 
 private val prettyJson = Json { prettyPrint = true }
 
@@ -101,6 +112,9 @@ private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
     put("openLaneTabs", config.openLaneTabs)
     put("manualSteps", config.manualSteps.name)
     put("judgeInconclusivePolicy", config.judgeInconclusivePolicy.wire)
+    put("judgeTiming", config.judgeTiming.wire)
+    put("caseRetries", config.caseRetries)
+    config.stepRetriesOverride?.let { put("stepRetriesOverride", it) }
 }
 
 private fun checkResultToJson(check: CheckResult): JsonObject = buildJsonObject {
@@ -125,6 +139,17 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     putIfNotNull("screenshotPath", step.screenshotPath)
     putIfNotNull("startScreenshotPath", step.startScreenshotPath)
     if (step.sampleScreenshotPaths.isNotEmpty()) put("sampleScreenshotPaths", buildJsonArray { step.sampleScreenshotPaths.forEach { add(JsonPrimitive(it)) } })
+    if (step.attemptHistory.isNotEmpty()) put("attemptHistory", buildJsonArray { step.attemptHistory.forEach { add(stepAttemptToJson(it)) } })
+    put("flaky", step.flaky)
+    put("userRejected", step.userRejected)
+    step.executionStatus?.let { put("executionStatus", it.name) }
+    put("verificationState", step.verificationState.name)
+    if (step.caseId.isNotBlank()) put("caseId", step.caseId)
+    put("iteration", step.iteration)
+    put("caseAttempt", step.caseAttempt)
+    put("automaticRetryExcluded", step.automaticRetryExcluded)
+    putIfNotNull("judgeQueueWaitMs", step.judgeQueueWaitMs)
+    putIfNotNull("judgmentDurationMs", step.judgmentDurationMs)
     putIfNotNull("logStartOffset", step.logStartOffset)
     putIfNotNull("logEndOffset", step.logEndOffset)
     putIfNotNull("transcriptStartOffset", step.transcriptStartOffset)
@@ -148,6 +173,40 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     }
 }
 
+private fun stepAttemptToJson(attempt: StepAttemptRecord): JsonObject = buildJsonObject {
+    put("caseId", attempt.caseId)
+    put("iteration", attempt.iteration)
+    put("caseAttempt", attempt.caseAttempt)
+    put("stepId", attempt.stepId)
+    put("attempt", attempt.attempt)
+    put("retryReason", attempt.retryReason)
+    put("status", attempt.status.name)
+    putIfNotNull("agentClaim", attempt.agentClaim)
+    put("observation", attempt.observation)
+    put("checks", buildJsonArray { attempt.checks.forEach { add(checkResultToJson(it)) } })
+    attempt.judge?.let { put("judge", judgementToJson(it)) }
+    put("startedAt", attempt.startedAt)
+    put("durationMs", attempt.durationMs)
+    putIfNotNull("screenshotPath", attempt.screenshotPath)
+    putIfNotNull("startScreenshotPath", attempt.startScreenshotPath)
+    if (attempt.sampleScreenshotPaths.isNotEmpty()) {
+        put("sampleScreenshotPaths", buildJsonArray { attempt.sampleScreenshotPaths.forEach { add(JsonPrimitive(it)) } })
+    }
+    putIfNotNull("logStartOffset", attempt.logStartOffset)
+    putIfNotNull("logEndOffset", attempt.logEndOffset)
+    putIfNotNull("transcriptStartOffset", attempt.transcriptStartOffset)
+    putIfNotNull("transcriptEndOffset", attempt.transcriptEndOffset)
+    putIfNotNull("note", attempt.note)
+    attempt.agentUsage?.let { put("agentUsage", aiUsageToJson(it)) }
+    attempt.judgeUsage?.let { put("judgeUsage", aiUsageToJson(it)) }
+    put("userRejected", attempt.userRejected)
+    attempt.executionStatus?.let { put("executionStatus", it.name) }
+    put("verificationState", attempt.verificationState.name)
+    put("automaticRetryExcluded", attempt.automaticRetryExcluded)
+    putIfNotNull("judgeQueueWaitMs", attempt.judgeQueueWaitMs)
+    putIfNotNull("judgmentDurationMs", attempt.judgmentDurationMs)
+}
+
 private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
     put("caseId", case.caseId)
     put("caseName", case.caseName)
@@ -160,6 +219,23 @@ private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
     case.agentUsage?.let { put("agentUsage", aiUsageToJson(it)) }
     case.judgeUsage?.let { put("judgeUsage", aiUsageToJson(it)) }
     case.externalToolCalls?.let { put("externalToolCalls", it) }
+    put("caseAttempt", case.caseAttempt)
+    if (case.priorAttempts.isNotEmpty()) put("priorAttempts", buildJsonArray { case.priorAttempts.forEach { add(caseAttemptToJson(it)) } })
+    put("flaky", case.flaky)
+}
+
+private fun caseAttemptToJson(attempt: CaseAttemptRecord): JsonObject = buildJsonObject {
+    put("caseId", attempt.caseId)
+    put("iteration", attempt.iteration)
+    put("attempt", attempt.attempt)
+    put("status", attempt.status.name)
+    put("steps", buildJsonArray { attempt.steps.forEach { add(stepResultToJson(it)) } })
+    put("startedAt", attempt.startedAt)
+    putIfNotNull("finishedAt", attempt.finishedAt)
+    putIfNotNull("note", attempt.note)
+    attempt.agentUsage?.let { put("agentUsage", aiUsageToJson(it)) }
+    attempt.judgeUsage?.let { put("judgeUsage", aiUsageToJson(it)) }
+    attempt.externalToolCalls?.let { put("externalToolCalls", it) }
 }
 
 private fun laneResultToJson(lane: LaneResult): JsonObject = buildJsonObject {
@@ -265,6 +341,9 @@ private fun decodeConfig(o: JsonObject): RunConfig {
         manualSteps = o.enumOr("manualSteps", ManualStepsOption.USE_SCRIPT_THEN_WAIT),
         judgeInconclusivePolicy = o.optStr("judgeInconclusivePolicy")?.let(JudgeInconclusivePolicy::parse)
             ?: if (o["judgeInconclusivePolicy"] == null) JudgeInconclusivePolicy.KEEP_AGENT_PASS else JudgeInconclusivePolicy.BLOCK,
+        judgeTiming = o.optStr("judgeTiming")?.let(JudgeTiming::parse) ?: JudgeTiming.INLINE,
+        caseRetries = o.int("caseRetries", 0).coerceIn(0, 2),
+        stepRetriesOverride = (o["stepRetriesOverride"] as? JsonPrimitive)?.intOrNull?.coerceIn(0, com.indagium.testing.model.MAX_STEP_RETRIES),
     )
 }
 
@@ -290,6 +369,19 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     screenshotPath = o.optStr("screenshotPath"),
     startScreenshotPath = o.optStr("startScreenshotPath"),
     sampleScreenshotPaths = o.strings("sampleScreenshotPaths"),
+    // Ten configured retries permit eleven attempts. Keep the newest bounded window so an extended
+    // manual-retry history can never lose its actual final attempt while decoding.
+    attemptHistory = o.objects("attemptHistory").takeLast(com.indagium.testing.model.MAX_STEP_RETRIES + 1).mapNotNull { decodeStepAttempt(it) },
+    flaky = o.bool("flaky", false),
+    userRejected = o.bool("userRejected", false),
+    executionStatus = o.optEnum<StepStatus>("executionStatus"),
+    verificationState = o.enumOr("verificationState", VerificationState.NOT_REQUESTED),
+    caseId = o.str("caseId"),
+    iteration = o.int("iteration", 1).coerceAtLeast(1),
+    caseAttempt = o.int("caseAttempt", 1).coerceIn(1, 3),
+    automaticRetryExcluded = o.bool("automaticRetryExcluded", false),
+    judgeQueueWaitMs = o.optLong("judgeQueueWaitMs")?.coerceAtLeast(0L),
+    judgmentDurationMs = o.optLong("judgmentDurationMs")?.coerceAtLeast(0L),
     logStartOffset = o.optLong("logStartOffset"),
     logEndOffset = o.optLong("logEndOffset"),
     transcriptStartOffset = o.optLong("transcriptStartOffset"),
@@ -308,6 +400,61 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     classification = o.optEnum<JudgeClassification>("classification"),
 )
 
+private fun decodeStepAttempt(o: JsonObject): StepAttemptRecord? {
+    val attempt = o.int("attempt", 0)
+    if (attempt !in 1..MAX_PERSISTED_STEP_ATTEMPT) return null
+    return StepAttemptRecord(
+        caseId = o.str("caseId"),
+        iteration = o.int("iteration", 1).coerceAtLeast(1),
+        caseAttempt = o.int("caseAttempt", 1).coerceIn(1, MAX_PERSISTED_CASE_ATTEMPTS),
+        stepId = o.str("stepId"),
+        attempt = attempt,
+        retryReason = o.str("retryReason", "final").take(40),
+        status = o.enumOr("status", StepStatus.ERROR),
+        agentClaim = o.optStr("agentClaim"),
+        observation = o.str("observation").take(MAX_PERSISTED_STEP_OBSERVATION_CHARS),
+        checks = o.objects("checks").take(MAX_PERSISTED_CHECKS_PER_STEP).map { decodeCheckResult(it) },
+        judge = (o["judge"] as? JsonObject)?.let { decodeJudgement(it) },
+        startedAt = o.long("startedAt", 0L),
+        durationMs = o.long("durationMs", 0L).coerceAtLeast(0),
+        screenshotPath = o.optStr("screenshotPath"),
+        startScreenshotPath = o.optStr("startScreenshotPath"),
+        sampleScreenshotPaths = o.strings("sampleScreenshotPaths").take(MAX_PERSISTED_SAMPLE_SCREENSHOTS),
+        logStartOffset = o.optLong("logStartOffset"),
+        logEndOffset = o.optLong("logEndOffset"),
+        transcriptStartOffset = o.optLong("transcriptStartOffset"),
+        transcriptEndOffset = o.optLong("transcriptEndOffset"),
+        note = o.optStr("note")?.take(MAX_PERSISTED_NOTE_CHARS),
+        agentUsage = decodeAiUsage(o["agentUsage"]),
+        judgeUsage = decodeAiUsage(o["judgeUsage"]),
+        userRejected = o.bool("userRejected", false),
+        executionStatus = o.optEnum<StepStatus>("executionStatus"),
+        verificationState = o.enumOr("verificationState", VerificationState.NOT_REQUESTED),
+        automaticRetryExcluded = o.bool("automaticRetryExcluded", false),
+        judgeQueueWaitMs = o.optLong("judgeQueueWaitMs")?.coerceAtLeast(0L),
+        judgmentDurationMs = o.optLong("judgmentDurationMs")?.coerceAtLeast(0L),
+    )
+}
+
+private fun decodeCaseAttempt(o: JsonObject): CaseAttemptRecord? {
+    val attempt = o.int("attempt", 0)
+    val status = o.optEnum<CaseStatus>("status") ?: return null
+    if (attempt !in 1..MAX_PERSISTED_CASE_ATTEMPTS) return null
+    return CaseAttemptRecord(
+        caseId = o.str("caseId"),
+        iteration = o.int("iteration", 1).coerceAtLeast(1),
+        attempt = attempt,
+        status = status,
+        steps = o.objects("steps").take(MAX_PERSISTED_STEPS_PER_CASE_ATTEMPT).map { decodeStepResult(it) },
+        startedAt = o.long("startedAt", 0L),
+        finishedAt = o.optLong("finishedAt"),
+        note = o.optStr("note")?.take(MAX_PERSISTED_NOTE_CHARS),
+        agentUsage = decodeAiUsage(o["agentUsage"]),
+        judgeUsage = decodeAiUsage(o["judgeUsage"]),
+        externalToolCalls = o.optLong("externalToolCalls")?.takeIf { it >= 0L },
+    )
+}
+
 private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(
     caseId = o.str("caseId"),
     caseName = o.str("caseName"),
@@ -320,6 +467,9 @@ private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(
     agentUsage = decodeAiUsage(o["agentUsage"]),
     judgeUsage = decodeAiUsage(o["judgeUsage"]),
     externalToolCalls = o.optLong("externalToolCalls")?.takeIf { it >= 0L },
+    caseAttempt = o.int("caseAttempt", 1).coerceIn(1, 3),
+    priorAttempts = o.objects("priorAttempts").take(2).mapNotNull { decodeCaseAttempt(it) },
+    flaky = o.bool("flaky", false),
 )
 
 private fun decodeLaneResult(o: JsonObject): LaneResult? {
@@ -384,5 +534,38 @@ fun decodeRunFile(text: String): Result<TestRun> = runCatching {
     val root = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrElse { error("This file is not a test run (it is not valid JSON).") }
     if (root.str("format") != TEST_RUN_FILE_FORMAT) error("This file is not an Indagium test run.")
     val runObject = root["run"] as? JsonObject ?: error("This test run file has no run in it.")
-    decodeRun(runObject) ?: error("This test run file has no usable run.")
+    val run = decodeRun(runObject) ?: error("This test run file has no usable run.")
+
+    fun StepResult.hasPendingVerification(): Boolean =
+        verificationState == VerificationState.PENDING || attemptHistory.any { it.verificationState == VerificationState.PENDING }
+
+    fun CaseResult.hasPendingVerification(): Boolean =
+        steps.any(StepResult::hasPendingVerification) || priorAttempts.any { attempt -> attempt.steps.any(StepResult::hasPendingVerification) }
+    val unresolved = run.lanes.any { lane ->
+        lane.cases.any(CaseResult::hasPendingVerification)
+    }
+    if (unresolved && run.status == RunStatus.PASSED) {
+        run.copy(
+            status = RunStatus.ERROR,
+            error = listOfNotNull(run.error, "Stored run had unresolved verification and cannot be shown as passed.").joinToString(" "),
+            lanes = run.lanes.map { lane ->
+                val lanePending = lane.cases.any(CaseResult::hasPendingVerification)
+                lane.copy(
+                    status = if (lanePending) RunStatus.ERROR else lane.status,
+                    cases = lane.cases.map { case ->
+                        val pending = case.hasPendingVerification()
+                        case.copy(
+                            status = if (pending && case.status == CaseStatus.PASS) CaseStatus.BLOCKED else case.status,
+                            priorAttempts = case.priorAttempts.map { prior ->
+                                val priorPending = prior.steps.any(StepResult::hasPendingVerification)
+                                if (priorPending && prior.status == CaseStatus.PASS) prior.copy(status = CaseStatus.BLOCKED) else prior
+                            },
+                        )
+                    },
+                )
+            },
+        )
+    } else {
+        run
+    }
 }

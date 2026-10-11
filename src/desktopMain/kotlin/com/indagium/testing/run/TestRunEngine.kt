@@ -58,13 +58,14 @@ internal class TestRunEngine(
 ) {
     suspend fun execute() {
         val snapshot = state.current
+        val judgeLimiter = JudgeConcurrencyLimiter(maxConcurrent = 2)
         state.update { it.copy(status = RunStatus.RUNNING, startedAt = deps.wallClock()) }
         var cancelled = false
         var judge: JudgeService? = null
         try {
             judge = prepareJudge(snapshot)
             runLaneGroups(snapshot.lanes.map { it.config }, deps.tuning.maxParallelDevices) { config ->
-                runLane(snapshot, config, checkNotNull(handles[config.id]) { "No lane handle for ${config.id}" }, judge)
+                runLane(snapshot, config, checkNotNull(handles[config.id]) { "No lane handle for ${config.id}" }, judge, judgeLimiter)
             }
             if (judge != null) compareLanes(judge)
         } catch (stop: CancellationException) {
@@ -105,9 +106,15 @@ internal class TestRunEngine(
     }
 
     @Suppress("TooGenericExceptionCaught") // A lane that crashes must not take the run, or the other lanes, down with it.
-    private suspend fun runLane(snapshot: TestRun, config: LaneConfig, handle: LaneHandle, judge: JudgeService?) {
+    private suspend fun runLane(
+        snapshot: TestRun,
+        config: LaneConfig,
+        handle: LaneHandle,
+        judge: JudgeService?,
+        judgeLimiter: JudgeConcurrencyLimiter,
+    ) {
         try {
-            LaneRunner(snapshot.id, snapshot, config, plan.cases, plan.locked, state, deps, handle, judge?.forLane(config.id)).run()
+            LaneRunner(snapshot.id, snapshot, config, plan.cases, plan.locked, state, deps, handle, judge?.forLane(config.id), judgeLimiter).run()
         } catch (stop: CancellationException) {
             throw stop
         } catch (crash: Exception) {

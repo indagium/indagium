@@ -172,6 +172,24 @@ class RecordingRewriteVideoEvidenceTest {
     }
 
     @Test
+    fun eligibleStoredScreenshotsWinOverVideoAndOnlyRenderedVideoCellsAreCredited() {
+        val first = tap(1, 10_000, shot(HOME, 9_700), shot(APP, 13_000))
+        val second = tap(2, 20_000)
+
+        val evidence = buildRewriteEvidence(listOf(first, second), FakeVideo(splashStartMs = 0, splashEndMs = 0))
+
+        assertEquals(RewriteEvidenceKind.SHEETS, evidence.kind)
+        val sheet = evidence.images.single()
+        assertEquals(setOf(1, 2), sheet.inputs.toSet())
+        assertEquals(2, sheet.storedScreens, "the first input's eligible before and settled-after screenshots are rendered")
+        assertEquals(2, sheet.videoFrames, "only the second input contributes its before and after video frames")
+        assertEquals(emptySet(), sheet.videoMoments[1], "available video is not credited when screenshot cells were rendered instead")
+        assertEquals(setOf("before", "after"), sheet.videoMoments[2])
+        assertTrue(near(HOME, sheetPixel(sheet.bytes, 0)))
+        assertTrue(near(APP, sheetPixel(sheet.bytes, 1)))
+    }
+
+    @Test
     fun theSettledFrameIsTheLastOneBeforeTheNextInputWhenThatStartsSoonerThanTheSettleWindow() {
         val quick = (1..3).map { number -> tap(number, 10_000L + number * 700L, shot(HOME, null), shot(APP, null)) }
         val video = FakeVideo(splashStartMs = 0, splashEndMs = 0)

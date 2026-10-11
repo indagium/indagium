@@ -85,11 +85,23 @@ internal fun sanitizeEvidence(evidence: SessionEvidence): SanitizedEvidence {
             )
         }
         val ownKept = keep(own)
+        val expectedTimestamp = row.expectedScreenshotTimestampMs ?: row.screenshotAcquiredAtMs
+        val expectedWithheld = rowWithheld || expectedTimestamp?.let { sensitivity.spanWithheld(it, it) } == true
+        if (expectedWithheld && row.expectedScreenshotJpeg != null) droppedShots++
         return row.copy(
             screenshotJpeg = ownKept?.jpeg,
-            useScreenshotAsExpected = row.useScreenshotAsExpected && ownKept != null,
+            useScreenshotAsExpected = row.useScreenshotAsExpected && if (row.expectedScreenshotJpeg != null) !expectedWithheld else ownKept != null,
+            expectedScreenshotJpeg = row.expectedScreenshotJpeg.takeUnless { expectedWithheld },
+            expectedScreenshotSource = row.expectedScreenshotSource.takeUnless { expectedWithheld },
+            expectedScreenshotTimestampMs = row.expectedScreenshotTimestampMs.takeUnless { expectedWithheld },
+            expectedScreenshotAlignment = row.expectedScreenshotAlignment.takeUnless { expectedWithheld },
             beforeScreenshot = keep(row.beforeScreenshot),
             afterScreenshot = keep(row.afterScreenshot),
+            tappedElement = row.tappedElement.takeUnless { rowWithheld },
+            targetUnderTouch = row.targetUnderTouch.takeUnless { rowWithheld },
+            clickableTargets = row.clickableTargets.takeUnless { rowWithheld }.orEmpty(),
+            touchWithinTarget = row.touchWithinTarget.takeUnless { rowWithheld },
+            sourceHint = row.sourceHint.takeUnless { rowWithheld },
         )
     }
 
@@ -320,7 +332,10 @@ internal class RecordingEvidenceSaver(
     )
 
     private fun RecordedTestStep.withoutImages() =
-        copy(screenshotJpeg = null, beforeScreenshot = null, afterScreenshot = null, useScreenshotAsExpected = false)
+        copy(
+            screenshotJpeg = null, beforeScreenshot = null, afterScreenshot = null, useScreenshotAsExpected = false,
+            expectedScreenshotJpeg = null, expectedScreenshotSource = null, expectedScreenshotTimestampMs = null, expectedScreenshotAlignment = null,
+        )
 
     private companion object {
         const val PASSWORD_VIDEO_REASON = "A password was typed while recording; the video of such a recording is never stored."

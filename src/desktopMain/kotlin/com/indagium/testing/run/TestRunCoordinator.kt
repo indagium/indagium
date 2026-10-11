@@ -513,8 +513,12 @@ internal class TestRunCoordinator(
     }
 
     /** Resumes a lane paused by a PAUSE_FOR_USER step. False when the lane is not paused. */
-    fun resumePausedStep(runId: String, laneId: String, decision: PauseDecision): Boolean =
-        runs[runId]?.handles?.get(laneId)?.resolvePause(decision) ?: false
+    fun resumePausedStep(runId: String, laneId: String, decision: PauseDecision): Boolean {
+        val handle = runs[runId]?.handles?.get(laneId) ?: return false
+        val paused = handle.pausedStep() ?: return false
+        if (decision == PauseDecision.RETRY && !paused.retryAllowed) return false
+        return handle.resolvePause(decision)
+    }
 
     /** The lanes that wait for a tester to do a manual step (the "Waiting for you" cards). */
     fun waitingSteps(): List<WaitingLaneInfo> = runs.values.flatMap { entry ->

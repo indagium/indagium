@@ -9,6 +9,7 @@ import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.newCheckId
 import com.indagium.testing.model.newHookId
 import com.indagium.testing.store.StoreResult
+import com.indagium.testing.store.TEST_LIBRARY_FILE_VERSION
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.decodeSuiteFile
 import com.indagium.testing.store.encodeSuiteFile
@@ -556,7 +557,8 @@ class TestLibraryStoreTest {
     fun aNewerLibraryFileMakesEveryLibraryLevelWriteInvalidWithoutTouchingTheFile() {
         val dir = tempTestingDir()
         dir.mkdirs()
-        val text = """{"format":"indagium-test-library","version":4,"suiteOrder":[],"scripts":[],"sharedSteps":[],"newThing":{}}"""
+        val text = """{"format":"indagium-test-library","version":${TEST_LIBRARY_FILE_VERSION + 1},"suiteOrder":[],
+            "scripts":[],"sharedSteps":[],"newThing":{}}""".trimIndent()
         File(dir, "library.json").writeText(text)
         val store = newStore(dir)
 

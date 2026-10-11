@@ -4,16 +4,19 @@ import com.indagium.debug.IndagiumToolGateway
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.device.DeviceInputAction
 import com.indagium.testing.device.TestDeviceSession
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepCompletion
 import com.indagium.testing.model.StepJudgement
@@ -22,19 +25,27 @@ import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.VerificationState
+import com.indagium.testing.model.compactDescription
 import com.indagium.testing.model.isDriverStep
 import com.indagium.testing.script.ScriptRunContext
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.script.untrustedData
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -88,6 +99,8 @@ private const val REPLACED_RUN_MESSAGE = "This agent run was replaced by a new o
 private const val TIMEOUT_OBSERVATION = "No result was reported before the step timed out."
 private const val MAX_AGENT_EXAMPLE_SOURCE_BYTES = 16 * 1024 * 1024
 private const val MAX_AGENT_EXAMPLE_CAPTION_CHARS = 300
+private const val MAX_DEFERRED_EVIDENCE_BYTES = 16L * 1024 * 1024
+private const val BYTES_PER_MEBIBYTE = 1_048_576
 
 /** Read an asset with a hard cap that remains effective if the file changes after library validation. */
 internal fun readBoundedExampleAsset(file: File?): ByteArray? {
@@ -121,6 +134,8 @@ internal data class PausedStep(
     val status: StepStatus,
     val observation: String,
     val failedChecks: List<String>,
+    val attempt: Int = 1,
+    val retryAllowed: Boolean = true,
 )
 
 /** What a sequence reports to its owner: progress for the status views, finished steps, and the pause. */
@@ -134,6 +149,9 @@ internal interface SequenceListener {
     fun toolCallFinished(call: LaneToolCall) = Unit
 
     fun judgeUsage(usage: AiUsageStats) = Unit
+
+    /** Replaces one provisional result after its deferred judge finishes; implementations must match full attempt identity. */
+    fun stepUpdated(result: StepResult) = Unit
 
     suspend fun awaitUser(paused: PausedStep): PauseDecision
 
@@ -151,6 +169,8 @@ internal data class SequenceSpec(
     val evidencePrefix: String,
     val caseBudget: CaseBudget? = null,
     val iteration: Int = 1,
+    val caseAttempt: Int = 1,
+    val priorCaseAttempts: List<CaseAttemptRecord> = emptyList(),
 )
 
 /** What every sequence of a lane shares. [nanoTime] and [wallClock] are test seams. */
@@ -171,6 +191,10 @@ internal class SequenceEnv(
     val judge: StepJudge? = null,
     val judgeMode: JudgeMode = JudgeMode.OFF,
     val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
+    val judgeTiming: JudgeTiming = JudgeTiming.INLINE,
+    val judgeLimiter: JudgeConcurrencyLimiter = JudgeConcurrencyLimiter(),
+    val laneId: String = "",
+    val stepRetriesOverride: Int? = null,
     /** True when the run requested a judge, even if startup failed before a [judge] instance became available. */
     val judgeRequested: Boolean = false,
     val pauseGate: RunPauseGate? = null,
@@ -186,11 +210,95 @@ private class Shot(val path: String?, val jpeg: ByteArray?, val capturedAtMs: Lo
 private class Evaluation(
     val step: TestStep,
     val status: StepStatus,
-    val result: StepResult,
+    var result: StepResult,
     val failedChecks: List<String>,
     val stepIndex: Int,
     val attemptNumber: Int,
+) {
+    var deferredJudge: FrozenJudge? = null
+}
+
+private data class FrozenJudge(
+    val step: TestStep,
+    val stepIndex: Int,
+    val attemptNumber: Int,
+    val claim: LaneStepStatus,
+    val driver: DriverReport?,
+    val submittedObservation: String,
+    @Volatile var evidence: JudgeEvidence?,
+    val site: JudgeSite,
+    val unavailableReason: String? = null,
+    val retainedBytes: Long = 0L,
+    val executionCompletedAtMs: Long? = null,
+    val evidenceReleased: AtomicBoolean = AtomicBoolean(false),
 )
+
+private class DeferredJudgeWork(
+    val evaluation: Evaluation,
+    val frozen: FrozenJudge,
+    val queuedAtNanos: Long,
+    val result: CompletableDeferred<JudgementOutcome> = CompletableDeferred(),
+)
+
+/** A run-wide two-request cap that lets inline checkpoints take the next available slot. */
+internal class JudgeConcurrencyLimiter(maxConcurrent: Int = 2) {
+    private val permits = Semaphore(maxConcurrent.coerceAtLeast(1))
+    private val laneLocks = java.util.concurrent.ConcurrentHashMap<String, Mutex>()
+    private val inlineWaiters = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
+    private val globalInlineWaiters = AtomicInteger(0)
+
+    suspend fun <T> inline(laneId: String, block: suspend () -> T): T {
+        val waiters = inlineWaiters.computeIfAbsent(laneId) { AtomicInteger() }
+        waiters.incrementAndGet()
+        globalInlineWaiters.incrementAndGet()
+        val lock = laneLocks.computeIfAbsent(laneId) { Mutex() }
+        try {
+            lock.lock()
+            try {
+                permits.acquire()
+                try {
+                    return block()
+                } finally {
+                    permits.release()
+                }
+            } finally {
+                lock.unlock()
+            }
+        } finally {
+            waiters.decrementAndGet()
+            globalInlineWaiters.decrementAndGet()
+        }
+    }
+
+    suspend fun <T> background(laneId: String, block: suspend () -> T): T {
+        val waiters = inlineWaiters.computeIfAbsent(laneId) { AtomicInteger() }
+        val lock = laneLocks.computeIfAbsent(laneId) { Mutex() }
+        var result: Box<T>? = null
+        while (result == null) {
+            while (waiters.get() > 0 || globalInlineWaiters.get() > 0) delay(10)
+            lock.lock()
+            try {
+                if (waiters.get() == 0 && globalInlineWaiters.get() == 0 && permits.tryAcquire()) {
+                    if (waiters.get() == 0 && globalInlineWaiters.get() == 0) {
+                        try {
+                            result = Box(block())
+                        } finally {
+                            permits.release()
+                        }
+                    } else {
+                        permits.release()
+                    }
+                }
+            } finally {
+                lock.unlock()
+            }
+            if (result == null) delay(10)
+        }
+        return result.value
+    }
+
+    private class Box<T>(val value: T)
+}
 
 private class ActionEvidence(
     val shot: Shot,
@@ -202,7 +310,7 @@ private class ActionEvidence(
     val checksNanos: Long,
 )
 
-private data class JudgementOutcome(val judgement: StepJudgement?, val durationNanos: Long?)
+private data class JudgementOutcome(val judgement: StepJudgement?, val durationNanos: Long?, val queueWaitNanos: Long? = null)
 
 /**
  * What the run learned performing a MANUAL or SCRIPT step. [claim] is the verdict before the checks (PASS: it was done, FAIL: it
@@ -215,6 +323,8 @@ internal class DriverReport(
     val completion: StepCompletion?,
     val checks: List<StepCheck>? = null,
     val note: String? = null,
+    /** False for permission, library, or configuration failures that cannot improve on an automatic retry. */
+    val retryable: Boolean = true,
 )
 
 private data class ToolAdmission(
@@ -241,7 +351,15 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private val finishing = AtomicBoolean(false)
     private val epoch = AtomicLong(0)
     private val toolCalls = AtomicInteger(0)
+    private val attemptPaidCalls = AtomicInteger(0)
     private val recorded = CopyOnWriteArrayList<StepResult>()
+    private val attemptHistory = ArrayList<StepAttemptRecord>()
+    private val deferredJudges = CopyOnWriteArrayList<DeferredJudgeWork>()
+    private val deferredEvidenceBytes = AtomicLong(0L)
+    private val deferredQueue = Channel<DeferredJudgeWork>(capacity = 8)
+    private val deferredScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var deferredWorker: Job? = null
     private val observations = CopyOnWriteArrayList<String>()
     private val attemptNotes = ArrayList<String>()
     private val checks = DeterministicChecks(env.session, env.scriptRunner, { id -> env.scripts.firstOrNull { it.id == id } }, ::scriptContext)
@@ -288,7 +406,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     @Volatile private var lastKnownLogEnd: Long? = null
 
-    @Volatile private var firstAttemptWallMs = 0L
+    @Volatile private var attemptStartedWallMs = 0L
 
     @Volatile private var active = false
 
@@ -367,6 +485,33 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** Results of the steps that ended, in step order. */
     fun results(): List<StepResult> = recorded.toList()
 
+    /** Finalizes deferred ordinary-step judgments at the case boundary, after execution and teardown. */
+    suspend fun finishDeferredJudgements() {
+        deferredJudges.forEach { work ->
+            if (env.judgeTiming == JudgeTiming.AFTER_CASE) {
+                work.result.complete(evaluateFrozenJudge(work.frozen, background = true, queuedAtNanos = work.queuedAtNanos))
+            }
+            applyDeferredOutcome(work, work.result.await())
+            releaseDeferredEvidence(work)
+        }
+        deferredQueue.close()
+        deferredWorker?.join()
+        deferredScope.cancel()
+    }
+
+    /** Stops unfinished deferred work and preserves any verdict that already completed. */
+    suspend fun cancelDeferredJudgements() {
+        deferredQueue.close()
+        deferredScope.cancel()
+        withContext(NonCancellable) { deferredWorker?.join() }
+        deferredJudges.forEach { work ->
+            if (work.result.isCompleted && !work.result.isCancelled) {
+                runCatching { work.result.await() }.getOrNull()?.let { applyDeferredOutcome(work, it) }
+            }
+            releaseDeferredEvidence(work)
+        }
+    }
+
     /** The attempt number of the current step (1 for the first try). */
     val currentAttempt: Int get() = attempt
 
@@ -405,6 +550,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             condition = step.condition,
             intent = step.intent.wire,
             precondition = step.precondition,
+            gestureHint = step.gestureHints.compactDescription().takeIf(String::isNotBlank),
             dispatchEpoch = epoch.get(),
         )
     }
@@ -439,6 +585,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private suspend fun dispatchTool(tool: String, arguments: Map<String, Any?>, runEpoch: Long?, execute: suspend () -> Any?): Any? {
         val admission = mutex.withLock { admitToolLocked(tool, arguments, runEpoch) }
         admission.refusal?.let { return mapOf("error" to it) }
+        if (admission.paid) attemptPaidCalls.incrementAndGet()
         val initial = admission.activity
         if (admission.paid) env.externalDispatchAdmitted(currentCoroutineContext()[Job], initial?.stepId, initial?.attempt ?: 0)
         if (initial != null) runCatching { env.listener.toolCallStarted(initial) }
@@ -657,7 +804,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         index = stepIndex
         attempt = 1
         attemptNotes.clear()
-        firstAttemptWallMs = env.wallClock()
+        attemptHistory.clear()
         previousAttemptFailure = null
         submittedReportStepId = null
         submittedReportAttempt = 0
@@ -667,11 +814,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     private suspend fun startAttemptLocked() {
+        attemptStartedWallMs = env.wallClock()
         attemptLogOffset = runCatching { env.session.logMarker() }.getOrDefault(attemptLogOffset)
         lastKnownLogEnd = attemptLogOffset
         attemptTranscriptOffset = env.transcript?.sizeBytes ?: 0L
         attemptStartNanos = env.nanoTime()
         toolCalls.set(0)
+        attemptPaidCalls.set(0)
         attemptStartShot = null
         attemptPlaybackSamples = emptyList()
         startCaptureAttempted = false
@@ -834,6 +983,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             }
             skipRefusal?.let { return mapOf("error" to it) }
             val currentEvaluation = evaluation ?: return mapOf("error" to "No step is active.")
+            scheduleDeferredJudge(currentEvaluation)
             val answer = when {
                 timedOut -> respond(settleTimeout(currentEvaluation, cancelAgentBeforePause = false))
                 status == LaneStepStatus.SKIPPED -> {
@@ -869,15 +1019,26 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!mutex.withLock { isCurrentLocked(evaluation) }) return null
         val step = evaluation.step
         if (evaluation.status == StepStatus.PASS) return mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) }
-        // Nobody can redo a manual step by itself: a retry would only make the tester wait again.
-        val retries = if (step.kind == StepKind.MANUAL) 0 else step.retries
-        if (evaluation.status != StepStatus.TIMEOUT && attempt < retries + 1) return mutex.withLock { retryLocked(evaluation) }
+        if (canRetryStep(evaluation, timeout = evaluation.status == StepStatus.TIMEOUT)) {
+            return mutex.withLock { retryLocked(evaluation) }
+        }
         return when (step.onFailure) {
             OnFailure.PAUSE_FOR_USER -> pauseFlow(evaluation)
             OnFailure.STOP_CASE -> mutex.withLock { settleLocked(evaluation, Flow.End, issue = false) }
             OnFailure.CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) }
             OnFailure.CREATE_ISSUE_AND_CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = true) }
         }
+    }
+
+    private fun canRetryStep(evaluation: Evaluation, timeout: Boolean): Boolean {
+        if (spec.caseBudget?.exhausted() == true) return false
+        if (evaluation.status !in setOf(StepStatus.FAIL, StepStatus.BLOCKED, StepStatus.TIMEOUT) || evaluation.result.automaticRetryExcluded) return false
+        // Execution timeouts opt into reruns only through an explicit positive run-level override.
+        if (timeout && (env.stepRetriesOverride ?: 0) <= 0) return false
+        val manualTesterStep = evaluation.step.kind == StepKind.MANUAL && evaluation.result.completedBy != StepCompletion.SCRIPT
+        if (manualTesterStep) return false
+        val retries = env.stepRetriesOverride ?: evaluation.step.retries
+        return attempt < retries + 1
     }
 
     /**
@@ -935,7 +1096,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             "optional" to brief.optional,
             "condition" to brief.condition,
             "attempt" to brief.attempt,
-        ) + brief.exampleMetadata()
+        ) + brief.exampleMetadata() + brief.gestureHint?.let {
+            untrustedData("recorded_gesture_hint", mapOf("summary" to it))
+        }.orEmpty()
     }
 
     // ── Evaluating a step ────────────────────────────────────────────
@@ -947,6 +1110,171 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
         val result = buildResult(step, StepStatus.SKIPPED, "skipped".takeIf { driver == null }, reported, emptyList(), null, logEnd, driver = driver)
         return Evaluation(step, StepStatus.SKIPPED, result, emptyList(), index, attempt)
+    }
+
+    /** Called only after releasing [mutex]; a full queue may wait without blocking worker callbacks. */
+    @Suppress("TooGenericExceptionCaught") // A deferred judge failure becomes inconclusive and never interrupts case execution.
+    private suspend fun scheduleDeferredJudge(evaluation: Evaluation) {
+        val frozen = evaluation.deferredJudge ?: return
+        val work = DeferredJudgeWork(evaluation, frozen, env.nanoTime())
+        deferredJudges += work
+        env.transcript?.append(
+            "deferred_judgment_queued",
+            mapOf(
+                "caseId" to spec.caseId, "iteration" to spec.iteration, "caseAttempt" to spec.caseAttempt,
+                "stepId" to frozen.site.stepId, "stepAttempt" to frozen.site.attempt,
+                "schedule" to env.judgeTiming.name.lowercase(),
+            ),
+        )
+        if (env.judgeTiming == JudgeTiming.BACKGROUND) {
+            if (deferredWorker == null) {
+                deferredWorker = deferredScope.launch {
+                    for (queued in deferredQueue) {
+                        try {
+                            queued.result.complete(evaluateFrozenJudge(queued.frozen, background = true, queuedAtNanos = queued.queuedAtNanos))
+                            releaseDeferredEvidence(queued)
+                        } catch (stop: CancellationException) {
+                            queued.result.cancel(stop)
+                            releaseDeferredEvidence(queued)
+                            throw stop
+                        } catch (failure: Exception) {
+                            releaseDeferredEvidence(queued)
+                            queued.result.complete(
+                                JudgementOutcome(
+                                    StepJudgement(
+                                        verdict = JudgeVerdict.INCONCLUSIVE,
+                                        judgedAt = env.wallClock(),
+                                        error = "The judge failed: ${failure.message ?: failure::class.simpleName}",
+                                    ),
+                                    null,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+            // Backpressure is applied here, after the sequence lock has been released.
+            deferredQueue.send(work)
+        }
+    }
+
+    private fun releaseDeferredEvidence(work: DeferredJudgeWork) {
+        val frozen = work.frozen
+        if (!frozen.evidenceReleased.compareAndSet(false, true)) return
+        frozen.evidence = null
+        if (frozen.retainedBytes > 0L) deferredEvidenceBytes.addAndGet(-frozen.retainedBytes)
+        work.evaluation.deferredJudge = null
+    }
+
+    private fun shouldCreateDeferredIssue(status: StepStatus, onFailure: OnFailure): Boolean =
+        status in setOf(StepStatus.FAIL, StepStatus.BLOCKED) && onFailure == OnFailure.CREATE_ISSUE_AND_CONTINUE
+
+    private fun isPendingAttempt(attempt: StepAttemptRecord, step: StepResult, attemptNumber: Int): Boolean =
+        attempt.caseId == step.caseId && attempt.iteration == step.iteration && attempt.caseAttempt == step.caseAttempt &&
+            attempt.stepId == step.stepId && attempt.attempt == attemptNumber && attempt.verificationState == VerificationState.PENDING
+
+    @Suppress("CyclomaticComplexMethod") // One identity-guarded update must settle either the current or an earlier retry record atomically.
+    private fun applyDeferredOutcome(work: DeferredJudgeWork, outcome: JudgementOutcome) {
+        val judgement = outcome.judgement ?: return
+        val frozen = work.frozen
+        val currentIndex = recorded.indexOfFirst { row ->
+            row.caseId == spec.caseId && row.iteration == spec.iteration && row.caseAttempt == spec.caseAttempt &&
+                row.stepId == frozen.step.id
+        }
+        if (currentIndex < 0) return
+        val old = recorded[currentIndex]
+        val verification = when (judgement.verdict) {
+            JudgeVerdict.PASS -> VerificationState.VERIFIED
+            JudgeVerdict.FAIL -> VerificationState.FAILED
+            JudgeVerdict.INCONCLUSIVE -> VerificationState.INCONCLUSIVE
+        }
+
+        fun noteFor(existing: String?) = listOfNotNull(
+            existing?.takeIf { !it.contains("Independent verification is pending.") },
+            when (judgement.verdict) {
+                JudgeVerdict.PASS -> "Independent judge confirmed the expected result."
+                JudgeVerdict.FAIL -> "Independent judge failed the expected result."
+                JudgeVerdict.INCONCLUSIVE -> "Independent judgment was inconclusive; verification remains unresolved."
+            },
+            judgement.error,
+        ).joinToString(" ")
+        val updated: StepResult
+        if (old.attempts == frozen.attemptNumber && old.verificationState == VerificationState.PENDING) {
+            val checks = applyJudgementToChecks(old.checks, judgement)
+            val base = old.executionStatus ?: old.status
+            val settled = settleWithJudge(base, judgement, requiresVerdict = false, inconclusivePolicy = env.judgeInconclusivePolicy)
+            updated = old.copy(
+                status = settled.status,
+                checks = checks,
+                judge = judgement,
+                judgeInconclusive = judgement.verdict == JudgeVerdict.INCONCLUSIVE,
+                executionStatus = base,
+                verificationState = verification,
+                judgeQueueWaitMs = outcome.queueWaitNanos?.div(NANOS_PER_MILLI),
+                judgmentDurationMs = outcome.durationNanos?.div(NANOS_PER_MILLI),
+                issueRequested = old.issueRequested || shouldCreateDeferredIssue(settled.status, frozen.step.onFailure),
+                note = noteFor(old.note),
+                attemptHistory = old.attemptHistory.map { attempt ->
+                    if (isPendingAttempt(attempt, old, frozen.attemptNumber)) {
+                        attempt.copy(
+                            status = settled.status,
+                            checks = checks,
+                            judge = judgement,
+                            judgeUsage = judgement.usage,
+                            executionStatus = base,
+                            verificationState = verification,
+                            judgeQueueWaitMs = outcome.queueWaitNanos?.div(NANOS_PER_MILLI),
+                            judgmentDurationMs = outcome.durationNanos?.div(NANOS_PER_MILLI),
+                        )
+                    } else {
+                        attempt
+                    }
+                },
+            )
+        } else {
+            val historyIndex = old.attemptHistory.indexOfFirst { attempt ->
+                attempt.caseId == old.caseId && attempt.iteration == old.iteration && attempt.caseAttempt == old.caseAttempt &&
+                    attempt.stepId == old.stepId && attempt.attempt == frozen.attemptNumber && attempt.verificationState == VerificationState.PENDING
+            }
+            if (historyIndex < 0) return
+            val attempt = old.attemptHistory[historyIndex]
+            val checks = applyJudgementToChecks(attempt.checks, judgement)
+            val base = attempt.executionStatus ?: attempt.status
+            val settled = settleWithJudge(base, judgement, requiresVerdict = false, inconclusivePolicy = env.judgeInconclusivePolicy)
+            updated = old.copy(
+                attemptHistory = old.attemptHistory.mapIndexed { index, saved ->
+                    if (index == historyIndex) {
+                        saved.copy(
+                            status = settled.status,
+                            checks = checks,
+                            judge = judgement,
+                            judgeUsage = judgement.usage,
+                            executionStatus = base,
+                            verificationState = verification,
+                            judgeQueueWaitMs = outcome.queueWaitNanos?.div(NANOS_PER_MILLI),
+                            judgmentDurationMs = outcome.durationNanos?.div(NANOS_PER_MILLI),
+                        )
+                    } else {
+                        saved
+                    }
+                },
+            )
+        }
+        val finalized = updated.copy(
+            flaky = updated.status == StepStatus.PASS && updated.attemptHistory.dropLast(1).any { it.status != StepStatus.PASS },
+        )
+        recorded[currentIndex] = finalized
+        work.evaluation.result = finalized
+        env.listener.stepUpdated(finalized)
+        env.transcript?.append(
+            "deferred_judgment_applied",
+            mapOf(
+                "caseId" to old.caseId, "iteration" to old.iteration, "caseAttempt" to old.caseAttempt,
+                "stepId" to old.stepId, "stepAttempt" to frozen.attemptNumber,
+                "verificationState" to verification.name,
+                "attemptIsFinal" to (old.attempts == frozen.attemptNumber),
+            ),
+        )
     }
 
     private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String, driver: DriverReport? = null): Evaluation? {
@@ -973,14 +1301,48 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         )
         val remaining = (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)
         val actionEvidence = collectActionEvidence(step, driver, evaluationStart, remaining) ?: return null
+        val executionCompletedAtMs = env.wallClock()
+        val judgeRequested = shouldJudge(env.judgeMode, step, claim, actionEvidence.automaticFailed) &&
+            (env.judgeRequested || env.judge != null)
+        val canDefer = judgeRequested && driver == null && !spec.setup && !hasJudgeChecks(step) &&
+            step.onFailure != OnFailure.PAUSE_FOR_USER && env.judgeTiming != JudgeTiming.INLINE
+        if (canDefer) {
+            val frozen = freezeDeferredJudge(step, claim, driver, submittedObservation, actionEvidence, executionCompletedAtMs)
+            val provisional = settleEvaluation(
+                step, claim, driver, submittedObservation, actionEvidence, null,
+                executionCompletedAtMs = executionCompletedAtMs,
+            )
+            appendStepTiming(step, actionEvidence.evidenceNanos, actionEvidence.checksNanos, null, executionCompletedAtMs)
+            provisional.deferredJudge = frozen
+            provisional.result = provisional.result.copy(
+                executionStatus = provisional.result.status,
+                verificationState = VerificationState.PENDING,
+                note = listOfNotNull(provisional.result.note, "Independent verification is pending.").joinToString(" "),
+            )
+            return provisional
+        }
         val judgeOutcome = evaluateJudgement(step, claim, driver, actionEvidence)
+        val verificationCompletedAtMs = env.wallClock().takeIf { judgeOutcome.judgement != null }
         appendStepTiming(
             step,
             actionEvidence.evidenceNanos,
             actionEvidence.checksNanos,
             judgeOutcome.durationNanos,
+            executionCompletedAtMs,
+            verificationCompletedAtMs,
+            judgeOutcome.queueWaitNanos,
         )
-        return settleEvaluation(step, claim, driver, submittedObservation, actionEvidence, judgeOutcome.judgement)
+        return settleEvaluation(
+            step,
+            claim,
+            driver,
+            submittedObservation,
+            actionEvidence,
+            judgeOutcome.judgement,
+            judgeOutcome.queueWaitNanos,
+            judgeOutcome.durationNanos,
+            executionCompletedAtMs,
+        )
     }
 
     private suspend fun collectActionEvidence(
@@ -1022,6 +1384,49 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         )
     }
 
+    private fun freezeDeferredJudge(
+        step: TestStep,
+        claim: LaneStepStatus,
+        driver: DriverReport?,
+        submittedObservation: String,
+        actionEvidence: ActionEvidence,
+        executionCompletedAtMs: Long,
+    ): FrozenJudge {
+        val images = listOfNotNull(actionEvidence.shot.jpeg, attemptStartShot?.jpeg) + actionEvidence.samples.mapNotNull { it.jpeg }
+        val bytes = images.sumOf { it.size.toLong() }
+        val hasImages = images.isNotEmpty()
+        val retainImages = hasImages && reserveDeferredEvidence(bytes)
+        val unavailable = when {
+            hasImages && !retainImages ->
+                "The per-case deferred evidence limit of ${MAX_DEFERRED_EVIDENCE_BYTES / BYTES_PER_MEBIBYTE} MiB was reached; " +
+                    "independent verification is inconclusive."
+            else -> null
+        }
+        return FrozenJudge(
+            step = step,
+            stepIndex = index,
+            attemptNumber = attempt,
+            claim = claim,
+            driver = driver,
+            submittedObservation = submittedObservation,
+            evidence = judgeEvidence(
+                step, actionEvidence.checks, actionEvidence.shot, actionEvidence.logEnd, actionEvidence.samples, includeImages = retainImages,
+            ),
+            site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt, spec.iteration, spec.caseAttempt),
+            unavailableReason = unavailable,
+            retainedBytes = bytes.takeIf { retainImages } ?: 0L,
+            executionCompletedAtMs = executionCompletedAtMs,
+        )
+    }
+
+    private fun reserveDeferredEvidence(bytes: Long): Boolean {
+        while (true) {
+            val current = deferredEvidenceBytes.get()
+            if (current + bytes > MAX_DEFERRED_EVIDENCE_BYTES) return false
+            if (deferredEvidenceBytes.compareAndSet(current, current + bytes)) return true
+        }
+    }
+
     private suspend fun evaluateJudgement(
         step: TestStep,
         claim: LaneStepStatus,
@@ -1030,26 +1435,74 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     ): JudgementOutcome {
         val requested = judgeable(step, driver) && shouldJudge(env.judgeMode, step, claim, evidence.automaticFailed)
         if (!requested || (!env.judgeRequested && env.judge == null)) return JudgementOutcome(null, null)
-        val started = env.nanoTime()
-        val judgement = if (env.judgeRequested && env.judge == null) {
-            StepJudgement(
-                verdict = JudgeVerdict.INCONCLUSIVE,
-                judgedAt = env.wallClock(),
-                error = "The configured judge could not be prepared; independent verification is unavailable.",
-            )
-        } else {
-            withTimeoutOrNull(JUDGE_TIMEOUT_MS) {
-                judgeAttempt(step, claim, evidence.checks, evidence.automaticFailed, evidence.shot, evidence.logEnd, evidence.samples)
-            } ?: StepJudgement(
-                verdict = JudgeVerdict.INCONCLUSIVE,
-                judgedAt = env.wallClock(),
-                error = "The judge did not answer within ${JUDGE_TIMEOUT_MS / 1_000} s.",
-            )
-        }
-        judgement.error?.let { attemptNotes += "The judge could not finish: $it" }
-        return JudgementOutcome(judgement, env.nanoTime() - started)
+        val frozen = FrozenJudge(
+            step,
+            index,
+            attempt,
+            claim,
+            driver,
+            submittedObservation = "",
+            evidence = judgeEvidence(step, evidence.checks, evidence.shot, evidence.logEnd, evidence.samples),
+            site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt, spec.iteration, spec.caseAttempt),
+        )
+        val outcome = evaluateFrozenJudge(frozen, background = false)
+        return outcome
     }
 
+    private suspend fun evaluateFrozenJudge(
+        frozen: FrozenJudge,
+        background: Boolean,
+        queuedAtNanos: Long = env.nanoTime(),
+    ): JudgementOutcome {
+        val queuedAt = queuedAtNanos
+        var started = queuedAt
+        val evaluate: suspend () -> JudgementOutcome = {
+            started = env.nanoTime()
+            val judgement = if (frozen.unavailableReason != null) {
+                StepJudgement(verdict = JudgeVerdict.INCONCLUSIVE, judgedAt = env.wallClock(), error = frozen.unavailableReason)
+            } else if (env.judgeRequested && env.judge == null) {
+                StepJudgement(
+                    verdict = JudgeVerdict.INCONCLUSIVE,
+                    judgedAt = env.wallClock(),
+                    error = "The configured judge could not be prepared; independent verification is unavailable.",
+                )
+            } else {
+                withTimeoutOrNull(JUDGE_TIMEOUT_MS) {
+                    judgeAttempt(frozen.site, checkNotNull(frozen.evidence), reportUsage = !background)
+                } ?: StepJudgement(
+                    verdict = JudgeVerdict.INCONCLUSIVE,
+                    judgedAt = env.wallClock(),
+                    error = "The judge did not answer within ${JUDGE_TIMEOUT_MS / 1_000} s.",
+                )
+            }
+            JudgementOutcome(judgement, env.nanoTime() - started, (started - queuedAt).coerceAtLeast(0L))
+        }
+        val outcome = if (background) {
+            env.judgeLimiter.background(laneId = env.laneId, block = evaluate)
+        } else {
+            env.judgeLimiter.inline(laneId = env.laneId, block = evaluate)
+        }
+        env.transcript?.append(
+            if (background) "deferred_judgment_finished" else "inline_judgment_finished",
+            mapOf(
+                "caseId" to frozen.site.caseId,
+                "iteration" to frozen.site.iteration,
+                "caseAttempt" to frozen.site.caseAttempt,
+                "stepId" to frozen.site.stepId,
+                "stepNumber" to frozen.site.stepNumber,
+                "stepAttempt" to frozen.site.attempt,
+                "executionCompletedAtMs" to frozen.executionCompletedAtMs,
+                "verificationCompletedAtMs" to outcome.judgement?.judgedAt,
+                "queueWaitMs" to ((outcome.queueWaitNanos ?: 0L) / NANOS_PER_MILLI),
+                "judgmentMs" to (outcome.durationNanos ?: 0L) / NANOS_PER_MILLI,
+                "verification" to outcome.judgement?.verdict?.name?.lowercase(),
+                "evidenceUnavailableReason" to frozen.unavailableReason,
+            ),
+        )
+        return outcome
+    }
+
+    @Suppress("CyclomaticComplexMethod") // Execution outcome, verification state, and user-facing note are settled as one result.
     private suspend fun settleEvaluation(
         step: TestStep,
         claim: LaneStepStatus,
@@ -1057,10 +1510,14 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         submittedObservation: String,
         actionEvidence: ActionEvidence,
         judgement: StepJudgement?,
+        judgeQueueWaitNanos: Long? = null,
+        judgmentDurationNanos: Long? = null,
+        executionCompletedAtMs: Long? = null,
     ): Evaluation {
         val results = applyJudgementToChecks(actionEvidence.checks, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val base = deterministicBaseStatus(claim, failed.isNotEmpty())
+        val executionStatus = deterministicBaseStatus(claim, actionEvidence.automaticFailed)
         val settled = settleWithJudge(
             base,
             judgement,
@@ -1085,8 +1542,25 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             step, settled.status, claimText(claim, driver), submittedObservation, results, actionEvidence.shot.path, actionEvidence.logEnd, judgement,
             settled.inconclusive, driver, startScreenshotPath = attemptStartShot?.path,
             sampleScreenshotPaths = actionEvidence.samples.mapNotNull { it.path },
+            executionCompletedAtMs = executionCompletedAtMs,
         )
-            .let { result -> result.copy(note = listOfNotNull(result.note, verificationNote).joinToString(" ").ifBlank { null }) }
+            .let { result ->
+                val requested = judgeable(step, driver) && shouldJudge(env.judgeMode, step, claim, actionEvidence.automaticFailed) &&
+                    (env.judgeRequested || env.judge != null)
+                result.copy(
+                    executionStatus = executionStatus,
+                    verificationState = when {
+                        !requested -> VerificationState.NOT_REQUESTED
+                        judgement == null -> VerificationState.PENDING
+                        judgement.verdict == JudgeVerdict.PASS -> VerificationState.VERIFIED
+                        judgement.verdict == JudgeVerdict.FAIL -> VerificationState.FAILED
+                        else -> VerificationState.INCONCLUSIVE
+                    },
+                    note = listOfNotNull(result.note, verificationNote).joinToString(" ").ifBlank { null },
+                    judgeQueueWaitMs = judgeQueueWaitNanos?.div(NANOS_PER_MILLI),
+                    judgmentDurationMs = judgmentDurationNanos?.div(NANOS_PER_MILLI),
+                )
+            }
             .let {
                 if (!unresolved) it else it.copy(
                     note = listOfNotNull(
@@ -1100,11 +1574,21 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     /** Execution evidence/check work shares the step allowance; the independent judge duration is recorded separately. */
-    private fun appendStepTiming(step: TestStep, evidenceNanos: Long, checksNanos: Long, judgeNanos: Long?) {
+    private fun appendStepTiming(
+        step: TestStep,
+        evidenceNanos: Long,
+        checksNanos: Long,
+        judgeNanos: Long?,
+        executionCompletedAtMs: Long,
+        verificationCompletedAtMs: Long? = null,
+        queueWaitNanos: Long? = null,
+    ) {
         val transcript = env.transcript ?: return
         val evidenceMs = evidenceNanos / NANOS_PER_MILLI
         val checksMs = checksNanos / NANOS_PER_MILLI
         val judgeMs = judgeNanos?.let { it / NANOS_PER_MILLI }
+        val queueWaitMs = queueWaitNanos?.div(NANOS_PER_MILLI)
+        val executionDurationMs = (executionCompletedAtMs - attemptStartedWallMs).coerceAtLeast(0L)
         transcript.append(
             "finish_step_timing",
             mapOf(
@@ -1115,7 +1599,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 "evidenceCaptureMs" to evidenceMs,
                 "deterministicChecksMs" to checksMs,
                 "judgeMs" to judgeMs,
-                "totalMs" to evidenceMs + checksMs + (judgeMs ?: 0L),
+                "evidenceAndChecksMs" to evidenceMs + checksMs,
+                "executionDurationMs" to executionDurationMs,
+                "queueWaitMs" to queueWaitMs,
+                "verificationDurationMs" to judgeMs,
+                "totalMs" to (executionDurationMs + (queueWaitMs ?: 0L) + (judgeMs ?: 0L)),
+                "executionCompletedAtMs" to executionCompletedAtMs,
+                "verificationCompletedAtMs" to verificationCompletedAtMs,
                 "startCapturedAtMs" to attemptStartShot?.capturedAtMs,
                 "endCapturedAtMs" to lastAttemptShot?.capturedAtMs,
                 "playbackEvidenceRequired" to playbackRelated(step),
@@ -1144,26 +1634,22 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         else -> StepStatus.FAIL
     }
 
-    /** Asks the judge about this attempt when the mode says so. The judge is blind: it gets [JudgeEvidence], which has no agent words. */
-    @Suppress("TooGenericExceptionCaught", "LongParameterList") // A judge must never decide the step by throwing; whatever it throws is an inconclusive answer.
-    private suspend fun judgeAttempt(
-        step: TestStep,
-        claim: LaneStepStatus,
-        automatic: List<CheckResult>,
-        automaticFailed: Boolean,
-        shot: Shot,
-        logEnd: Long?,
-        samples: List<Shot>,
-    ): StepJudgement? {
-        val judge = env.judge ?: return null
-        if (!shouldJudge(env.judgeMode, step, claim, automaticFailed)) return null
-        val site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt)
-        val judgement = try {
-            val evidence = judgeEvidence(step, automatic, shot, logEnd, samples)
+    /** Runs only frozen evidence; no mutable current-step or conversation state is read here. */
+    @Suppress("TooGenericExceptionCaught") // A judge must never decide the step by throwing; whatever it throws is inconclusive.
+    private suspend fun judgeAttempt(site: JudgeSite, evidence: JudgeEvidence, reportUsage: Boolean): StepJudgement {
+        val judge = env.judge ?: return StepJudgement(
+            verdict = JudgeVerdict.INCONCLUSIVE,
+            judgedAt = env.wallClock(),
+            error = "The configured judge could not be prepared; independent verification is unavailable.",
+        )
+        return try {
             if (judge is UsageReportingStepJudge) {
-                judge.judge(site, evidence, env.listener::judgeUsage)
+                val usageReporter: (AiUsageStats) -> Unit = if (reportUsage) env.listener::judgeUsage else { _ -> }
+                judge.judge(site, evidence, usageReporter)
             } else {
-                judge.judge(site, evidence).also { judgement -> judgement.usage?.let(env.listener::judgeUsage) }
+                val judgement = judge.judge(site, evidence)
+                if (reportUsage) judgement.usage?.let(env.listener::judgeUsage)
+                judgement
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -1173,30 +1659,42 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 error = "The judge failed: ${failure.message ?: failure::class.simpleName}",
             )
         }
-        return judgement
     }
 
-    private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?, samples: List<Shot>): JudgeEvidence {
+    private fun judgeEvidence(
+        step: TestStep,
+        automatic: List<CheckResult>,
+        shot: Shot,
+        logEnd: Long?,
+        samples: List<Shot>,
+        includeImages: Boolean = true,
+    ): JudgeEvidence {
         val start = attemptLogOffset
         val logFile = env.session.readLogFile
         val startShot = attemptStartShot
+        val endImage = shot.jpeg?.takeIf { includeImages }
+        val startImage = startShot?.jpeg?.takeIf { includeImages }
+        val frozenSamples = samples.map { sample ->
+            Triple(sample.capturedAtMs, sample.jpeg?.takeIf { includeImages }, sample.path)
+        }
         val lane = JudgeLaneEvidence(
             label = JUDGE_LANE_LABEL,
             laneId = "",
             deterministic = deterministicOnly(automatic),
-            screenshot = { shot.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
+            screenshot = { endImage?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
             log = { offset, limit -> withContext(Dispatchers.IO) { readStepLogSlice(logFile, start, logEnd, offset, limit) } },
             logBytes = logEnd?.minus(start),
-            startScreenshot = { startShot?.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
+            startScreenshot = { startImage?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
             startScreenshotCapturedAtMs = startShot?.capturedAtMs,
             screenshotCapturedAtMs = shot.capturedAtMs,
-            samples = samples.mapIndexed { index, sample ->
-                JudgeScreenshotSample(index + 1, sample.capturedAtMs) { sample.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } }
+            samples = frozenSamples.mapIndexed { index, sample ->
+                JudgeScreenshotSample(index + 1, sample.first) { sample.second?.let { JudgeImage(it, SCREEN_MIME_TYPE) } }
             },
         )
         return JudgeEvidence(
             spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane),
             step.intent, step.precondition,
+            attemptIdentity = JudgeAttemptIdentity(spec.caseId, spec.iteration, spec.caseAttempt, step.id, attempt),
         )
     }
 
@@ -1214,6 +1712,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         driver: DriverReport? = null,
         startScreenshotPath: String? = attemptStartShot?.path,
         sampleScreenshotPaths: List<String> = emptyList(),
+        executionCompletedAtMs: Long? = null,
     ): StepResult {
         val logEnd = knownLogEnd ?: runCatching { env.session.logMarker() }.getOrNull()
         return StepResult(
@@ -1232,8 +1731,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             logEndOffset = logEnd,
             transcriptStartOffset = attemptTranscriptOffset,
             transcriptEndOffset = env.transcript?.sizeBytes,
-            startedAt = firstAttemptWallMs,
-            durationMs = env.wallClock() - firstAttemptWallMs,
+            startedAt = attemptStartedWallMs,
+            durationMs = ((executionCompletedAtMs ?: env.wallClock()) - attemptStartedWallMs).coerceAtLeast(0L),
             note = (attemptNotes + listOfNotNull(driver?.note)).takeIf { it.isNotEmpty() }?.joinToString(" "),
             judge = judgement,
             judgeInconclusive = judgeInconclusive,
@@ -1242,6 +1741,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             manualCompletion = step.manualCompletion.takeIf { step.kind == StepKind.MANUAL },
             startScreenshotPath = startScreenshotPath,
             sampleScreenshotPaths = sampleScreenshotPaths,
+            executionStatus = status,
+            caseId = spec.caseId,
+            iteration = spec.iteration,
+            caseAttempt = spec.caseAttempt,
+            automaticRetryExcluded = driver?.retryable == false,
         )
     }
 
@@ -1278,6 +1782,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private suspend fun retryLocked(evaluation: Evaluation): Flow {
         if (!isCurrentLocked(evaluation)) return Flow.End
         previousAttemptFailure = recordRetryEvidence(evaluation, "automatic")
+        attemptHistory += evaluation.result.toAttemptRecord(evaluation.attemptNumber, "automatic_retry")
         attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}" +
             (if (evaluation.failedChecks.isNotEmpty()) " (a check failed)" else "") + "."
         attempt++
@@ -1288,7 +1793,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** Records [evaluation] as the step's final result, then moves according to [flow]. Returns where the sequence went. */
     private suspend fun settleLocked(evaluation: Evaluation, flow: Flow, issue: Boolean, afterRecord: (() -> Unit)? = null): Flow {
         if (!isCurrentLocked(evaluation)) return Flow.End
-        val result = evaluation.result.copy(issueRequested = issue)
+        val history = attemptHistory + evaluation.result.toAttemptRecord(evaluation.attemptNumber, "final")
+        val recovered = evaluation.result.status == StepStatus.PASS && history.dropLast(1).any { it.status != StepStatus.PASS }
+        val result = evaluation.result.copy(issueRequested = issue, attemptHistory = history, flaky = recovered)
         recorded += result
         // A skipped step did nothing to the device: the next step starts from the screen this one started from.
         if (result.status == StepStatus.SKIPPED) lastAttemptShot = lastAttemptShot ?: attemptStartShot
@@ -1317,7 +1824,16 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!current) return Flow.End
         val decision = try {
             env.listener.awaitUser(
-                PausedStep(spec.caseName, index + 1, evaluation.step.action, evaluation.status, evaluation.result.observation, evaluation.failedChecks),
+                PausedStep(
+                    spec.caseName,
+                    index + 1,
+                    evaluation.step.action,
+                    evaluation.status,
+                    evaluation.result.observation,
+                    evaluation.failedChecks,
+                    attempt = evaluation.attemptNumber,
+                    retryAllowed = evaluation.attemptNumber < com.indagium.testing.model.MAX_STEP_RETRIES + 1,
+                ),
             )
         } finally {
             awaitingUser = false
@@ -1326,17 +1842,63 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             if (!isCurrentLocked(evaluation)) return@withLock Flow.End
             when (decision) {
                 PauseDecision.RETRY -> {
+                    if (attempt >= com.indagium.testing.model.MAX_STEP_RETRIES + 1) {
+                        evaluation.result = evaluation.result.copy(
+                            note = listOfNotNull(
+                                evaluation.result.note,
+                                "The maximum of ${com.indagium.testing.model.MAX_STEP_RETRIES} retries for this step has been reached.",
+                            ).joinToString(" "),
+                        )
+                        return@withLock settleLocked(evaluation, Flow.End, issue = false)
+                    }
                     previousAttemptFailure = recordRetryEvidence(evaluation, "user_requested")
+                    attemptHistory += evaluation.result.toAttemptRecord(evaluation.attemptNumber, "user_requested_retry")
                     attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}; the user asked for another attempt."
                     attempt++
                     startAttemptLocked()
                     Flow.Redo
                 }
                 PauseDecision.CONTINUE -> settleLocked(evaluation, Flow.Next(index + 1), issue = false)
-                PauseDecision.STOP -> settleLocked(evaluation, Flow.End, issue = false)
+                PauseDecision.STOP -> {
+                    evaluation.result = evaluation.result.copy(userRejected = true)
+                    settleLocked(evaluation, Flow.End, issue = false)
+                }
             }
         }
     }
+
+    /** Keeps each failed attempt in the saved lane transcript, with bounded references instead of nested StepResult copies. */
+    private fun StepResult.toAttemptRecord(number: Int, retryReason: String): StepAttemptRecord = StepAttemptRecord(
+        caseId = spec.caseId,
+        iteration = spec.iteration,
+        caseAttempt = spec.caseAttempt,
+        stepId = stepId,
+        attempt = number,
+        retryReason = retryReason,
+        status = status,
+        agentClaim = agentClaim,
+        observation = observation,
+        checks = checks,
+        judge = judge,
+        startedAt = startedAt,
+        durationMs = durationMs,
+        screenshotPath = screenshotPath,
+        startScreenshotPath = startScreenshotPath,
+        sampleScreenshotPaths = sampleScreenshotPaths,
+        logStartOffset = logStartOffset,
+        logEndOffset = logEndOffset,
+        transcriptStartOffset = transcriptStartOffset,
+        transcriptEndOffset = transcriptEndOffset,
+        note = note,
+        agentUsage = attemptPaidCalls.get().takeIf { it > 0 }?.let { AiUsageStats(toolCalls = it.toLong(), partial = true) },
+        judgeUsage = judge?.usage,
+        userRejected = userRejected,
+        executionStatus = executionStatus,
+        verificationState = verificationState,
+        automaticRetryExcluded = automaticRetryExcluded,
+        judgeQueueWaitMs = judgeQueueWaitMs,
+        judgmentDurationMs = judgmentDurationMs,
+    )
 
     /** Keeps each failed attempt in the saved lane transcript, with bounded references instead of nested StepResult copies. */
     private fun recordRetryEvidence(evaluation: Evaluation, retryReason: String): Map<String, Any?> {
@@ -1443,6 +2005,19 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** Finishes the timeout outcome before notifying the lane driver that its current agent is stale. */
     private suspend fun settleTimeout(evaluation: Evaluation, cancelAgentBeforePause: Boolean): Flow {
         val step = evaluation.step
+        if (canRetryStep(evaluation, timeout = true)) {
+            return withContext(NonCancellable) {
+                mutex.withLock {
+                    if (!isCurrentLocked(evaluation)) return@withLock Flow.End
+                    // Stale the timed-out agent before reopening the step for its fresh attempt.
+                    epoch.incrementAndGet()
+                    val retried = retryLocked(evaluation)
+                    events.trySend(SequenceEvent.TimedOut())
+                    events.trySend(SequenceEvent.Moved(index))
+                    retried
+                }
+            }
+        }
         if (step.onFailure == OnFailure.PAUSE_FOR_USER) {
             val flow = pauseFlow(evaluation) {
                 // Invalidate the current lane agent in the same critical section that accepts

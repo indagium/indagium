@@ -25,6 +25,7 @@ import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
@@ -53,6 +54,11 @@ private const val MAX_STATE_CHANGES = 32
 private const val MAX_WARNINGS = 60
 private const val MAX_STEP_IDS = 400
 private const val MAX_TEXT_CHARS = 20_000
+private const val MAX_SCREENSHOT_SOURCE_CHARS = 100
+private const val MAX_SCREENSHOT_ALIGNMENT_CHARS = 160
+private const val MAX_TARGET_LABEL_CHARS = 120
+private const val MAX_TARGET_RESOURCE_ID_CHARS = 200
+private const val MAX_TARGET_CLASS_NAME_CHARS = 80
 private val IMAGE_REF = Regex("^[0-9a-f]{16,64}$")
 private val prettyJson = Json { prettyPrint = true }
 
@@ -218,6 +224,18 @@ private fun pointJson(point: RecordedPoint): JsonObject = buildJsonObject {
     put("screenHeight", point.screenHeight)
 }
 
+private fun uiTargetJson(target: RecordedUiTarget): JsonObject = buildJsonObject {
+    put("text", target.text)
+    put("contentDesc", target.contentDesc)
+    put("resourceId", target.resourceId)
+    put("className", target.className)
+    put("left", target.left)
+    put("top", target.top)
+    put("right", target.right)
+    put("bottom", target.bottom)
+    put("clickable", target.clickable)
+}
+
 @Suppress("CyclomaticComplexMethod") // One optional key per field of a row.
 private fun rowJson(row: RecordedTestStep, images: RecordingImageStore): JsonObject = buildJsonObject {
     put("id", row.id)
@@ -228,6 +246,10 @@ private fun rowJson(row: RecordedTestStep, images: RecordingImageStore): JsonObj
     row.screenContext?.let { put("screenContext", it) }
     row.screenshotJpeg?.let { put("image", images.put(it)) }
     put("useScreenshotAsExpected", row.useScreenshotAsExpected)
+    row.expectedScreenshotJpeg?.let { put("expectedScreenshotImage", images.put(it)) }
+    row.expectedScreenshotSource?.let { put("expectedScreenshotSource", it.take(MAX_SCREENSHOT_SOURCE_CHARS)) }
+    putIfNotNull("expectedScreenshotTimestampMs", row.expectedScreenshotTimestampMs)
+    row.expectedScreenshotAlignment?.let { put("expectedScreenshotAlignment", it.take(MAX_SCREENSHOT_ALIGNMENT_CHARS)) }
     put("screenshotFromAdb", row.screenshotFromAdb)
     putIfNotNull("durationMs", row.durationMs)
     put("gesturePath", buildJsonArray { row.gesturePath.forEach { add(pointJson(it)) } })
@@ -244,6 +266,12 @@ private fun rowJson(row: RecordedTestStep, images: RecordingImageStore): JsonObj
             },
         )
     }
+    row.targetUnderTouch?.let { put("targetUnderTouch", uiTargetJson(it)) }
+    if (row.clickableTargets.isNotEmpty()) put("clickableTargets", buildJsonArray { row.clickableTargets.take(3).forEach { add(uiTargetJson(it)) } })
+    row.targetScreenWidth?.let { put("targetScreenWidth", it) }
+    row.targetScreenHeight?.let { put("targetScreenHeight", it) }
+    row.targetOrientationQuarterTurns?.let { put("targetOrientationQuarterTurns", it) }
+    row.touchWithinTarget?.let { put("touchWithinTarget", buildJsonObject { put("x", it.x); put("y", it.y) }) }
     row.kind?.let { put("kind", it.name) }
     put("inputAtMs", row.inputAtMs)
     put("inputStartMs", row.inputStartMs)
@@ -409,6 +437,18 @@ private fun decodeScreenRef(o: JsonObject?): RecordingScreenRef? =
 
 private fun decodePoint(o: JsonObject) = RecordedPoint(o.int("x", 0), o.int("y", 0), o.int("screenWidth", 0), o.int("screenHeight", 0))
 
+private fun decodeUiTarget(o: JsonObject) = RecordedUiTarget(
+    text = o.str("text").take(MAX_TARGET_LABEL_CHARS),
+    contentDesc = o.str("contentDesc").take(MAX_TARGET_LABEL_CHARS),
+    resourceId = o.str("resourceId").take(MAX_TARGET_RESOURCE_ID_CHARS),
+    className = o.str("className").take(MAX_TARGET_CLASS_NAME_CHARS),
+    left = o.int("left", 0),
+    top = o.int("top", 0),
+    right = o.int("right", 0),
+    bottom = o.int("bottom", 0),
+    clickable = o.bool("clickable", false),
+)
+
 private fun decodeEvent(o: JsonObject) = EnvironmentEvent(o.str("key"), o.str("from"), o.str("to"), o.long("atMs", 0L), o.long("sinceMs", o.long("atMs", 0L)))
 
 private fun decodeRow(o: JsonObject, context: DecodeContext): RecordedTestStep {
@@ -423,6 +463,10 @@ private fun decodeRow(o: JsonObject, context: DecodeContext): RecordedTestStep {
         screenContext = o.optStr("screenContext"),
         screenshotJpeg = imageBytes(o, images),
         useScreenshotAsExpected = o.bool("useScreenshotAsExpected", false),
+        expectedScreenshotJpeg = o.optStr("expectedScreenshotImage")?.let(images::get),
+        expectedScreenshotSource = o.optStr("expectedScreenshotSource"),
+        expectedScreenshotTimestampMs = optLong(o, "expectedScreenshotTimestampMs"),
+        expectedScreenshotAlignment = o.optStr("expectedScreenshotAlignment"),
         id = o.str("id").takeIf { it.isNotBlank() } ?: java.util.UUID.randomUUID().toString(),
         screenshotFromAdb = o.bool("screenshotFromAdb", false),
         durationMs = optLong(o, "durationMs"),
@@ -431,6 +475,16 @@ private fun decodeRow(o: JsonObject, context: DecodeContext): RecordedTestStep {
         after = decodeScreenRef(o["after"] as? JsonObject),
         tappedElement = (o["tappedElement"] as? JsonObject)?.let {
             TappedElement(it.str("text"), it.str("contentDesc"), it.str("resourceId"), it.str("className"))
+        },
+        targetUnderTouch = (o["targetUnderTouch"] as? JsonObject)?.let(::decodeUiTarget),
+        clickableTargets = o.objects("clickableTargets").take(3).map(::decodeUiTarget),
+        targetScreenWidth = o.int("targetScreenWidth", 0).takeIf { it > 0 },
+        targetScreenHeight = o.int("targetScreenHeight", 0).takeIf { it > 0 },
+        targetOrientationQuarterTurns = o.int("targetOrientationQuarterTurns", -1).takeIf { it in 0..3 },
+        touchWithinTarget = (o["touchWithinTarget"] as? JsonObject)?.let { point ->
+            val x = (point["x"] as? JsonPrimitive)?.doubleOrNull
+            val y = (point["y"] as? JsonPrimitive)?.doubleOrNull
+            if (x != null && y != null && x in 0.0..1.0 && y in 0.0..1.0) com.indagium.testing.model.NormalizedGesturePoint(x, y) else null
         },
         kind = kind,
         inputAtMs = o.long("inputAtMs", 0L),

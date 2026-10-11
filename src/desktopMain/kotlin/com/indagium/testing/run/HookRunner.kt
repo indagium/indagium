@@ -1,5 +1,6 @@
 package com.indagium.testing.run
 
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepResult
@@ -32,16 +33,18 @@ internal class HookRunner(
         budget: CaseBudget,
         stopOnFailure: Boolean,
         scriptsOnly: Boolean = false,
+        caseAttempt: Int = 1,
+        priorCaseAttempts: List<CaseAttemptRecord> = emptyList(),
     ): Boolean {
         var allPassed = true
         for ((position, hook) in hooks.withIndex()) {
             val passed = when (hook) {
-                is HookItem.Script -> runScript(hook, position + 1, caseId)
+                is HookItem.Script -> runScript(hook, position + 1, caseId, iteration, caseAttempt)
                 is HookItem.Shared ->
                     if (scriptsOnly) {
-                        skipShared(hook, position + 1)
+                        skipShared(hook, position + 1, caseId, iteration, caseAttempt)
                     } else {
-                        runShared(hook, position + 1, caseId, iteration, "$evidencePrefix-h${position + 1}", budget)
+                        runShared(hook, position + 1, caseId, iteration, "$evidencePrefix-h${position + 1}", budget, caseAttempt, priorCaseAttempts)
                     }
             }
             if (!passed) {
@@ -52,17 +55,44 @@ internal class HookRunner(
         return allPassed
     }
 
-    private fun result(hookId: String, number: Int, action: String, status: StepStatus, observation: String, startedAt: Long): StepResult =
+    private fun result(
+        hookId: String,
+        number: Int,
+        action: String,
+        status: StepStatus,
+        observation: String,
+        startedAt: Long,
+        caseId: String,
+        iteration: Int,
+        caseAttempt: Int,
+        executionStatus: StepStatus? = null,
+        automaticRetryExcluded: Boolean = false,
+    ): StepResult =
         StepResult(
             stepId = hookId, stepNumber = number, action = action, setup = true, status = status, attempts = 1,
             observation = observation, startedAt = startedAt, durationMs = env.wallClock() - startedAt,
+            caseId = caseId, iteration = iteration, caseAttempt = caseAttempt,
+            executionStatus = executionStatus, automaticRetryExcluded = automaticRetryExcluded,
         )
 
-    private suspend fun runScript(hook: HookItem.Script, number: Int, caseId: String): Boolean {
+    private suspend fun runScript(hook: HookItem.Script, number: Int, caseId: String, iteration: Int, caseAttempt: Int): Boolean {
         val startedAt = env.wallClock()
         val script = snapshot.scripts.firstOrNull { it.id == hook.scriptId }
         if (script == null) {
-            record(result(hook.id, number, "Run script ${hook.scriptId}", StepStatus.FAIL, "The script is not in the library.", startedAt))
+            record(
+                result(
+                    hook.id,
+                    number,
+                    "Run script ${hook.scriptId}",
+                    StepStatus.FAIL,
+                    "The script is not in the library.",
+                    startedAt,
+                    caseId,
+                    iteration,
+                    caseAttempt,
+                    automaticRetryExcluded = true,
+                ),
+            )
             return false
         }
         val action = "Run script ${script.toolName}"
@@ -70,7 +100,20 @@ internal class HookRunner(
         val context = ScriptRunContext(env.session.serial, env.packageName, env.laneDir, caseId, hook.id)
         return when (val outcome = env.scriptRunner.run(script, hook.args, context, adb)) {
             is ScriptRunOutcome.Rejected -> {
-                record(result(hook.id, number, action, StepStatus.FAIL, outcome.message, startedAt))
+                record(
+                    result(
+                        hook.id,
+                        number,
+                        action,
+                        StepStatus.FAIL,
+                        outcome.message,
+                        startedAt,
+                        caseId,
+                        iteration,
+                        caseAttempt,
+                        automaticRetryExcluded = true,
+                    ),
+                )
                 false
             }
             is ScriptRunOutcome.Finished -> {
@@ -79,22 +122,60 @@ internal class HookRunner(
                 val timedOut = if (finished.timedOut) " (timed out)" else ""
                 val warnings = finished.warnings.joinToString("") { " Warning: $it" }
                 val summary = "exit code ${finished.exitCode}$timedOut: ${finished.stdout.trim().take(OUTPUT_EXCERPT_CHARS)}$warnings"
-                record(result(hook.id, number, action, if (passed) StepStatus.PASS else StepStatus.FAIL, summary, startedAt))
+                val status = when {
+                    passed -> StepStatus.PASS
+                    finished.timedOut -> StepStatus.TIMEOUT
+                    else -> StepStatus.FAIL
+                }
+                record(result(hook.id, number, action, status, summary, startedAt, caseId, iteration, caseAttempt, executionStatus = status))
                 passed
             }
         }
     }
 
-    private fun skipShared(hook: HookItem.Shared, number: Int): Boolean {
-        record(result(hook.id, number, "Run shared step ${hook.sharedStepId}", StepStatus.SKIPPED, "Skipped because the run was cancelled.", env.wallClock()))
+    private fun skipShared(hook: HookItem.Shared, number: Int, caseId: String, iteration: Int, caseAttempt: Int): Boolean {
+        record(
+            result(
+                hook.id,
+                number,
+                "Run shared step ${hook.sharedStepId}",
+                StepStatus.SKIPPED,
+                "Skipped because the run was cancelled.",
+                env.wallClock(),
+                caseId,
+                iteration,
+                caseAttempt,
+            ),
+        )
         return true
     }
 
     @Suppress("LongParameterList")
-    private suspend fun runShared(hook: HookItem.Shared, number: Int, caseId: String, iteration: Int, prefix: String, budget: CaseBudget): Boolean {
+    private suspend fun runShared(
+        hook: HookItem.Shared,
+        number: Int,
+        caseId: String,
+        iteration: Int,
+        prefix: String,
+        budget: CaseBudget,
+        caseAttempt: Int,
+        priorCaseAttempts: List<CaseAttemptRecord>,
+    ): Boolean {
         val shared = snapshot.sharedSteps.firstOrNull { it.id == hook.sharedStepId }
         if (shared == null) {
-            record(result(hook.id, number, "Run shared step ${hook.sharedStepId}", StepStatus.FAIL, "The shared step is not in the library.", env.wallClock()))
+            record(
+                result(
+                    hook.id,
+                    number,
+                    "Run shared step ${hook.sharedStepId}",
+                    StepStatus.FAIL,
+                    "The shared step is not in the library.",
+                    env.wallClock(),
+                    caseId,
+                    iteration,
+                    caseAttempt,
+                ),
+            )
             return false
         }
         if (shared.steps.isEmpty()) return true
@@ -109,6 +190,8 @@ internal class HookRunner(
                 evidencePrefix = prefix,
                 caseBudget = budget,
                 iteration = iteration,
+                caseAttempt = caseAttempt,
+                priorCaseAttempts = priorCaseAttempts,
             ),
         )
         driver.drive(sequence, null, iteration, budget)
