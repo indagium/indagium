@@ -88,7 +88,7 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
         val case = state.testLibrary.suite(suite.id)!!.cases.single()
         assertEquals(case.id, state.testsView.selectedCaseId)
-        rule.onNodeWithText("Case name").assertExists()
+        rule.onNodeWithContentDescription("Case name").assertExists()
         rule.onNodeWithText("Steps (0)").assertExists()
 
         rule.onNodeWithText("+ Add step").performClick()
@@ -98,7 +98,7 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Steps (1)").assertExists()
         rule.onNodeWithText("Expected result").assertExists()
         // Adding a step puts the cursor in its Action field, which may scroll the page (the inspector stacks under the list here).
-        rule.onNodeWithText("‹ Smoke").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("Back to suite Smoke").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Cases (1)").assertExists()
     }
@@ -169,7 +169,13 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Steps (2)").assertExists()
         rule.onNodeWithText("Checks (6)").assertExists()
         rule.onNodeWithText("Examples (2)").assertExists()
+        // Allowed tools live behind the Tools chip: closed until it is clicked.
+        rule.onNodeWithText("Allowed tools").assertDoesNotExist()
+        rule.onNodeWithText("Tools").performClick()
+        rule.waitForIdle()
         rule.onNodeWithText("Allowed tools").assertExists()
+        state.testsView.caseInspectorField = null
+        rule.waitForIdle()
         // The inspector's Examples start collapsed; opening them shows the editors.
         rule.onNodeWithText("Golden screenshot").assertDoesNotExist()
         rule.onNodeWithText("Examples (2)").performScrollTo().performClick()
@@ -270,7 +276,7 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
         assertEquals(betaId, state.testsView.selectedSuiteId)
         assertEquals(tourId, state.testsView.selectedCaseId)
-        rule.onNodeWithText("Case name").assertExists()
+        rule.onNodeWithContentDescription("Case name").assertExists()
 
         rule.onNodeWithContentDescription("Collapse Beta").performClick()
         rule.waitForIdle()

@@ -199,8 +199,8 @@ class StepListInspectorUiTest {
         rule.waitForIdle()
         rule.onNodeWithText("Move up").assertExists()
         rule.onNodeWithText("Move down").assertExists()
-        assertTrue(rule.onAllNodesWithText("Duplicate").fetchSemanticsNodes().size >= 2, "the menu's Duplicate beside the case's own")
-        assertTrue(rule.onAllNodesWithText("Delete").fetchSemanticsNodes().size >= 2, "the menu's Delete beside the case's own")
+        rule.onNodeWithText("Duplicate").assertExists()
+        rule.onNodeWithText("Delete").assertExists()
 
         clickMenuItem("Move up")
 
