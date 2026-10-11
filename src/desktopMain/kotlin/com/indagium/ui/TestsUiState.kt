@@ -10,13 +10,20 @@ import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.activeCaseIds
 import com.indagium.testing.limits.activeSuiteIds
 import com.indagium.testing.limits.decide
+import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.IssueRecord
+import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
+import com.indagium.testing.model.SuiteCaseHistory
+import com.indagium.testing.model.SuiteCaseLaneHistory
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
+import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.summary
 import com.indagium.testing.store.StoreResult
 
 // UI-free state derivation for the Tests workspace (ui/TestsWorkspace.kt and friends): everything that
@@ -41,9 +48,7 @@ internal sealed interface TestsNav {
 internal enum class SuiteTab(val label: String) {
     Cases("Cases"),
     Runs("Runs"),
-    SetupTeardown("Setup & teardown"),
-    AgentInstructions("Agent instructions"),
-    Variables("Variables"),
+    Settings("Settings"),
 }
 
 /**
@@ -452,3 +457,75 @@ internal fun scriptUsageCount(library: TestLibrary, scriptId: String): Int {
 /** How many suite and case hooks run shared step [sharedStepId]. */
 internal fun sharedStepUsageCount(library: TestLibrary, sharedStepId: String): Int =
     library.suites.flatMap { it.allHooks() }.count { it is HookItem.Shared && it.sharedStepId == sharedStepId }
+
+// ── Suite screen ─────────────────────────────────────────────────────
+
+/** Below this content width (dp) the suite's case table becomes two-line rows without the column header. */
+internal const val SUITE_COMPACT_BELOW_DP = 720f
+
+internal fun suiteCasesCompact(contentWidthDp: Float): Boolean = contentWidthDp < SUITE_COMPACT_BELOW_DP
+
+/** "Cases (3)", "Runs (2)", "Settings". The run count is null while the suite's run history is still loading (no "Runs (0)" flash). */
+internal fun suiteTabLabel(tab: SuiteTab, caseCount: Int, runCount: Int?): String = when (tab) {
+    SuiteTab.Cases -> "${tab.label} ($caseCount)"
+    SuiteTab.Runs -> if (runCount == null) tab.label else "${tab.label} ($runCount)"
+    SuiteTab.Settings -> tab.label
+}
+
+/** What the suite screen's "last run" line shows. */
+internal sealed interface SuiteLastRun {
+    /** The suite's run history is still being read: never claim "not run yet" at this point. */
+    data object Loading : SuiteLastRun
+
+    /** The history is loaded and holds no finished run. */
+    data object NeverRun : SuiteLastRun
+
+    data class Ran(
+        val runId: String,
+        val status: RunStatus,
+        val momentMs: Long,
+        val caseCount: Int,
+        val laneCount: Int,
+        val passedSteps: Int,
+        val totalSteps: Int,
+    ) : SuiteLastRun
+}
+
+/** A finished run is shown even while the rest of the history loads; with none, [loaded] decides between Loading and NeverRun. */
+internal fun suiteLastRun(loaded: Boolean, latestFinished: TestRun?): SuiteLastRun {
+    if (latestFinished == null) return if (loaded) SuiteLastRun.NeverRun else SuiteLastRun.Loading
+    val summary = latestFinished.summary()
+    return SuiteLastRun.Ran(
+        runId = latestFinished.id,
+        status = latestFinished.status,
+        momentMs = latestFinished.finishedAt ?: latestFinished.createdAt,
+        caseCount = summary.caseCount,
+        laneCount = summary.laneCount,
+        passedSteps = summary.passedSteps,
+        totalSteps = summary.totalSteps,
+    )
+}
+
+/** "3 cases · 1 lane · 12 of 12 steps passed". */
+internal fun SuiteLastRun.Ran.detail(): String =
+    "$caseCount case${if (caseCount == 1) "" else "s"} · $laneCount lane${if (laneCount == 1) "" else "s"} · $passedSteps of $totalSteps steps passed"
+
+/** The lanes of a case's latest result that actually ran it (a lane the case is absent from is left out). */
+internal fun SuiteCaseHistory?.ranLanes(): List<SuiteCaseLaneHistory> = this?.lanes.orEmpty().filter { it.status != null }
+
+/**
+ * One tooltip line for a lane's result: "Pixel 8 · Pass · 48s ×2" ("Pixel 8 · Not run" for a lane that did not run the case).
+ * [laneName] is resolved by the caller (profile or device).
+ */
+internal fun laneResultLine(laneName: String, status: CaseStatus?, durationMs: Long, repeatCount: Int): String {
+    if (status == null) return "$laneName · Not run"
+    val repeats = if (repeatCount > 1) " ×$repeatCount" else ""
+    return "$laneName · ${status.label()} · ${formatDuration(durationMs)}$repeats"
+}
+
+/**
+ * The issues linked to a case: the ones its latest run raised plus the stored issues whose source is that case, in that order,
+ * without duplicates. The first is what the Issues column opens.
+ */
+internal fun caseIssueIds(case: SuiteCaseHistory?, caseId: String, suiteId: String, issues: List<IssueRecord>): List<String> =
+    (case?.issueIds.orEmpty() + issues.filter { it.source.suiteId == suiteId && it.source.caseId == caseId }.map { it.id }).distinct()

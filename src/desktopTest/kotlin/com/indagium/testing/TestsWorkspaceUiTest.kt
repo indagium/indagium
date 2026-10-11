@@ -74,7 +74,7 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
 
         assertEquals(listOf("New suite"), state.testLibrary.suites.map { it.name })
-        rule.onNodeWithText("Suite name").assertExists()
+        rule.onNodeWithContentDescription("Suite name").assertExists()
         rule.onNodeWithText("Cases (0)").assertExists()
     }
 
@@ -84,7 +84,7 @@ class TestsWorkspaceUiTest {
         rule.setContent { TestsWorkspace(state) }
         state.testsView.selectedSuiteId = suite.id
 
-        rule.onNodeWithText("New case").performClick()
+        rule.onNodeWithText("+ New case").performClick()
         rule.waitForIdle()
         val case = state.testLibrary.suite(suite.id)!!.cases.single()
         assertEquals(case.id, state.testsView.selectedCaseId)
@@ -153,13 +153,16 @@ class TestsWorkspaceUiTest {
 
         rule.waitForIdle()
         rule.onNodeWithText("Cases (2)").assertExists()
-        rule.onNodeWithText("Setup & teardown").performClick()
+        // "Settings" is also a case of this suite and a nav entry: the tab is the topmost match right of the nav.
+        val settingsNodes = rule.onAllNodesWithText("Settings").fetchSemanticsNodes()
+        val tab = settingsNodes.indices.filter { settingsNodes[it].boundsInRoot.left >= state.testsView.navWidthDp }
+            .minBy { settingsNodes[it].boundsInRoot.top }
+        rule.onAllNodesWithText("Settings")[tab].performClick()
         rule.waitForIdle()
+        rule.onNodeWithText("Setup & teardown").assertExists()
         rule.onNodeWithText("Setup hooks").assertExists()
-        rule.onNodeWithText("Variables").performClick()
-        rule.waitForIdle()
-        // The tab label and the section title it opened.
-        assertTrue(rule.onAllNodesWithText("Variables").fetchSemanticsNodes().size >= 2, "Variables section should be shown")
+        rule.onNodeWithText("Agent instructions").assertExists()
+        rule.onNodeWithText("Variables").assertExists()
         state.testsView.selectedSuiteTab = SuiteTab.Cases
         rule.waitForIdle()
 
@@ -223,15 +226,19 @@ class TestsWorkspaceUiTest {
 
         assertEquals(second.id, state.testsView.selectedSuiteId)
         assertTrue(rule.onAllNodesWithText("This suite is locked.", substring = true).fetchSemanticsNodes().isNotEmpty())
-        assertButtonDisabled("New case")
-        assertButtonDisabled("Duplicate")
-        assertButtonDisabled("Run suite…")
-        rule.onAllNodesWithText("Delete")[0].assertIsEnabled()
-        rule.onNodeWithText("Export…").assertIsEnabled()
-        rule.onAllNodesWithText("Delete")[0].performClick()
+        assertButtonDisabled("+ New case")
+        assertButtonDisabled("▶ Run suite")
+        rule.onNodeWithContentDescription("Suite actions").performClick()
+        rule.waitForIdle()
+        // A disabled menu item stays in the menu (it explains itself in a tooltip) but does nothing.
+        rule.onNodeWithText("Export…").assertExists()
+        rule.onNodeWithText("Duplicate").performClick()
+        rule.waitForIdle()
+        assertEquals(2, state.testLibrary.suites.size, "Duplicate is refused for a locked suite")
+        rule.onNodeWithText("Delete…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Delete suite?").assertExists()
-        rule.onAllNodesWithText("Delete")[1].performClick()
+        rule.onNodeWithText("Delete").performClick()
         rule.waitUntil(timeoutMillis = 5_000) { state.testLibrary.suite(second.id) == null }
     }
 
