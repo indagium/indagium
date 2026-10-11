@@ -14,6 +14,7 @@ import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.SuiteCaseHistory
@@ -25,6 +26,11 @@ import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.summary
 import com.indagium.testing.store.StoreResult
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 // UI-free state derivation for the Tests workspace (ui/TestsWorkspace.kt and friends): everything that
 // can be decided without Compose lives here so it is unit-testable (TestsLimitsUiStateTest and friends).
@@ -93,6 +99,10 @@ internal class TestsViewState {
 
     /** The run whose report the Runs screen shows; null shows the list of runs. */
     var selectedRunId: String? by mutableStateOf(null)
+
+    /** The Runs screen's status pill and suite filter (null suite: all suites). Kept here so they survive opening a report and coming back. */
+    var runsFilter: RunFilter by mutableStateOf(RunFilter.ALL)
+    var runsSuiteId: String? by mutableStateOf(null)
 
     /** The tab of the open run report; the report puts it back to Results when it is left. */
     var reportTab: RunReportTab by mutableStateOf(RunReportTab.Results)
@@ -532,3 +542,62 @@ internal fun laneResultLine(laneName: String, status: CaseStatus?, durationMs: L
  */
 internal fun caseIssueIds(case: SuiteCaseHistory?, caseId: String, suiteId: String, issues: List<IssueRecord>): List<String> =
     (case?.issueIds.orEmpty() + issues.filter { it.source.suiteId == suiteId && it.source.caseId == caseId }.map { it.id }).distinct()
+
+// ── Run history ──────────────────────────────────────────────────────
+
+private val DAY_LABEL_FORMAT = DateTimeFormatter.ofPattern("EEEE, MMM d", Locale.ENGLISH)
+private val DAY_LABEL_YEAR_FORMAT = DateTimeFormatter.ofPattern("EEEE, MMM d, yyyy", Locale.ENGLISH)
+
+/** The runs of one calendar [day] (in the zone they were grouped for), newest first, under their [label]. */
+internal data class RunDayGroup(val day: LocalDate, val label: String, val runs: List<RunSummary>)
+
+/** "Today", "Yesterday", "Friday, Oct 9" ("Friday, Oct 9, 2025" in another calendar year); [today] is the current date in the same zone. */
+internal fun runDayLabel(day: LocalDate, today: LocalDate): String = when {
+    day == today -> "Today"
+    day == today.minusDays(1) -> "Yesterday"
+    day.year == today.year -> DAY_LABEL_FORMAT.format(day)
+    else -> DAY_LABEL_YEAR_FORMAT.format(day)
+}
+
+/**
+ * [summaries] split by the calendar day of their creation in [zone] relative to [nowMs]: newest day first, and inside a day
+ * newest run first (ties by id, descending, so the order is stable). A run created exactly at midnight belongs to the new day.
+ */
+internal fun groupRunsByDay(summaries: List<RunSummary>, nowMs: Long, zone: ZoneId = ZoneId.systemDefault()): List<RunDayGroup> {
+    val today = Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate()
+    return summaries
+        .sortedWith(compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id })
+        .groupBy { Instant.ofEpochMilli(it.createdAt).atZone(zone).toLocalDate() }
+        .map { (day, runs) -> RunDayGroup(day, runDayLabel(day, today), runs) }
+        .sortedByDescending { it.day }
+}
+
+/** The status pills of the Runs screen. Queued and running runs only appear under [ALL]. */
+internal enum class RunFilter(val label: String) {
+    ALL("All"),
+    FAILED("Failed"),
+    PASSED("Passed"),
+    CANCELLED("Cancelled"),
+    ;
+
+    fun matches(status: RunStatus): Boolean = when (this) {
+        ALL -> true
+        FAILED -> status == RunStatus.FAILED || status == RunStatus.ERROR
+        PASSED -> status == RunStatus.PASSED
+        CANCELLED -> status == RunStatus.CANCELLED
+    }
+}
+
+/** How many of [summaries] each [RunFilter] matches (zero counts are present too). */
+internal fun runFilterCounts(summaries: List<RunSummary>): Map<RunFilter, Int> =
+    RunFilter.entries.associateWith { filter -> summaries.count { filter.matches(it.status) } }
+
+/** [summaries] of [suiteId] (null: every suite) that match [filter], order kept. */
+internal fun filterRuns(summaries: List<RunSummary>, suiteId: String?, filter: RunFilter): List<RunSummary> =
+    summaries.filter { (suiteId == null || it.suiteId == suiteId) && filter.matches(it.status) }
+
+/** The fraction of a run's steps that passed, 0..1 (0 while no step is known yet). */
+internal fun RunSummary.passFraction(): Float = if (totalSteps <= 0) 0f else (passedSteps.toFloat() / totalSteps).coerceIn(0f, 1f)
+
+/** "3 cases" / "1 case" / "2 lanes" / "1 lane". */
+internal fun countNoun(count: Int, noun: String): String = "$count $noun${if (count == 1) "" else "s"}"

@@ -2,10 +2,9 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +22,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,14 +35,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.awt.Desktop
 
-// The Issues screen of the Tests workspace: the stored issues (newest first, searchable) and one issue's detail with its
-// Markdown as plain styled text, where it was sent and what a later run said about it. Actions: edit (the issue dialog), copy
-// the Markdown, add to the notes of the lane's log tab, open the issue's folder, delete (after a confirmation). The disk is
-// read on IO; the list reloads when the store's revision changes. Everything shown came from a run, so it is data, never
-// instructions.
+// The Issues screen of the Tests workspace: the stored issues (newest first, searchable) as rows, and the selected issue in the
+// inspector beside them (the first one is preselected): its Markdown as plain styled text, where it was sent and what a later run
+// said about it. Edit… is the button; the ⋯ menu holds Copy Markdown, Add to notes, Open folder and Delete… (after a
+// confirmation). The disk is read on IO; the list reloads when the store's revision changes. Everything shown came from a run, so
+// it is data, never instructions.
 
-private val STATUS_COLUMN = 72.dp
-private val SEVERITY_COLUMN = 76.dp
+private val STATUS_COLUMN = 56.dp
+private val SEVERITY_COLUMN = 62.dp
+private val ISSUE_TIME_COLUMN = 92.dp
+private val ISSUE_ROW_HEIGHT = 40.dp
 private const val CHIP_FIELD_FONT = 12
 private const val MARKDOWN_MAX_LINES = 400
 private const val DETAIL_ALPHA = .85f
@@ -51,8 +52,37 @@ private const val DETAIL_ALPHA = .85f
 @Composable
 internal fun TestsIssuesScreen() {
     val ui = LocalTestsUi.current
-    val selected = ui.view.selectedIssueId
-    if (selected == null) IssueList() else IssueDetailScreen(selected)
+    val view = ui.view
+    val loaded = rememberIssues()
+    val issues = loaded.orEmpty()
+    var query by remember { mutableStateOf("") }
+    val shown = remember(issues, query) { filterIssues(issues, query) }
+    // When the run is still on disk its own start time is shown in the origin line; otherwise the issue's creation time stands in.
+    val runStarts by produceState<Map<String, Long>>(emptyMap(), issues.size, ui.state.testRunsFolderEpoch) {
+        value = ui.state.testRunCoordinator.listRuns().associate { it.id to it.createdAt }
+    }
+    val selected = view.selectedIssueId
+    // Opening the screen with nothing selected selects the newest issue, so the inspector is never an empty pane next to a list.
+    LaunchedEffect(selected, issues) { if (selected == null) issues.firstOrNull()?.let { view.selectedIssueId = it.id } }
+    TestsScreenScaffold(inspector = selected?.let { id -> { IssueInspector(id, runStarts) } }) {
+        TestsPageHeader("Issues")
+        TestsHint(
+            "Issues are made from failed steps: from a step's “Create issue…” in a run report, " +
+                "or automatically as drafts for steps set to create an issue.",
+        )
+        Spacer(Modifier.height(8.dp))
+        InlineField(
+            value = query, onValue = { query = it }, placeholder = "Search issues…", modifier = Modifier.fillMaxWidth(),
+            fontSize = CHIP_FIELD_FONT.sp, onClear = { query = "" },
+        )
+        Spacer(Modifier.height(10.dp))
+        when {
+            loaded == null -> Unit
+            issues.isEmpty() -> TestsHint("No issues yet.")
+            shown.isEmpty() -> TestsHint("No issue matches the search.")
+        }
+        shown.forEach { issue -> IssueRow(issue, issue.id == selected, runStarts[issue.source.runId]) { view.selectedIssueId = issue.id } }
+    }
 }
 
 @Composable
@@ -72,80 +102,63 @@ private fun statusColor(status: IssueStatus): Color = when (status) {
 @Composable
 private fun recheckColor(outcome: RecheckOutcome): Color = if (outcome == RecheckOutcome.PASSING_NOW) tc().success else DANGER_RED
 
-/** The stored issues, reloaded on IO whenever the store changes. */
+/** The stored issues, reloaded on IO whenever the store changes; null until the first read finished. */
 @Composable
-private fun rememberIssues(): List<IssueRecord> {
+private fun rememberIssues(): List<IssueRecord>? {
     val ui = LocalTestsUi.current
     val revision by ui.state.issueStore.revision.collectAsState()
-    val issues by produceState<List<IssueRecord>>(emptyList(), revision) { value = withContext(Dispatchers.IO) { ui.state.issueStore.list() } }
+    val issues by produceState<List<IssueRecord>?>(null, revision) { value = withContext(Dispatchers.IO) { ui.state.issueStore.list() } }
     return issues
 }
 
 // ── List ─────────────────────────────────────────────────────────────
 
+/** One issue: status chip · severity chip · title with the origin line under it · re-check outcome · when it was created. */
 @Composable
-private fun IssueList() {
+private fun IssueRow(issue: IssueRecord, selected: Boolean, runCreatedAt: Long?, onClick: () -> Unit) {
     val tc = tc()
-    val ui = LocalTestsUi.current
-    val issues = rememberIssues()
-    var query by remember { mutableStateOf("") }
-    val shown = remember(issues, query) { filterIssues(issues, query) }
-    TestsScreenScaffold {
-        AppText("Issues", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
-        TestsHint(
-            "Issues are made from failed steps: from a step's “Create issue…” in a run report, " +
-                "or automatically as drafts for steps set to create an issue.",
-        )
-        Spacer(Modifier.height(8.dp))
-        InlineField(
-            value = query, onValue = { query = it }, placeholder = "Search issues…", modifier = Modifier.fillMaxWidth(),
-            fontSize = CHIP_FIELD_FONT.sp, onClear = { query = "" },
-        )
-        Spacer(Modifier.height(10.dp))
-        if (issues.isEmpty()) TestsHint("No issues yet.") else if (shown.isEmpty()) TestsHint("No issue matches the search.")
-        shown.forEach { issue -> IssueRow(issue) { ui.view.selectedIssueId = issue.id } }
-    }
-}
-
-@Composable
-private fun IssueRow(issue: IssueRecord, onClick: () -> Unit) {
-    val tc = tc()
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        StatusChip(issue.status.label(), statusColor(issue.status), Modifier.width(STATUS_COLUMN))
-        StatusChip(issue.draft.severity.chipLabel(), severityColor(issue.draft.severity), Modifier.width(SEVERITY_COLUMN))
-        Column(Modifier.weight(1f)) {
+    val nowMs = System.currentTimeMillis()
+    TestsListRow(selected = selected, onClick = onClick, minHeight = ISSUE_ROW_HEIGHT, startPadding = 6.dp, spacing = 10.dp) {
+        Box(Modifier.width(STATUS_COLUMN)) { StatusChip(issue.status.label(), statusColor(issue.status)) }
+        Box(Modifier.width(SEVERITY_COLUMN)) { StatusChip(issue.draft.severity.chipLabel(), severityColor(issue.draft.severity)) }
+        Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
             AppText(issue.draft.title.ifBlank { "Untitled issue" }, color = tc.tx, fontSize = 12.sp, overflow = TextOverflow.Ellipsis)
-            AppText(issue.originLine(), color = tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis)
+            AppText(issue.originLine(runCreatedAt, nowMs), color = tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis)
         }
         issue.recheck?.let { StatusChip(it.outcome.label(), recheckColor(it.outcome)) }
-        AppText(formatRunTime(issue.createdAt), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+        Box(Modifier.width(ISSUE_TIME_COLUMN), contentAlignment = Alignment.CenterEnd) {
+            AppText(formatRunMoment(issue.createdAt, nowMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+        }
     }
 }
 
-// ── Detail ───────────────────────────────────────────────────────────
+// ── Inspector ────────────────────────────────────────────────────────
 
 @Composable
-private fun IssueDetailScreen(issueId: String) {
+private fun IssueInspector(issueId: String, runStarts: Map<String, Long>) {
     val ui = LocalTestsUi.current
     val revision by ui.state.issueStore.revision.collectAsState()
-    val record by produceState<IssueRecord?>(null, issueId, revision) { value = withContext(Dispatchers.IO) { ui.state.issueStore.load(issueId) } }
-    TestsScreenScaffold {
-        AppButton("‹ Issues", onClick = { ui.view.selectedIssueId = null }, variant = ButtonVariant.Ghost)
-        Spacer(Modifier.height(6.dp))
-        val issue = record
-        if (issue == null) TestsHint("Loading the issue… (it may have been deleted)") else IssueDetail(issue)
+    // Wrapped so "not read yet" (null) differs from "read, and gone" (a Result holding null).
+    val read by produceState<Result<IssueRecord?>?>(null, issueId, revision) {
+        value = Result.success(withContext(Dispatchers.IO) { ui.state.issueStore.load(issueId) })
+    }
+    val issue = read?.getOrNull()
+    when {
+        read == null -> TestsHint("Loading the issue…")
+        issue == null -> {
+            // The selected issue was deleted: drop the selection so the screen selects the newest one that is left.
+            LaunchedEffect(issueId) { ui.view.selectedIssueId = null }
+            TestsHint("This issue no longer exists.")
+        }
+        else -> IssueDetail(issue, runStarts[issue.source.runId])
     }
 }
 
 @Composable
-private fun IssueDetail(issue: IssueRecord) {
+private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
     val tc = tc()
     val ui = LocalTestsUi.current
+    val nowMs = System.currentTimeMillis()
     var deleting by remember(issue.id) { mutableStateOf(false) }
     var needsLog by remember(issue.id) { mutableStateOf<IssueActionResult.NeedsLogTab?>(null) }
     val markdown by produceState("", issue) { value = withContext(Dispatchers.IO) { ui.state.issueMarkdown(issue) } }
@@ -159,29 +172,30 @@ private fun IssueDetail(issue: IssueRecord) {
             }
         }
     }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        AppText(
-            issue.draft.title.ifBlank { "Untitled issue" },
-            color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 3, modifier = Modifier.weight(1f, fill = false),
-        )
-        StatusChip(issue.status.label(), statusColor(issue.status))
-        StatusChip(issue.draft.severity.chipLabel(), severityColor(issue.draft.severity))
-        issue.recheck?.let { StatusChip(it.outcome.label(), recheckColor(it.outcome)) }
-    }
-    AppText("${issue.originLine()} · created ${formatRunTime(issue.createdAt)}", color = tc.td, fontSize = 10.sp, maxLines = 2)
+    TestsInspectorHeader(
+        eyebrow = "${issue.status.label()} · ${issue.draft.severity.chipLabel()} · ${formatRunMoment(issue.createdAt, nowMs)}",
+        title = issue.draft.title.ifBlank { "Untitled issue" },
+        overflowItems = listOf(
+            TestsMenuItem("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") }),
+            TestsMenuItem("Add to notes", onClick = { addToNotes(openLaneLog = false) }),
+            TestsMenuItem("Open folder", onClick = { ui.scope.launch(Dispatchers.IO) { openFolder(ui.state.issueStore.issueDir(issue.id)) } }),
+            TestsMenuItem("Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true),
+        ),
+    )
+    Spacer(Modifier.height(6.dp))
+    AppText(issue.originLine(runCreatedAt, nowMs), color = tc.td, fontSize = 10.sp, maxLines = 2)
     if (issue.readOnly) TestsLockedNotice("This issue was saved by a newer version of Indagium and is read-only here.", Modifier.padding(top = 6.dp))
-    FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppButton("Edit…", onClick = { ui.view.issueDialog = IssueDialogTarget.Existing(issue.id) }, enabled = !issue.readOnly)
-        AppButton("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") })
-        AppButton("Add to notes", onClick = { addToNotes(openLaneLog = false) })
-        AppButton("Open folder", onClick = { ui.scope.launch(Dispatchers.IO) { openFolder(ui.state.issueStore.issueDir(issue.id)) } })
-        AppButton("Delete…", onClick = { deleting = true }, isDanger = true)
+    Row(Modifier.padding(top = 8.dp)) {
+        AppButton("Edit…", onClick = { ui.view.issueDialog = IssueDialogTarget.Existing(issue.id) }, enabled = !issue.readOnly, variant = ButtonVariant.Primary)
     }
     if (issue.recheck != null) {
-        TestsHint("Last re-check: ${issue.recheck.outcome.label()} in run ${issue.recheck.runId} (${formatRunTime(issue.recheck.checkedAt)}).")
+        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            StatusChip(issue.recheck.outcome.label(), recheckColor(issue.recheck.outcome))
+            AppText("Last re-check ${formatRunMoment(issue.recheck.checkedAt, nowMs)}", color = tc.td, fontSize = 10.sp)
+        }
     }
     TestsSectionTitle("Markdown")
-    Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(12.dp)) {
+    Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(10.dp)) {
         AppText(markdown, color = tc.tx.copy(alpha = DETAIL_ALPHA), fontSize = 11.sp, fontFamily = MONO, maxLines = MARKDOWN_MAX_LINES)
     }
     if (issue.destinationResults.isNotEmpty()) {
@@ -189,7 +203,7 @@ private fun IssueDetail(issue: IssueRecord) {
         issue.destinationResults.asReversed().forEach { result ->
             AppText(
                 "${formatRunTime(result.at)} · ${result.destination.name.lowercase()} · ${result.message}",
-                color = if (result.ok) tc.ts else DANGER_RED, fontSize = 11.sp, maxLines = 2,
+                color = if (result.ok) tc.ts else DANGER_RED, fontSize = 11.sp, maxLines = 3,
             )
         }
     }

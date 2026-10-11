@@ -12,12 +12,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -30,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.isAltPressed
@@ -70,6 +73,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.ZoneId
 
 // The Runs screen of the Tests workspace: the list of runs (this launch and stored ones), and one run's report — a
 // cases x steps x lanes matrix (one column per lane, a single one for now), the step detail (what the agent claimed and
@@ -77,7 +81,12 @@ import java.io.File
 // Allow/Deny and pause controls. Text that came from an agent, the device or a script is labelled untrusted: it is shown,
 // never acted on.
 
-private val STATUS_COLUMN = 110.dp
+private val RUN_STATUS_COLUMN = 72.dp
+private val RUN_BAR_COLUMN = 130.dp
+private val RUN_STEPS_MIN_WIDTH = 34.dp
+private val RUN_META_MAX_WIDTH = 150.dp
+private val RUN_CLOCK_COLUMN = 40.dp
+private val RUN_SUITE_MENU_WIDTH = 240.dp
 private val LANE_COLUMN = 92.dp
 private val JUDGE_COLUMN = 104.dp
 private val ROW_HEIGHT = 30.dp
@@ -90,6 +99,7 @@ private const val VERDICT_ALPHA = .10f
 private const val ROW_SEPARATOR_ALPHA = .6f
 private const val LIVE_POLL_MS = 500L
 private const val CHIP_ALPHA = .16f
+private const val BAR_TRACK_ALPHA = .85f
 
 @Composable
 internal fun TestsRunsScreen() {
@@ -100,40 +110,139 @@ internal fun TestsRunsScreen() {
 
 // ── List ─────────────────────────────────────────────────────────────
 
+/** The Runs screen: "Runs" with a suite filter, the status pills with counts, then the runs grouped by day. */
 @Composable
 private fun TestRunList() {
-    val tc = tc()
     val ui = LocalTestsUi.current
+    val view = ui.view
     val runs = ui.state.testRuns
     val revision = runs.map { "${it.id}:${it.status}" }
-    val summaries by produceState<List<RunSummary>>(emptyList(), revision, ui.state.testRunsFolderEpoch) { value = ui.state.testRunCoordinator.listRuns() }
+    // Null until the first read finished: "No runs yet" must not flash while the stored runs are still loading.
+    val loaded by produceState<List<RunSummary>?>(null, revision, ui.state.testRunsFolderEpoch) { value = ui.state.testRunCoordinator.listRuns() }
+    val suites = ui.library.suites
+    val suiteId = view.runsSuiteId?.takeIf { id -> suites.any { it.id == id } }
+    val summaries = loaded
+    val inSuite = remember(summaries, suiteId) { summaries.orEmpty().let { all -> if (suiteId == null) all else all.filter { it.suiteId == suiteId } } }
+    val counts = remember(inSuite) { runFilterCounts(inSuite) }
+    val shown = remember(inSuite, view.runsFilter) { filterRuns(inSuite, null, view.runsFilter) }
     TestsScreenScaffold {
-        AppText("Runs", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
+        TestsPageHeader(
+            title = "Runs",
+            primary = {
+                TestsDropdown(
+                    selectedLabel = suites.firstOrNull { it.id == suiteId }?.name?.ifBlank { "Untitled suite" } ?: "All suites",
+                    options = listOf<String?>(null) + suites.map { it.id },
+                    optionLabel = { id -> id?.let { wanted -> suites.firstOrNull { it.id == wanted }?.name?.ifBlank { "Untitled suite" } } ?: "All suites" },
+                    onSelect = { view.runsSuiteId = it },
+                    isSelected = { it == suiteId },
+                    menuWidth = RUN_SUITE_MENU_WIDTH,
+                )
+            },
+        )
         TestsHint("Start a run from a suite's “Run suite…” or a case's “Run this case…”. A run keeps its evidence in the save folder.")
         Spacer(Modifier.height(10.dp))
-        if (summaries.isEmpty()) TestsHint("No runs yet.")
-        summaries.forEach { summary -> RunListRow(summary) { ui.view.selectedRunId = summary.id } }
+        RunFilterPills(counts, view.runsFilter) { view.runsFilter = it }
+        Spacer(Modifier.height(4.dp))
+        when {
+            summaries == null -> TestsHint("Loading runs…", Modifier.padding(top = 8.dp))
+            summaries.isEmpty() -> TestsHint("No runs yet. Start one with Run suite on a suite.", Modifier.padding(top = 8.dp))
+            shown.isEmpty() -> TestsHint("No runs match this filter.", Modifier.padding(top = 8.dp))
+            else -> RunHistoryList(shown, showSuite = true, onOpen = { view.selectedRunId = it })
+        }
     }
 }
 
 @Composable
-private fun RunListRow(summary: RunSummary, onClick: () -> Unit) {
+private fun RunFilterPills(counts: Map<RunFilter, Int>, selected: RunFilter, onSelect: (RunFilter) -> Unit) {
     val tc = tc()
-    Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        StatusChip(summary.status.label(), runColor(summary.status), Modifier.width(STATUS_COLUMN))
-        AppText(
-            summary.suiteName.ifBlank { "Untitled suite" },
-            color = tc.tx, fontSize = 12.sp, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        )
-        AppText(summary.line(), color = tc.td, fontSize = 10.sp)
-        AppText(formatRunTime(summary.createdAt), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        RunFilter.entries.forEach { filter ->
+            TestsFilterPill(
+                label = filter.label,
+                count = counts[filter] ?: 0,
+                selected = filter == selected,
+                onClick = { onSelect(filter) },
+                countColor = when (filter) {
+                    RunFilter.ALL -> tc.tx
+                    RunFilter.FAILED -> DANGER_RED
+                    RunFilter.PASSED -> tc.success
+                    RunFilter.CANCELLED -> tc.warn
+                },
+            )
+        }
     }
 }
+
+/**
+ * Runs grouped by day (Today, Yesterday, "Friday, Oct 9"), newest first, one 34 dp row each: status chip (fixed width, never cut) ·
+ * the suite name — or "N cases" when [showSuite] is false because the surrounding screen is already one suite — · a pass bar with
+ * "passed/total" steps · "N cases · N lanes" (plus the judge / flaky notes) · the clock time. [onOpen] gets the run id. Used by the
+ * Runs screen and the suite's Runs tab.
+ */
+@Composable
+internal fun RunHistoryList(
+    runs: List<RunSummary>,
+    showSuite: Boolean,
+    onOpen: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    nowMs: Long = System.currentTimeMillis(),
+    zone: ZoneId = ZoneId.systemDefault(),
+) {
+    val tc = tc()
+    val groups = remember(runs, nowMs, zone) { groupRunsByDay(runs, nowMs, zone) }
+    Column(modifier.fillMaxWidth()) {
+        groups.forEach { group ->
+            AppText(
+                group.label, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 6.dp, top = 12.dp, bottom = 4.dp),
+            )
+            group.runs.forEach { run -> RunHistoryRow(run, showSuite, zone) { onOpen(run.id) } }
+        }
+    }
+}
+
+@Composable
+private fun RunHistoryRow(run: RunSummary, showSuite: Boolean, zone: ZoneId, onClick: () -> Unit) {
+    val tc = tc()
+    val color = runColor(run.status)
+    TestsListRow(selected = false, onClick = onClick, startPadding = 6.dp, spacing = 10.dp) {
+        Box(Modifier.width(RUN_STATUS_COLUMN)) { StatusChip(run.status.label(), color) }
+        AppText(
+            if (showSuite) run.suiteName.ifBlank { "Untitled suite" } else countNoun(run.caseCount, "case"),
+            color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+        )
+        RunPassBar(run, color)
+        AppText(
+            runMetaText(run, showSuite), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = RUN_META_MAX_WIDTH),
+        )
+        Box(Modifier.width(RUN_CLOCK_COLUMN), contentAlignment = Alignment.CenterEnd) {
+            AppText(formatClock(run.createdAt, zone), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+        }
+    }
+}
+
+/** A 6 dp rounded track filled with the share of passed steps, and "passed/total" after it. A live run fills in the accent colour. */
+@Composable
+private fun RunPassBar(run: RunSummary, statusColor: Color) {
+    val tc = tc()
+    val live = run.status == RunStatus.QUEUED || run.status == RunStatus.RUNNING
+    Row(Modifier.width(RUN_BAR_COLUMN), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(tc.br.copy(alpha = BAR_TRACK_ALPHA))) {
+            val fraction = run.passFraction()
+            if (fraction > 0f) Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(if (live) statusColor else tc.success))
+        }
+        AppText("${run.passedSteps}/${run.totalSteps}", color = tc.ts, fontSize = 11.sp, maxLines = 1, modifier = Modifier.widthIn(min = RUN_STEPS_MIN_WIDTH))
+    }
+}
+
+/** "5 cases · 1 lane" (the cases part is dropped when the screen already shows them), plus the judge and flaky notes the old list had. */
+internal fun runMetaText(run: RunSummary, showSuite: Boolean): String = listOfNotNull(
+    countNoun(run.caseCount, "case").takeIf { showSuite },
+    countNoun(run.laneCount, "lane"),
+    "${run.pendingVerificationSteps} awaiting judge".takeIf { run.pendingVerificationSteps > 0 },
+    "flaky recovery".takeIf { run.flaky },
+).joinToString(" · ")
 
 // ── Colours and chips ────────────────────────────────────────────────
 
