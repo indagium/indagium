@@ -12,6 +12,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -55,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -64,6 +67,7 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -108,6 +112,8 @@ private val CHIP_SHAPE = RoundedCornerShape(6.dp)
 private val SUMMARY_CHIP_MAX_WIDTH = 280.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
 private val TITLE_FONT_SIZE = 14.sp
+private val INSPECTOR_PADDING = 14.dp
+private val ICON_BUTTON_SIZE = 22.dp
 
 /** A line of feedback under the workspace header: an error, or an informational note such as an import warning. */
 internal class TestsBanner(val message: String, val isError: Boolean)
@@ -126,7 +132,20 @@ internal class TestsUi(
 ) {
     var banner: TestsBanner? by mutableStateOf(null)
 
+    /** Which text inputs hold focus right now; the shared fields report into it (see [textInputFocusReporter]). */
+    val textFocus = TextInputFocusTracker()
+
+    /** The screen that currently handles the workspace's bare keys (↑/↓, ⌥↑/⌥↓, Esc), set by [TestsKeyTargetEffect]. */
+    var keyTarget: TestsKeyTarget? by mutableStateOf(null)
+
     val library: TestLibrary get() = state.testLibrary
+
+    /**
+     * Offers a key press to the current [keyTarget]. Only key-down events are routed, and never while a text input has
+     * focus (the field owns its keys then: arrows move the caret, Esc cancels the edit). True when the target used it.
+     */
+    fun routeKey(event: KeyEvent): Boolean =
+        event.type == KeyEventType.KeyDown && !textFocus.anyFocused && keyTarget?.onKey(event) == true
 
     /** Gives keyboard focus back to the workspace root (a dismissed Popup / clicked clickable otherwise keeps it). */
     fun reclaimFocus() {
@@ -147,6 +166,23 @@ internal class TestsUi(
 
     fun info(message: String) {
         banner = TestsBanner(message, isError = false)
+    }
+}
+
+/** What a screen implements to receive the workspace's bare key presses; see [TestsUi.routeKey]. Return true when handled. */
+internal fun interface TestsKeyTarget {
+    fun onKey(event: KeyEvent): Boolean
+}
+
+/** Registers [handler] as the workspace's key target while this call is composed (the last screen to register wins). */
+@Composable
+internal fun TestsKeyTargetEffect(handler: (KeyEvent) -> Boolean) {
+    val ui = LocalTestsUi.current
+    val current by rememberUpdatedState(handler)
+    val target = remember { TestsKeyTarget { event -> current(event) } }
+    DisposableEffect(ui, target) {
+        ui.keyTarget = target
+        onDispose { if (ui.keyTarget === target) ui.keyTarget = null }
     }
 }
 
@@ -216,6 +252,45 @@ internal fun TestsScrollColumn(
     }
 }
 
+/**
+ * The frame every centre screen sits in: the [main] content, and optionally an [inspector] beside it. Each pane scrolls on
+ * its own ([TestsScrollColumn]). Wide: `main | divider | inspector`, the inspector [TestsViewState.inspectorWidthDp] wide
+ * (drag the divider to resize). When the two together are narrower than [TESTS_INSPECTOR_STACK_BELOW_DP] the inspector
+ * stacks under [main] inside one scroll column. Without an inspector [main] fills the space.
+ */
+@Composable
+internal fun TestsSplitScreen(
+    main: @Composable () -> Unit,
+    inspector: (@Composable () -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val view = LocalTestsUi.current.view
+    if (inspector == null) {
+        TestsScrollColumn(modifier.fillMaxSize()) { main() }
+        return
+    }
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        if (testsInspectorStacked(maxWidth.value)) {
+            TestsScrollColumn(Modifier.fillMaxSize()) {
+                main()
+                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                Column(Modifier.fillMaxWidth().background(tc.p).padding(INSPECTOR_PADDING)) { inspector() }
+            }
+        } else {
+            Row(Modifier.fillMaxSize()) {
+                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight()) { main() }
+                // The divider sits left of the inspector, so dragging it right makes the inspector narrower.
+                HDivider { delta -> view.inspectorWidthDp = clampTestsInspectorWidth(view.inspectorWidthDp, -delta) }
+                TestsScrollColumn(
+                    Modifier.width(view.inspectorWidthDp.dp).fillMaxHeight().background(tc.p),
+                    contentModifier = Modifier.padding(INSPECTOR_PADDING),
+                ) { inspector() }
+            }
+        }
+    }
+}
+
 // ── Rows ─────────────────────────────────────────────────────────────
 
 /**
@@ -228,6 +303,8 @@ internal fun TestsListRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     minHeight: Dp = LIST_ROW_MIN_HEIGHT,
+    startPadding: Dp = 8.dp,
+    spacing: Dp = 8.dp,
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
@@ -237,9 +314,9 @@ internal fun TestsListRow(
         baseBg = if (selected) tc.abg else Color.Transparent,
     ) {
         Row(
-            Modifier.fillMaxWidth().heightIn(min = minHeight).padding(horizontal = 8.dp),
+            Modifier.fillMaxWidth().heightIn(min = minHeight).padding(start = startPadding, end = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(spacing),
             content = content,
         )
     }
@@ -709,6 +786,38 @@ internal fun TestsOverflowMenu(
             }
         }
         if (menu.open) TestsMenuPopup(items, Alignment.TopEnd, OVERFLOW_BUTTON_SIZE + 2.dp, menu::close)
+    }
+}
+
+/**
+ * A small square text-glyph button ("+", "☰") for the nav and screen headers. A disabled one shows [disabledHint] in a
+ * tooltip. [contentDescription] names it for assistive tech and UI tests.
+ */
+@Composable
+internal fun TestsIconButton(
+    symbol: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    disabledHint: String? = null,
+) {
+    val tc = tc()
+    HintWhen(!enabled && disabledHint != null, disabledHint.orEmpty()) {
+        HoverBox(
+            modifier = modifier.size(ICON_BUTTON_SIZE).clip(CORNER_SM)
+                .semantics(mergeDescendants = true) {
+                    this.contentDescription = contentDescription
+                    role = Role.Button
+                    if (!enabled) disabled()
+                },
+            hoverEnabled = enabled,
+            onClick = if (enabled) onClick else null,
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                DisableSelection { AppText(symbol, color = if (enabled) tc.ts else tc.td, fontSize = 14.sp) }
+            }
+        }
     }
 }
 

@@ -13,6 +13,7 @@ import com.indagium.testing.limits.decide
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
@@ -83,6 +84,22 @@ internal class TestsViewState {
 
     /** Width of the left navigation column in dp; dragged through the shared HDivider, clamped by [clampTestsNavWidth]. */
     var navWidthDp: Float by mutableStateOf(TESTS_NAV_WIDTH_DEFAULT_DP)
+
+    /** Width of the right inspector column in dp (wide windows only); clamped by [clampTestsInspectorWidth]. */
+    var inspectorWidthDp: Float by mutableStateOf(TESTS_INSPECTOR_WIDTH_DEFAULT_DP)
+
+    /** The suites whose cases the navigation tree lists. The selected suite is added when it is selected. */
+    var expandedSuiteIds: Set<String> by mutableStateOf(emptySet())
+}
+
+/** Expands [suiteId] in the navigation tree (a no-op when it already is). */
+internal fun TestsViewState.expandSuite(suiteId: String) {
+    if (suiteId !in expandedSuiteIds) expandedSuiteIds = expandedSuiteIds + suiteId
+}
+
+/** Collapses an expanded suite and expands a collapsed one. */
+internal fun TestsViewState.toggleSuiteExpanded(suiteId: String) {
+    expandedSuiteIds = if (suiteId in expandedSuiteIds) expandedSuiteIds - suiteId else expandedSuiteIds + suiteId
 }
 
 /** The place a step was edited in, so the script editor opened from it can lead back there. */
@@ -121,6 +138,24 @@ internal const val TESTS_NAV_WIDTH_MAX_DP = 420f
 /** [current] widened by [deltaDp], kept within the navigation column's bounds. */
 internal fun clampTestsNavWidth(current: Float, deltaDp: Float): Float =
     (current + deltaDp).coerceIn(TESTS_NAV_WIDTH_MIN_DP, TESTS_NAV_WIDTH_MAX_DP)
+
+internal const val TESTS_INSPECTOR_WIDTH_DEFAULT_DP = 380f
+internal const val TESTS_INSPECTOR_WIDTH_MIN_DP = 300f
+internal const val TESTS_INSPECTOR_WIDTH_MAX_DP = 560f
+
+/** [current] widened by [deltaDp], kept within the inspector column's bounds. */
+internal fun clampTestsInspectorWidth(current: Float, deltaDp: Float): Float =
+    (current + deltaDp).coerceIn(TESTS_INSPECTOR_WIDTH_MIN_DP, TESTS_INSPECTOR_WIDTH_MAX_DP)
+
+/** Below this total width the navigation column collapses to a ☰ toggle. */
+internal const val TESTS_NAV_COLLAPSE_BELOW_DP = 600f
+
+/** Below this width for the centre screen plus its inspector, the inspector stacks under the centre content. */
+internal const val TESTS_INSPECTOR_STACK_BELOW_DP = 900f
+
+internal fun testsNavCollapsed(totalWidthDp: Float): Boolean = totalWidthDp < TESTS_NAV_COLLAPSE_BELOW_DP
+
+internal fun testsInspectorStacked(centreAndInspectorWidthDp: Float): Boolean = centreAndInspectorWidthDp < TESTS_INSPECTOR_STACK_BELOW_DP
 
 // ── Edition limits ───────────────────────────────────────────────────
 
@@ -256,6 +291,31 @@ internal fun filterSuites(suites: List<TestSuite>, query: String): List<TestSuit
             suite.targetPackage.lowercase().contains(q) || suite.tags.any { it.lowercase().contains(q) }
     }
 }
+
+/** One suite of the navigation tree: the cases listed under it and whether a search forces it open. */
+internal data class NavSuiteEntry(val suite: TestSuite, val cases: List<TestCase>, val forceExpanded: Boolean)
+
+/** Cases whose name, description or instructions contain [query] (ignoring case). */
+private fun TestCase.matchesQuery(q: String): Boolean =
+    name.lowercase().contains(q) || description.lowercase().contains(q) || instructions.lowercase().contains(q)
+
+/**
+ * The navigation tree for [query]. A blank query lists every suite with all its cases. Otherwise a suite is listed when it
+ * matches ([filterSuites]) or one of its cases does; its cases are then only the matching ones, and a suite with a matching
+ * case is [NavSuiteEntry.forceExpanded] so the match is visible.
+ */
+internal fun filterNavTree(suites: List<TestSuite>, query: String): List<NavSuiteEntry> {
+    val q = query.trim().lowercase()
+    if (q.isEmpty()) return suites.map { NavSuiteEntry(it, it.cases, forceExpanded = false) }
+    val suiteMatches = filterSuites(suites, query).mapTo(HashSet()) { it.id }
+    return suites.mapNotNull { suite ->
+        val cases = suite.cases.filter { it.matchesQuery(q) }
+        if (suite.id in suiteMatches || cases.isNotEmpty()) NavSuiteEntry(suite, cases, forceExpanded = cases.isNotEmpty()) else null
+    }
+}
+
+/** The navigation footer's total: "1 case" / "5 cases". */
+internal fun navCaseCountLabel(count: Int): String = if (count == 1) "1 case" else "$count cases"
 
 // ── Step badges, numbers and key=value text ──────────────────────────
 
