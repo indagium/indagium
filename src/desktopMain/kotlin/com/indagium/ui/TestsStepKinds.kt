@@ -5,7 +5,6 @@ package com.indagium.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -50,12 +49,23 @@ private val WITHIN_FIELD_WIDTH = 110.dp
 private val SCRIPT_MENU_WIDTH = 240.dp
 private const val DEFAULT_DEVICE_STATE_REGEX = ".+"
 
+/** Small controls side by side that wrap onto further lines when the pane is narrow (the 300dp inspector). */
+@Composable
+internal fun WrapRow(content: @Composable () -> Unit) {
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) { content() }
+}
+
 internal fun stepKindLabel(kind: StepKind): String = KIND_LABELS.getValue(kind)
 
 /** The three kinds as a segmented control. */
 @Composable
 internal fun StepKindSelector(kind: StepKind, enabled: Boolean, onSelect: (StepKind) -> Unit) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    // Wraps in a narrow inspector (the three buttons and the label are about 270dp together).
+    WrapRow {
         AppText("Performed by", color = tc().td, fontSize = 10.sp)
         StepKind.entries.forEach { option ->
             AppButton(
@@ -110,7 +120,7 @@ internal fun ScriptCallEditor(
     val scripts = ui.library.scripts
     val selected = call?.let { chosen -> scripts.firstOrNull { it.id == chosen.scriptId } }
     val offered = scripts.filter { it.permission != ScriptPermission.SETUP_TEARDOWN_ONLY || it.id == call?.scriptId }
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    WrapRow {
         TestsDropdown(
             selectedLabel = when {
                 call == null -> chooseLabel
@@ -190,7 +200,7 @@ private fun ScriptExpectations(call: ScriptCall, enabled: Boolean, onChange: (Sc
 /** A device-state check: which property of the device, what it must match and for how long it is watched. */
 @Composable
 internal fun DeviceStateCheckBody(check: StepCheck.DeviceState, enabled: Boolean, onChange: (StepCheck.DeviceState) -> StoreResult<*>) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    WrapRow {
         TestsBadge("Device state")
         TestsDropdown(
             selectedLabel = check.key.ifBlank { "Choose a property" },

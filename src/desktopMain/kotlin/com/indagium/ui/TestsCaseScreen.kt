@@ -35,8 +35,8 @@ import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.store.StoreResult
 
-// The case editor: goal, preconditions, instructions, hooks, allowed tools and the step list. A locked case (past the
-// edition's per-suite limit) renders read-only with the lock notice; it can still be duplicated-out of the way
+// The case editor: goal, preconditions, instructions, hooks, allowed tools and the step list (the selected step is edited in the
+// inspector). A locked case (past the edition's per-suite limit) renders read-only with the lock notice; it can still be duplicated-out of the way
 // (deleted) from the suite table.
 
 @Composable
@@ -48,7 +48,7 @@ internal fun TestsCaseScreen(suiteId: String, caseId: String) {
     val case = suite.cases.firstOrNull { it.id == caseId } ?: return
     val access = caseEditAccess(library, suite, case.id, limits)
     var confirmDelete by remember { mutableStateOf(false) }
-    TestsScreenScaffold {
+    TestsScreenScaffold(inspector = { SelectedStepInspector(caseStepOps(ui, suite, case, access.editable)) }) {
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             if (maxWidth >= 760.dp) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -207,7 +207,10 @@ private fun CaseContextPanel(case: TestCase, editable: Boolean) {
         } else {
             examples.forEach { (step, example) ->
                 Row(
-                    Modifier.fillMaxWidth().clickable { ui.view.expandedStepId = step.id }.padding(vertical = 3.dp),
+                    Modifier.fillMaxWidth().clickable {
+                        ui.view.selectedStepId = step.id
+                        ui.view.stepExamplesExpanded = true
+                    }.padding(vertical = 3.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {

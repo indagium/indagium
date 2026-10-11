@@ -1,35 +1,55 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
 import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
+import com.indagium.testing.model.DEFAULT_MANUAL_STEP_TIMEOUT_MS
+import com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS
 import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptCall
@@ -56,7 +76,6 @@ import java.io.File
 
 private const val NEW_STEP_ACTION = "New step"
 private const val DEFAULT_CHECK_REGEX = ".+"
-private val STEP_FIELD_WIDTH = 150.dp
 private val NUMBER_FIELD_WIDTH = 110.dp
 private val THUMB_HEIGHT = 72.dp
 private val STEP_MENU_WIDTH = 200.dp
@@ -76,14 +95,32 @@ internal class StepListOps(
 
 // ── Step list ────────────────────────────────────────────────────────
 
+private val STEP_ROW_HEIGHT = 34.dp
+private val STEP_NUMBER_WIDTH = 20.dp
+private val STEP_MENU_SLOT = 26.dp
+private val CHECK_DOT_SIZE = 7.dp
+private const val UNTITLED_STEP = "Untitled step"
+
 @Composable
 internal fun StepListSection(ops: StepListOps) {
     val ui = LocalTestsUi.current
+    val view = ui.view
+    val ids = ops.steps.map { it.id }
+    val selectedId = effectiveSelectedStepId(ops.steps, view.selectedStepId)
+    // A step is always selected while there are steps (the inspector is never empty): a case opened without one selects its first.
+    LaunchedEffect(ids, view.selectedStepId) {
+        if (selectedId != null && selectedId != view.selectedStepId) view.selectedStepId = selectedId
+    }
+    TestsKeyTargetEffect { event -> handleStepKey(ui, ops, event) }
     TestsSectionTitle("Steps (${ops.steps.size})") {
         if (ops.editable) {
             AppButton("+ Add step", onClick = {
                 val step = TestStep(newStepId(), NEW_STEP_ACTION)
-                if (ui.report(ops.add(step)) is StoreResult.Ok) ui.view.expandedStepId = step.id
+                if (ui.report(ops.add(step)) is StoreResult.Ok) {
+                    view.selectedStepId = step.id
+                    view.revealStepId = step.id
+                    view.focusStepActionId = step.id
+                }
             }, variant = ButtonVariant.Ghost)
         }
     }
@@ -92,45 +129,154 @@ internal fun StepListSection(ops: StepListOps) {
         items = ops.steps,
         idOf = { it.id },
         onMove = { id, to -> ui.report(ops.move(id, to)) },
+        fixedRowHeight = STEP_ROW_HEIGHT,
         reorderEnabled = ops.editable,
-        rowGap = 6.dp,
-    ) { step, row -> StepCard(step, row, ops) }
+    ) { step, row -> StepRow(step, row, ops, selected = step.id == selectedId) }
+    if (ops.steps.size > 1) TestsHint("↑ ↓ select a step" + if (ops.editable) " · ⌥↑ ⌥↓ move it" else "", Modifier.padding(top = 6.dp))
+}
+
+/**
+ * Handles the bare keys of a step list (registered through [TestsKeyTargetEffect]): ↑/↓ select the previous/next step and
+ * ⌥↑/⌥↓ move the selected one. Moving is refused (the key is left alone) when the list is read-only.
+ */
+private fun handleStepKey(ui: TestsUi, ops: StepListOps, event: KeyEvent): Boolean {
+    val view = ui.view
+    val selected = effectiveSelectedStepId(ops.steps, view.selectedStepId)
+    altArrowDirection(event)?.let { up ->
+        if (!ops.editable || selected == null) return false
+        reorderAltTarget(ops.steps.map { it.id }, selected, up)?.let { to ->
+            ui.report(ops.move(selected, to))
+            view.revealStepId = selected
+        }
+        return true
+    }
+    if (event.isAltPressed || event.isCtrlPressed || event.isMetaPressed || event.isShiftPressed) return false
+    val delta = when (event.key) {
+        Key.DirectionUp -> -1
+        Key.DirectionDown -> 1
+        else -> return false
+    }
+    val next = stepSelectionMovedBy(ops.steps, selected, delta) ?: return false
+    view.selectedStepId = next
+    view.revealStepId = next
+    // A clicked row keeps keyboard focus (and draws its focus border); hand it back so the arrows keep working from the root.
+    ui.reclaimFocus()
+    return true
+}
+
+/** The ⋯ menu of a step, shared by its list row and the inspector header. */
+private fun stepMenuItems(ui: TestsUi, ops: StepListOps, step: TestStep): List<TestsMenuItem> {
+    val index = ops.steps.indexOfFirst { it.id == step.id }
+    val readOnlyHint = "This list is read-only."
+    return listOf(
+        TestsMenuItem(
+            "Move up", onClick = { ui.report(ops.move(step.id, index - 1)) }, kbd = "⌥↑",
+            enabled = ops.editable && index > 0, disabledHint = readOnlyHint.takeIf { !ops.editable },
+        ),
+        TestsMenuItem(
+            "Move down", onClick = { ui.report(ops.move(step.id, index + 1)) }, kbd = "⌥↓",
+            enabled = ops.editable && index in 0 until ops.steps.lastIndex, disabledHint = readOnlyHint.takeIf { !ops.editable },
+        ),
+        TestsMenuItem(
+            "Duplicate", onClick = { ui.report(ops.duplicate(step.id)) },
+            enabled = ops.editable, disabledHint = readOnlyHint,
+        ),
+        TestsMenuItem(
+            "Delete", onClick = { deleteStep(ui, ops, step) }, danger = true,
+            enabled = ops.editable, disabledHint = readOnlyHint, dividerBefore = true,
+        ),
+    )
+}
+
+/** Deletes [step] at once (like the × always did); when it was the selected one its neighbour becomes selected. */
+private fun deleteStep(ui: TestsUi, ops: StepListOps, step: TestStep) {
+    val view = ui.view
+    val wasSelected = effectiveSelectedStepId(ops.steps, view.selectedStepId) == step.id
+    val neighbour = stepSelectionAfterDelete(ops.steps, step.id)
+    if (ui.report(ops.delete(step.id)) is StoreResult.Ok && wasSelected) view.selectedStepId = neighbour
+    ui.reclaimFocus()
 }
 
 @Composable
-private fun StepCard(step: TestStep, row: ReorderRowScope, ops: StepListOps) {
+private fun StepRow(step: TestStep, row: ReorderRowScope, ops: StepListOps, selected: Boolean) {
     val tc = tc()
     val ui = LocalTestsUi.current
-    val expanded = ui.view.expandedStepId == step.id
-    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).border(1.dp, if (expanded) tc.ac.copy(alpha = .5f) else tc.br, CORNER_MD)) {
-        Row(Modifier.fillMaxWidth().padding(6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            ReorderGrip(row)
-            Row(
-                Modifier.weight(1f).clickable { ui.view.expandedStepId = if (expanded) null else step.id },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(18.dp))
-                AppText(
-                    step.action.ifBlank { "(no action)" },
-                    color = tc.tx,
-                    fontSize = 12.sp,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                stepKindBadge(step)?.let { TestsBadge(it) }
-                stepCheckBadges(step).forEach { TestsBadge(it) }
-                AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 10.sp)
-            }
-            ReorderMoveButtons(row)
-            SquareIconButton("⧉", fontSize = 12.sp, enabled = ops.editable, onClick = { ui.report(ops.duplicate(step.id)) })
-            SquareIconButton("×", fontSize = 14.sp, enabled = ops.editable, onClick = {
-                ui.report(ops.delete(step.id))
-                ui.reclaimFocus()
-            })
+    val view = ui.view
+    var hovered by remember { mutableStateOf(false) }
+    val revealer = remember { BringIntoViewRequester() }
+    LaunchedEffect(view.revealStepId) {
+        if (view.revealStepId == step.id) {
+            revealer.bringIntoView()
+            view.revealStepId = null
         }
-        if (expanded) {
-            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+    }
+    TestsListRow(
+        selected = selected,
+        // Handing the keyboard focus back first makes a field of the step being left commit before the inspector switches.
+        onClick = {
+            ui.reclaimFocus()
+            view.selectedStepId = step.id
+        },
+        modifier = Modifier.bringIntoViewRequester(revealer)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        minHeight = STEP_ROW_HEIGHT,
+        startPadding = 4.dp,
+        spacing = 6.dp,
+    ) {
+        // The grip and the ⋯ keep their slots while hidden so the other columns never shift.
+        Box(Modifier.alpha(if (hovered || row.dragging) 1f else 0f)) { ReorderGrip(row) }
+        AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(STEP_NUMBER_WIDTH))
+        AppText(
+            step.action.ifBlank { UNTITLED_STEP },
+            color = if (step.action.isBlank()) tc.td else tc.tx,
+            fontSize = 12.sp,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        TestsBadge(stepKindLabel(step.kind))
+        stepChecksSummary(step)?.let { summary -> StepChecksSummary(step, summary) }
+        Box(Modifier.size(STEP_MENU_SLOT).alpha(if (hovered || selected) 1f else 0f)) {
+            TestsOverflowMenu(stepMenuItems(ui, ops, step), contentDescription = "Step ${row.index + 1} actions")
+        }
+    }
+}
+
+/** A dot and "Screen" / "3 checks"; hovering lists every check kind. */
+@Composable
+private fun StepChecksSummary(step: TestStep, summary: String) {
+    val tc = tc()
+    HintWhen(true, stepCheckBadges(step).joinToString(", ")) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Box(Modifier.size(CHECK_DOT_SIZE).border(1.5.dp, tc.ac, CircleShape))
+            AppText(summary, color = tc.ts, fontSize = 10.sp)
+        }
+    }
+}
+
+// ── Step inspector ───────────────────────────────────────────────────
+
+/**
+ * The editor of the selected step, for the inspector pane (or under the list where a screen has no inspector): a header
+ * "Step N of M" with the step's ⋯ menu, then [StepEditor]. Shows a hint while no step is selected.
+ */
+@Composable
+internal fun SelectedStepInspector(ops: StepListOps) {
+    val ui = LocalTestsUi.current
+    val selectedId = effectiveSelectedStepId(ops.steps, ui.view.selectedStepId)
+    val step = ops.steps.firstOrNull { it.id == selectedId }
+    if (step == null) {
+        TestsHint(if (ops.steps.isEmpty()) "No steps yet. Add one to edit it here." else "Select a step to edit it.")
+        return
+    }
+    // Keyed by step so a draft typed into one step's field can never be committed to the next one.
+    key(step.id) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            TestsInspectorHeader(
+                "Step ${ops.steps.indexOf(step) + 1} of ${ops.steps.size}",
+                step.action.ifBlank { UNTITLED_STEP },
+                overflowItems = stepMenuItems(ui, ops, step),
+            )
             StepEditor(step, ops)
         }
     }
@@ -144,12 +290,21 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
     val update: ((TestStep) -> TestStep) -> StoreResult<*> = { transform -> ops.update(step.id, transform) }
     var configuringOptional by remember(step.id, step.optional) { mutableStateOf(false) }
     var optionalCondition by remember(step.id, step.condition) { mutableStateOf(step.condition.orEmpty()) }
-    Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val actionFocus = remember { FocusRequester() }
+    // A step that was just added gets the cursor in its Action field.
+    LaunchedEffect(step.id, ui.view.focusStepActionId) {
+        if (ui.view.focusStepActionId == step.id) {
+            runCatching { actionFocus.requestFocus() }
+            ui.view.focusStepActionId = null
+        }
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         StepKindSelector(step.kind, ops.editable) { kind -> changeStepKind(ui, step, kind, update) }
         TestsHint(stepKindHint(step.kind))
         TestsLabeled(if (step.kind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
             CommitTextField(
                 step.action, { text -> update { it.copy(action = text) } },
+                modifier = Modifier.focusRequester(actionFocus),
                 enabled = ops.editable, multiline = true,
                 placeholder = when (step.kind) {
                     StepKind.AGENT -> "What the agent should do"
@@ -263,12 +418,48 @@ private val ON_FAILURE_LABELS = mapOf(
     OnFailure.PAUSE_FOR_USER to "Pause for me",
 )
 
+/**
+ * The one line shown under a collapsed "Advanced" header, built from the fields inside it: "retries 1 · up to 40 tool
+ * calls · on failure: stop the case". Fields the step's kind does not have are left out, and a timeout only shows when it is
+ * not the kind's default.
+ */
+internal fun stepAdvancedSummary(step: TestStep): String = buildList {
+    if (step.kind != StepKind.MANUAL) add("retries ${step.retries}")
+    if (step.kind == StepKind.AGENT) add("up to ${step.maxToolCalls} tool calls")
+    add("on failure: ${ON_FAILURE_LABELS.getValue(step.onFailure).lowercase()}")
+    val defaultTimeout = if (step.kind == StepKind.MANUAL) DEFAULT_MANUAL_STEP_TIMEOUT_MS else DEFAULT_STEP_TIMEOUT_MS
+    if (step.timeoutMs != defaultTimeout) add("${if (step.kind == StepKind.MANUAL) "waits up to" else "timeout"} ${formatDuration(step.timeoutMs)}")
+}.joinToString(" · ")
+
+/** A collapsible section header of the step inspector; toggling hands keyboard focus back to the workspace. */
+@Composable
+private fun InspectorDisclosure(
+    title: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    trailing: (@Composable RowScope.() -> Unit)? = null,
+) {
+    val ui = LocalTestsUi.current
+    SectionHeader(title, trailing = trailing, expanded = expanded, onToggle = {
+        onToggle()
+        ui.reclaimFocus()
+    })
+}
+
 @Composable
 private fun StepSettings(step: TestStep, ops: StepListOps) {
+    val view = LocalTestsUi.current.view
     val update: ((TestStep) -> TestStep) -> StoreResult<*> = { transform -> ops.update(step.id, transform) }
-    TestsSectionTitle("Settings")
+    val expanded = view.stepAdvancedExpanded
+    InspectorDisclosure("Advanced", expanded, onToggle = { view.stepAdvancedExpanded = !expanded })
+    if (!expanded) {
+        TestsHint(
+            stepAdvancedSummary(step), Modifier.padding(horizontal = 12.dp), maxLines = 2,
+        )
+        return
+    }
     FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        TestsLabeled("When it fails", Modifier.width(STEP_FIELD_WIDTH + 50.dp)) {
+        TestsLabeled("When it fails") {
             TestsDropdown(
                 selectedLabel = ON_FAILURE_LABELS.getValue(step.onFailure),
                 options = OnFailure.entries,
@@ -400,12 +591,13 @@ private fun LogCheckBody(
     onRegex: (String) -> StoreResult<*>,
     onDuration: (Long) -> StoreResult<*>,
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    // Wraps in a narrow inspector: the badge and the duration share a line, the tag gets a line of its own.
+    WrapRow {
         TestsBadge(badge)
-        CommitTextField(tag.orEmpty(), { onTag(it.trim().ifEmpty { null }) }, Modifier.weight(1f), editable, "tag (optional)", mono = true)
         AppText(durationLabel, color = tc().td, fontSize = 10.sp)
         CommitNumberField(durationMs, 1L, MAX_STEP_TIMEOUT_MS, onDuration, Modifier.width(NUMBER_FIELD_WIDTH), editable)
     }
+    CommitTextField(tag.orEmpty(), { onTag(it.trim().ifEmpty { null }) }, enabled = editable, placeholder = "tag (optional)", mono = true)
     CommitTextField(regex, onRegex, enabled = editable, placeholder = "regular expression", mono = true)
 }
 
@@ -416,7 +608,7 @@ private fun ScreenJudgeBody(check: StepCheck.ScreenJudge, step: TestStep, editab
         check.text, { t -> update { s -> s.mapCheck<StepCheck.ScreenJudge>(check.id) { it.copy(text = t) } } },
         enabled = editable, multiline = true, placeholder = "What the screen should look like",
     )
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    WrapRow {
         AppText("Compare with", color = tc().td, fontSize = 10.sp)
         val options: List<String?> = listOf<String?>(null) + step.examples.map { it.id }
         TestsDropdown(
@@ -433,7 +625,7 @@ private fun ScreenJudgeBody(check: StepCheck.ScreenJudge, step: TestStep, editab
 @Composable
 private fun ScriptResultBody(check: StepCheck.ScriptResult, editable: Boolean, update: ((TestStep) -> TestStep) -> StoreResult<*>) {
     val library = LocalTestsUi.current.library
-    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+    WrapRow {
         TestsBadge(checkKindLabel(check))
         TestsDropdown(
             selectedLabel = library.script(check.scriptId)?.toolName ?: "(missing script)",
@@ -492,8 +684,10 @@ private fun ExamplesEditor(step: TestStep, ops: StepListOps) {
         add(ExampleKind.REFERENCE_LOG)
         if (ops.assetSuiteId != null) add(ExampleKind.GOLDEN_SCREENSHOT)
     }
-    TestsSectionTitle("Examples (${step.examples.size})") {
-        if (ops.editable) {
+    val view = ui.view
+    val expanded = view.stepExamplesExpanded
+    InspectorDisclosure("Examples (${step.examples.size})", expanded, onToggle = { view.stepExamplesExpanded = !expanded }) {
+        if (expanded && ops.editable) {
             TestsDropdown(
                 selectedLabel = "+ Add example",
                 options = addOptions,
@@ -512,6 +706,7 @@ private fun ExamplesEditor(step: TestStep, ops: StepListOps) {
             )
         }
     }
+    if (!expanded) return
     if (step.examples.isEmpty()) {
         TestsHint(if (ops.assetSuiteId == null) "None. Shared steps can hold reference logs; screenshots belong to a suite's case steps." else "None.")
     }
@@ -577,17 +772,17 @@ private fun GoldenScreenshotBody(example: StepExample.GoldenScreenshot, ops: Ste
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         GoldenThumbnail(file)
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText(example.assetPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
             if (file == null || !file.isFile) TestsErrorText("The image file is missing from this suite's assets.")
-        }
-        val suiteId = ops.assetSuiteId
-        if (ops.editable && suiteId != null) {
-            AppButton("Replace…", onClick = {
-                chooseGoldenImage(ui, suiteId)?.let { name ->
-                    ui.report(update { s -> s.mapExample<StepExample.GoldenScreenshot>(example.id) { it.copy(assetPath = name) } })
-                }
-            })
+            val suiteId = ops.assetSuiteId
+            if (ops.editable && suiteId != null) {
+                AppButton("Replace…", onClick = {
+                    chooseGoldenImage(ui, suiteId)?.let { name ->
+                        ui.report(update { s -> s.mapExample<StepExample.GoldenScreenshot>(example.id) { it.copy(assetPath = name) } })
+                    }
+                })
+            }
         }
     }
 }

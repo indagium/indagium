@@ -5,6 +5,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import com.indagium.testing.model.DEFAULT_MANUAL_STEP_TIMEOUT_MS
 import com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS
@@ -61,6 +62,12 @@ class StepKindEditorUiTest {
         return case.id
     }
 
+    /** The inspector's Advanced section starts collapsed. */
+    private fun openAdvanced() {
+        rule.onNodeWithText("Advanced").performScrollTo().performClick()
+        rule.waitForIdle()
+    }
+
     private fun stepOf(caseId: String) = state.testLibrary.findCase(caseId)!!.case.steps.single()
 
     @Test
@@ -77,6 +84,7 @@ class StepKindEditorUiTest {
         rule.onNodeWithText("Instructions for the tester").assertExists()
         rule.onNodeWithText("Completed by").assertExists()
         rule.onNodeWithText("Automation script (optional)").assertExists()
+        openAdvanced()
         rule.onNodeWithText("Wait up to (ms)").assertExists()
     }
 
@@ -115,7 +123,7 @@ class StepKindEditorUiTest {
         rule.waitForIdle()
 
         assertEquals(TestsNav.Suites, state.testsView.nav)
-        assertEquals(stepId, state.testsView.expandedStepId)
+        assertEquals(stepId, state.testsView.selectedStepId)
         assertNull(state.testsView.scriptReturn)
         rule.onNodeWithText("Script to run").assertExists()
         assertNotNull(state.testLibrary.script(created.id))
@@ -133,6 +141,7 @@ class StepKindEditorUiTest {
         val step = stepOf(caseId)
         assertEquals(StepKind.AGENT, step.kind)
         assertEquals(DEFAULT_STEP_TIMEOUT_MS, step.timeoutMs)
+        openAdvanced()
         rule.onNodeWithText("Max tool calls").assertExists()
     }
 }
