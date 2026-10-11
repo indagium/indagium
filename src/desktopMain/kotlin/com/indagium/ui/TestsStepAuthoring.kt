@@ -62,26 +62,20 @@ import java.util.UUID
 
 private data class StepInsertionPoint(val label: String, val index: Int)
 
+/**
+ * The header of a case's step list: the "Steps (N)" title, a "+ Add step" split button (main click: [onAddStep]; menu: draft with
+ * AI, record from a device, paste log lines as checks, insert a shared sequence) and a ⋯ menu (improve with AI, rewrite from a saved
+ * recording). Under it, while they apply: the recording device picker, the connection progress with Cancel, the last error and
+ * the recording review panel. The dialogs these actions open are composed here too.
+ */
 @Composable
-internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boolean) {
+internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean, onAddStep: () -> Unit) {
     val ui = LocalTestsUi.current
     val tc = tc()
     val step = case.steps.firstOrNull { it.id == ui.view.selectedStepId } ?: case.steps.firstOrNull()
-    val selectedIndex = case.steps.indexOfFirst { it.id == step?.id }.coerceAtLeast(0)
-    val insertionPoints = buildList {
-        add(StepInsertionPoint("At end", case.steps.size))
-        case.steps.forEachIndexed { index, row ->
-            add(StepInsertionPoint("Before ${index + 1}: ${row.action.take(32)}", index))
-            add(StepInsertionPoint("After ${index + 1}: ${row.action.take(32)}", index + 1))
-        }
-    }.distinctBy { it.index to it.label }
-    val shared = ui.library.sharedSteps
-    var selectedShared by remember(shared.map { it.id }) { mutableStateOf(shared.firstOrNull()) }
-    var sharedPosition by remember(case.id, case.steps.map { it.id }) {
-        mutableStateOf(StepInsertionPoint("After selected step", (selectedIndex + 1).coerceAtMost(case.steps.size)))
-    }
     var draftOpen by remember { mutableStateOf(false) }
     var logOpen by remember { mutableStateOf(false) }
+    var insertSharedOpen by remember { mutableStateOf(false) }
     var recordError by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
     var authoringDevices by remember(suiteId, case.id) { mutableStateOf<List<CaptureDevice>>(emptyList()) }
     var selectedAuthoringSerial by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
@@ -97,130 +91,186 @@ internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boo
     }
     var reopening by remember(suiteId, case.id) { mutableStateOf(false) }
 
-    TestsSectionTitle("Step authoring")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        HintedButton("Draft steps with AI", onClick = { draftOpen = true }, enabled = editable, disabledHint = "This case is read-only.")
-        HintedButton(
-            "Improve steps with AI",
-            onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
-            enabled = improveBlockedReason(case, editable) == null,
-            disabledHint = improveBlockedReason(case, editable),
-        )
-        if (authoringDevices.size > 1) {
-            TestsDropdown(
-                selectedLabel = authoringDevices.firstOrNull { it.serial == selectedAuthoringSerial }?.let(::recordingDeviceLabel)
-                    ?: "Choose device",
-                options = authoringDevices,
-                optionLabel = ::recordingDeviceLabel,
-                onSelect = { selectedAuthoringSerial = it.serial },
-                enabled = editable && !preparingRecording,
-                isSelected = { it.serial == selectedAuthoringSerial },
-                menuWidth = 240.dp,
-            )
-        }
-        HintedButton(
-            if (preparingRecording) "Connecting…" else "Record from device",
-            onClick = {
-                if (preparingRecording) return@HintedButton
-                recordingPreparationJob = ui.scope.launch {
-                    preparingRecording = true
-                    try {
-                        handleAuthoringPreparationFailure({ recordError = it }) {
-                            authoringDevices = withContext(Dispatchers.IO) { ui.state.discoverTestStepRecordingDevices() }
-                            val preferredSerial = ui.state.liveCaptureSerial()
-                            val serial = selectedAuthoringSerial?.takeIf { selected -> authoringDevices.any { it.serial == selected } }
-                                ?: authoringDevices.firstOrNull { it.serial == preferredSerial }?.serial
-                                ?: authoringDevices.singleOrNull()?.serial
-                            selectedAuthoringSerial = serial
-                            if (authoringDevices.isEmpty()) {
-                                recordError = "No connected Android devices are available. Connect or authorize a device, then try again."
-                            } else if (serial == null) {
-                                recordError = "Choose the device to record. The Tests workspace will stay open while the recording prepares."
-                            } else {
-                                startAuthoringRecording(serial, ui, suiteId, case.id) { recordError = it }
-                            }
-                        }
-                    } finally {
-                        preparingRecording = false
-                        recordingPreparationJob = null
+    fun beginRecording() {
+        if (preparingRecording) return
+        recordingPreparationJob = ui.scope.launch {
+            preparingRecording = true
+            try {
+                handleAuthoringPreparationFailure({ recordError = it }) {
+                    authoringDevices = withContext(Dispatchers.IO) { ui.state.discoverTestStepRecordingDevices() }
+                    val preferredSerial = ui.state.liveCaptureSerial()
+                    val serial = selectedAuthoringSerial?.takeIf { selected -> authoringDevices.any { it.serial == selected } }
+                        ?: authoringDevices.firstOrNull { it.serial == preferredSerial }?.serial
+                        ?: authoringDevices.singleOrNull()?.serial
+                    selectedAuthoringSerial = serial
+                    if (authoringDevices.isEmpty()) {
+                        recordError = "No connected Android devices are available. Connect or authorize a device, then try again."
+                    } else if (serial == null) {
+                        recordError = "Choose the device to record. The Tests workspace will stay open while the recording prepares."
+                    } else {
+                        startAuthoringRecording(serial, ui, suiteId, case.id) { recordError = it }
                     }
                 }
-            },
-            enabled = editable && !preparingRecording,
-            disabledHint = if (!editable) "This case is read-only." else "Preparing the recording.",
-        )
-        if (preparingRecording) {
-            AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
+            } finally {
+                preparingRecording = false
+                recordingPreparationJob = null
+            }
         }
+    }
+
+    val readOnlyHint = "This case is read-only."
+    val addMenu = buildList {
+        add(TestsMenuItem("Draft steps with AI…", onClick = { draftOpen = true }, enabled = editable, disabledHint = readOnlyHint))
+        add(
+            TestsMenuItem(
+                if (preparingRecording) "Connecting…" else "Record from device…", onClick = ::beginRecording,
+                enabled = editable && !preparingRecording, disabledHint = if (!editable) readOnlyHint else "Preparing the recording.",
+            ),
+        )
+        add(
+            TestsMenuItem(
+                "Paste log lines as checks…", onClick = { logOpen = true },
+                enabled = editable && step != null, disabledHint = if (!editable) readOnlyHint else "Add a step first.",
+            ),
+        )
+        if (ui.library.sharedSteps.isNotEmpty()) {
+            add(
+                TestsMenuItem(
+                    "Insert shared sequence…", onClick = { insertSharedOpen = true },
+                    enabled = editable, disabledHint = readOnlyHint, dividerBefore = true,
+                ),
+            )
+        }
+    }
+    val moreMenu = buildList {
+        add(
+            TestsMenuItem(
+                "Improve steps with AI…", onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
+                enabled = improveBlockedReason(case, editable) == null, disabledHint = improveBlockedReason(case, editable),
+            ),
+        )
         storedRecordings.forEachIndexed { position, recordingId ->
             val busy = ui.state.testStepRecordingSession != null
-            HintedButton(
-                if (storedRecordings.size == 1) "Rewrite with AI from saved recording" else "Rewrite with AI from saved recording ${position + 1}",
-                onClick = {
-                    if (reopening) return@HintedButton
-                    reopening = true
-                    ui.scope.launch {
-                        try {
-                            recordError = ui.state.reopenTestStepRecording(case.id, recordingId).takeIf { it !is StoreResult.Ok }?.userMessage()
-                        } finally {
-                            reopening = false
+            add(
+                TestsMenuItem(
+                    if (storedRecordings.size == 1) "Rewrite with AI from saved recording" else "Rewrite with AI from saved recording ${position + 1}",
+                    onClick = {
+                        if (!reopening) {
+                            reopening = true
+                            ui.scope.launch {
+                                try {
+                                    recordError = ui.state.reopenTestStepRecording(case.id, recordingId).takeIf { it !is StoreResult.Ok }?.userMessage()
+                                } finally {
+                                    reopening = false
+                                }
+                            }
                         }
-                    }
-                },
-                enabled = editable && !reopening && !busy && !preparingRecording,
-                disabledHint = when {
-                    !editable -> "This case is read-only."
-                    busy -> "Finish or discard the open recording first."
-                    else -> "Opening the saved recording."
-                },
+                    },
+                    enabled = editable && !reopening && !busy && !preparingRecording,
+                    disabledHint = when {
+                        !editable -> readOnlyHint
+                        busy -> "Finish or discard the open recording first."
+                        else -> "Opening the saved recording."
+                    },
+                    dividerBefore = position == 0,
+                ),
             )
         }
-        if (shared.isNotEmpty()) {
-            TestsDropdown(
-                selectedLabel = selectedShared?.name ?: "Shared sequence",
-                options = shared,
-                optionLabel = SharedStep::name,
-                onSelect = { selectedShared = it },
-                enabled = editable,
-                isSelected = { it.id == selectedShared?.id },
-                menuWidth = 260.dp,
-            )
-            TestsDropdown(
-                selectedLabel = sharedPosition.label,
-                options = insertionPoints,
-                optionLabel = StepInsertionPoint::label,
-                onSelect = { sharedPosition = it },
-                enabled = editable,
-                isSelected = { it == sharedPosition },
-                menuWidth = 260.dp,
-            )
-            HintedButton(
-                "Insert shared",
-                onClick = {
-                    selectedShared?.let { chosen ->
-                        ui.report(ui.state.insertSharedSteps(case.id, chosen.id, sharedPosition.index))
-                    }
-                },
-                enabled = editable && selectedShared != null,
-                disabledHint = if (selectedShared == null) "Choose a shared sequence first." else "This case is read-only.",
-            )
+    }
+
+    TestsSectionTitle("Steps (${case.steps.size})") {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+            TestsSplitButton("+ Add step", onClick = onAddStep, menuItems = addMenu, enabled = editable, disabledHint = readOnlyHint)
+            TestsOverflowMenu(moreMenu, contentDescription = "More step actions")
         }
-        HintedButton(
-            "Paste log lines as checks",
-            onClick = { logOpen = true },
-            enabled = editable && step != null,
-            disabledHint = if (!editable) "This case is read-only." else "Add a step first.",
-        )
+    }
+    if (authoringDevices.size > 1 || preparingRecording) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (authoringDevices.size > 1) {
+                TestsDropdown(
+                    selectedLabel = authoringDevices.firstOrNull { it.serial == selectedAuthoringSerial }?.let(::recordingDeviceLabel)
+                        ?: "Choose device",
+                    options = authoringDevices,
+                    optionLabel = ::recordingDeviceLabel,
+                    onSelect = { selectedAuthoringSerial = it.serial },
+                    enabled = editable && !preparingRecording,
+                    isSelected = { it.serial == selectedAuthoringSerial },
+                    menuWidth = 240.dp,
+                )
+            }
+            if (preparingRecording) {
+                AppText("Connecting to the device…", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(vertical = 5.dp))
+                AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
+            }
+        }
     }
     recordError?.let { TestsErrorText(it) }
-    Spacer(Modifier.height(8.dp))
     if (draftOpen) TestStepDraftDialog(suiteId, case, onDismiss = { draftOpen = false })
     if (logOpen && step != null) LogChecksDialog(step.id, onDismiss = { logOpen = false })
+    if (insertSharedOpen) InsertSharedDialog(case, step, onDismiss = { insertSharedOpen = false })
     val recordingTarget = ui.state.testStepRecordingTarget
     if (recordingTarget == (suiteId to case.id)) {
         ui.state.testStepRecordingSession?.let { session ->
             TestStepRecordingPanel(session, case, onDismiss = { ui.state.clearTestStepRecording(session.id) })
         }
+    }
+}
+
+/** Inserts a library shared sequence into [case]: which sequence, and where (after the selected step by default). */
+@Composable
+private fun InsertSharedDialog(case: TestCase, selectedStep: TestStep?, onDismiss: () -> Unit) {
+    val ui = LocalTestsUi.current
+    val shared = ui.library.sharedSteps
+    val selectedIndex = case.steps.indexOfFirst { it.id == selectedStep?.id }.coerceAtLeast(0)
+    val insertionPoints = buildList {
+        add(StepInsertionPoint("At end", case.steps.size))
+        case.steps.forEachIndexed { index, row ->
+            add(StepInsertionPoint("Before ${index + 1}: ${row.action.take(32)}", index))
+            add(StepInsertionPoint("After ${index + 1}: ${row.action.take(32)}", index + 1))
+        }
+    }.distinctBy { it.index to it.label }
+    var chosen by remember { mutableStateOf(shared.firstOrNull()) }
+    var position by remember { mutableStateOf(StepInsertionPoint("After selected step", (selectedIndex + 1).coerceAtMost(case.steps.size))) }
+
+    fun dismiss() {
+        onDismiss()
+        ui.reclaimFocus()
+    }
+    Dialog(onDismissRequest = ::dismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        TestsDialogFrame(
+            title = "Insert shared sequence",
+            body = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TestsLabeled("Shared sequence") {
+                        TestsDropdown(
+                            selectedLabel = chosen?.name ?: "Choose a shared sequence",
+                            options = shared,
+                            optionLabel = SharedStep::name,
+                            onSelect = { chosen = it },
+                            isSelected = { it.id == chosen?.id },
+                            menuWidth = 260.dp,
+                        )
+                    }
+                    TestsLabeled("Position") {
+                        TestsDropdown(
+                            selectedLabel = position.label,
+                            options = insertionPoints,
+                            optionLabel = StepInsertionPoint::label,
+                            onSelect = { position = it },
+                            isSelected = { it == position },
+                            menuWidth = 260.dp,
+                        )
+                    }
+                }
+            },
+            footer = {
+                DialogActionButton("Insert", active = true, enabled = chosen != null) {
+                    chosen?.let { ui.report(ui.state.insertSharedSteps(case.id, it.id, position.index)) }
+                    dismiss()
+                }
+                DialogActionButton("Cancel", active = false) { dismiss() }
+            },
+        )
     }
 }
 

@@ -3,6 +3,7 @@ package com.indagium.testing
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -92,7 +93,8 @@ class TestCaseImproveUiTest {
         state.testsView.selectedCaseId = IMPROVE_CASE_ID
         rule.waitForIdle()
 
-        rule.onNodeWithText("Improve steps with AI").performClick()
+        rule.onNodeWithContentDescription("More step actions").performClick()
+        rule.onNodeWithText("Improve steps with AI…").performClick()
         rule.waitUntilAtLeastOneExists(hasText("Generate preview"), WAIT_MS)
         assertEquals(ImproveStepsTarget(suiteId, IMPROVE_CASE_ID, null), state.testsView.improveDialog)
         rule.waitUntilAtLeastOneExists(hasText("No run of this case yet · steps only"), WAIT_MS)
@@ -118,7 +120,8 @@ class TestCaseImproveUiTest {
         state.testsView.selectedCaseId = case.id
         rule.waitForIdle()
 
-        rule.onNodeWithText("Improve steps with AI").performClick()
+        rule.onNodeWithContentDescription("More step actions").performClick()
+        rule.onNodeWithText("Improve steps with AI…").performClick()
         rule.waitForIdle()
 
         assertNull(state.testsView.improveDialog, "a disabled button opens nothing")

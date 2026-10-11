@@ -101,8 +101,12 @@ private val STEP_MENU_SLOT = 26.dp
 private val CHECK_DOT_SIZE = 7.dp
 private const val UNTITLED_STEP = "Untitled step"
 
+/**
+ * The step list. [header] replaces the default "Steps (N)" title with a "+ Add step" button (the case screen passes its own
+ * header with the authoring menu); without it the list draws the default, which is what shared steps use.
+ */
 @Composable
-internal fun StepListSection(ops: StepListOps) {
+internal fun StepListSection(ops: StepListOps, header: (@Composable () -> Unit)? = null) {
     val ui = LocalTestsUi.current
     val view = ui.view
     val ids = ops.steps.map { it.id }
@@ -112,16 +116,11 @@ internal fun StepListSection(ops: StepListOps) {
         if (selectedId != null && selectedId != view.selectedStepId) view.selectedStepId = selectedId
     }
     TestsKeyTargetEffect { event -> handleStepKey(ui, ops, event) }
-    TestsSectionTitle("Steps (${ops.steps.size})") {
-        if (ops.editable) {
-            AppButton("+ Add step", onClick = {
-                val step = TestStep(newStepId(), NEW_STEP_ACTION)
-                if (ui.report(ops.add(step)) is StoreResult.Ok) {
-                    view.selectedStepId = step.id
-                    view.revealStepId = step.id
-                    view.focusStepActionId = step.id
-                }
-            }, variant = ButtonVariant.Ghost)
+    if (header != null) {
+        header()
+    } else {
+        TestsSectionTitle("Steps (${ops.steps.size})") {
+            if (ops.editable) AppButton("+ Add step", onClick = { addBlankStep(ui, ops) }, variant = ButtonVariant.Ghost)
         }
     }
     if (ops.steps.isEmpty()) TestsHint("No steps yet. A step is one thing the agent does, with what you expect to see afterwards.")
@@ -135,12 +134,32 @@ internal fun StepListSection(ops: StepListOps) {
     if (ops.steps.size > 1) TestsHint("↑ ↓ select a step" + if (ops.editable) " · ⌥↑ ⌥↓ move it" else "", Modifier.padding(top = 6.dp))
 }
 
+/** Appends a blank step, selects it and asks for the cursor in its Action field. */
+internal fun addBlankStep(ui: TestsUi, ops: StepListOps) {
+    val step = TestStep(newStepId(), NEW_STEP_ACTION)
+    if (ui.report(ops.add(step)) is StoreResult.Ok) {
+        ui.view.selectStep(step.id)
+        ui.view.revealStepId = step.id
+        ui.view.focusStepActionId = step.id
+    }
+}
+
+/** Esc: closes the case-field editor in the inspector; false (key left alone) when none is open. */
+private fun closeCaseFieldEditor(ui: TestsUi): Boolean {
+    if (ui.view.caseInspectorField == null) return false
+    ui.view.caseInspectorField = null
+    ui.reclaimFocus()
+    return true
+}
+
 /**
  * Handles the bare keys of a step list (registered through [TestsKeyTargetEffect]): ↑/↓ select the previous/next step and
- * ⌥↑/⌥↓ move the selected one. Moving is refused (the key is left alone) when the list is read-only.
+ * ⌥↑/⌥↓ move the selected one, Esc closes an open case-field editor. Moving is refused (the key is left alone) when the list
+ * is read-only.
  */
 private fun handleStepKey(ui: TestsUi, ops: StepListOps, event: KeyEvent): Boolean {
     val view = ui.view
+    if (event.key == Key.Escape) return closeCaseFieldEditor(ui)
     val selected = effectiveSelectedStepId(ops.steps, view.selectedStepId)
     altArrowDirection(event)?.let { up ->
         if (!ops.editable || selected == null) return false
@@ -154,10 +173,10 @@ private fun handleStepKey(ui: TestsUi, ops: StepListOps, event: KeyEvent): Boole
     val delta = when (event.key) {
         Key.DirectionUp -> -1
         Key.DirectionDown -> 1
-        else -> return false
+        else -> null
     }
-    val next = stepSelectionMovedBy(ops.steps, selected, delta) ?: return false
-    view.selectedStepId = next
+    val next = delta?.let { stepSelectionMovedBy(ops.steps, selected, it) } ?: return false
+    view.selectStep(next)
     view.revealStepId = next
     // A clicked row keeps keyboard focus (and draws its focus border); hand it back so the arrows keep working from the root.
     ui.reclaimFocus()
@@ -215,7 +234,7 @@ private fun StepRow(step: TestStep, row: ReorderRowScope, ops: StepListOps, sele
         // Handing the keyboard focus back first makes a field of the step being left commit before the inspector switches.
         onClick = {
             ui.reclaimFocus()
-            view.selectedStepId = step.id
+            view.selectStep(step.id)
         },
         modifier = Modifier.bringIntoViewRequester(revealer)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }

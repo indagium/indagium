@@ -61,6 +61,12 @@ internal class TestsViewState {
     /** The one step selected in the step list (its editor is the inspector), per container (case id or shared-step id). */
     var selectedStepId: String? by mutableStateOf(null)
 
+    /**
+     * The case-level field whose editor the case screen's inspector shows instead of the selected step's (a summary chip was
+     * clicked); null shows the step editor. Selecting a step, Done and Esc clear it.
+     */
+    var caseInspectorField: CaseField? by mutableStateOf(null)
+
     /** A step the list should scroll into view (set by keyboard selection); the row clears it once it did. */
     var revealStepId: String? by mutableStateOf(null)
 
@@ -110,6 +116,45 @@ internal fun TestsViewState.expandSuite(suiteId: String) {
 /** Collapses an expanded suite and expands a collapsed one. */
 internal fun TestsViewState.toggleSuiteExpanded(suiteId: String) {
     expandedSuiteIds = if (suiteId in expandedSuiteIds) expandedSuiteIds - suiteId else expandedSuiteIds + suiteId
+}
+
+/** Selects [stepId] in the step list and closes any case-field editor, so the inspector shows that step. */
+internal fun TestsViewState.selectStep(stepId: String) {
+    selectedStepId = stepId
+    caseInspectorField = null
+}
+
+/** The case-level fields the case screen summarises as chips; each opens its editor in the inspector. */
+internal enum class CaseField(val label: String, val inspectorTitle: String) {
+    Preconditions("Preconditions", "Preconditions"),
+    Instructions("Instructions", "Instructions for the agent"),
+    Hooks("Hooks", "Hooks"),
+    Tools("Tools", "Tools"),
+    Examples("Examples", "Examples"),
+}
+
+/** What a summary chip shows: [text], and whether the field is empty (the chip then mutes it). */
+internal data class CaseChipValue(val text: String, val empty: Boolean)
+
+internal const val CASE_CHIP_EMPTY = "—"
+
+/** The examples attached to the steps of [case], in step order. */
+internal fun caseExampleCount(case: TestCase): Int = case.steps.sumOf { it.examples.size }
+
+/**
+ * The chip text of [field] for [case]: the first non-blank line of Preconditions / Instructions, "setup · teardown"
+ * counts for Hooks, "All" or "N allowed" for Tools, the example count for Examples. An empty field shows "—".
+ */
+internal fun caseChipValue(case: TestCase, field: CaseField): CaseChipValue {
+    fun firstLine(text: String) = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+    val text = when (field) {
+        CaseField.Preconditions -> firstLine(case.preconditions)
+        CaseField.Instructions -> firstLine(case.instructions)
+        CaseField.Hooks -> if (case.setup.isEmpty() && case.teardown.isEmpty()) null else "${case.setup.size} · ${case.teardown.size}"
+        CaseField.Tools -> case.allowedTools?.let { "${it.size} allowed" } ?: "All"
+        CaseField.Examples -> caseExampleCount(case).takeIf { it > 0 }?.toString()
+    }
+    return CaseChipValue(text ?: CASE_CHIP_EMPTY, empty = text == null)
 }
 
 /** The place a step was edited in, so the script editor opened from it can lead back there. */

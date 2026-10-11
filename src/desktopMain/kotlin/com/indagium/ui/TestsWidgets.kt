@@ -72,6 +72,7 @@ import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -536,6 +537,7 @@ internal fun TestsPageHeader(
     titlePlaceholder: String = "",
     primary: (@Composable () -> Unit)? = null,
     overflowItems: List<TestsMenuItem> = emptyList(),
+    overflowDescription: String = "More actions",
     breadcrumb: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val tc = tc()
@@ -550,7 +552,39 @@ internal fun TestsPageHeader(
                 }
             }
             primary?.invoke()
-            if (overflowItems.isNotEmpty()) TestsOverflowMenu(overflowItems)
+            if (overflowItems.isNotEmpty()) TestsOverflowMenu(overflowItems, contentDescription = overflowDescription)
+        }
+    }
+}
+
+/**
+ * A link in a [TestsPageHeader] breadcrumb ("Smoke ›"): accent text, underlined while hovered, that leads back up one
+ * level. [contentDescription] names it for assistive tech and UI tests; the click hands keyboard focus back to the root.
+ */
+@Composable
+internal fun TestsBreadcrumbLink(label: String, onClick: () -> Unit, modifier: Modifier = Modifier, contentDescription: String = label) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .clip(CORNER_SM)
+            .clickable {
+                onClick()
+                ui.reclaimFocus()
+            }
+            .semantics(mergeDescendants = true) {
+                this.contentDescription = contentDescription
+                role = Role.Button
+            }
+            .padding(horizontal = 2.dp),
+    ) {
+        DisableSelection {
+            AppText(
+                label, color = tc.ac, fontSize = SMALL_FONT_SIZE, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                textDecoration = if (hovered) TextDecoration.Underline else null,
+            )
         }
     }
 }
