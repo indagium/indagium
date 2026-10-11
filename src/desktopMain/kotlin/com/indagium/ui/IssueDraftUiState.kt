@@ -10,6 +10,7 @@ import com.indagium.testing.model.RecheckOutcome
 import com.indagium.testing.model.isPendingCaptureArchive
 import com.indagium.testing.model.normalizeTags
 import com.indagium.testing.run.formatByteSize
+import java.time.ZoneId
 
 // UI-free state of the issue dialog and the Issues screen: what the form holds while the user edits it, how it becomes a
 // draft again, which destinations are on offer and how an issue reads in a list. Pure functions over plain data, unit-tested
@@ -112,9 +113,19 @@ internal fun RecheckOutcome.label(): String = when (this) {
     RecheckOutcome.PASSING_NOW -> "passing now"
 }
 
-/** "Case · step 3 · run-…", the second line of an issue in the list. */
-internal fun IssueRecord.originLine(): String =
-    listOf(source.caseName.ifBlank { "case" }, "step ${source.stepNumber}", source.runId).joinToString(" · ")
+/**
+ * "Login · step 2 · run Oct 7, 23:25", the second line of an issue in the list: the case, the step and when the run happened.
+ * [runCreatedAt] is the run's own start; when the run is no longer known the issue's creation time stands in ("run on Oct 7,
+ * 23:25"). The raw run id is never shown.
+ */
+internal fun IssueRecord.originLine(
+    runCreatedAt: Long? = null,
+    nowMs: Long = System.currentTimeMillis(),
+    zone: ZoneId = ZoneId.systemDefault(),
+): String {
+    val moment = if (runCreatedAt != null) "run ${formatRunMoment(runCreatedAt, nowMs, zone)}" else "run on ${formatRunMoment(createdAt, nowMs, zone)}"
+    return listOf(source.caseName.ifBlank { "case" }, "step ${source.stepNumber}", moment).joinToString(" · ")
+}
 
 /** Issues as the list shows them: newest first (the store already sorts them), filtered by a case-insensitive search of title, case and labels. */
 internal fun filterIssues(issues: List<IssueRecord>, query: String): List<IssueRecord> {

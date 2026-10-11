@@ -20,6 +20,8 @@ import com.indagium.ui.filterIssues
 import com.indagium.ui.liveColumns
 import com.indagium.ui.originLine
 import com.indagium.ui.withOverrides
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -117,7 +119,14 @@ class IssueDraftUiStateTest {
         assertEquals(listOf(two), filterIssues(listOf(one, two), "settings"))
         assertEquals(listOf(two), filterIssues(listOf(one, two), "ui"))
         assertFalse(filterIssues(listOf(one, two), "nothing").isNotEmpty())
-        assertEquals("Login · step 2 · run-1", one.originLine())
+        val zone = ZoneId.of("Europe/Berlin")
+        val now = ZonedDateTime.of(2026, 10, 12, 12, 0, 0, 0, zone).toInstant().toEpochMilli()
+        val runStart = ZonedDateTime.of(2026, 10, 7, 23, 25, 0, 0, zone).toInstant().toEpochMilli()
+        assertEquals("Login · step 2 · run Oct 7, 23:25", one.originLine(runStart, now, zone))
+        // A run that is gone: the issue's own creation time stands in, and the raw run id never shows.
+        val created = one.copy(createdAt = ZonedDateTime.of(2026, 10, 11, 9, 5, 0, 0, zone).toInstant().toEpochMilli())
+        assertEquals("Login · step 2 · run on yesterday 09:05", created.originLine(null, now, zone))
+        assertFalse(created.originLine(null, now, zone).contains("run-1"))
     }
 
     @Test

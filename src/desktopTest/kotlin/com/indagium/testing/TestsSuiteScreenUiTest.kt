@@ -259,7 +259,11 @@ class TestsSuiteScreenUiTest {
         rule.waitForIdle()
         val chips = rule.onAllNodesWithText("Cancelled")
         chips[0].assertExists().assertTextNotTruncated()
-        rule.onNodeWithText("1/1 steps · 1 case(s) · 1 lane(s)").assertExists()
+        // Without the suite name (the screen is the suite) the row reads: chip · "1 case" · pass bar "1/1" · "1 lane" · clock time.
+        rule.onNodeWithText("1/1").assertExists()
+        assertTrue(centre("1 case").isNotEmpty(), "the run row names its cases (the nav tree carries the same words)")
+        rule.onNodeWithText("1 lane").assertExists()
+        rule.onNodeWithText("Today").assertExists()
     }
 
     @Test

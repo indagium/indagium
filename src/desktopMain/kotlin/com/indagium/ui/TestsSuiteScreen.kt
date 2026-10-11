@@ -47,7 +47,6 @@ import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
-import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
@@ -76,8 +75,6 @@ private val ROW_MIN_HEIGHT = 34.dp
 private val ROW_MIN_HEIGHT_WITH_GOAL = 44.dp
 private val ROW_START_PADDING = 6.dp
 private val SUITE_TABS_MAX_WIDTH = 330.dp
-private val RUN_STATUS_COLUMN = 76.dp
-private val RUN_MOMENT_MIN_WIDTH = 110.dp
 private val DOT_SIZE = 8.dp
 private const val ROW_MENU_IDLE_ALPHA = .35f
 private const val ROW_SEPARATOR_ALPHA = .6f
@@ -471,22 +468,9 @@ private fun SuiteRunsTab(data: SuiteScreenData) {
     val ui = LocalTestsUi.current
     val runs = data.history.runs
     when {
-        runs.isNotEmpty() -> {
-            val now = System.currentTimeMillis()
-            Column(Modifier.fillMaxWidth()) { runs.forEach { run -> SuiteRunRow(run, now) { openSuiteRun(ui, run.id) } } }
-        }
+        runs.isNotEmpty() -> RunHistoryList(runs, showSuite = false, onOpen = { openSuiteRun(ui, it) })
         !data.loaded -> TestsHint("Loading runs…")
         else -> TestsHint("No runs yet. Start one with Run suite.")
-    }
-}
-
-@Composable
-private fun SuiteRunRow(run: RunSummary, nowMs: Long, onClick: () -> Unit) {
-    val tc = tc()
-    TestsListRow(selected = false, onClick = onClick, startPadding = ROW_START_PADDING) {
-        Box(Modifier.width(RUN_STATUS_COLUMN)) { StatusChip(run.status.label(), runColor(run.status)) }
-        AppText(formatRunMoment(run.createdAt, nowMs), color = tc.tx, fontSize = 11.sp, modifier = Modifier.widthIn(min = RUN_MOMENT_MIN_WIDTH))
-        AppText(run.line(), color = tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
     }
 }
 
