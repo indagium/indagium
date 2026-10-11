@@ -614,6 +614,6 @@ private fun GoldenThumbnail(file: File?) {
     }
     Box(Modifier.height(THUMB_HEIGHT).width(THUMB_HEIGHT).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM), contentAlignment = Alignment.Center) {
         bitmap?.let { Image(it, contentDescription = "Reference screenshot", contentScale = ContentScale.Fit, modifier = Modifier.height(THUMB_HEIGHT)) }
-            ?: AppText("no preview", color = tc.td, fontSize = 9.sp)
+            ?: AppText("no preview", color = tc.td, fontSize = 10.sp)
     }
 }

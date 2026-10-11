@@ -294,7 +294,7 @@ private fun CaseRow(case: com.indagium.testing.model.TestCase, row: ReorderRowSc
                 SquareIconButton("×", fontSize = 14.sp, enabled = !ui.library.readOnly, onClick = onDelete)
             }
             Row(Modifier.fillMaxWidth().padding(start = 42.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("${case.steps.size} steps", color = tc.ts, fontSize = 9.sp)
+                AppText("${case.steps.size} steps", color = tc.ts, fontSize = 10.sp)
                 CaseLatestResults(history, Modifier.weight(1f))
             }
         }
@@ -311,7 +311,7 @@ private fun CaseRow(case: com.indagium.testing.model.TestCase, row: ReorderRowSc
                     AppText(case.name.ifBlank { "Untitled case" }, color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     if (locked) LockBadge(limits.hint)
                 }
-                AppText(case.description.ifBlank { case.steps.firstOrNull()?.action.orEmpty() }, color = tc.td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AppText(case.description.ifBlank { case.steps.firstOrNull()?.action.orEmpty() }, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             AppText("${case.steps.size}", color = tc.ts, fontSize = 11.sp, modifier = Modifier.width(STEPS_COLUMN))
             CaseLatestResults(history, Modifier.width(RESULT_COLUMN))
@@ -339,15 +339,15 @@ private fun CaseLatestResults(history: SuiteCaseHistory?, modifier: Modifier) {
                 ui.state.settings.aiProviderProfiles.firstOrNull { it.id == lane.lane.profileId }?.displayName ?: lane.lane.profileId.orEmpty()
             }.take(24)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                StatusChip(lane.status?.label() ?: "Not run", if (lane.status == null) tc.td else caseColor(lane.status), Modifier.width(56.dp))
-                AppText(label, color = tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                StatusChip(lane.status?.label() ?: "Not run", if (lane.status == null) tc.td else caseColor(lane.status), Modifier.widthIn(min = 56.dp))
+                AppText(label, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 if (lane.status != null) {
-                    AppText("${lane.durationMs / 1000.0}s", color = tc.td, fontSize = 9.sp, fontFamily = MONO)
-                    if (lane.repeatCount > 1) AppText("×${lane.repeatCount}", color = tc.td, fontSize = 9.sp)
+                    AppText(formatDuration(lane.durationMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                    if (lane.repeatCount > 1) AppText("×${lane.repeatCount}", color = tc.td, fontSize = 10.sp)
                 }
                 if (history.disagreement) AppText("≠", color = DANGER_RED, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                 if (lane.issueIds.isNotEmpty()) {
-                    AppText("Issue ×${lane.issueIds.size}", color = tc.warn, fontSize = 9.sp, modifier = Modifier.clickable {
+                    AppText("Issue ×${lane.issueIds.size}", color = tc.warn, fontSize = 10.sp, modifier = Modifier.clickable {
                         ui.view.nav = TestsNav.Issues
                         ui.view.selectedIssueId = lane.issueIds.first()
                     })
@@ -411,7 +411,7 @@ private fun SuiteRunRow(run: RunSummary, onClick: () -> Unit) {
         StatusChip(run.status.label(), runColor(run.status), Modifier.width(75.dp))
         Column(Modifier.weight(1f)) {
             AppText(formatRunTime(run.createdAt), color = tc.tx, fontSize = 10.sp, fontFamily = MONO)
-            AppText("${run.laneCount} lane(s) · ${run.repeat} repeat(s)", color = tc.td, fontSize = 9.sp)
+            AppText("${run.laneCount} lane(s) · ${run.repeat} repeat(s)", color = tc.td, fontSize = 10.sp)
         }
         AppText("Open →", color = tc.ac, fontSize = 10.sp)
     }
@@ -432,9 +432,9 @@ private fun SuiteHistoryRail(suite: TestSuite, history: com.indagium.testing.mod
             Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).clickable { openSuiteRun(ui, latest.id) }.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                 StatusChip(latest.status.label(), runColor(latest.status))
                 AppText(formatRunTime(latest.finishedAt ?: latest.createdAt), color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
-                AppText("${latest.lanes.size} lane(s) · ${latest.config.repeat} repeat(s)", color = tc.td, fontSize = 9.sp)
-                AppText("${metrics.passed} passed · ${metrics.failed} failed · ${metrics.blocked} blocked · ${metrics.errors} errors", color = tc.ts, fontSize = 9.sp)
-                AppText("${metrics.disagreements} disagreement(s) · ${metrics.unresolvedJudging} unresolved judge check(s)", color = tc.ts, fontSize = 9.sp)
+                AppText("${latest.lanes.size} lane(s) · ${latest.config.repeat} repeat(s)", color = tc.td, fontSize = 10.sp)
+                AppText("${metrics.passed} passed · ${metrics.failed} failed · ${metrics.blocked} blocked · ${metrics.errors} errors", color = tc.ts, fontSize = 10.sp)
+                AppText("${metrics.disagreements} disagreement(s) · ${metrics.unresolvedJudging} unresolved judge check(s)", color = tc.ts, fontSize = 10.sp)
                 latest.lanes.take(MAX_RAIL_LANES).forEach { lane ->
                     val cases = lane.cases.filter { it.caseId != com.indagium.testing.model.SUITE_SETUP_CASE_ID && it.caseId != com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID }
                     val counts = cases.mapNotNull { it.status }.groupingBy { it }.eachCount()
@@ -452,12 +452,12 @@ private fun SuiteHistoryRail(suite: TestSuite, history: com.indagium.testing.mod
                     AppText(
                         "$label · $outcomes${if (latest.config.repeat > 1) " · ×${latest.config.repeat} repeats" else ""}",
                         color = tc.ts,
-                        fontSize = 9.sp,
+                        fontSize = 10.sp,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (latest.lanes.size > MAX_RAIL_LANES) AppText("+${latest.lanes.size - MAX_RAIL_LANES} more lanes", color = tc.td, fontSize = 9.sp)
+                if (latest.lanes.size > MAX_RAIL_LANES) AppText("+${latest.lanes.size - MAX_RAIL_LANES} more lanes", color = tc.td, fontSize = 10.sp)
                 AppText("Open report →", color = tc.ac, fontSize = 10.sp)
             }
         }
@@ -466,7 +466,7 @@ private fun SuiteHistoryRail(suite: TestSuite, history: com.indagium.testing.mod
         history.recentRuns.take(5).forEach { run ->
             Row(Modifier.fillMaxWidth().clickable { openSuiteRun(ui, run.id) }.padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
                 StatusChip(run.status.label(), runColor(run.status), Modifier.width(66.dp))
-                AppText(formatRunTime(run.createdAt), color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
+                AppText(formatRunTime(run.createdAt), color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             }
         }
         TestsSectionTitle("Linked issues")
@@ -480,7 +480,7 @@ private fun SuiteHistoryRail(suite: TestSuite, history: com.indagium.testing.mod
                     ui.view.selectedIssueId = issue.id
                 }.padding(vertical = 4.dp)) {
                     AppText(issue.draft.title, color = tc.tx, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    AppText("${issue.status.label()} · ${issue.source.caseName}", color = tc.td, fontSize = 9.sp)
+                    AppText("${issue.status.label()} · ${issue.source.caseName}", color = tc.td, fontSize = 10.sp)
                 }
             }
         }

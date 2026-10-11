@@ -17,9 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -78,7 +76,7 @@ private fun TestsMasterDetail(list: @Composable () -> Unit, detail: @Composable 
     val tc = tc()
     BoxWithConstraints(Modifier.fillMaxSize()) {
         if (maxWidth < MASTER_DETAIL_BREAKPOINT) {
-            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
+            TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(16.dp)) {
                 list()
                 Spacer(Modifier.height(12.dp))
                 Spacer(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
@@ -87,9 +85,9 @@ private fun TestsMasterDetail(list: @Composable () -> Unit, detail: @Composable 
             }
         } else {
             Row(Modifier.fillMaxSize()) {
-                Column(Modifier.width(MASTER_LIST_WIDTH).fillMaxHeight().verticalScroll(rememberScrollState()).padding(12.dp)) { list() }
+                TestsScrollColumn(Modifier.width(MASTER_LIST_WIDTH).fillMaxHeight(), contentModifier = Modifier.padding(12.dp)) { list() }
                 Spacer(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                Column(Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight(), contentModifier = Modifier.padding(16.dp)) {
                     Column(Modifier.fillMaxWidth().widthIn(max = TESTS_CONTENT_MAX_WIDTH)) { detail() }
                 }
             }
@@ -314,8 +312,8 @@ private fun ScriptSchemaPanel(script: TestScript) {
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(10.dp)) {
         TestsSectionTitle("Tool schema preview")
         AppText(script.toolName, color = tc.ac, fontSize = 10.sp, fontFamily = MONO)
-        AppText(descriptor.description, color = tc.ts, fontSize = 9.sp)
-        AppText(schema, color = tc.td, fontSize = 8.sp, fontFamily = MONO, maxLines = 18, overflow = TextOverflow.Ellipsis)
+        AppText(descriptor.description, color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        AppText(schema, color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 18, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -342,7 +340,7 @@ private fun ScriptUsagePanel(script: TestScript) {
                     if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.SetupTeardown
                 }
             }.padding(vertical = 4.dp)) {
-                AppText(listOf(owner, ref.label).filter(String::isNotBlank).joinToString(" — "), color = tc.ac, fontSize = 9.sp)
+                AppText(listOf(owner, ref.label).filter(String::isNotBlank).joinToString(" — "), color = tc.ac, fontSize = 10.sp)
             }
         }
     }

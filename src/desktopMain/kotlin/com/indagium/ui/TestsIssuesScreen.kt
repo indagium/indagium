@@ -66,11 +66,11 @@ private fun severityColor(severity: IssueSeverity): Color = when (severity) {
 private fun statusColor(status: IssueStatus): Color = when (status) {
     IssueStatus.DRAFT -> tc().warn
     IssueStatus.SAVED -> tc().ac
-    IssueStatus.SENT -> tc().ok
+    IssueStatus.SENT -> tc().success
 }
 
 @Composable
-private fun recheckColor(outcome: RecheckOutcome): Color = if (outcome == RecheckOutcome.PASSING_NOW) tc().ok else DANGER_RED
+private fun recheckColor(outcome: RecheckOutcome): Color = if (outcome == RecheckOutcome.PASSING_NOW) tc().success else DANGER_RED
 
 /** The stored issues, reloaded on IO whenever the store changes. */
 @Composable

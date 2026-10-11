@@ -133,8 +133,8 @@ private fun LaneLogcatPreview(relativePath: String?, runDir: File, tick: Int) {
     }
     preview?.takeIf(String::isNotBlank)?.let { text ->
         Column(Modifier.fillMaxWidth().padding(top = 4.dp).background(tc.p, CORNER_SM).padding(6.dp)) {
-            AppText("LIVE LOGCAT · LAST LINES", color = tc.td, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
-            AppText(text, color = tc.ts, fontSize = 9.sp, fontFamily = MONO, maxLines = 6, overflow = TextOverflow.Ellipsis)
+            AppText("LIVE LOGCAT · LAST LINES", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            AppText(text, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 6, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -327,7 +327,7 @@ private fun JudgeFeed(run: TestRun) {
 
 @Composable
 internal fun verdictColor(verdict: JudgeVerdict): Color = when (verdict) {
-    JudgeVerdict.PASS -> tc().ok
+    JudgeVerdict.PASS -> tc().success
     JudgeVerdict.FAIL -> DANGER_RED
     JudgeVerdict.INCONCLUSIVE -> tc().warn
 }

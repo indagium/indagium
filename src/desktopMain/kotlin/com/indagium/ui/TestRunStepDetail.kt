@@ -12,9 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -124,13 +122,13 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
                     color = tc.ts,
                     fontSize = 10.sp,
                 )
-                attempt.executionStatus?.let { AppText("Execution: ${it.name.lowercase()}", color = tc.td, fontSize = 9.sp) }
+                attempt.executionStatus?.let { AppText("Execution: ${it.name.lowercase()}", color = tc.td, fontSize = 10.sp) }
                 if (attempt.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
-                    AppText("Verification: ${attempt.verificationState.name.lowercase().replace('_', ' ')}", color = tc.td, fontSize = 9.sp)
+                    AppText("Verification: ${attempt.verificationState.name.lowercase().replace('_', ' ')}", color = tc.td, fontSize = 10.sp)
                 }
-                attempt.judgeQueueWaitMs?.let { AppText("Judge queue wait: ${it}ms", color = tc.td, fontSize = 9.sp) }
-                attempt.judgmentDurationMs?.let { AppText("Judge duration: ${it}ms", color = tc.td, fontSize = 9.sp) }
-                attempt.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 9.sp) }
+                attempt.judgeQueueWaitMs?.let { AppText("Judge queue wait: ${it}ms", color = tc.td, fontSize = 10.sp) }
+                attempt.judgmentDurationMs?.let { AppText("Judge duration: ${it}ms", color = tc.td, fontSize = 10.sp) }
+                attempt.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 10.sp) }
                 if (attempt.observation.isNotBlank()) DetailLine("Attempt observation (untrusted)", attempt.observation, mono = true)
                 attempt.judge?.let { TestsBadge("judge ${it.verdict.name.lowercase()} · ${it.usage?.summaryLabel() ?: "usage unavailable"}") }
             }
@@ -152,20 +150,22 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
             Column(Modifier.fillMaxWidth().padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     StatusChip("attempt ${attempt.attempt} · ${attempt.status.name.lowercase()}", caseColor(attempt.status))
-                    attempt.note?.takeIf { it.isNotBlank() }?.let { AppText(it, color = tc.td, fontSize = 9.sp, maxLines = 2) }
+                    attempt.note?.takeIf { it.isNotBlank() }?.let { AppText(it, color = tc.td, fontSize = 10.sp, maxLines = 2) }
                 }
                 attempt.steps.filter { it.status != StepStatus.PASS && it.status != StepStatus.SKIPPED }.forEach { failed ->
                     AppText("Step ${failed.stepNumber}: ${failed.status.name.lowercase()} · ${failed.action}", color = tc.ts, fontSize = 10.sp, maxLines = 2)
-                    failed.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 9.sp, maxLines = 2) }
-                    if (failed.observation.isNotBlank()) AppText("Observation (untrusted): ${failed.observation}", color = tc.td, fontSize = 9.sp, maxLines = 3)
+                    failed.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 10.sp, maxLines = 2) }
+                    if (failed.observation.isNotBlank()) {
+                        AppText("Observation (untrusted): ${failed.observation}", color = tc.td, fontSize = 10.sp, maxLines = 3)
+                    }
                     failed.checks.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }.forEach { check ->
-                        AppText("${check.status.name.lowercase()} ${check.kind}: ${check.detail}", color = tc.td, fontSize = 9.sp, maxLines = 2)
+                        AppText("${check.status.name.lowercase()} ${check.kind}: ${check.detail}", color = tc.td, fontSize = 10.sp, maxLines = 2)
                     }
                     failed.judge?.let { judge ->
                         AppText(
                             "Judge ${judge.verdict.name.lowercase()}: ${judge.reasoning.orEmpty().ifBlank { judge.error.orEmpty() }}",
                             color = tc.td,
-                            fontSize = 9.sp,
+                            fontSize = 10.sp,
                             maxLines = 3,
                         )
                     }
@@ -194,7 +194,7 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
 
 @Composable
 internal fun checkColor(status: CheckStatus): Color = when (status) {
-    CheckStatus.PASS -> tc().ok
+    CheckStatus.PASS -> tc().success
     CheckStatus.FAIL, CheckStatus.ERROR -> DANGER_RED
     CheckStatus.NOT_EVALUATED -> tc().td
 }
@@ -291,7 +291,7 @@ private fun StepFixDialog(runId: String, stepId: String, fixRef: String, action:
             changes.forEach { change ->
                 AppText(change.field.uppercase(), color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
                 AppText("− ${change.before.ifBlank { "(empty)" }}", color = DANGER_RED, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
-                AppText("+ ${change.after}", color = tc.ok, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
+                AppText("+ ${change.after}", color = tc.success, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
             }
             problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
             Spacer(Modifier.padding(top = 10.dp))
@@ -372,7 +372,7 @@ private fun StepEvidence(step: StepResult, lane: LaneResult, runDir: File) {
     }
     excerpt?.takeIf { it.isNotBlank() }?.let { text ->
         AppText("LOG DURING THE STEP (untrusted)", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-        Box(Modifier.fillMaxWidth().heightIn(max = EXCERPT_MAX_HEIGHT).background(tc.bg, CORNER_SM).verticalScroll(rememberScrollState()).padding(6.dp)) {
+        TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = EXCERPT_MAX_HEIGHT).background(tc.bg, CORNER_SM), contentModifier = Modifier.padding(6.dp)) {
             AppText(text, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
         }
     }

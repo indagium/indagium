@@ -82,12 +82,12 @@ class ExternalEventRowUiTest {
     fun anExternalEventShowsTheChooserAndStaysAManualStepThatWaitsForATester() {
         openReview()
 
-        rule.onNodeWithText("DETECTED ON THE DEVICE").assertExists()
+        rule.onNodeWithText("Detected on the device").assertExists()
         rule.onNodeWithText("Instructions for the tester").assertExists()
         rule.onNodeWithText("Wait for tester").assertExists()
         rule.onNodeWithText("Run script ▾").assertExists()
         rule.onNodeWithText("+ New script").assertExists()
-        rule.onNodeWithText("DEVICE-STATE CHECKS (1)").assertExists()
+        rule.onNodeWithText("Device-state checks (1)").assertExists()
         assertEquals(StepKind.MANUAL, external().stepKind)
         assertNull(external().script)
     }

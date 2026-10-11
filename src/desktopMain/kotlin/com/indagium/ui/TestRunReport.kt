@@ -16,9 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -122,7 +120,7 @@ private fun RunListRow(summary: RunSummary, onClick: () -> Unit) {
 
 @Composable
 internal fun runColor(status: RunStatus): Color = when (status) {
-    RunStatus.PASSED -> tc().ok
+    RunStatus.PASSED -> tc().success
     RunStatus.FAILED, RunStatus.ERROR -> DANGER_RED
     RunStatus.RUNNING, RunStatus.QUEUED -> tc().ac
     RunStatus.CANCELLED -> tc().warn
@@ -130,7 +128,7 @@ internal fun runColor(status: RunStatus): Color = when (status) {
 
 @Composable
 internal fun stepColor(status: StepStatus): Color = when (status) {
-    StepStatus.PASS -> tc().ok
+    StepStatus.PASS -> tc().success
     StepStatus.FAIL, StepStatus.ERROR, StepStatus.TIMEOUT -> DANGER_RED
     StepStatus.BLOCKED -> tc().warn
     StepStatus.SKIPPED -> tc().td
@@ -138,7 +136,7 @@ internal fun stepColor(status: StepStatus): Color = when (status) {
 
 @Composable
 internal fun caseColor(status: CaseStatus?): Color = when (status) {
-    CaseStatus.PASS -> tc().ok
+    CaseStatus.PASS -> tc().success
     CaseStatus.FAIL, CaseStatus.ERROR -> DANGER_RED
     CaseStatus.BLOCKED, CaseStatus.CANCELLED -> tc().warn
     CaseStatus.SKIPPED -> tc().td
@@ -242,7 +240,7 @@ private fun ReportMetrics(run: TestRun) {
     val metrics = remember(run) { reportMetrics(run) }
     Column(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            MetricCard("Passed · final cases", metrics.passedCases, tc().ok, Modifier.weight(1f))
+            MetricCard("Passed · final cases", metrics.passedCases, tc().success, Modifier.weight(1f))
             MetricCard("Failed · final cases", metrics.failedCases, DANGER_RED, Modifier.weight(1f))
             MetricCard("Blocked / error", metrics.blockedOrErrorCases, tc().warn, Modifier.weight(1f))
         }
@@ -259,7 +257,7 @@ private fun MetricCard(label: String, value: Any, color: Color, modifier: Modifi
     val tc = tc()
     Column(modifier.background(tc.p, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(horizontal = 10.dp, vertical = 7.dp)) {
         AppText(value.toString(), color = color, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        AppText(label, color = tc.td, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        AppText(label, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -292,12 +290,12 @@ private fun RunComparisonPicker(
         Column(Modifier.width(560.dp).heightIn(max = 620.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(16.dp)) {
             AppText("Compare runs", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            TestsScrollColumn(Modifier.weight(1f, fill = false)) {
                 runs.forEach { candidate ->
                     Row(Modifier.fillMaxWidth().clickable { onChoose(candidate.id) }.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         StatusChip(candidate.status.label(), runColor(candidate.status))
                         AppText(candidate.suiteName, color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        AppText("${candidate.laneCount} lanes · ×${candidate.repeat} · ${candidate.id.take(8)} · ${formatRunTime(candidate.createdAt)}", color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+                        AppText("${candidate.laneCount} lanes · ×${candidate.repeat} · ${candidate.id.take(8)} · ${formatRunTime(candidate.createdAt)}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                         if (candidate.id == selectedId) TestsBadge("selected")
                     }
                 }
@@ -316,7 +314,7 @@ private fun RunComparisonPanel(previous: TestRun, current: TestRun) {
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(10.dp)) {
         AppText("Compared with ${previous.suite.name} · ${formatRunTime(previous.finishedAt)}", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
         if (rows.isEmpty()) TestsHint("Stable case and step IDs, definitions, and statuses match.")
-        Column(Modifier.heightIn(max = 230.dp).verticalScroll(rememberScrollState())) {
+        TestsScrollColumn(Modifier.heightIn(max = 230.dp)) {
             rows.forEach { row ->
                 val label = when {
                     row.suiteDefinitionChanged -> "Suite context changed"
@@ -329,7 +327,7 @@ private fun RunComparisonPanel(previous: TestRun, current: TestRun) {
                     else -> "Status changed"
                 }
                 AppText("$label · ${row.caseName}${row.stepId.takeIf(String::isNotBlank)?.let { " · $it" }.orEmpty()}", color = tc.ts, fontSize = 10.sp, fontWeight = FontWeight.Medium)
-                AppText("${row.previousStatuses} → ${row.currentStatuses}${row.previousAction?.let { "\n$it" }.orEmpty()}${row.currentAction?.let { "\n→ $it" }.orEmpty()}", color = tc.td, fontSize = 9.sp, maxLines = 4)
+                AppText("${row.previousStatuses} → ${row.currentStatuses}${row.previousAction?.let { "\n$it" }.orEmpty()}${row.currentAction?.let { "\n→ $it" }.orEmpty()}", color = tc.td, fontSize = 10.sp, maxLines = 4)
             }
         }
     }
@@ -397,10 +395,10 @@ private fun ReportExportDialog(run: TestRun, runDir: File, onDismiss: () -> Unit
             )
             if (format == TestRunReportFormat.EVIDENCE_ZIP) {
                 TestsSectionTitle("Saved evidence")
-                Column(Modifier.weight(1f, fill = false).heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                TestsScrollColumn(Modifier.weight(1f, fill = false).heightIn(max = 260.dp)) {
                     evidencePaths.forEach { path ->
                         CheckRow(path in selectedEvidence, { selectedEvidence = if (path in selectedEvidence) selectedEvidence - path else selectedEvidence + path }) {
-                            AppText(path, color = tc.ts, fontSize = 9.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            AppText(path, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         }
                     }
                     if (evidencePaths.isEmpty()) TestsHint("No saved screenshots, logs, or tool activity paths are available.")
@@ -449,7 +447,7 @@ private fun LaneProgress(run: TestRun, lane: LaneResult, runDir: File) {
                 "external ${if (calls == 0L) "Tools 0" else "Tools $calls · Tokens unavailable · Partial"}"
             },
         )
-        if (scopes.isNotEmpty()) AppText("${case.caseName} · ${scopes.joinToString(" · ")}", color = tc.td, fontSize = 9.sp)
+        if (scopes.isNotEmpty()) AppText("${case.caseName} · ${scopes.joinToString(" · ")}", color = tc.td, fontSize = 10.sp)
     }
     if (lane.toolCalls.isNotEmpty()) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -472,7 +470,7 @@ private fun LaneProgress(run: TestRun, lane: LaneResult, runDir: File) {
                         val context = listOf("caseId", "stepId", "iteration", "attempt").mapNotNull { key -> decoded?.get(key)?.let { "$key=$it" } }.joinToString(" · ")
                         val args = decoded?.get("argumentsPreview")?.toString().orEmpty()
                         val result = decoded?.get("resultPreview")?.toString().orEmpty()
-                        AppText("$tool · $status${if (context.isBlank()) "" else " · $context"}\n${listOf(args, result).filter(String::isNotBlank).joinToString(" → ")}", color = tc.ts, fontSize = 9.sp, fontFamily = MONO, maxLines = 4)
+                        AppText("$tool · $status${if (context.isBlank()) "" else " · $context"}\n${listOf(args, result).filter(String::isNotBlank).joinToString(" → ")}", color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 4)
                     }
                 }
                 if (savedActivity.isEmpty()) TestsHint("Full activity history is unavailable or exceeds its safe read limit.")
@@ -481,7 +479,7 @@ private fun LaneProgress(run: TestRun, lane: LaneResult, runDir: File) {
                 AppText(
                     "${call.toolName} · ${call.status.name.lowercase()} · ${call.caseId}/${call.stepId} · iteration ${call.iteration}, attempt ${call.attempt}\n" +
                         listOf(call.argumentsPreview, call.resultPreview).filter(String::isNotBlank).joinToString(" → "),
-                    color = tc.ts, fontSize = 9.sp, fontFamily = MONO, maxLines = 3,
+                    color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 3,
                 )
             }
         }
@@ -490,7 +488,7 @@ private fun LaneProgress(run: TestRun, lane: LaneResult, runDir: File) {
 
 @Composable
 private fun consensusColor(tone: ConsensusTone): Color = when (tone) {
-    ConsensusTone.PASS -> tc().ok
+    ConsensusTone.PASS -> tc().success
     ConsensusTone.FAIL, ConsensusTone.DISAGREE -> DANGER_RED
     ConsensusTone.UNSURE -> tc().warn
     ConsensusTone.NONE -> tc().td
@@ -520,7 +518,7 @@ private fun ReportMatrix(run: TestRun, selection: StepSelection?, filters: Set<T
                 )
                 if (lane.config.kind != LaneKind.EXTERNAL) {
                     val name = profiles.firstOrNull { it.id == lane.config.profileId }?.displayName
-                    AppText(lane.config.driverLabel(name), color = tc.td, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    AppText(lane.config.driverLabel(name), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
