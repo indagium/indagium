@@ -58,8 +58,18 @@ internal class TestsViewState {
     /** Non-null opens the case editor for that case in the centre pane. */
     var selectedCaseId: String? by mutableStateOf(null)
 
-    /** The one step shown expanded in the step list, per container (case id or shared-step id). */
-    var expandedStepId: String? by mutableStateOf(null)
+    /** The one step selected in the step list (its editor is the inspector), per container (case id or shared-step id). */
+    var selectedStepId: String? by mutableStateOf(null)
+
+    /** A step the list should scroll into view (set by keyboard selection); the row clears it once it did. */
+    var revealStepId: String? by mutableStateOf(null)
+
+    /** A just-added step whose Action field should take the cursor; the step editor clears it once it did. */
+    var focusStepActionId: String? by mutableStateOf(null)
+
+    /** Whether the step inspector's Examples / Advanced sections are open. In memory only, shared by every step. */
+    var stepExamplesExpanded: Boolean by mutableStateOf(false)
+    var stepAdvancedExpanded: Boolean by mutableStateOf(false)
     var selectedScriptId: String? by mutableStateOf(null)
     var selectedSharedStepId: String? by mutableStateOf(null)
     var search: String by mutableStateOf("")
@@ -119,7 +129,7 @@ internal fun TestsViewState.openScriptEditorFor(scriptId: String, stepId: String
     nav = TestsNav.Scripts
 }
 
-/** Leads back to the step that opened the script editor, expanded; does nothing when no step did. */
+/** Leads back to the step that opened the script editor, selected again; does nothing when no step did. */
 internal fun TestsViewState.returnFromScriptEditor() {
     val target = scriptReturn ?: return
     scriptReturn = null
@@ -128,7 +138,7 @@ internal fun TestsViewState.returnFromScriptEditor() {
     selectedSuiteTab = target.suiteTab
     selectedCaseId = target.caseId
     selectedSharedStepId = target.sharedStepId
-    expandedStepId = target.stepId
+    selectedStepId = target.stepId
 }
 
 internal const val TESTS_NAV_WIDTH_DEFAULT_DP = 248f
@@ -335,6 +345,32 @@ internal fun stepCheckBadges(step: TestStep): List<String> =
 
 /** The badge that says who performs [step] when it is not the AI agent, else null. */
 internal fun stepKindBadge(step: TestStep): String? = if (step.kind == StepKind.AGENT) null else stepKindLabel(step.kind)
+
+/** The label next to a step row's dot: the kind of its only check, "N checks" for several, null for none. */
+internal fun stepChecksSummary(step: TestStep): String? = when (step.checks.size) {
+    0 -> null
+    1 -> checkKindLabel(step.checks.single())
+    else -> "${step.checks.size} checks"
+}
+
+/** The id of the step selected in [steps]: [selectedId] when it is one of them, else the first step, else null. */
+internal fun effectiveSelectedStepId(steps: List<TestStep>, selectedId: String?): String? =
+    steps.firstOrNull { it.id == selectedId }?.id ?: steps.firstOrNull()?.id
+
+/** The step to select once [deletedId] is gone: the one after it, else the one before it, else null. */
+internal fun stepSelectionAfterDelete(steps: List<TestStep>, deletedId: String): String? {
+    val index = steps.indexOfFirst { it.id == deletedId }
+    if (index < 0) return null
+    return (steps.getOrNull(index + 1) ?: steps.getOrNull(index - 1))?.id
+}
+
+/** The step [delta] places from [currentId], clamped to the list ends; the first step when [currentId] is not in it. */
+internal fun stepSelectionMovedBy(steps: List<TestStep>, currentId: String?, delta: Int): String? {
+    if (steps.isEmpty()) return null
+    val index = steps.indexOfFirst { it.id == currentId }
+    if (index < 0) return steps.first().id
+    return steps[(index + delta).coerceIn(0, steps.lastIndex)].id
+}
 
 /** [text] as a whole number within [min]..[max], or null when it is not one. */
 internal fun parseWholeNumber(text: String, min: Long, max: Long): Long? = text.trim().toLongOrNull()?.takeIf { it in min..max }

@@ -336,7 +336,7 @@ private fun ScriptUsagePanel(script: TestScript) {
                     ui.view.nav = TestsNav.Suites
                     ui.view.selectedSuiteId = ref.suiteId
                     ui.view.selectedCaseId = ref.caseId
-                    ui.view.expandedStepId = ref.stepId
+                    ui.view.selectedStepId = ref.stepId
                     if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.SetupTeardown
                 }
             }.padding(vertical = 4.dp)) {
@@ -462,7 +462,13 @@ private fun SharedStepEditor(shared: SharedStep, editable: Boolean) {
             enabled = editable, multiline = true, placeholder = "What this sequence does",
         )
     }
-    StepListSection(sharedStepOps(shared, editable, update))
+    // The shared-steps screen has no inspector pane yet, so the selected step's editor sits right under the list.
+    val stepOps = sharedStepOps(shared, editable, update)
+    StepListSection(stepOps)
+    Spacer(Modifier.height(10.dp))
+    Divider()
+    Spacer(Modifier.height(10.dp))
+    SelectedStepInspector(stepOps)
     Spacer(Modifier.height(12.dp))
     HintedButton("Delete shared step", onClick = { confirmDelete = true }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
     if (confirmDelete) {

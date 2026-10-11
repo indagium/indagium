@@ -15,6 +15,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
@@ -96,7 +97,8 @@ class TestsWorkspaceUiTest {
         assertEquals(1, state.testLibrary.findCase(case.id)!!.case.steps.size)
         rule.onNodeWithText("Steps (1)").assertExists()
         rule.onNodeWithText("Expected result").assertExists()
-        rule.onNodeWithText("‹ Smoke").performClick()
+        // Adding a step puts the cursor in its Action field, which may scroll the page (the inspector stacks under the list here).
+        rule.onNodeWithText("‹ Smoke").performScrollTo().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Cases (1)").assertExists()
     }
@@ -162,12 +164,16 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
 
         state.testsView.selectedCaseId = case.id
-        state.testsView.expandedStepId = case.steps.first().id
+        state.testsView.selectedStepId = case.steps.first().id
         rule.waitForIdle()
         rule.onNodeWithText("Steps (2)").assertExists()
         rule.onNodeWithText("Checks (6)").assertExists()
         rule.onNodeWithText("Examples (2)").assertExists()
         rule.onNodeWithText("Allowed tools").assertExists()
+        // The inspector's Examples start collapsed; opening them shows the editors.
+        rule.onNodeWithText("Golden screenshot").assertDoesNotExist()
+        rule.onNodeWithText("Examples (2)").performScrollTo().performClick()
+        rule.waitForIdle()
         rule.onNodeWithText("Golden screenshot").assertExists()
         assertTrue(rule.onAllNodesWithText("Reference log").fetchSemanticsNodes().isNotEmpty())
 

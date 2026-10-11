@@ -59,7 +59,8 @@ internal fun TestsAgentExamplesScreen() {
                                 ui.view.selectedSuiteId = item.suiteId
                                 ui.view.selectedCaseId = item.caseId
                             }
-                            ui.view.expandedStepId = item.step.id
+                            ui.view.selectedStepId = item.step.id
+                            ui.view.stepExamplesExpanded = true
                         }.padding(10.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {

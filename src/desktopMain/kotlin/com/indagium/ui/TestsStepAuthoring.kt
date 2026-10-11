@@ -66,7 +66,7 @@ private data class StepInsertionPoint(val label: String, val index: Int)
 internal fun CaseAuthoringActions(suiteId: String, case: TestCase, editable: Boolean) {
     val ui = LocalTestsUi.current
     val tc = tc()
-    val step = case.steps.firstOrNull { it.id == ui.view.expandedStepId } ?: case.steps.firstOrNull()
+    val step = case.steps.firstOrNull { it.id == ui.view.selectedStepId } ?: case.steps.firstOrNull()
     val selectedIndex = case.steps.indexOfFirst { it.id == step?.id }.coerceAtLeast(0)
     val insertionPoints = buildList {
         add(StepInsertionPoint("At end", case.steps.size))
@@ -528,7 +528,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 when (val result = ui.state.applyTestStepRecording(
                     session.id,
                     reviewed.map { it.action to it.expected },
-                    case.steps.indexOfFirst { it.id == ui.view.expandedStepId }.takeIf { it >= 0 }?.plus(1),
+                    case.steps.indexOfFirst { it.id == ui.view.selectedStepId }.takeIf { it >= 0 }?.plus(1),
                     reviewed.filter { it.useScreenshotAsExpected }.map { it.id }.toSet(),
                     reviewed.map { it.id },
                     reviewed.associate { it.id to (it.optional to it.condition) },

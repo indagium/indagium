@@ -199,7 +199,7 @@ class StepKindReportTest {
         assertEquals(TestsNav.Suites, view.nav)
         assertEquals("suite-1", view.selectedSuiteId)
         assertEquals("case-1", view.selectedCaseId)
-        assertEquals("step-9", view.expandedStepId)
+        assertEquals("step-9", view.selectedStepId)
         assertNull(view.scriptReturn)
 
         view.returnFromScriptEditor()
