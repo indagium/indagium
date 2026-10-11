@@ -13,8 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -304,18 +302,18 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
     }
 
     Dialog(onDismissRequest = ::discardPreview, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
-            Modifier.width(660.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(18.dp)
-                .heightIn(max = 760.dp).verticalScroll(rememberScrollState()),
+        TestsScrollColumn(
+            Modifier.width(660.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = 760.dp),
+            contentModifier = Modifier.padding(18.dp),
         ) {
             AppText("Draft steps with AI", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             TestsHint("Generation only creates this preview. It has no device controls and does not change the library until you apply it.")
             if (attemptUsage != null) {
                 Spacer(Modifier.height(5.dp))
-                AppText("Latest attempt · ${attemptUsage?.summaryLabel()}", color = tc.td, fontSize = 9.sp)
+                AppText("Latest attempt · ${attemptUsage?.summaryLabel()}", color = tc.td, fontSize = 10.sp)
             }
-            sessionUsage?.let { AppText("Creation session total · ${it.summaryLabel()}", color = tc.td, fontSize = 9.sp) }
+            sessionUsage?.let { AppText("Creation session total · ${it.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
             Spacer(Modifier.height(12.dp))
             if (draft == null) {
                 TestsLabeled("Provider profile") {
@@ -384,9 +382,9 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                 AppText("Review and edit ${editableSteps.size} proposed step(s).", color = tc.ts, fontSize = 11.sp)
                 draft?.creationUsage?.let { usage ->
                     Spacer(Modifier.height(4.dp))
-                    AppText("Creation session total · ${usage.summaryLabel()}", color = tc.td, fontSize = 9.sp)
+                    AppText("Creation session total · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp)
                 }
-                draft?.latestUsage?.let { usage -> AppText("Latest draft attempt · ${usage.summaryLabel()}", color = tc.td, fontSize = 9.sp) }
+                draft?.latestUsage?.let { usage -> AppText("Latest draft attempt · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
                 TestsDropdown(
                     selectedLabel = insertion.label,
                     options = insertionPoints,
@@ -470,7 +468,7 @@ private fun LogChecksDialog(stepId: String, onDismiss: () -> Unit) {
             ScrollableTextArea(text, { text = it }, modifier = Modifier.fillMaxWidth(), minHeight = 120.dp, maxHeight = 250.dp)
             Spacer(Modifier.height(8.dp))
             AppText("PREVIEW · ${preview.checks.size} checks", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            Column(Modifier.fillMaxWidth().heightIn(max = 210.dp).verticalScroll(rememberScrollState())) {
+            TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = 210.dp)) {
                 editableChecks.forEachIndexed { index, check ->
                     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(6.dp)) {
                         TestsLabeled("Tag (optional)") { CommitTextField(check.tag.orEmpty(), { value -> editableChecks[index] = check.copy(tag = value.trim().ifEmpty { null }); StoreResult.Ok(Unit) }, placeholder = "Any tag") }
@@ -478,7 +476,7 @@ private fun LogChecksDialog(stepId: String, onDismiss: () -> Unit) {
                         TestsLabeled("Wait (ms)") { CommitNumberField(check.withinMs, 1L, 300_000L, { value -> editableChecks[index] = check.copy(withinMs = value); StoreResult.Ok(Unit) }) }
                     }
                 }
-                preview.warnings.forEach { warning -> AppText(warning, color = tc.warn, fontSize = 9.sp) }
+                preview.warnings.forEach { warning -> AppText(warning, color = tc.warn, fontSize = 10.sp) }
             }
             error?.let { TestsErrorText(it) }
             TestsDropdown(
@@ -549,7 +547,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         error = ui.state.insertTestRecordingRow(session.id, at, RecordedTestStep(action = "")).takeIf { it !is StoreResult.Ok }?.userMessage()
         ui.reclaimFocus()
     }
-    Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
+    TestsScrollColumn(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = 600.dp), contentModifier = Modifier.padding(14.dp)) {
         AppText(
             when {
                 snapshot.active -> "Recording device input…"
@@ -610,7 +608,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     ReorderGrip(scope)
                     AppText("STEP ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                     if (row.authorAdded) TestsBadge("ADDED BY YOU")
-                    if (row.isExternalEvent) TestsBadge("DETECTED ON THE DEVICE")
+                    if (row.isExternalEvent) TestsBadge("Detected on the device")
                     Spacer(Modifier.weight(1f))
                     ReorderMoveButtons(scope)
                     AppButton(
@@ -669,7 +667,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             else it.copy(optional = true)
                         }
                     }, enabled = editable) {
-                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
+                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 10.sp)
                     }
                 }
                 if (row.optional) {
@@ -698,7 +696,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 row.reviewReason?.let {
                     when {
                         row.expected.isBlank() -> TestsErrorText("Review required: $it")
-                        it == INCIDENTAL_EXPECTED_WARNING -> AppText(it, color = tc.warn, fontSize = 9.sp)
+                        it == INCIDENTAL_EXPECTED_WARNING -> AppText(it, color = tc.warn, fontSize = 10.sp)
                         else -> TestsHint("Recording note: $it")
                     }
                 }
@@ -738,7 +736,7 @@ private fun ReopenedRecordingNotes(info: ReopenedRecordingInfo, replacement: Rep
             "(${if (info.videoStored) "with video" else "without video"}). No device is needed. Rewrite with AI, edit and reorder work as " +
             "for a new recording.",
     )
-    info.notes.forEach { AppText(it, color = tc.warn, fontSize = 9.sp) }
+    info.notes.forEach { AppText(it, color = tc.warn, fontSize = 10.sp) }
     when (replacement) {
         is ReplacementPlan.Replace ->
             TestsHint("Applying replaces the ${replacement.stepIds.size} step(s) this recording made, in place. Discarding changes nothing.")
@@ -777,7 +775,7 @@ private fun RecordedEvidencePreview(session: TestStepRecordingSession, row: Reco
                 )
             }
         }, enabled = editable) {
-            AppText("Use this eligible after image as an expected screenshot (review first)", color = tc.ts, fontSize = 9.sp)
+            AppText("Use this eligible after image as an expected screenshot (review first)", color = tc.ts, fontSize = 10.sp)
         }
     }
 }
@@ -794,7 +792,7 @@ private fun PreviewFrameColumn(title: String, evidence: RecordingPreviewImage) {
                 append(" · ").append(evidence.alignmentConfidence)
             },
             color = tc().td,
-            fontSize = 8.sp,
+            fontSize = 10.sp,
             maxLines = 3,
         )
     }

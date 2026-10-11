@@ -67,7 +67,7 @@ class TestsWorkspaceUiTest {
 
         assertEquals(listOf("New suite"), state.testLibrary.suites.map { it.name })
         rule.onNodeWithText("Suite name").assertExists()
-        rule.onNodeWithText("CASES (0)").assertExists()
+        rule.onNodeWithText("Cases (0)").assertExists()
     }
 
     @Test
@@ -81,17 +81,17 @@ class TestsWorkspaceUiTest {
         val case = state.testLibrary.suite(suite.id)!!.cases.single()
         assertEquals(case.id, state.testsView.selectedCaseId)
         rule.onNodeWithText("Case name").assertExists()
-        rule.onNodeWithText("STEPS (0)").assertExists()
+        rule.onNodeWithText("Steps (0)").assertExists()
 
         rule.onNodeWithText("+ Add step").performClick()
         rule.waitForIdle()
 
         assertEquals(1, state.testLibrary.findCase(case.id)!!.case.steps.size)
-        rule.onNodeWithText("STEPS (1)").assertExists()
+        rule.onNodeWithText("Steps (1)").assertExists()
         rule.onNodeWithText("Expected result").assertExists()
         rule.onNodeWithText("‹ Smoke").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("CASES (1)").assertExists()
+        rule.onNodeWithText("Cases (1)").assertExists()
     }
 
     @Test
@@ -103,7 +103,7 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
         assertEquals(TestsNav.Scripts, state.testsView.nav)
         rule.onNodeWithText("Tool name").assertExists()
-        rule.onNodeWithText("Try it".uppercase()).assertExists()
+        rule.onNodeWithText("Try it").assertExists()
 
         rule.onNodeWithText("Shared steps").performClick()
         rule.waitForIdle()
@@ -142,36 +142,37 @@ class TestsWorkspaceUiTest {
         state.testsView.selectedSuiteId = suite.id
 
         rule.waitForIdle()
-        rule.onNodeWithText("CASES (2)").assertExists()
+        rule.onNodeWithText("Cases (2)").assertExists()
         rule.onNodeWithText("Setup & teardown").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("SETUP HOOKS").assertExists()
+        rule.onNodeWithText("Setup hooks").assertExists()
         rule.onNodeWithText("Variables").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("VARIABLES").assertExists()
+        // The tab label and the section title it opened.
+        assertTrue(rule.onAllNodesWithText("Variables").fetchSemanticsNodes().size >= 2, "Variables section should be shown")
         state.testsView.selectedSuiteTab = SuiteTab.Cases
         rule.waitForIdle()
 
         state.testsView.selectedCaseId = case.id
         state.testsView.expandedStepId = case.steps.first().id
         rule.waitForIdle()
-        rule.onNodeWithText("STEPS (2)").assertExists()
-        rule.onNodeWithText("CHECKS (6)").assertExists()
-        rule.onNodeWithText("EXAMPLES (2)").assertExists()
-        rule.onNodeWithText("ALLOWED TOOLS").assertExists()
+        rule.onNodeWithText("Steps (2)").assertExists()
+        rule.onNodeWithText("Checks (6)").assertExists()
+        rule.onNodeWithText("Examples (2)").assertExists()
+        rule.onNodeWithText("Allowed tools").assertExists()
         rule.onNodeWithText("Golden screenshot").assertExists()
         assertTrue(rule.onAllNodesWithText("Reference log").fetchSemanticsNodes().isNotEmpty())
 
         state.testsView.nav = TestsNav.Scripts
         state.testsView.selectedScriptId = script.id
         rule.waitForIdle()
-        rule.onNodeWithText("PARAMETERS").assertExists()
-        rule.onNodeWithText("COMMAND").assertExists()
+        rule.onNodeWithText("Parameters").assertExists()
+        rule.onNodeWithText("Command").assertExists()
 
         state.testsView.nav = TestsNav.SharedSteps
         state.testsView.selectedSharedStepId = shared.id
         rule.waitForIdle()
-        rule.onNodeWithText("STEPS (2)").assertExists()
+        rule.onNodeWithText("Steps (2)").assertExists()
     }
 
     @Test

@@ -66,7 +66,7 @@ internal fun ExternalEventRowEditor(session: TestStepRecordingSession, row: Reco
         )
         if (row.script != null) {
             CheckRow(checked = keepFallback, onToggle = { edit { it.runScript(requireNotNull(it.script), !keepFallback) } }, enabled = enabled) {
-                AppText("Keep manual fallback: wait for a tester when the script does not do it", color = tc().ts, fontSize = 9.sp)
+                AppText("Keep manual fallback: wait for a tester when the script does not do it", color = tc().ts, fontSize = 10.sp)
             }
         }
     }

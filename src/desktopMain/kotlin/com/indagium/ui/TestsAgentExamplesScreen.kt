@@ -70,7 +70,7 @@ internal fun TestsAgentExamplesScreen() {
                     AppText("${item.ownerName}  /  ${item.step.action}", color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     when (val example = item.example) {
                         is StepExample.ReferenceLog -> if (example.text.isNotBlank()) {
-                            AppText(example.text.take(220), color = tc.td, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, fontFamily = MONO)
+                            AppText(example.text, color = tc.td, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis, fontFamily = MONO)
                         }
                         is StepExample.GoldenScreenshot -> AppText("Asset: ${example.assetPath}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                     }

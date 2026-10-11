@@ -12,8 +12,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -89,9 +87,9 @@ internal fun TestStepImproveDialog(target: ImproveStepsTarget, onDismiss: () -> 
     }
 
     Dialog(onDismissRequest = ::discardPreview, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
-            Modifier.width(DIALOG_WIDTH).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(18.dp)
-                .heightIn(max = DIALOG_MAX_HEIGHT).verticalScroll(rememberScrollState()),
+        TestsScrollColumn(
+            Modifier.width(DIALOG_WIDTH).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = DIALOG_MAX_HEIGHT),
+            contentModifier = Modifier.padding(18.dp),
         ) {
             AppText("Improve steps with AI", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             AppText(case?.name.orEmpty(), color = tc.ts, fontSize = 11.sp)
@@ -296,7 +294,7 @@ private fun ImproveReviewPhase(
             }
             if (row.canBeOptional) {
                 CheckRow(checked = row.optional, onToggle = { row.optional = !row.optional }, enabled = !working) {
-                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
+                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 10.sp)
                 }
                 if (row.optional) {
                     TestsLabeled("Perform only when") {
@@ -308,7 +306,7 @@ private fun ImproveReviewPhase(
                 TestsHint("Its checks change too: ${checkSummary(step.previous.checks.size, step.checks.size)}.")
             }
             TestsHint("Why: ${step.reason}", maxLines = 4)
-            row.warning?.let { AppText(it, color = tc.warn, fontSize = 9.sp) }
+            row.warning?.let { AppText(it, color = tc.warn, fontSize = 10.sp) }
             row.problem?.let { TestsErrorText(it) }
         }
         Spacer(Modifier.height(6.dp))
@@ -332,7 +330,7 @@ private fun ImproveReviewPhase(
 private fun ImproveWas(label: String, text: String) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
-        AppText(label, color = tc.td, fontSize = 9.sp)
+        AppText(label, color = tc.td, fontSize = 10.sp)
         AppText(text, color = tc.td, fontSize = 11.sp)
     }
 }

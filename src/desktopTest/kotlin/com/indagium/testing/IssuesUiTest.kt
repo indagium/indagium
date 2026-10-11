@@ -80,7 +80,7 @@ class IssuesUiTest {
         rule.setContent { TestsWorkspace(state) }
         state.testsView.issueDialog = IssueDialogTarget.Existing(issue.id)
 
-        rule.waitUntilAtLeastOneExists(hasText("Send to".uppercase()).or(hasText("Send to")), WAIT_MS)
+        rule.waitUntilAtLeastOneExists(hasText("Send to"), WAIT_MS)
         rule.onNodeWithText("Save draft").assertExists()
         rule.onNodeWithText("Link to case and re-check on next run").assertExists()
         assertTrue(

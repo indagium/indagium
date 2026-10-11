@@ -94,7 +94,7 @@ private fun CaseEditorContents(suite: TestSuite, case: TestCase, editable: Boole
                     CaseMetadata(case, editable, onDelete)
                     case.creationUsage?.let { usage ->
                         Spacer(Modifier.height(4.dp))
-                        AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 9.sp)
+                        AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 10.sp)
                     }
                     CaseDetails(case, editable)
                     CaseAuthoringActions(suite.id, case, editable)
@@ -109,7 +109,7 @@ private fun CaseEditorContents(suite: TestSuite, case: TestCase, editable: Boole
                 CaseMetadata(case, editable, onDelete)
                 case.creationUsage?.let { usage ->
                     Spacer(Modifier.height(4.dp))
-                    AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 9.sp)
+                    AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 10.sp)
                 }
                 CaseDetails(case, editable)
                 CaseContextPanel(case, editable)
@@ -149,7 +149,7 @@ private fun CaseNavigationRail(suite: TestSuite, selected: TestCase, limits: Tes
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    AppText("${suite.cases.indexOf(item) + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO)
+                    AppText("${suite.cases.indexOf(item) + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
                     AppText(item.name.ifBlank { "Untitled case" }, color = if (item.id == selected.id) tc.ac else tc.tx, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     if (limits.isCaseLocked(item.id)) LockBadge(limits.hint)
                 }
@@ -195,11 +195,11 @@ private fun CaseContextPanel(case: TestCase, editable: Boolean) {
         AppText(
             if (case.allowedTools == null) "This case may use the default device tools and permitted library scripts."
             else "Allowed lane tools: ${case.allowedTools.sorted().joinToString().ifBlank { "none" }}",
-            color = tc.ts, fontSize = 10.sp,
+            color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis,
         )
         if (scriptNames.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
-            AppText("Available scripts: ${scriptNames.joinToString { it.toolName }}", color = tc.td, fontSize = 9.sp)
+            AppText("Available scripts: ${scriptNames.joinToString { it.toolName }}", color = tc.td, fontSize = 10.sp)
         }
         Spacer(Modifier.height(4.dp))
         if (examples.isEmpty()) {
@@ -211,9 +211,9 @@ private fun CaseContextPanel(case: TestCase, editable: Boolean) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    AppText(if (example is com.indagium.testing.model.StepExample.GoldenScreenshot) "Screenshot" else "Reference log", color = tc.ac, fontSize = 9.sp)
+                    AppText(if (example is com.indagium.testing.model.StepExample.GoldenScreenshot) "Screenshot" else "Reference log", color = tc.ac, fontSize = 10.sp)
                     AppText(example.caption.ifBlank { step.action }, color = tc.tx, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                    AppText("Step ${case.steps.indexOfFirst { it.id == step.id } + 1}", color = tc.td, fontSize = 9.sp)
+                    AppText("Step ${case.steps.indexOfFirst { it.id == step.id } + 1}", color = tc.td, fontSize = 10.sp)
                 }
             }
         }

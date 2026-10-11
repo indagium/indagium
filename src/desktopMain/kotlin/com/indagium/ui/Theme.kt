@@ -48,6 +48,11 @@ private const val ALPHA_WARN_BG_DARK = 0.22f
 private const val ALPHA_SEQ_CELL_BG_LIGHT = 0.16f
 private const val ALPHA_SEQ_CELL_BG_DARK = 0.22f
 
+// Default pass-status green for ThemeColors.success: GitHub's success green, darker on light backgrounds and
+// brighter on dark ones so it keeps 3:1 against the panel in both families.
+private const val SUCCESS_LIGHT = 0xFF1a7f37
+private const val SUCCESS_DARK = 0xFF3fb950
+
 data class ThemeColors(
     val bg: Color, val p: Color, val p2: Color, val br: Color,
     val tx: Color, val ts: Color, val td: Color,
@@ -70,17 +75,25 @@ data class ThemeColors(
     // produce the ts/pid-tid cell background wash. A Float, not a Color, since it's combined with a
     // different colour per sequence (SEQ_COLORS), not one fixed per-theme hue.
     val seqCellBgAlpha: Float,
+    // Pass / success status in the Tests workspace (run, case and step results, judge verdicts). A real green
+    // per light/dark family (see theme()) rather than `ok`, which is a preset's seq1 and can be purple or blue.
+    // Appended last; runtime-only like every other field here.
+    val success: Color,
 )
 
 // Relative luminance of a packed 0xAARRGGBB background — lets theme() pick light- vs dark-tuned
 // search-highlight alphas without every preset having to declare which family it belongs to.
 private fun bgIsLight(argb: Long): Boolean = Color(argb).luminance() > LIGHT_LUMINANCE_THRESHOLD
 
+// One parameter per palette role plus the two optional overrides; a preset table row is the only caller shape that reads well.
+@Suppress("LongParameterList")
 private fun theme(
     bg: Long, p: Long, p2: Long, br: Long,
     tx: Long, ts: Long, td: Long,
     ac: Long, seq1: Long, seq2: Long,
     hv: Color = Color.White.copy(ALPHA_HOVER),
+    // Only for a preset whose derived green misses 3:1 against its own bg/panel (pinned by ThemeSuccessContrastTest).
+    success: Long? = null,
 ): ThemeColors {
     val light = bgIsLight(bg)
     return ThemeColors(
@@ -108,6 +121,7 @@ private fun theme(
         warnBg = Color(seq2).copy(alpha = if (light) ALPHA_WARN_BG_LIGHT else ALPHA_WARN_BG_DARK),
         ok = Color(seq1),
         seqCellBgAlpha = if (light) ALPHA_SEQ_CELL_BG_LIGHT else ALPHA_SEQ_CELL_BG_DARK,
+        success = Color(success ?: if (light) SUCCESS_LIGHT else SUCCESS_DARK),
     )
 }
 

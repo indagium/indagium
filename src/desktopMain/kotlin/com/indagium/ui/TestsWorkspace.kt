@@ -19,10 +19,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -108,8 +106,8 @@ internal fun TestsWorkspace(state: AppState) {
             ui.banner?.let { TestsBannerView(it) { ui.banner = null } }
             limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
-            state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true)) { } }
-            state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false)) { } }
+            state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true), dismissible = false) { } }
+            state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false), dismissible = false) { } }
             view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
             view.improveDialog?.let { target -> TestStepImproveDialog(target) { view.improveDialog = null } }
             view.issueDialog?.let { target -> IssueDraftDialog(target) { view.issueDialog = null } }
@@ -202,7 +200,7 @@ private fun TestsNoSuites() {
 /** The common frame of a centre screen: scrolls, padded, content capped to a readable width. */
 @Composable
 internal fun TestsScreenScaffold(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Box(modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+    TestsScrollColumn(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxWidth().widthIn(max = TESTS_CONTENT_MAX_WIDTH).padding(16.dp)) { content() }
     }
 }
@@ -218,7 +216,7 @@ private fun TestsNavPane(modifier: Modifier) {
     val library = ui.library
     val shown = filterSuites(library.suites, view.search)
     val selectedSuite = library.selectedSuiteOrFirst(view.selectedSuiteId)
-    Column(modifier.background(tc.p).verticalScroll(rememberScrollState()).padding(10.dp)) {
+    TestsScrollColumn(modifier.background(tc.p), contentModifier = Modifier.padding(10.dp)) {
         InlineField(
             value = view.search,
             onValue = { view.search = it },

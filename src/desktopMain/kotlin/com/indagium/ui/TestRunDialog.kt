@@ -13,9 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -177,7 +175,7 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
                 else -> "Run suite “${suite.name}”"
             }
             AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+            TestsScrollColumn(Modifier.weight(1f, fill = false)) {
                 CasesSection(suite, model.selectedCaseIds, limits, onChange = { model = model.copy(selectedCaseIds = it) })
                 LanesSection(model, { model = it }, choices, profiles, catalog, devices, deviceChoices) { refresh++ }
                 JudgeSection(model, { model = it }, choices.filterNot { it.isExternal }, profiles, catalog)
@@ -241,7 +239,7 @@ private suspend fun loadDevices(state: AppState): DevicesState = withContext(Dis
 @Composable
 private fun CasesSection(suite: TestSuite, selected: Set<String>, limits: TestsLimitsUiState, onChange: (Set<String>) -> Unit) {
     TestsSectionTitle("Cases")
-    Column(Modifier.heightIn(max = CASES_MAX_HEIGHT).verticalScroll(rememberScrollState())) {
+    TestsScrollColumn(Modifier.heightIn(max = CASES_MAX_HEIGHT)) {
         suite.cases.forEach { case -> CaseCheckRow(case, case.id in selected, limits) { on -> onChange(if (on) selected + case.id else selected - case.id) } }
     }
     if (suite.cases.isEmpty()) TestsHint("This suite has no cases yet.")
