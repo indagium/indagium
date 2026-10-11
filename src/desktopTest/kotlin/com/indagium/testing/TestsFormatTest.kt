@@ -1,8 +1,11 @@
 package com.indagium.testing
 
+import com.indagium.model.AiUsageStats
+import com.indagium.ui.formatClock
 import com.indagium.ui.formatDuration
 import com.indagium.ui.formatRunMoment
 import com.indagium.ui.formatTokens
+import com.indagium.ui.formatUsage
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import kotlin.test.Test
@@ -76,5 +79,25 @@ class TestsFormatTest {
         val now = at(2026, 10, 11, 9, 30)
         val lateUtc = ZonedDateTime.of(2026, 10, 10, 23, 30, 0, 0, ZoneId.of("UTC")).toInstant().toEpochMilli()
         assertEquals("today 01:30", formatRunMoment(lateUtc, now, zone))
+    }
+
+    @Test
+    fun clockTimesUseTheZone() {
+        assertEquals("13:27", formatClock(at(2026, 10, 11, 13, 27), zone))
+        assertEquals("00:05", formatClock(at(2026, 10, 11, 0, 5), zone))
+    }
+
+    @Test
+    fun usageReadsInShortFormsAndNeverShowsAMissingMetricAsZero() {
+        assertEquals("Unavailable", formatUsage(null))
+        assertEquals(
+            "43 tool calls · 1.36M tokens · partial count",
+            formatUsage(AiUsageStats(toolCalls = 43, totalTokens = 1_360_000, partial = true)),
+        )
+        assertEquals("1 tool call · 980 tokens", formatUsage(AiUsageStats(toolCalls = 1, totalTokens = 980)))
+        assertEquals("0 tool calls · tokens unavailable", formatUsage(AiUsageStats(toolCalls = 0)))
+        assertEquals("tool calls unavailable · 150K in · 12K out", formatUsage(AiUsageStats(inputTokens = 150_000, outputTokens = 12_000)))
+        assertEquals("tool calls unavailable · 150K in · out unavailable", formatUsage(AiUsageStats(inputTokens = 150_000)))
+        assertEquals("tool calls unavailable · in unavailable · 2K out", formatUsage(AiUsageStats(outputTokens = 2_000)))
     }
 }

@@ -69,6 +69,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -110,6 +111,7 @@ private val SPLIT_CHEVRON_WIDTH = 24.dp
 private val SPLIT_START_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
 private val SPLIT_END_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
 private val CHIP_SHAPE = RoundedCornerShape(6.dp)
+private val PILL_SHAPE = RoundedCornerShape(50)
 private val SUMMARY_CHIP_MAX_WIDTH = 280.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
 private val TITLE_FONT_SIZE = 14.sp
@@ -986,6 +988,54 @@ internal fun TestsSummaryChip(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
+            }
+        }
+    }
+}
+
+/**
+ * A round filter pill ("Failures 2"): the label, and a [count] in [countColor] that turns muted at zero. [selected] tints it with
+ * the accent. Several pills can be on at once, so it reads as a toggle; the semantics carry "label, count" and the selected state.
+ */
+@Composable
+internal fun TestsFilterPill(
+    label: String,
+    count: Int?,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    countColor: Color? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = modifier.clip(PILL_SHAPE).border(1.dp, if (selected) Color.Transparent else tc.br, PILL_SHAPE)
+            .semantics(mergeDescendants = true) {
+                contentDescription = if (count == null) label else "$label, $count"
+                role = Role.Button
+                this.selected = selected
+            },
+        baseBg = if (selected) tc.abg else Color.Transparent,
+        onClick = onClick,
+    ) {
+        DisableSelection {
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText(label, color = if (selected) tc.ac else tc.ts, fontSize = SMALL_FONT_SIZE, maxLines = 1)
+                if (count != null) {
+                    AppText(
+                        "$count",
+                        color = when {
+                            count == 0 -> tc.td
+                            selected -> tc.ac
+                            else -> countColor ?: tc.tx
+                        },
+                        fontSize = SMALL_FONT_SIZE,
+                        fontWeight = if (count == 0) FontWeight.Normal else FontWeight.SemiBold,
+                    )
+                }
             }
         }
     }
