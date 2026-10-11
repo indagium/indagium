@@ -1,5 +1,6 @@
 package com.indagium.ui
 
+import com.indagium.model.AiUsageStats
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -62,4 +63,28 @@ internal fun formatRunMoment(epochMs: Long, nowMs: Long, zone: ZoneId = ZoneId.s
         day.year == today.year -> "${DAY_FORMAT.format(day)}, $clock"
         else -> "${DAY_YEAR_FORMAT.format(day)}, $clock"
     }
+}
+
+/** "13:27": the clock time of [epochMs] in [zone], for a moment that shares its day with one already shown. */
+internal fun formatClock(epochMs: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+    CLOCK_FORMAT.format(Instant.ofEpochMilli(epochMs).atZone(zone))
+
+/**
+ * An AI usage total in the short form the report shows: "43 tool calls · 1.36M tokens · partial count". A metric the source did
+ * not report reads "unavailable" instead of looking like zero. Null (no usage at all) is "Unavailable".
+ */
+internal fun formatUsage(usage: AiUsageStats?): String {
+    if (usage == null) return "Unavailable"
+    val input = usage.inputTokens
+    val output = usage.outputTokens
+    val total = usage.totalTokens
+    val tools = usage.toolCalls?.let { "$it tool ${if (it == 1L) "call" else "calls"}" } ?: "tool calls unavailable"
+    val tokens = when {
+        total != null -> "${formatTokens(total)} tokens"
+        input != null && output != null -> "${formatTokens(input)} in · ${formatTokens(output)} out"
+        input != null -> "${formatTokens(input)} in · out unavailable"
+        output != null -> "in unavailable · ${formatTokens(output)} out"
+        else -> "tokens unavailable"
+    }
+    return listOfNotNull(tools, tokens, "partial count".takeIf { usage.partial }).joinToString(" · ")
 }

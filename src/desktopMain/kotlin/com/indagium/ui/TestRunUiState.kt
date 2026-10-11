@@ -27,11 +27,18 @@ import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestingSettings
+import com.indagium.testing.model.driverLabel
 import com.indagium.testing.model.hasUnresolvedJudgeOutcome
+import com.indagium.testing.model.judge
 import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newLaneId
+import com.indagium.testing.run.ComparedCasePresence
+import com.indagium.testing.run.ComparedRunStep
+import com.indagium.testing.run.ComparedStepPresence
 import com.indagium.testing.run.deviceSharingWarnings
 import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.ZoneId
 import java.util.Date
 import java.util.Locale
 
@@ -383,21 +390,28 @@ internal fun reportMetrics(run: TestRun): TestRunReportMetrics {
     )
 }
 
+/** True when a step row of [run] matches [filter] (any lane's result for it, or the cross-lane / judge state of the row). */
+private fun stepRowMatches(run: TestRun, row: MatrixRow.Step, filter: TestRunReportFilter): Boolean {
+    val results = row.cells.mapNotNull { it.result }
+    return when (filter) {
+        TestRunReportFilter.FAILURES -> results.any { it.status in setOf(StepStatus.FAIL, StepStatus.TIMEOUT) }
+        TestRunReportFilter.BLOCKED_OR_ERROR -> results.any { it.status in setOf(StepStatus.BLOCKED, StepStatus.ERROR) }
+        TestRunReportFilter.DISAGREEMENTS -> consensusFor(run, row).tone == ConsensusTone.DISAGREE
+        TestRunReportFilter.UNRESOLVED_JUDGING -> results.any { it.hasUnresolvedJudgeOutcome() }
+    }
+}
+
+/** How many step rows of [run] each filter matches (a row counts for every filter it matches); zero counts are present too. */
+internal fun reportFilterCounts(run: TestRun): Map<TestRunReportFilter, Int> {
+    val steps = buildMatrix(run).filterIsInstance<MatrixRow.Step>()
+    return TestRunReportFilter.entries.associateWith { filter -> steps.count { stepRowMatches(run, it, filter) } }
+}
+
 /** Keeps matching rows and their case headers so a filtered report remains navigable. Multiple filters are ORed. */
 internal fun filterReportRows(run: TestRun, filters: Set<TestRunReportFilter>): List<MatrixRow> {
     val rows = buildMatrix(run)
     if (filters.isEmpty()) return rows
-    val matchingSteps = rows.filterIsInstance<MatrixRow.Step>().filter { row ->
-        val results = row.cells.mapNotNull { it.result }
-        filters.any { filter ->
-            when (filter) {
-                TestRunReportFilter.FAILURES -> results.any { it.status in setOf(StepStatus.FAIL, StepStatus.TIMEOUT) }
-                TestRunReportFilter.BLOCKED_OR_ERROR -> results.any { it.status in setOf(StepStatus.BLOCKED, StepStatus.ERROR) }
-                TestRunReportFilter.DISAGREEMENTS -> consensusFor(run, row).tone == ConsensusTone.DISAGREE
-                TestRunReportFilter.UNRESOLVED_JUDGING -> results.any { it.hasUnresolvedJudgeOutcome() }
-            }
-        }
-    }
+    val matchingSteps = rows.filterIsInstance<MatrixRow.Step>().filter { row -> filters.any { stepRowMatches(run, row, it) } }
     val matchingKeys = matchingSteps.map { it.caseId to it.iteration }.toSet()
     return rows.filter { row ->
         when (row) {
@@ -405,10 +419,8 @@ internal fun filterReportRows(run: TestRun, filters: Set<TestRunReportFilter>): 
             is MatrixRow.Case -> {
                 (row.caseId to row.iteration) in matchingKeys || filters.any { filter ->
                     when (filter) {
-                        TestRunReportFilter.FAILURES -> row.cells.any { it.status == com.indagium.testing.model.CaseStatus.FAIL }
-                        TestRunReportFilter.BLOCKED_OR_ERROR -> row.cells.any {
-                            it.status in setOf(com.indagium.testing.model.CaseStatus.BLOCKED, com.indagium.testing.model.CaseStatus.ERROR)
-                        }
+                        TestRunReportFilter.FAILURES -> row.cells.any { it.status == CaseStatus.FAIL }
+                        TestRunReportFilter.BLOCKED_OR_ERROR -> row.cells.any { it.status in setOf(CaseStatus.BLOCKED, CaseStatus.ERROR) }
                         TestRunReportFilter.DISAGREEMENTS, TestRunReportFilter.UNRESOLVED_JUDGING -> false
                     }
                 }
@@ -497,4 +509,269 @@ internal fun readLogExcerpt(logFile: java.io.File, start: Long?, end: Long?, max
     }
     val text = String(buffer, Charsets.UTF_8)
     return if (available > maxBytes) "$text\n… (${available - maxBytes} more bytes)" else text
+}
+
+// ── Verdict, meta line and selection ─────────────────────────────────
+
+/** The one-sentence outcome shown at the top of a report. [headline] starts with the status ("Failed — …"). */
+internal data class RunVerdict(val status: RunStatus, val headline: String)
+
+private val BAD_STEP_STATUSES = setOf(StepStatus.FAIL, StepStatus.BLOCKED, StepStatus.TIMEOUT, StepStatus.ERROR)
+private val BAD_CASE_STATUSES = setOf(CaseStatus.FAIL, CaseStatus.BLOCKED, CaseStatus.ERROR, CaseStatus.CANCELLED)
+private const val VERDICT_ACTION_CHARS = 60
+private const val VERDICT_ERROR_CHARS = 140
+
+/** The first thing that did not pass, in matrix order: a step of a case (on [laneId]) or, when no step explains it, the case itself. */
+internal class FirstFailure(
+    val caseName: String,
+    val step: MatrixRow.Step?,
+    val laneId: String?,
+    val stepStatus: StepStatus?,
+    val caseStatus: CaseStatus?,
+)
+
+/**
+ * The first failing step (FAIL, BLOCKED, TIMEOUT or ERROR) in matrix order, the lowest lane first within a row. A case that did
+ * not pass without any failing step (for example one cancelled before it began) counts at its own position. Null when nothing failed.
+ */
+internal fun firstFailure(rows: List<MatrixRow>): FirstFailure? {
+    val sections = ArrayList<Pair<MatrixRow.Case, ArrayList<MatrixRow.Step>>>()
+    rows.forEach { row ->
+        when (row) {
+            is MatrixRow.Case -> sections += row to ArrayList()
+            is MatrixRow.Step -> sections.lastOrNull()?.second?.add(row)
+        }
+    }
+    for ((header, steps) in sections) {
+        val name = header.name + if (header.iteration > 1) " (run ${header.iteration})" else ""
+        for (step in steps) {
+            val cell = step.cells.firstOrNull { it.result?.status in BAD_STEP_STATUSES } ?: continue
+            return FirstFailure(name, step, cell.laneId, cell.result?.status, null)
+        }
+        header.cells.firstOrNull { it.status in BAD_CASE_STATUSES }?.let { return FirstFailure(name, null, null, null, it.status) }
+    }
+    return null
+}
+
+private fun StepStatus.verb(): String = when (this) {
+    StepStatus.FAIL -> "failed"
+    StepStatus.BLOCKED -> "blocked"
+    StepStatus.TIMEOUT -> "timed out"
+    StepStatus.ERROR -> "hit an error"
+    StepStatus.PASS -> "passed"
+    StepStatus.SKIPPED -> "was skipped"
+}
+
+private fun CaseStatus.verb(): String = when (this) {
+    CaseStatus.FAIL -> "failed"
+    CaseStatus.BLOCKED -> "blocked"
+    CaseStatus.ERROR -> "hit an error"
+    CaseStatus.CANCELLED -> "was cancelled"
+    CaseStatus.PASS -> "passed"
+    CaseStatus.SKIPPED -> "was skipped"
+}
+
+private fun String.oneLine(limit: Int): String {
+    val flat = lineSequence().map(String::trim).firstOrNull(String::isNotEmpty).orEmpty()
+    return if (flat.length > limit) flat.take(limit).trimEnd() + "…" else flat
+}
+
+private fun stepsText(count: Int): String = if (count == 1) "1 step" else "$count steps"
+
+private fun FirstFailure.sentence(): String {
+    val step = step
+    if (step == null) return "$caseName ${caseStatus?.verb() ?: "did not pass"}"
+    val action = step.action.oneLine(VERDICT_ACTION_CHARS)
+    return "$caseName ${stepStatus?.verb() ?: "did not pass"} at step ${step.number}" + if (action.isEmpty()) "" else " “$action”"
+}
+
+/** The error text of a run that ended with an error: the run's own, else a lane's (named when there are several lanes). */
+private fun errorText(run: TestRun): String {
+    run.error?.takeIf { it.isNotBlank() }?.let { return it.oneLine(VERDICT_ERROR_CHARS) }
+    run.lanes.forEachIndexed { index, lane ->
+        lane.error?.takeIf { it.isNotBlank() }?.let { return (if (run.lanes.size > 1) "Lane ${index + 1}: " else "") + it.oneLine(VERDICT_ERROR_CHARS) }
+    }
+    return "the run ended with an error"
+}
+
+/**
+ * The outcome of [run] in one sentence. Passed: all steps passed; Failed / Cancelled / Error name what went wrong first (the
+ * first failing case and step in matrix order, the steps that ran before a cancel, the run's or a lane's error); Running and Queued
+ * say how far along the run is.
+ */
+internal fun runVerdict(run: TestRun): RunVerdict {
+    val rows = buildMatrix(run)
+    val steps = rows.filterIsInstance<MatrixRow.Step>()
+    val ran = steps.count { row -> row.cells.any { it.result != null } }
+    val prefix = "${run.status.label()} — "
+    val body = when (run.status) {
+        RunStatus.PASSED -> {
+            val passing = steps.count { row -> row.cells.any { it.result != null && it.result.status != StepStatus.SKIPPED } }
+            val skipped = ran - passing
+            val lanes = if (run.lanes.size > 1) " on ${run.lanes.size} lanes" else ""
+            when {
+                ran == 0 -> "no steps were run"
+                else -> "all ${stepsText(passing)} passed$lanes" + if (skipped > 0) " ($skipped skipped)" else ""
+            }
+        }
+        RunStatus.FAILED -> firstFailure(rows)?.sentence() ?: run.error?.takeIf { it.isNotBlank() }?.oneLine(VERDICT_ERROR_CHARS) ?: "see the results below"
+        RunStatus.CANCELLED -> if (ran == 0) "stopped before any step ran" else "stopped after $ran of ${stepsText(steps.size)}"
+        RunStatus.ERROR -> errorText(run)
+        RunStatus.RUNNING -> "$ran of ${stepsText(steps.size)} done"
+        RunStatus.QUEUED -> "waiting to start"
+    }
+    return RunVerdict(run.status, prefix + body)
+}
+
+/** The glyph in front of a verdict: ✓ passed, ✕ failed, ! error, ■ cancelled, ● running or queued. */
+internal fun verdictGlyph(status: RunStatus): String = when (status) {
+    RunStatus.PASSED -> "✓"
+    RunStatus.FAILED -> "✕"
+    RunStatus.ERROR -> "!"
+    RunStatus.CANCELLED -> "■"
+    RunStatus.RUNNING, RunStatus.QUEUED -> "●"
+}
+
+/**
+ * The line under the verdict: when the run happened (start → finish and its duration), how many cases (× repeats), the lanes
+ * (device and driver, [profileName] resolves a profile id to its display name) and the judge mode.
+ */
+internal fun runMetaLine(run: TestRun, nowMs: Long, profileName: (String?) -> String?, zone: ZoneId = ZoneId.systemDefault()): String {
+    val start = (run.startedAt ?: run.createdAt).takeIf { it > 0L }
+    val finish = run.finishedAt?.takeIf { start != null && it > 0L }
+    val time = when {
+        start == null -> null
+        finish == null -> "started ${formatRunMoment(start, nowMs, zone)}"
+        else -> {
+            val sameDay = Instant.ofEpochMilli(start).atZone(zone).toLocalDate() == Instant.ofEpochMilli(finish).atZone(zone).toLocalDate()
+            val end = if (sameDay) formatClock(finish, zone) else formatRunMoment(finish, nowMs, zone)
+            "${formatRunMoment(start, nowMs, zone)} → $end (${formatDuration(finish - start)})"
+        }
+    }
+    val caseCount = run.config.caseIds?.size ?: run.suite.cases.size
+    val cases = "$caseCount ${if (caseCount == 1) "case" else "cases"}" + if (run.config.repeat > 1) " × ${run.config.repeat} repeats" else ""
+    val lanes = run.lanes.joinToString("; ") { lane ->
+        val driver = if (lane.config.kind == LaneKind.EXTERNAL) EXTERNAL_LANE_LABEL else lane.config.driverLabel(profileName(lane.config.profileId))
+        listOf(lane.config.deviceSerial, driver).filter(String::isNotBlank).joinToString(" · ")
+    }
+    val laneText = if (run.lanes.size == 1) "1 lane: $lanes" else "${run.lanes.size} lanes: $lanes"
+    val judge = if (run.config.judge == JudgeMode.OFF) "no judge" else "judge: ${run.config.judge.label.lowercase()}"
+    return listOfNotNull(time, cases, laneText.takeIf { run.lanes.isNotEmpty() }, judge).joinToString(" · ")
+}
+
+/** The step to show in the inspector when a report opens: the first one that did not pass, or null when every step passed. */
+internal fun firstNonPassingSelection(run: TestRun): StepSelection? {
+    val failure = firstFailure(buildMatrix(run)) ?: return null
+    val step = failure.step ?: return null
+    return failure.laneId?.let { StepSelection(step.key, it) }
+}
+
+/**
+ * The selection [delta] rows from [current] among the rows that have a result (the clicked lane stays when the next row has a
+ * result for it). With nothing selected ↓ picks the first row and ↑ the last. Null when no row has a result.
+ */
+internal fun reportSelectionMovedBy(rows: List<MatrixRow>, current: StepSelection?, delta: Int): StepSelection? {
+    val selectable = rows.filterIsInstance<MatrixRow.Step>().filter { row -> row.cells.any { it.result != null } }
+    if (selectable.isEmpty()) return null
+    val index = selectable.indexOfFirst { it.key == current?.rowKey }
+    val target = if (index < 0) (if (delta > 0) 0 else selectable.lastIndex) else (index + delta).coerceIn(0, selectable.lastIndex)
+    val row = selectable[target]
+    val cell = row.cells.firstOrNull { it.laneId == current?.laneId && it.result != null } ?: row.cells.first { it.result != null }
+    return StepSelection(row.key, cell.laneId)
+}
+
+/** The name of a case of [run] by id, with the suite hooks named too ("Suite setup"); the id itself when nothing knows it. */
+internal fun matrixCaseName(run: TestRun, caseId: String): String = when (caseId) {
+    SUITE_SETUP_CASE_ID -> "Suite setup"
+    SUITE_TEARDOWN_CASE_ID -> "Suite teardown"
+    else -> (
+        run.suite.cases.firstOrNull { it.id == caseId }?.name
+            ?: run.lanes.flatMap { it.cases }.firstOrNull { it.caseId == caseId }?.caseName
+    )?.ifBlank { "Untitled case" } ?: caseId
+}
+
+/** The report tabs. */
+internal enum class RunReportTab(val label: String) {
+    Results("Results"),
+    Compare("Compare"),
+    Activity("Activity"),
+    Usage("Usage"),
+}
+
+/** "Activity 37" once the run has tool activity to show, otherwise just the tab name. */
+internal fun runReportTabLabel(tab: RunReportTab, activityCount: Int): String =
+    if (tab == RunReportTab.Activity && activityCount > 0) "${tab.label} $activityCount" else tab.label
+
+// ── Compare tab ──────────────────────────────────────────────────────
+
+/** One row of the Compare tab: what changed ([change]) about what ([subject]), its result [before] and [now], and an optional wording [detail]. */
+internal data class CompareLine(val change: String, val subject: String, val before: String, val now: String, val detail: String?)
+
+/** "EXTERNAL//pixel/i1:PASS, …" (the comparison's raw key) as "Pass", or "Pass, Fail" for lanes that differ; "Not run" stays. */
+internal fun friendlyStatuses(raw: String): String {
+    if (raw.isBlank() || raw == "Not run") return "Not run"
+    return raw.split(", ").map { it.substringAfterLast(':').lowercase().replaceFirstChar(Char::uppercase) }.distinct().joinToString(", ")
+}
+
+private const val COMPARE_TEXT_CHARS = 80
+
+private fun changed(label: String, before: String?, now: String?): String? =
+    if (before != null && now != null && before != now) "$label: “${before.oneLine(COMPARE_TEXT_CHARS)}” → “${now.oneLine(COMPARE_TEXT_CHARS)}”" else null
+
+private fun ComparedRunStep.changeLabel(): String = when {
+    suiteDefinitionChanged -> "Suite context changed"
+    casePresence == ComparedCasePresence.ADDED -> "Case added"
+    casePresence == ComparedCasePresence.REMOVED -> "Case removed"
+    caseDefinitionChanged -> "Case context changed"
+    presence == ComparedStepPresence.ADDED -> "Step added"
+    presence == ComparedStepPresence.REMOVED -> "Step removed"
+    definitionChanged -> "Step changed"
+    else -> "Result changed"
+}
+
+private fun ComparedRunStep.subjectText(): String {
+    val action = (currentAction ?: previousAction).orEmpty().oneLine(COMPARE_TEXT_CHARS)
+    return when {
+        suiteDefinitionChanged -> ""
+        stepId.isBlank() -> caseName
+        else -> caseName + " · " + if (action.isEmpty()) "a step" else "“$action”"
+    }
+}
+
+private fun ComparedRunStep.detailText(): String? = when {
+    !definitionChanged -> null
+    stepId.isBlank() ->
+        listOfNotNull(previousAction?.let { "Before: $it" }, currentAction?.let { "Now: $it" }).joinToString("\n").ifBlank { null }
+    else ->
+        listOfNotNull(changed("Action", previousAction, currentAction), changed("Expected", previousExpected, currentExpected))
+            .joinToString("\n").ifBlank { null }
+}
+
+/** The Compare tab's rows in words: the step's action text instead of its id, readable results instead of lane keys. */
+internal fun compareLines(rows: List<ComparedRunStep>): List<CompareLine> = rows.map { row ->
+    val before = if (row.casePresence == ComparedCasePresence.ADDED || row.presence == ComparedStepPresence.ADDED) {
+        "Not in that run"
+    } else {
+        friendlyStatuses(row.previousStatuses)
+    }
+    val now = if (row.casePresence == ComparedCasePresence.REMOVED || row.presence == ComparedStepPresence.REMOVED) {
+        "Not in this run"
+    } else {
+        friendlyStatuses(row.currentStatuses)
+    }
+    CompareLine(row.changeLabel(), row.subjectText(), before, now, row.detailText())
+}
+
+// ── Activity tab ─────────────────────────────────────────────────────
+
+/** "Login · step 2 · run 2 · attempt 3": where a tool call happened, from the frozen suite (the ids when the case is gone). */
+internal fun activityContext(run: TestRun, caseId: String, stepId: String, iteration: Int, attempt: Int): String {
+    val case = run.suite.cases.firstOrNull { it.id == caseId }
+    val stepIndex = case?.steps?.indexOfFirst { it.id == stepId } ?: -1
+    return listOfNotNull(
+        matrixCaseName(run, caseId).takeIf { caseId.isNotBlank() },
+        if (stepIndex >= 0) "step ${stepIndex + 1}" else stepId.takeIf { it.isNotBlank() }?.let { "a hook step" },
+        "run $iteration".takeIf { iteration > 1 },
+        "attempt $attempt".takeIf { attempt > 1 },
+    ).joinToString(" · ")
 }

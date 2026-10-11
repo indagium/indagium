@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.Image
@@ -5,7 +7,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,34 +62,53 @@ private val SCREENSHOT_MAX_HEIGHT = 360.dp
 private val EXCERPT_MAX_HEIGHT = 200.dp
 private val FIX_DIALOG_WIDTH = 520.dp
 private val FIX_DIALOG_SHAPE = RoundedCornerShape(8.dp)
-private const val MILLIS_PER_SECOND = 1_000L
 private const val DETAIL_MAX_LINES = 12
 private const val PANEL_ALPHA = .6f
+private const val HEADER_ACTION_CHARS = 80
+
+/** Below this width the expected and actual screenshots stack instead of sitting side by side. */
+private val SIDE_BY_SIDE_MIN_WIDTH = 440.dp
 
 /** A step of a lane picked in the matrix: [rowKey] is the matrix row's key. */
 internal data class StepSelection(val rowKey: String, val laneId: String)
 
+/**
+ * The inspector content for one selected step: its header (step number and case, the action) and the evidence below. Everything
+ * wraps or stacks so it fits the narrowest inspector (300dp).
+ */
 @Composable
 internal fun StepDetailFor(run: TestRun, runDir: File, selection: StepSelection) {
     val row = remember(run, selection.rowKey) { buildMatrix(run).filterIsInstance<MatrixRow.Step>().firstOrNull { it.key == selection.rowKey } }
-    val result = row?.cells?.firstOrNull { it.laneId == selection.laneId }?.result ?: return
-    val lane = run.lane(selection.laneId) ?: return
-    TestsSectionTitle("Step ${result.stepNumber}")
+    val result = row?.cells?.firstOrNull { it.laneId == selection.laneId }?.result
+    val lane = run.lane(selection.laneId)
+    if (row == null || result == null || lane == null) {
+        TestsHint("This step has no result yet.")
+        return
+    }
+    val laneIndex = run.lanes.indexOfFirst { it.laneId == lane.laneId }
+    val eyebrow = listOfNotNull(
+        (if (row.setup) "Setup step ${result.stepNumber}" else "Step ${result.stepNumber}") +
+            " · " + matrixCaseName(run, row.caseId) + if (row.iteration > 1) " (run ${row.iteration})" else "",
+        "Lane ${laneIndex + 1}".takeIf { run.lanes.size > 1 },
+    ).joinToString(" · ")
+    TestsInspectorHeader(eyebrow, result.action.ifBlank { row.action })
     StepDetail(run, row, result, lane, runDir)
 }
 
 @Composable
 private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane: LaneResult, runDir: File) {
     val tc = tc()
-    Column(
-        Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    Column(Modifier.fillMaxWidth().padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         lane.cases.firstOrNull { it.caseId == row.caseId && it.iteration == row.iteration }
             ?.priorAttempts?.takeIf { it.isNotEmpty() }?.let { attempts -> EarlierCaseAttempts(attempts, lane, runDir) }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
             StatusChip(step.status.label(), stepColor(step.status))
-            AppText("${step.attempts} attempt(s) · ${step.durationMs / MILLIS_PER_SECOND}s", color = tc.td, fontSize = 10.sp)
+            val attempts = if (step.attempts == 1) "1 attempt" else "${step.attempts} attempts"
+            AppText("$attempts · ${formatDuration(step.durationMs)}", color = tc.td, fontSize = 10.sp)
             if (step.flaky) TestsBadge("flaky")
             if (step.verificationState == com.indagium.testing.model.VerificationState.PENDING) TestsBadge("provisional · judge pending")
             if (step.issueId != null) TestsBadge("issue draft created") else if (step.issueRequested) TestsBadge("issue requested")
@@ -93,15 +116,16 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             if (step.automaticRetryExcluded) TestsBadge("automatic retry unavailable")
             if (step.agentError != null) TestsBadge("marked as agent error")
         }
-        DetailLine("Action", step.action)
+        // The header shows the action in two lines; a longer one is repeated here in full.
+        if (step.action.length > HEADER_ACTION_CHARS) DetailLine("Action", step.action)
         step.performedByLine()?.let { DetailLine("Performed by", it) }
         DetailLine("Expected", step.expected)
         step.executionStatus?.let { if (it != step.status) DetailLine("Execution outcome", it.name.lowercase()) }
         if (step.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
             DetailLine("Verification", step.verificationState.name.lowercase().replace('_', ' '))
         }
-        step.judgeQueueWaitMs?.let { DetailLine("Judge queue wait", "$it ms") }
-        step.judgmentDurationMs?.let { DetailLine("Judge duration", "$it ms") }
+        step.judgeQueueWaitMs?.let { DetailLine("Judge queue wait", formatDuration(it)) }
+        step.judgmentDurationMs?.let { DetailLine("Judge duration", formatDuration(it)) }
         step.classification?.let { DetailLine("Classification", it.label()) }
         step.agentClaim?.let { DetailLine("Agent claimed", it) }
         if (step.observation.isNotBlank()) DetailLine("Observation (untrusted)", step.observation, mono = true)
@@ -118,7 +142,7 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 AppText(
                     "Attempt ${attempt.attempt} · ${attempt.status.name.lowercase()} · " +
-                        "${attempt.retryReason.replace('_', ' ')} · ${attempt.durationMs / MILLIS_PER_SECOND}s",
+                        "${attempt.retryReason.replace('_', ' ')} · ${formatDuration(attempt.durationMs)}",
                     color = tc.ts,
                     fontSize = 10.sp,
                 )
@@ -126,11 +150,13 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
                 if (attempt.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
                     AppText("Verification: ${attempt.verificationState.name.lowercase().replace('_', ' ')}", color = tc.td, fontSize = 10.sp)
                 }
-                attempt.judgeQueueWaitMs?.let { AppText("Judge queue wait: ${it}ms", color = tc.td, fontSize = 10.sp) }
-                attempt.judgmentDurationMs?.let { AppText("Judge duration: ${it}ms", color = tc.td, fontSize = 10.sp) }
+                attempt.judgeQueueWaitMs?.let { AppText("Judge queue wait: ${formatDuration(it)}", color = tc.td, fontSize = 10.sp) }
+                attempt.judgmentDurationMs?.let { AppText("Judge duration: ${formatDuration(it)}", color = tc.td, fontSize = 10.sp) }
                 attempt.agentClaim?.let { AppText("Claim (untrusted): $it", color = tc.td, fontSize = 10.sp) }
                 if (attempt.observation.isNotBlank()) DetailLine("Attempt observation (untrusted)", attempt.observation, mono = true)
-                attempt.judge?.let { TestsBadge("judge ${it.verdict.name.lowercase()} · ${it.usage?.summaryLabel() ?: "usage unavailable"}") }
+                attempt.judge?.let { judge ->
+                    TestsBadge("judge ${judge.verdict.name.lowercase()} · ${judge.usage?.let(::formatUsage) ?: "usage unavailable"}")
+                }
             }
         }
         run.comparisons.filter { it.stepId == row.stepId && it.iteration == row.iteration && it.caseId == row.caseId }
@@ -145,7 +171,7 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
 private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneResult, runDir: File) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppText("EARLIER CASE ATTEMPTS", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        AppText("Earlier case attempts", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         attempts.forEach { attempt ->
             Column(Modifier.fillMaxWidth().padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -172,7 +198,7 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
                     val evidencePaths = listOfNotNull(failed.startScreenshotPath, failed.screenshotPath) + failed.sampleScreenshotPaths
                     if (evidencePaths.isNotEmpty()) {
                         val scope = LocalTestsUi.current.scope
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             evidencePaths.distinct().forEachIndexed { index, path ->
                                 val file = File(runDir, path)
                                 if (file.isFile) AppButton("Open evidence ${index + 1}", onClick = { scope.launch(Dispatchers.IO) { openFile(file) } })
@@ -204,7 +230,7 @@ private fun DetailLine(label: String, value: String, mono: Boolean = false) {
     if (value.isBlank()) return
     val tc = tc()
     Column {
-        AppText(label.uppercase(), color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        AppText(label, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         AppText(value, color = tc.tx, fontSize = 11.sp, fontFamily = if (mono) MONO else LocalUiFontFamily.current, maxLines = DETAIL_MAX_LINES)
     }
 }
@@ -216,7 +242,7 @@ private fun JudgeSection(run: TestRun, row: MatrixRow.Step, judge: StepJudgement
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            AppText("JUDGE", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Judge", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             StatusChip(judge.verdict.label(), verdictColor(judge.verdict))
             TestsBadge(judge.classification.label())
         }
@@ -232,10 +258,10 @@ private fun ComparisonSection(run: TestRun, row: MatrixRow.Step, comparison: Jud
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            AppText("LANES COMPARED", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Lanes compared", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             TestsBadge(comparison.classification.label())
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             comparison.verdicts.forEach { (laneId, verdict) ->
                 val index = run.lanes.indexOfFirst { it.laneId == laneId }
                 StatusChip("Lane ${index + 1}: ${verdict.label()}", verdictColor(verdict))
@@ -257,7 +283,7 @@ private fun FixLine(run: TestRun, row: MatrixRow.Step, fix: StepFix, fixRef: Str
     val location = ui.library.findStep(row.stepId)
     val libraryStep = location?.step
     val locked = location != null && (limits.isSuiteLocked(location.suite.id) || limits.isCaseLocked(location.case.id))
-    AppText("SUGGESTED STEP FIX", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+    AppText("Suggested step fix", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     fix.action?.let { DetailLine("New action", it) }
     fix.expected?.let { DetailLine("New expected result", it) }
     fix.note?.let { DetailLine("Note", it) }
@@ -329,7 +355,7 @@ private fun rememberBitmap(file: File?): ImageBitmap? {
 private fun ScreenshotPane(title: String, bitmap: ImageBitmap?, missing: String, modifier: Modifier) {
     val tc = tc()
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppText(title, color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        AppText(title, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         if (bitmap != null) {
             Image(bitmap, contentDescription = title, contentScale = ContentScale.Fit, modifier = Modifier.heightIn(max = SCREENSHOT_MAX_HEIGHT))
         } else {
@@ -354,12 +380,22 @@ private fun ExpectedVersusActual(run: TestRun, row: MatrixRow.Step, step: StepRe
     val actual = rememberBitmap(step.screenshotFile(runDir))
     if (golden == null && actual == null) return
     if (golden == null) {
-        ScreenshotPane("SCREENSHOT AT THE END OF THE STEP", actual, "No screenshot was kept.", Modifier.fillMaxWidth())
+        ScreenshotPane("Screenshot at the end of the step", actual, "No screenshot was kept.", Modifier.fillMaxWidth())
         return
     }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        ScreenshotPane("EXPECTED (${golden.caption.ifBlank { golden.assetPath }})", expected, "The reference image is missing.", Modifier.weight(1f))
-        ScreenshotPane("ACTUAL", actual, "No screenshot was kept.", Modifier.weight(1f))
+    val expectedTitle = "Expected (${golden.caption.ifBlank { golden.assetPath }})"
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        if (maxWidth >= SIDE_BY_SIDE_MIN_WIDTH) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ScreenshotPane(expectedTitle, expected, "The reference image is missing.", Modifier.weight(1f))
+                ScreenshotPane("Actual", actual, "No screenshot was kept.", Modifier.weight(1f))
+            }
+        } else {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                ScreenshotPane(expectedTitle, expected, "The reference image is missing.", Modifier.fillMaxWidth())
+                ScreenshotPane("Actual", actual, "No screenshot was kept.", Modifier.fillMaxWidth())
+            }
+        }
     }
 }
 
@@ -371,7 +407,7 @@ private fun StepEvidence(step: StepResult, lane: LaneResult, runDir: File) {
         value = log?.let { withContext(Dispatchers.IO) { runCatching { readLogExcerpt(it, step.logStartOffset, step.logEndOffset) }.getOrNull() } }
     }
     excerpt?.takeIf { it.isNotBlank() }?.let { text ->
-        AppText("LOG DURING THE STEP (untrusted)", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+        AppText("Log during the step (untrusted)", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = EXCERPT_MAX_HEIGHT).background(tc.bg, CORNER_SM), contentModifier = Modifier.padding(6.dp)) {
             AppText(text, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
         }
@@ -379,7 +415,7 @@ private fun StepEvidence(step: StepResult, lane: LaneResult, runDir: File) {
     val transcript = lane.transcriptPath?.let { File(runDir, it) }?.takeIf { it.isFile }
     if (transcript != null) {
         val scope = LocalTestsUi.current.scope
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             AppText("Transcript bytes ${step.transcriptStartOffset ?: 0}–${step.transcriptEndOffset ?: 0}", color = tc.td, fontSize = 10.sp)
             AppButton("Open transcript", onClick = { scope.launch(Dispatchers.IO) { openFile(transcript) } })
         }
@@ -398,7 +434,7 @@ private fun StepActions(run: TestRun, row: MatrixRow.Step, lane: LaneResult, ste
     val ui = LocalTestsUi.current
     var marking by remember(row.key, lane.laneId) { mutableStateOf(false) }
     var starting by remember(row.key, lane.laneId) { mutableStateOf(false) }
-    Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    FlowRow(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppButton("Mark as agent error…", onClick = { marking = true })
         if (step.status != StepStatus.PASS && step.status != StepStatus.SKIPPED) {
             AppButton(

@@ -94,6 +94,9 @@ internal class TestsViewState {
     /** The run whose report the Runs screen shows; null shows the list of runs. */
     var selectedRunId: String? by mutableStateOf(null)
 
+    /** The tab of the open run report; the report puts it back to Results when it is left. */
+    var reportTab: RunReportTab by mutableStateOf(RunReportTab.Results)
+
     /** The issue whose detail the Issues screen shows; null shows the list of issues. */
     var selectedIssueId: String? by mutableStateOf(null)
 
