@@ -16,7 +16,11 @@ import com.indagium.testing.model.EXAMPLE_ID_PREFIX
 import com.indagium.testing.model.HOOK_ID_PREFIX
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.NormalizedGestureBounds
+import com.indagium.testing.model.NormalizedGesturePoint
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.RecordedGestureHint
+import com.indagium.testing.model.RecordedGestureTarget
 import com.indagium.testing.model.SCRIPT_ID_PREFIX
 import com.indagium.testing.model.SHARED_STEP_ID_PREFIX
 import com.indagium.testing.model.STEP_ID_PREFIX
@@ -50,6 +54,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
@@ -63,7 +68,8 @@ import kotlinx.serialization.json.put
 //
 // Version policy: files are written at the BASE version (2) unless they hold something an older build would hand to the wrong
 // actor: a MANUAL or SCRIPT step (it would give "plug in the USB device" to an AI agent) or a device-state check. Those are
-// written at the STEP-KINDS version (3), which every build that predates them opens read-only. TEST_*_FILE_VERSION is the newest
+// written at the STEP-KINDS version (3), which every build that predates them opens read-only. Recorded gesture hints use version 4,
+// which earlier builds also open read-only to avoid dropping target and geometry provenance. TEST_*_FILE_VERSION is the newest
 // version this build reads. A suite with only AI steps therefore stays byte-identical to what earlier builds wrote.
 //
 // Reads are tolerant: unknown keys are ignored, a missing or mistyped field takes its default, an
@@ -73,10 +79,12 @@ import kotlinx.serialization.json.put
 
 const val TEST_SUITE_FILE_FORMAT = "indagium-test-suite"
 const val TEST_LIBRARY_FILE_FORMAT = "indagium-test-library"
-const val TEST_SUITE_FILE_VERSION = 3
-const val TEST_LIBRARY_FILE_VERSION = 3
+const val TEST_SUITE_FILE_VERSION = 4
+const val TEST_LIBRARY_FILE_VERSION = 4
 const val TEST_SUITE_BASE_FILE_VERSION = 2
 const val TEST_LIBRARY_BASE_FILE_VERSION = 2
+const val TEST_SUITE_STEP_KIND_FILE_VERSION = 3
+const val TEST_LIBRARY_STEP_KIND_FILE_VERSION = 3
 
 // The `type` values of the polymorphic entries. A reader skips an entry of any other type, so a caller
 // that must not lose input silently (the MCP authoring tools) checks against these first.
@@ -225,6 +233,105 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     step.recordingRef?.let { put("recordingRef", it) }
     if (step.intent != StepIntent.PERFORM_ACTION) put("intent", step.intent.wire)
     step.precondition?.let { put("precondition", it) }
+    if (step.gestureHints.isNotEmpty()) {
+        put("gestureHints", buildJsonArray { step.gestureHints.take(MAX_GESTURE_HINTS).forEach { add(gestureHintToJson(it)) } })
+    }
+}
+
+private const val MAX_GESTURE_HINTS = 24
+private const val MAX_GESTURE_HINT_PATH_POINTS = 10
+private const val MAX_GESTURE_HINT_TARGETS = 3
+private const val MAX_GESTURE_HINT_KIND_CHARS = 32
+private const val MAX_GESTURE_HINT_DURATION_MS = 600_000L
+private const val MAX_GESTURE_SCREEN_DIMENSION = 20_000
+private const val MIN_GESTURE_SCREEN_DIMENSION = 1
+private const val MAX_GESTURE_ORIENTATION_QUARTER_TURNS = 3
+private const val MAX_GESTURE_TARGET_LABEL_CHARS = 120
+private const val MAX_GESTURE_TARGET_RESOURCE_ID_CHARS = 200
+private const val MAX_GESTURE_TARGET_CLASS_CHARS = 80
+private const val MIN_NORMALIZED_GESTURE_COORDINATE = 0.0
+private const val MAX_NORMALIZED_GESTURE_COORDINATE = 1.0
+
+private fun gestureHintToJson(hint: RecordedGestureHint): JsonObject = buildJsonObject {
+    put("kind", hint.kind.take(MAX_GESTURE_HINT_KIND_CHARS))
+    hint.durationMs?.let { put("durationMs", it.coerceIn(0L, MAX_GESTURE_HINT_DURATION_MS)) }
+    hint.sourceScreenWidth?.takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION }?.let { put("sourceScreenWidth", it) }
+    hint.sourceScreenHeight?.takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION }?.let { put("sourceScreenHeight", it) }
+    hint.orientationQuarterTurns?.takeIf { it in 0..MAX_GESTURE_ORIENTATION_QUARTER_TURNS }?.let { put("orientationQuarterTurns", it) }
+    put(
+        "path",
+        buildJsonArray {
+            hint.path.take(MAX_GESTURE_HINT_PATH_POINTS).forEach { point ->
+                add(buildJsonObject { put("x", point.x); put("y", point.y) })
+            }
+        },
+    )
+    hint.targetUnderTouch?.let { put("targetUnderTouch", gestureTargetToJson(it)) }
+    if (hint.clickableTargets.isNotEmpty()) {
+        put("clickableTargets", buildJsonArray { hint.clickableTargets.take(MAX_GESTURE_HINT_TARGETS).forEach { add(gestureTargetToJson(it)) } })
+    }
+    hint.touchWithinTarget?.let { point -> put("touchWithinTarget", buildJsonObject { put("x", point.x); put("y", point.y) }) }
+}
+
+private fun gestureTargetToJson(target: RecordedGestureTarget): JsonObject = buildJsonObject {
+    put("text", target.text.take(MAX_GESTURE_TARGET_LABEL_CHARS))
+    put("contentDescription", target.contentDescription.take(MAX_GESTURE_TARGET_LABEL_CHARS))
+    put("resourceId", target.resourceId.take(MAX_GESTURE_TARGET_RESOURCE_ID_CHARS))
+    put("className", target.className.take(MAX_GESTURE_TARGET_CLASS_CHARS))
+    target.bounds?.let { bounds -> put("bounds", buildJsonObject {
+        put("left", bounds.left); put("top", bounds.top); put("right", bounds.right); put("bottom", bounds.bottom)
+    }) }
+}
+
+private fun JsonObject.safeUnit(key: String): Double? =
+    (this[key] as? JsonPrimitive)?.doubleOrNull?.takeIf {
+        it.isFinite() && it in MIN_NORMALIZED_GESTURE_COORDINATE..MAX_NORMALIZED_GESTURE_COORDINATE
+    }
+
+private fun normalizedBounds(left: Double?, top: Double?, right: Double?, bottom: Double?): NormalizedGestureBounds? {
+    val validLeft = left ?: return null
+    val validTop = top ?: return null
+    val validRight = right ?: return null
+    val validBottom = bottom ?: return null
+    if (validRight < validLeft || validBottom < validTop) return null
+    return NormalizedGestureBounds(validLeft, validTop, validRight, validBottom)
+}
+
+private fun decodeGestureTarget(o: JsonObject): RecordedGestureTarget {
+    val b = o["bounds"] as? JsonObject
+    val left = b?.safeUnit("left")
+    val top = b?.safeUnit("top")
+    val right = b?.safeUnit("right")
+    val bottom = b?.safeUnit("bottom")
+    val bounds = normalizedBounds(left, top, right, bottom)
+    return RecordedGestureTarget(
+        text = o.str("text").take(MAX_GESTURE_TARGET_LABEL_CHARS),
+        contentDescription = o.str("contentDescription").take(MAX_GESTURE_TARGET_LABEL_CHARS),
+        resourceId = o.str("resourceId").take(MAX_GESTURE_TARGET_RESOURCE_ID_CHARS),
+        className = o.str("className").take(MAX_GESTURE_TARGET_CLASS_CHARS),
+        bounds = bounds,
+    )
+}
+
+private fun decodeGestureHint(o: JsonObject): RecordedGestureHint? {
+    val kind = o.str("kind").take(MAX_GESTURE_HINT_KIND_CHARS).takeIf(String::isNotBlank) ?: return null
+
+    fun decodePoint(point: JsonObject): NormalizedGesturePoint? {
+        val x = point.safeUnit("x") ?: return null
+        val y = point.safeUnit("y") ?: return null
+        return NormalizedGesturePoint(x, y)
+    }
+    return RecordedGestureHint(
+        kind = kind,
+        path = o.objects("path").take(MAX_GESTURE_HINT_PATH_POINTS).mapNotNull(::decodePoint),
+        durationMs = (o["durationMs"] as? JsonPrimitive)?.longOrNull?.coerceIn(0L, MAX_GESTURE_HINT_DURATION_MS),
+        sourceScreenWidth = o.int("sourceScreenWidth", 0).takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION },
+        sourceScreenHeight = o.int("sourceScreenHeight", 0).takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION },
+        orientationQuarterTurns = o.int("orientationQuarterTurns", -1).takeIf { it in 0..MAX_GESTURE_ORIENTATION_QUARTER_TURNS },
+        targetUnderTouch = (o["targetUnderTouch"] as? JsonObject)?.let(::decodeGestureTarget),
+        clickableTargets = o.objects("clickableTargets").take(MAX_GESTURE_HINT_TARGETS).map(::decodeGestureTarget),
+        touchWithinTarget = (o["touchWithinTarget"] as? JsonObject)?.let(::decodePoint),
+    )
 }
 
 internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
@@ -306,12 +413,20 @@ internal fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject 
     put("steps", buildJsonArray { shared.steps.forEach { add(stepToJson(it)) } })
 }
 
-/** The envelope version [suite] is written with: the base version, or the step-kinds version when it holds a manual/script step. */
-fun suiteFileVersionFor(suite: TestSuite): Int = if (suite.usesStepKinds()) TEST_SUITE_FILE_VERSION else TEST_SUITE_BASE_FILE_VERSION
+/** The envelope version [suite] is written with: base, step-kinds, or gesture-hints version as needed. */
+fun suiteFileVersionFor(suite: TestSuite): Int = when {
+    suite.cases.any { case -> case.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_SUITE_FILE_VERSION
+    suite.usesStepKinds() -> TEST_SUITE_STEP_KIND_FILE_VERSION
+    else -> TEST_SUITE_BASE_FILE_VERSION
+}
 
 /** The envelope version a library file with these shared steps is written with. */
 fun libraryFileVersionFor(sharedSteps: List<SharedStep>): Int =
-    if (sharedSteps.any { shared -> shared.steps.any { it.usesStepKinds() } }) TEST_LIBRARY_FILE_VERSION else TEST_LIBRARY_BASE_FILE_VERSION
+    when {
+        sharedSteps.any { shared -> shared.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_LIBRARY_FILE_VERSION
+        sharedSteps.any { shared -> shared.steps.any { it.usesStepKinds() } } -> TEST_LIBRARY_STEP_KIND_FILE_VERSION
+        else -> TEST_LIBRARY_BASE_FILE_VERSION
+    }
 
 fun encodeSuiteFile(suite: TestSuite, externalAssetsRequired: Boolean = false): String = prettyJson.encodeToString(
     JsonObject.serializer(),
@@ -404,6 +519,7 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep {
         recordingRef = o.optStr("recordingRef")?.takeIf { isSafeId(it) },
         intent = StepIntent.parse(o.optStr("intent")) ?: StepIntent.PERFORM_ACTION,
         precondition = o.optStr("precondition"),
+        gestureHints = o.objects("gestureHints").take(MAX_GESTURE_HINTS).mapNotNull(::decodeGestureHint),
     )
 }
 

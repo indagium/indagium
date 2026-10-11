@@ -115,6 +115,8 @@ internal data class JudgeAnswer(
     val reasoning: String = "The screen matches what is expected.",
     val fix: JsonObject? = null,
     val laneVerdicts: Map<String, String> = emptyMap(),
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
 )
 
 /**
@@ -125,6 +127,9 @@ internal data class JudgeAnswer(
 internal class ScriptedJudgeProvider(
     private val responseDelayMs: Long = 0L,
     private val onStarted: () -> Unit = {},
+    private val onSubmitted: () -> Unit = {},
+    private val onCompleted: () -> Unit = {},
+    private val beforeSubmit: suspend (JudgeAsk) -> Unit = {},
     private val answer: (JudgeAsk) -> JudgeAnswer = { JudgeAnswer() },
 ) : LlmProvider {
     val requests = CopyOnWriteArrayList<LlmRequest>()
@@ -143,15 +148,30 @@ internal class ScriptedJudgeProvider(
     override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
         requests += request.copy(messages = request.messages.toList())
         onStarted()
-        if (responseDelayMs > 0L) delay(responseDelayMs)
-        val ask = askOf(request)
-        val toolResults = request.messages.count { it.role == LlmRole.TOOL }
-        when {
-            ask.evidenceAttached && toolResults == 0 -> emit(submission(ask, answer(ask)))
-            ask.evidenceAttached -> emit(LlmStreamEvent.TextDelta("Submitted."))
-            else -> emitFetchingScript(ask, toolResults)
+        try {
+            if (responseDelayMs > 0L) delay(responseDelayMs)
+            val ask = askOf(request)
+            val toolResults = request.messages.count { it.role == LlmRole.TOOL }
+            val submitsNow = ask.evidenceAttached && toolResults == 0 || !ask.evidenceAttached && toolResults == 2
+            when {
+                submitsNow -> {
+                    val response = answer(ask)
+                    beforeSubmit(ask)
+                    if (response.inputTokens != null || response.outputTokens != null) {
+                        val input = response.inputTokens ?: 0L
+                        val output = response.outputTokens ?: 0L
+                        emit(LlmStreamEvent.Usage(input, output, input + output))
+                    }
+                    onSubmitted()
+                    emit(submission(ask, response))
+                }
+                ask.evidenceAttached -> emit(LlmStreamEvent.TextDelta("Submitted."))
+                else -> emitFetchingScript(ask, toolResults)
+            }
+            emit(LlmStreamEvent.Completed)
+        } finally {
+            onCompleted()
         }
-        emit(LlmStreamEvent.Completed)
     }
 
     /** The judge of a first message without the evidence: brief, screenshot, verdict. */
@@ -159,7 +179,7 @@ internal class ScriptedJudgeProvider(
         when (toolResults) {
             0 -> emit(call("get_step_brief"))
             1 -> emit(call("get_step_screenshot", buildJsonObject { if (ask.comparison) put("lane", ask.lanes.first()) }))
-            2 -> emit(submission(ask, answer(ask)))
+            2 -> emit(LlmStreamEvent.TextDelta("Ready to submit."))
             else -> emit(LlmStreamEvent.TextDelta("Submitted."))
         }
     }

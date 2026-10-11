@@ -3,23 +3,32 @@ package com.indagium.testing
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiUsageAggregation
+import com.indagium.ai.LlmStreamEvent
 import com.indagium.ai.LlmToolCall
 import com.indagium.ai.aiRunTiming
 import com.indagium.ai.logSummary
 import com.indagium.model.AiRunTiming
 import com.indagium.model.summaryLabel
 import com.indagium.testing.model.CaseResult
+import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.VerificationState
+import com.indagium.testing.model.newCaseId
+import com.indagium.testing.model.newCheckId
 import com.indagium.testing.run.AgentSegmentRequest
 import com.indagium.testing.run.EngineTuning
+import com.indagium.testing.run.JudgeConcurrencyLimiter
 import com.indagium.testing.run.JudgeEvidence
 import com.indagium.testing.run.JudgeImage
 import com.indagium.testing.run.JudgeLaneEvidence
@@ -35,7 +44,9 @@ import com.indagium.testing.store.TranscriptWriter
 import com.indagium.testing.store.decodeRunFile
 import com.indagium.testing.store.encodeRunFile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
@@ -52,6 +63,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.longOrNull
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
@@ -429,9 +442,391 @@ class JudgeTimingTest {
         assertNotNull(stepTiming.long("deterministicChecksMs"))
         assertNotNull(stepTiming.long("judgeMs"), "a judged step reports the judge's share of finish_step")
         assertEquals(
-            stepTiming.long("evidenceCaptureMs")!! + stepTiming.long("deterministicChecksMs")!! + stepTiming.long("judgeMs")!!,
+            stepTiming.long("executionDurationMs")!! + stepTiming.long("queueWaitMs")!! + stepTiming.long("judgeMs")!!,
             stepTiming.long("totalMs"),
         )
+        assertEquals(run.allSteps().single().durationMs, stepTiming.long("executionDurationMs"))
         assertEquals(1L, stepTiming.long("stepNumber"))
+    }
+
+    @Test
+    fun allJudgmentSchedulesFinishRequestedEveryStepVerification() {
+        for (timingMode in JudgeTiming.entries) {
+            harness?.close()
+            val agent = AutoAgentProvider(listOf("pass" to "It opened"))
+            val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass", reasoning = "It matches.") }
+            val suite = suiteOf(caseOf("Login", step("Open the app")))
+            val h = RunHarness(
+                libraryOf(suite),
+                profile = profileOf(LANE_A_PROFILE_ID),
+                extraProfiles = listOf(judgeProfile),
+                agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+            ).also { harness = it }
+            val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+                judgeProfileId = JUDGE_PROFILE_ID,
+                judgeMode = JudgeMode.EVERY_STEP.wire,
+                judgeTiming = timingMode,
+            )
+            val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+            val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+            assertEquals(RunStatus.PASSED, run.status, "$timingMode: $run")
+            val stepResult = run.allSteps().single()
+            assertEquals(StepStatus.PASS, stepResult.status, timingMode.name)
+            assertEquals(VerificationState.VERIFIED, stepResult.verificationState, timingMode.name)
+            val transcript = lines(File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)))
+            val kind = if (timingMode == JudgeTiming.INLINE) "inline_judgment_finished" else "deferred_judgment_finished"
+            val timingRecord = transcript.single { it.text("kind") == kind }
+            assertNotNull(timingRecord.long("queueWaitMs"), "$timingMode records queue delay independently")
+            assertNotNull(timingRecord.long("judgmentMs"), "$timingMode records evaluation duration")
+            assertEquals(timingMode.wire, run.config.judgeTiming.wire)
+        }
+    }
+
+    @Test
+    fun slowInlineJudgmentDoesNotInflateStepExecutionDuration() {
+        val agent = AutoAgentProvider(listOf("pass" to "The screen is ready"))
+        val judge = ScriptedJudgeProvider(responseDelayMs = 500L) { JudgeAnswer(verdict = "pass", reasoning = "It matches.") }
+        val suite = suiteOf(caseOf("Timed judgment", step("Open the app")))
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.INLINE,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+        val stepResult = run.allSteps().single()
+        val judgmentMs = assertNotNull(stepResult.judgmentDurationMs)
+
+        assertEquals(StepStatus.PASS, stepResult.status)
+        assertTrue(judgmentMs >= 450L, "the provider held the judgment for 500 ms; reported $judgmentMs ms")
+        assertTrue(
+            stepResult.durationMs < judgmentMs,
+            "step duration is execution only (${stepResult.durationMs} ms), independent of the $judgmentMs ms judgment",
+        )
+        val transcript = lines(File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)))
+        val timing = transcript.single { it.text("kind") == "finish_step_timing" }
+        assertNotNull(timing.long("executionCompletedAtMs"))
+        assertNotNull(timing.long("verificationCompletedAtMs"))
+        assertTrue(
+            assertNotNull(timing.long("executionCompletedAtMs")) <= assertNotNull(timing.long("verificationCompletedAtMs")),
+            "verification completes after execution",
+        )
+    }
+
+    @Test
+    fun afterCaseWaitsForTeardownWhileExplicitAskJudgeRemainsInline() {
+        val marker = File(dir, "case-teardown-finished")
+        val script = hostScript("mark_teardown", "printf done > '${marker.absolutePath}'")
+        val observedTeardown = CopyOnWriteArrayList<Boolean>()
+        val agent = TurnProvider(listOf(finishTurn("pass", "ordinary action"), finishTurn("pass", "explicit checkpoint"), textTurn))
+        val judge = ScriptedJudgeProvider(onSubmitted = { observedTeardown += marker.exists() })
+        val suite = suiteOf(
+            caseOf(
+                "Boundary",
+                step("Ordinary action"),
+                step("Explicit checkpoint", checks = listOf(StepCheck.AskJudge(newCheckId(), "Is the screen ready?"))),
+                teardown = listOf(scriptHook(script)),
+            ),
+        )
+        val h = RunHarness(
+            libraryOf(suite, script),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.AFTER_CASE,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertTrue(marker.exists(), "teardown completed")
+        assertEquals(listOf(false, true), observedTeardown, "Ask judge is inline, ordinary judgment starts after teardown")
+        assertEquals(2, observedTeardown.size)
+    }
+
+    @Test
+    fun backgroundJudgmentsOverlapLaterActionsAndDrainPastTheEightItemQueue() {
+        val firstJudgeWaiting = CompletableDeferred<Unit>()
+        val releaseFirstJudge = CompletableDeferred<Unit>()
+        val completed = AtomicInteger()
+        val active = AtomicInteger()
+        val peak = AtomicInteger()
+        val laterActionOverlapped = AtomicInteger()
+        val submissions = AtomicInteger()
+        val judge = ScriptedJudgeProvider(
+            onStarted = {
+                active.incrementAndGet().also { now -> peak.updateAndGet { prior -> maxOf(prior, now) } }
+            },
+            onCompleted = { active.decrementAndGet(); completed.incrementAndGet() },
+            beforeSubmit = {
+                if (submissions.incrementAndGet() == 1) {
+                    firstJudgeWaiting.complete(Unit)
+                    releaseFirstJudge.await()
+                }
+            },
+        )
+        val turns: List<Turn> = buildList {
+            add(finishTurn("pass", "first action"))
+            add {
+                withTimeout(AWAIT_MS) { firstJudgeWaiting.await() }
+                if (completed.get() == 0) laterActionOverlapped.set(1)
+                emit(LlmStreamEvent.ToolCall(LlmToolCall("later-action", "finish_step", """{"status":"pass","observation":"action during judge"}""")))
+                emit(LlmStreamEvent.Completed)
+            }
+            repeat(8) { index -> add(finishTurn("pass", "action ${index + 3}")) }
+            add(textTurn)
+        }
+        val agent = TurnProvider(turns)
+        val steps = List(10) { step("Action ${it + 1}") }
+        val suite = suiteOf(TestCase(newCaseId(), "Queue", steps = steps))
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.BACKGROUND,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        runBlocking { withTimeout(AWAIT_MS) { firstJudgeWaiting.await() } }
+        val transcriptPath = assertNotNull(h.coordinator.run(started.runId)?.lanes?.single()?.transcriptPath)
+        val transcriptFile = File(h.store.runDir(started.runId), transcriptPath)
+        try {
+            runBlocking {
+                withTimeout(AWAIT_MS) {
+                    while (lines(transcriptFile).count { it.text("kind") == "deferred_judgment_queued" } < 10) delay(POLL_MS)
+                }
+            }
+            assertEquals(10, agent.requests.size, "all ten finishes reached the full background queue")
+            val waitingRun = assertNotNull(h.coordinator.run(started.runId))
+            assertEquals(RunStatus.RUNNING, waitingRun.status)
+            assertEquals(9, waitingRun.caseResult("Queue").steps.count { !it.setup }, "the tenth finish waits on queue capacity")
+        } finally {
+            releaseFirstJudge.complete(Unit)
+        }
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(1, laterActionOverlapped.get(), "the lane completed another action while its first judgment was active")
+        assertEquals(1, peak.get(), "a single lane serializes access to its judge process")
+        assertEquals(10, submissions.get(), "each requested judgment eventually submitted once after capacity was released")
+        assertTrue(run.caseResult("Queue").steps.filterNot { it.setup }.all { it.verificationState == VerificationState.VERIFIED })
+        val transcript = lines(File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)))
+        assertEquals(10, transcript.count { it.text("kind") == "deferred_judgment_queued" })
+        assertEquals(10, transcript.count { it.text("kind") == "deferred_judgment_finished" })
+    }
+
+    @Test
+    fun cancellingAnActiveBackgroundJudgeLeavesItsVerificationPending() {
+        val judgeStarted = CompletableDeferred<Unit>()
+        val agent = TurnProvider(listOf(finishTurn("pass", "agent completed"), textTurn))
+        val judge = ScriptedJudgeProvider(responseDelayMs = 60_000L, onStarted = { judgeStarted.complete(Unit) })
+        val suite = suiteOf(caseOf("Cancel judge", step("Open the app")))
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.BACKGROUND,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+
+        val run = runBlocking {
+            withTimeout(AWAIT_MS) { judgeStarted.await() }
+            assertTrue(h.coordinator.cancel(started.runId))
+            withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) }
+        }
+        assertEquals(RunStatus.CANCELLED, run.status)
+        val result = run.caseResult("Cancel judge").steps.single { !it.setup }
+        assertEquals(StepStatus.PASS, result.status)
+        assertEquals(VerificationState.PENDING, result.verificationState, "completed execution is retained without inventing a verdict")
+    }
+
+    @Test
+    fun inlineJudgmentTakesPriorityAndTheLimiterCapsRunWideConcurrency() = runBlocking {
+        val limiter = JudgeConcurrencyLimiter(maxConcurrent = 2)
+        val firstStarted = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+        val thirdStarted = CompletableDeferred<Unit>()
+        val inlineStarted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val releaseSecond = CompletableDeferred<Unit>()
+        val releaseThird = CompletableDeferred<Unit>()
+        val releaseInline = CompletableDeferred<Unit>()
+        val active = AtomicInteger()
+        val peak = AtomicInteger()
+
+        suspend fun held(entered: CompletableDeferred<Unit>, release: CompletableDeferred<Unit>) {
+            active.incrementAndGet().also { now -> peak.updateAndGet { prior -> maxOf(prior, now) } }
+            entered.complete(Unit)
+            try {
+                release.await()
+            } finally {
+                active.decrementAndGet()
+            }
+        }
+
+        val first = launch(start = CoroutineStart.UNDISPATCHED) { limiter.background("lane-a") { held(firstStarted, releaseFirst) } }
+        val second = launch(start = CoroutineStart.UNDISPATCHED) { limiter.background("lane-b") { held(secondStarted, releaseSecond) } }
+        withTimeout(AWAIT_MS) { firstStarted.await(); secondStarted.await() }
+        val inline = launch(start = CoroutineStart.UNDISPATCHED) {
+            limiter.inline("lane-c") { held(inlineStarted, releaseInline) }
+        }
+        val third = launch(start = CoroutineStart.UNDISPATCHED) { limiter.background("lane-d") { held(thirdStarted, releaseThird) } }
+
+        releaseFirst.complete(Unit)
+        withTimeout(AWAIT_MS) { inlineStarted.await() }
+        assertFalse(thirdStarted.isCompleted, "background work yields to the already-waiting inline checkpoint")
+        releaseInline.complete(Unit)
+        withTimeout(AWAIT_MS) { thirdStarted.await() }
+        releaseSecond.complete(Unit)
+        releaseThird.complete(Unit)
+        first.join()
+        second.join()
+        inline.join()
+        third.join()
+
+        assertEquals(2, peak.get(), "the shared run limiter never exceeds its two concurrent judge slots")
+        assertEquals(0, active.get())
+    }
+
+    @Test
+    fun deferredJudgmentWithNoCapturedImagesStillUsesItsFrozenTextEvidence() {
+        val agent = AutoAgentProvider(listOf("pass" to "The expected screen is visible."))
+        val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass", reasoning = "The bounded text evidence supports it.") }
+        val suite = suiteOf(caseOf("Text evidence", step("Open the app", "The welcome screen appears")))
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        h.adb.png = byteArrayOf(0) // Make screenshot decoding fail while logs and the expected text remain available.
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            evidence = com.indagium.testing.model.EvidenceFlags(screenshots = false, logcat = true, transcript = true),
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.AFTER_CASE,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val result = run.allSteps().single()
+        assertEquals(VerificationState.VERIFIED, result.verificationState, result.toString())
+        val written = lines(File(h.store.runDir(run.id), TEST_RUN_JUDGE_FILE_NAME))
+        val finished = written.single { it.text("kind") == "judge_finished" }
+        assertEquals("PASS", finished.text("verdict"))
+        val deferred = lines(File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)))
+            .single { it.text("kind") == "deferred_judgment_finished" }
+        assertNull(deferred.text("evidenceUnavailableReason"), "absence of an image is missing evidence, not a false budget overflow")
+    }
+
+    @Test
+    fun deferredRetryVerdictsAndUsageUpdateTheExactHistoricalAttempt() {
+        for (mode in listOf(JudgeMode.FAILURES_ONLY, JudgeMode.EVERY_STEP)) {
+            harness?.close()
+            val judgeCall = AtomicLong()
+            val agent = TurnProvider(listOf(finishTurn("fail", "first execution failed"), finishTurn("pass", "retry passed"), textTurn))
+            val judge = ScriptedJudgeProvider(answer = {
+                val index = judgeCall.getAndIncrement()
+                JudgeAnswer(
+                    verdict = if (index == 0L) "fail" else "pass",
+                    reasoning = "Verdict for judge call $index",
+                    inputTokens = 100L * (index + 1),
+                    outputTokens = 10L,
+                )
+            })
+            val suite = suiteOf(caseOf("Retry", step("Open the app", retries = 1)))
+            val h = RunHarness(
+                libraryOf(suite),
+                profile = profileOf(LANE_A_PROFILE_ID),
+                extraProfiles = listOf(judgeProfile),
+                agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+            ).also { harness = it }
+            val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+                judgeProfileId = JUDGE_PROFILE_ID,
+                judgeMode = mode.wire,
+                judgeTiming = JudgeTiming.AFTER_CASE,
+            )
+            val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+            val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+            val case = run.caseResult("Retry")
+            val stepResult = case.steps.single { !it.setup }
+            val earlier = stepResult.attemptHistory.single { it.attempt == 1 }
+            assertEquals(CaseStatus.PASS, case.status, "$mode: ${case.steps}")
+            assertEquals(2, stepResult.attempts)
+            assertEquals(StepStatus.FAIL, earlier.status)
+            assertEquals(JudgeVerdict.FAIL, earlier.judge?.verdict, "$mode must update the prior attempt's deferred verdict")
+            assertEquals(VerificationState.FAILED, earlier.verificationState)
+            assertEquals(100L, earlier.judgeUsage?.inputTokens)
+            assertNotNull(earlier.judgeQueueWaitMs, "$mode persists queue wait on the exact historical attempt")
+            assertNotNull(earlier.judgmentDurationMs, "$mode persists judge duration separately from execution")
+            when (mode) {
+                JudgeMode.FAILURES_ONLY -> {
+                    assertEquals(1L, judgeCall.get())
+                    assertEquals(VerificationState.NOT_REQUESTED, stepResult.verificationState, "the recovered pass is not judged in failures-only mode")
+                    assertEquals(null, stepResult.judge)
+                    assertEquals(100L, case.judgeUsage?.inputTokens)
+                }
+                JudgeMode.EVERY_STEP -> {
+                    assertEquals(2L, judgeCall.get())
+                    assertEquals(JudgeVerdict.PASS, stepResult.judge?.verdict)
+                    assertEquals(VerificationState.VERIFIED, stepResult.verificationState)
+                    assertEquals(300L, case.judgeUsage?.inputTokens, "one prior-attempt verdict plus the final verdict, no double count")
+                }
+                JudgeMode.OFF -> error("not exercised")
+            }
+        }
+    }
+
+    @Test
+    fun deferredJudgeFailureClearsFlakyAfterAnExecutionRetryPasses() {
+        harness?.close()
+        val judgeCall = AtomicLong()
+        val agent = TurnProvider(listOf(finishTurn("fail", "first execution failed"), finishTurn("pass", "retry passed"), textTurn))
+        val judge = ScriptedJudgeProvider(answer = {
+            judgeCall.incrementAndGet()
+            JudgeAnswer(verdict = "fail", reasoning = "The expected state was not present")
+        })
+        val suite = suiteOf(caseOf("Retry", step("Open the app", retries = 1)))
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)),
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeTiming = JudgeTiming.AFTER_CASE,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val case = run.caseResult("Retry")
+        val stepResult = case.steps.single { !it.setup }
+        assertEquals(2L, judgeCall.get())
+        assertEquals(StepStatus.FAIL, stepResult.status)
+        assertFalse(stepResult.flaky, "the final deferred FAIL invalidates the execution-only recovered-pass marker")
+        assertFalse(case.flaky)
     }
 }

@@ -2264,6 +2264,33 @@ class AppState(
         return StoreResult.Ok(session.snapshot.value)
     }
 
+    internal fun testStepRecordingPreview(
+        sessionId: String,
+        rowId: String,
+    ): StoreResult<com.indagium.testing.authoring.RecordingPreviewEvidence> {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return StoreResult.Invalid("That recording session is no longer available.")
+        return StoreResult.Ok(session.previewEvidenceFor(rowId))
+    }
+
+    internal fun testStepRecordingGestureHints(
+        sessionId: String,
+        rowId: String,
+    ): StoreResult<List<com.indagium.testing.model.RecordedGestureHint>> {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return StoreResult.Invalid("That recording session is no longer available.")
+        return StoreResult.Ok(session.gestureHintsForPreview(rowId))
+    }
+
+    internal fun testStepRecordingTappedElement(
+        sessionId: String,
+        rowId: String,
+    ): StoreResult<com.indagium.testing.authoring.TappedElement?> {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return StoreResult.Invalid("That recording session is no longer available.")
+        return StoreResult.Ok(session.tappedElementForPreview(rowId))
+    }
+
     internal suspend fun stopTestStepRecordingAndDrain(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> {
         val session = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
         return StoreResult.Ok(session.stopAndDrain())
@@ -2276,22 +2303,35 @@ class AppState(
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
         performerEdits: Map<String, com.indagium.testing.authoring.RecordedPerformerEdit> = emptyMap(),
-    ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
-        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
-            ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
-        if (sessionId in recordingApplications) {
-            return@synchronized StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+    ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> {
+        val session = synchronized(testStepRecordingLock) {
+            testStepRecordingSession?.takeIf { it.id == sessionId }
+                ?: return StoreResult.Invalid("That recording session is no longer active.")
         }
-        if (sessionId in recordingRewrites) {
-            return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+        val selections = expectedScreenshotIds.associateWith { id ->
+            session.expectedScreenshotSelectionFor(id)
+                ?: return StoreResult.Invalid("Only an eligible settled after image can be selected as an expected screenshot.")
         }
-        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides, allowReorder = true, performerEdits)) {
-            return@synchronized StoreResult.Invalid(
-                "The recording must be stopped and the edited rows and screenshot choices must match its current draft; " +
-                    "row ids may be sent in any order but must name every current row once.",
-            )
+        return synchronized(testStepRecordingLock) {
+            if (testStepRecordingSession !== session) return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+            if (sessionId in recordingApplications) {
+                return@synchronized StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+            }
+            if (sessionId in recordingRewrites) {
+                return@synchronized StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+            }
+            if (!session.updateReviewedSteps(
+                    edited, expectedScreenshotIds, expectedRowIds, optionalOverrides,
+                    allowReorder = true, performerEdits, expectedScreenshotSelections = selections,
+                )
+            ) {
+                return@synchronized StoreResult.Invalid(
+                    "The recording must be stopped and the edited rows and eligible after-image choices must match its current draft; " +
+                        "row ids may be sent in any order but must name every current row once.",
+                )
+            }
+            StoreResult.Ok(session.snapshot.value)
         }
-        StoreResult.Ok(session.snapshot.value)
     }
 
     internal fun removeTestRecordingRows(sessionId: String, rowIds: Set<String>): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> =
@@ -2398,8 +2438,13 @@ class AppState(
                 is StoreResult.NotFound -> return prepared
                 is StoreResult.LimitReached -> return prepared
             }
-            if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides)) {
-                return StoreResult.Invalid("Stop recording and send one edited action/result pair and valid screenshot choices in the original row order.")
+            val selections = expectedScreenshotIds.associateWith { rowId ->
+                session.expectedScreenshotSelectionFor(rowId)
+                    ?: return StoreResult.Invalid("Only an eligible settled after image can be selected as an expected screenshot.")
+            }
+            if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds, optionalOverrides,
+                    expectedScreenshotSelections = selections)) {
+                return StoreResult.Invalid("Stop recording and send one edited action/result pair and eligible after-image choices in the original row order.")
             }
             session.stopAndDrain()
             testStepRecordingApplyService.apply(session, target.first, target.second, index, options)

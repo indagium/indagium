@@ -559,7 +559,14 @@ private fun CaseMatrixRow(row: MatrixRow.Case, improvable: Boolean, onImprove: (
         }
         row.cells.forEach { cell ->
             Box(Modifier.width(STATUS_COLUMN)) {
-                if (cell.present) StatusChip(cell.status.label(), caseColor(cell.status)) else AppText("—", color = tc.td, fontSize = 11.sp)
+                if (cell.present) {
+                    StatusChip(
+                        cell.status.label() + (if (cell.flaky) " · flaky" else "") + if (cell.attempts > 1) " ×${cell.attempts}" else "",
+                        caseColor(cell.status),
+                    )
+                } else {
+                    AppText("—", color = tc.td, fontSize = 11.sp)
+                }
             }
         }
         Spacer(Modifier.width(CONSENSUS_COLUMN))
@@ -590,7 +597,10 @@ private fun StepMatrixRow(row: MatrixRow.Step, consensus: ConsensusCell, selecti
                 if (result == null) {
                     AppText("·", color = tc.td, fontSize = 11.sp)
                 } else {
-                    StatusChip(result.status.label() + if (result.attempts > 1) " ×${result.attempts}" else "", stepColor(result.status))
+                    StatusChip(
+                        result.status.label() + (if (result.flaky) " · flaky" else "") + if (result.attempts > 1) " ×${result.attempts}" else "",
+                        stepColor(result.status),
+                    )
                 }
             }
         }

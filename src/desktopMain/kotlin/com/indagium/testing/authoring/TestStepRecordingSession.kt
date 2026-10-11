@@ -12,6 +12,10 @@ import com.indagium.model.sumAiUsage
 import com.indagium.testing.device.DEVICE_STATE_BATTERY_STATUS
 import com.indagium.testing.device.DEVICE_STATE_POWER_SOURCE
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.NormalizedGestureBounds
+import com.indagium.testing.model.NormalizedGesturePoint
+import com.indagium.testing.model.RecordedGestureHint
+import com.indagium.testing.model.RecordedGestureTarget
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
@@ -58,6 +62,14 @@ data class RecordedTestStep(
     val before: RecordingScreenRef? = null,
     val after: RecordingScreenRef? = null,
     val tappedElement: TappedElement? = null,
+    /** Exact node under a touch, including an unlabeled icon. */
+    val targetUnderTouch: RecordedUiTarget? = null,
+    /** Enclosing clickable nodes, nearest first; duplicate system tile IDs are distinguished by their bounds. */
+    val clickableTargets: List<RecordedUiTarget> = emptyList(),
+    val targetScreenWidth: Int? = null,
+    val targetScreenHeight: Int? = null,
+    val targetOrientationQuarterTurns: Int? = null,
+    val touchWithinTarget: NormalizedGesturePoint? = null,
     val kind: RecordedInputKind? = null,
     /** Wall-clock time the input completed (a touch's release); with [inputStartMs] the key the screen states are attached by. */
     val inputAtMs: Long = 0L,
@@ -106,6 +118,11 @@ data class RecordedTestStep(
     val humanReviewed: Boolean = false,
     /** True when the rewrite had adequate evidence for the row; kept separate from explicit human review. */
     val modelSupported: Boolean = false,
+    /** Explicitly reviewed after image selected as an expected screenshot; raw preview images remain separate. */
+    val expectedScreenshotJpeg: ByteArray? = null,
+    val expectedScreenshotSource: String? = null,
+    val expectedScreenshotTimestampMs: Long? = null,
+    val expectedScreenshotAlignment: String? = null,
 )
 
 /**
@@ -160,6 +177,10 @@ private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
 private const val MAX_RECORDING_SNAPSHOT_BYTES = 2 * 1024 * 1024
 private const val MAX_RECORDING_SNAPSHOT_DIMENSION = 1_280
 private const val VIDEO_DRAIN_TIMEOUT_MS = 12_000L
+private const val REVIEW_HASH_MULTIPLIER = 31
+private const val MAX_GESTURE_TARGET_TEXT_CHARS = 120
+private const val MAX_GESTURE_TARGET_RESOURCE_ID_CHARS = 200
+private const val MAX_GESTURE_TARGET_CLASS_CHARS = 80
 
 /**
  * Converts accepted mirror inputs to an ordered, review-only step draft. It never starts a device or sends input.
@@ -722,13 +743,14 @@ class TestStepRecordingSession internal constructor(
      * given - the order of [expectedRowIds], which must then be a permutation of the current row ids and becomes the new review
      * order. Without [allowReorder], [expectedRowIds] must equal the current order (the apply path never reorders).
      */
-    fun updateReviewedSteps(
+    internal fun updateReviewedSteps(
         actionsAndExpected: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
         allowReorder: Boolean = false,
         performerEdits: Map<String, RecordedPerformerEdit> = emptyMap(),
+        expectedScreenshotSelections: Map<String, RecordingExpectedScreenshotSelection> = emptyMap(),
     ): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         val original = current.steps
@@ -741,7 +763,12 @@ class TestStepRecordingSession internal constructor(
         } else {
             original
         }
-        if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides, performerEdits)) {
+        if (expectedScreenshotIds != expectedScreenshotSelections.keys ||
+            expectedScreenshotSelections.any { (id, selection) ->
+                !selection.image.eligibleAsExpectedScreenshot || reviewFingerprint(mutableSnapshot.value, id) != selection.reviewFingerprint
+            } ||
+            !validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides, performerEdits)
+        ) {
             return@synchronized false
         }
         val edited = old.mapIndexed { index, row ->
@@ -760,6 +787,10 @@ class TestStepRecordingSession internal constructor(
                     row.reviewReason
                 },
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
+                expectedScreenshotJpeg = expectedScreenshotSelections[row.id]?.image?.jpeg,
+                expectedScreenshotSource = expectedScreenshotSelections[row.id]?.image?.source,
+                expectedScreenshotTimestampMs = expectedScreenshotSelections[row.id]?.image?.timestampMs,
+                expectedScreenshotAlignment = expectedScreenshotSelections[row.id]?.image?.alignmentConfidence,
             )
             val withPerformer = performerEdits[row.id]?.applyTo(updated) ?: updated
             val changed = reviewedContent(row) != reviewedContent(withPerformer)
@@ -926,11 +957,13 @@ class TestStepRecordingSession internal constructor(
 
     internal fun releaseApplyReservation() = synchronized(lock) { applicationReserved = false }
 
+    @Suppress("CyclomaticComplexMethod") // A saved step combines review choices, retained hints, and evidence provenance in one mapping.
     internal fun toTestSteps(rows: List<RecordedTestStep>, assetPathFor: (ByteArray) -> String? = { null }): List<TestStep> = rows.map { row ->
         val rewritten = row.sourceInputIds.isNotEmpty()
         val context = row.screenContext?.takeIf(String::isNotBlank)
-        val assetPath = row.screenshotJpeg?.takeIf { row.useScreenshotAsExpected }?.let(assetPathFor)
-        val screenshotSource = row.screenshotSource?.name?.lowercase()?.replace('_', ' ')
+        val selectedExpected = if (row.useScreenshotAsExpected) row.expectedScreenshotJpeg else null
+        val assetPath = selectedExpected?.let(assetPathFor)
+        val screenshotSource = row.expectedScreenshotSource ?: row.screenshotSource?.name?.lowercase()?.replace('_', ' ')
         // Only an AI step reads examples: a manual or script step is done by a person or the run itself.
         val byAgent = row.stepKind == StepKind.AGENT
         val examples = buildList {
@@ -948,6 +981,8 @@ class TestStepRecordingSession internal constructor(
             if (assetPath != null && row.useScreenshotAsExpected) {
                 val caption = when {
                     rewritten -> "Reviewed expected screenshot; verified after evidence from ${screenshotSource ?: "screen probe"}"
+                    row.expectedScreenshotJpeg != null ->
+                        "Reviewed expected screenshot; verified after evidence from ${screenshotSource ?: "recording preview"}"
                     row.screenshotVerifiedMoment != null ->
                         "Reviewed expected screenshot; verified ${row.screenshotVerifiedMoment} evidence from ${screenshotSource ?: "screen probe"}"
                     row.screenshotTimingUncertain -> "Reviewed expected screenshot; uncertain raw input preview from ${screenshotSource ?: "mirror"}"
@@ -966,6 +1001,7 @@ class TestStepRecordingSession internal constructor(
             condition = row.condition,
             intent = row.intent,
             precondition = row.precondition,
+            gestureHints = gestureHintsFor(row),
             script = row.script,
             manualCompletion = row.manualCompletion,
         ).withKind(row.stepKind)
@@ -1312,6 +1348,135 @@ class TestStepRecordingSession internal constructor(
     /** A stored probe state, for the review panel and later tools; null for an unknown [seq]. */
     fun screenState(seq: Int): RecordingScreenState? = synchronized(lock) { screenStates[seq] }
 
+    /**
+     * Selects one before image for the first input and one settled after image for the last input of a semantic step. Video decode is
+     * bounded to those two stills and is called by the review UI on its IO dispatcher, never between recorded gestures.
+     */
+    @Suppress("CyclomaticComplexMethod") // This single snapshot applies sensitivity, time alignment, fallback, and reason policy together.
+    internal fun previewEvidenceFor(rowId: String): RecordingPreviewEvidence {
+        val (current, stateSnapshot, timeline) = synchronized(lock) { Triple(mutableSnapshot.value, screenStates.toMap(), videoTimeline) }
+        val visible = current.steps.firstOrNull { it.id == rowId }
+            ?: return RecordingPreviewEvidence(null, null, "UI context unavailable.", "This recording row is no longer available.")
+        val fingerprint = reviewFingerprint(current, rowId)
+        val sourceIds = visible.sourceInputIds.toSet().ifEmpty { setOf(visible.id) }
+        val rawRows = (current.rawSteps ?: current.steps).filter { !it.authorAdded }
+        val inputs = rewriteInputsOf(rawRows, stateSnapshot::get)
+        val chronological = inputs.filterNot { it.fixed || it.row.isExternalEvent }.sortedBy { it.row.inputAtMs }
+        val group = chronological.filter { input -> input.row.id in sourceIds }
+        if (group.isEmpty()) {
+            return RecordingPreviewEvidence(
+                null, null, "UI hierarchy unavailable for this step.", "No recorded input is linked to this row.",
+                reviewFingerprint = fingerprint,
+            )
+        }
+        val sensitivity = RewriteSensitivity(inputs)
+        if (group.any(sensitivity::inputWithheld)) {
+            return RecordingPreviewEvidence(
+                null, null, "UI context withheld because this step includes a password-sensitive input.",
+                "Images withheld for this password-sensitive step.",
+                reviewFingerprint = fingerprint,
+            )
+        }
+        val first = group.first()
+        val last = group.last()
+        val next = chronological.firstOrNull { it.row.inputStartMs > last.row.inputAtMs }
+        val beforeAt = first.row.inputStartMs - REWRITE_VIDEO_BEFORE_MS
+        val afterAt = settledAtMs(last, next?.row?.inputStartMs)
+        val afterScreenshot = settledAfterOf(last, next, sensitivity)
+        val beforeScreenshot = first.screenshot("before")
+        val needsBeforeVideo = beforeScreenshot == null || !hasEligibleBeforeScreenshot(beforeScreenshot)
+        val needsAfterVideo = afterScreenshot.shot == null || !afterScreenshot.settled || !hasEligibleAfterScreenshot(afterScreenshot.shot)
+        val video = timeline?.takeIf { it.summary().available && it.summary().finished }
+        val requestedTimes = buildList {
+            if (needsBeforeVideo) add(beforeAt)
+            if (needsAfterVideo) add(afterAt)
+        }
+        val stills = if (requestedTimes.isNotEmpty()) {
+            video?.stillsAt(requestedTimes.map(video::sessionOffsetMs), inputs).orEmpty()
+        } else {
+            emptyList()
+        }
+        var stillIndex = 0
+        val beforeFrame = if (needsBeforeVideo) stills.getOrNull(stillIndex++)?.let { still ->
+            video?.let { RewriteVideoFrame(still.image, it.wallClockOfSessionMs(still.sessionMs), still.sessionMs) }
+        } else null
+        val afterFrame = if (needsAfterVideo) stills.getOrNull(stillIndex)?.let { still ->
+            video?.let { RewriteVideoFrame(still.image, it.wallClockOfSessionMs(still.sessionMs), still.sessionMs) }
+        } else null
+        val beforeSelection = selectRecordingPreviewEvidence(first, next, sensitivity, beforeFrame = beforeFrame)
+        val afterSelection = selectRecordingPreviewEvidence(last, next, sensitivity, afterFrame = afterFrame)
+        val videoSummary = timeline?.summary()
+        val frameDecodeOrGapFailure = requestedTimes.isNotEmpty() && stills.none { it != null } && videoSummary?.available == true
+        val timingOverlap = listOfNotNull(beforeScreenshot, afterScreenshot.shot).any { it.timingUncertain }
+        val imageReason = when {
+            beforeSelection.before != null && afterSelection.after != null -> null
+            beforeSelection.imageAvailabilityMessage?.contains("decode", ignoreCase = true) == true -> beforeSelection.imageAvailabilityMessage
+            afterSelection.imageAvailabilityMessage?.contains("decode", ignoreCase = true) == true -> afterSelection.imageAvailabilityMessage
+            else -> buildList {
+                if (timingOverlap) add("Screenshot timing overlapped or was uncertain during a gesture.")
+                if (videoSummary?.warning != null) add("Recorded video: ${videoSummary.warning}")
+                if (videoSummary == null || !videoSummary.available || !videoSummary.finished) {
+                    add("No finished recorded video frame was available.")
+                } else if (frameDecodeOrGapFailure) {
+                    val gaps = if (videoSummary.gapCount > 0) " and reports ${videoSummary.gapCount} gap(s)" else ""
+                    add("The recorded video had no decodable frame at the requested moment$gaps.")
+                }
+                if (beforeSelection.before == null) add("Before image unavailable.")
+                if (afterSelection.after == null) add("After image unavailable.")
+            }.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        }
+        val target = first.row.targetUnderTouch
+        val hierarchy = first.before?.nodes.orEmpty()
+        val targetResolved = target?.let { expected ->
+            hierarchy.any { node ->
+                (expected.resourceId.isNotBlank() && node.resourceId == expected.resourceId) ||
+                    (node.left == expected.left && node.top == expected.top && node.right == expected.right && node.bottom == expected.bottom)
+            }
+        } ?: false
+        val uiMessage = when {
+            hierarchy.isEmpty() -> "UI hierarchy unavailable for this input."
+            target != null && !targetResolved -> "UI hierarchy was captured, but the recorded target is unresolved."
+            else -> "UI hierarchy was captured for this input."
+        }
+        return RecordingPreviewEvidence(
+            beforeSelection.before, afterSelection.after, uiMessage, imageReason, beforeSelection.rawInput, fingerprint,
+        )
+    }
+
+    internal fun expectedScreenshotSelectionFor(rowId: String): RecordingExpectedScreenshotSelection? {
+        val evidence = previewEvidenceFor(rowId)
+        val image = evidence.after?.takeIf { it.eligibleAsExpectedScreenshot } ?: return null
+        return evidence.reviewFingerprint?.let { RecordingExpectedScreenshotSelection(image, it) }
+    }
+
+    private fun reviewFingerprint(snapshot: TestStepRecordingSnapshot, rowId: String): Int {
+        val row = snapshot.steps.firstOrNull { it.id == rowId } ?: return 0
+        val sourceIds = row.sourceInputIds.toSet().ifEmpty { setOf(row.id) }
+        val rawRows = (snapshot.rawSteps ?: snapshot.steps).filter { it.id in sourceIds && !it.authorAdded }
+        return REVIEW_HASH_MULTIPLIER * row.hashCode() + rawRows.hashCode()
+    }
+
+    internal fun gestureHintsForPreview(rowId: String): List<RecordedGestureHint> = synchronized(lock) {
+        mutableSnapshot.value.steps.firstOrNull { it.id == rowId }?.let(::gestureHintsFor).orEmpty()
+    }
+
+    /** A tapped label is device-derived text too; withhold it using the complete raw-input timeline, just like gesture hints. */
+    internal fun tappedElementForPreview(rowId: String): TappedElement? = synchronized(lock) {
+        val visible = mutableSnapshot.value.steps.firstOrNull { it.id == rowId } ?: return@synchronized null
+        val rows = (mutableSnapshot.value.rawSteps ?: mutableSnapshot.value.steps).filterNot { it.authorAdded }
+        val inputs = rewriteInputsOf(rows, ::screenState)
+        val sensitivity = RewriteSensitivity(inputs)
+        val wantedIds = visible.sourceInputIds.ifEmpty { listOf(visible.id) }.toSet()
+        val selectedInputs = inputs.filter { it.row.id in wantedIds }
+        if (selectedInputs.isEmpty() || selectedInputs.any(sensitivity::inputWithheld) ||
+            selectedInputs.any { sensitivity.spanWithheld(it.row.inputStartMs, it.row.inputAtMs) }
+        ) {
+            null
+        } else {
+            visible.tappedElement
+        }
+    }
+
     /** What is saved with the recording ("Keep recording evidence"): the review state, the screen readings and screenshots, the video. */
     internal fun evidence(): SessionEvidence = synchronized(lock) {
         SessionEvidence(mutableSnapshot.value, screenStates.values.toList(), probeScreenshots.toList(), videoTimeline, deviceSerial)
@@ -1424,6 +1589,12 @@ class TestStepRecordingSession internal constructor(
                 before = before?.ref(),
                 after = after?.ref(),
                 tappedElement = tappedElementFor(rows[index], before),
+                targetUnderTouch = tappedTargetsFor(rows[index], before)?.underTouch,
+                clickableTargets = tappedTargetsFor(rows[index], before)?.clickableAncestors.orEmpty(),
+                targetScreenWidth = before?.screenWidth?.takeIf { it > 0 },
+                targetScreenHeight = before?.screenHeight?.takeIf { it > 0 },
+                targetOrientationQuarterTurns = before?.rotation,
+                touchWithinTarget = touchWithinTargetFor(rows[index], before),
                 beforeScreenshot = beforeScreenshot,
                 afterScreenshot = afterScreenshot,
             )
@@ -1466,6 +1637,83 @@ class TestStepRecordingSession internal constructor(
         return if (tapped && before != null && point != null) resolveTappedElement(before, point) else null
     }
 
+    private fun tappedTargetsFor(row: RecordedTestStep, before: RecordingScreenState?): ResolvedTappedTargets? {
+        val tapped = row.kind == RecordedInputKind.TAP || row.kind == RecordedInputKind.LONG_PRESS
+        val point = row.gesturePath.lastOrNull()
+        return if (tapped && before != null && point != null) resolveTappedTargets(before, point) else null
+    }
+
+    private fun touchWithinTargetFor(row: RecordedTestStep, before: RecordingScreenState?): NormalizedGesturePoint? {
+        val screen = before ?: return null
+        val target = tappedTargetsFor(row, screen)?.underTouch ?: return null
+        val point = row.gesturePath.lastOrNull() ?: return null
+        if (point.screenWidth <= 0 || point.screenHeight <= 0 || target.right <= target.left || target.bottom <= target.top) return null
+        val x = point.x.toLong() * screen.screenWidth / point.screenWidth
+        val y = point.y.toLong() * screen.screenHeight / point.screenHeight
+        return NormalizedGesturePoint(
+            ((x - target.left).toDouble() / (target.right - target.left)).coerceIn(0.0, 1.0),
+            ((y - target.top).toDouble() / (target.bottom - target.top)).coerceIn(0.0, 1.0),
+        )
+    }
+
+    /** A rewritten semantic step inherits every source gesture in recorded order. */
+    private fun gestureHintsFor(row: RecordedTestStep): List<RecordedGestureHint> {
+        val snapshot = mutableSnapshot.value
+        val allRows = snapshot.rawSteps ?: snapshot.steps
+        val allInputs = rewriteInputsOf(allRows, ::screenState)
+        val sensitivity = RewriteSensitivity(allInputs)
+        val wantedIds = row.sourceInputIds.ifEmpty { listOf(row.id) }.toSet()
+        return allInputs.asSequence()
+            .filter { it.row.id in wantedIds }
+            .filterNot(sensitivity::inputWithheld)
+            .mapNotNull { gestureHintOf(it.row) }
+            .take(MAX_GESTURE_HINTS)
+            .toList()
+    }
+
+    private fun gestureHintOf(row: RecordedTestStep): RecordedGestureHint? {
+        val kind = row.kind?.takeIf { it == RecordedInputKind.TAP || it == RecordedInputKind.LONG_PRESS || it == RecordedInputKind.SWIPE }
+            ?: return null
+        val source = row.gesturePath.firstOrNull() ?: return null
+        val sourceWidth = source.screenWidth.takeIf { it > 0 } ?: return null
+        val sourceHeight = source.screenHeight.takeIf { it > 0 } ?: return null
+        val targetWidth = row.targetScreenWidth?.takeIf { it > 0 }
+        val targetHeight = row.targetScreenHeight?.takeIf { it > 0 }
+
+        fun target(value: RecordedUiTarget) = RecordedGestureTarget(
+            text = value.text.take(MAX_GESTURE_TARGET_TEXT_CHARS),
+            contentDescription = value.contentDesc.take(MAX_GESTURE_TARGET_TEXT_CHARS),
+            resourceId = value.resourceId.take(MAX_GESTURE_TARGET_RESOURCE_ID_CHARS),
+            className = value.className.take(MAX_GESTURE_TARGET_CLASS_CHARS),
+            bounds = if (targetWidth != null && targetHeight != null) {
+                NormalizedGestureBounds(
+                    value.left.toDouble() / targetWidth,
+                    value.top.toDouble() / targetHeight,
+                    value.right.toDouble() / targetWidth,
+                    value.bottom.toDouble() / targetHeight,
+                )
+            } else {
+                null
+            },
+        )
+        return RecordedGestureHint(
+            kind = kind.name,
+            path = row.gesturePath.take(MAX_GESTURE_SAMPLES + 2).map { point ->
+                NormalizedGesturePoint(
+                    point.x.toDouble() / point.screenWidth.coerceAtLeast(1),
+                    point.y.toDouble() / point.screenHeight.coerceAtLeast(1),
+                )
+            },
+            durationMs = row.durationMs,
+            sourceScreenWidth = sourceWidth,
+            sourceScreenHeight = sourceHeight,
+            orientationQuarterTurns = row.targetOrientationQuarterTurns,
+            targetUnderTouch = row.targetUnderTouch?.let(::target),
+            clickableTargets = row.clickableTargets.take(MAX_GESTURE_CLICKABLE_ANCESTORS).map(::target),
+            touchWithinTarget = row.touchWithinTarget,
+        )
+    }
+
     /** The hidden action for an unedited typed/pasted row that is not hidden yet; null for anything else. */
     private fun maskedTextAction(row: RecordedTestStep): String? {
         if (row.kind != RecordedInputKind.TEXT) return null
@@ -1483,6 +1731,8 @@ class TestStepRecordingSession internal constructor(
 
     private companion object {
         const val MAX_RECORDED_STEPS = 100
+        const val MAX_GESTURE_HINTS = 24
+        const val MAX_GESTURE_CLICKABLE_ANCESTORS = 3
         const val MAX_RECORDED_WARNINGS = 30
         const val MAX_RECORDED_TEXT = 200
         const val TOUCH_MOVE_THRESHOLD = 24

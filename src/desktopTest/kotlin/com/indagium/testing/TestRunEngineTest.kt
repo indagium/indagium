@@ -411,6 +411,57 @@ class TestRunEngineTest {
     }
 
     @Test
+    fun anEligibleCaseFailureRerunsHooksAndKeepsAttemptHistoryAndUsage() {
+        assumeFalse(System.getProperty("os.name").lowercase().contains("win"))
+        val marker = File.createTempFile("case-retry-order", ".txt").also { it.delete() }
+
+        fun hook(tool: String, mark: String) = hostScript(tool, "printf $mark >> '${marker.absolutePath}'")
+        val suiteSetup = hook("suite_setup", "S")
+        val caseSetup = hook("case_setup", "C")
+        val caseTeardown = hook("case_teardown", "T")
+        val suiteTeardown = hook("suite_teardown", "E")
+        val suite = suiteOf(
+            caseOf("Recover", step("Open the app"), setup = listOf(scriptHook(caseSetup)), teardown = listOf(scriptHook(caseTeardown))),
+            setup = listOf(scriptHook(suiteSetup)),
+            teardown = listOf(scriptHook(suiteTeardown)),
+        )
+
+        fun finishWithUsage(status: String, input: Long): Turn = {
+            emit(LlmStreamEvent.Usage(input, 5L, input + 5L))
+            emit(LlmStreamEvent.ToolCall(LlmToolCall("retry-$input", "finish_step", """{"status":"$status","observation":"attempt $status"}""")))
+            emit(LlmStreamEvent.Completed)
+        }
+        val scripts = listOf(suiteSetup, caseSetup, caseTeardown, suiteTeardown)
+        val h = harness(suite, listOf(finishWithUsage("fail", 30L), textTurn, finishWithUsage("pass", 70L), textTurn), scripts)
+        val run = runBlocking {
+            val config = h.config(suite).copy(caseRetries = 1)
+            val started = assertIs<StartRunResult.Started>(h.coordinator.start(config))
+            withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) }
+        }
+
+        val result = run.caseResult("Recover")
+        assertEquals("SCTCTE", marker.readText(), "suite setup runs once; case hooks repeat in setup/body/teardown order")
+        assertEquals(CaseStatus.PASS, result.status)
+        assertEquals(2, result.caseAttempt)
+        assertTrue(result.flaky)
+        assertEquals(1, result.priorAttempts.size)
+        assertEquals(CaseStatus.FAIL, result.priorAttempts.single().status)
+        assertEquals("fail", result.priorAttempts.single().steps.single { !it.setup }.agentClaim)
+        assertEquals(30L, result.priorAttempts.single().agentUsage?.inputTokens)
+        assertEquals(70L, result.agentUsage?.inputTokens)
+        assertEquals(100L, run.aiUsage()?.inputTokens, "run costs include both attempts while the final status comes from attempt two")
+        val recordedAttempts = listOf(1 to result.priorAttempts.single().steps, 2 to result.steps)
+        recordedAttempts.forEach { (attempt, steps) ->
+            assertEquals(setOf(result.caseId), steps.map { it.caseId }.toSet(), "all hook/body results carry the case identity")
+            assertEquals(setOf(1), steps.map { it.iteration }.toSet())
+            assertEquals(setOf(attempt), steps.map { it.caseAttempt }.toSet(), "hook results must follow the body attempt identity")
+        }
+        assertEquals(RunStatus.PASSED, run.status)
+        assertEquals(result, assertNotNull(h.store.load(run.id)).caseResult("Recover"))
+        marker.delete()
+    }
+
+    @Test
     fun continueAndCreateIssueAndContinueMoveOnAndFlagTheIssue() {
         val suite = suiteOf(
             caseOf(
@@ -487,6 +538,24 @@ class TestRunEngineTest {
     }
 
     @Test
+    fun positiveRunRetryOverrideRetriesTheActualAgentWatchdogTimeoutBeforePausePolicy() {
+        val suite = suiteOf(caseOf("Timeout retry", step("Slow action", timeoutMs = 250, onFailure = OnFailure.PAUSE_FOR_USER)))
+        val h = harness(suite, listOf(hangingTurn, finishTurn("pass", "retry completed"), textTurn))
+        val started = assertIs<StartRunResult.Started>(runBlocking {
+            h.coordinator.start(h.config(suite).copy(stepRetriesOverride = 1))
+        })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val result = run.caseResult("Timeout retry").steps.single()
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(CaseStatus.PASS, run.caseResult("Timeout retry").status)
+        assertEquals(2, result.attempts)
+        assertEquals(StepStatus.TIMEOUT, result.attemptHistory.first { it.attempt == 1 }.status)
+        assertEquals(StepStatus.PASS, result.status)
+        assertTrue(h.coordinator.pausedSteps().isEmpty(), "the explicit positive timeout retry runs before the pause-for-user policy")
+    }
+
+    @Test
     fun anAgentThatStopsWithoutFinishingIsRestartedAtTheSameStepThenGivenUp() {
         val suite = suiteOf(caseOf("Stops", step("Only step")))
         // maxAgentRestarts = 1: the first plain-text answer restarts the agent, the second one gives up on the step.
@@ -539,6 +608,7 @@ class TestRunEngineTest {
         val case = run.caseResult("Blocked one")
         assertEquals(CaseStatus.BLOCKED, case.status)
         assertEquals(listOf(StepStatus.SKIPPED, StepStatus.SKIPPED), case.steps.map { it.status })
+        assertTrue(case.steps.all { it.caseId == case.caseId && it.iteration == case.iteration && it.caseAttempt == case.caseAttempt })
         assertEquals(RunStatus.FAILED, run.status)
         assertTrue(h.provider.requests.isEmpty(), "the agent was never started")
         assertEquals("done", marker.readText())
@@ -562,6 +632,31 @@ class TestRunEngineTest {
         assertEquals(CaseStatus.BLOCKED, run.caseResult("Needs setup").status)
         assertEquals(CaseStatus.PASS, run.caseResult("Fine").status)
         assertEquals(RunStatus.FAILED, run.status)
+    }
+
+    @Test
+    fun anExecutedTransientSetupScriptFailureCanRerunWithFreshAttemptIdentity() {
+        assumeFalse(System.getProperty("os.name").lowercase().contains("win"))
+        val marker = File.createTempFile("case-setup-retry", ".txt").also { it.delete() }
+        val command = "if [ ! -f '${marker.absolutePath}' ]; then touch '${marker.absolutePath}'; exit 3; fi"
+        val setup = hostScript("transient_setup", command)
+        val suite = suiteOf(caseOf("Setup retries", step("Open the app"), setup = listOf(scriptHook(setup))))
+        val h = harness(suite, listOf(finishTurn("pass"), textTurn), scripts = listOf(setup))
+        val run = runBlocking {
+            val started = assertIs<StartRunResult.Started>(h.coordinator.start(h.config(suite).copy(caseRetries = 1)))
+            withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) }
+        }
+
+        val result = run.caseResult("Setup retries")
+        val previous = result.priorAttempts.single()
+        assertEquals(CaseStatus.PASS, result.status)
+        assertEquals(2, result.caseAttempt)
+        assertEquals(StepStatus.FAIL, previous.steps.single { it.setup }.status)
+        assertEquals(StepStatus.FAIL, previous.steps.single { it.setup }.executionStatus)
+        assertEquals(StepStatus.PASS, result.steps.single { it.setup }.status)
+        assertEquals(setOf(1), previous.steps.map { it.caseAttempt }.toSet())
+        assertEquals(setOf(2), result.steps.map { it.caseAttempt }.toSet())
+        marker.delete()
     }
 
     @Test

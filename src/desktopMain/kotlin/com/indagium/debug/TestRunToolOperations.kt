@@ -1,16 +1,20 @@
 package com.indagium.debug
 
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.aiUsage
@@ -184,7 +188,22 @@ internal class TestRunToolOperations(private val appState: AppState) {
             openLaneTabs = a.bool("openLaneTabs") ?: true,
             manualSteps = manualStepsOf(a),
             judgeInconclusivePolicy = judgeInconclusivePolicyOf(a),
+            judgeTiming = judgeTimingOf(a),
+            caseRetries = a.int("caseRetries") ?: 0,
+            stepRetriesOverride = stepRetriesOverrideOf(a),
         )
+    }
+
+    private fun judgeTimingOf(a: ToolArgs): JudgeTiming {
+        val raw = a.string("judgeTiming")?.trim()?.takeIf { it.isNotEmpty() } ?: return JudgeTiming.INLINE
+        return JudgeTiming.parse(raw) ?: toolArgError("judgeTiming must be one of ${JudgeTiming.entries.joinToString(", ") { it.wire }}.")
+    }
+
+    private fun stepRetriesOverrideOf(a: ToolArgs): Int? {
+        if (!a.hasKey("stepRetriesOverride") || a.map["stepRetriesOverride"] == null) return null
+        val retries = a.int("stepRetriesOverride") ?: toolArgError("stepRetriesOverride must be a whole number from 0 to $MAX_STEP_RETRIES.")
+        if (retries !in 0..MAX_STEP_RETRIES) toolArgError("stepRetriesOverride must be between 0 and $MAX_STEP_RETRIES.")
+        return retries
     }
 
     private fun judgeInconclusivePolicyOf(a: ToolArgs): JudgeInconclusivePolicy {
@@ -238,10 +257,23 @@ internal class TestRunToolOperations(private val appState: AppState) {
         put("suiteId", run.suite.id)
         put("suiteName", run.suite.name)
         put("status", run.status.name)
+        val summary = run.summary()
+        put("flaky", summary.flaky)
+        put("pendingVerificationSteps", summary.pendingVerificationSteps)
         put("createdAt", run.createdAt)
         put("startedAt", run.startedAt)
         put("finishedAt", run.finishedAt)
         put("warnings", run.warnings)
+        put(
+            "judging",
+            mapOf(
+                "mode" to run.config.judgeMode,
+                "timing" to run.config.judgeTiming.wire,
+                "inconclusivePolicy" to run.config.judgeInconclusivePolicy.wire,
+                "stepRetriesOverride" to run.config.stepRetriesOverride,
+                "caseRetries" to run.config.caseRetries,
+            ),
+        )
         run.error?.let { put("error", it) }
         put("lanes", run.lanes.map(::laneMap))
         put("paused", coordinator.isPaused(run.id))
@@ -268,10 +300,19 @@ internal class TestRunToolOperations(private val appState: AppState) {
                 mapOf(
                     "laneId" to it.laneId, "case" to it.step.caseName, "stepNumber" to it.step.stepNumber, "action" to it.step.action,
                     "status" to it.step.status.name, "observation" to it.step.observation,
+                    "attempt" to it.step.attempt, "retryAllowed" to it.step.retryAllowed,
                 )
             },
         )
-        put("summary", run.summary().let { mapOf("passedSteps" to it.passedSteps, "totalSteps" to it.totalSteps, "cases" to it.caseCount) })
+        put("summary", summary.let {
+            mapOf(
+                "passedSteps" to it.passedSteps,
+                "totalSteps" to it.totalSteps,
+                "pendingVerificationSteps" to it.pendingVerificationSteps,
+                "flaky" to it.flaky,
+                "cases" to it.caseCount,
+            )
+        })
         usageMap(run.aiUsage())?.let { put("usage", it) }
     }
 
@@ -295,7 +336,11 @@ internal class TestRunToolOperations(private val appState: AppState) {
                     put("name", case.caseName)
                     put("iteration", case.iteration)
                     put("status", case.status?.name)
+                    put("caseAttempt", case.caseAttempt)
+                    put("flaky", case.flaky)
                     put("steps", case.steps.map { it.status.name })
+                    put("stepResults", case.steps.map(::stepResultMap))
+                    if (case.priorAttempts.isNotEmpty()) put("priorAttempts", case.priorAttempts.map(::caseAttemptMap))
                     judgedStepTimings(case.steps).takeIf { it.isNotEmpty() }?.let { put("judgedSteps", it) }
                     usageMap(case.agentUsage)?.let { put("agentUsage", it) }
                     usageMap(case.judgeUsage)?.let { put("judgeUsage", it) }
@@ -310,6 +355,76 @@ internal class TestRunToolOperations(private val appState: AppState) {
     private fun judgedStepTimings(steps: List<StepResult>): List<Map<String, Any?>> = steps.mapNotNull { step ->
         step.judge?.timing?.let { mapOf("stepNumber" to step.stepNumber, "stepId" to step.stepId, "judgeMs" to it.totalMs, "judgeModelTurns" to it.modelTurns) }
     }
+
+    private fun stepResultMap(step: StepResult): Map<String, Any?> = buildMap {
+        put("stepId", step.stepId)
+        put("stepNumber", step.stepNumber)
+        put("status", step.status.name)
+        put("attempts", step.attempts)
+        put("flaky", step.flaky)
+        put("executionStatus", step.executionStatus?.name)
+        put("verificationState", step.verificationState.name)
+        put("provisional", step.verificationState == com.indagium.testing.model.VerificationState.PENDING)
+        put("automaticRetryExcluded", step.automaticRetryExcluded)
+        put("caseId", step.caseId)
+        put("iteration", step.iteration)
+        put("caseAttempt", step.caseAttempt)
+        put("startedAt", step.startedAt)
+        put("durationMs", step.durationMs)
+        put("agentClaim", step.agentClaim)
+        put("observation", step.observation)
+        put("checks", step.checks.map { mapOf("kind" to it.kind, "status" to it.status.name, "detail" to it.detail, "durationMs" to it.durationMs) })
+        put("screenshotPath", step.screenshotPath)
+        put("startScreenshotPath", step.startScreenshotPath)
+        put("sampleScreenshotPaths", step.sampleScreenshotPaths)
+        put("logStartOffset", step.logStartOffset)
+        put("logEndOffset", step.logEndOffset)
+        put("transcriptStartOffset", step.transcriptStartOffset)
+        put("transcriptEndOffset", step.transcriptEndOffset)
+        put("judge", step.judge?.let { mapOf("verdict" to it.verdict.name, "usage" to usageMap(it.usage), "timing" to it.timing?.totalMs) })
+        put("attemptHistory", step.attemptHistory.map(::stepAttemptMap))
+    }
+
+    private fun stepAttemptMap(attempt: StepAttemptRecord): Map<String, Any?> = mapOf(
+        "caseId" to attempt.caseId,
+        "iteration" to attempt.iteration,
+        "caseAttempt" to attempt.caseAttempt,
+        "stepId" to attempt.stepId,
+        "attempt" to attempt.attempt,
+        "retryReason" to attempt.retryReason,
+        "status" to attempt.status.name,
+        "executionStatus" to attempt.executionStatus?.name,
+        "verificationState" to attempt.verificationState.name,
+        "startedAt" to attempt.startedAt,
+        "durationMs" to attempt.durationMs,
+        "agentClaim" to attempt.agentClaim,
+        "observation" to attempt.observation,
+        "checks" to attempt.checks.map { mapOf("kind" to it.kind, "status" to it.status.name, "detail" to it.detail) },
+        "judge" to attempt.judge?.let { mapOf("verdict" to it.verdict.name, "usage" to usageMap(it.usage), "timing" to it.timing?.totalMs) },
+        "agentUsage" to usageMap(attempt.agentUsage),
+        "judgeUsage" to usageMap(attempt.judgeUsage),
+        "screenshotPath" to attempt.screenshotPath,
+        "startScreenshotPath" to attempt.startScreenshotPath,
+        "sampleScreenshotPaths" to attempt.sampleScreenshotPaths,
+        "logStartOffset" to attempt.logStartOffset,
+        "logEndOffset" to attempt.logEndOffset,
+        "transcriptStartOffset" to attempt.transcriptStartOffset,
+        "transcriptEndOffset" to attempt.transcriptEndOffset,
+    )
+
+    private fun caseAttemptMap(attempt: CaseAttemptRecord): Map<String, Any?> = mapOf(
+        "caseId" to attempt.caseId,
+        "iteration" to attempt.iteration,
+        "attempt" to attempt.attempt,
+        "status" to attempt.status.name,
+        "startedAt" to attempt.startedAt,
+        "finishedAt" to attempt.finishedAt,
+        "note" to attempt.note,
+        "steps" to attempt.steps.map(::stepResultMap),
+        "agentUsage" to usageMap(attempt.agentUsage),
+        "judgeUsage" to usageMap(attempt.judgeUsage),
+        "externalToolCalls" to attempt.externalToolCalls,
+    )
 
     private suspend fun listRuns(): Map<String, Any?> = mapOf(
         "runs" to coordinator.listRuns().map {
@@ -365,7 +480,10 @@ internal class TestRunToolOperations(private val appState: AppState) {
         val runId = a.requiredString("runId")
         val laneId = a.requiredString("laneId")
         val decision = a.enum("decision", PauseDecision.entries) ?: toolArgError("decision is required.")
-        return if (coordinator.resumePausedStep(runId, laneId, decision)) {
+        val paused = coordinator.pausedSteps().firstOrNull { it.runId == runId && it.laneId == laneId }?.step
+        return if (decision == PauseDecision.RETRY && paused?.retryAllowed == false) {
+            errorMap("The maximum of ${com.indagium.testing.model.MAX_STEP_RETRIES} retries for this step has been reached. Choose continue or stop.")
+        } else if (coordinator.resumePausedStep(runId, laneId, decision)) {
             mapOf("runId" to runId, "laneId" to laneId, "decision" to decision.name.lowercase())
         } else {
             errorMap("Lane '$laneId' of run '$runId' is not paused.")

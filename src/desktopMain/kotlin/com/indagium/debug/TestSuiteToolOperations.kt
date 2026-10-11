@@ -30,6 +30,7 @@ import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.compactDescription
 import com.indagium.testing.model.previewLogChecks
 import com.indagium.testing.model.recordingRefs
 import com.indagium.testing.script.ScriptRunOutcome
@@ -54,7 +55,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 
 private const val MAX_PASTED_LOG_CHARS = 100_000
-private const val MAX_RECORDED_SCREEN_CAPTION_CHARS = 240
 
 private fun usageResultMap(usage: AiUsageStats?): Map<String, Any?>? = usage?.let {
     buildMap {
@@ -111,6 +111,21 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         "export_test_script" to suspendTool { a -> exportScript(a) },
         "stop_test_recording" to suspendTool { a ->
             appState.stopTestStepRecordingAndDrain(a.requiredString("sessionId")).toResult { snapshot -> recordingMap(a.requiredString("sessionId"), snapshot) }
+        },
+        "get_test_recording" to suspendTool { a ->
+            val id = a.requiredString("sessionId")
+            val rowId = a.string("rowId")
+            when (val result = appState.testStepRecordingSnapshot(id)) {
+                is StoreResult.Ok -> {
+                    if (rowId != null && result.value.steps.none { it.id == rowId }) {
+                        errorMap("No recording row '$rowId' is available.")
+                    } else {
+                        val preview = rowId?.let { appState.testStepRecordingPreview(id, it) as? StoreResult.Ok }
+                        withContext(Dispatchers.IO) { recordingMap(id, result.value, rowId, preview?.value) }
+                    }
+                }
+                else -> result.toResult { recordingMap(id, it) }
+            }
         },
         "apply_test_recording" to suspendTool { a ->
             val rows = a.objects("steps") ?: toolArgError("steps is required.")
@@ -364,17 +379,6 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         "insert_log_checks" to tool { a -> insertLogChecks(a) },
         "apply_test_step_draft" to tool { a -> applyStepDraft(a) },
         "apply_test_case_improvement" to tool { a -> applyCaseImprovement(a) },
-        "get_test_recording" to tool { a ->
-            val id = a.requiredString("sessionId")
-            val rowId = a.string("rowId")
-            appState.testStepRecordingSnapshot(id).toResult { snapshot ->
-                if (rowId != null && snapshot.steps.none { it.id == rowId && it.screenshotJpeg != null }) {
-                    errorMap("No captured input-time image is available for recording row '$rowId'.")
-                } else {
-                    recordingMap(id, snapshot, rowId)
-                }
-            }
-        },
         "update_test_recording" to tool { a ->
             val rows = a.objects("steps") ?: toolArgError("steps is required.")
             val pairs = rows.mapIndexed { index, row ->
@@ -582,6 +586,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         put("optional", step.optional)
         put("condition", step.condition)
         put("reason", step.reason)
+        stepToJson(step.proposed).toPlainMap()["gestureHints"]?.let { put("gestureHints", it) }
         put(
             "previous",
             mapOf(
@@ -591,6 +596,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 "condition" to step.previous.condition,
                 "intent" to step.intent.wire,
                 "precondition" to step.precondition,
+                "gestureHints" to stepToJson(step.previous).toPlainMap()["gestureHints"],
             ),
         )
         step.incidentalWarning?.let { put("incidentalWarning", it) }
@@ -666,6 +672,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         id: String,
         snapshot: com.indagium.testing.authoring.TestStepRecordingSnapshot,
         imageRowId: String? = null,
+        preview: com.indagium.testing.authoring.RecordingPreviewEvidence? = null,
     ): Map<String, Any?> {
         val imageRow = imageRowId?.let { wanted -> snapshot.steps.firstOrNull { it.id == wanted } }
         return buildMap {
@@ -693,7 +700,14 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 )
             }
             if (snapshot.rewriteApplied) put("rewriteNotes", snapshot.rewriteNotes)
-            put("steps", snapshot.steps.map(::recordingStepMap))
+            put(
+                "steps",
+                snapshot.steps.map { row ->
+                    val hints = (appState.testStepRecordingGestureHints(id, row.id) as? StoreResult.Ok)?.value.orEmpty()
+                    val tappedElement = (appState.testStepRecordingTappedElement(id, row.id) as? StoreResult.Ok)?.value
+                    recordingStepMap(row, hints, tappedElement)
+                },
+            )
             snapshot.videoTimeline?.let { timeline ->
                 put(
                     "videoTimeline",
@@ -709,12 +723,45 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                     ),
                 )
             }
-            imageRow?.let { row -> row.screenshotJpeg?.let { image -> putAll(recordingImageMap(row, image)) } }
+            // The row's raw screenshot can still exist in the in-memory recording while the shared preview selector withholds it
+            // (for example, because the row falls inside a password window). Only expose the selector's decoded, privacy-filtered
+            // input-time image through the legacy top-level image fields.
+            imageRow?.let { row -> preview?.rawInput?.let { image -> putAll(recordingImageMap(row, image)) } }
+            preview?.let { evidence ->
+                put(
+                    "previewEvidence",
+                    mapOf(
+                        "uiContext" to evidence.uiContextMessage,
+                        "imageAvailability" to evidence.imageAvailabilityMessage,
+                        "before" to evidence.before?.let(::recordingPreviewImageMap),
+                        "after" to evidence.after?.let(::recordingPreviewImageMap),
+                        "rawInput" to evidence.rawInput?.let(::recordingPreviewImageMap),
+                        "previewOnly" to true,
+                        "modelReceivedImages" to false,
+                    ),
+                )
+            }
             put("warnings", snapshot.warnings)
         }
     }
 
-    private fun recordingStepMap(row: RecordedTestStep): Map<String, Any?> {
+    private fun recordingPreviewImageMap(image: com.indagium.testing.authoring.RecordingPreviewImage): Map<String, Any?> = mapOf(
+        "imageBase64" to java.util.Base64.getEncoder().encodeToString(image.jpeg),
+        "mimeType" to "image/jpeg",
+        "moment" to image.moment,
+        "source" to image.source,
+        "timestampMs" to image.timestampMs,
+        "alignmentConfidence" to image.alignmentConfidence,
+        "eligibleAsExpectedScreenshot" to image.eligibleAsExpectedScreenshot,
+        "previewOnly" to true,
+        "modelReceivedImage" to false,
+    )
+
+    private fun recordingStepMap(
+        row: RecordedTestStep,
+        gestureHints: List<com.indagium.testing.model.RecordedGestureHint>,
+        tappedElement: com.indagium.testing.authoring.TappedElement?,
+    ): Map<String, Any?> {
         val screen = row.before?.takeIf { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() } ?: row.after
         return buildMap {
             put("id", row.id)
@@ -740,9 +787,14 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             put("screenshotAcquisitionFinishedAtMs", row.screenshotAcquisitionFinishedAtMs)
             put("screenshotTimingUncertain", row.screenshotTimingUncertain)
             put("screenshotVerifiedMoment", row.screenshotVerifiedMoment)
+            if (gestureHints.isNotEmpty()) {
+                put("gestureHints", stepToJson(TestStep("recorded-hints", "", gestureHints = gestureHints)).toPlainMap()["gestureHints"])
+                put("gestureHintsAreUntrustedDeviceData", true)
+                put("gestureHintsDescription", com.indagium.testing.run.fenceUntrusted("recorded_gesture_hints", gestureHints.compactDescription()))
+            }
             put("package", screen?.packageName)
             put("activity", screen?.activity)
-            put("tappedElement", row.tappedElement?.let {
+            put("tappedElement", tappedElement?.let {
                 mapOf(
                     "text" to it.text,
                     "contentDesc" to it.contentDesc,
@@ -860,33 +912,18 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         }.toMap()
     }
 
-    private fun recordingImageMap(row: RecordedTestStep, image: ByteArray): Map<String, Any?> = buildMap {
-        put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))
+    private fun recordingImageMap(row: RecordedTestStep, image: com.indagium.testing.authoring.RecordingPreviewImage): Map<String, Any?> = buildMap {
+        put("imageBase64", java.util.Base64.getEncoder().encodeToString(image.jpeg))
         put("mimeType", "image/jpeg")
         put("kind", "inputTimeContext")
         put("exampleId", row.id)
-        put("source", row.screenshotSource?.name?.lowercase() ?: "unknown")
-        put("acquiredAtMs", row.screenshotAcquiredAtMs)
-        put("acquisitionFinishedAtMs", row.screenshotAcquisitionFinishedAtMs)
-        put("timingUncertain", row.screenshotTimingUncertain)
-        put("verifiedFor", row.screenshotVerifiedMoment)
-        put("caption", recordingImageCaption(row).take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
+        put("source", image.source)
+        put("acquiredAtMs", image.timestampMs)
+        put("acquisitionFinishedAtMs", null)
+        put("timingUncertain", image.alignmentConfidence.contains("uncertain", ignoreCase = true))
+        put("verifiedFor", null)
+        put("caption", "Privacy-filtered input-time preview; source=${image.source}; timestamp=${image.timestampMs ?: "unknown"} ms")
         put("message", "Saved screenshot context with explicit source and timing; it is not the current device screen.")
-    }
-
-    private fun recordingImageCaption(row: RecordedTestStep): String {
-        val source = row.screenshotSource?.name?.lowercase() ?: "unknown"
-        val intervalStart = row.screenshotAcquiredAtMs ?: "unknown"
-        val intervalEnd = row.screenshotAcquisitionFinishedAtMs ?: "unknown"
-        val interval = "$intervalStart..$intervalEnd ms"
-        return when {
-            row.sourceInputIds.isNotEmpty() ->
-                "Verified ${row.screenshotVerifiedMoment ?: "after"} screenshot evidence for: ${row.action}; " +
-                    "source=$source; acquired=$interval"
-            row.screenshotTimingUncertain ->
-                "Uncertain raw input preview for: ${row.action}; source=$source; acquisition interval unavailable"
-            else -> "Raw input preview for: ${row.action}; source=$source; acquired=$interval"
-        }
     }
 
     private fun insertLogChecks(a: ToolArgs): Map<String, Any?> {

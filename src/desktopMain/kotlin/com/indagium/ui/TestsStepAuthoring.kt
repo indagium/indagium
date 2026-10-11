@@ -40,6 +40,8 @@ import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.INCIDENTAL_EXPECTED_WARNING
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.authoring.RecordingPreviewEvidence
+import com.indagium.testing.authoring.RecordingPreviewImage
 import com.indagium.testing.authoring.ReopenedRecordingInfo
 import com.indagium.testing.authoring.ReplacementPlan
 import com.indagium.testing.authoring.TestStepDraft
@@ -691,7 +693,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 if (row.stepKind == StepKind.AGENT && row.stateChanges.isNotEmpty() && row.sourceInputIds.isEmpty()) {
                     RecordedStateChangesHint(session, row, editable)
                 }
-                row.contextHint()?.let { TestsHint("Screen context: $it") }
+                row.contextHint()?.let { TestsHint("UI/activity context: $it") }
                 row.screenContext?.let { TestsHint(it) }
                 row.reviewReason?.let {
                     when {
@@ -700,26 +702,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                         else -> TestsHint("Recording note: $it")
                     }
                 }
-                row.screenshotJpeg?.let { bytes ->
-                    val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
-                    val caption = when {
-                        row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
-                        row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
-                        else -> "Image: raw input preview from $source; acquisition interval recorded."
-                    }
-                    TestsHint(caption)
-                    RecordedScreenshotPreview(bytes)
-                    CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
-                        updateRecorded(session, row.id) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
-                    }, enabled = editable) {
-                        val label = if (row.screenshotVerifiedMoment == "after") {
-                            "Use this verified after screenshot as an expected screenshot (review first)"
-                        } else {
-                            "Use this raw input preview as an expected screenshot (review first)"
-                        }
-                        AppText(label, color = tc.ts, fontSize = 9.sp)
-                    }
-                }
+                RecordedEvidencePreview(session, row, editable)
             }
         }
         snapshot.warnings.forEach { TestsErrorText(it) }
@@ -765,7 +748,60 @@ private fun ReopenedRecordingNotes(info: ReopenedRecordingInfo, replacement: Rep
 }
 
 @Composable
-private fun RecordedScreenshotPreview(bytes: ByteArray) {
+private fun RecordedEvidencePreview(session: TestStepRecordingSession, row: RecordedTestStep, editable: Boolean) {
+    val tc = tc()
+    val selected by produceState<RecordingPreviewEvidence?>(null, session.id, row) {
+        value = withContext(Dispatchers.IO) { session.previewEvidenceFor(row.id) }
+    }
+    val evidence = selected ?: run {
+        TestsHint("Preparing recording evidence preview…")
+        return
+    }
+    TestsHint(evidence.uiContextMessage)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        evidence.before?.let { PreviewFrameColumn("Before", it) }
+        evidence.after?.let { PreviewFrameColumn("After", it) }
+        evidence.rawInput?.let { PreviewFrameColumn("Input preview", it) }
+    }
+    evidence.imageAvailabilityMessage?.let { TestsHint(it, maxLines = 3) }
+    evidence.after?.takeIf { it.eligibleAsExpectedScreenshot }?.let { after ->
+        CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
+            val use = !row.useScreenshotAsExpected
+            updateRecorded(session, row.id) {
+                it.copy(
+                    useScreenshotAsExpected = use,
+                    expectedScreenshotJpeg = after.jpeg.takeIf { use },
+                    expectedScreenshotSource = after.source.takeIf { use },
+                    expectedScreenshotTimestampMs = after.timestampMs.takeIf { use },
+                    expectedScreenshotAlignment = after.alignmentConfidence.takeIf { use },
+                )
+            }
+        }, enabled = editable) {
+            AppText("Use this eligible after image as an expected screenshot (review first)", color = tc.ts, fontSize = 9.sp)
+        }
+    }
+}
+
+@Composable
+private fun PreviewFrameColumn(title: String, evidence: RecordingPreviewImage) {
+    Column(Modifier.width(150.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        AppText(title, color = tc().tx, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        RecordedPreviewImageThumb(evidence.jpeg, "$title recording evidence")
+        AppText(
+            buildString {
+                append(evidence.source)
+                evidence.timestampMs?.let { append(" · t=").append(it).append(" ms") }
+                append(" · ").append(evidence.alignmentConfidence)
+            },
+            color = tc().td,
+            fontSize = 8.sp,
+            maxLines = 3,
+        )
+    }
+}
+
+@Composable
+private fun RecordedPreviewImageThumb(bytes: ByteArray, description: String) {
     val bitmap by produceState<ImageBitmap?>(null, bytes) {
         value = withContext(Dispatchers.IO) {
             runCatching {
@@ -773,7 +809,7 @@ private fun RecordedScreenshotPreview(bytes: ByteArray) {
             }.getOrNull()
         }
     }
-    bitmap?.let { Image(it, contentDescription = "Input-time screenshot context", contentScale = ContentScale.Fit, modifier = Modifier.heightIn(max = 180.dp)) }
+    bitmap?.let { Image(it, contentDescription = description, contentScale = ContentScale.Fit, modifier = Modifier.width(150.dp).heightIn(max = 180.dp)) }
 }
 
 internal fun updateRecorded(session: TestStepRecordingSession, rowId: String, transform: (RecordedTestStep) -> RecordedTestStep) {

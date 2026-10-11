@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
 import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
+import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptPermission
@@ -43,7 +44,6 @@ import com.indagium.testing.model.newExampleId
 import com.indagium.testing.model.newStepId
 import com.indagium.testing.model.withKind
 import com.indagium.testing.store.MAX_STEP_MAX_TOOL_CALLS
-import com.indagium.testing.store.MAX_STEP_RETRIES
 import com.indagium.testing.store.MAX_STEP_TIMEOUT_MS
 import com.indagium.testing.store.MIN_STEP_MAX_TOOL_CALLS
 import com.indagium.testing.store.StoreResult

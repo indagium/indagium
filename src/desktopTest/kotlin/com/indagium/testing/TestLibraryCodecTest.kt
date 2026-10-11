@@ -2,7 +2,11 @@ package com.indagium.testing
 
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.NormalizedGestureBounds
+import com.indagium.testing.model.NormalizedGesturePoint
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.RecordedGestureHint
+import com.indagium.testing.model.RecordedGestureTarget
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepCheck
@@ -302,6 +306,41 @@ class TestLibraryCodecTest {
         assertEquals("case-dup", ids[0])
         assertNotEquals("case-dup", ids[1])
         assertTrue(ids.drop(1).all { it.startsWith("case-") })
+    }
+
+    @Test
+    fun recordedGestureTargetsRoundTripThroughSuiteExportAndImport() {
+        val hint = RecordedGestureHint(
+            kind = "TAP",
+            path = listOf(NormalizedGesturePoint(0.35, 0.6)),
+            durationMs = 120L,
+            sourceScreenWidth = 1080,
+            sourceScreenHeight = 2400,
+            orientationQuarterTurns = 1,
+            targetUnderTouch = RecordedGestureTarget(
+                text = "Wi-Fi icon",
+                resourceId = "com.android.systemui:id/qs_tile_icon",
+                className = "android.widget.ImageView",
+                bounds = NormalizedGestureBounds(0.32, 0.56, 0.39, 0.62),
+            ),
+            clickableTargets = listOf(
+                RecordedGestureTarget(resourceId = "com.android.systemui:id/qs_tile_toggle_target", bounds = NormalizedGestureBounds(0.29, 0.53, 0.42, 0.68)),
+                RecordedGestureTarget(resourceId = "com.android.systemui:id/qs_tile_large", bounds = NormalizedGestureBounds(0.27, 0.51, 0.72, 0.75)),
+            ),
+            touchWithinTarget = NormalizedGesturePoint(0.43, 0.67),
+        )
+        val base = fullSuite()
+        val suite = base.copy(
+            cases = base.cases.mapIndexed { caseIndex, case ->
+                if (caseIndex == 0) case.copy(steps = case.steps.mapIndexed { stepIndex, step ->
+                    if (stepIndex == 0) step.copy(gestureHints = listOf(hint)) else step
+                }) else case
+            },
+        )
+        val text = encodeSuiteFile(suite)
+
+        assertEquals(TEST_SUITE_FILE_VERSION, (rootOf(text)["version"] as JsonPrimitive).content.toInt())
+        assertEquals(hint, decodeSuiteFile(text).getOrThrow().suite.cases.first().steps.first().gestureHints.single())
     }
 
     @Test

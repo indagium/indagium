@@ -9,10 +9,12 @@ import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.VerificationState
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.summary
 import kotlin.test.Test
@@ -21,6 +23,67 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AiUsageRunAggregationTest {
+    @Test
+    fun runSummaryMarksRecoveredStepsFlakyAndCountsPendingAttemptHistoryOnce() {
+        val suite = suiteOf(caseOf("Verify", step("Open app")))
+        val stepId = suite.cases.single().steps.single().id
+        val lane = agentLane("profile-a", "SER-A")
+        val pendingHistory = (1..2).map { attempt ->
+            StepAttemptRecord(
+                caseId = suite.cases.single().id,
+                iteration = 1,
+                caseAttempt = 1,
+                stepId = stepId,
+                attempt = attempt,
+                status = StepStatus.PASS,
+                executionStatus = StepStatus.PASS,
+                verificationState = VerificationState.PENDING,
+            )
+        }
+        val result = StepResult(
+            stepId = stepId,
+            stepNumber = 1,
+            action = "Open app",
+            status = StepStatus.PASS,
+            attempts = 2,
+            caseId = suite.cases.single().id,
+            caseAttempt = 1,
+            flaky = true,
+            executionStatus = StepStatus.PASS,
+            verificationState = VerificationState.PENDING,
+            attemptHistory = pendingHistory,
+        )
+        val case = CaseResult(
+            caseId = suite.cases.single().id,
+            caseName = suite.cases.single().name,
+            status = CaseStatus.PASS,
+            steps = listOf(result),
+            flaky = true,
+        )
+        val run = TestRun(
+            id = "run-flaky-pending",
+            suite = suite,
+            scripts = emptyList(),
+            sharedSteps = emptyList(),
+            config = RunConfig(suite.id, lanes = listOf(lane)),
+            lanes = listOf(LaneResult(lane.id, lane, RunStatus.RUNNING, listOf(case))),
+            status = RunStatus.RUNNING,
+        )
+
+        val summary = run.summary()
+
+        assertTrue(summary.flaky)
+        assertEquals(2, summary.pendingVerificationSteps, "the current result and its matching history row are one attempt")
+        assertEquals(0, summary.passedSteps, "execution PASS stays provisional while verification is pending")
+
+        val secondLane = lane.copy(id = "lane-2")
+        val twoLaneRun = run.copy(
+            config = run.config.copy(lanes = listOf(lane, secondLane)),
+            lanes = run.lanes + LaneResult(secondLane.id, secondLane, RunStatus.RUNNING, listOf(case)),
+        )
+        assertEquals(4, twoLaneRun.summary().pendingVerificationSteps, "matching attempt IDs on different lanes are independent pending work")
+    }
+
     @Test
     fun runTotalsSumCaseRetriesLanesAndComparisonWithoutAddingRollupsOrStepJudgeTwice() {
         val suite = suiteOf(caseOf("Sign in", step("Open sign-in")))

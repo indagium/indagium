@@ -2,6 +2,7 @@ package com.indagium.testing.run
 
 import com.indagium.model.summaryLabel
 import com.indagium.testing.model.CaseResult
+import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepFix
@@ -42,10 +43,13 @@ private fun StringBuilder.quote(label: String, text: String) {
     text.trim().lines().forEach { append("    > ").append(it).append('\n') }
 }
 
+@Suppress("CyclomaticComplexMethod") // Emits the independent evidence, timing, verification, and history fields of one report row.
 private fun StringBuilder.step(result: StepResult) {
     append("- ").append(if (result.setup) "(setup) " else "").append(result.stepNumber).append(". ").append(result.action.trim())
         .append(" — **").append(result.status.mark()).append("**")
     if (result.attempts > 1) append(" (").append(result.attempts).append(" attempts)")
+    if (result.flaky) append(" · **flaky**")
+    if (result.verificationState == com.indagium.testing.model.VerificationState.PENDING) append(" · **provisional: judge pending**")
     append(" · ").append(result.durationMs / MILLIS_PER_SECOND).append("s\n")
     appendPerformer(result)
     if (result.expected.isNotBlank()) append("  - Expected: ").append(result.expected.trim()).append('\n')
@@ -56,6 +60,12 @@ private fun StringBuilder.step(result: StepResult) {
             .append(" — ").append(check.detail.trim().take(MAX_CHECK_DETAIL)).append('\n')
     }
     result.judge?.let { judge -> appendJudge(judge, result.judgeInconclusive) }
+    if (result.executionStatus != null && result.executionStatus != result.status) {
+        append("  - Execution outcome: **").append(result.executionStatus.name).append("** · verification: ")
+            .append(result.verificationState.name.lowercase().replace('_', ' ')).append('\n')
+    }
+    result.judgeQueueWaitMs?.let { append("  - Judge queue wait: ").append(it).append(" ms\n") }
+    result.judgmentDurationMs?.let { append("  - Judge duration: ").append(it).append(" ms\n") }
     result.agentError?.let { append("  - Marked as an agent error: ").append(it.trim().replace('\n', ' ')).append('\n') }
     result.screenshotPath?.let { append("  - Screenshot: `").append(it).append("`\n") }
     result.startScreenshotPath?.let { append("  - Start screenshot: `").append(it).append("`\n") }
@@ -69,12 +79,39 @@ private fun StringBuilder.step(result: StepResult) {
     if (result.issueRequested) {
         append("  - An issue was requested for this step").append(result.issueId?.let { " (draft `$it`)" }.orEmpty()).append(".\n")
     }
+    result.attemptHistory.dropLast(1).forEach { attempt ->
+        append("  - Earlier attempt ").append(attempt.attempt).append(" (").append(attempt.status.name.lowercase()).append(")")
+            .append(" · ").append(attempt.durationMs / MILLIS_PER_SECOND).append("s · ").append(attempt.retryReason).append('\n')
+        if (attempt.verificationState == com.indagium.testing.model.VerificationState.PENDING) {
+            append("    - Provisional: independent judge pending; execution outcome: ")
+                .append(attempt.executionStatus?.name ?: "unavailable").append('\n')
+        }
+        if (attempt.executionStatus != null && attempt.executionStatus != attempt.status) {
+            append("    - Execution outcome: ").append(attempt.executionStatus.name)
+                .append(" · verification: ").append(attempt.verificationState.name.lowercase().replace('_', ' ')).append('\n')
+        }
+        attempt.judgeQueueWaitMs?.let { append("    - Judge queue wait: ").append(it).append(" ms\n") }
+        attempt.judgmentDurationMs?.let { append("    - Judge duration: ").append(it).append(" ms\n") }
+        attempt.agentClaim?.let { append("    - Agent claim: ").append(it).append('\n') }
+        quote("Attempt ${attempt.attempt} observation", attempt.observation)
+        attempt.checks.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }.forEach { check ->
+            append("    - Failed check ").append(check.kind).append(": ").append(check.detail.trim().take(MAX_CHECK_DETAIL)).append('\n')
+        }
+        attempt.judge?.let { judge ->
+            append("    - Judge: ").append(judge.verdict.name)
+                .append(judge.usage?.let { usage -> " · ${usage.summaryLabel()}" }.orEmpty()).append('\n')
+        }
+        attempt.screenshotPath?.let { append("    - Screenshot: `").append(it).append("`\n") }
+        if (attempt.logStartOffset != null && attempt.logEndOffset != null) {
+            append("    - Log bytes ").append(attempt.logStartOffset).append("–").append(attempt.logEndOffset).append('\n')
+        }
+    }
 }
 
 /** The judge's verdict on a step with what it cost: the problem it had, its usage, its time, its reasoning and its suggested fix. */
 private fun StringBuilder.appendJudge(judge: StepJudgement, inconclusive: Boolean) {
     append("  - Judge: **").append(judge.verdict.name).append("** (").append(judge.classification.name.lowercase()).append(")")
-    if (inconclusive) append(" — the step status is the agent's claim and the checks alone")
+    if (inconclusive) append(" — independent verification was inconclusive")
     append('\n')
     judge.error?.let { append("    - Judge problem: ").append(it).append('\n') }
     judge.usage?.let { append("    - Judge attempt usage: ").append(it.summaryLabel()).append('\n') }
@@ -112,12 +149,18 @@ private fun StringBuilder.case(case: CaseResult) {
     append("\n#### ").append(case.caseName)
     if (case.iteration > 1) append(" (run ").append(case.iteration).append(')')
     append(" — ").append(case.status?.name ?: "running").append('\n')
+    if (case.flaky) append("- Flaky: recovered on case attempt ").append(case.caseAttempt).append('\n')
     case.agentUsage?.let { append("- Agent usage: ").append(it.summaryLabel()).append('\n') }
     case.judgeUsage?.let { append("- Inline judge usage: ").append(it.summaryLabel()).append('\n') }
     case.externalToolCalls?.let {
         append("- External MCP actor usage: ").append(if (it == 0L) "Tools 0" else "Tools $it · Tokens unavailable · Partial").append('\n')
     }
     case.note?.let { append(it).append('\n') }
+    case.priorAttempts.forEach { attempt ->
+        append("- Earlier case attempt ").append(attempt.attempt).append(": ").append(attempt.status.name)
+            .append(" · ").append(((attempt.finishedAt ?: attempt.startedAt) - attempt.startedAt).coerceAtLeast(0) / MILLIS_PER_SECOND).append("s")
+            .append(attempt.note?.let { " · $it" }.orEmpty()).append('\n')
+    }
     case.steps.forEach { step(it) }
 }
 

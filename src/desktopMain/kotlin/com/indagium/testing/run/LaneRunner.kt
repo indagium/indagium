@@ -8,6 +8,7 @@ import com.indagium.model.sumAiUsage
 import com.indagium.testing.device.LaneMarkerOutcome
 import com.indagium.testing.device.LaneMarkerRequest
 import com.indagium.testing.device.TestDeviceSession
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.HookItem
@@ -83,6 +84,7 @@ internal class LaneRunner(
     private val handle: LaneHandle,
     /** The judge of this lane, or null when the run has none. */
     private val judge: StepJudge? = null,
+    private val judgeLimiter: JudgeConcurrencyLimiter = JudgeConcurrencyLimiter(),
 ) : SequenceListener {
     private val suite = snapshot.suite
     private val evidence = snapshot.config.evidence
@@ -221,6 +223,10 @@ internal class LaneRunner(
             judge = judge,
             judgeMode = snapshot.config.judge,
             judgeInconclusivePolicy = snapshot.config.judgeInconclusivePolicy,
+            judgeTiming = snapshot.config.judgeTiming,
+            judgeLimiter = judgeLimiter,
+            laneId = lane.id,
+            stepRetriesOverride = snapshot.config.stepRetriesOverride,
             judgeRequested = snapshot.config.judgeActive,
             pauseGate = deps.pauseGate,
             suiteId = suite.id,
@@ -298,43 +304,239 @@ internal class LaneRunner(
     private fun blockCases(note: String) {
         for (iteration in 1..snapshot.config.repeat) {
             for (case in cases) {
-                val steps = case.steps.mapIndexed { i, step -> skipped(i, step, note) }
+                val steps = case.steps.mapIndexed { i, step -> skipped(i, step, note, case.id, iteration, caseAttempt = 1) }
                 state.upsertCase(lane.id, CaseResult(case.id, case.name, iteration, CaseStatus.BLOCKED, steps, now(), now(), note))
             }
         }
     }
 
-    private fun skipped(index: Int, step: TestStep, note: String) =
-        StepResult(step.id, index + 1, step.action, step.expected, status = StepStatus.SKIPPED, attempts = 0, startedAt = now(), note = note, kind = step.kind)
+    private fun skipped(index: Int, step: TestStep, note: String, caseId: String, iteration: Int, caseAttempt: Int) =
+        StepResult(
+            step.id,
+            index + 1,
+            step.action,
+            step.expected,
+            status = StepStatus.SKIPPED,
+            attempts = 0,
+            startedAt = now(),
+            note = note,
+            kind = step.kind,
+            caseId = caseId,
+            iteration = iteration,
+            caseAttempt = caseAttempt,
+        )
 
     @Suppress("LongParameterList")
     private suspend fun runCase(env: SequenceEnv, driver: LaneDriver, hooks: HookRunner, case: TestCase, iteration: Int, prefix: String) {
-        deps.pauseGate.awaitResumed()
-        val owner = CaseRecorder(CaseResult(case.id, case.name, iteration, startedAt = now()))
+        val maximumAttempts = 1 + snapshot.config.caseRetries.coerceIn(0, 2)
+        val priorAttempts = ArrayList<CaseAttemptRecord>()
+        val manualReason = manualRetryExclusion(case)
+        for (caseAttempt in 1..maximumAttempts) {
+            deps.pauseGate.awaitResumed()
+            val attemptPrefix = "$prefix-a$caseAttempt"
+            val attemptResult = runCaseAttempt(env, driver, hooks, case, iteration, caseAttempt, attemptPrefix, priorAttempts)
+            var result = attemptResult.copy(
+                caseAttempt = caseAttempt,
+                priorAttempts = priorAttempts.toList(),
+                flaky = attemptResult.status == CaseStatus.PASS &&
+                    (priorAttempts.isNotEmpty() || attemptResult.steps.any { it.flaky }),
+            )
+            val canRetry = caseAttempt < maximumAttempts && isEligibleForCaseRetry(result)
+            val exclusion = manualReason ?: caseRetryExclusion(result)
+            if (canRetry && exclusion != null) {
+                result = result.copy(note = listOfNotNull(result.note, "Automatic case retry skipped: $exclusion").joinToString(" "))
+            }
+            if (canRetry && exclusion == null) {
+                priorAttempts += result.toAttemptRecord(caseAttempt)
+                result = result.copy(
+                    priorAttempts = priorAttempts.dropLast(1),
+                    note = listOfNotNull(result.note, "Automatic retry scheduled after attempt $caseAttempt.").joinToString(" "),
+                )
+                state.upsertCase(lane.id, result)
+                env.transcript?.append(
+                    "case_retry_scheduled",
+                    mapOf(
+                        "caseId" to case.id,
+                        "iteration" to iteration,
+                        "caseAttempt" to caseAttempt,
+                        "nextCaseAttempt" to caseAttempt + 1,
+                        "status" to result.status?.name,
+                    ),
+                )
+                continue
+            }
+            val needsFinalIssueDrafts = result.status != CaseStatus.PASS &&
+                (snapshot.config.caseRetries > 0 || snapshot.config.judgeTiming != com.indagium.testing.model.JudgeTiming.INLINE)
+            if (needsFinalIssueDrafts) {
+                result = finalizeIssueDrafts(result)
+            }
+            state.upsertCase(lane.id, result)
+            if (result.flaky) {
+                env.transcript?.append(
+                    "case_flaky_recovered",
+                    mapOf("caseId" to case.id, "iteration" to iteration, "caseAttempt" to caseAttempt),
+                )
+            }
+            return
+        }
+    }
+
+    @Suppress("LongParameterList")
+    private suspend fun runCaseAttempt(
+        env: SequenceEnv,
+        driver: LaneDriver,
+        hooks: HookRunner,
+        case: TestCase,
+        iteration: Int,
+        caseAttempt: Int,
+        prefix: String,
+        priorAttempts: List<CaseAttemptRecord>,
+    ): CaseResult {
+        val owner = CaseRecorder(
+            CaseResult(case.id, case.name, iteration, startedAt = now(), caseAttempt = caseAttempt, priorAttempts = priorAttempts.toList()),
+        )
         recorder = owner
-        updateLane { it.copy(currentCase = case.name, currentStepNumber = null, currentStepAction = null) }
-        env.transcript?.append("case_started", mapOf("case" to case.name, "iteration" to iteration))
+        updateLane {
+            it.copy(
+                currentCase = if (caseAttempt > 1) "${case.name} (attempt $caseAttempt)" else case.name,
+                currentStepNumber = null,
+                currentStepAction = null,
+            )
+        }
+        env.transcript?.append("case_started", mapOf("case" to case.name, "iteration" to iteration, "caseAttempt" to caseAttempt))
         val budget = CaseBudget(snapshot.config.caseToolCallLimit)
+        var sequence: StepSequence? = null
+        var setupBlocked: CaseStatus? = null
+        var caseBodyCompleted = false
         try {
-            val setupOk = hooks.run(case.setup, case.id, iteration, "$prefix-setup", budget, stopOnFailure = true)
+            val setupOk = hooks.run(
+                case.setup,
+                case.id,
+                iteration,
+                "$prefix-setup",
+                budget,
+                stopOnFailure = true,
+                caseAttempt = caseAttempt,
+                priorCaseAttempts = priorAttempts,
+            )
             if (!setupOk) {
                 val note = if (budget.exhausted()) CASE_BUDGET_EXHAUSTED_NOTE else SETUP_FAILED_NOTE
-                owner.addAll(case.steps.mapIndexed { i, step -> skipped(i, step, note) })
-                owner.finish(if (budget.exhausted()) CaseStatus.ERROR else CaseStatus.BLOCKED, note)
+                owner.addAll(case.steps.mapIndexed { i, step -> skipped(i, step, note, case.id, iteration, caseAttempt) })
+                setupBlocked = if (budget.exhausted()) CaseStatus.ERROR else CaseStatus.BLOCKED
+                owner.note(note)
             } else {
-                runSteps(env, driver, owner, case, iteration, prefix, budget)
+                sequence = runSteps(env, driver, owner, case, iteration, caseAttempt, prefix, budget, priorAttempts)
             }
+            caseBodyCompleted = true
         } catch (stop: CancellationException) {
             cancelled = true
+            withContext(NonCancellable) { sequence?.cancelDeferredJudgements() }
             owner.finish(CaseStatus.CANCELLED)
             throw stop
         } finally {
             withContext(NonCancellable) {
-                val tornDown = hooks.run(case.teardown, case.id, iteration, "$prefix-teardown", CaseBudget(snapshot.config.caseToolCallLimit), false, cancelled)
+                val tornDown = hooks.run(
+                    case.teardown,
+                    case.id,
+                    iteration,
+                    "$prefix-teardown",
+                    CaseBudget(snapshot.config.caseToolCallLimit),
+                    false,
+                    cancelled,
+                    caseAttempt,
+                    priorAttempts,
+                )
                 if (!tornDown) owner.note("Teardown failed.")
-                recorder = null
+                if (!caseBodyCompleted) recorder = null
             }
         }
+        try {
+            if (setupBlocked != null) {
+                owner.finish(checkNotNull(setupBlocked))
+            } else {
+                sequence?.finishDeferredJudgements()
+                owner.finish(
+                    caseStatus(owner.snapshot().steps.filterNot { it.setup }, case.steps.size, budget),
+                    CASE_BUDGET_EXHAUSTED_NOTE.takeIf { budget.exhausted() },
+                )
+            }
+        } catch (stop: CancellationException) {
+            cancelled = true
+            withContext(NonCancellable) {
+                sequence?.cancelDeferredJudgements()
+                owner.finish(CaseStatus.CANCELLED)
+            }
+            throw stop
+        } finally {
+            recorder = null
+        }
+        return owner.snapshot()
+    }
+
+    private fun manualRetryExclusion(case: TestCase): String? {
+        val caseHookSteps = (case.setup + case.teardown).flatMap { hook ->
+            when (hook) {
+                is HookItem.Script -> emptyList()
+                is HookItem.Shared -> snapshot.sharedSteps.firstOrNull { it.id == hook.sharedStepId }?.steps.orEmpty()
+            }
+        }
+        val manual = (case.steps + caseHookSteps).filter { it.kind == com.indagium.testing.model.StepKind.MANUAL }
+        if (manual.isEmpty()) return null
+        return when (snapshot.config.manualSteps) {
+            com.indagium.testing.model.ManualStepsOption.WAIT_FOR_TESTER -> "the case requires a tester for manual steps."
+            com.indagium.testing.model.ManualStepsOption.USE_SCRIPT_THEN_WAIT ->
+                "the case has manual steps without an automation script."
+                    .takeIf { manual.any { step -> step.script == null } }
+            com.indagium.testing.model.ManualStepsOption.SKIP -> null
+        }
+    }
+
+    private fun isEligibleForCaseRetry(result: CaseResult): Boolean {
+        if (result.status !in setOf(CaseStatus.FAIL, CaseStatus.BLOCKED)) return false
+        if (result.steps.any { it.userRejected || it.automaticRetryExcluded }) return false
+        val failed = result.steps.filter { step ->
+            step.status == StepStatus.TIMEOUT || step.status == StepStatus.FAIL && (
+                !step.setup || step.checks.isNotEmpty() || step.agentClaim != null || step.judge?.verdict == com.indagium.testing.model.JudgeVerdict.FAIL ||
+                    step.executionStatus == StepStatus.FAIL
+            )
+        }
+        if (failed.isNotEmpty()) return true
+        if (result.steps.any { it.setup && it.status == StepStatus.BLOCKED && !it.judgeInconclusive }) return true
+        val blockers = result.steps.filter { !it.setup && it.status == StepStatus.BLOCKED }
+        return blockers.isNotEmpty() && blockers.any { !it.judgeInconclusive }
+    }
+
+    private fun caseRetryExclusion(result: CaseResult): String? = when {
+        result.steps.any { it.automaticRetryExcluded } -> "a driver step needs a configuration or permission change."
+        result.steps.any { it.userRejected } -> "a user rejected the step."
+        result.steps.any { it.kind == com.indagium.testing.model.StepKind.MANUAL && it.completedBy == com.indagium.testing.model.StepCompletion.TESTER } ->
+            "a tester completed a manual step."
+        else -> null
+    }
+
+    private fun CaseResult.toAttemptRecord(attempt: Int) = CaseAttemptRecord(
+        caseId = caseId,
+        iteration = iteration,
+        attempt = attempt,
+        status = status ?: CaseStatus.ERROR,
+        steps = steps,
+        startedAt = startedAt,
+        finishedAt = finishedAt,
+        note = note,
+        agentUsage = agentUsage,
+        judgeUsage = judgeUsage,
+        externalToolCalls = externalToolCalls,
+    )
+
+    private fun finalizeIssueDrafts(result: CaseResult): CaseResult {
+        val issues = deps.issues ?: return result
+        val drafter = IssueAutoDrafter(issues, deps.store.runDir(runId), deps.goldenFile)
+        val steps = result.steps.map { step ->
+            if (!step.issueRequested || step.issueId != null) return@map step
+            val draft = runCatching { drafter.draft(state.current, lane.id, result.caseId, result.iteration, step).getOrNull() }.getOrNull()
+            if (draft != null) step.copy(issueId = draft) else step
+        }
+        return result.copy(steps = steps)
     }
 
     @Suppress("LongParameterList")
@@ -344,12 +546,13 @@ internal class LaneRunner(
         owner: CaseRecorder,
         case: TestCase,
         iteration: Int,
+        caseAttempt: Int,
         prefix: String,
         budget: CaseBudget,
-    ) {
+        priorAttempts: List<CaseAttemptRecord>,
+    ): StepSequence? {
         if (case.steps.isEmpty()) {
-            owner.finish(CaseStatus.PASS, "The case has no steps.")
-            return
+            return null
         }
         val sequence = StepSequence(
             env,
@@ -362,6 +565,8 @@ internal class LaneRunner(
                 evidencePrefix = prefix,
                 caseBudget = budget,
                 iteration = iteration,
+                caseAttempt = caseAttempt,
+                priorCaseAttempts = priorAttempts,
             ),
         )
         try {
@@ -370,16 +575,16 @@ internal class LaneRunner(
             // A cancellation during independent judgment must not discard the finish_step report already
             // committed to the sequence. Preserve the current result before the case is finalized.
             withContext(NonCancellable) {
+                sequence.cancelDeferredJudgements()
                 sequence.abort(StepStatus.ERROR, "The run was cancelled while this step was being evaluated.")
             }
             throw cancelled
         }
         val results = sequence.results()
-        owner.addAll(case.steps.drop(results.size).mapIndexed { i, step -> skipped(results.size + i, step, STOPPED_NOTE) })
-        owner.finish(
-            caseStatus(results, case.steps.size, budget),
-            CASE_BUDGET_EXHAUSTED_NOTE.takeIf { budget.exhausted() },
+        owner.addAll(
+            case.steps.drop(results.size).mapIndexed { i, step -> skipped(results.size + i, step, STOPPED_NOTE, case.id, iteration, caseAttempt) },
         )
+        return sequence
     }
 
     private fun caseStatus(results: List<StepResult>, stepCount: Int, budget: CaseBudget): CaseStatus = when {
@@ -399,8 +604,23 @@ internal class LaneRunner(
 
     override fun stepRecorded(result: StepResult) {
         val owner = recorder ?: return
-        owner.add(if (result.issueRequested && !result.setup) withIssueDraft(owner, result) else result)
+        owner.add(
+            if (result.issueRequested && !result.setup && snapshot.config.caseRetries == 0 &&
+                snapshot.config.judgeTiming == com.indagium.testing.model.JudgeTiming.INLINE
+            ) {
+                withIssueDraft(owner, result)
+            } else {
+                result
+            },
+        )
         if (!result.setup && result.status in MARKED_STEP_STATUSES) markStepInCapture(owner.caseName, result)
+    }
+
+    override fun stepUpdated(result: StepResult) {
+        val owner = recorder ?: return
+        if (owner.updateDeferredStep(result) && !result.setup && result.status in MARKED_STEP_STATUSES) {
+            markStepInCapture(owner.caseName, result)
+        }
     }
 
     /**
@@ -516,6 +736,53 @@ internal class LaneRunner(
             publish()
         }
 
+        @Suppress("CyclomaticComplexMethod") // Atomically applies deferred verdicts to exact pending top-level/history attempts.
+        @Synchronized
+        fun updateDeferredStep(step: StepResult): Boolean {
+            if (step.caseId != caseId || step.iteration != iteration || step.caseAttempt != result.caseAttempt) return false
+            val position = result.steps.indexOfFirst { current ->
+                current.caseId == step.caseId && current.iteration == step.iteration && current.caseAttempt == step.caseAttempt &&
+                    current.stepId == step.stepId && (
+                        current.attempts == step.attempts && current.verificationState == com.indagium.testing.model.VerificationState.PENDING ||
+                            current.attemptHistory.any { earlier ->
+                                earlier.verificationState == com.indagium.testing.model.VerificationState.PENDING &&
+                                    step.attemptHistory.any { resolved ->
+                                        resolved.caseId == earlier.caseId && resolved.iteration == earlier.iteration &&
+                                            resolved.caseAttempt == earlier.caseAttempt && resolved.stepId == earlier.stepId &&
+                                            resolved.attempt == earlier.attempt &&
+                                            resolved.verificationState != com.indagium.testing.model.VerificationState.PENDING
+                                    }
+                            }
+                    )
+            }
+            if (position < 0) return false
+            val previous = result.steps[position]
+            val completedJudges = step.attemptHistory.filter { resolved ->
+                previous.attemptHistory.any { before ->
+                    before.caseId == resolved.caseId && before.iteration == resolved.iteration && before.caseAttempt == resolved.caseAttempt &&
+                        before.stepId == resolved.stepId && before.attempt == resolved.attempt &&
+                        before.verificationState == com.indagium.testing.model.VerificationState.PENDING &&
+                        resolved.verificationState != com.indagium.testing.model.VerificationState.PENDING
+                }
+            }.mapNotNull { it.judgeUsage }
+            val topAttemptResolvedInHistory = step.attemptHistory.any { resolved ->
+                resolved.caseId == previous.caseId && resolved.iteration == previous.iteration && resolved.caseAttempt == previous.caseAttempt &&
+                    resolved.stepId == previous.stepId && resolved.attempt == previous.attempts &&
+                    resolved.verificationState != com.indagium.testing.model.VerificationState.PENDING
+            }
+            val topJudgeUsage = if (previous.verificationState == com.indagium.testing.model.VerificationState.PENDING && !topAttemptResolvedInHistory) {
+                step.judge?.usage
+            } else {
+                null
+            }
+            result = result.copy(
+                steps = result.steps.mapIndexed { index, current -> if (index == position) step else current },
+                judgeUsage = sumAiUsage(listOfNotNull(result.judgeUsage, topJudgeUsage) + completedJudges),
+            )
+            publish()
+            return true
+        }
+
         @Synchronized
         fun note(text: String) {
             result = result.copy(note = listOfNotNull(result.note, text).joinToString(" "))
@@ -547,6 +814,9 @@ internal class LaneRunner(
             result = result.copy(status = status, finishedAt = now(), note = note ?: result.note)
             publish()
         }
+
+        @Synchronized
+        fun snapshot(): CaseResult = result
     }
 }
 

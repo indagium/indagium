@@ -13,6 +13,7 @@ import com.indagium.testing.authoring.RecordingScreenshotEvidence
 import com.indagium.testing.authoring.TappedElement
 import com.indagium.testing.authoring.parseTopActivity
 import com.indagium.testing.authoring.resolveTappedElement
+import com.indagium.testing.authoring.resolveTappedTargets
 import com.indagium.testing.device.UI_DUMP_COMMAND
 import com.indagium.testing.device.UI_DUMP_TIMEOUT_SECONDS
 import com.indagium.testing.device.UiNode
@@ -283,6 +284,27 @@ class RecordingScreenProbeTest {
         val inner = node(100, 100, 300, 300, cls = "Inner", clickable = true)
         assertEquals("Inner", resolveTappedElement(screen(outer, inner), tapAt(15, 15))?.className)
         assertNull(resolveTappedElement(screen(node(0, 0, 1000, 1000, cls = "Plain")), tapAt(15, 15)), "no label and nothing clickable")
+    }
+
+    @Test
+    fun aWifiIconRemainsDistinctFromItsTileAndSiblingLabelWithRepeatedTileIds() {
+        val icon = node(348, 602, 416, 670, id = "com.android.systemui:id/qs_tile_icon", cls = "ImageView")
+        val activation = node(313, 567, 450, 704, id = "com.android.systemui:id/qs_tile_toggle_target", cls = "FrameLayout", clickable = true)
+        val tile = node(293, 547, 777, 723, id = "com.android.systemui:id/qs_tile_large", cls = "FrameLayout", clickable = true)
+        val wifiLabel = node(465, 599, 757, 639, text = "Wi-Fi")
+        val bluetooth = node(293, 750, 777, 930, id = "com.android.systemui:id/qs_tile_large", cls = "FrameLayout", clickable = true)
+        val bluetoothToggle = node(313, 770, 450, 907, id = "com.android.systemui:id/qs_tile_toggle_target", cls = "FrameLayout", clickable = true)
+        val targets = assertNotNull(
+            resolveTappedTargets(screen(icon, activation, tile, wifiLabel, bluetooth, bluetoothToggle), RecordedPoint(382, 636, 1000, 2000)),
+        )
+
+        assertEquals("com.android.systemui:id/qs_tile_icon", targets.underTouch.resourceId)
+        assertEquals(
+            listOf("com.android.systemui:id/qs_tile_toggle_target", "com.android.systemui:id/qs_tile_large"),
+            targets.clickableAncestors.map { it.resourceId },
+        )
+        assertEquals(listOf(313 to 567, 293 to 547), targets.clickableAncestors.map { it.left to it.top })
+        assertFalse(targets.underTouch.text == "Wi-Fi", "the sibling label is not the icon under the touch")
     }
 
     @Test

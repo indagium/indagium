@@ -101,7 +101,24 @@ data class RunConfig(
     val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
     /** How a new run treats a missing judge verdict when judging was requested. */
     val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
+    /** When ordinary step judgments run. Explicit judge checks and user pauses remain inline. */
+    val judgeTiming: JudgeTiming = JudgeTiming.INLINE,
+    /** Additional whole-case attempts after an eligible failure. */
+    val caseRetries: Int = 0,
+    /** null inherits each step's configured retry count; zero disables retries; positive values override it. */
+    val stepRetriesOverride: Int? = null,
 )
+
+enum class JudgeTiming(val wire: String, val label: String) {
+    INLINE("inline", "Inline"),
+    AFTER_CASE("after_case", "After case"),
+    BACKGROUND("background", "Background"),
+    ;
+
+    companion object {
+        fun parse(text: String?): JudgeTiming? = entries.firstOrNull { it.wire.equals(text?.trim(), ignoreCase = true) }
+    }
+}
 
 enum class JudgeInconclusivePolicy(val wire: String) {
     BLOCK("block"),
@@ -144,6 +161,9 @@ enum class StepStatus { PASS, FAIL, BLOCKED, TIMEOUT, SKIPPED, ERROR }
 enum class StepCompletion { AGENT, TESTER, CHECKS, SCRIPT, SKIPPED }
 
 enum class CaseStatus { PASS, FAIL, BLOCKED, SKIPPED, CANCELLED, ERROR }
+
+/** Independent verification state, kept separate from what the agent or deterministic checks established. */
+enum class VerificationState { NOT_REQUESTED, PENDING, VERIFIED, FAILED, INCONCLUSIVE }
 
 /** NOT_EVALUATED: the check needs the judge and none judged this step (no judge configured, or it was inconclusive). */
 enum class CheckStatus { PASS, FAIL, NOT_EVALUATED, ERROR }
@@ -207,6 +227,75 @@ data class StepResult(
     val startScreenshotPath: String? = null,
     /** Timestamped playback-related evidence frames in capture order; relative to the run folder. */
     val sampleScreenshotPaths: List<String> = emptyList(),
+    /** Every concrete attempt, including the final one. Kept even when transcript retention is disabled. */
+    val attemptHistory: List<StepAttemptRecord> = emptyList(),
+    /** The final attempt passed after an earlier attempt failed. */
+    val flaky: Boolean = false,
+    /** A user explicitly rejected a paused step; automatic case retries must not overrule that decision. */
+    val userRejected: Boolean = false,
+    /** Outcome before any blind judge verdict is applied. */
+    val executionStatus: StepStatus? = null,
+    /** Whether the requested independent judgment has finished. Older run files decode as NOT_REQUESTED. */
+    val verificationState: VerificationState = VerificationState.NOT_REQUESTED,
+    /** Complete attempt identity; blank/one defaults decode legacy result rows. */
+    val caseId: String = "",
+    val iteration: Int = 1,
+    val caseAttempt: Int = 1,
+    /** A driver step failed before an action could run for a permanent setup/permission/configuration reason. */
+    val automaticRetryExcluded: Boolean = false,
+    /** Time spent queued for the blind judge; execution duration stays in [durationMs]. */
+    val judgeQueueWaitMs: Long? = null,
+    /** The judge's independent allowance, excluding queue wait. */
+    val judgmentDurationMs: Long? = null,
+)
+
+data class StepAttemptRecord(
+    val caseId: String,
+    val iteration: Int,
+    val caseAttempt: Int,
+    val stepId: String,
+    val attempt: Int,
+    val retryReason: String = "final",
+    val status: StepStatus,
+    val agentClaim: String? = null,
+    val observation: String = "",
+    val checks: List<CheckResult> = emptyList(),
+    val judge: StepJudgement? = null,
+    val startedAt: Long = 0L,
+    val durationMs: Long = 0L,
+    val screenshotPath: String? = null,
+    val startScreenshotPath: String? = null,
+    val sampleScreenshotPaths: List<String> = emptyList(),
+    val logStartOffset: Long? = null,
+    val logEndOffset: Long? = null,
+    val transcriptStartOffset: Long? = null,
+    val transcriptEndOffset: Long? = null,
+    val note: String? = null,
+    val agentUsage: AiUsageStats? = null,
+    val judgeUsage: AiUsageStats? = null,
+    val userRejected: Boolean = false,
+    val executionStatus: StepStatus? = null,
+    val verificationState: VerificationState = VerificationState.NOT_REQUESTED,
+    /** Preserves a driver's permanent setup/permission/configuration exclusion in attempt history. */
+    val automaticRetryExcluded: Boolean = false,
+    /** Time spent queued for the blind judge; execution duration stays in [durationMs]. */
+    val judgeQueueWaitMs: Long? = null,
+    /** The judge's independent allowance, excluding queue wait. */
+    val judgmentDurationMs: Long? = null,
+)
+
+data class CaseAttemptRecord(
+    val caseId: String,
+    val iteration: Int,
+    val attempt: Int,
+    val status: CaseStatus,
+    val steps: List<StepResult> = emptyList(),
+    val startedAt: Long = 0L,
+    val finishedAt: Long? = null,
+    val note: String? = null,
+    val agentUsage: AiUsageStats? = null,
+    val judgeUsage: AiUsageStats? = null,
+    val externalToolCalls: Long? = null,
 )
 
 /** [iteration] is 1-based (a run can repeat every case). [caseId] is [SUITE_SETUP_CASE_ID] or [SUITE_TEARDOWN_CASE_ID] for the suite-level hooks. */
@@ -225,6 +314,12 @@ data class CaseResult(
     val judgeUsage: AiUsageStats? = null,
     /** Uncapped external-lane tool starts. The caller's model tokens are not visible to Indagium. */
     val externalToolCalls: Long? = null,
+    /** 1-based attempt number of the visible/final result. */
+    val caseAttempt: Int = 1,
+    /** Completed attempts before [caseAttempt], retained when the case was automatically retried. */
+    val priorAttempts: List<CaseAttemptRecord> = emptyList(),
+    /** The final attempt passed after an earlier attempt failed. */
+    val flaky: Boolean = false,
 )
 
 data class LaneResult(
@@ -298,7 +393,14 @@ data class TestRun(
 
 /** Sum of the non-overlapping agent and inline-judge scopes of this case occurrence. */
 fun CaseResult.aiUsage(): AiUsageStats? = sumAiUsage(
-    listOf(agentUsage, judgeUsage, externalToolCalls?.takeIf { it > 0L }?.let { AiUsageStats(toolCalls = it, partial = true) }),
+    priorAttempts.flatMap(::caseAttemptUsageParts) +
+        listOf(agentUsage, judgeUsage, externalToolCalls?.takeIf { it > 0L }?.let { AiUsageStats(toolCalls = it, partial = true) }),
+)
+
+private fun caseAttemptUsageParts(attempt: CaseAttemptRecord): List<AiUsageStats?> = listOf(
+    attempt.agentUsage,
+    attempt.judgeUsage,
+    attempt.externalToolCalls?.takeIf { it > 0L }?.let { AiUsageStats(toolCalls = it, partial = true) },
 )
 
 /** Sum of case occurrences and suite hooks in this lane; no cached-history-derived counts are involved. */
@@ -321,10 +423,25 @@ data class RunSummary(
     val suiteId: String = "",
     val repeat: Int = 1,
     val usage: AiUsageStats? = null,
+    val pendingVerificationSteps: Int = 0,
+    val flaky: Boolean = false,
 )
 
 fun TestRun.summary(): RunSummary {
     val steps = lanes.flatMap { lane -> lane.cases.flatMap { it.steps } }.filterNot { it.setup }
+    val pendingAttempts = lanes.flatMap { lane ->
+        val currentSteps = lane.cases.flatMap { it.steps }.filterNot { it.setup }
+        val priorSteps = lane.cases.flatMap { case -> case.priorAttempts.flatMap { it.steps } }.filterNot { it.setup }
+        (currentSteps + priorSteps).flatMap { step ->
+            val identity = listOf(lane.laneId, step.caseId, step.iteration.toString(), step.caseAttempt.toString(), step.stepId)
+            buildList {
+                step.attemptHistory.filter { it.verificationState == VerificationState.PENDING }.forEach { attempt ->
+                    add(identity + attempt.attempt.toString())
+                }
+                if (step.verificationState == VerificationState.PENDING) add(identity + step.attempts.toString())
+            }
+        }
+    }.distinct()
     return RunSummary(
         id = id,
         suiteName = suite.name,
@@ -333,11 +450,13 @@ fun TestRun.summary(): RunSummary {
         finishedAt = finishedAt,
         laneCount = lanes.size,
         caseCount = lanes.firstOrNull()?.cases?.count { it.caseId != SUITE_SETUP_CASE_ID && it.caseId != SUITE_TEARDOWN_CASE_ID } ?: 0,
-        passedSteps = steps.count { it.status == StepStatus.PASS },
+        passedSteps = steps.count { it.status == StepStatus.PASS && it.verificationState != VerificationState.PENDING },
         totalSteps = steps.size,
         suiteId = config.suiteId,
         repeat = config.repeat,
         usage = aiUsage(),
+        pendingVerificationSteps = pendingAttempts.size,
+        flaky = lanes.any { lane -> lane.cases.any { case -> case.flaky || case.steps.any { it.flaky } } },
     )
 }
 

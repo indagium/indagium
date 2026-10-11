@@ -24,6 +24,10 @@ import com.indagium.testing.improveScript
 import com.indagium.testing.improveSuite
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeVerdict
+import com.indagium.testing.model.NormalizedGestureBounds
+import com.indagium.testing.model.NormalizedGesturePoint
+import com.indagium.testing.model.RecordedGestureHint
+import com.indagium.testing.model.RecordedGestureTarget
 import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
@@ -194,6 +198,40 @@ class TestCaseImproveToolsTest {
         assertTrue(first.images.isEmpty())
         assertTrue("NOT attached" in first.content.orEmpty())
         assertTrue("Judge says step 1" in first.content.orEmpty())
+    }
+
+    @Test
+    fun recordedGestureHintsAreFencedFixedAndPreservedByWordingImprovement() {
+        val hint = RecordedGestureHint(
+            kind = "TAP",
+            path = listOf(NormalizedGesturePoint(0.42, 0.37)),
+            targetUnderTouch = RecordedGestureTarget(
+                text = "Wi-Fi icon",
+                resourceId = "com.android.systemui:id/qs_tile_icon",
+                bounds = NormalizedGestureBounds(0.4, 0.3, 0.5, 0.4),
+            ),
+            clickableTargets = listOf(RecordedGestureTarget(text = "Wi-Fi tile", resourceId = "com.android.systemui:id/qs_tile_toggle_target")),
+        )
+        assertTrue(state.updateTestStep(STEP_OPEN) { step -> step.copy(gestureHints = listOf(hint)) } is StoreResult.Ok)
+        saveRun()
+        val provider = scripted(answer(improvedAnswer()))
+
+        val proposal = call("improve_test_case", "caseId" to caseId, "profileId" to IMPROVE_PROFILE_ID)
+
+        assertNull(proposal["error"], proposal.toString())
+        val first = proposal.rows("steps").first()
+        assertEquals(1, (first["gestureHints"] as List<*>).size)
+        val previous = first["previous"] as Map<*, *>
+        assertEquals(first["gestureHints"], previous["gestureHints"])
+        val prompt = provider.requests.single().messages.first { it.role == LlmRole.USER }.content.orEmpty()
+        assertTrue("<untrusted_data source=\"recorded_gesture_hints\">" in prompt)
+        assertTrue("Wi-Fi icon" in prompt && "Wi-Fi tile" in prompt)
+        assertTrue("fixed provenance" in prompt)
+
+        val rows = proposal.rows("steps").map { mapOf("stepId" to it["stepId"], "action" to it["action"], "expected" to it["expected"]) }
+        val applied = call("apply_test_case_improvement", "proposalId" to proposal["proposalId"], "accept" to listOf(STEP_OPEN), "steps" to rows)
+        assertNull(applied["error"], applied.toString())
+        assertEquals(listOf(hint), steps().first().gestureHints)
     }
 
     @Test

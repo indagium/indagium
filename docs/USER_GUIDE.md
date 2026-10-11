@@ -1456,8 +1456,11 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    keeps its original gesture and explains what needs review.
    Incidental actions such as dismissing a skippable ad may be optional when their condition says when to perform them;
    they can have no expected result and are skipped without failing the case when absent. The AI's notes (for example an
-   input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The picture
-   of the screen after a step can be used as an expected screenshot, but only if you tick it.
+   input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The review
+   shows separate before and after evidence, preferring eligible captured screenshots and then a suitable
+   recorded-video frame. A raw input image is preview-only, and a settled after image becomes an expected screenshot only
+   after you review and tick it. UI/activity context and image availability have separate explanations; evidence can be shown
+   even when the touched target is unresolved.
    The AI is told to write expected results that stay true on every run, not what happened to be on screen while you
    recorded (an ad, a video title, a view count, a timestamp, a notification, picture-in-picture). When an expected result
    still mentions something like that, the step shows "Check this expected result: it may depend on content that changes
@@ -1480,10 +1483,15 @@ row id in the new order) or add one with `insert_test_recording_row`. `get_test_
 and the detected external events (`inputKind` EXTERNAL); `update_test_recording` and `insert_test_recording_row` can set a
 step's `kind` (manual or script), `script`, `manualCompletion` and `checks`.
 
+Recorded target hints distinguish the specific element under the touch from its clickable ancestors and preserve normalized
+coordinates, path, duration, screen orientation and target geometry. They are device observations; the agent must match the
+specific control against the current screen because a later layout can move it.
+
 ### Improving the steps of a saved case
 
-A saved case cannot be rewritten from a recording any more (its screens are temporary), but it can be improved. On the case
-screen press **Improve steps with AI** (next to *Draft steps with AI*); on a finished run's report a case with failed,
+When retained recording evidence exists, reopen that recording to repair its input-to-step structure; see **Keeping a recording's
+evidence** below. For wording-only changes to a saved case, press **Improve steps with AI** (next to *Draft steps with AI*);
+on a finished run's report a case with failed,
 blocked, timed-out or unjudged steps also has **Improve these steps with AI**, which uses that run as the evidence.
 Choose the provider, model and reasoning effort, optionally say what should be improved, and read the line that says what
 will be sent, for example "Latest run 2026-10-10 18:20 · 4 screenshots · 2 judge suggestions": the steps and the suite and case
@@ -1553,7 +1561,10 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   depends on chance (an ad, a particular video, picture-in-picture) is reported as a problem with the step, with a more
   stable wording suggested, rather than as an app defect. It can turn a pass into a fail but never a fail
   into a pass. Where lanes ended a step differently, it also compares their evidence and explains why. The judge
-  has its own model and reasoning-effort pickers.
+  has its own model and reasoning-effort pickers. **Judgment timing** is *Inline* (the default), *After case* or
+  *Background*. After case judges ordinary steps after the case's actions and teardown; background judges them as steps
+  finish while later actions proceed. Both finalize before deciding a case retry. Setup/teardown hooks, explicit Screen
+  judge/Ask judge checks and *Pause for me* steps stay inline.
 - **Recording** — what every lane records, with the same controls as *Before start* on a new live capture
   (*Record video to file*, *Capture audio*, *Include earlier device logs*, *Keep sound on the device*, microphone,
   device display, buffers, video quality). They start from your saved capture settings and change **this run only**.
@@ -1561,7 +1572,8 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   device*, without taking focus from the Tests workspace; click it (or **Open capture tab** in the live view) to
   watch the mirror, read the log, add notes or use **Save ZIP**. When the lane ends the capture stops and the tab
   stays as an ordinary stopped capture. With the box off, lanes record the same way without a tab.
-- **Settings** — repeat each case 1×, 3× or 5×, a **tool-call budget per case** (default 60), and the **evidence
+- **Settings** — repeat each case 1×, 3× or 5×, **automatic case retries** (0, 1 or 2 extra attempts; default 0),
+  **step retries** (inherit the saved per-step count, disable, or choose a count up to 10), a **tool-call budget per case** (default 60), and the **evidence
   to keep**: screenshots and the agent transcript (the log and the screen recording are part of the lane's
   recording above).
 
@@ -1588,6 +1600,12 @@ A script that needs permission appears as a card — **Allow once** or **Deny** 
 denied after the confirmation timeout (5 minutes by default, *Settings → Testing*). A step set to *Pause for
 me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown scripts.
 
+Automatic case retries repeat only a failed case, after its teardown and with its setup and steps run again; suite setup
+stays once per run. They skip cases that need a tester to complete a manual step, user rejection, tool-budget exhaustion,
+permanent setup/configuration failures, or a result blocked only because the judge was unavailable. Earlier failures remain
+in attempt history. A recovered pass is marked **flaky**; it remains a pass, with the prior failure visible in the report.
+A deferred judge result is provisional while pending and cannot make a case pass until it settles.
+
 ### Reading the report
 
 When a run ends, **Runs → (the run)** shows total tool calls and reported tokens, with a partial marker when a provider
@@ -1599,6 +1617,9 @@ judge/consensus column. Step detail shows the action and expected result, the ag
 screenshot, log excerpt, and judge verdict and reasoning when one ran. Its note distinguishes a conclusive independent judge pass from
 an agent/check-only pass or an advisory pass with unresolved verification. The saved run's JSON includes its suite snapshot and the
 start/playback evidence paths; the Markdown report lists those paths, while capture timestamps are in the evidence and transcript records.
+Deferred results show execution and verification separately, including queue wait and judge duration. Recovered runs, cases
+and steps are marked **flaky**, while their earlier attempt details remain available.
+
 Useful actions on a step:
 
 - **Apply fix…** — when the judge suggests that your step's wording is wrong, applies its new action or

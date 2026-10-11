@@ -85,7 +85,7 @@ internal class JudgeService(
         evidence: JudgeEvidence,
         onUsage: (AiUsageStats) -> Unit = {},
     ): StepJudgement {
-        val label = "$laneId:${site.evidencePrefix}-s${site.stepNumber}-a${site.attempt}"
+        val label = "$laneId:${site.evidencePrefix}-i${site.iteration}-ca${site.caseAttempt}-s${site.stepNumber}-a${site.attempt}"
         val spec = JudgeRunSpec(JUDGE_SYSTEM_PROMPT, JUDGE_TOOL_CALL_BUDGET, JUDGE_FETCH_TOOL_CALL_BUDGET, judgePrompt(evidence))
         val outcome = runJudge(evidence, label, spec, onUsage, agentForLane(laneId))
         val submission = outcome.submission

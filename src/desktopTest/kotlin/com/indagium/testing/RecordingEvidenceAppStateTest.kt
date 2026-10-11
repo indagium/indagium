@@ -2,8 +2,11 @@
 
 package com.indagium.testing
 
+import com.indagium.capture.mirror.MirrorControlCommand
+import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.debug.IndagiumToolOperations
 import com.indagium.testing.authoring.ReplacementPlan
+import com.indagium.testing.authoring.TappedElement
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.RecordingCleanup
@@ -243,6 +246,68 @@ class RecordingEvidenceAppStateTest {
         assertTrue(call("reopen_test_recording", "caseId" to caseId)["error"] != null, "only one recording at a time")
         assertEquals(true, call("discard_test_recording", "sessionId" to sessionId)["discarded"])
         assertTrue(call("export_test_suite", "suiteId" to suiteId)["recordingEvidence"] != null)
+    }
+
+    @Test
+    fun mcpCannotPromoteRawOrPasswordSensitiveInputImagesToExpectedScreenshots() {
+        val operations = IndagiumToolOperations(state)
+
+        @Suppress("UNCHECKED_CAST")
+        fun call(tool: String, vararg args: Pair<String, Any?>) =
+            runBlocking { operations.toolGateway.executeSuspending(tool, mapOf(*args)) as Map<String, Any?> }
+
+        val raw = com.indagium.testing.authoring.TestStepRecordingSession("fixture-device")
+        raw.accept(MirrorControlCommand.Text("open settings"), MirrorFrame(16, 12, IntArray(16 * 12) { 0xff4477aa.toInt() }))
+        runBlocking { raw.stopAndDrain() }
+        val sensitive = recordedShopSession("hunter2-sensitive", passwordField = true)
+
+        for (session in listOf(raw, sensitive)) {
+            assertIs<StoreResult.Ok<*>>(state.registerTestStepRecording(session, suiteId, caseId))
+            val rows = session.snapshot.value.steps
+            val payload = rows.map { row ->
+                mapOf("id" to row.id, "action" to row.action, "expected" to "It is visible", "useScreenshotAsExpected" to true)
+            }
+            val response = call("update_test_recording", "sessionId" to session.id, "steps" to payload)
+            assertTrue(response["error"] != null, response.toString())
+            assertTrue(session.snapshot.value.steps.all { it.expectedScreenshotJpeg == null })
+            state.clearTestStepRecording(session.id)
+        }
+    }
+
+    @Test
+    fun getRecordingCannotReturnRawImagesOrGestureLabelsFromAPasswordWindow() {
+        val operations = IndagiumToolOperations(state)
+
+        @Suppress("UNCHECKED_CAST")
+        fun call(tool: String, vararg args: Pair<String, Any?>) =
+            runBlocking { operations.toolGateway.executeSuspending(tool, mapOf(*args)) as Map<String, Any?> }
+
+        val secretTarget = "hunter2-target-label"
+        val session = recordedShopSession(
+            "hunter2-sensitive",
+            passwordField = true,
+            targetLabel = secretTarget,
+            tapFrame = MirrorFrame(16, 12, IntArray(16 * 12) { 0xff884422.toInt() }),
+        )
+        val initialTap = session.snapshot.value.steps.first { it.kind?.name == "TAP" }
+        val privateTap = initialTap.copy(
+            expected = "Reviewed target metadata",
+            tappedElement = TappedElement(secretTarget, "private target description", "$SHOP_PACKAGE:id/search_button", "android.widget.Button"),
+        )
+        assertTrue(session.replaceSteps(session.snapshot.value.steps.map { if (it.id == initialTap.id) privateTap else it }))
+        val tappedRow = session.snapshot.value.steps.first { it.id == initialTap.id }
+        assertNotNull(tappedRow.screenshotJpeg, "fixture must include the raw mirror screenshot")
+        assertEquals(secretTarget, assertNotNull(tappedRow.tappedElement, "fixture must include target text").text)
+        assertIs<StoreResult.Ok<*>>(state.registerTestStepRecording(session, suiteId, caseId))
+        val response = call("get_test_recording", "sessionId" to session.id, "rowId" to tappedRow.id)
+
+        assertFalse("imageBase64" in response.toString(), "raw or nested preview images must be omitted in a password window")
+        assertFalse(secretTarget in response.toString(), "sensitive target labels must not escape through gesture hints")
+        val preview = response["previewEvidence"] as Map<*, *>
+        assertEquals(null, preview["rawInput"])
+        assertEquals(null, preview["before"])
+        assertEquals(null, preview["after"])
+        assertTrue(state.clearTestStepRecording(session.id))
     }
 
     @Test

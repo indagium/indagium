@@ -245,6 +245,54 @@ class ManualScriptStepsTest {
         marker.delete()
     }
 
+    @Test
+    fun aDeclinedScriptPermissionIsNotAskedAgainByAutomaticCaseRetry() {
+        noWindows()
+        val marker = File.createTempFile("ask-no-retry", ".txt").also { it.delete() }
+        val script = hostScript("ask_once", "printf ran > '${marker.absolutePath}'", ScriptPermission.ASK)
+        val suite = suiteOf(caseOf("Declined", scriptStep(script)))
+        val (h, started) = start(suite, script) { it.copy(caseRetries = 1) }
+
+        awaitTrue("the permission card") { h.coordinator.pendingConfirmations().isNotEmpty() }
+        val card = h.coordinator.pendingConfirmations().single()
+        assertTrue(h.coordinator.resolveConfirmation(started.runId, card.confirmationId, false))
+        val run = h.finished(started)
+        val result = run.caseResult("Declined")
+
+        assertEquals(CaseStatus.BLOCKED, result.status)
+        assertEquals(1, result.caseAttempt)
+        assertTrue(result.priorAttempts.isEmpty())
+        assertTrue(result.steps.single().automaticRetryExcluded)
+        assertTrue(result.steps.single().observation.contains("not allowed"))
+        assertTrue(h.coordinator.pendingConfirmations().isEmpty())
+        assertFalse(marker.exists(), "the declined script is never run")
+        marker.delete()
+    }
+
+    @Test
+    fun aMissingScriptLibraryEntryIsNotRetriedAsAnEnvironmentalBlocker() {
+        noWindows()
+        val declared = hostScript("missing_library_entry", "printf should-not-run")
+        val suite = suiteOf(caseOf("Missing", scriptStep(declared)))
+        val h = RunHarness(libraryOf(suite)).also { harness = it }
+
+        val rejected = assertIs<StartRunResult.Rejected>(runBlocking { h.coordinator.start(h.config(suite).copy(caseRetries = 1)) })
+        assertTrue(rejected.errors.any { "is not in the library" in it }, rejected.toString())
+        assertTrue(runBlocking { h.coordinator.listRuns() }.isEmpty(), "invalid library state is rejected before any case attempt")
+    }
+
+    @Test
+    fun aSetupOnlyScriptUsedAsAStepIsNotRetriedAsAnEnvironmentalBlocker() {
+        noWindows()
+        val script = hostScript("setup_only_step", "printf should-not-run", ScriptPermission.SETUP_TEARDOWN_ONLY)
+        val suite = suiteOf(caseOf("Hook only", scriptStep(script)))
+        val h = RunHarness(libraryOf(suite, script)).also { harness = it }
+
+        val rejected = assertIs<StartRunResult.Rejected>(runBlocking { h.coordinator.start(h.config(suite).copy(caseRetries = 1)) })
+        assertTrue(rejected.errors.any { "limited to setup and teardown" in it }, rejected.toString())
+        assertTrue(runBlocking { h.coordinator.listRuns() }.isEmpty(), "invalid use is rejected before any case attempt")
+    }
+
     // ── Manual steps ────────────────────────────────────────────────
 
     @Test

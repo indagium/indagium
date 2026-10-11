@@ -20,9 +20,10 @@ import com.indagium.testing.model.usesStepKinds
 import com.indagium.testing.model.withKind
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TEST_LIBRARY_BASE_FILE_VERSION
-import com.indagium.testing.store.TEST_LIBRARY_FILE_VERSION
+import com.indagium.testing.store.TEST_LIBRARY_STEP_KIND_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_BASE_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_FILE_VERSION
+import com.indagium.testing.store.TEST_SUITE_STEP_KIND_FILE_VERSION
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.decodeLibraryFile
 import com.indagium.testing.store.decodeSuiteFile
@@ -80,7 +81,7 @@ class StepKindsModelTest {
 
         listOf(manual, scripted, onlyACheck).forEach { suite ->
             assertTrue(suite.usesStepKinds())
-            assertEquals(TEST_SUITE_FILE_VERSION, versionOf(encodeSuiteFile(suite)), suite.cases.single().steps.single().toString())
+            assertEquals(TEST_SUITE_STEP_KIND_FILE_VERSION, versionOf(encodeSuiteFile(suite)), suite.cases.single().steps.single().toString())
         }
         assertTrue(TEST_SUITE_FILE_VERSION > TEST_SUITE_BASE_FILE_VERSION)
     }
@@ -135,7 +136,7 @@ class StepKindsModelTest {
         val withKinds = encodeLibraryFile(listOf("suite-a"), emptyList(), listOf(shared))
 
         assertEquals(TEST_LIBRARY_BASE_FILE_VERSION, versionOf(plain))
-        assertEquals(TEST_LIBRARY_FILE_VERSION, versionOf(withKinds))
+        assertEquals(TEST_LIBRARY_STEP_KIND_FILE_VERSION, versionOf(withKinds))
         assertEquals(shared, decodeLibraryFile(withKinds).getOrThrow().sharedSteps.single())
     }
 
@@ -242,7 +243,7 @@ class StepKindsModelTest {
 
         val text = File(dir, "suites/${f.suite.id}.json").readText()
 
-        assertEquals(TEST_SUITE_FILE_VERSION, versionOf(text))
+        assertEquals(TEST_SUITE_STEP_KIND_FILE_VERSION, versionOf(text))
         assertEquals(f.store.library.value, TestLibraryStore(dir).library.value)
     }
 }

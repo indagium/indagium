@@ -11,9 +11,11 @@ import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.RunConfig
@@ -102,6 +104,9 @@ internal data class RunDialogModel(
     /** What the run does with manual steps; the dialog only offers the choice when the suite has some. */
     val manualSteps: ManualStepsOption = ManualStepsOption.USE_SCRIPT_THEN_WAIT,
     val judgeInconclusivePolicy: JudgeInconclusivePolicy = JudgeInconclusivePolicy.BLOCK,
+    val judgeTiming: JudgeTiming = JudgeTiming.INLINE,
+    val caseRetries: Int = 0,
+    val stepRetriesOverride: Int? = null,
 ) {
     /** Every lane row, first lane first. */
     fun allLanes(): List<LaneDraft> =
@@ -150,12 +155,14 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
     val drafts = allLanes()
     val laneProblem = drafts.withIndex().firstNotNullOfOrNull { (i, draft) -> laneProblem(draft, if (drafts.size == 1) "" else "Lane ${i + 1}") }
     val unknownCases = selectedCaseIds - allCaseIds.toSet()
+    val retriesProblem = retriesProblem()
     val problem = when {
         selectedCaseIds.isEmpty() -> "Choose at least one case."
         unknownCases.isNotEmpty() -> "Some selected cases no longer exist in this suite: ${unknownCases.joinToString()}. " +
             "Refresh the suite and choose current cases."
         laneProblem != null -> laneProblem
         repeat !in ALLOWED_RUN_REPEATS -> "Repeat must be ${ALLOWED_RUN_REPEATS.joinToString(", ")}."
+        retriesProblem != null -> retriesProblem
         toolLimitText.trim().toIntOrNull() !in MIN_CASE_TOOL_CALL_LIMIT..MAX_CASE_TOOL_CALL_LIMIT ->
             "The tool-call limit must be a whole number from $MIN_CASE_TOOL_CALL_LIMIT to $MAX_CASE_TOOL_CALL_LIMIT."
         judgeMode != JudgeMode.OFF && judgeProfileId.isNullOrBlank() -> "Choose the AI profile that judges the steps, or turn the judge off."
@@ -193,8 +200,18 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             openLaneTabs = openLaneTabs,
             manualSteps = manualSteps,
             judgeInconclusivePolicy = judgeInconclusivePolicy,
+            judgeTiming = judgeTiming,
+            caseRetries = caseRetries,
+            stepRetriesOverride = stepRetriesOverride,
         ),
     )
+}
+
+private fun RunDialogModel.retriesProblem(): String? = when {
+    caseRetries !in 0..2 -> "Automatic case retries must be between 0 and 2."
+    stepRetriesOverride?.let { it !in 0..MAX_STEP_RETRIES } == true ->
+        "Step retry override must be between 0 and $MAX_STEP_RETRIES."
+    else -> null
 }
 
 /** Prefills a rerun dialog from the original run while assigning new lane ids for this new run. */
@@ -232,6 +249,9 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
         openLaneTabs = config.openLaneTabs,
         manualSteps = config.manualSteps,
         judgeInconclusivePolicy = config.judgeInconclusivePolicy,
+        judgeTiming = config.judgeTiming,
+        caseRetries = config.caseRetries,
+        stepRetriesOverride = config.stepRetriesOverride,
     )
 }
 
@@ -292,7 +312,9 @@ private const val TIME_PATTERN = "yyyy-MM-dd HH:mm"
 internal fun formatRunTime(millis: Long?): String = millis?.let { SimpleDateFormat(TIME_PATTERN, Locale.ROOT).format(Date(it)) } ?: "—"
 
 /** A one-line description of a run for the list. */
-internal fun RunSummary.line(): String = "$passedSteps/$totalSteps steps · $caseCount case(s) · $laneCount lane(s)"
+internal fun RunSummary.line(): String = "$passedSteps/$totalSteps steps" +
+    (if (pendingVerificationSteps > 0) " · $pendingVerificationSteps awaiting judge" else "") +
+    (if (flaky) " · flaky recovery" else "") + " · $caseCount case(s) · $laneCount lane(s)"
 
 /** What a lane is doing right now, for the in-progress view. */
 internal fun TestRun.progressLine(laneId: String): String {
@@ -310,7 +332,7 @@ private const val PROGRESS_ACTION_CHARS = 60
 /** A cell of the matrix: what one lane did, or null when the lane has not got there yet. */
 internal data class MatrixStepCell(val laneId: String, val result: StepResult?)
 
-internal data class MatrixCaseCell(val laneId: String, val status: CaseStatus?, val present: Boolean)
+internal data class MatrixCaseCell(val laneId: String, val status: CaseStatus?, val present: Boolean, val flaky: Boolean = false, val attempts: Int = 1)
 
 /** One row of the report matrix, in display order. */
 internal sealed interface MatrixRow {
@@ -417,7 +439,7 @@ internal fun buildMatrix(run: TestRun): List<MatrixRow> {
                 key, case.id, case.name, iteration,
                 run.lanes.mapIndexed { i, lane ->
                     val result = run.lanes.caseOf(i, case.id, iteration)
-                    MatrixCaseCell(lane.laneId, result?.status, result != null)
+                    MatrixCaseCell(lane.laneId, result?.status, result != null, result?.flaky == true, result?.caseAttempt ?: 1)
                 },
             )
             val hookSteps = run.lanes.indices.flatMap { run.lanes.caseOf(it, case.id, iteration)?.steps.orEmpty() }.filter { it.setup }

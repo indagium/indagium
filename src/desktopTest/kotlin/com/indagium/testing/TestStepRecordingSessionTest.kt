@@ -12,6 +12,8 @@ import com.indagium.testing.authoring.RecordingScreenshotEvidence
 import com.indagium.testing.authoring.RecordingScreenshotSource
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.recordingApplyBlockedReason
+import com.indagium.testing.model.NormalizedGestureBounds
+import com.indagium.testing.model.NormalizedGesturePoint
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -39,6 +41,39 @@ class TestStepRecordingSessionTest {
     private fun frame() = MirrorFrame(16, 12, IntArray(16 * 12) { 0xff44aa77.toInt() })
 
     private fun png(): ByteArray = ByteArrayOutputStream().also { ImageIO.write(BufferedImage(16, 12, BufferedImage.TYPE_INT_RGB), "png", it) }.toByteArray()
+
+    @Test
+    fun recordedTapHintKeepsLeafGeometryClickableTargetAndRelativeTouch() {
+        val session = recordedShopSession(rotation = 2)
+        val hint = session.toTestSteps().first().gestureHints.single()
+
+        assertEquals("TAP", hint.kind)
+        assertEquals(listOf(NormalizedGesturePoint(0.54, 0.31)), hint.path)
+        assertEquals(100, hint.sourceScreenWidth)
+        assertEquals(200, hint.sourceScreenHeight)
+        assertEquals(2, hint.orientationQuarterTurns)
+        assertEquals("Search", hint.targetUnderTouch?.text)
+        assertEquals("$SHOP_PACKAGE:id/search_button", hint.targetUnderTouch?.resourceId)
+        assertEquals(NormalizedGestureBounds(0.5, 0.275, 0.7, 0.35), hint.targetUnderTouch?.bounds)
+        assertEquals(NormalizedGesturePoint(0.2, 0.4666666666666667), hint.touchWithinTarget)
+        assertEquals(listOf("$SHOP_PACKAGE:id/search_button"), hint.clickableTargets.map { it.resourceId })
+        session.close()
+    }
+
+    @Test
+    fun gestureCoordinatesRemainAdvisoryWhenTheUiTreeIsUnavailable() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device")
+        session.accept(touch(MirrorTouchAction.DOWN, 1, 40, 50), nowMs = 1_000)
+        session.accept(touch(MirrorTouchAction.UP, 1, 40, 50), nowMs = 1_050)
+        session.stopAndDrain()
+
+        val hint = session.toTestSteps().single().gestureHints.single()
+        assertEquals(listOf(NormalizedGesturePoint(0.4, 0.25)), hint.path)
+        assertNull(hint.targetUnderTouch)
+        assertTrue(hint.clickableTargets.isEmpty())
+        assertNull(hint.touchWithinTarget)
+        session.close()
+    }
 
     @Test
     fun tapSwipeLongPressKeyTextAndImageContextAreRecordedInOrder() = runBlocking {
@@ -109,7 +144,7 @@ class TestStepRecordingSessionTest {
     }
 
     @Test
-    fun capturedInputTimeFrameIsContextByDefaultAndOnlyBecomesOracleAfterReview() = runBlocking {
+    fun capturedInputTimeFrameStaysContextWhenItsTimingCannotProveAnAfterImage() = runBlocking {
         val session = TestStepRecordingSession("fixture-device")
         session.accept(MirrorControlCommand.Text("open settings"), frame())
         val snapshot = session.stopAndDrain()
@@ -122,14 +157,9 @@ class TestStepRecordingSessionTest {
         assertTrue(inputContext.caption.contains("Recorded input context"))
         assertTrue(inputContext.text.contains("UI hierarchy isn't exposed"))
 
-        assertTrue(session.updateReviewedSteps(listOf("open settings" to "settings screen is open"), setOf(row.id)))
+        assertFalse(session.updateReviewedSteps(listOf("open settings" to "settings screen is open"), setOf(row.id)))
         val reviewedStep = session.toTestSteps { "assets/context.jpg" }.single()
-        assertEquals(1, reviewedStep.examples.filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>().size)
-        assertTrue(
-            reviewedStep.examples
-                .filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>()
-                .single().caption.contains("uncertain raw input preview"),
-        )
+        assertTrue(reviewedStep.examples.none { it is com.indagium.testing.model.StepExample.GoldenScreenshot })
         session.close()
     }
 
@@ -378,10 +408,9 @@ class TestStepRecordingSessionTest {
         assertTrue("adb" in row.screenContext.orEmpty())
         assertTrue(noFrameWarning !in snapshot.warnings)
         assertEquals(0, snapshot.pendingSnapshots)
-        assertTrue(session.updateReviewedSteps(listOf("open settings" to "settings"), setOf(row.id)))
-        val golden = session.toTestSteps { "assets/adb.jpg" }.single().examples
-            .filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>().single()
-        assertTrue("adb" in golden.caption)
+        assertFalse(session.updateReviewedSteps(listOf("open settings" to "settings"), setOf(row.id)))
+        val examples = session.toTestSteps { "assets/adb.jpg" }.single().examples
+        assertTrue(examples.none { it is com.indagium.testing.model.StepExample.GoldenScreenshot })
         session.close()
     }
 

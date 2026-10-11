@@ -289,8 +289,9 @@ private fun PauseCard(runId: String, paused: PausedStepInfo) {
     Column(Modifier.fillMaxWidth().padding(top = 6.dp).background(tc.warnBg, CORNER_MD).padding(8.dp)) {
         AppText("Paused at step ${paused.step.stepNumber}: ${paused.step.action}", color = tc.tx, fontSize = 11.sp, maxLines = 2)
         AppText("${paused.step.status.label()} — ${paused.step.observation.take(PAUSE_OBSERVATION_CHARS)}", color = tc.ts, fontSize = 10.sp, maxLines = 3)
+        if (!paused.step.retryAllowed) TestsHint("The maximum of 10 retries for this step has been reached. Continue or stop the case.")
         Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppButton("Retry", onClick = { decide(PauseDecision.RETRY) })
+            if (paused.step.retryAllowed) AppButton("Retry", onClick = { decide(PauseDecision.RETRY) })
             AppButton("Continue", onClick = { decide(PauseDecision.CONTINUE) }, variant = ButtonVariant.Primary)
             AppButton("Stop", onClick = { decide(PauseDecision.STOP) }, isDanger = true)
         }

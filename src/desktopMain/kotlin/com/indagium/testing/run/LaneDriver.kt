@@ -202,6 +202,7 @@ internal class LaneDriver(
             prompt = lanePrompt(
                 suite, case, seq.spec.caseName, seq.spec.steps, seq.currentIndex, seq.currentAttempt, seq.results(), seq.spec.setup,
                 case?.allowedTools,
+                seq.spec.priorCaseAttempts,
             ),
             systemPrompt = LANE_SYSTEM_PROMPT,
             context = AiInvestigationContext(tabId),
