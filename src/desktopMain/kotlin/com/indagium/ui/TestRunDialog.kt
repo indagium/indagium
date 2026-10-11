@@ -2,10 +2,10 @@
 
 package com.indagium.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -24,7 +23,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -49,18 +47,27 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// "Run suite…" / "Run this case": a cases checklist, lane rows (what drives each lane, with which model and reasoning effort, and
-// on which device; add, remove and reorder them), the judge (profile, model, effort), the recording every lane does (the same
-// "Before start" controls as a manual live capture), repeat, the tool-call limit and the evidence to keep. Lanes on different
-// devices run at the same time, lanes that share a device one after another (the dialog says so). Start validates through the coordinator (which refuses
-// with every problem at once); on success the Runs screen opens on the new run. The device list is read with adb off the UI thread.
+// "Run suite…" / "Run this case", on TestsDialogFrame, as rows of a muted label and its content:
+//   What   - a summary of the chosen cases ("All 5 cases · 27 steps") that opens the cases checklist in place;
+//   Where  - lane rows (what drives each lane, with which model and reasoning effort, and on which device; add, remove and
+//            reorder them). Lanes on different devices run at the same time, lanes that share a device one after another (the
+//            dialog says so);
+//   Judge  - the judge mode as a segmented control (like Settings > Testing), then its profile, model and effort;
+//   Record - a one-line summary of the recording every lane does that opens the same "Before start" controls as a manual
+//            live capture;
+//   More   - a one-line summary of retries, repeat, tool-call limit, evidence and manual steps that opens those controls.
+// Start validates through the coordinator (which refuses with every problem at once); on success the Runs screen opens on the
+// new run. The device list is read with adb off the UI thread. The summary strings are pure functions in TestRunUiState.kt.
 
 private val DIALOG_WIDTH = 640.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
-private val DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private val LIMIT_FIELD_WIDTH = 90.dp
 private val CASES_MAX_HEIGHT = 180.dp
 private val MENU_WIDTH = 300.dp
+private val LANE_FIELD_WIDTH = 200.dp
+private val JUDGE_FIELD_WIDTH = 260.dp
+private val RETRY_FIELD_WIDTH = 200.dp
+private val REPEAT_SEGMENT_HEIGHT = 26.dp
 
 /** What the dialog was opened for: a whole suite, or one case ([caseId]). */
 internal data class RunDialogTarget(
@@ -165,39 +172,46 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
         }
     }
 
+    var casesOpen by remember { mutableStateOf(false) }
+    var recordOpen by remember { mutableStateOf(false) }
+    var moreOpen by remember { mutableStateOf(false) }
+    val showManualSteps = suiteHasManualSteps(suite, ui.library)
+    val title = when {
+        target.initialConfig?.rerunOf != null -> "Re-run failed cases · ${suite.name}"
+        target.caseId != null -> suite.cases.firstOrNull { it.id == target.caseId }?.name?.let { "Run case “$it”" } ?: "Run suite “${suite.name}”"
+        else -> "Run suite “${suite.name}”"
+    }
+
     Dialog(onDismissRequest = ::close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(
-            Modifier.width(DIALOG_WIDTH).heightIn(max = DIALOG_MAX_HEIGHT).background(tc.p, DIALOG_SHAPE).border(1.dp, tc.br, DIALOG_SHAPE).padding(20.dp),
-        ) {
-            val title = when {
-                target.initialConfig?.rerunOf != null -> "Re-run failed cases · ${suite.name}"
-                target.caseId != null -> suite.cases.firstOrNull { it.id == target.caseId }?.name?.let { "Run case “$it”" } ?: "Run suite “${suite.name}”"
-                else -> "Run suite “${suite.name}”"
-            }
-            AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            TestsScrollColumn(Modifier.weight(1f, fill = false)) {
-                CasesSection(suite, model.selectedCaseIds, limits, onChange = { model = model.copy(selectedCaseIds = it) })
-                LanesSection(model, { model = it }, choices, profiles, catalog, devices, deviceChoices) { refresh++ }
-                JudgeSection(model, { model = it }, choices.filterNot { it.isExternal }, profiles, catalog)
-                RecordingSection(model, { model = it })
-                if (suiteHasManualSteps(suite, ui.library)) ManualStepsSection(model.manualSteps) { model = model.copy(manualSteps = it) }
-                SettingsSection(
-                    model.repeat, { model = model.copy(repeat = it) },
-                    model.toolLimitText, { model = model.copy(toolLimitText = it) },
-                    model.evidence, { model = model.copy(evidence = it) },
-                )
-                RetrySection(model, { model = it })
-            }
-            problem?.let {
-                Spacer(Modifier.padding(top = 8.dp))
-                TestsErrorText(it)
-            }
-            Spacer(Modifier.padding(top = 10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+        TestsDialogFrame(
+            title = title,
+            width = DIALOG_WIDTH,
+            maxHeight = DIALOG_MAX_HEIGHT,
+            status = { problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
+            body = {
+                Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    TestsDialogRow("What") {
+                        CasesRow(suite, runnable, model.selectedCaseIds, limits, casesOpen, { casesOpen = !casesOpen }) { model = model.copy(selectedCaseIds = it) }
+                    }
+                    TestsDialogRow("Where") {
+                        LanesRow(model, { model = it }, choices, profiles, catalog, devices, deviceChoices) { refresh++ }
+                    }
+                    TestsDialogRow("Judge") {
+                        JudgeRow(model, { model = it }, choices.filterNot { it.isExternal }, profiles, catalog)
+                    }
+                    TestsDialogRow("Record") {
+                        RecordingRow(model, { model = it }, recordOpen) { recordOpen = !recordOpen }
+                    }
+                    TestsDialogRow("More") {
+                        MoreRow(model, { model = it }, showManualSteps, moreOpen) { moreOpen = !moreOpen }
+                    }
+                }
+            },
+            footer = {
                 DialogActionButton(if (starting) "Starting…" else "Start", active = true, enabled = !starting) { start() }
                 DialogActionButton("Cancel", active = false) { close() }
-            }
-        }
+            },
+        )
     }
 }
 
@@ -236,13 +250,34 @@ private suspend fun loadDevices(state: AppState): DevicesState = withContext(Dis
     }
 }
 
+/** The chosen cases in one summary button; it opens the checklist of every case in place. */
 @Composable
-private fun CasesSection(suite: TestSuite, selected: Set<String>, limits: TestsLimitsUiState, onChange: (Set<String>) -> Unit) {
-    TestsSectionTitle("Cases")
-    TestsScrollColumn(Modifier.heightIn(max = CASES_MAX_HEIGHT)) {
-        suite.cases.forEach { case -> CaseCheckRow(case, case.id in selected, limits) { on -> onChange(if (on) selected + case.id else selected - case.id) } }
+private fun CasesRow(
+    suite: TestSuite,
+    runnable: List<TestCase>,
+    selected: Set<String>,
+    limits: TestsLimitsUiState,
+    open: Boolean,
+    onToggleOpen: () -> Unit,
+    onChange: (Set<String>) -> Unit,
+) {
+    TestsDisclosureButton(runCasesSummary(runnable, selected), open, onToggleOpen)
+    if (open) {
+        DetailsBox {
+            TestsScrollColumn(Modifier.heightIn(max = CASES_MAX_HEIGHT)) {
+                suite.cases.forEach { case ->
+                    CaseCheckRow(case, case.id in selected, limits) { on -> onChange(if (on) selected + case.id else selected - case.id) }
+                }
+            }
+        }
     }
-    if (suite.cases.isEmpty()) TestsHint("This suite has no cases yet.")
+    if (suite.cases.isEmpty()) TestsHint("This suite has no cases yet.", Modifier.padding(top = 4.dp))
+}
+
+/** The bordered area under a summary that holds the controls it opens. */
+@Composable
+private fun DetailsBox(content: @Composable ColumnScope.() -> Unit) {
+    Column(Modifier.padding(top = 6.dp).fillMaxWidth().border(1.dp, tc().br, CORNER_MD).padding(6.dp), content = content)
 }
 
 @Composable
@@ -256,7 +291,7 @@ private fun CaseCheckRow(case: TestCase, checked: Boolean, limits: TestsLimitsUi
 }
 
 @Composable
-private fun LanesSection(
+private fun LanesRow(
     model: RunDialogModel,
     onModel: (RunDialogModel) -> Unit,
     choices: List<LaneChoice>,
@@ -266,15 +301,13 @@ private fun LanesSection(
     deviceChoices: List<DeviceChoice>,
     onRefresh: () -> Unit,
 ) {
+    val ui = LocalTestsUi.current
     val lanes = model.allLanes()
-    TestsSectionTitle("Lanes")
-    TestsHint("Lanes on different devices run at the same time (up to $MAX_PARALLEL_DEVICES devices); lanes that share a device run one after another.")
     ReorderableColumn(
         items = lanes,
         idOf = { it.id },
         onMove = { id, to -> onModel(model.moveLane(id, to)) },
         rowGap = 6.dp,
-        modifier = Modifier.padding(top = 6.dp),
     ) { draft, row ->
         ReorderRowCard(row, enabled = true, onRemove = if (lanes.size > 1) ({ onModel(model.removeLane(draft.id)) }) else null) {
             LaneRow(draft, choices, profiles, catalog, deviceChoices, { updated -> onModel(model.updateLane(draft.id) { updated }) }, Modifier.weight(1f))
@@ -283,7 +316,12 @@ private fun LanesSection(
     Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         AppButton("+ Add lane", onClick = { onModel(model.addLane(LaneDraft(choice = lanes.last().choice)).withDefaultDevices(deviceChoices)) })
         AppButton("Refresh devices", onClick = onRefresh)
+        TestsBreadcrumbLink("Manage profiles…", { ui.state.openAiProviderSettings() })
     }
+    TestsHint(
+        "Lanes on different devices run at the same time (up to $MAX_PARALLEL_DEVICES devices); lanes that share a device run one after another.",
+        Modifier.padding(top = 6.dp),
+    )
     model.deviceWarnings().forEach { TestsLockedNotice(it, Modifier.padding(top = 6.dp)) }
     when (devices) {
         DevicesState.Loading -> TestsHint("Looking for devices…")
@@ -293,6 +331,7 @@ private fun LanesSection(
     if (lanes.any { it.choice?.isExternal == true }) TestsHint("An external lane has no agent: drive it with the test_lane_tool_call MCP tool.")
 }
 
+/** One lane: what drives it and its device, then its model and effort. All four pickers are the same filled field and wrap when the row is narrow. */
 @Composable
 private fun LaneRow(
     draft: LaneDraft,
@@ -322,17 +361,21 @@ private fun LaneRow(
                     ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_RUN_LANE, WorkflowAiSelection(profileId))
                 }
             },
+            modifier = Modifier.width(LANE_FIELD_WIDTH),
             menuWidth = MENU_WIDTH,
             isSelected = { it == draft.choice },
+            filled = true,
         )
         TestsDropdown(
             selectedLabel = deviceChoices.firstOrNull { it.serial == draft.deviceSerial }?.let(::deviceChoiceLabel) ?: "Choose a device",
             options = deviceChoices,
             optionLabel = ::deviceChoiceLabel,
             onSelect = { onChange(draft.copy(deviceSerial = it.serial)) },
+            modifier = Modifier.width(LANE_FIELD_WIDTH),
             menuWidth = MENU_WIDTH,
             isSelected = { it.serial == draft.deviceSerial },
             emptyText = "No ready device found",
+            filled = true,
         )
         if (profile != null) {
             ModelAndEffortPickers(
@@ -353,9 +396,12 @@ private fun LaneRow(
     }
 }
 
-/** The judge: which AI profile and when. Any profile kind works (Claude Code and Codex too); the judge never sees what an agent claimed. */
+/**
+ * The judge: when it judges (a segmented control, as in Settings > Testing), then which AI profile. Any profile kind works
+ * (Claude Code and Codex too); the judge never sees what an agent claimed.
+ */
 @Composable
-private fun JudgeSection(
+private fun JudgeRow(
     model: RunDialogModel,
     onModel: (RunDialogModel) -> Unit,
     profileChoices: List<LaneChoice>,
@@ -363,64 +409,63 @@ private fun JudgeSection(
     catalog: ModelCatalog,
 ) {
     val ui = LocalTestsUi.current
-    TestsSectionTitle("Judge")
+    SegmentedControl(
+        options = JudgeMode.entries.map { it.label },
+        selectedIndices = setOf(JudgeMode.entries.indexOf(model.judgeMode)),
+        onToggle = { index ->
+            val profile = model.judgeProfileId ?: profileChoices.firstOrNull()?.profileId
+            onModel(model.copy(judgeMode = JudgeMode.entries[index], judgeProfileId = profile))
+        },
+    )
     TestsHint(
         "A blind AI judge compares each step's expected result with the screenshot, the log and the check results, " +
             "without seeing what the agent claimed.",
+        Modifier.padding(top = 4.dp),
     )
-    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        JudgeMode.entries.forEach { mode ->
-            AppButton(
-                mode.label,
-                onClick = {
-                    val profile = model.judgeProfileId ?: profileChoices.firstOrNull()?.profileId
-                    onModel(model.copy(judgeMode = mode, judgeProfileId = profile))
-                },
-                variant = if (mode == model.judgeMode) ButtonVariant.Primary else ButtonVariant.Secondary,
-            )
-        }
-    }
     if (model.judgeMode != JudgeMode.OFF) {
-        TestsLabeled("Judgment schedule") {
+        TestsLabeled("Judgment schedule", Modifier.padding(top = 8.dp)) {
             TestsDropdown(
                 selectedLabel = model.judgeTiming.label,
                 options = JudgeTiming.entries,
                 optionLabel = JudgeTiming::label,
                 onSelect = { onModel(model.copy(judgeTiming = it)) },
                 isSelected = { it == model.judgeTiming },
+                modifier = Modifier.width(JUDGE_FIELD_WIDTH),
                 menuWidth = MENU_WIDTH,
+                filled = true,
             )
         }
         val selected = profileChoices.firstOrNull { it.profileId == model.judgeProfileId }
-        TestsDropdown(
-            selectedLabel = selected?.label ?: "Choose the judge's AI profile",
-            options = profileChoices,
-            optionLabel = { it.label },
-            onSelect = {
-                onModel(
-                    model.copy(
-                        judgeProfileId = it.profileId,
-                        judgeModel = null,
-                        judgeReasoningEffort = null,
-                        judgeModelWasDiscovered = false,
-                    ),
-                )
-                it.profileId?.let { profileId ->
-                    ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_RUN_JUDGE, WorkflowAiSelection(profileId))
-                }
-            },
-            menuWidth = MENU_WIDTH,
-            isSelected = { it.profileId == model.judgeProfileId },
-            modifier = Modifier.padding(top = 6.dp),
-            emptyText = "No AI profile configured (Settings > AI providers)",
-        )
-        profiles.firstOrNull { it.id == model.judgeProfileId }?.let { judgeProfile ->
-            FlowRow(
-                Modifier.padding(top = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                itemVerticalAlignment = Alignment.CenterVertically,
-            ) {
+        FlowRow(
+            Modifier.padding(top = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            TestsDropdown(
+                selectedLabel = selected?.label ?: "Choose the judge's AI profile",
+                options = profileChoices,
+                optionLabel = { it.label },
+                onSelect = {
+                    onModel(
+                        model.copy(
+                            judgeProfileId = it.profileId,
+                            judgeModel = null,
+                            judgeReasoningEffort = null,
+                            judgeModelWasDiscovered = false,
+                        ),
+                    )
+                    it.profileId?.let { profileId ->
+                        ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_RUN_JUDGE, WorkflowAiSelection(profileId))
+                    }
+                },
+                modifier = Modifier.width(LANE_FIELD_WIDTH),
+                menuWidth = MENU_WIDTH,
+                isSelected = { it.profileId == model.judgeProfileId },
+                emptyText = "No AI profile configured (Settings > AI providers)",
+                filled = true,
+            )
+            profiles.firstOrNull { it.id == model.judgeProfileId }?.let { judgeProfile ->
                 ModelAndEffortPickers(
                     profile = judgeProfile,
                     catalog = catalog,
@@ -452,7 +497,8 @@ private fun RetrySection(model: RunDialogModel, onModel: (RunDialogModel) -> Uni
         verticalArrangement = Arrangement.spacedBy(6.dp),
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        TestsLabeled("Additional case attempts") {
+        Column(Modifier.width(RETRY_FIELD_WIDTH)) {
+            TestsFieldLabel("Additional case attempts")
             TestsDropdown(
                 selectedLabel = model.caseRetries.toString(),
                 options = listOf(0, 1, 2),
@@ -460,12 +506,14 @@ private fun RetrySection(model: RunDialogModel, onModel: (RunDialogModel) -> Uni
                 onSelect = { onModel(model.copy(caseRetries = it)) },
                 isSelected = { it == model.caseRetries },
                 menuWidth = 180.dp,
+                filled = true,
             )
         }
         val retryChoices = listOf(StepRetryChoice(null, "Inherit step setting"), StepRetryChoice(0, "Disable retries")) +
             (1..com.indagium.testing.model.MAX_STEP_RETRIES).map { count -> StepRetryChoice(count, "$count ${if (count == 1) "retry" else "retries"}") }
         val selected = retryChoices.first { it.count == model.stepRetriesOverride }
-        TestsLabeled("Step retries") {
+        Column(Modifier.width(RETRY_FIELD_WIDTH)) {
+            TestsFieldLabel("Step retries")
             TestsDropdown(
                 selectedLabel = selected.label,
                 options = retryChoices,
@@ -473,50 +521,75 @@ private fun RetrySection(model: RunDialogModel, onModel: (RunDialogModel) -> Uni
                 onSelect = { onModel(model.copy(stepRetriesOverride = it.count)) },
                 isSelected = { it.count == model.stepRetriesOverride },
                 menuWidth = 220.dp,
+                filled = true,
             )
         }
     }
 }
 
 /**
- * What every lane records: the same "Before start" controls as a manual live capture, starting from the saved capture settings and
- * changed for this run only. Whether each lane also opens a real live tab for it is the checkbox below them.
+ * What every lane records, in one line; "Change ▸" opens the same "Before start" controls as a manual live capture, starting from
+ * the saved capture settings and changed for this run only. Whether each lane also opens a real live tab for it is the checkbox
+ * below them.
  */
 @Composable
-private fun RecordingSection(model: RunDialogModel, onModel: (RunDialogModel) -> Unit) {
+private fun RecordingRow(model: RunDialogModel, onModel: (RunDialogModel) -> Unit, open: Boolean, onToggle: () -> Unit) {
     val ui = LocalTestsUi.current
-    val capture = model.capture ?: return
-    TestsSectionTitle("Recording")
-    TestsHint(
-        "Each lane records like a live capture you start by hand: the log, and with these options the screen, device audio and microphone. " +
-            "Changes here apply to this run only.",
-    )
-    Column(Modifier.padding(top = 6.dp)) {
-        CaptureStartOptions(
-            settings = capture,
-            onReclaimFocus = { ui.reclaimFocus() },
-            nativeMediaSupport = ui.state.captureNativeMediaSupport,
-            scrcpyAvailable = ui.state.captureToolResolution?.scrcpyPath != null,
-            edit = { transform -> onModel(model.copy(capture = transform(capture))) },
-        )
+    val capture = model.capture
+    if (capture == null) {
+        AppText(recordingSummary(null, model.openLaneTabs), color = tc().ts, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+        return
     }
-    CheckRow(checked = model.openLaneTabs, onToggle = { onModel(model.copy(openLaneTabs = !model.openLaneTabs)) }) {
-        AppText("Open a live tab per lane", color = tc().tx, fontSize = 12.sp)
-    }
-    TestsHint(
-        if (model.openLaneTabs) {
-            "Each lane appears as a capture tab (without taking focus). It stays as a stopped capture tab after the lane ends, " +
-                "so you can review it and Save ZIP."
-        } else {
-            "Lanes record the same way without a tab. A failed step's issue can still include the whole capture archive."
-        },
-    )
-    val liveSerial = ui.state.liveCaptureSerial()
-    if (liveSerial != null && model.allLanes().any { it.deviceSerial == liveSerial }) {
+    TestsSummaryRow(recordingSummary(capture, model.openLaneTabs), open, onToggle)
+    if (!open) return
+    DetailsBox {
         TestsHint(
-            "A lane on $liveSerial will borrow the active manual capture. It keeps running after the lane finishes; its current capture settings apply, " +
-                "and the Recording options above apply only to newly started lane captures.",
+            "Each lane records like a live capture you start by hand: the log, and with these options the screen, device audio and microphone. " +
+                "Changes here apply to this run only.",
         )
+        Column(Modifier.padding(top = 6.dp)) {
+            CaptureStartOptions(
+                settings = capture,
+                onReclaimFocus = { ui.reclaimFocus() },
+                nativeMediaSupport = ui.state.captureNativeMediaSupport,
+                scrcpyAvailable = ui.state.captureToolResolution?.scrcpyPath != null,
+                edit = { transform -> onModel(model.copy(capture = transform(capture))) },
+            )
+        }
+        CheckRow(checked = model.openLaneTabs, onToggle = { onModel(model.copy(openLaneTabs = !model.openLaneTabs)) }) {
+            AppText("Open a live tab per lane", color = tc().tx, fontSize = 12.sp)
+        }
+        TestsHint(
+            if (model.openLaneTabs) {
+                "Each lane appears as a capture tab (without taking focus). It stays as a stopped capture tab after the lane ends, " +
+                    "so you can review it and Save ZIP."
+            } else {
+                "Lanes record the same way without a tab. A failed step's issue can still include the whole capture archive."
+            },
+        )
+        val liveSerial = ui.state.liveCaptureSerial()
+        if (liveSerial != null && model.allLanes().any { it.deviceSerial == liveSerial }) {
+            TestsHint(
+                "A lane on $liveSerial will borrow the active manual capture. It keeps running after the lane finishes; its current capture settings apply, " +
+                    "and the Recording options above apply only to newly started lane captures.",
+            )
+        }
+    }
+}
+
+/** Retries, repeat, the tool-call limit, the evidence to keep and the manual-steps choice in one line; "Change ▸" opens them all. */
+@Composable
+private fun MoreRow(model: RunDialogModel, onModel: (RunDialogModel) -> Unit, showManualSteps: Boolean, open: Boolean, onToggle: () -> Unit) {
+    TestsSummaryRow(moreSummary(model, showManualSteps), open, onToggle)
+    if (!open) return
+    DetailsBox {
+        RetrySection(model, onModel)
+        SettingsSection(
+            model.repeat, { onModel(model.copy(repeat = it)) },
+            model.toolLimitText, { onModel(model.copy(toolLimitText = it)) },
+            model.evidence, { onModel(model.copy(evidence = it)) },
+        )
+        if (showManualSteps) ManualStepsSection(model.manualSteps) { onModel(model.copy(manualSteps = it)) }
     }
 }
 
@@ -535,14 +608,17 @@ private fun SettingsSection(
     TestsSectionTitle("Settings")
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         AppText("Repeat", color = tc().ts, fontSize = 11.sp)
-        ALLOWED_RUN_REPEATS.forEach { n ->
-            AppButton("$n×", onClick = { onRepeat(n) }, variant = if (n == repeat) ButtonVariant.Primary else ButtonVariant.Secondary)
-        }
+        SegmentedControl(
+            options = ALLOWED_RUN_REPEATS.map { "$it×" },
+            selectedIndices = setOf(ALLOWED_RUN_REPEATS.indexOf(repeat)),
+            onToggle = { onRepeat(ALLOWED_RUN_REPEATS[it]) },
+            segmentHeight = REPEAT_SEGMENT_HEIGHT,
+        )
         Spacer(Modifier.width(12.dp))
         AppText("Tool calls per case", color = tc().ts, fontSize = 11.sp)
         InlineField(value = limit, onValue = onLimit, modifier = Modifier.width(LIMIT_FIELD_WIDTH), fontSize = 12.sp)
     }
-    TestsFieldLabel("Evidence to keep (the log and the screen recording are part of each lane's recording, above)")
+    TestsFieldLabel("Evidence to keep (the log and the screen recording are part of each lane's recording, above)", Modifier.padding(top = 6.dp))
     EvidenceRow("Screenshots", evidence.screenshots) { onEvidence(evidence.copy(screenshots = !evidence.screenshots)) }
     EvidenceRow("Agent transcript", evidence.transcript) { onEvidence(evidence.copy(transcript = !evidence.transcript)) }
 }

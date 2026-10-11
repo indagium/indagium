@@ -4,19 +4,16 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,7 +58,6 @@ import java.io.File
 private val SCREENSHOT_MAX_HEIGHT = 360.dp
 private val EXCERPT_MAX_HEIGHT = 200.dp
 private val FIX_DIALOG_WIDTH = 520.dp
-private val FIX_DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private const val DETAIL_MAX_LINES = 12
 private const val PANEL_ALPHA = .6f
 private const val HEADER_ACTION_CHARS = 80
@@ -310,18 +306,20 @@ private fun StepFixDialog(runId: String, stepId: String, fixRef: String, action:
         ui.reclaimFocus()
     }
     Dialog(onDismissRequest = ::close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(FIX_DIALOG_WIDTH).background(tc.p, FIX_DIALOG_SHAPE).border(1.dp, tc.br, FIX_DIALOG_SHAPE).padding(20.dp)) {
-            AppText("Apply the suggested fix?", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            TestsHint("This changes the step in your library. The run keeps its own copy.")
-            if (changes.isEmpty()) TestsHint("The fix would not change anything: the step already says this.")
-            changes.forEach { change ->
-                AppText(change.field.uppercase(), color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
-                AppText("− ${change.before.ifBlank { "(empty)" }}", color = DANGER_RED, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
-                AppText("+ ${change.after}", color = tc.success, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
-            }
-            problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
-            Spacer(Modifier.padding(top = 10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+        TestsDialogFrame(
+            title = "Apply the suggested fix?",
+            width = FIX_DIALOG_WIDTH,
+            status = { problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
+            body = {
+                TestsHint("This changes the step in your library. The run keeps its own copy.")
+                if (changes.isEmpty()) TestsHint("The fix would not change anything: the step already says this.")
+                changes.forEach { change ->
+                    AppText(change.field.uppercase(), color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                    AppText("− ${change.before.ifBlank { "(empty)" }}", color = DANGER_RED, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
+                    AppText("+ ${change.after}", color = tc.success, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
+                }
+            },
+            footer = {
                 DialogActionButton("Apply fix", active = true, enabled = changes.isNotEmpty()) {
                     ui.scope.launch {
                         when (val result = ui.state.applyStepFix(runId, stepId, fixRef)) {
@@ -334,8 +332,8 @@ private fun StepFixDialog(runId: String, stepId: String, fixRef: String, action:
                     }
                 }
                 DialogActionButton("Cancel", active = false) { close() }
-            }
-        }
+            },
+        )
     }
 }
 
@@ -474,19 +472,21 @@ private fun AgentErrorDialog(runId: String, laneId: String, row: MatrixRow.Step,
         ui.reclaimFocus()
     }
     Dialog(onDismissRequest = ::close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(FIX_DIALOG_WIDTH).background(tc.p, FIX_DIALOG_SHAPE).border(1.dp, tc.br, FIX_DIALOG_SHAPE).padding(20.dp)) {
-            AppText("Mark as an agent error", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            TestsHint("Say what the agent got wrong (the app is fine). The note is kept with the step's result.")
-            InlineField(
-                value = note,
-                onValue = { note = it },
-                placeholder = "What did the agent get wrong?",
-                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                fontSize = 12.sp,
-            )
-            problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
-            Spacer(Modifier.padding(top = 10.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+        TestsDialogFrame(
+            title = "Mark as an agent error",
+            width = FIX_DIALOG_WIDTH,
+            status = { problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
+            body = {
+                TestsHint("Say what the agent got wrong (the app is fine). The note is kept with the step's result.")
+                InlineField(
+                    value = note,
+                    onValue = { note = it },
+                    placeholder = "What did the agent get wrong?",
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    fontSize = 12.sp,
+                )
+            },
+            footer = {
                 DialogActionButton("Save note", active = true, enabled = note.isNotBlank()) {
                     ui.scope.launch {
                         when (val result = ui.state.markAgentError(runId, laneId, row.caseId, row.iteration, row.stepId, note)) {
@@ -496,7 +496,7 @@ private fun AgentErrorDialog(runId: String, laneId: String, row: MatrixRow.Step,
                     }
                 }
                 DialogActionButton("Cancel", active = false) { close() }
-            }
-        }
+            },
+        )
     }
 }

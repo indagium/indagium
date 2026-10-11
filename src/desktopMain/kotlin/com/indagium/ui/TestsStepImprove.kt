@@ -1,7 +1,6 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -9,7 +8,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -45,6 +43,7 @@ import kotlinx.coroutines.launch
 private val DIALOG_WIDTH = 720.dp
 private val DIALOG_MAX_HEIGHT = 780.dp
 private val PROFILE_MENU_WIDTH = 320.dp
+private val PROFILE_FIELD_WIDTH = 200.dp
 private val NOTE_MIN_HEIGHT = 60.dp
 private val NOTE_MAX_HEIGHT = 140.dp
 
@@ -86,136 +85,141 @@ internal fun TestStepImproveDialog(target: ImproveStepsTarget, onDismiss: () -> 
         }
     }
 
+    val current = review
     Dialog(onDismissRequest = ::discardPreview, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        TestsScrollColumn(
-            Modifier.width(DIALOG_WIDTH).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = DIALOG_MAX_HEIGHT),
-            contentModifier = Modifier.padding(18.dp),
-        ) {
-            AppText("Improve steps with AI", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            AppText(case?.name.orEmpty(), color = tc.ts, fontSize = 11.sp)
-            Spacer(Modifier.height(6.dp))
-            val current = review
-            if (current == null) {
-                ImproveAskPhase(
-                    profileName = profile?.displayName,
-                    evidenceLine = evidence?.let { result ->
-                        (result as? StoreResult.Ok)?.let { improveEvidenceLabel(it.value, explicitRun = target.runId != null) }
-                            ?: result.userMessage()
-                    },
-                    blockedReason = blockedReason,
-                    profilePicker = {
-                        TestsLabeled("Provider profile") {
-                            TestsDropdown(
-                                selectedLabel = profile?.displayName ?: "Choose a configured profile",
-                                options = profiles,
-                                optionLabel = { it.displayName },
-                                onSelect = {
-                                    selection = WorkflowAiSelection(profileId = it.id)
-                                    ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_CASE_IMPROVE, selection)
-                                },
-                                enabled = !working,
-                                isSelected = { it.id == profile?.id },
-                                emptyText = "Configure a provider profile in Settings first",
-                                menuWidth = PROFILE_MENU_WIDTH,
-                            )
-                        }
-                        profile?.let { chosen ->
-                            FlowRow(
-                                Modifier.padding(top = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                ModelAndEffortPickers(
-                                    profile = chosen,
-                                    catalog = catalog,
-                                    model = selection.modelId,
-                                    effort = selection.reasoningEffort,
-                                    modelWasDiscovered = selection.modelWasDiscovered,
-                                    onChange = { pickedModel, pickedEffort, discovered ->
-                                        selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
-                                        ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_CASE_IMPROVE, selection)
-                                    },
-                                )
-                            }
-                        }
-                    },
-                    note = note,
-                    onNote = { note = it.take(MAX_IMPROVE_NOTE_CHARS) },
-                    working = working,
-                    usageLine = attemptUsage?.let { "Latest attempt · ${it.summaryLabel()}" },
-                    error = error,
-                    canGenerate = !working && profile != null && blockedReason == null,
-                    onCancel = ::discardPreview,
-                    onGenerate = {
-                        val selected = profile ?: return@ImproveAskPhase
-                        working = true
-                        error = null
-                        job = ui.scope.launch {
-                            try {
-                                when (val result = service.create(
-                                    target.caseId, selected.id, note, selection.modelId, selection.reasoningEffort, target.runId,
-                                    onUsage = { attemptUsage = it },
-                                )) {
-                                    is StoreResult.Ok -> review = ImproveReview(result.value, ui.library.scripts)
-                                    else -> error = result.userMessage()
+        TestsDialogFrame(
+            title = "Improve steps with AI",
+            width = DIALOG_WIDTH,
+            maxHeight = DIALOG_MAX_HEIGHT,
+            status = {
+                if (current == null) blockedReason?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
+                error?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
+                if (current != null) current.blockedReason?.let { TestsHint(it, Modifier.padding(top = 8.dp)) }
+            },
+            body = {
+                AppText(case?.name.orEmpty(), color = tc.ts, fontSize = 11.sp)
+                Spacer(Modifier.height(6.dp))
+                if (current == null) {
+                    ImproveAskPhase(
+                        evidenceLine = evidence?.let { result ->
+                            (result as? StoreResult.Ok)?.let { improveEvidenceLabel(it.value, explicitRun = target.runId != null) }
+                                ?: result.userMessage()
+                        },
+                        profilePicker = {
+                            TestsLabeled("Provider profile") {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    itemVerticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    TestsDropdown(
+                                        selectedLabel = profile?.displayName ?: "Choose a configured profile",
+                                        options = profiles,
+                                        optionLabel = { it.displayName },
+                                        onSelect = {
+                                            selection = WorkflowAiSelection(profileId = it.id)
+                                            ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_CASE_IMPROVE, selection)
+                                        },
+                                        modifier = Modifier.width(PROFILE_FIELD_WIDTH),
+                                        enabled = !working,
+                                        isSelected = { it.id == profile?.id },
+                                        emptyText = "Configure a provider profile in Settings first",
+                                        menuWidth = PROFILE_MENU_WIDTH,
+                                        filled = true,
+                                    )
+                                    profile?.let { chosen ->
+                                        ModelAndEffortPickers(
+                                            profile = chosen,
+                                            catalog = catalog,
+                                            model = selection.modelId,
+                                            effort = selection.reasoningEffort,
+                                            modelWasDiscovered = selection.modelWasDiscovered,
+                                            onChange = { pickedModel, pickedEffort, discovered ->
+                                                selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
+                                                ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_CASE_IMPROVE, selection)
+                                            },
+                                        )
+                                    }
                                 }
-                            } finally {
-                                working = false
+                            }
+                        },
+                        note = note,
+                        onNote = { note = it.take(MAX_IMPROVE_NOTE_CHARS) },
+                        working = working,
+                        usageLine = attemptUsage?.let { "Latest attempt · ${it.summaryLabel()}" },
+                    )
+                } else {
+                    ImproveReviewPhase(review = current, working = working)
+                }
+            },
+            footer = {
+                if (current == null) {
+                    val canGenerate = !working && profile != null && blockedReason == null
+                    HintWhen(!canGenerate, blockedReason ?: if (profile == null) "Choose a provider profile first." else "Working…") {
+                        DialogActionButton(if (working) "Improving…" else "Generate preview", active = true, enabled = canGenerate) {
+                            val selected = profile ?: return@DialogActionButton
+                            working = true
+                            error = null
+                            job = ui.scope.launch {
+                                try {
+                                    when (val result = service.create(
+                                        target.caseId, selected.id, note, selection.modelId, selection.reasoningEffort, target.runId,
+                                        onUsage = { attemptUsage = it },
+                                    )) {
+                                        is StoreResult.Ok -> review = ImproveReview(result.value, ui.library.scripts)
+                                        else -> error = result.userMessage()
+                                    }
+                                } finally {
+                                    working = false
+                                }
                             }
                         }
-                    },
-                )
-            } else {
-                ImproveReviewPhase(
-                    review = current,
-                    working = working,
-                    error = error,
-                    onBack = {
+                    }
+                    DialogActionButton("Cancel", active = false) { discardPreview() }
+                } else {
+                    val canApply = !working && current.blockedReason == null
+                    HintWhen(!canApply && current.blockedReason != null, current.blockedReason.orEmpty()) {
+                        DialogActionButton(if (working) "Applying…" else current.applyLabel, active = true, enabled = canApply) {
+                            working = true
+                            error = null
+                            job = ui.scope.launch {
+                                try {
+                                    when (val result = service.apply(current.proposal.id, current.edits(), current.acceptedIds())) {
+                                        is StoreResult.Ok -> {
+                                            ui.report(result)
+                                            review = null
+                                            onDismiss()
+                                        }
+                                        else -> error = result.userMessage()
+                                    }
+                                } finally {
+                                    working = false
+                                }
+                            }
+                        }
+                    }
+                    DialogActionButton("Back", active = false, enabled = !working) {
                         job?.cancel()
                         service.discard(current.proposal.id)
                         review = null
                         error = null
-                    },
-                    onCancel = ::discardPreview,
-                    onApply = {
-                        working = true
-                        error = null
-                        job = ui.scope.launch {
-                            try {
-                                when (val result = service.apply(current.proposal.id, current.edits(), current.acceptedIds())) {
-                                    is StoreResult.Ok -> {
-                                        ui.report(result)
-                                        review = null
-                                        onDismiss()
-                                    }
-                                    else -> error = result.userMessage()
-                                }
-                            } finally {
-                                working = false
-                            }
-                        }
-                    },
-                )
-            }
-        }
+                    }
+                    DialogActionButton("Cancel", active = false) { discardPreview() }
+                }
+            },
+        )
     }
 }
 
-@Suppress("LongParameterList") // The ask phase is a pure view of the dialog's state; each argument is one piece of it.
+/** The ask phase's body: what is sent, the profile, model and effort, and the optional note. Its buttons and messages are the dialog's footer and status. */
 @Composable
 private fun ImproveAskPhase(
-    profileName: String?,
     evidenceLine: String?,
-    blockedReason: String?,
     profilePicker: @Composable () -> Unit,
     note: String,
     onNote: (String) -> Unit,
     working: Boolean,
     usageLine: String?,
-    error: String?,
-    canGenerate: Boolean,
-    onCancel: () -> Unit,
-    onGenerate: () -> Unit,
 ) {
     val tc = tc()
     TestsHint(
@@ -237,31 +241,11 @@ private fun ImproveAskPhase(
             modifier = Modifier.fillMaxWidth(), minHeight = NOTE_MIN_HEIGHT, maxHeight = NOTE_MAX_HEIGHT, enabled = !working,
         )
     }
-    blockedReason?.let { TestsErrorText(it) }
-    error?.let { TestsErrorText(it) }
-    Spacer(Modifier.height(12.dp))
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-        AppButton("Cancel", onClick = onCancel, variant = ButtonVariant.Ghost)
-        HintedButton(
-            if (working) "Improving…" else "Generate preview",
-            onClick = onGenerate,
-            enabled = canGenerate,
-            disabledHint = blockedReason ?: if (profileName == null) "Choose a provider profile first." else "Working…",
-            variant = ButtonVariant.Primary,
-        )
-    }
 }
 
 @Suppress("LongMethod") // The review is one list of step cards; splitting it would only move the parameters around.
 @Composable
-private fun ImproveReviewPhase(
-    review: ImproveReview,
-    working: Boolean,
-    error: String?,
-    onBack: () -> Unit,
-    onCancel: () -> Unit,
-    onApply: () -> Unit,
-) {
+private fun ImproveReviewPhase(review: ImproveReview, working: Boolean) {
     val tc = tc()
     val proposal: TestCaseImproveProposal = review.proposal
     AppText(
@@ -310,19 +294,6 @@ private fun ImproveReviewPhase(
             row.problem?.let { TestsErrorText(it) }
         }
         Spacer(Modifier.height(6.dp))
-    }
-    error?.let { TestsErrorText(it) }
-    review.blockedReason?.let { TestsHint(it) }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-        AppButton("Back", onClick = onBack, enabled = !working, variant = ButtonVariant.Ghost)
-        AppButton("Cancel", onClick = onCancel, variant = ButtonVariant.Ghost)
-        HintedButton(
-            if (working) "Applying…" else review.applyLabel,
-            onClick = onApply,
-            enabled = !working && review.blockedReason == null,
-            disabledHint = review.blockedReason,
-            variant = ButtonVariant.Primary,
-        )
     }
 }
 

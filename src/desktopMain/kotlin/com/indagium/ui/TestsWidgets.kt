@@ -117,6 +117,8 @@ private val DIALOG_MAX_HEIGHT = 720.dp
 private val TITLE_FONT_SIZE = 14.sp
 private val INSPECTOR_PADDING = 14.dp
 private val ICON_BUTTON_SIZE = 22.dp
+private val FILLED_FIELD_HEIGHT = 28.dp
+private val DIALOG_LABEL_WIDTH = 60.dp
 
 /** A line of feedback under the workspace header: an error, or an informational note such as an import warning. */
 internal class TestsBanner(val message: String, val isError: Boolean)
@@ -614,6 +616,10 @@ internal fun TestsInspectorHeader(
 /**
  * A "label ▾" button that opens a menu of [options]. Dismissing the popup hands keyboard focus back to the workspace
  * root (a closed Popup does not), which is what keeps Alt+arrow and Esc working after the first click.
+ *
+ * [filled] draws the field the way the AI pickers ([AiProviderDropdown], [AiModelDropdown], [AiReasoningEffortDropdown]) do:
+ * a 28dp filled field as wide as its box ([modifier] sets that width), the label left and a ▼/▲ at the right. Dialogs use it
+ * wherever a provider, device, model or effort picker sits beside those, so every picker of a row looks the same.
  */
 @Composable
 internal fun <T> TestsDropdown(
@@ -626,6 +632,7 @@ internal fun <T> TestsDropdown(
     menuWidth: Dp = 220.dp,
     isSelected: (T) -> Boolean = { false },
     emptyText: String = "Nothing to choose from",
+    filled: Boolean = false,
 ) {
     val tc = tc()
     val ui = LocalTestsUi.current
@@ -639,26 +646,53 @@ internal fun <T> TestsDropdown(
         ui.reclaimFocus()
     }
     Box(modifier) {
-        HoverBox(
-            modifier = Modifier.clip(CORNER_MD).background(if (open) tc.p2 else Color.Transparent, CORNER_MD).border(1.dp, tc.br, CORNER_MD),
-            hoverEnabled = enabled,
-            onClick = if (enabled) ({ if (System.currentTimeMillis() >= suppressUntilMs) open = !open }) else null,
-        ) {
-            Row(
-                Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+        if (filled) {
+            HoverBox(
+                modifier = Modifier.fillMaxWidth().height(FILLED_FIELD_HEIGHT).clip(CORNER_SM).background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM),
+                hoverEnabled = enabled,
+                onClick = if (enabled) ({ if (System.currentTimeMillis() >= suppressUntilMs) open = !open }) else null,
             ) {
-                DisableSelection {
-                    AppText(selectedLabel, color = if (enabled) tc.tx else tc.ts, fontSize = FIELD_FONT_SIZE, modifier = Modifier.weight(1f, fill = false))
-                    AppText("▾", color = tc.td, fontSize = 9.sp)
+                Row(
+                    Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    DisableSelection {
+                        AppText(
+                            selectedLabel,
+                            color = if (enabled) tc.tx else tc.ts,
+                            fontSize = SMALL_FONT_SIZE,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+                    }
+                }
+            }
+        } else {
+            HoverBox(
+                modifier = Modifier.clip(CORNER_MD).background(if (open) tc.p2 else Color.Transparent, CORNER_MD).border(1.dp, tc.br, CORNER_MD),
+                hoverEnabled = enabled,
+                onClick = if (enabled) ({ if (System.currentTimeMillis() >= suppressUntilMs) open = !open }) else null,
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    DisableSelection {
+                        AppText(selectedLabel, color = if (enabled) tc.tx else tc.ts, fontSize = FIELD_FONT_SIZE, modifier = Modifier.weight(1f, fill = false))
+                        AppText("▾", color = tc.td, fontSize = 9.sp)
+                    }
                 }
             }
         }
         if (open) {
             Popup(
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                offset = IntOffset(0, with(density) { (if (filled) 32.dp else 30.dp).roundToPx() }),
                 onDismissRequest = ::close,
                 properties = PopupProperties(focusable = false),
             ) {
@@ -1079,7 +1113,9 @@ internal fun TestsLockedNotice(text: String, modifier: Modifier = Modifier) {
 /**
  * The surface every Tests dialog shares, placed inside a `Dialog`: 8dp corners, 20dp padding, a 14sp [title], a
  * [body] that scrolls (with a scrollbar) once it outgrows [maxHeight], and a [footer] of centred
- * [DialogActionButton]s that stays visible below it.
+ * [DialogActionButton]s that stays visible below it. [status] sits between the two and does not scroll: the place for an
+ * error or a progress line that must stay in view while the body is scrolled away from it (it is empty by default and
+ * then takes no room, so a caller adds its own top padding).
  */
 @Composable
 internal fun TestsDialogFrame(
@@ -1087,6 +1123,7 @@ internal fun TestsDialogFrame(
     modifier: Modifier = Modifier,
     width: Dp = CONFIRM_DIALOG_WIDTH,
     maxHeight: Dp = DIALOG_MAX_HEIGHT,
+    status: @Composable ColumnScope.() -> Unit = {},
     body: @Composable ColumnScope.() -> Unit,
     footer: @Composable RowScope.() -> Unit,
 ) {
@@ -1095,6 +1132,7 @@ internal fun TestsDialogFrame(
         AppText(title, color = tc.tx, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.size(6.dp))
         TestsScrollColumn(Modifier.weight(1f, fill = false), content = body)
+        Column(Modifier.fillMaxWidth(), content = status)
         Spacer(Modifier.size(14.dp))
         Row(
             Modifier.fillMaxWidth(),
@@ -1102,6 +1140,64 @@ internal fun TestsDialogFrame(
             verticalAlignment = Alignment.CenterVertically,
             content = footer,
         )
+    }
+}
+
+/**
+ * One row of a dialog laid out as "what / where / …": a muted [label] column and the [content] beside it. A body of
+ * these is spaced by the caller (a `Column` with `spacedBy`).
+ */
+@Composable
+internal fun TestsDialogRow(label: String, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
+        AppText(label, color = tc().ts, fontSize = SMALL_FONT_SIZE, modifier = Modifier.width(DIALOG_LABEL_WIDTH).padding(top = 6.dp))
+        Column(Modifier.weight(1f), content = content)
+    }
+}
+
+/**
+ * A filled button that summarises a choice ("All 5 cases · 27 steps") and opens or closes the details under it in place.
+ * [open] flips the arrow; the click hands keyboard focus back to the workspace root.
+ */
+@Composable
+internal fun TestsDisclosureButton(label: String, open: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    HoverBox(
+        modifier = modifier.clip(CORNER_SM).background(tc.p2, CORNER_SM).border(1.dp, tc.br, CORNER_SM)
+            .semantics(mergeDescendants = true) { role = Role.Button },
+        onClick = {
+            onClick()
+            ui.reclaimFocus()
+        },
+    ) {
+        DisableSelection {
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText(
+                    label,
+                    color = tc.tx,
+                    fontSize = SMALL_FONT_SIZE,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+    }
+}
+
+/** A one-line summary with a "Change ▸" / "Done" link that expands the details under it in place. */
+@Composable
+internal fun TestsSummaryRow(summary: String, open: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    Row(modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        AppText(summary, color = tc().ts, fontSize = FIELD_FONT_SIZE, maxLines = 3, modifier = Modifier.weight(1f, fill = false))
+        TestsBreadcrumbLink(if (open) "Done" else "Change ▸", onToggle, Modifier.padding(top = 1.dp))
     }
 }
 

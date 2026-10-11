@@ -20,8 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -934,9 +934,19 @@ private fun UsageRow(label: String, value: String, emphasis: Boolean = false) {
     }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
+/**
+ * Exports a run's report: the format as a segmented control, the destination as a path field with a native "Choose…" save prompt
+ * ([chooseFile], prefilled with a file name made of the suite, the run's time and the format's extension) and, for the evidence ZIP, the
+ * saved evidence to include. Closing is refused while an export runs; its button then cancels it.
+ */
+@Suppress("ktlint:standard:max-line-length", "MaxLineLength", "LongMethod")
 @Composable
-private fun ReportExportDialog(run: TestRun, runDir: File, onDismiss: () -> Unit) {
+internal fun ReportExportDialog(
+    run: TestRun,
+    runDir: File,
+    onDismiss: () -> Unit,
+    chooseFile: (title: String, suggestedName: String, initialDirectory: File?) -> File? = ::pickSaveFile,
+) {
     val tc = tc()
     val ui = LocalTestsUi.current
     var format by remember(run.id) { mutableStateOf(TestRunReportFormat.JSON) }
@@ -949,6 +959,7 @@ private fun ReportExportDialog(run: TestRun, runDir: File, onDismiss: () -> Unit
     var running by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf<TestRunReportExportProgress?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
+    val suggestedName = reportExportFileName(run.suite.name, run.createdAt, format)
 
     fun export() {
         if (destination.isBlank() || running) return
@@ -969,51 +980,73 @@ private fun ReportExportDialog(run: TestRun, runDir: File, onDismiss: () -> Unit
             }
         }
     }
+
+    fun choose() {
+        val folder = destination.takeIf(String::isNotBlank)?.let { File(it).absoluteFile.parentFile }?.takeIf(File::isDirectory)
+        chooseFile("Export run report", suggestedName, folder ?: ui.state.initialSaveDialogDir())?.let { destination = it.absolutePath }
+        ui.reclaimFocus()
+    }
     Dialog(onDismissRequest = { if (running) job?.cancel() else onDismiss() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(620.dp).heightIn(max = 700.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(16.dp)) {
-            AppText("Export run report", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            TestsHint("Choose a local JSON, Markdown, or evidence ZIP destination. Existing files are never replaced by this dialog.")
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                TestRunReportFormat.entries.forEach { option ->
-                    AppButton(option.name.replace('_', ' '), onClick = { format = option }, variant = if (format == option) ButtonVariant.Primary else ButtonVariant.Secondary)
-                }
-            }
-            AppText("Destination path", color = tc.ts, fontSize = 10.sp)
-            BasicTextField(
-                value = destination,
-                onValueChange = { destination = it },
-                singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = tc.tx, fontSize = 11.sp, fontFamily = MONO),
-                modifier = Modifier.fillMaxWidth().background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM).padding(8.dp),
-                decorationBox = { inner ->
-                    Box {
-                        if (destination.isBlank()) {
-                            AppText("/path/to/report.${format.name.lowercase()}", color = tc.td, fontSize = 10.sp)
-                        }
-                        inner()
+        TestsDialogFrame(
+            title = "Export run report",
+            width = EXPORT_DIALOG_WIDTH,
+            maxHeight = EXPORT_DIALOG_MAX_HEIGHT,
+            status = {
+                progress?.let { TestsHint("${it.percent}% · ${it.current}", Modifier.padding(top = 8.dp)) }
+                message?.let { TestsHint(it, Modifier.padding(top = 4.dp)) }
+            },
+            body = {
+                TestsHint("Choose a local JSON, Markdown, or evidence ZIP destination. Existing files are never replaced by this dialog.")
+                Spacer(Modifier.height(12.dp))
+                TestsFieldLabel("Format")
+                SegmentedControl(
+                    options = TestRunReportFormat.entries.map { it.label() },
+                    selectedIndices = setOf(TestRunReportFormat.entries.indexOf(format)),
+                    onToggle = { index ->
+                        format = TestRunReportFormat.entries[index]
+                        destination = withReportExtension(destination, format)
+                    },
+                    enabled = !running,
+                )
+                Spacer(Modifier.height(10.dp))
+                TestsFieldLabel("Destination path")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CompositionLocalProvider(LocalUiFontFamily provides MONO) {
+                        InlineField(
+                            value = destination,
+                            onValue = { destination = it },
+                            placeholder = "/path/to/$suggestedName",
+                            modifier = Modifier.weight(1f),
+                            fontSize = 11.sp,
+                        )
                     }
-                },
-            )
-            if (format == TestRunReportFormat.EVIDENCE_ZIP) {
-                TestsSectionTitle("Saved evidence")
-                TestsScrollColumn(Modifier.weight(1f, fill = false).heightIn(max = 260.dp)) {
-                    evidencePaths.forEach { path ->
-                        CheckRow(path in selectedEvidence, { selectedEvidence = if (path in selectedEvidence) selectedEvidence - path else selectedEvidence + path }) {
-                            AppText(path, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                        }
-                    }
-                    if (evidencePaths.isEmpty()) TestsHint("No saved screenshots, logs, or tool activity paths are available.")
+                    AppButton("Choose…", onClick = ::choose, enabled = !running)
                 }
-            }
-            progress?.let { TestsHint("${it.percent}% · ${it.current}") }
-            message?.let { TestsHint(it) }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                AppButton(if (running) "Cancel export" else "Export", onClick = { if (running) job?.cancel() else export() }, enabled = running || destination.isNotBlank(), variant = ButtonVariant.Primary)
-                AppButton("Close", onClick = onDismiss, enabled = !running)
-            }
-        }
+                if (format == TestRunReportFormat.EVIDENCE_ZIP) {
+                    TestsSectionTitle("Saved evidence")
+                    BoundedScrollBoxDp(EVIDENCE_LIST_MAX_HEIGHT) {
+                        evidencePaths.forEach { path ->
+                            CheckRow(path in selectedEvidence, { selectedEvidence = if (path in selectedEvidence) selectedEvidence - path else selectedEvidence + path }) {
+                                AppText(path, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            }
+                        }
+                        if (evidencePaths.isEmpty()) TestsHint("No saved screenshots, logs, or tool activity paths are available.")
+                    }
+                }
+            },
+            footer = {
+                DialogActionButton(if (running) "Cancel export" else "Export", active = true, enabled = running || destination.isNotBlank()) {
+                    if (running) job?.cancel() else export()
+                }
+                DialogActionButton("Close", active = false, enabled = !running) { onDismiss() }
+            },
+        )
     }
 }
+
+private val EXPORT_DIALOG_WIDTH = 620.dp
+private val EXPORT_DIALOG_MAX_HEIGHT = 700.dp
+private const val EVIDENCE_LIST_MAX_HEIGHT = 240
 
 private const val MAX_REPORT_ACTIVITY_BYTES = 20 * 1024 * 1024
 private const val ACTIVITY_PAGE_SIZE = 60

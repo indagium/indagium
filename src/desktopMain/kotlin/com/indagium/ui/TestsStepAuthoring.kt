@@ -62,6 +62,12 @@ import java.util.UUID
 
 private data class StepInsertionPoint(val label: String, val index: Int)
 
+private val DRAFT_DIALOG_WIDTH = 660.dp
+private val DRAFT_DIALOG_MAX_HEIGHT = 760.dp
+private val LOG_DIALOG_WIDTH = 620.dp
+private val LOG_DIALOG_MAX_HEIGHT = 760.dp
+private val AI_FIELD_WIDTH = 200.dp
+
 /**
  * The header of a case's step list: the "Steps (N)" title, a "+ Add step" split button (main click: [onAddStep]; menu: draft with
  * AI, record from a device, paste log lines as checks, insert a shared sequence) and a ⋯ menu (improve with AI, rewrite from a saved
@@ -205,8 +211,8 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
         }
     }
     recordError?.let { TestsErrorText(it) }
-    if (draftOpen) TestStepDraftDialog(suiteId, case, onDismiss = { draftOpen = false })
-    if (logOpen && step != null) LogChecksDialog(step.id, onDismiss = { logOpen = false })
+    if (draftOpen) TestStepDraftDialog(suiteId, case, onDismiss = { draftOpen = false; ui.reclaimFocus() })
+    if (logOpen && step != null) LogChecksDialog(step.id, onDismiss = { logOpen = false; ui.reclaimFocus() })
     if (insertSharedOpen) InsertSharedDialog(case, step, onDismiss = { insertSharedOpen = false })
     val recordingTarget = ui.state.testStepRecordingTarget
     if (recordingTarget == (suiteId to case.id)) {
@@ -352,142 +358,150 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
     }
 
     Dialog(onDismissRequest = ::discardPreview, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        TestsScrollColumn(
-            Modifier.width(660.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = 760.dp),
-            contentModifier = Modifier.padding(18.dp),
-        ) {
-            AppText("Draft steps with AI", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(6.dp))
-            TestsHint("Generation only creates this preview. It has no device controls and does not change the library until you apply it.")
-            if (attemptUsage != null) {
-                Spacer(Modifier.height(5.dp))
-                AppText("Latest attempt · ${attemptUsage?.summaryLabel()}", color = tc.td, fontSize = 10.sp)
-            }
-            sessionUsage?.let { AppText("Creation session total · ${it.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
-            Spacer(Modifier.height(12.dp))
-            if (draft == null) {
-                TestsLabeled("Provider profile") {
-                    TestsDropdown(
-                        selectedLabel = profile?.displayName ?: "Choose a configured profile",
-                        options = profiles,
-                        optionLabel = { it.displayName },
-                        onSelect = {
-                            selection = WorkflowAiSelection(profileId = it.id)
-                            ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
-                        },
-                        isSelected = { it.id == profile?.id },
-                        emptyText = "Configure a provider profile in Settings first",
-                        menuWidth = 320.dp,
-                    )
+        TestsDialogFrame(
+            title = "Draft steps with AI",
+            width = DRAFT_DIALOG_WIDTH,
+            maxHeight = DRAFT_DIALOG_MAX_HEIGHT,
+            status = { error?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
+            body = {
+                TestsHint("Generation only creates this preview. It has no device controls and does not change the library until you apply it.")
+                if (attemptUsage != null) {
+                    Spacer(Modifier.height(5.dp))
+                    AppText("Latest attempt · ${attemptUsage?.summaryLabel()}", color = tc.td, fontSize = 10.sp)
                 }
-                profile?.let { chosen ->
-                    FlowRow(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        ModelAndEffortPickers(
-                            profile = chosen,
-                            catalog = catalog,
-                            model = selection.modelId,
-                            effort = selection.reasoningEffort,
-                            modelWasDiscovered = selection.modelWasDiscovered,
-                            onChange = { pickedModel, pickedEffort, discovered ->
-                                selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
-                                ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
-                            },
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                TestsLabeled("What should the added steps do?") {
-                    ScrollableTextArea(prompt, { prompt = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
-                }
-                error?.let { TestsErrorText(it) }
+                sessionUsage?.let { AppText("Creation session total · ${it.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
                 Spacer(Modifier.height(12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                    AppButton("Cancel", onClick = ::discardPreview, variant = ButtonVariant.Ghost)
-                    AppButton(
-                        if (working) "Drafting…" else "Generate preview",
-                        onClick = {
-                            val selected = profile ?: return@AppButton
-                            working = true
-                            error = null
-                            job = ui.scope.launch {
-                                try {
-                                    when (val result = ui.state.testStepDraftService.create(
-                                        suiteId, case.id, selected.id, prompt, selection.modelId, selection.reasoningEffort,
-                                        authoringSessionId = authoringSessionId,
-                                        onUsage = { latest, total -> attemptUsage = latest; sessionUsage = total },
-                                    )) {
-                                        is StoreResult.Ok -> draft = result.value
-                                        else -> error = result.userMessage()
-                                    }
-                                } finally {
-                                    working = false
-                                }
+                if (draft == null) {
+                    TestsLabeled("Provider profile") {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            itemVerticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TestsDropdown(
+                                selectedLabel = profile?.displayName ?: "Choose a configured profile",
+                                options = profiles,
+                                optionLabel = { it.displayName },
+                                onSelect = {
+                                    selection = WorkflowAiSelection(profileId = it.id)
+                                    ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
+                                },
+                                modifier = Modifier.width(AI_FIELD_WIDTH),
+                                isSelected = { it.id == profile?.id },
+                                emptyText = "Configure a provider profile in Settings first",
+                                menuWidth = 320.dp,
+                                filled = true,
+                            )
+                            profile?.let { chosen ->
+                                ModelAndEffortPickers(
+                                    profile = chosen,
+                                    catalog = catalog,
+                                    model = selection.modelId,
+                                    effort = selection.reasoningEffort,
+                                    modelWasDiscovered = selection.modelWasDiscovered,
+                                    onChange = { pickedModel, pickedEffort, discovered ->
+                                        selection = WorkflowAiSelection(chosen.id, pickedModel, pickedEffort, discovered)
+                                        ui.state.rememberAiWorkflowSelection(AiWorkflow.TEST_STEP_DRAFT, selection)
+                                    },
+                                )
                             }
-                        },
-                        enabled = !working && profile != null && prompt.isNotBlank(),
-                        variant = ButtonVariant.Primary,
-                    )
-                }
-            } else {
-                AppText("Review and edit ${editableSteps.size} proposed step(s).", color = tc.ts, fontSize = 11.sp)
-                draft?.creationUsage?.let { usage ->
-                    Spacer(Modifier.height(4.dp))
-                    AppText("Creation session total · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp)
-                }
-                draft?.latestUsage?.let { usage -> AppText("Latest draft attempt · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
-                TestsDropdown(
-                    selectedLabel = insertion.label,
-                    options = insertionPoints,
-                    optionLabel = StepInsertionPoint::label,
-                    onSelect = { insertion = it },
-                    isSelected = { it == insertion },
-                    menuWidth = 380.dp,
-                )
-                Spacer(Modifier.height(8.dp))
-                editableSteps.forEachIndexed { index, step ->
-                    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(9.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                            AppButton("Remove", onClick = { editableSteps.removeAt(index) }, variant = ButtonVariant.Ghost)
-                        }
-                        TestsLabeled("Action") {
-                            CommitTextField(step.action, { value -> editableSteps[index] = editableSteps[index].copy(action = value); StoreResult.Ok(Unit) }, placeholder = "What the tester does")
-                        }
-                        TestsLabeled("Expected result") {
-                            CommitTextField(step.expected, { value -> editableSteps[index] = editableSteps[index].copy(expected = value); StoreResult.Ok(Unit) }, multiline = true, placeholder = "What should happen")
                         }
                     }
-                    Spacer(Modifier.height(6.dp))
-                }
-                error?.let { TestsErrorText(it) }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                    AppButton("Back", onClick = { job?.cancel(); draft?.let { ui.state.testStepDraftService.discard(it.id) }; draft = null; error = null }, variant = ButtonVariant.Ghost)
-                    AppButton("Cancel", onClick = ::discardPreview, variant = ButtonVariant.Ghost)
-                    AppButton(
-                        if (working) "Applying…" else "Apply to case",
-                        onClick = {
-                            val activeDraft = draft ?: return@AppButton
-                            working = true
-                            job = ui.scope.launch {
-                                try {
-                                    when (val result = ui.state.testStepDraftService.apply(activeDraft.id, editableSteps.toList(), insertion.index)) {
-                                        is StoreResult.Ok -> {
-                                            ui.report(result)
-                                            onDismiss()
-                                        }
-                                        else -> error = result.userMessage()
-                                    }
-                                } finally {
-                                    working = false
-                                }
-                            }
-                        },
-                        enabled = !working && editableSteps.isNotEmpty() && editableSteps.all { it.action.isNotBlank() },
-                        variant = ButtonVariant.Primary,
+                    Spacer(Modifier.height(8.dp))
+                    TestsLabeled("What should the added steps do?") {
+                        ScrollableTextArea(prompt, { prompt = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
+                    }
+                } else {
+                    AppText("Review and edit ${editableSteps.size} proposed step(s).", color = tc.ts, fontSize = 11.sp)
+                    draft?.creationUsage?.let { usage ->
+                        Spacer(Modifier.height(4.dp))
+                        AppText("Creation session total · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp)
+                    }
+                    draft?.latestUsage?.let { usage -> AppText("Latest draft attempt · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
+                    TestsDropdown(
+                        selectedLabel = insertion.label,
+                        options = insertionPoints,
+                        optionLabel = StepInsertionPoint::label,
+                        onSelect = { insertion = it },
+                        isSelected = { it == insertion },
+                        menuWidth = 380.dp,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    editableSteps.forEachIndexed { index, step ->
+                        Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(9.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                AppButton("Remove", onClick = { editableSteps.removeAt(index) }, variant = ButtonVariant.Ghost)
+                            }
+                            TestsLabeled("Action") {
+                                CommitTextField(step.action, { value -> editableSteps[index] = editableSteps[index].copy(action = value); StoreResult.Ok(Unit) }, placeholder = "What the tester does")
+                            }
+                            TestsLabeled("Expected result") {
+                                CommitTextField(step.expected, { value -> editableSteps[index] = editableSteps[index].copy(expected = value); StoreResult.Ok(Unit) }, multiline = true, placeholder = "What should happen")
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                    }
                 }
-            }
-        }
+            },
+            footer = {
+                if (draft == null) {
+                    DialogActionButton(
+                        if (working) "Drafting…" else "Generate preview",
+                        active = true,
+                        enabled = !working && profile != null && prompt.isNotBlank(),
+                    ) {
+                        val selected = profile ?: return@DialogActionButton
+                        working = true
+                        error = null
+                        job = ui.scope.launch {
+                            try {
+                                when (val result = ui.state.testStepDraftService.create(
+                                    suiteId, case.id, selected.id, prompt, selection.modelId, selection.reasoningEffort,
+                                    authoringSessionId = authoringSessionId,
+                                    onUsage = { latest, total -> attemptUsage = latest; sessionUsage = total },
+                                )) {
+                                    is StoreResult.Ok -> draft = result.value
+                                    else -> error = result.userMessage()
+                                }
+                            } finally {
+                                working = false
+                            }
+                        }
+                    }
+                    DialogActionButton("Cancel", active = false) { discardPreview() }
+                } else {
+                    DialogActionButton(
+                        if (working) "Applying…" else "Apply to case",
+                        active = true,
+                        enabled = !working && editableSteps.isNotEmpty() && editableSteps.all { it.action.isNotBlank() },
+                    ) {
+                        val activeDraft = draft ?: return@DialogActionButton
+                        working = true
+                        job = ui.scope.launch {
+                            try {
+                                when (val result = ui.state.testStepDraftService.apply(activeDraft.id, editableSteps.toList(), insertion.index)) {
+                                    is StoreResult.Ok -> {
+                                        ui.report(result)
+                                        onDismiss()
+                                    }
+                                    else -> error = result.userMessage()
+                                }
+                            } finally {
+                                working = false
+                            }
+                        }
+                    }
+                    DialogActionButton("Back", active = false) {
+                        job?.cancel()
+                        draft?.let { ui.state.testStepDraftService.discard(it.id) }
+                        draft = null
+                        error = null
+                    }
+                    DialogActionButton("Cancel", active = false) { discardPreview() }
+                }
+            },
+        )
     }
 }
 
@@ -510,44 +524,47 @@ private fun LogChecksDialog(stepId: String, onDismiss: () -> Unit) {
     }
     var error by remember { mutableStateOf<String?>(null) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(620.dp).background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(18.dp)) {
-            AppText("Paste log lines as checks", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(5.dp))
-            TestsHint("Android log tags are detected when available. Messages are regex-escaped literally; each check uses the default wait duration.")
-            Spacer(Modifier.height(8.dp))
-            ScrollableTextArea(text, { text = it }, modifier = Modifier.fillMaxWidth(), minHeight = 120.dp, maxHeight = 250.dp)
-            Spacer(Modifier.height(8.dp))
-            AppText("PREVIEW · ${preview.checks.size} checks", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-            TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = 210.dp)) {
-                editableChecks.forEachIndexed { index, check ->
-                    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(6.dp)) {
-                        TestsLabeled("Tag (optional)") { CommitTextField(check.tag.orEmpty(), { value -> editableChecks[index] = check.copy(tag = value.trim().ifEmpty { null }); StoreResult.Ok(Unit) }, placeholder = "Any tag") }
-                        TestsLabeled("Literal message regex") { CommitTextField(check.regex, { value -> editableChecks[index] = check.copy(regex = value); StoreResult.Ok(Unit) }, mono = true) }
-                        TestsLabeled("Wait (ms)") { CommitNumberField(check.withinMs, 1L, 300_000L, { value -> editableChecks[index] = check.copy(withinMs = value); StoreResult.Ok(Unit) }) }
+        TestsDialogFrame(
+            title = "Paste log lines as checks",
+            width = LOG_DIALOG_WIDTH,
+            maxHeight = LOG_DIALOG_MAX_HEIGHT,
+            status = { error?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
+            body = {
+                TestsHint("Android log tags are detected when available. Messages are regex-escaped literally; each check uses the default wait duration.")
+                Spacer(Modifier.height(8.dp))
+                ScrollableTextArea(text, { text = it }, modifier = Modifier.fillMaxWidth(), minHeight = 120.dp, maxHeight = 250.dp)
+                Spacer(Modifier.height(8.dp))
+                AppText("PREVIEW · ${preview.checks.size} checks", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = 210.dp)) {
+                    editableChecks.forEachIndexed { index, check ->
+                        Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(6.dp)) {
+                            TestsLabeled("Tag (optional)") { CommitTextField(check.tag.orEmpty(), { value -> editableChecks[index] = check.copy(tag = value.trim().ifEmpty { null }); StoreResult.Ok(Unit) }, placeholder = "Any tag") }
+                            TestsLabeled("Literal message regex") { CommitTextField(check.regex, { value -> editableChecks[index] = check.copy(regex = value); StoreResult.Ok(Unit) }, mono = true) }
+                            TestsLabeled("Wait (ms)") { CommitNumberField(check.withinMs, 1L, 300_000L, { value -> editableChecks[index] = check.copy(withinMs = value); StoreResult.Ok(Unit) }) }
+                        }
                     }
+                    preview.warnings.forEach { warning -> AppText(warning, color = tc.warn, fontSize = 10.sp) }
                 }
-                preview.warnings.forEach { warning -> AppText(warning, color = tc.warn, fontSize = 10.sp) }
-            }
-            error?.let { TestsErrorText(it) }
-            TestsDropdown(
-                selectedLabel = insertion.label,
-                options = checkPositions,
-                optionLabel = StepInsertionPoint::label,
-                onSelect = { insertion = it },
-                isSelected = { it.index == insertion.index },
-                menuWidth = 300.dp,
-            )
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                AppButton("Cancel", onClick = onDismiss, variant = ButtonVariant.Ghost)
-                AppButton("Insert checks", onClick = {
+                Spacer(Modifier.height(8.dp))
+                TestsDropdown(
+                    selectedLabel = insertion.label,
+                    options = checkPositions,
+                    optionLabel = StepInsertionPoint::label,
+                    onSelect = { insertion = it },
+                    isSelected = { it.index == insertion.index },
+                    menuWidth = 300.dp,
+                )
+            },
+            footer = {
+                DialogActionButton("Insert checks", active = true, enabled = preview.checks.isNotEmpty()) {
                     when (val result = ui.state.insertTestChecks(stepId, editableChecks.toList(), insertion.index.takeIf { it != Int.MAX_VALUE })) {
                         is StoreResult.Ok -> { ui.report(result); onDismiss() }
                         else -> error = result.userMessage()
                     }
-                }, enabled = preview.checks.isNotEmpty(), variant = ButtonVariant.Primary)
-            }
-        }
+                }
+                DialogActionButton("Cancel", active = false) { onDismiss() }
+            },
+        )
     }
 }
 

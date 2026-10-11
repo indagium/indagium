@@ -1470,6 +1470,8 @@ internal fun StuckLoadingDialog(
     }
 }
 
+private const val DISABLED_ACTION_ALPHA = 0.45f
+
 @Composable
 internal fun DialogActionButton(
     label: String,
@@ -1481,9 +1483,11 @@ internal fun DialogActionButton(
     val tc = tc()
     val accent = if (danger) DANGER_RED else tc.ac
     val shape = RoundedCornerShape(5.dp)
+    // A label longer than the 132dp minimum widens the button (with room around the text) instead of wrapping.
     Box(
         Modifier
-            .width(132.dp)
+            .alpha(if (enabled) 1f else DISABLED_ACTION_ALPHA)
+            .widthIn(min = 132.dp)
             .height(38.dp)
             .border(1.dp, if (active) accent else tc.br, shape)
             .background(if (active) accent.copy(.18f) else Color.Transparent, shape)
@@ -1491,7 +1495,13 @@ internal fun DialogActionButton(
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        AppText(label, color = if (active) accent else tc.ts, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        AppText(
+            label,
+            color = if (active) accent else tc.ts,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 14.dp),
+        )
     }
 }
 
