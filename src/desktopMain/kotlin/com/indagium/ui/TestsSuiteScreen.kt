@@ -1,7 +1,12 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 
 package com.indagium.ui
 
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,12 +16,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -26,18 +32,27 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.IssueRecord
+import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.SuiteCaseHistory
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.TestSuiteHistory
 import com.indagium.testing.model.deriveTestSuiteHistory
-import com.indagium.testing.model.metrics
 import com.indagium.testing.model.summary
 import com.indagium.testing.run.mergeRunSnapshots
 import com.indagium.testing.store.StoreResult
@@ -45,15 +60,31 @@ import com.indagium.testing.store.StoredSuiteRunHistory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-// A compact suite workspace: case execution is the default tab, while less-used suite metadata stays behind focused tabs.
-// Persisted and live run snapshots are merged with live state winning so a late disk read cannot roll the view backwards.
+// The suite screen (wireframe B): the name with ▶ Run suite and a ⋯ menu, a one-line summary of the last run, and underline tabs
+// Cases · Runs · Settings. Cases is a compact table (# · case and goal · steps · latest result · issues · ⋯); Settings holds the
+// less-used suite metadata (hooks, agent instructions, variables). Persisted and live run snapshots are merged with live state
+// winning so a late disk read cannot roll the view backwards; until that read completes the screen says "Loading runs…" rather
+// than claiming nothing ran.
 
-private val CASE_ROW_HEIGHT = 56.dp
 private val INDEX_COLUMN = 24.dp
-private val STEPS_COLUMN = 48.dp
-private val RESULT_COLUMN = 270.dp
-private val SUITE_RAIL_WIDTH = 220.dp
-private val SUITE_TAB_SHAPE = CORNER_SM
+private val STEPS_COLUMN = 44.dp
+private val LATEST_COLUMN = 150.dp
+private val ISSUES_COLUMN = 52.dp
+private val GRIP_COLUMN = 18.dp
+private val MENU_COLUMN = 26.dp
+private val ROW_MIN_HEIGHT = 34.dp
+private val ROW_MIN_HEIGHT_WITH_GOAL = 44.dp
+private val ROW_START_PADDING = 6.dp
+private val SUITE_TABS_MAX_WIDTH = 330.dp
+private val RUN_STATUS_COLUMN = 76.dp
+private val RUN_MOMENT_MIN_WIDTH = 110.dp
+private val DOT_SIZE = 8.dp
+private const val ROW_MENU_IDLE_ALPHA = .35f
+private const val ROW_SEPARATOR_ALPHA = .6f
+private const val ISSUE_PILL_ALPHA = .18f
+
+/** What the suite screen derived from the run history. [loaded] is false until the stored runs were read. */
+private class SuiteScreenData(val history: TestSuiteHistory, val issues: List<IssueRecord>, val loaded: Boolean)
 
 @Composable
 internal fun TestsSuiteScreen(suiteId: String) {
@@ -62,26 +93,17 @@ internal fun TestsSuiteScreen(suiteId: String) {
     val library = ui.library
     val suite = library.suite(suiteId) ?: return
     val access = suiteEditAccess(library, suite, limits)
-    val (history, issues) = rememberSuiteHistory(suite)
+    val data = rememberSuiteScreenData(suite)
     var confirmDelete by remember { mutableStateOf(false) }
     TestsScreenScaffold {
-        SuiteHeader(suite, access, onDelete = { confirmDelete = true })
-        Spacer(Modifier.height(8.dp))
-        SuiteTabs(ui.view.selectedSuiteTab) { ui.view.selectedSuiteTab = it }
-        BoxWithConstraints(Modifier.fillMaxWidth()) {
-            if (maxWidth < 720.dp) {
-                val compact = maxWidth < 560.dp
-                Column(Modifier.fillMaxWidth()) {
-                    SuiteTabContent(suite, access.editable, history, compact)
-                    SuiteHistoryRail(suite, history, issues, Modifier.fillMaxWidth())
-                }
-            } else {
-                val tabContentWidth = maxWidth - SUITE_RAIL_WIDTH - 14.dp
-                val compact = tabContentWidth < 700.dp
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    Column(Modifier.weight(1f)) { SuiteTabContent(suite, access.editable, history, compact) }
-                    SuiteHistoryRail(suite, history, issues, Modifier.width(SUITE_RAIL_WIDTH))
-                }
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            SuiteHeader(suite, access, onDelete = { confirmDelete = true })
+            SuiteLastRunLine(suiteLastRun(data.loaded, data.history.latestTerminalRun))
+            SuiteTabs(suite, if (data.loaded) data.history.runs.size else null)
+            when (ui.view.selectedSuiteTab) {
+                SuiteTab.Cases -> SuiteCasesTab(suite, data)
+                SuiteTab.Runs -> SuiteRunsTab(data)
+                SuiteTab.Settings -> SuiteSettingsTab(suite, access.editable)
             }
         }
     }
@@ -96,27 +118,31 @@ internal fun TestsSuiteScreen(suiteId: String) {
     }
 }
 
+/** The stored runs of [StoredSuiteRunHistory], tagged with the suite they were read for. */
+private class LoadedSuiteRuns(val suiteId: String, val stored: StoredSuiteRunHistory)
+
 @Composable
-private fun rememberSuiteHistory(suite: TestSuite): Pair<com.indagium.testing.model.TestSuiteHistory, List<IssueRecord>> {
+private fun rememberSuiteScreenData(suite: TestSuite): SuiteScreenData {
     val ui = LocalTestsUi.current
     val liveRuns = ui.state.testRuns.filter { it.config.suiteId == suite.id }
-    val suiteRunHistory by produceState(
-        initialValue = StoredSuiteRunHistory(liveRuns, liveRuns.map { it.summary() }),
+    val loadedRuns by produceState<LoadedSuiteRuns?>(
+        initialValue = null,
         key1 = suite.id,
         key2 = ui.state.testRuns,
         key3 = ui.state.testRunsFolderEpoch,
     ) {
-        value = ui.state.testRunCoordinator.loadSuiteRunHistory(suite.id)
+        value = LoadedSuiteRuns(suite.id, ui.state.testRunCoordinator.loadSuiteRunHistory(suite.id))
     }
-    val runs = remember(liveRuns, suiteRunHistory) { mergeRunSnapshots(liveRuns, suiteRunHistory.recentRecords) }
-    val history = remember(suite, runs, suiteRunHistory.summaries) {
-        deriveTestSuiteHistory(suite, runs, allRunSummaries = suiteRunHistory.summaries)
-    }
+    // A result read for another suite (the screen was reused) does not count: the new suite is loading again.
+    val loaded = loadedRuns?.suiteId == suite.id
+    val stored = loadedRuns?.takeIf { loaded }?.stored ?: StoredSuiteRunHistory(liveRuns, liveRuns.map { it.summary() })
+    val runs = remember(liveRuns, stored) { mergeRunSnapshots(liveRuns, stored.recentRecords) }
+    val history = remember(suite, runs, stored.summaries) { deriveTestSuiteHistory(suite, runs, allRunSummaries = stored.summaries) }
     val issueRevision by ui.state.issueStore.revision.collectAsState()
     val issues by produceState<List<IssueRecord>>(emptyList(), issueRevision) {
         value = withContext(Dispatchers.IO) { ui.state.issueStore.list() }
     }
-    return history to issues
+    return SuiteScreenData(history, issues, loaded)
 }
 
 private fun deleteSuiteAndSelectNext(ui: TestsUi, suite: TestSuite) {
@@ -127,128 +153,142 @@ private fun deleteSuiteAndSelectNext(ui: TestsUi, suite: TestSuite) {
     }
 }
 
+// ── Header ───────────────────────────────────────────────────────────
+
+/** The suite name, ▶ Run suite and the ⋯ menu (Duplicate, Export…, Delete…), with the read-only notice under it. */
 @Composable
 private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
     val limits = LocalTestsLimits.current
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (maxWidth >= 620.dp) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SuiteNameField(suite, access.editable, Modifier.weight(1f))
-                SuiteHeaderActions(suite, limits, onDelete)
-            }
-        } else {
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                SuiteNameField(suite, access.editable, Modifier.fillMaxWidth())
-                SuiteHeaderActions(suite, limits, onDelete)
-            }
-        }
-    }
+    val writable = !ui.library.readOnly
+    TestsPageHeader(
+        title = suite.name,
+        onTitleCommit = { t -> ui.state.updateTestSuite(suite.id) { it.copy(name = t.trim()) } },
+        titleEditable = access.editable,
+        titleDescription = "Suite name",
+        titlePlaceholder = "Suite name",
+        primary = {
+            HintedButton(
+                "▶ Run suite",
+                onClick = { ui.view.runDialog = RunDialogTarget(suite.id) },
+                enabled = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) },
+                disabledHint = limits.hint,
+                variant = ButtonVariant.Primary,
+            )
+        },
+        overflowDescription = "Suite actions",
+        overflowItems = listOf(
+            TestsMenuItem(
+                "Duplicate",
+                onClick = { duplicateSuiteAndSelect(ui, suite) },
+                enabled = writable && limits.canDuplicateSuite(suite.id),
+                disabledHint = if (!writable) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
+            ),
+            TestsMenuItem("Export…", onClick = { exportSuiteToChosenFile(ui, suite) }),
+            TestsMenuItem(
+                "Delete…", onClick = onDelete, danger = true,
+                enabled = writable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, dividerBefore = true,
+            ),
+        ),
+    )
     if (access.reason != null) {
         Spacer(Modifier.height(6.dp))
         TestsLockedNotice(access.reason)
     }
 }
 
+/** "Last run  ● Passed  yesterday 19:27 · 3 cases · 1 lane · 12 of 12 steps passed  Open report →", or the loading / never-run text. */
 @Composable
-private fun SuiteNameField(suite: TestSuite, editable: Boolean, modifier: Modifier) {
+private fun SuiteLastRunLine(line: SuiteLastRun) {
+    val tc = tc()
     val ui = LocalTestsUi.current
-    Column(modifier) {
-        AppText("Suite name", color = tc().td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-        CommitTextField(
-            value = suite.name,
-            onCommit = { text -> ui.state.updateTestSuite(suite.id) { it.copy(name = text.trim()) } },
-            enabled = editable,
-            placeholder = "Suite name",
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        when (line) {
+            SuiteLastRun.Loading -> AppText("Loading runs…", color = tc.td, fontSize = 11.sp)
+            SuiteLastRun.NeverRun -> AppText("Not run yet", color = tc.td, fontSize = 11.sp)
+            is SuiteLastRun.Ran -> {
+                val color = runColor(line.status)
+                AppText("Last run", color = tc.td, fontSize = 11.sp)
+                StatusDot(color)
+                AppText(line.status.label(), color = color, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                AppText(
+                    "${formatRunMoment(line.momentMs, System.currentTimeMillis())} · ${line.detail()}",
+                    color = tc.ts, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                TestsBreadcrumbLink("Open report →", onClick = { openSuiteRun(ui, line.runId) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusDot(color: Color, modifier: Modifier = Modifier) {
+    Box(modifier.size(DOT_SIZE).background(color, CircleShape))
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────
+
+@Composable
+private fun SuiteTabs(suite: TestSuite, runCount: Int?) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val tabs = SuiteTab.entries
+    Box(Modifier.fillMaxWidth()) {
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br).align(Alignment.BottomStart))
+        UnderlineTabs(
+            labels = tabs.map { suiteTabLabel(it, suite.cases.size, runCount) },
+            selectedIndex = tabs.indexOf(ui.view.selectedSuiteTab),
+            onSelect = {
+                ui.view.selectedSuiteTab = tabs[it]
+                ui.reclaimFocus()
+            },
+            modifier = Modifier.widthIn(max = SUITE_TABS_MAX_WIDTH),
         )
     }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteHeaderActions(suite: TestSuite, limits: TestsLimitsUiState, onDelete: () -> Unit) {
-    val ui = LocalTestsUi.current
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        HintedButton("Duplicate", onClick = { duplicateSuiteAndSelect(ui, suite) }, enabled = !ui.library.readOnly && limits.canDuplicateSuite(suite.id), disabledHint = limits.hint)
-        HintedButton("Export…", onClick = { exportSuiteToChosenFile(ui, suite) })
-        HintedButton("Run suite…", onClick = { ui.view.runDialog = RunDialogTarget(suite.id) }, enabled = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) }, disabledHint = limits.hint, variant = ButtonVariant.Primary)
-        HintedButton("Delete", onClick = onDelete, enabled = !ui.library.readOnly, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
-    }
-}
-
-/*
- * The narrower layout wraps tab chips rather than compressing five labels into unreadable slivers.
- */
-@Composable
-private fun SuiteTabs(selected: SuiteTab, onSelect: (SuiteTab) -> Unit) {
-    val tc = tc()
-    BoxWithConstraints(Modifier.fillMaxWidth().background(tc.p2, SUITE_TAB_SHAPE).padding(3.dp)) {
-        if (maxWidth >= 560.dp) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                SuiteTab.entries.forEach { tab -> SuiteTabChip(tab, selected, onSelect, Modifier.weight(1f)) }
-            }
-        } else {
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                SuiteTab.entries.forEach { tab -> SuiteTabChip(tab, selected, onSelect, Modifier.widthIn(min = 72.dp)) }
-            }
-        }
-    }
-}
+// ── Cases ────────────────────────────────────────────────────────────
 
 @Composable
-private fun SuiteTabChip(tab: SuiteTab, selected: SuiteTab, onSelect: (SuiteTab) -> Unit, modifier: Modifier) {
-    val tc = tc()
-    Box(
-        modifier.clickable { onSelect(tab) }
-            .background(if (tab == selected) tc.ac.copy(alpha = .18f) else Color.Transparent, SUITE_TAB_SHAPE)
-            .padding(vertical = 7.dp, horizontal = 5.dp),
-        contentAlignment = Alignment.Center,
-    ) { AppText(tab.label, color = if (tab == selected) tc.ac else tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-}
-
-@Composable
-private fun SuiteTabContent(suite: TestSuite, editable: Boolean, history: com.indagium.testing.model.TestSuiteHistory, compact: Boolean) {
-    when (LocalTestsUi.current.view.selectedSuiteTab) {
-        SuiteTab.Cases -> SuiteCasesTab(suite, history, compact)
-        SuiteTab.Runs -> SuiteRunsTab(history)
-        SuiteTab.SetupTeardown -> SuiteHooksTab(suite, editable)
-        SuiteTab.AgentInstructions -> SuiteInstructionsTab(suite, editable)
-        SuiteTab.Variables -> SuiteVariablesTab(suite, editable)
-    }
-}
-
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteCasesTab(suite: TestSuite, history: com.indagium.testing.model.TestSuiteHistory, compact: Boolean) {
+private fun SuiteCasesTab(suite: TestSuite, data: SuiteScreenData) {
     val ui = LocalTestsUi.current
     val limits = LocalTestsLimits.current
-    var caseToDelete by remember(suite.id) { mutableStateOf<com.indagium.testing.model.TestCase?>(null) }
-    TestsSectionTitle("Cases (${suite.cases.size})") {
-        HintedButton("New case", onClick = { createCaseAndOpen(ui, suite) }, enabled = !ui.library.readOnly && !suite.readOnly && limits.canCreateCase(suite.id), disabledHint = limits.hint)
-    }
-    if (suite.cases.isEmpty()) {
-        TestsHint("No cases yet. Add a case to define a workflow for the agent.")
-        return
-    }
-    if (!compact) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            Spacer(Modifier.width(18.dp))
-            TableHeader("#", Modifier.width(INDEX_COLUMN))
-            TableHeader("CASE", Modifier.weight(1f))
-            TableHeader("STEPS", Modifier.width(STEPS_COLUMN))
-            TableHeader("LATEST RUN", Modifier.width(RESULT_COLUMN))
-            Spacer(Modifier.width(CASE_ACTIONS_WIDTH))
+    var caseToDelete by remember(suite.id) { mutableStateOf<TestCase?>(null) }
+    Column(Modifier.fillMaxWidth()) {
+        if (suite.cases.isEmpty()) {
+            TestsHint("No cases yet. Add a case to define a workflow for the agent.")
+        } else {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val compact = suiteCasesCompact(maxWidth.value)
+                Column(Modifier.fillMaxWidth()) {
+                    if (!compact) CasesTableHeader()
+                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc().br))
+                    ReorderableColumn(
+                        items = suite.cases,
+                        idOf = { it.id },
+                        onMove = { id, to -> ui.report(ui.state.moveTestCase(id, to)) },
+                        reorderEnabled = !ui.library.readOnly && !suite.readOnly,
+                    ) { case, row ->
+                        CaseRow(suite, case, row, data, compact, onDelete = { caseToDelete = case })
+                    }
+                }
+            }
         }
-    }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(tc().br))
-    ReorderableColumn(
-        items = suite.cases,
-        idOf = { it.id },
-        onMove = { id, to -> ui.report(ui.state.moveTestCase(id, to)) },
-        fixedRowHeight = caseRowHeight(history.latestTerminalRun?.lanes?.size ?: 1, compact),
-        reorderEnabled = !ui.library.readOnly && !suite.readOnly,
-    ) { case, row ->
-        CaseRow(case, row, limits.isCaseLocked(case.id), history.cases[case.id], compact, onDelete = { caseToDelete = case })
+        Spacer(Modifier.height(10.dp))
+        Row {
+            HintedButton(
+                "+ New case",
+                onClick = { createCaseAndOpen(ui, suite) },
+                enabled = !ui.library.readOnly && !suite.readOnly && limits.canCreateCase(suite.id),
+                disabledHint = limits.hint,
+                variant = ButtonVariant.Ghost,
+            )
+        }
     }
     caseToDelete?.let { case ->
         TestsConfirmDialog(
@@ -261,233 +301,228 @@ private fun SuiteCasesTab(suite: TestSuite, history: com.indagium.testing.model.
     }
 }
 
-private val CASE_ACTIONS_WIDTH = 18.dp * 3 + 8.dp
-
-private fun caseRowHeight(laneCount: Int, compact: Boolean) = if (compact) {
-    // The compact row has a case header, one line per lane, and vertical padding.
-    maxOf(CASE_ROW_HEIGHT, (40 + 18 * laneCount.coerceAtLeast(1)).dp)
-} else {
-    maxOf(CASE_ROW_HEIGHT, (48 + 18 * laneCount.coerceAtLeast(1)).dp)
+/** The column headings, laid out with the same paddings and widths as a [CaseRow] so they line up. */
+@Composable
+private fun CasesTableHeader() {
+    Row(
+        Modifier.fillMaxWidth().height(28.dp).padding(start = ROW_START_PADDING, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Spacer(Modifier.width(GRIP_COLUMN))
+        TableHeading("#", Modifier.width(INDEX_COLUMN))
+        TableHeading("CASE", Modifier.weight(1f))
+        TableHeading("STEPS", Modifier.width(STEPS_COLUMN), Alignment.CenterEnd)
+        TableHeading("LATEST", Modifier.width(LATEST_COLUMN))
+        TableHeading("ISSUES", Modifier.width(ISSUES_COLUMN), Alignment.CenterEnd)
+        Spacer(Modifier.width(MENU_COLUMN))
+    }
 }
 
 @Composable
-private fun TableHeader(text: String, modifier: Modifier) {
-    AppText(text, color = tc().td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = modifier.padding(vertical = 4.dp))
+private fun TableHeading(text: String, modifier: Modifier, alignment: Alignment = Alignment.CenterStart) {
+    Box(modifier, contentAlignment = alignment) { AppText(text, color = tc().td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
+/** One case: the grip (hover), its number, name with a goal line, step count, latest result, issues and the ⋯ menu. */
 @Composable
-private fun CaseRow(case: com.indagium.testing.model.TestCase, row: ReorderRowScope, locked: Boolean, history: SuiteCaseHistory?, compact: Boolean, onDelete: () -> Unit) {
+private fun CaseRow(suite: TestSuite, case: TestCase, row: ReorderRowScope, data: SuiteScreenData, compact: Boolean, onDelete: () -> Unit) {
     val tc = tc()
     val ui = LocalTestsUi.current
     val limits = LocalTestsLimits.current
-    val canDuplicate = !ui.library.readOnly && limits.canDuplicateCase(case.id)
-    if (compact) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 4.dp).background(if (row.index % 2 == 1) tc.hv else Color.Transparent).padding(vertical = 4.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                ReorderGrip(row)
-                AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(INDEX_COLUMN))
-                AppText(case.name.ifBlank { "Untitled case" }, color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).clickable { ui.view.selectedCaseId = case.id })
-                if (locked) LockBadge(limits.hint)
-                ReorderMoveButtons(row)
-                HintWhen(!canDuplicate, limits.hint) { SquareIconButton("⧉", fontSize = 12.sp, enabled = canDuplicate, onClick = { ui.report(ui.state.duplicateTestCase(case.id)) }) }
-                SquareIconButton("×", fontSize = 14.sp, enabled = !ui.library.readOnly, onClick = onDelete)
-            }
-            Row(Modifier.fillMaxWidth().padding(start = 42.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("${case.steps.size} steps", color = tc.ts, fontSize = 10.sp)
-                CaseLatestResults(history, Modifier.weight(1f))
-            }
-        }
-    } else {
-        Row(
-            Modifier.fillMaxSize().padding(horizontal = 4.dp).background(if (row.index % 2 == 1) tc.hv else Color.Transparent),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
+    var hovered by remember { mutableStateOf(false) }
+    val history = data.history.cases[case.id]
+    val issueIds = caseIssueIds(history, case.id, suite.id, data.issues)
+    val goal = case.description.replace('\n', ' ').trim().takeIf { it.isNotBlank() && it != case.name.trim() }
+    val locked = limits.isCaseLocked(case.id)
+    Column(Modifier.fillMaxWidth()) {
+        TestsListRow(
+            selected = false,
+            onClick = { ui.view.selectedCaseId = case.id },
+            modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
+            minHeight = if (goal != null || compact) ROW_MIN_HEIGHT_WITH_GOAL else ROW_MIN_HEIGHT,
+            startPadding = ROW_START_PADDING,
         ) {
-            ReorderGrip(row)
+            ReorderGrip(row, Modifier.alpha(if (hovered || row.dragging) 1f else 0f))
             AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(INDEX_COLUMN))
-            Column(Modifier.weight(1f).fillMaxSize().clickable { ui.view.selectedCaseId = case.id }, verticalArrangement = Arrangement.Center) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppText(case.name.ifBlank { "Untitled case" }, color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    AppText(
+                        case.name.ifBlank { "Untitled case" }, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium,
+                        overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                    )
                     if (locked) LockBadge(limits.hint)
                 }
-                AppText(case.description.ifBlank { case.steps.firstOrNull()?.action.orEmpty() }, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (compact) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AppText("${case.steps.size} steps ·", color = tc.ts, fontSize = 10.sp)
+                        CaseLatestCell(history, data.loaded, Modifier.weight(1f, fill = false))
+                        IssuesCount(issueIds)
+                    }
+                } else if (goal != null) {
+                    AppText(goal, color = tc.td, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
+                }
             }
-            AppText("${case.steps.size}", color = tc.ts, fontSize = 11.sp, modifier = Modifier.width(STEPS_COLUMN))
-            CaseLatestResults(history, Modifier.width(RESULT_COLUMN))
-            ReorderMoveButtons(row)
-            HintWhen(!canDuplicate, limits.hint) { SquareIconButton("⧉", fontSize = 12.sp, enabled = canDuplicate, onClick = { ui.report(ui.state.duplicateTestCase(case.id)) }) }
-            SquareIconButton("×", fontSize = 14.sp, enabled = !ui.library.readOnly, onClick = onDelete)
+            if (!compact) {
+                Box(Modifier.width(STEPS_COLUMN), contentAlignment = Alignment.CenterEnd) {
+                    AppText("${case.steps.size}", color = tc.ts, fontSize = 11.sp)
+                }
+                CaseLatestCell(history, data.loaded, Modifier.width(LATEST_COLUMN))
+                Box(Modifier.width(ISSUES_COLUMN), contentAlignment = Alignment.CenterEnd) { IssuesCount(issueIds) }
+            }
+            CaseRowMenu(case, row, hovered, onDelete)
         }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br.copy(alpha = ROW_SEPARATOR_ALPHA)))
     }
 }
 
+/** The row's ⋯ (Move up, Move down, Duplicate, Delete…): faint until the row is hovered. */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun CaseLatestResults(history: SuiteCaseHistory?, modifier: Modifier) {
+private fun CaseRowMenu(case: TestCase, row: ReorderRowScope, hovered: Boolean, onDelete: () -> Unit) {
+    val ui = LocalTestsUi.current
+    val limits = LocalTestsLimits.current
+    val writable = !ui.library.readOnly
+    Box(Modifier.alpha(if (hovered) 1f else ROW_MENU_IDLE_ALPHA)) {
+        TestsOverflowMenu(
+            contentDescription = "Actions for ${case.name.ifBlank { "Untitled case" }}",
+            items = listOf(
+                TestsMenuItem("Move up", onClick = row.moveUp, enabled = row.canMoveUp, disabledHint = if (writable && row.enabled) null else LIBRARY_READ_ONLY_MESSAGE),
+                TestsMenuItem("Move down", onClick = row.moveDown, enabled = row.canMoveDown, disabledHint = if (writable && row.enabled) null else LIBRARY_READ_ONLY_MESSAGE),
+                TestsMenuItem(
+                    "Duplicate",
+                    onClick = { ui.report(ui.state.duplicateTestCase(case.id)) },
+                    enabled = writable && limits.canDuplicateCase(case.id),
+                    disabledHint = if (!writable) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
+                ),
+                TestsMenuItem("Delete…", onClick = onDelete, danger = true, enabled = writable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, dividerBefore = true),
+            ),
+        )
+    }
+}
+
+/** The number of issues linked to a case; clicking it opens the Issues screen on the first one. Nothing is drawn for none. */
+@Composable
+private fun IssuesCount(issueIds: List<String>) {
+    if (issueIds.isEmpty()) return
     val tc = tc()
     val ui = LocalTestsUi.current
-    if (history == null || history.lanes.none { it.status != null }) {
-        AppText("Not run", color = tc.td, fontSize = 10.sp, modifier = modifier)
+    Box(
+        Modifier.background(tc.warn.copy(alpha = ISSUE_PILL_ALPHA), CORNER_SM)
+            .clickable {
+                ui.view.nav = TestsNav.Issues
+                ui.view.selectedIssueId = issueIds.first()
+                ui.reclaimFocus()
+            }
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Issues: ${issueIds.size}"
+                role = Role.Button
+            }
+            .padding(horizontal = 7.dp, vertical = 1.dp),
+    ) { AppText("${issueIds.size}", color = tc.warn, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+}
+
+private fun laneLabel(ui: TestsUi, lane: LaneConfig): String =
+    if (lane.kind == LaneKind.EXTERNAL) {
+        "External · ${lane.deviceSerial}"
+    } else {
+        ui.state.settings.aiProviderProfiles.firstOrNull { it.id == lane.profileId }?.displayName ?: lane.profileId.orEmpty()
+    }
+
+/**
+ * A case's latest result in one fixed-height line. One lane: dot, status, duration and "×repeats". Several lanes: one dot per
+ * lane (the row never grows) with a tooltip listing each lane's name, status and duration. "Not run" only once the history loaded.
+ */
+@Composable
+private fun CaseLatestCell(history: SuiteCaseHistory?, loaded: Boolean, modifier: Modifier) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val lanes = history.ranLanes()
+    if (lanes.isEmpty()) {
+        AppText(if (loaded) "Not run" else "—", color = tc.td, fontSize = 10.sp, modifier = modifier)
         return
     }
-    Column(modifier, verticalArrangement = Arrangement.Center) {
-        history.lanes.forEach { lane ->
-            val label = if (lane.lane.kind == LaneKind.EXTERNAL) {
-                "External · ${lane.lane.deviceSerial}"
-            } else {
-                ui.state.settings.aiProviderProfiles.firstOrNull { it.id == lane.lane.profileId }?.displayName ?: lane.lane.profileId.orEmpty()
-            }.take(24)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                StatusChip(lane.status?.label() ?: "Not run", if (lane.status == null) tc.td else caseColor(lane.status), Modifier.widthIn(min = 56.dp))
-                AppText(label, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                if (lane.status != null) {
-                    AppText(formatDuration(lane.durationMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
-                    if (lane.repeatCount > 1) AppText("×${lane.repeatCount}", color = tc.td, fontSize = 10.sp)
-                }
-                if (history.disagreement) AppText("≠", color = DANGER_RED, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                if (lane.issueIds.isNotEmpty()) {
-                    AppText("Issue ×${lane.issueIds.size}", color = tc.warn, fontSize = 10.sp, modifier = Modifier.clickable {
-                        ui.view.nav = TestsNav.Issues
-                        ui.view.selectedIssueId = lane.issueIds.first()
-                    })
-                }
+    val single = lanes.singleOrNull()
+    if (single != null) {
+        val color = caseColor(single.status)
+        Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+            StatusDot(color)
+            AppText(single.status.label(), color = color, fontSize = 11.sp)
+            AppText(formatDuration(single.durationMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 1)
+            if (single.repeatCount > 1) AppText("×${single.repeatCount}", color = tc.td, fontSize = 10.sp)
+        }
+        return
+    }
+    val lines = lanes.map { laneResultLine(laneLabel(ui, it.lane), it.status, it.durationMs, it.repeatCount) }
+    TooltipArea(tooltip = { ToolbarTooltip(lines.joinToString("\n"), maxLines = lines.size) }, modifier = modifier) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            lanes.forEachIndexed { index, lane ->
+                StatusDot(caseColor(lane.status), Modifier.semantics { contentDescription = lines[index] })
             }
+            if (history?.disagreement == true) AppText("≠", color = DANGER_RED, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
+// ── Runs ─────────────────────────────────────────────────────────────
+
 @Composable
-private fun SuiteRunsTab(history: com.indagium.testing.model.TestSuiteHistory) {
+private fun SuiteRunsTab(data: SuiteScreenData) {
     val ui = LocalTestsUi.current
-    TestsSectionTitle("Suite run history · ${history.runs.size}")
-    if (history.runs.isEmpty()) TestsHint("No runs have been saved for this suite yet.")
-    history.runs.forEach { run -> SuiteRunRow(run) { openSuiteRun(ui, run.id) } }
+    val runs = data.history.runs
+    when {
+        runs.isNotEmpty() -> {
+            val now = System.currentTimeMillis()
+            Column(Modifier.fillMaxWidth()) { runs.forEach { run -> SuiteRunRow(run, now) { openSuiteRun(ui, run.id) } } }
+        }
+        !data.loaded -> TestsHint("Loading runs…")
+        else -> TestsHint("No runs yet. Start one with Run suite.")
+    }
 }
 
+@Composable
+private fun SuiteRunRow(run: RunSummary, nowMs: Long, onClick: () -> Unit) {
+    val tc = tc()
+    TestsListRow(selected = false, onClick = onClick, startPadding = ROW_START_PADDING) {
+        Box(Modifier.width(RUN_STATUS_COLUMN)) { StatusChip(run.status.label(), runColor(run.status)) }
+        AppText(formatRunMoment(run.createdAt, nowMs), color = tc.tx, fontSize = 11.sp, modifier = Modifier.widthIn(min = RUN_MOMENT_MIN_WIDTH))
+        AppText(run.line(), color = tc.td, fontSize = 10.sp, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+    }
+}
+
+// ── Settings ─────────────────────────────────────────────────────────
+
+/** Setup & teardown hooks, agent instructions and variables: the suite metadata that is edited rarely. */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun SuiteHooksTab(suite: TestSuite, editable: Boolean) {
+private fun SuiteSettingsTab(suite: TestSuite, editable: Boolean) {
     val ui = LocalTestsUi.current
     val update: ((TestSuite) -> TestSuite) -> StoreResult<*> = { transform -> ui.state.updateTestSuite(suite.id, transform) }
-    TestsSectionTitle("Setup & teardown")
-    TestsHint("Suite hooks run once around the selected cases. Case hooks are edited inside each case.")
-    HooksEditor("Setup hooks", suite.setup, editable) { hooks -> update { it.copy(setup = hooks) } }
-    HooksEditor("Teardown hooks", suite.teardown, editable) { hooks -> update { it.copy(teardown = hooks) } }
-}
-
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteInstructionsTab(suite: TestSuite, editable: Boolean) {
-    val ui = LocalTestsUi.current
-    val update: ((TestSuite) -> TestSuite) -> StoreResult<*> = { transform -> ui.state.updateTestSuite(suite.id, transform) }
-    TestsSectionTitle("Agent instructions")
-    TestsLabeled("Suite goal") { CommitTextField(suite.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What this suite covers") }
-    Spacer(Modifier.height(8.dp))
-    TestsLabeled("Instructions shown to every testing agent") { CommitTextField(suite.instructions, { t -> update { it.copy(instructions = t) } }, enabled = editable, multiline = true, placeholder = "Context every case shares") }
-    Spacer(Modifier.height(8.dp))
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        TestsLabeled("Target package", Modifier.weight(1f)) { CommitTextField(suite.targetPackage, { t -> update { it.copy(targetPackage = t.trim()) } }, enabled = editable, placeholder = "com.example.app", mono = true) }
-        TestsLabeled("Device hint", Modifier.weight(1f)) { CommitTextField(suite.deviceProfileHint, { t -> update { it.copy(deviceProfileHint = t) } }, enabled = editable, placeholder = "Pixel, Android version…") }
-    }
-    Spacer(Modifier.height(8.dp))
-    TestsLabeled("Tags") { TagsEditor(suite.tags, editable) { tags -> update { it.copy(tags = tags) } } }
-}
-
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteVariablesTab(suite: TestSuite, editable: Boolean) {
-    val ui = LocalTestsUi.current
-    TestsHint("Values in this list are available to suite instructions and script parameters.")
-    VariablesEditor(suite.variables, editable) { variables -> ui.report(ui.state.updateTestSuite(suite.id) { it.copy(variables = variables) }) }
-}
-
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteRunRow(run: RunSummary, onClick: () -> Unit) {
-    val tc = tc()
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 5.dp, horizontal = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        StatusChip(run.status.label(), runColor(run.status), Modifier.width(75.dp))
-        Column(Modifier.weight(1f)) {
-            AppText(formatRunTime(run.createdAt), color = tc.tx, fontSize = 10.sp, fontFamily = MONO)
-            AppText("${run.laneCount} lane(s) · ${run.repeat} repeat(s)", color = tc.td, fontSize = 10.sp)
+    Column(Modifier.fillMaxWidth()) {
+        TestsSectionTitle("Setup & teardown")
+        TestsHint("Suite hooks run once around the selected cases. Case hooks are edited inside each case.")
+        HooksEditor("Setup hooks", suite.setup, editable) { hooks -> update { it.copy(setup = hooks) } }
+        HooksEditor("Teardown hooks", suite.teardown, editable) { hooks -> update { it.copy(teardown = hooks) } }
+        Spacer(Modifier.height(10.dp))
+        Divider()
+        TestsSectionTitle("Agent instructions")
+        TestsLabeled("Suite goal") { CommitTextField(suite.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What this suite covers") }
+        Spacer(Modifier.height(8.dp))
+        TestsLabeled("Instructions shown to every testing agent") { CommitTextField(suite.instructions, { t -> update { it.copy(instructions = t) } }, enabled = editable, multiline = true, placeholder = "Context every case shares") }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TestsLabeled("Target package", Modifier.weight(1f)) { CommitTextField(suite.targetPackage, { t -> update { it.copy(targetPackage = t.trim()) } }, enabled = editable, placeholder = "com.example.app", mono = true) }
+            TestsLabeled("Device hint", Modifier.weight(1f)) { CommitTextField(suite.deviceProfileHint, { t -> update { it.copy(deviceProfileHint = t) } }, enabled = editable, placeholder = "Pixel, Android version…") }
         }
-        AppText("Open →", color = tc.ac, fontSize = 10.sp)
+        Spacer(Modifier.height(8.dp))
+        TestsLabeled("Tags") { TagsEditor(suite.tags, editable) { tags -> update { it.copy(tags = tags) } } }
+        Spacer(Modifier.height(10.dp))
+        Divider()
+        // VariablesEditor draws its own "Variables" heading and + Add button.
+        TestsHint("Values in this list are available to suite instructions and script parameters.")
+        VariablesEditor(suite.variables, editable) { variables -> ui.report(ui.state.updateTestSuite(suite.id) { it.copy(variables = variables) }) }
     }
 }
-
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun SuiteHistoryRail(suite: TestSuite, history: com.indagium.testing.model.TestSuiteHistory, issues: List<IssueRecord>, modifier: Modifier = Modifier) {
-    val tc = tc()
-    val ui = LocalTestsUi.current
-    Column(modifier.padding(top = 14.dp)) {
-        TestsSectionTitle("Latest run")
-        val latest = history.latestTerminalRun
-        if (latest == null) {
-            TestsHint("No completed run yet.")
-        } else {
-            val metrics = latest.metrics()
-            Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).clickable { openSuiteRun(ui, latest.id) }.padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-                StatusChip(latest.status.label(), runColor(latest.status))
-                AppText(formatRunTime(latest.finishedAt ?: latest.createdAt), color = tc.ts, fontSize = 10.sp, fontFamily = MONO)
-                AppText("${latest.lanes.size} lane(s) · ${latest.config.repeat} repeat(s)", color = tc.td, fontSize = 10.sp)
-                AppText("${metrics.passed} passed · ${metrics.failed} failed · ${metrics.blocked} blocked · ${metrics.errors} errors", color = tc.ts, fontSize = 10.sp)
-                AppText("${metrics.disagreements} disagreement(s) · ${metrics.unresolvedJudging} unresolved judge check(s)", color = tc.ts, fontSize = 10.sp)
-                latest.lanes.take(MAX_RAIL_LANES).forEach { lane ->
-                    val cases = lane.cases.filter { it.caseId != com.indagium.testing.model.SUITE_SETUP_CASE_ID && it.caseId != com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID }
-                    val counts = cases.mapNotNull { it.status }.groupingBy { it }.eachCount()
-                    val label = if (lane.config.kind == LaneKind.EXTERNAL) {
-                        "External · ${lane.config.deviceSerial}"
-                    } else {
-                        ui.state.settings.aiProviderProfiles.firstOrNull { it.id == lane.config.profileId }?.displayName ?: "Agent profile"
-                    }
-                    val outcomes = listOfNotNull(
-                        counts[com.indagium.testing.model.CaseStatus.PASS]?.let { "$it pass" },
-                        counts[com.indagium.testing.model.CaseStatus.FAIL]?.let { "$it fail" },
-                        counts[com.indagium.testing.model.CaseStatus.BLOCKED]?.let { "$it block" },
-                        counts[com.indagium.testing.model.CaseStatus.ERROR]?.let { "$it error" },
-                    ).ifEmpty { listOf("no case results") }.joinToString(" · ")
-                    AppText(
-                        "$label · $outcomes${if (latest.config.repeat > 1) " · ×${latest.config.repeat} repeats" else ""}",
-                        color = tc.ts,
-                        fontSize = 10.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                if (latest.lanes.size > MAX_RAIL_LANES) AppText("+${latest.lanes.size - MAX_RAIL_LANES} more lanes", color = tc.td, fontSize = 10.sp)
-                AppText("Open report →", color = tc.ac, fontSize = 10.sp)
-            }
-        }
-        TestsSectionTitle("Recent runs · ${history.recentRuns.size}")
-        if (history.recentRuns.isEmpty()) TestsHint("Runs appear here after the first suite run.")
-        history.recentRuns.take(5).forEach { run ->
-            Row(Modifier.fillMaxWidth().clickable { openSuiteRun(ui, run.id) }.padding(vertical = 3.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-                StatusChip(run.status.label(), runColor(run.status), Modifier.width(66.dp))
-                AppText(formatRunTime(run.createdAt), color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-            }
-        }
-        TestsSectionTitle("Linked issues")
-        val linked = issues.filter { it.source.suiteId == suite.id }
-        if (linked.isEmpty()) {
-            TestsHint("No issues are linked to this suite yet.")
-        } else {
-            linked.forEach { issue ->
-                Column(Modifier.fillMaxWidth().clickable {
-                    ui.view.nav = TestsNav.Issues
-                    ui.view.selectedIssueId = issue.id
-                }.padding(vertical = 4.dp)) {
-                    AppText(issue.draft.title, color = tc.tx, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    AppText("${issue.status.label()} · ${issue.source.caseName}", color = tc.td, fontSize = 10.sp)
-                }
-            }
-        }
-    }
-}
-
-private const val MAX_RAIL_LANES = 4
 
 private fun openSuiteRun(ui: TestsUi, runId: String) {
     ui.view.nav = TestsNav.Runs

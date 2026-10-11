@@ -337,7 +337,7 @@ private fun ScriptUsagePanel(script: TestScript) {
                     ui.view.selectedSuiteId = ref.suiteId
                     ui.view.selectedCaseId = ref.caseId
                     ui.view.selectedStepId = ref.stepId
-                    if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.SetupTeardown
+                    if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.Settings
                 }
             }.padding(vertical = 4.dp)) {
                 AppText(listOf(owner, ref.label).filter(String::isNotBlank).joinToString(" — "), color = tc.ac, fontSize = 10.sp)
