@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
@@ -276,7 +277,7 @@ private fun StepChecksSummary(step: TestStep, summary: String) {
 // ── Step inspector ───────────────────────────────────────────────────
 
 /**
- * The editor of the selected step, for the inspector pane (or under the list where a screen has no inspector): a header
+ * The editor of the selected step, for the inspector pane (the case and shared-step screens): a header
  * "Step N of M" with the step's ⋯ menu, then [StepEditor]. Shows a hint while no step is selected.
  */
 @Composable
@@ -814,8 +815,9 @@ private fun chooseGoldenImage(ui: TestsUi, suiteId: String): String? {
     return (result as? StoreResult.Ok)?.value
 }
 
+/** The golden screenshot [file] fitted into a square of [size] (a placeholder while it is missing or decoding). */
 @Composable
-private fun GoldenThumbnail(file: File?) {
+internal fun GoldenThumbnail(file: File?, size: Dp = THUMB_HEIGHT) {
     val tc = tc()
     val bitmap by produceState<ImageBitmap?>(null, file) {
         value = if (file == null || !file.isFile) {
@@ -826,8 +828,8 @@ private fun GoldenThumbnail(file: File?) {
             }
         }
     }
-    Box(Modifier.height(THUMB_HEIGHT).width(THUMB_HEIGHT).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM), contentAlignment = Alignment.Center) {
-        bitmap?.let { Image(it, contentDescription = "Reference screenshot", contentScale = ContentScale.Fit, modifier = Modifier.height(THUMB_HEIGHT)) }
+    Box(Modifier.size(size).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM), contentAlignment = Alignment.Center) {
+        bitmap?.let { Image(it, contentDescription = "Reference screenshot", contentScale = ContentScale.Fit, modifier = Modifier.height(size)) }
             ?: AppText("no preview", color = tc.td, fontSize = 10.sp)
     }
 }

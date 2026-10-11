@@ -111,12 +111,12 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Scripts").performClick()
         rule.waitForIdle()
         assertEquals(TestsNav.Scripts, state.testsView.nav)
-        rule.onNodeWithText("Tool name").assertExists()
+        rule.onNodeWithContentDescription("Tool name").assertExists()
         rule.onNodeWithText("Try it").assertExists()
 
         rule.onNodeWithText("Shared steps").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("New shared step").assertExists()
+        rule.onNodeWithText("+ New shared step").assertExists()
 
         // Runs and Issues are real screens now (the run list and the issue list).
         rule.onNodeWithText("Runs").performClick()

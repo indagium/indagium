@@ -1,23 +1,21 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package com.indagium.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -26,8 +24,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -57,57 +56,55 @@ import java.awt.Frame
 import java.io.File
 
 // The two library screens: scripts (shell commands exposed to agents as tools) and shared steps (reusable step
-// sequences that suite and case hooks run). Both are a list on the left and an editor on the right, stacked on
-// a narrow window.
+// sequences that suite and case hooks run). Both are a TestsSplitScreen: the centre column holds the list at the top and the
+// selected item's editor under it; the inspector holds the secondary panel (a script's Try it / Tool schema / Used in, a
+// shared step's selected-step editor). A narrow window stacks the inspector under the centre column.
 
-private val MASTER_DETAIL_BREAKPOINT = 640.dp
-private val MASTER_LIST_WIDTH = 250.dp
 private val LIBRARY_ROW_HEIGHT = 34.dp
-private val LIBRARY_ROW_SHAPE = RoundedCornerShape(6.dp)
-private val SMALL_FIELD_WIDTH = 150.dp
+private val LIBRARY_ROW_MENU_SLOT = 26.dp
+private val HEADER_GAP = 10.dp
+private val REFERENCE_ROW_HEIGHT = 26.dp
+private val SETTINGS_GRID_TWO_COLUMNS_FROM = 460.dp
+private val SCHEMA_MAX_HEIGHT = 220.dp
+private const val SCHEMA_MAX_LINES = 400
 private const val NEW_SCRIPT_BASE = "new_script"
 private const val NEW_SCRIPT_COMMAND = "echo hello"
 private const val NEW_SHARED_STEP_BASE = "New shared step"
 private const val SCRIPT_COMMAND_MIN_HEIGHT_DP = 90
 private const val SCRIPT_COMMAND_MAX_HEIGHT_DP = 280
 
+/**
+ * One row of a library list: the reorder grip (shown on hover), the [title], an optional [badge] and a ⋯ menu with Move up /
+ * Move down (shown on hover or while selected), so the row keeps its column widths whether or not it is hovered.
+ */
 @Composable
-private fun TestsMasterDetail(list: @Composable () -> Unit, detail: @Composable () -> Unit) {
+private fun LibraryListRow(
+    title: String,
+    badge: String?,
+    mono: Boolean,
+    selected: Boolean,
+    row: ReorderRowScope,
+    menuDescription: String,
+    onClick: () -> Unit,
+) {
     val tc = tc()
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        if (maxWidth < MASTER_DETAIL_BREAKPOINT) {
-            TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(16.dp)) {
-                list()
-                Spacer(Modifier.height(12.dp))
-                Spacer(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
-                Spacer(Modifier.height(12.dp))
-                detail()
-            }
-        } else {
-            Row(Modifier.fillMaxSize()) {
-                TestsScrollColumn(Modifier.width(MASTER_LIST_WIDTH).fillMaxHeight(), contentModifier = Modifier.padding(12.dp)) { list() }
-                Spacer(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight(), contentModifier = Modifier.padding(16.dp)) {
-                    Column(Modifier.fillMaxWidth().widthIn(max = TESTS_CONTENT_MAX_WIDTH)) { detail() }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LibraryListRow(title: String, badge: String?, mono: Boolean, selected: Boolean, row: ReorderRowScope, onClick: () -> Unit) {
-    val tc = tc()
-    Row(
-        Modifier.fillMaxSize().clip(LIBRARY_ROW_SHAPE).background(if (selected) tc.ac.copy(alpha = .16f) else Color.Transparent)
-            .clickable(onClick = onClick).padding(horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    val ui = LocalTestsUi.current
+    var hovered by remember { mutableStateOf(false) }
+    TestsListRow(
+        selected = selected,
+        onClick = {
+            ui.reclaimFocus()
+            onClick()
+        },
+        modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
+        minHeight = LIBRARY_ROW_HEIGHT,
+        startPadding = 4.dp,
+        spacing = 6.dp,
     ) {
-        ReorderGrip(row)
+        Box(Modifier.alpha(if (hovered || row.dragging) 1f else 0f)) { ReorderGrip(row) }
         AppText(
             title,
-            color = if (selected) tc.ac else tc.tx,
+            color = tc.tx,
             fontSize = 12.sp,
             fontFamily = if (mono) MONO else LocalUiFontFamily.current,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
@@ -115,7 +112,40 @@ private fun LibraryListRow(title: String, badge: String?, mono: Boolean, selecte
             modifier = Modifier.weight(1f),
         )
         badge?.let { TestsBadge(it) }
-        ReorderMoveButtons(row)
+        Box(Modifier.size(LIBRARY_ROW_MENU_SLOT).alpha(if (hovered || selected) 1f else 0f)) {
+            val readOnlyHint = LIBRARY_READ_ONLY_MESSAGE.takeIf { !row.enabled }
+            TestsOverflowMenu(
+                listOf(
+                    TestsMenuItem("Move up", onClick = row.moveUp, enabled = row.canMoveUp, disabledHint = readOnlyHint),
+                    TestsMenuItem("Move down", onClick = row.moveDown, enabled = row.canMoveDown, disabledHint = readOnlyHint),
+                ),
+                contentDescription = menuDescription,
+            )
+        }
+    }
+}
+
+/** The section title of a library list ("Scripts (3)") with its trailing actions, right aligned. */
+@Composable
+private fun LibraryListHeader(title: String, trailing: @Composable () -> Unit) {
+    TestsSectionTitle(title) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) { trailing() }
+    }
+}
+
+/** [cells] laid out two per row when the column is wide enough, one per row when it is narrow. */
+@Composable
+private fun TestsFieldGrid(cells: List<@Composable () -> Unit>) {
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val columns = if (maxWidth >= SETTINGS_GRID_TWO_COLUMNS_FROM) 2 else 1
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            cells.chunked(columns).forEach { rowCells ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    rowCells.forEach { cell -> Box(Modifier.weight(1f)) { cell() } }
+                    repeat(columns - rowCells.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+        }
     }
 }
 
@@ -135,53 +165,62 @@ internal fun TestsScriptsScreen() {
     val access = libraryEditAccess(library)
     val selected = library.scripts.firstOrNull { it.id == ui.view.selectedScriptId } ?: library.scripts.firstOrNull()
     var importError by remember { mutableStateOf<String?>(null) }
-    TestsMasterDetail(
-        list = {
+    TestsScreenScaffold(inspector = selected?.let { script -> { key(script.id) { ScriptInspector(script) } } }) {
+        access.reason?.let {
+            TestsLockedNotice(it)
+            Spacer(Modifier.height(HEADER_GAP))
+        }
+        if (ui.view.scriptReturn != null) {
+            ScriptReturnBar(ui)
+            Spacer(Modifier.height(HEADER_GAP))
+        }
+        LibraryListHeader("Scripts (${library.scripts.size})") {
             HintedButton(
-                "New script",
+                "+ New script",
                 onClick = { createScriptAndSelect(ui) },
                 enabled = access.editable,
                 disabledHint = access.reason,
-                variant = ButtonVariant.Primary,
-                modifier = Modifier.fillMaxWidth(),
+                variant = ButtonVariant.Ghost,
             )
-            HintedButton(
-                "Import JSON",
-                onClick = {
-                    importError = null
-                    importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { importError = it })
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = access.editable,
-                disabledHint = access.reason,
+            TestsOverflowMenu(
+                listOf(
+                    TestsMenuItem(
+                        "Import JSON…",
+                        onClick = {
+                            importError = null
+                            importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { importError = it })
+                        },
+                        enabled = access.editable,
+                        disabledHint = access.reason,
+                    ),
+                ),
+                contentDescription = "Script list actions",
             )
-            importError?.let { TestsErrorText(it) }
-            Spacer(Modifier.height(8.dp))
-            if (library.scripts.isEmpty()) TestsHint("No scripts yet. A script is a shell command an agent can call as a tool.")
-            ReorderableColumn(
-                items = library.scripts,
-                idOf = { it.id },
-                onMove = { id, to -> ui.report(ui.state.moveTestScript(id, to)) },
-                fixedRowHeight = LIBRARY_ROW_HEIGHT,
-                reorderEnabled = access.editable,
-            ) { script, row ->
-                LibraryListRow(script.toolName, null, mono = true, selected = script.id == selected?.id, row = row) {
-                    ui.view.selectedScriptId = script.id
-                }
-            }
-        },
-        detail = {
-            access.reason?.let {
-                TestsLockedNotice(it)
-                Spacer(Modifier.height(10.dp))
-            }
-            if (ui.view.scriptReturn != null) {
-                ScriptReturnBar(ui)
-                Spacer(Modifier.height(10.dp))
-            }
-            if (selected == null) TestsHint("Create a script to edit it here.") else key(selected.id) { ScriptEditor(selected, access.editable) }
-        },
-    )
+        }
+        importError?.let { TestsErrorText(it) }
+        if (library.scripts.isEmpty()) TestsHint("No scripts yet. A script is a shell command an agent can call as a tool.")
+        ReorderableColumn(
+            items = library.scripts,
+            idOf = { it.id },
+            onMove = { id, to -> ui.report(ui.state.moveTestScript(id, to)) },
+            fixedRowHeight = LIBRARY_ROW_HEIGHT,
+            reorderEnabled = access.editable,
+        ) { script, row ->
+            val uses = scriptUsageCount(library, script.id)
+            LibraryListRow(
+                script.toolName, "used in $uses".takeIf { uses > 0 }, mono = true, selected = script.id == selected?.id, row = row,
+                menuDescription = "${script.toolName} actions",
+            ) { ui.view.selectedScriptId = script.id }
+        }
+        if (selected == null) {
+            TestsHint("Create a script to edit it here.", Modifier.padding(top = 12.dp))
+        } else {
+            Spacer(Modifier.height(12.dp))
+            Divider()
+            Spacer(Modifier.height(12.dp))
+            key(selected.id) { ScriptEditor(selected, access.editable) }
+        }
+    }
 }
 
 private fun createScriptAndSelect(ui: TestsUi) {
@@ -221,6 +260,10 @@ private fun ScriptReturnBar(ui: TestsUi) {
     }
 }
 
+/**
+ * The selected script's editor: the tool name as the title with the ⋯ menu (Duplicate, Import JSON…, Export JSON…, Delete…), then
+ * its description, parameters, command and settings.
+ */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
 private fun ScriptEditor(script: TestScript, editable: Boolean) {
@@ -228,45 +271,31 @@ private fun ScriptEditor(script: TestScript, editable: Boolean) {
     var confirmDelete by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     val update: ((TestScript) -> TestScript) -> StoreResult<*> = { transform -> ui.state.updateTestScript(script.id, transform) }
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        HintedButton("Duplicate", onClick = { ui.report(ui.state.duplicateTestScript(script.id).also { result -> if (result is StoreResult.Ok) ui.view.selectedScriptId = result.value.id }) }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE)
-        HintedButton("Import JSON", onClick = {
-            importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { actionError = it })
-        }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE)
-        HintedButton("Export JSON", onClick = {
-            val destination = pickSaveScriptFile(suiteExportFileName(script.toolName.replace(' ', '_'))) ?: return@HintedButton
-            ui.reclaimFocus()
-            ui.scope.launch(Dispatchers.IO) {
-                when (val source = ui.state.exportTestScriptEnvelope(script.id)) {
-                    is StoreResult.Ok -> runCatching { writeTestScriptEnvelope(destination, source.value, overwrite = destination.exists()) }
-                        .fold({ ui.info("Exported ${script.toolName} to ${destination.name}.") }, { actionError = it.message ?: "Could not write script JSON." })
-                    else -> ui.report(source)
-                }
-            }
-        }, enabled = true)
-    }
+    TestsPageHeader(
+        title = script.toolName,
+        onTitleCommit = { t -> update { it.copy(toolName = t.trim()) } },
+        titleEditable = editable,
+        titleDescription = "Tool name",
+        titlePlaceholder = "reset_app",
+        overflowDescription = "More script actions",
+        overflowItems = listOf(
+            TestsMenuItem(
+                "Duplicate",
+                onClick = { ui.report(ui.state.duplicateTestScript(script.id).also { result -> if (result is StoreResult.Ok) ui.view.selectedScriptId = result.value.id }) },
+                enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE,
+            ),
+            TestsMenuItem(
+                "Import JSON…",
+                onClick = { importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { actionError = it }) },
+                enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE,
+            ),
+            TestsMenuItem("Export JSON…", onClick = { exportScriptJson(ui, script) { actionError = it } }),
+            TestsMenuItem("Delete…", onClick = { confirmDelete = true }, danger = true, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, dividerBefore = true),
+        ),
+    )
     actionError?.let { TestsErrorText(it) }
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
-        if (maxWidth >= 700.dp) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
-                Column(Modifier.weight(1f)) { ScriptFields(script, editable, update) }
-                Column(Modifier.width(290.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    TryItPanel(script)
-                    ScriptSchemaPanel(script)
-                    ScriptUsagePanel(script)
-                }
-            }
-        } else {
-            Column(Modifier.fillMaxWidth()) {
-                ScriptFields(script, editable, update)
-                TryItPanel(script)
-                ScriptSchemaPanel(script)
-                ScriptUsagePanel(script)
-            }
-        }
-    }
-    Spacer(Modifier.height(12.dp))
-    HintedButton("Delete script", onClick = { confirmDelete = true }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
+    Spacer(Modifier.height(HEADER_GAP))
+    ScriptFields(script, editable, update)
     if (confirmDelete) {
         val uses = scriptUsageCount(ui.library, script.id)
         TestsConfirmDialog(
@@ -282,13 +311,21 @@ private fun ScriptEditor(script: TestScript, editable: Boolean) {
     }
 }
 
+private fun exportScriptJson(ui: TestsUi, script: TestScript, onError: (String) -> Unit) {
+    val destination = pickSaveScriptFile(suiteExportFileName(script.toolName.replace(' ', '_'))) ?: return
+    ui.reclaimFocus()
+    ui.scope.launch(Dispatchers.IO) {
+        when (val source = ui.state.exportTestScriptEnvelope(script.id)) {
+            is StoreResult.Ok -> runCatching { writeTestScriptEnvelope(destination, source.value, overwrite = destination.exists()) }
+                .fold({ ui.info("Exported ${script.toolName} to ${destination.name}.") }, { onError(it.message ?: "Could not write script JSON.") })
+            else -> ui.report(source)
+        }
+    }
+}
+
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
 private fun ScriptFields(script: TestScript, editable: Boolean, update: ((TestScript) -> TestScript) -> StoreResult<*>) {
-    TestsLabeled("Tool name") {
-        CommitTextField(script.toolName, { t -> update { it.copy(toolName = t.trim()) } }, enabled = editable, placeholder = "reset_app", mono = true)
-    }
-    Spacer(Modifier.height(8.dp))
     TestsLabeled("Description (shown to the agent)") {
         CommitTextField(script.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What the script does")
     }
@@ -303,44 +340,77 @@ private fun ScriptFields(script: TestScript, editable: Boolean, update: ((TestSc
     ScriptSettings(script, editable, update)
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
+// ── Script inspector ─────────────────────────────────────────────────
+
+/** The selected script's secondary panels: Try it, the Tool schema the agent sees, and where the script is used. */
 @Composable
-private fun ScriptSchemaPanel(script: TestScript) {
-    val tc = tc()
-    val descriptor = scriptToolDescriptor(script)
-    val schema = Json.encodeToJsonElement(ToolSchema.serializer(), descriptor.schema).toString()
-    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(10.dp)) {
-        TestsSectionTitle("Tool schema preview")
-        AppText(script.toolName, color = tc.ac, fontSize = 10.sp, fontFamily = MONO)
-        AppText(descriptor.description, color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        AppText(schema, color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 18, overflow = TextOverflow.Ellipsis)
+private fun ScriptInspector(script: TestScript) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(HEADER_GAP)) {
+        TryItPanel(script)
+        ScriptSchemaPanel(script)
+        ScriptUsagePanel(script)
     }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
+/** A card of the inspector: [title] inside it, a Show / Hide link at the right when [expandable], then [content] while [open]. */
+@Composable
+private fun InspectorCard(title: String, open: Boolean, expandable: Boolean, onToggle: () -> Unit, content: @Composable ColumnScope.() -> Unit) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            TestsPanelTitle(title, Modifier.weight(1f))
+            if (expandable) TestsBreadcrumbLink(if (open) "Hide" else "Show ▸", onToggle, contentDescription = "${if (open) "Hide" else "Show"} $title")
+        }
+        if (open || !expandable) content()
+    }
+}
+
+@Composable
+private fun ScriptSchemaPanel(script: TestScript) {
+    val tc = tc()
+    var open by remember(script.id) { mutableStateOf(false) }
+    InspectorCard("Tool schema", open, expandable = true, onToggle = { open = !open }) {
+        val descriptor = scriptToolDescriptor(script)
+        val schema = Json.encodeToJsonElement(ToolSchema.serializer(), descriptor.schema).toString()
+        AppText(script.toolName, color = tc.ac, fontSize = 10.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
+        AppText(descriptor.description, color = tc.ts, fontSize = 10.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = SCHEMA_MAX_HEIGHT)) {
+            AppText(schema, color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = SCHEMA_MAX_LINES)
+        }
+    }
+}
+
 @Composable
 private fun ScriptUsagePanel(script: TestScript) {
     val ui = LocalTestsUi.current
     val tc = tc()
     val references = testScriptUsageReferences(ui.library, script.id)
-    var expanded by remember(script.id) { mutableStateOf(false) }
-    Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(10.dp)) {
-        AppButton("Used in · ${references.size}", onClick = { expanded = !expanded }, variant = ButtonVariant.Ghost)
-        if (expanded) references.forEach { ref ->
+    var open by remember(script.id) { mutableStateOf(false) }
+    InspectorCard("Used in ${references.size}", open, expandable = references.isNotEmpty(), onToggle = { open = !open }) {
+        if (references.isEmpty()) TestsHint("No step, hook or check uses this script yet.")
+        references.forEach { ref ->
             val owner = ref.sharedStepName ?: listOfNotNull(ref.suiteName, ref.caseName).joinToString(" · ")
-            Column(Modifier.fillMaxWidth().clickable {
-                if (ref.sharedStepId != null) {
-                    ui.view.nav = TestsNav.SharedSteps
-                    ui.view.selectedSharedStepId = ref.sharedStepId
-                } else if (ref.suiteId != null) {
-                    ui.view.nav = TestsNav.Suites
-                    ui.view.selectedSuiteId = ref.suiteId
-                    ui.view.selectedCaseId = ref.caseId
-                    ui.view.selectedStepId = ref.stepId
-                    if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.Settings
-                }
-            }.padding(vertical = 4.dp)) {
-                AppText(listOf(owner, ref.label).filter(String::isNotBlank).joinToString(" — "), color = tc.ac, fontSize = 10.sp)
+            TestsListRow(
+                selected = false,
+                onClick = {
+                    ui.reclaimFocus()
+                    if (ref.sharedStepId != null) {
+                        ui.view.nav = TestsNav.SharedSteps
+                        ui.view.selectedSharedStepId = ref.sharedStepId
+                    } else if (ref.suiteId != null) {
+                        ui.view.nav = TestsNav.Suites
+                        ui.view.selectedSuiteId = ref.suiteId
+                        ui.view.selectedCaseId = ref.caseId
+                        ui.view.selectedStepId = ref.stepId
+                        if (ref.kind == "hook") ui.view.selectedSuiteTab = SuiteTab.Settings
+                    }
+                },
+                minHeight = REFERENCE_ROW_HEIGHT,
+            ) {
+                AppText(
+                    listOf(owner, ref.label).filter(String::isNotBlank).joinToString(" — "),
+                    color = tc.ac, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -357,37 +427,47 @@ private fun pickSaveScriptFile(defaultName: String): File? {
 @Composable
 private fun ScriptSettings(script: TestScript, editable: Boolean, update: ((TestScript) -> TestScript) -> StoreResult<*>) {
     TestsSectionTitle("Settings")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        TestsLabeled("Runs on", Modifier.width(SMALL_FIELD_WIDTH + 30.dp)) {
-            TestsDropdown(
-                selectedLabel = TARGET_LABELS.getValue(script.target),
-                options = ScriptTarget.entries,
-                optionLabel = { TARGET_LABELS.getValue(it) },
-                onSelect = { target -> update { it.copy(target = target) } },
-                enabled = editable,
-                isSelected = { it == script.target },
-            )
-        }
-        TestsLabeled("Who may start it", Modifier.width(SMALL_FIELD_WIDTH + 50.dp)) {
-            TestsDropdown(
-                selectedLabel = PERMISSION_LABELS.getValue(script.permission),
-                options = ScriptPermission.entries,
-                optionLabel = { PERMISSION_LABELS.getValue(it) },
-                onSelect = { permission -> update { it.copy(permission = permission) } },
-                enabled = editable,
-                isSelected = { it == script.permission },
-            )
-        }
-        TestsLabeled("Timeout (ms)", Modifier.width(SMALL_FIELD_WIDTH)) {
-            CommitNumberField(script.timeoutMs, 1L, MAX_SCRIPT_TIMEOUT_MS, { n -> update { it.copy(timeoutMs = n) } }, enabled = editable)
-        }
-        TestsLabeled("Output cap (bytes)", Modifier.width(SMALL_FIELD_WIDTH)) {
-            CommitNumberField(
-                script.outputCapBytes.toLong(), 1L, MAX_SCRIPT_OUTPUT_CAP_BYTES.toLong(),
-                { n -> update { it.copy(outputCapBytes = n.toInt()) } }, enabled = editable,
-            )
-        }
-    }
+    TestsFieldGrid(
+        listOf(
+            {
+                TestsLabeled("Runs on") {
+                    TestsDropdown(
+                        selectedLabel = TARGET_LABELS.getValue(script.target),
+                        options = ScriptTarget.entries,
+                        optionLabel = { TARGET_LABELS.getValue(it) },
+                        onSelect = { target -> update { it.copy(target = target) } },
+                        enabled = editable,
+                        isSelected = { it == script.target },
+                    )
+                }
+            },
+            {
+                TestsLabeled("Who may start it") {
+                    TestsDropdown(
+                        selectedLabel = PERMISSION_LABELS.getValue(script.permission),
+                        options = ScriptPermission.entries,
+                        optionLabel = { PERMISSION_LABELS.getValue(it) },
+                        onSelect = { permission -> update { it.copy(permission = permission) } },
+                        enabled = editable,
+                        isSelected = { it == script.permission },
+                    )
+                }
+            },
+            {
+                TestsLabeled("Timeout (ms)") {
+                    CommitNumberField(script.timeoutMs, 1L, MAX_SCRIPT_TIMEOUT_MS, { n -> update { it.copy(timeoutMs = n) } }, enabled = editable)
+                }
+            },
+            {
+                TestsLabeled("Output cap (bytes)") {
+                    CommitNumberField(
+                        script.outputCapBytes.toLong(), 1L, MAX_SCRIPT_OUTPUT_CAP_BYTES.toLong(),
+                        { n -> update { it.copy(outputCapBytes = n.toInt()) } }, enabled = editable,
+                    )
+                }
+            },
+        ),
+    )
     Spacer(Modifier.height(8.dp))
     TestsLabeled("Working directory (optional)") {
         CommitTextField(
@@ -406,38 +486,56 @@ internal fun TestsSharedStepsScreen() {
     val library = ui.library
     val access = libraryEditAccess(library)
     val selected = library.sharedSteps.firstOrNull { it.id == ui.view.selectedSharedStepId } ?: library.sharedSteps.firstOrNull()
-    TestsMasterDetail(
-        list = {
+    if (selected == null) {
+        TestsEmptyState(
+            glyph = "⧉",
+            title = "No shared steps yet",
+            text = "A shared step is a reusable sequence of steps. Suite and case hooks can run it before or after a case.",
+            modifier = Modifier.fillMaxSize(),
+        ) {
             HintedButton(
-                "New shared step",
+                "+ New shared step",
                 onClick = { createSharedStepAndSelect(ui) },
                 enabled = access.editable,
                 disabledHint = access.reason,
                 variant = ButtonVariant.Primary,
-                modifier = Modifier.fillMaxWidth(),
             )
-            Spacer(Modifier.height(8.dp))
-            if (library.sharedSteps.isEmpty()) TestsHint("No shared steps yet. A shared step is a reusable sequence of steps for suite and case hooks.")
-            ReorderableColumn(
-                items = library.sharedSteps,
-                idOf = { it.id },
-                onMove = { id, to -> ui.report(ui.state.moveSharedStep(id, to)) },
-                fixedRowHeight = LIBRARY_ROW_HEIGHT,
-                reorderEnabled = access.editable,
-            ) { shared, row ->
-                LibraryListRow(shared.name.ifBlank { "Untitled" }, "${shared.steps.size}", mono = false, selected = shared.id == selected?.id, row = row) {
-                    ui.view.selectedSharedStepId = shared.id
-                }
-            }
-        },
-        detail = {
-            access.reason?.let {
-                TestsLockedNotice(it)
-                Spacer(Modifier.height(10.dp))
-            }
-            if (selected == null) TestsHint("Create a shared step to edit it here.") else key(selected.id) { SharedStepEditor(selected, access.editable) }
-        },
-    )
+        }
+        return
+    }
+    val update: ((SharedStep) -> SharedStep) -> StoreResult<*> = { transform -> ui.state.updateSharedStep(selected.id, transform) }
+    val stepOps = sharedStepOps(selected, access.editable, update)
+    TestsScreenScaffold(inspector = { key(selected.id) { SelectedStepInspector(stepOps) } }) {
+        access.reason?.let {
+            TestsLockedNotice(it)
+            Spacer(Modifier.height(HEADER_GAP))
+        }
+        LibraryListHeader("Shared steps (${library.sharedSteps.size})") {
+            HintedButton(
+                "+ New shared step",
+                onClick = { createSharedStepAndSelect(ui) },
+                enabled = access.editable,
+                disabledHint = access.reason,
+                variant = ButtonVariant.Ghost,
+            )
+        }
+        ReorderableColumn(
+            items = library.sharedSteps,
+            idOf = { it.id },
+            onMove = { id, to -> ui.report(ui.state.moveSharedStep(id, to)) },
+            fixedRowHeight = LIBRARY_ROW_HEIGHT,
+            reorderEnabled = access.editable,
+        ) { shared, row ->
+            LibraryListRow(
+                shared.name.ifBlank { "Untitled" }, "${shared.steps.size}", mono = false, selected = shared.id == selected.id, row = row,
+                menuDescription = "${shared.name.ifBlank { "Untitled" }} actions",
+            ) { ui.view.selectedSharedStepId = shared.id }
+        }
+        Spacer(Modifier.height(12.dp))
+        Divider()
+        Spacer(Modifier.height(12.dp))
+        key(selected.id) { SharedStepEditor(selected, access.editable, stepOps, update) }
+    }
 }
 
 private fun createSharedStepAndSelect(ui: TestsUi) {
@@ -446,31 +544,39 @@ private fun createSharedStepAndSelect(ui: TestsUi) {
     if (result is StoreResult.Ok) ui.view.selectedSharedStepId = result.value.id
 }
 
+/**
+ * The selected shared step: its name as the title with a ⋯ menu (Delete…), the description and the step list; the selected
+ * step's editor is the screen's inspector.
+ */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun SharedStepEditor(shared: SharedStep, editable: Boolean) {
+private fun SharedStepEditor(
+    shared: SharedStep,
+    editable: Boolean,
+    stepOps: StepListOps,
+    update: ((SharedStep) -> SharedStep) -> StoreResult<*>,
+) {
     val ui = LocalTestsUi.current
     var confirmDelete by remember { mutableStateOf(false) }
-    val update: ((SharedStep) -> SharedStep) -> StoreResult<*> = { transform -> ui.state.updateSharedStep(shared.id, transform) }
-    TestsLabeled("Name") {
-        CommitTextField(shared.name, { t -> update { it.copy(name = t.trim()) } }, enabled = editable, placeholder = "Log in")
-    }
-    Spacer(Modifier.height(8.dp))
+    TestsPageHeader(
+        title = shared.name,
+        onTitleCommit = { t -> update { it.copy(name = t.trim()) } },
+        titleEditable = editable,
+        titleDescription = "Shared step name",
+        titlePlaceholder = "Log in",
+        overflowDescription = "More shared step actions",
+        overflowItems = listOf(
+            TestsMenuItem("Delete…", onClick = { confirmDelete = true }, danger = true, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE),
+        ),
+    )
+    Spacer(Modifier.height(HEADER_GAP))
     TestsLabeled("Description") {
         CommitTextField(
             shared.description, { t -> update { it.copy(description = t) } },
             enabled = editable, multiline = true, placeholder = "What this sequence does",
         )
     }
-    // The shared-steps screen has no inspector pane yet, so the selected step's editor sits right under the list.
-    val stepOps = sharedStepOps(shared, editable, update)
     StepListSection(stepOps)
-    Spacer(Modifier.height(10.dp))
-    Divider()
-    Spacer(Modifier.height(10.dp))
-    SelectedStepInspector(stepOps)
-    Spacer(Modifier.height(12.dp))
-    HintedButton("Delete shared step", onClick = { confirmDelete = true }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
     if (confirmDelete) {
         val uses = sharedStepUsageCount(ui.library, shared.id)
         TestsConfirmDialog(
