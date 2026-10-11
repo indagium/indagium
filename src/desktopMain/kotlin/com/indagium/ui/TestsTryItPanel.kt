@@ -29,7 +29,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-// The console of the Scripts screen: pick a device, fill the script's parameters, run it once and read what it
+// The console of the Scripts screen (its inspector): pick a device, fill the script's parameters, run it once and read what it
 // printed. It runs exactly what an agent's tool call would (TestScriptRunner through AppState.tryTestScript), so
 // "it worked here" means the script and its parameters are right. Closing the screen or pressing Stop kills it.
 
@@ -59,11 +59,11 @@ internal fun TryItPanel(script: TestScript) {
     // A device that was unplugged since it was picked is no longer a valid choice.
     val device = chosen?.takeIf { picked -> devices.any { it.serial == picked.serial } }
 
-    TestsSectionTitle("Try it")
     Column(
         Modifier.fillMaxWidth().border(1.dp, tc.br, CORNER_MD).background(tc.p2, CORNER_MD).padding(TRY_PANEL_PADDING),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        TestsPanelTitle("Try it")
         TestsHint("Runs the script once, the way an agent's tool call would. Nothing is saved.")
         TestsLabeled(if (needsDevice) "Device" else "Device (optional)") {
             TestsDropdown(

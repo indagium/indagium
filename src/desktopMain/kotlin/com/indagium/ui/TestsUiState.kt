@@ -89,6 +89,9 @@ internal class TestsViewState {
     var stepAdvancedExpanded: Boolean by mutableStateOf(false)
     var selectedScriptId: String? by mutableStateOf(null)
     var selectedSharedStepId: String? by mutableStateOf(null)
+
+    /** The example the Examples screen's inspector shows, as `<stepId>/<exampleId>`; null (or a gone one) shows the first. */
+    var selectedExampleKey: String? by mutableStateOf(null)
     var search: String by mutableStateOf("")
 
     /** Non-null while the run dialog is open. */

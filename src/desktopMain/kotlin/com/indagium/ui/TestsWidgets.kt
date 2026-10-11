@@ -99,6 +99,8 @@ private val MULTILINE_MIN_HEIGHT = 56.dp
 private val MULTILINE_MAX_HEIGHT = 160.dp
 private val CONFIRM_DIALOG_WIDTH = 440.dp
 private val LOCK_ICON_SIZE = 14.dp
+private val EMPTY_STATE_MAX_WIDTH = 340.dp
+private val EMPTY_GLYPH_SIZE = 34.dp
 private const val BANNER_MAX_LINES = 4
 private val DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private const val MENU_REOPEN_SUPPRESS_MS = 200L
@@ -213,6 +215,41 @@ internal fun TestsFieldLabel(text: String, modifier: Modifier = Modifier) {
 @Composable
 internal fun TestsHint(text: String, modifier: Modifier = Modifier, maxLines: Int = 3) {
     AppText(text, color = tc().td, fontSize = SMALL_FONT_SIZE, maxLines = maxLines, modifier = modifier)
+}
+
+/** The title of a panel (a card in the inspector): small, muted and bold; the card pads itself and spaces its rows. */
+@Composable
+internal fun TestsPanelTitle(text: String, modifier: Modifier = Modifier) {
+    AppText(text, color = tc().td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = modifier)
+}
+
+/**
+ * A screen with nothing to show yet, centred in its space: a small glyph box, a [title], a line of [text] and an optional
+ * [action] (the primary button that fixes the emptiness). The caller gives it the whole area (`Modifier.fillMaxSize()`).
+ */
+@Composable
+internal fun TestsEmptyState(
+    glyph: String,
+    title: String,
+    text: String,
+    modifier: Modifier = Modifier,
+    action: (@Composable () -> Unit)? = null,
+) {
+    val tc = tc()
+    Box(modifier.padding(20.dp), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.widthIn(max = EMPTY_STATE_MAX_WIDTH),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.size(EMPTY_GLYPH_SIZE).border(1.5.dp, tc.br, DIALOG_SHAPE), contentAlignment = Alignment.Center) {
+                AppText(glyph, color = tc.ts, fontSize = 16.sp)
+            }
+            AppText(title, color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            AppText(text, color = tc.td, fontSize = SMALL_FONT_SIZE, maxLines = BANNER_MAX_LINES)
+            action?.invoke()
+        }
+    }
 }
 
 @Composable

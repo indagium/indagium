@@ -286,7 +286,7 @@ class StepListInspectorUiTest {
     }
 
     @Test
-    fun sharedStepsShowTheSameRowsWithTheSelectedStepsEditorUnderneath() {
+    fun sharedStepsShowTheSameRowsWithTheSelectedStepsEditorInTheInspector() {
         val shared = SharedStep(id = "", name = "Log in", steps = listOf(TestStep(newStepId(), "Enter the PIN"), TestStep(newStepId(), "Confirm")))
         val created = (state.createSharedStep(shared) as StoreResult.Ok).value
         rule.setContent { TestsWorkspace(state) }
