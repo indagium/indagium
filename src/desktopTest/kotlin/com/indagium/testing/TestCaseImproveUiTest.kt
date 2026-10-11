@@ -6,7 +6,6 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import com.indagium.ai.LlmStreamEvent
 import com.indagium.model.AiProviderKind
@@ -105,7 +104,7 @@ class TestCaseImproveUiTest {
         rule.onNodeWithText("Why: More precise").assertExists()
         assertEquals("Open the app", state.testLibrary.findCase(IMPROVE_CASE_ID)!!.case.steps[0].action, "the preview changes nothing")
 
-        rule.onNodeWithText("Apply 2 selected steps").performScrollTo().performClick()
+        rule.onNodeWithText("Apply 2 selected steps").performClick()
         rule.waitUntil(timeoutMillis = WAIT_MS) { state.testLibrary.findCase(IMPROVE_CASE_ID)!!.case.steps[0].action == "Launch the shop app" }
         rule.waitUntil(timeoutMillis = WAIT_MS) { state.testsView.improveDialog == null }
         assertEquals("A list of search results is shown", state.testLibrary.findCase(IMPROVE_CASE_ID)!!.case.steps[1].expected)

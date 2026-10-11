@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -39,6 +40,7 @@ import kotlinx.coroutines.launch
 private val NOTE_MIN_HEIGHT = 44.dp
 private val NOTE_MAX_HEIGHT = 110.dp
 private val PROFILE_MENU_WIDTH = 280.dp
+private val PROFILE_FIELD_WIDTH = 200.dp
 
 /**
  * What the rewrite button says and does. After a rewrite, the steps nobody flagged for review stay as they are in the next one: when
@@ -106,10 +108,12 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
                 selection = WorkflowAiSelection(profileId = it.id)
                 ui.state.rememberAiWorkflowSelection(AiWorkflow.RECORDING_REWRITE, selection)
             },
+            modifier = Modifier.width(PROFILE_FIELD_WIDTH),
             enabled = !busy,
             isSelected = { it.id == profile?.id },
             emptyText = "Configure a provider profile in Settings first",
             menuWidth = PROFILE_MENU_WIDTH,
+            filled = true,
         )
         profile?.let { chosen ->
             ModelAndEffortPickers(

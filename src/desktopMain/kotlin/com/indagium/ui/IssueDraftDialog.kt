@@ -1,19 +1,11 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -24,7 +16,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -49,7 +40,6 @@ import kotlinx.coroutines.withContext
 
 private val DIALOG_WIDTH = 720.dp
 private val DIALOG_MAX_HEIGHT = 760.dp
-private val DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private val AREA_MIN_HEIGHT = 56.dp
 private val AREA_MAX_HEIGHT = 150.dp
 private const val FIELD_FONT_SIZE = 12
@@ -93,27 +83,29 @@ internal fun IssueDraftDialog(target: IssueDialogTarget, onDismiss: () -> Unit) 
         ui.reclaimFocus()
     }
     Dialog(onDismissRequest = ::close, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        Column(Modifier.width(DIALOG_WIDTH).heightIn(max = DIALOG_MAX_HEIGHT).background(tc.p, DIALOG_SHAPE).border(1.dp, tc.br, DIALOG_SHAPE).padding(20.dp)) {
-            when (val state = load) {
-                DialogLoad.Loading -> {
-                    AppText("Issue", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    TestsHint("Preparing the issue from the run…")
-                }
-                is DialogLoad.Failed -> {
-                    AppText("Issue", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    TestsErrorText(state.message)
-                    Spacer(Modifier.padding(top = 10.dp))
-                    DialogActionButton("Close", active = false) { close() }
-                }
-                is DialogLoad.Ready -> IssueForm(state, ::close)
-            }
+        when (val state = load) {
+            DialogLoad.Loading -> TestsDialogFrame(
+                title = "Issue",
+                width = DIALOG_WIDTH,
+                maxHeight = DIALOG_MAX_HEIGHT,
+                body = { TestsHint("Preparing the issue from the run…") },
+                footer = { DialogActionButton("Cancel", active = false) { close() } },
+            )
+            is DialogLoad.Failed -> TestsDialogFrame(
+                title = "Issue",
+                width = DIALOG_WIDTH,
+                maxHeight = DIALOG_MAX_HEIGHT,
+                body = { TestsErrorText(state.message) },
+                footer = { DialogActionButton("Close", active = false) { close() } },
+            )
+            is DialogLoad.Ready -> IssueForm(state, ::close)
         }
     }
 }
 
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
+private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     val tc = tc()
     val ui = LocalTestsUi.current
     var form by remember(ready) { mutableStateOf(IssueFormModel.from(ready.draft, ready.linkToCase)) }
@@ -190,134 +182,141 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
             }
         }
     }
-    AppText(if (ready.existing == null) "Create issue" else "Issue", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        FormFields(form, ready.draft) { form = it }
-        EvidenceChecklist(
-            form = form,
-            onToggle = { if (!busy) form = form.toggleAttachment(it) },
-            onCollectBugreport = {
-                if (bugreportJob != null || busy) return@EvidenceChecklist
-                val collectionJob = ui.scope.launch(start = CoroutineStart.LAZY) {
-                    busy = true
-                    try {
-                        var issueId = storedId
-                        if (issueId == null) {
-                            when (val saved = ui.state.saveIssue(null, ready.source, form.toDraft(ready.draft), form.linkToCase)) {
-                                is IssueActionResult.Done -> {
-                                    issueId = saved.record.id
-                                    storedId = saved.record.id
-                                    form = form.copy(attachments = saved.record.draft.attachments)
+    TestsDialogFrame(
+        title = if (ready.existing == null) "Create issue" else "Issue",
+        width = DIALOG_WIDTH,
+        maxHeight = DIALOG_MAX_HEIGHT,
+        status = {
+            problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
+            archiveProgress?.let { TestsHint(it, Modifier.padding(top = 6.dp)) }
+            if (busy && bugreportJob == null && form.destination == IssueDestination.TRACKER) {
+                TestsHint("An AI agent is filing the issue in ${ui.state.settings.tracker.displayName}. This can take a minute.", Modifier.padding(top = 6.dp))
+            }
+        },
+        body = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                FormFields(form, ready.draft) { form = it }
+                EvidenceChecklist(
+                    form = form,
+                    onToggle = { if (!busy) form = form.toggleAttachment(it) },
+                    onCollectBugreport = {
+                        if (bugreportJob != null || busy) return@EvidenceChecklist
+                        val collectionJob = ui.scope.launch(start = CoroutineStart.LAZY) {
+                            busy = true
+                            try {
+                                var issueId = storedId
+                                if (issueId == null) {
+                                    when (val saved = ui.state.saveIssue(null, ready.source, form.toDraft(ready.draft), form.linkToCase)) {
+                                        is IssueActionResult.Done -> {
+                                            issueId = saved.record.id
+                                            storedId = saved.record.id
+                                            form = form.copy(attachments = saved.record.draft.attachments)
+                                        }
+                                        is IssueActionResult.Failed -> {
+                                            problem = saved.message
+                                            return@launch
+                                        }
+                                        is IssueActionResult.NeedsLogTab -> return@launch
+                                    }
                                 }
-                                is IssueActionResult.Failed -> {
-                                    problem = saved.message
-                                    return@launch
-                                }
-                                is IssueActionResult.NeedsLogTab -> return@launch
+                                val result = ui.state.collectIssueBugreport(issueId!!) { text -> bugreportProgress = text }
+                                result.fold(
+                                    onSuccess = { record ->
+                                        form = form.copy(attachments = record.draft.attachments)
+                                        bugreportProgress = "Bugreport is available in the attachment checklist."
+                                    },
+                                    onFailure = { problem = it.message ?: "Could not collect the Android bugreport." },
+                                )
+                            } finally {
+                                busy = false
+                                if (bugreportJob === coroutineContext[Job]) bugreportJob = null
                             }
                         }
-                        val result = ui.state.collectIssueBugreport(issueId!!) { text -> bugreportProgress = text }
-                        result.fold(
-                            onSuccess = { record ->
-                                form = form.copy(attachments = record.draft.attachments)
-                                bugreportProgress = "Bugreport is available in the attachment checklist."
-                            },
-                            onFailure = { problem = it.message ?: "Could not collect the Android bugreport." },
-                        )
-                    } finally {
-                        busy = false
-                        if (bugreportJob === coroutineContext[Job]) bugreportJob = null
-                    }
+                        bugreportJob = collectionJob
+                        collectionJob.start()
+                    },
+                    onCancelBugreport = { bugreportJob?.cancel(); bugreportProgress = "Cancelling bugreport collection…" },
+                    collecting = bugreportJob != null,
+                    progress = bugreportProgress,
+                    enabled = ready.draft.environment.deviceSerial.isNotBlank(),
+                    checklistEnabled = !busy,
+                )
+                if (ready.source.stepNumber > 0) {
+                    IssueStepClipControls(
+                        startText = clipStartText,
+                        endText = clipEndText,
+                        onStart = { clipStartText = it },
+                        onEnd = { clipEndText = it },
+                        defaultWindow = defaultClipWindow,
+                        unavailable = clipAvailability,
+                        progress = clipProgress,
+                        exporting = clipJob != null,
+                        enabled = !busy && clipJob == null && clipAvailability == null,
+                        onCancel = { clipJob?.cancel(); clipProgress = "Cancelling clip export…" },
+                        onExport = {
+                            if (busy || clipJob != null) return@IssueStepClipControls
+                            val start = clipStartText.trim().toLongOrNull()
+                            val end = clipEndText.trim().toLongOrNull()
+                            if (clipStartText.isNotBlank() && start == null || clipEndText.isNotBlank() && end == null) {
+                                problem = "Clip bounds must be whole-number milliseconds."
+                                return@IssueStepClipControls
+                            }
+                            val exportJob = ui.scope.launch(start = CoroutineStart.LAZY) {
+                                busy = true
+                                try {
+                                    var issueId = storedId
+                                    if (issueId == null) {
+                                        when (val saved = ui.state.saveIssue(null, ready.source, form.toDraft(ready.draft), form.linkToCase)) {
+                                            is IssueActionResult.Done -> {
+                                                issueId = saved.record.id
+                                                storedId = saved.record.id
+                                                form = form.copy(attachments = saved.record.draft.attachments)
+                                            }
+                                            is IssueActionResult.Failed -> {
+                                                problem = saved.message
+                                                return@launch
+                                            }
+                                            is IssueActionResult.NeedsLogTab -> return@launch
+                                        }
+                                    }
+                                    val savedIssueId = issueId ?: return@launch
+                                    val result = ui.state.exportIssueStepClip(savedIssueId, start, end) { message -> clipProgress = message }
+                                    result.fold(
+                                        onSuccess = { exported ->
+                                            form = form.copy(attachments = exported.issue.draft.attachments)
+                                            clipStartText = exported.actualStartMs.toString()
+                                            clipEndText = exported.actualEndMs.toString()
+                                            clipProgress = "Exported bounds ${exported.actualStartMs}–${exported.actualEndMs} ms. Original recording retained."
+                                        },
+                                        onFailure = { problem = it.message ?: "Could not export the step clip." },
+                                    )
+                                } finally {
+                                    busy = false
+                                    if (clipJob === coroutineContext[Job]) clipJob = null
+                                }
+                            }
+                            clipJob = exportJob
+                            exportJob.start()
+                        },
+                    )
                 }
-                bugreportJob = collectionJob
-                collectionJob.start()
-            },
-            onCancelBugreport = { bugreportJob?.cancel(); bugreportProgress = "Cancelling bugreport collection…" },
-            collecting = bugreportJob != null,
-            progress = bugreportProgress,
-            enabled = ready.draft.environment.deviceSerial.isNotBlank(),
-            checklistEnabled = !busy,
-        )
-        if (ready.source.stepNumber > 0) {
-            IssueStepClipControls(
-                startText = clipStartText,
-                endText = clipEndText,
-                onStart = { clipStartText = it },
-                onEnd = { clipEndText = it },
-                defaultWindow = defaultClipWindow,
-                unavailable = clipAvailability,
-                progress = clipProgress,
-                exporting = clipJob != null,
-                enabled = !busy && clipJob == null && clipAvailability == null,
-                onCancel = { clipJob?.cancel(); clipProgress = "Cancelling clip export…" },
-                onExport = {
-                    if (busy || clipJob != null) return@IssueStepClipControls
-                    val start = clipStartText.trim().toLongOrNull()
-                    val end = clipEndText.trim().toLongOrNull()
-                    if (clipStartText.isNotBlank() && start == null || clipEndText.isNotBlank() && end == null) {
-                        problem = "Clip bounds must be whole-number milliseconds."
-                        return@IssueStepClipControls
-                    }
-                    val exportJob = ui.scope.launch(start = CoroutineStart.LAZY) {
-                        busy = true
-                        try {
-                            var issueId = storedId
-                            if (issueId == null) {
-                                when (val saved = ui.state.saveIssue(null, ready.source, form.toDraft(ready.draft), form.linkToCase)) {
-                                    is IssueActionResult.Done -> {
-                                        issueId = saved.record.id
-                                        storedId = saved.record.id
-                                        form = form.copy(attachments = saved.record.draft.attachments)
-                                    }
-                                    is IssueActionResult.Failed -> {
-                                        problem = saved.message
-                                        return@launch
-                                    }
-                                    is IssueActionResult.NeedsLogTab -> return@launch
-                                }
-                            }
-                            val savedIssueId = issueId ?: return@launch
-                            val result = ui.state.exportIssueStepClip(savedIssueId, start, end) { message -> clipProgress = message }
-                            result.fold(
-                                onSuccess = { exported ->
-                                    form = form.copy(attachments = exported.issue.draft.attachments)
-                                    clipStartText = exported.actualStartMs.toString()
-                                    clipEndText = exported.actualEndMs.toString()
-                                    clipProgress = "Exported bounds ${exported.actualStartMs}–${exported.actualEndMs} ms. Original recording retained."
-                                },
-                                onFailure = { problem = it.message ?: "Could not export the step clip." },
-                            )
-                        } finally {
-                            busy = false
-                            if (clipJob === coroutineContext[Job]) clipJob = null
-                        }
-                    }
-                    clipJob = exportJob
-                    exportJob.start()
-                },
-            )
-        }
-        DestinationSection(form, ready.existing, ui.state) { form = form.copy(destination = it) }
-        CheckRow(checked = form.linkToCase, onToggle = { form = form.copy(linkToCase = !form.linkToCase) }) {
-            AppText("Link to case and re-check on next run", color = tc.tx, fontSize = 12.sp)
-        }
-        if (form.linkToCase) TestsHint("A later run of this case marks the issue “still failing” or “passing now”.")
-    }
-    problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
-    archiveProgress?.let { TestsHint(it, Modifier.padding(top = 6.dp)) }
-    if (busy && bugreportJob == null && form.destination == IssueDestination.TRACKER) {
-        TestsHint("An AI agent is filing the issue in ${ui.state.settings.tracker.displayName}. This can take a minute.", Modifier.padding(top = 6.dp))
-    }
-    Spacer(Modifier.padding(top = 10.dp))
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-        DialogActionButton(
-            if (busy && form.destination == IssueDestination.TRACKER) "Sending…" else createLabel(form.destination, ui.state.settings.tracker.displayName),
-            active = true,
-            enabled = !busy,
-        ) { submit(send = true) }
-        DialogActionButton("Save draft", active = false, enabled = !busy) { submit(send = false) }
-        DialogActionButton("Cancel", active = false) { close() }
-    }
+                DestinationSection(form, ready.existing, ui.state) { form = form.copy(destination = it) }
+                CheckRow(checked = form.linkToCase, onToggle = { form = form.copy(linkToCase = !form.linkToCase) }) {
+                    AppText("Link to case and re-check on next run", color = tc.tx, fontSize = 12.sp)
+                }
+                if (form.linkToCase) TestsHint("A later run of this case marks the issue “still failing” or “passing now”.")
+            }
+        },
+        footer = {
+            DialogActionButton(
+                if (busy && form.destination == IssueDestination.TRACKER) "Sending…" else createLabel(form.destination, ui.state.settings.tracker.displayName),
+                active = true,
+                enabled = !busy,
+            ) { submit(send = true) }
+            DialogActionButton("Save draft", active = false, enabled = !busy) { submit(send = false) }
+            DialogActionButton("Cancel", active = false) { close() }
+        },
+    )
     needsLog?.let { pending ->
         TestsConfirmDialog(
             title = "Open the lane's log?",

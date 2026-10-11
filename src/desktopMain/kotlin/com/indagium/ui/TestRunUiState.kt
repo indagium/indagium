@@ -2,6 +2,8 @@ package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.MICROPHONE_DEFAULT_ID
+import com.indagium.capture.MICROPHONE_OFF_ID
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.CaseResult
@@ -25,6 +27,7 @@ import com.indagium.testing.model.SUITE_SETUP_CASE_ID
 import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestingSettings
 import com.indagium.testing.model.driverLabel
@@ -35,10 +38,12 @@ import com.indagium.testing.model.newLaneId
 import com.indagium.testing.run.ComparedCasePresence
 import com.indagium.testing.run.ComparedRunStep
 import com.indagium.testing.run.ComparedStepPresence
+import com.indagium.testing.run.TestRunReportFormat
 import com.indagium.testing.run.deviceSharingWarnings
 import java.text.SimpleDateFormat
 import java.time.Instant
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Date
 import java.util.Locale
 
@@ -283,6 +288,110 @@ internal fun RunDialogModel.withTestingDefaults(testing: TestingSettings, profil
  */
 internal fun RunDialogModel.withCaptureDefaults(saved: CaptureSettings, testing: TestingSettings): RunDialogModel =
     copy(capture = saved.copy(recordVideo = saved.recordVideo || testing.evidence.video))
+
+// ── Run dialog summaries ─────────────────────────────────────────────
+
+private fun stepCountLabel(count: Int): String = if (count == 1) "1 step" else "$count steps"
+
+/**
+ * The "What" row of the run dialog: "All 5 cases · 27 steps", the case's name when one is chosen, or "2 of 5 cases · 9 steps".
+ * [cases] are the cases the run could include (locked ones left out); selected ids outside them do not count.
+ */
+internal fun runCasesSummary(cases: List<TestCase>, selectedIds: Set<String>): String {
+    val chosen = cases.filter { it.id in selectedIds }
+    if (chosen.isEmpty()) return "No cases selected"
+    val head = when {
+        chosen.size == 1 -> chosen.single().name.ifBlank { "Untitled case" }
+        chosen.size == cases.size -> "All ${chosen.size} cases"
+        else -> "${chosen.size} of ${cases.size} cases"
+    }
+    return "$head · ${stepCountLabel(chosen.sumOf { it.steps.size })}"
+}
+
+/**
+ * The "Record" row of the run dialog in one line, for example "video to file · device audio · mic off · no earlier logs". Without
+ * [capture] (the dialog has not read the saved settings yet) it says so; [openLaneTabs] off is the only tab state worth a mention.
+ */
+internal fun recordingSummary(capture: CaptureSettings?, openLaneTabs: Boolean): String {
+    if (capture == null) return "Recording as in Settings"
+    val parts = buildList {
+        add(if (capture.recordVideo) "video to file" else "no video")
+        add(if (capture.audio) "device audio" else "no device audio")
+        add(
+            when (capture.microphoneDeviceId) {
+                MICROPHONE_OFF_ID -> "mic off"
+                MICROPHONE_DEFAULT_ID -> "mic: system default"
+                else -> "mic on"
+            },
+        )
+        add(if (capture.includeBufferedLogs) "earlier logs included" else "no earlier logs")
+        if (capture.audio && capture.keepDeviceAudio) add("sound kept on the device")
+        if (!openLaneTabs) add("no live tab per lane")
+    }
+    return parts.joinToString(" · ")
+}
+
+private fun ManualStepsOption.shortLabel(): String = when (this) {
+    ManualStepsOption.USE_SCRIPT_THEN_WAIT -> "script, else wait for tester"
+    ManualStepsOption.WAIT_FOR_TESTER -> "wait for tester"
+    ManualStepsOption.SKIP -> "skip"
+}
+
+/**
+ * The "More" row of the run dialog in one line: retries, repeat, a tool-call limit that is not the default, the evidence kept and,
+ * when the suite has manual steps ([showManualSteps]), what the run does with them. For example
+ * "retries 1 · repeat 1× · evidence: screenshots, transcript · manual steps: wait for tester".
+ */
+internal fun moreSummary(model: RunDialogModel, showManualSteps: Boolean): String {
+    val parts = buildList {
+        add(
+            "retries ${model.caseRetries}" + when (val steps = model.stepRetriesOverride) {
+                null -> ""
+                0 -> " · step retries off"
+                else -> " · step retries $steps"
+            },
+        )
+        add("repeat ${model.repeat}×")
+        val limit = model.toolLimitText.trim()
+        if (limit != DEFAULT_CASE_TOOL_CALL_LIMIT.toString()) add("$limit tool calls per case")
+        val kept = listOfNotNull("screenshots".takeIf { model.evidence.screenshots }, "transcript".takeIf { model.evidence.transcript })
+        add(if (kept.isEmpty()) "no extra evidence" else "evidence: ${kept.joinToString(", ")}")
+        if (showManualSteps) add("manual steps: ${model.manualSteps.shortLabel()}")
+    }
+    return parts.joinToString(" · ")
+}
+
+// ── Report export ────────────────────────────────────────────────────
+
+/** The label of an export format in the dialog's segmented control. */
+internal fun TestRunReportFormat.label(): String = when (this) {
+    TestRunReportFormat.JSON -> "JSON"
+    TestRunReportFormat.MARKDOWN -> "Markdown"
+    TestRunReportFormat.EVIDENCE_ZIP -> "Evidence ZIP"
+}
+
+private fun TestRunReportFormat.extension(): String = when (this) {
+    TestRunReportFormat.JSON -> "json"
+    TestRunReportFormat.MARKDOWN -> "md"
+    TestRunReportFormat.EVIDENCE_ZIP -> "zip"
+}
+
+private const val EXPORT_NAME_MAX_CHARS = 60
+private const val EXPORT_STAMP_PATTERN = "yyyyMMdd-HHmm"
+
+/** A file name for an exported report: the suite's name reduced to safe characters, the run's start time and the format's extension. */
+internal fun reportExportFileName(suiteName: String, runMoment: Long, format: TestRunReportFormat, zone: ZoneId = ZoneId.systemDefault()): String {
+    val safe = suiteName.trim().replace(Regex("[^A-Za-z0-9._-]+"), "_").trim('_', '.').take(EXPORT_NAME_MAX_CHARS).ifBlank { "test_run" }
+    val stamp = DateTimeFormatter.ofPattern(EXPORT_STAMP_PATTERN, Locale.ROOT).format(Instant.ofEpochMilli(runMoment).atZone(zone))
+    return "${safe}_$stamp.${format.extension()}"
+}
+
+/** [path] with the extension of another export format swapped for [format]'s; any other path (or none) is left as typed. */
+internal fun withReportExtension(path: String, format: TestRunReportFormat): String {
+    val known = TestRunReportFormat.entries.map { ".${it.extension()}" }
+    val current = known.firstOrNull { path.endsWith(it, ignoreCase = true) } ?: return path
+    return path.dropLast(current.length) + ".${format.extension()}"
+}
 
 // ── Report ───────────────────────────────────────────────────────────
 
