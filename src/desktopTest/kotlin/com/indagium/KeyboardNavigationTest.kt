@@ -77,6 +77,18 @@ class KeyboardNavigationTest {
     }
 
     @Test
+    fun theTestsWorkspaceShortcutsHaveTheirOwnHelpGroup() {
+        val group = keyboardShortcutHelpGroups(mac = false).single { it.title == "Tests" }
+
+        assertEquals(listOf("Up / Down", "Alt Up / Alt Down", "Escape"), group.rows.map { it.label })
+        assertTrue(group.rows.all { it.panel == KeyboardPanel.TESTS })
+        assertEquals(
+            listOf("↑ / ↓", "⌥ ↑ / ⌥ ↓", "Escape"),
+            keyboardShortcutHelpGroups(mac = true).single { it.title == "Tests" }.rows.map { it.label },
+        )
+    }
+
+    @Test
     fun addAnnotationTargetsSortedSelectionElseCursorRowElseNothing() {
         assertEquals(listOf(2, 5, 9), annotationTargetIds(setOf(9, 2, 5), cursorId = 5))
         assertEquals(listOf(7), annotationTargetIds(emptySet(), cursorId = 7))

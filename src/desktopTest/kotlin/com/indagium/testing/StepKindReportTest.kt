@@ -43,7 +43,6 @@ import com.indagium.ui.manualWaitRemaining
 import com.indagium.ui.openScriptEditorFor
 import com.indagium.ui.returnFromScriptEditor
 import com.indagium.ui.scriptUsageCount
-import com.indagium.ui.stepKindBadge
 import com.indagium.ui.suiteHasManualSteps
 import com.indagium.ui.toConfig
 import com.indagium.ui.withRunConfig
@@ -207,15 +206,12 @@ class StepKindReportTest {
     }
 
     @Test
-    fun theKindBadgeAndTheScriptUsageCountSeeStepScripts() {
+    fun theScriptUsageCountSeesStepScripts() {
         val script = sampleScript("hub_on")
         val scripted = TestStep(newStepId(), "Hub on", kind = StepKind.SCRIPT, script = ScriptCall(script.id))
         val manual = TestStep(newStepId(), "Plug it in", kind = StepKind.MANUAL, script = ScriptCall(script.id))
         val library = TestLibrary(suites = listOf(suiteOf(caseOf("A", scripted, manual, plainStep()))), scripts = listOf(script))
 
-        assertEquals("Script", stepKindBadge(scripted))
-        assertEquals("Manual", stepKindBadge(manual))
-        assertNull(stepKindBadge(plainStep()))
         assertEquals(2, scriptUsageCount(library, script.id))
     }
 

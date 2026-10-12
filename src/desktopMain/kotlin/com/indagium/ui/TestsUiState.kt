@@ -16,7 +16,6 @@ import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepCheck
-import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.SuiteCaseLaneHistory
 import com.indagium.testing.model.TestCase
@@ -408,9 +407,6 @@ internal fun checkKindLabel(check: StepCheck): String = when (check) {
 /** One badge label per distinct check kind of [step], in first-seen order, with a count when a kind repeats. */
 internal fun stepCheckBadges(step: TestStep): List<String> =
     step.checks.groupBy { checkKindLabel(it) }.map { (label, checks) -> if (checks.size > 1) "$label ×${checks.size}" else label }
-
-/** The badge that says who performs [step] when it is not the AI agent, else null. */
-internal fun stepKindBadge(step: TestStep): String? = if (step.kind == StepKind.AGENT) null else stepKindLabel(step.kind)
 
 /** The label next to a step row's dot: the kind of its only check, "N checks" for several, null for none. */
 internal fun stepChecksSummary(step: TestStep): String? = when (step.checks.size) {

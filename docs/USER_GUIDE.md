@@ -1533,7 +1533,9 @@ script-result check or allowed-tool reference.
 
 ### Running
 
-Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
+Choose **▶ Run suite** on a suite (or **▶ Run case** on a case). The dialog groups its options as **What**
+(the cases), **Where** (the lanes), **Judge**, **Record** and **More** (retries, repeat count and manual steps).
+The cases, recording and *More* rows show a one-line summary; **Change ▸** opens the full options in place:
 
 - **Cases** — tick the cases to run.
 - **Lanes** — a lane is one device driven by one agent. Choose what drives it (a Claude Code, Codex or API

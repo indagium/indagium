@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -139,13 +138,13 @@ private fun TestRunList() {
                 )
             },
         )
-        TestsHint("Start a run from a suite's “Run suite…” or a case's “Run this case…”. A run keeps its evidence in the save folder.")
+        TestsHint("Start a run with “Run suite” on a suite or “Run case” on a case. A run keeps its evidence in the save folder.")
         Spacer(Modifier.height(10.dp))
         RunFilterPills(counts, view.runsFilter) { view.runsFilter = it }
         Spacer(Modifier.height(4.dp))
         when {
             summaries == null -> TestsHint("Loading runs…", Modifier.padding(top = 8.dp))
-            summaries.isEmpty() -> TestsHint("No runs yet. Start one with Run suite on a suite.", Modifier.padding(top = 8.dp))
+            summaries.isEmpty() -> TestsHint("No runs yet. Start one with Run suite.", Modifier.padding(top = 8.dp))
             shown.isEmpty() -> TestsHint("No runs match this filter.", Modifier.padding(top = 8.dp))
             else -> RunHistoryList(shown, showSuite = true, onOpen = { view.selectedRunId = it })
         }
@@ -228,7 +227,7 @@ private fun RunPassBar(run: RunSummary, statusColor: Color) {
     val tc = tc()
     val live = run.status == RunStatus.QUEUED || run.status == RunStatus.RUNNING
     Row(Modifier.width(RUN_BAR_COLUMN), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(tc.br.copy(alpha = BAR_TRACK_ALPHA))) {
+        Box(Modifier.weight(1f).height(6.dp).clip(CORNER_SM).background(tc.br.copy(alpha = BAR_TRACK_ALPHA))) {
             val fraction = run.passFraction()
             if (fraction > 0f) Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(if (live) statusColor else tc.success))
         }
@@ -436,7 +435,7 @@ private fun ReportTabs(run: TestRun) {
     val tabs = RunReportTab.entries
     val activityCount = run.lanes.sumOf { it.toolCalls.size }
     Box(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br).align(Alignment.BottomStart))
+        Box(Modifier.fillMaxWidth().align(Alignment.BottomStart)) { Divider() }
         UnderlineTabs(
             labels = tabs.map { runReportTabLabel(it, activityCount) },
             selectedIndex = tabs.indexOf(ui.view.reportTab),
@@ -561,7 +560,7 @@ private fun ReportMatrix(run: TestRun, rows: List<MatrixRow>, filtered: Boolean,
             color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, modifier = Modifier.width(JUDGE_COLUMN),
         )
     }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+    Divider()
     if (rows.isEmpty()) {
         TestsHint(if (filtered) "No steps match these filters." else "Nothing to show yet.", Modifier.padding(horizontal = 8.dp, vertical = 10.dp))
     }
@@ -744,7 +743,7 @@ private fun CompareTab(
         AppText("Before", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(COMPARE_RESULT_COLUMN))
         AppText("Now", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(COMPARE_RESULT_COLUMN))
     }
-    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+    Divider()
     lines.forEach { line ->
         Row(
             Modifier.fillMaxWidth().heightIn(min = ROW_HEIGHT).padding(horizontal = 8.dp, vertical = 5.dp),

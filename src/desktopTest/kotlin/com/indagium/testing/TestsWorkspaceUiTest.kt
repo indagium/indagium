@@ -122,7 +122,7 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Runs").performClick()
         rule.waitForIdle()
         assertEquals(TestsNav.Runs, state.testsView.nav)
-        rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite on a suite."), timeoutMillis = 10_000)
+        rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite."), timeoutMillis = 10_000)
         rule.onNodeWithText("Issues").performClick()
         rule.waitForIdle()
         assertEquals(TestsNav.Issues, state.testsView.nav)

@@ -430,7 +430,7 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                     editableSteps.forEachIndexed { index, step ->
                         Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(9.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                AppText("Step ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                                 AppButton("Remove", onClick = { editableSteps.removeAt(index) }, variant = ButtonVariant.Ghost)
                             }
                             TestsLabeled("Action") {
@@ -534,7 +534,7 @@ private fun LogChecksDialog(stepId: String, onDismiss: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 ScrollableTextArea(text, { text = it }, modifier = Modifier.fillMaxWidth(), minHeight = 120.dp, maxHeight = 250.dp)
                 Spacer(Modifier.height(8.dp))
-                AppText("PREVIEW · ${preview.checks.size} checks", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                AppText("Preview · ${preview.checks.size} checks", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                 TestsScrollColumn(Modifier.fillMaxWidth().heightIn(max = 210.dp)) {
                     editableChecks.forEachIndexed { index, check ->
                         Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(6.dp)) {
@@ -673,7 +673,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
             Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     ReorderGrip(scope)
-                    AppText("STEP ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                    AppText("Step ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                     if (row.authorAdded) TestsBadge("ADDED BY YOU")
                     if (row.isExternalEvent) TestsBadge("Detected on the device")
                     Spacer(Modifier.weight(1f))

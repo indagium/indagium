@@ -27,7 +27,7 @@ import com.indagium.ui.filterReportRows
 import com.indagium.ui.laneChoices
 import com.indagium.ui.progressLine
 import com.indagium.ui.readLogExcerpt
-import com.indagium.ui.reportMetrics
+import com.indagium.ui.reportFilterCounts
 import com.indagium.ui.toConfig
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -190,9 +190,9 @@ class TestRunUiStateTest {
         assertEquals(listOf(failingDefinition.id), disagreements.map { it.stepId })
         val unresolved = filterReportRows(run, setOf(TestRunReportFilter.UNRESOLVED_JUDGING)).filterIsInstance<MatrixRow.Step>()
         assertEquals(listOf(failingDefinition.id), unresolved.map { it.stepId }, "NOT_EVALUATED remains visible alongside deterministic FAIL")
-        val metrics = reportMetrics(run)
-        assertEquals(1, metrics.disagreements)
-        assertEquals(1, metrics.unresolvedJudging)
+        val counts = reportFilterCounts(run)
+        assertEquals(1, counts[TestRunReportFilter.DISAGREEMENTS])
+        assertEquals(1, counts[TestRunReportFilter.UNRESOLVED_JUDGING])
         val deterministicOnlyLane = laneA.copy(cases = laneA.cases.map { case ->
             if (case.caseId != testCase.id) case else case.copy(steps = case.steps.map { step ->
                 if (step.stepId == failingDefinition.id) step.copy(
@@ -201,7 +201,7 @@ class TestRunUiStateTest {
             })
         })
         val deterministicOnly = run.copy(lanes = listOf(deterministicOnlyLane, laneB))
-        assertEquals(0, reportMetrics(deterministicOnly).unresolvedJudging)
+        assertEquals(0, reportFilterCounts(deterministicOnly)[TestRunReportFilter.UNRESOLVED_JUDGING])
         assertTrue(filterReportRows(deterministicOnly, setOf(TestRunReportFilter.UNRESOLVED_JUDGING)).isEmpty())
     }
 

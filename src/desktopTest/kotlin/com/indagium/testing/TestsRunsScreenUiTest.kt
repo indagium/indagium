@@ -140,7 +140,7 @@ class TestsRunsScreenUiTest {
     fun withoutAnyRunTheEmptyTextAppearsOnlyAfterTheLoad() {
         openRuns()
 
-        rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite on a suite."), timeoutMillis = 10_000)
+        rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite."), timeoutMillis = 10_000)
         rule.onNodeWithText("Loading runs…").assertDoesNotExist()
     }
 

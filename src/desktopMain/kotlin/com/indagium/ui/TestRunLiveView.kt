@@ -112,7 +112,7 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, tick:
         LaneLogcatPreview(column.logcatPath, runDir, tick)
         column.steps.forEach { StepLine(it) }
         if (column.toolCalls.isNotEmpty()) {
-            AppText("LATEST TOOL CALLS", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
+            AppText("Latest tool calls", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
             column.toolCalls.asReversed().forEach {
                 AppText(it, color = tc.ts.copy(alpha = DETAIL_ALPHA), fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -133,7 +133,7 @@ private fun LaneLogcatPreview(relativePath: String?, runDir: File, tick: Int) {
     }
     preview?.takeIf(String::isNotBlank)?.let { text ->
         Column(Modifier.fillMaxWidth().padding(top = 4.dp).background(tc.p, CORNER_SM).padding(6.dp)) {
-            AppText("LIVE LOGCAT · LAST LINES", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Live logcat · last lines", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             AppText(text, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 6, overflow = TextOverflow.Ellipsis)
         }
     }

@@ -475,30 +475,6 @@ internal enum class TestRunReportFilter(val label: String) {
     UNRESOLVED_JUDGING("Unresolved judging"),
 }
 
-internal data class TestRunReportMetrics(
-    val passedCases: Int,
-    val failedCases: Int,
-    val blockedOrErrorCases: Int,
-    val disagreements: Int,
-    val unresolvedJudging: Int,
-    val caseIterations: Int,
-)
-
-/** Metrics count final case/step outcomes; earlier retries remain visible in each step's attempts count. */
-internal fun reportMetrics(run: TestRun): TestRunReportMetrics {
-    val caseResults = run.lanes.flatMap { it.cases }.filter { it.caseId !in setOf(SUITE_SETUP_CASE_ID, SUITE_TEARDOWN_CASE_ID) }
-    val stepRows = buildMatrix(run).filterIsInstance<MatrixRow.Step>()
-    val results = run.lanes.flatMap { lane -> lane.cases.flatMap { it.steps } }
-    return TestRunReportMetrics(
-        passedCases = caseResults.count { it.status == CaseStatus.PASS },
-        failedCases = caseResults.count { it.status == CaseStatus.FAIL },
-        blockedOrErrorCases = caseResults.count { it.status in setOf(CaseStatus.BLOCKED, CaseStatus.ERROR) },
-        disagreements = stepRows.count { consensusFor(run, it).tone == ConsensusTone.DISAGREE },
-        unresolvedJudging = results.count { it.hasUnresolvedJudgeOutcome() },
-        caseIterations = caseResults.map { it.caseId to it.iteration }.distinct().size,
-    )
-}
-
 /** True when a step row of [run] matches [filter] (any lane's result for it, or the cross-lane / judge state of the row). */
 private fun stepRowMatches(run: TestRun, row: MatrixRow.Step, filter: TestRunReportFilter): Boolean {
     val results = row.cells.mapNotNull { it.result }

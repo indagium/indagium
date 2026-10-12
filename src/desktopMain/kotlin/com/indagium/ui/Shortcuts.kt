@@ -15,6 +15,7 @@ enum class KeyboardPanel {
     LOG_VIEW,
     FILTERS,
     NOTES,
+    TESTS,
     AI,
     POPUPS,
 }
@@ -157,6 +158,7 @@ fun keyboardShortcutHelpGroups(mac: Boolean = isMacOs): List<ShortcutHelpGroup> 
         KeyboardPanel.LOG_VIEW to "Log view",
         KeyboardPanel.FILTERS to "Filters",
         KeyboardPanel.NOTES to "Notes",
+        KeyboardPanel.TESTS to "Tests",
         KeyboardPanel.POPUPS to "Context menus and popups",
     ).mapNotNull { (panel, title) ->
         rowsByPanel[panel]?.let { ShortcutHelpGroup(title, it) }
@@ -247,6 +249,9 @@ private fun shortcutSpecs(): List<ShortcutSpec> = listOf(
     ShortcutSpec("Alt ↑ / Alt ↓", "Alt Up / Alt Down", "Move selected note block", KeyboardPanel.NOTES),
     ShortcutSpec("Ctrl Enter", "Ctrl Enter", "Add text block below", KeyboardPanel.NOTES),
     ShortcutSpec("Delete", "Delete", "Remove selected note block", KeyboardPanel.NOTES),
+    ShortcutSpec("↑ / ↓", "Up / Down", "Select a step (also run report rows)", KeyboardPanel.TESTS),
+    ShortcutSpec("⌥ ↑ / ⌥ ↓", "Alt Up / Alt Down", "Move the selected step", KeyboardPanel.TESTS),
+    ShortcutSpec("Escape", "Escape", "Close the open case-field editor", KeyboardPanel.TESTS),
     ShortcutSpec("↑ / ↓", "Up / Down", "Move highlight", KeyboardPanel.POPUPS),
     ShortcutSpec("Enter", "Enter", "Activate highlighted item", KeyboardPanel.POPUPS),
     ShortcutSpec("Escape", "Escape", "Close menu or popup", KeyboardPanel.POPUPS),

@@ -362,8 +362,8 @@ class TestsSuiteScreenUiTest {
         val suite = suiteWithCases("Login", goal = "Signing in works")
         open(suite, width = 1400.dp)
 
-        rule.onNodeWithText("LATEST").assertExists()
-        rule.onNodeWithText("ISSUES").assertExists()
+        assertTrue(centre("Latest").isNotEmpty(), "the table header names the latest-result column")
+        assertTrue(centre("Issues").isNotEmpty(), "the table header names the issues column")
         assertTrue(centre("Signing in works").isNotEmpty(), "the goal line shows under the name")
     }
 
@@ -374,7 +374,7 @@ class TestsSuiteScreenUiTest {
         open(suite, width = 500.dp)
 
         rule.waitUntilAtLeastOneExists(hasText("Pass"), timeoutMillis = 10_000)
-        rule.onNodeWithText("LATEST").assertDoesNotExist()
+        assertTrue(centre("Latest").isEmpty(), "the narrow table has no header")
         // The narrow window hides the nav, so these can only be the centre screen's row.
         rule.onNodeWithText("0 steps ·").assertExists()
         rule.onNodeWithText("Login").assertExists()

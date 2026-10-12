@@ -236,7 +236,7 @@ private fun SuiteTabs(suite: TestSuite, runCount: Int?) {
     val ui = LocalTestsUi.current
     val tabs = SuiteTab.entries
     Box(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br).align(Alignment.BottomStart))
+        Box(Modifier.fillMaxWidth().align(Alignment.BottomStart)) { Divider() }
         UnderlineTabs(
             labels = tabs.map { suiteTabLabel(it, suite.cases.size, runCount) },
             selectedIndex = tabs.indexOf(ui.view.selectedSuiteTab),
@@ -264,7 +264,7 @@ private fun SuiteCasesTab(suite: TestSuite, data: SuiteScreenData) {
                 val compact = suiteCasesCompact(maxWidth.value)
                 Column(Modifier.fillMaxWidth()) {
                     if (!compact) CasesTableHeader()
-                    Box(Modifier.fillMaxWidth().height(1.dp).background(tc().br))
+                    Divider()
                     ReorderableColumn(
                         items = suite.cases,
                         idOf = { it.id },
@@ -308,10 +308,10 @@ private fun CasesTableHeader() {
     ) {
         Spacer(Modifier.width(GRIP_COLUMN))
         TableHeading("#", Modifier.width(INDEX_COLUMN))
-        TableHeading("CASE", Modifier.weight(1f))
-        TableHeading("STEPS", Modifier.width(STEPS_COLUMN), Alignment.CenterEnd)
-        TableHeading("LATEST", Modifier.width(LATEST_COLUMN))
-        TableHeading("ISSUES", Modifier.width(ISSUES_COLUMN), Alignment.CenterEnd)
+        TableHeading("Case", Modifier.weight(1f))
+        TableHeading("Steps", Modifier.width(STEPS_COLUMN), Alignment.CenterEnd)
+        TableHeading("Latest", Modifier.width(LATEST_COLUMN))
+        TableHeading("Issues", Modifier.width(ISSUES_COLUMN), Alignment.CenterEnd)
         Spacer(Modifier.width(MENU_COLUMN))
     }
 }
