@@ -539,7 +539,7 @@ class TestLibraryStoreTest {
         val suite = fullSuite().copy(id = "suite-future")
         val file = suiteFile(dir, suite.id)
         file.parentFile.mkdirs()
-        val newerText = encodeSuiteFile(suite).replace("\"version\": 2", "\"version\": 5").replace("\"name\": \"Smoke\"", "\"name\": \"Smoke\", \"fancy\": 1")
+        val newerText = encodeSuiteFile(suite).replace("\"version\": 2", "\"version\": 6").replace("\"name\": \"Smoke\"", "\"name\": \"Smoke\", \"fancy\": 1")
         file.writeText(newerText)
         val store = newStore(dir)
 

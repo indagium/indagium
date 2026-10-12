@@ -3193,7 +3193,7 @@ must have a condition that describes when to perform it. Only an optional step c
 the case; expected text may be blank only for a conditioned optional step. Library and suite envelopes write schema v2 and
 read v1 with required-step defaults, so older files remain readable and a newer writer cannot silently discard conditions.
 
-**Step kinds and the v3 envelope.** `TestStep.kind` is `AGENT` (default), `MANUAL` or `SCRIPT`, with `TestStep.script`
+**Step kinds and versioned envelopes.** `TestStep.kind` is `AGENT` (default), `MANUAL`, `SCRIPT` or `REPLAY`, with `TestStep.script`
 (`ScriptCall(scriptId, args, exitCode, stdoutContains)`: required for `SCRIPT`, the optional automation alternative of a
 `MANUAL` step) and `TestStep.manualCompletion` (`TESTER_ONLY`, `CHECKS_ONLY`, `TESTER_OR_CHECKS`); all three are appended
 last in `stepToJson`, and written **only when set**, so an AI step is byte-identical to what builds before step kinds wrote.
@@ -3201,7 +3201,8 @@ A suite file holding any non-`AGENT` step or a `DeviceState` check is written at
 (`suiteFileVersionFor`, `libraryFileVersionFor` over the shared steps); everything else stays at version 2. A build that
 predates step kinds reads versions up to 2 and opens a version 3 file **read-only** (`readEnvelope`), so "plug in the USB
 device" is never handed to an AI agent by an older build, and its store never rewrites the file. `TEST_SUITE_FILE_VERSION`
-(3) is the newest version this build reads, `TEST_SUITE_BASE_FILE_VERSION` (2) what it writes by default. A manual step has
+(5) is the newest version this build reads, `TEST_SUITE_BASE_FILE_VERSION` (2) what it writes by default. Gesture hints use
+version 4; replay steps and recorded screen roles use version 5 (below). A manual step has
 no timeout in the file: the decoder gives it `DEFAULT_MANUAL_STEP_TIMEOUT_MS` (10 minutes). Write-time validation
 (`validateStep(step, scripts)`) checks, against the library, that a step's script exists, may be started from a step (not
 `SETUP_TEARDOWN_ONLY`) and accepts its arguments (`validateScriptArgs`), that a `MANUAL` step has instructions and, for
@@ -3212,10 +3213,18 @@ external-event step may be manual or script, and its script must exist and valid
 
 **Storage layout.**
 
+**Recorded input and screenshot roles.** `testing/model/RecordedInput.kt` stores ordered touch/key/panel events, normalized
+coordinates, source screen size, per-sample timing, duration and gaps. `TestStep.recordedInput` is optional enrichment for AI
+steps and required for `StepKind.REPLAY`. `ScreenshotRole` distinguishes `EXPECTED` (the legacy default), `RECORDED_BEFORE`
+and `RECORDED_AFTER` on `StepExample.GoldenScreenshot`. Recorded images are contextual references, not assertions of a correct
+result. `TestLibraryCodec.kt` raises the envelope for replay and contextual screen roles so an older build cannot silently
+execute a replay as an AI step or use a recorded before image as an expected screenshot. Existing libraries and run reports
+remain readable with their previous defaults.
+
 | Path | Contents | Format |
 |---|---|---|
-| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `indagium-test-library` v2, v3 when a shared step uses a step kind or a device-state check (reads v1 with required steps as the default) (`testing/store/TestLibraryCodec.kt`) |
-| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `indagium-test-suite` v2, v3 when it uses a step kind or a device-state check (reads v1 with required steps as the default) (`:62`); the file name must equal the suite id |
+| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `indagium-test-library` v2 by default; v3 for manual/script steps or device-state checks, v4 for gesture hints, v5 for replay or recorded screen roles in shared steps (reads v1–v5) (`testing/store/TestLibraryCodec.kt`) |
+| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `indagium-test-suite` v2 by default; v3 for manual/script steps or device-state checks, v4 for gesture hints, v5 for replay or recorded screen roles (reads v1–v5); the file name must equal the suite id |
 | `<test suites folder>/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
 | `<issues folder>/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
 | `<test runs folder>/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config (`manualSteps`), per-lane results (a step result appends `kind`, `completedBy`, `manualCompletion`, `classification`), comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
@@ -3416,9 +3425,11 @@ flowchart TB
 - **Budgets.** Each lane's case iteration has an atomic paid-dispatch budget (`caseToolCallLimit`, default 60, 1..500)
   shared across that case's steps, retries and agent restarts. Agent and external lanes use the same guard and
   accounting rules; separate lanes and repeat iterations receive their own budget. A dispatched call counts even when execution
-  returns an error; protocol calls and actions refused before dispatch are free. Each step also has
+  returns an error; protocol calls, saved-example reads and actions refused before dispatch are free. Each step also has
   `maxToolCalls` (default 15). The three protocol tools (`get_current_step`, `report_observation`,
-  `finish_step`) are free for the case budget, so an agent that spent its actions can still report.
+  `finish_step`) and the saved-example tools (`list_step_examples`, `get_step_example`) are free for both case and step allowances.
+  Example reads still obey the case allow-list, step deadline and bounded image/text readers; activity and provider usage retain
+  the actual calls. The current step and transition replies already list its example IDs, so agents need not list them again.
   Exhaustion is settled as an actionable case `ERROR` before a blocked client can finish the case.
 - **Step intent.** `TestStep.intent` is `perform_action` (the compatibility default) or `ensure_state`, with an optional
   `precondition`. The prompt, `get_current_step`, next/redo replies, recording application, improvement brief, library/run codecs
@@ -3502,6 +3513,24 @@ the step's checks, the judge only for judge checks, then `decideFlow`: pass, ret
   an unknown key is a permanent error that names the supported ones.
 
 #### 26.5.4 Cancellation and bounded close
+
+**Recorded-input replay.** `DriverStepRunner.kt` executes `REPLAY` through the same driver handoff as manual/script steps.
+`ReplayPlan.kt` validates the whole input list before injection, scales coordinates to the latest screenshot and refuses a
+source/device aspect ratio difference above 5%. Pauses are capped at 5 s between events and settling at 3 s. The replay
+shares the step's execution deadline with deterministic checks; configured judging then examines the result as for an AI
+step. Injection failure must remain an execution failure even if the resulting screen happens to match the expected text.
+New replay steps default to zero retries because repeating a partly completed toggle can reverse its result.
+
+`testing/device/GestureScript.kt` sends ordered Android motion-event input with the path's times and the hold before release.
+Android shell command overhead limits timing accuracy; this is recorded-path replay rather than hardware-level timing.
+Devices without motion-event support fall back to a straight swipe with a reported approximation. Failure or cancellation
+attempts to release the finger; a partially injected gesture is not automatically injected again as a fallback.
+
+**Screen references during a run.** Recording apply copies eligible before/after screenshots to ordinary suite assets,
+independently of the opt-in full recording archive (§26.14). Agent example tools and judge briefs expose their roles.
+`JudgeBrief.kt` labels them separately from the current attempt's actual start/end evidence and expected screenshots;
+`JudgePrompts.kt` requires the written expected result to decide correctness. The step list's Screen indicator and example
+editor make those references visible. Password-withheld and chronologically ineligible images remain excluded.
 
 `TestRunCoordinator.cancel` cancels the run's job (`:246`). The engine's `finally` and each lane's
 `release` run in `withContext(NonCancellable)` on IO: the judge is closed, the final status derived and
@@ -4372,19 +4401,22 @@ refuse while it is set), then calls the service with **no lock held**:
    allowed here, unlike in a draft; see the environment watcher below for kinds and scripts). An
    invalid answer is an error with the reason and **changes nothing**. A tap or long press with neither a
    resolved target nor successful input-centered video inspection or a trustworthy before screenshot is forced into review
-   even if the model claims confidence: its recorded gesture remains unchanged, unsupported target and assertions stay blocked,
+   even if the model claims confidence: its recorded gesture is retained in `sourceHint`, unsupported target and assertions stay blocked,
    and Apply waits for a person to resolve the ambiguity. If only part of a multi-input group is unresolved, supported wording
    and checks remain available behind the review gate, while the unresolved source inputs are named for review. A
    video-inspected transition may support a broad action/result, never a
    named UI control from the destination alone. A conditional incidental action (such as dismissing a visible ad) stays
    separate from required actions, must include a condition, and may have blank expected text; when absent it records
    `SKIPPED` without failing the case or running expectation checks. An unresolved gesture cannot be made optional to avoid
-   review.
+   review. A model-generated coordinate-only action is also forced into review even when it supplies an expected result;
+   fixed and human-reviewed locked rows bypass this guard. Older coordinate-only rows marked model-supported are not locked during
+   partial rewrites unless a person reviewed them. The prompt asks for the supported semantic action and keeps coordinates
+   as recorded-input hints. Neither a destination screenshot alone nor unrelated package/activity changes establish a precise target.
 4. `TestStepRecordingSession.applyRewrite` swaps the rows in one step, keeping the recorded rows as
    `rawSteps` (refused if the recording is being applied or its recorded rows changed). Each new row keeps
    `sourceInputIds`; its candidate expected screenshot is an eligible after-image of its last (or named)
-   source input and is **off** until the reviewer ticks it. A fully unresolved row preserves the original gesture description
-   without a generated target, expected result or checks until edited; a partially resolved group keeps its supported wording
+   source input and is **off** until the reviewer ticks it. A fully unresolved or coordinate-only model row uses a generic recorded-gesture
+   action with the original description in `sourceHint`, without a generated target, expected result or checks until edited; a partially resolved group keeps its supported wording
    and checks behind the review gate. Re-running starts from `rawSteps`: a partial rewrite
    preserves author-added and human-reviewed rows plus distant model-supported rows, while unresolved rows and adjacent unreviewed
    autogenerated helpers may be reconsidered together. `scope=all` rewrites the full source block;
@@ -4424,7 +4456,8 @@ unavailable, and partial totals are marked instead of guessed.
 
 **Apply.** `toTestSteps` turns a rewritten row into a `TestStep` with the readable action/expected, the
 AI's checks, a `ReferenceLog` example "Recorded input (hint; prefer what is on screen)" listing the raw
-inputs (action, element label/id, package), and a golden screenshot only when ticked. Raw rows apply as
+inputs (action, element label/id, package), structured timed input, and eligible recorded before/after screenshots as contextual
+references. An expected screenshot is added only when ticked. Raw rows apply as
 before. **Privacy.** A remote rewrite sends screenshots, screen text and typed text (not passwords) to the
 profile's provider, so `rewrite_test_recording` is in `PER_CALL_APPROVAL_MCP_TOOLS` and raised to
 `CONFIRMATION_REQUIRED` for a remote profile exactly like `draft_test_steps`; `restore_test_recording_raw`

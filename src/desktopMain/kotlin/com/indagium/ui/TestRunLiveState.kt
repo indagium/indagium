@@ -266,6 +266,7 @@ internal fun fixChanges(step: TestStep, fix: StepFix): List<FixChange> = buildLi
 internal fun goldenExampleFor(step: TestStep?): StepExample.GoldenScreenshot? {
     if (step == null) return null
     val goldens = step.examples.filterIsInstance<StepExample.GoldenScreenshot>()
+        .filter { it.role == com.indagium.testing.model.ScreenshotRole.EXPECTED }
     val named = step.checks.filterIsInstance<StepCheck.ScreenJudge>().firstNotNullOfOrNull { check ->
         goldens.firstOrNull { it.id == check.exampleRef }
     }

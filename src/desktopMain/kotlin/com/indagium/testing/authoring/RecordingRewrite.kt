@@ -4,6 +4,7 @@ import com.indagium.debug.parseChecks
 import com.indagium.debug.toPlainMap
 import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.RECORDING_ROW_KINDS
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepIntent
@@ -155,6 +156,7 @@ internal enum class RewriteScope {
  */
 internal fun RecordedTestStep.isAcceptedRewriteStep(): Boolean =
     !authorAdded && sourceInputIds.isNotEmpty() && (humanReviewed || modelSupported) &&
+        (humanReviewed || !isCoordinateOnlyAction(action)) &&
         (reviewReason == null || reviewReason == INCIDENTAL_EXPECTED_WARNING || (humanReviewed && isSoftReviewWarning(reviewReason))) &&
         max(action.length, expected.length) <= MAX_FIXED_STEP_CHARS && action.isNotBlank()
 
@@ -251,7 +253,7 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
         "$where.optional must be a boolean when provided."
     }
     val condition = optionalTextField(obj, "condition", where, MAX_STEP_TEXT_CHARS)
-    val reviewReason = optionalTextField(obj, "reviewReason", where, MAX_REVIEW_REASON_CHARS)
+    val providedReviewReason = optionalTextField(obj, "reviewReason", where, MAX_REVIEW_REASON_CHARS)
     val intent = if (obj.containsKey("intent")) {
         val rawIntent = (obj["intent"] as? JsonPrimitive)?.takeIf { it.isString }?.content
             ?: throw IllegalArgumentException("$where.intent must be perform_action or ensure_state.")
@@ -269,14 +271,26 @@ private fun parseProposedStep(obj: JsonObject, index: Int, expectations: Rewrite
     val sources = sourceInputsOf(obj["sourceInputs"], where, expectations.inputCount)
     val fixed = sources.firstOrNull { it in expectations.fixedInputs }
     if (fixed != null) {
-        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason, intent = intent, precondition = precondition)
+        val step = ProposedStep(
+            action, expected, optional, condition, sources, null, emptyList(), providedReviewReason, intent = intent, precondition = precondition,
+        )
         requireFixedStepUnchanged(obj, where, step, fixed, requireNotNull(expectations.fixedInputs[fixed]))
         return step
     }
     expectations.lockedSteps.firstOrNull { group -> sources.any { it in group.inputs } }?.let { group ->
-        val step = ProposedStep(action, expected, optional, condition, sources, null, emptyList(), reviewReason, intent = intent, precondition = precondition)
+        val step = ProposedStep(
+            action, expected, optional, condition, sources, null, emptyList(), providedReviewReason, intent = intent, precondition = precondition,
+        )
         requireLockedStepUnchanged(obj, where, step, group)
         return step
+    }
+    val reviewReason = if (isCoordinateOnlyAction(action)) {
+        listOfNotNull(
+            providedReviewReason,
+            "This action only describes recorded coordinates. Name the evidenced user-level action; exact coordinates stay in the recorded-input reference.",
+        ).joinToString(" ").take(MAX_REVIEW_REASON_CHARS)
+    } else {
+        providedReviewReason
     }
     val performer = performerOf(obj, where, sources, expectations)
     require(performer.kind != StepKind.AGENT || expected.isNotBlank() || reviewReason != null || optional && !condition.isNullOrBlank()) {
@@ -355,7 +369,7 @@ private fun performerOf(obj: JsonObject, where: String, sources: List<Int>, expe
 private fun kindOf(element: JsonElement?, where: String): StepKind {
     if (element == null || element is JsonNull) return StepKind.AGENT
     val text = (element as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim().orEmpty()
-    return StepKind.entries.firstOrNull { it.name.equals(text, ignoreCase = true) }
+    return RECORDING_ROW_KINDS.firstOrNull { it.name.equals(text, ignoreCase = true) }
         ?: throw IllegalArgumentException("$where.kind must be agent, manual or script.")
 }
 
@@ -520,23 +534,23 @@ private fun buildRewrittenRow(
     sources.singleOrNull()?.takeIf { it.fixed }?.let { return it.row }
     sources.first().locked?.let { return it.step }
     val unclearGestures = sources.filter { source -> unclearGestureIn(listOf(source), safeVideoMoments, sensitivity) != null }
+    val coordinateOnly = isCoordinateOnlyAction(step.action)
     val unclearGesture = unclearGestures.firstOrNull()
     val byAgent = step.kind == StepKind.AGENT
     val blockingModelReason = step.reviewReason?.takeUnless(::isSoftReviewWarning)
     val needsReview = byAgent && (unclearGesture != null || blockingModelReason != null)
-    val fullyUnresolved = unclearGestures.size == sources.size && sources.isNotEmpty()
+    val requireGenericReview = requiresGenericGestureReview(coordinateOnly, unclearGestures, sources)
     val external = sources.singleOrNull()?.takeIf { it.row.isExternalEvent }
-    val rawAction = sources.joinToString("\n") { it.row.action }.take(MAX_STEP_TEXT_CHARS)
     val screenInput = step.screenInput ?: step.sourceInputs.last()
     val screenInputRow = inputs[screenInput - 1]
     val screen = if (needsReview) null else screenInputRow.screenshot("after")?.takeUnless {
         sensitivity.screenshotWithheld(it, screenInputRow.row.inputAtMs)
     }
     return RecordedTestStep(
-        action = if (fullyUnresolved) rawAction else step.action,
-        expected = if (fullyUnresolved) "" else step.expected,
-        optional = step.optional && !fullyUnresolved,
-        condition = step.condition.takeUnless { fullyUnresolved },
+        action = if (requireGenericReview) genericGestureAction(sources) else step.action,
+        expected = if (requireGenericReview) "" else step.expected,
+        optional = step.optional && !requireGenericReview,
+        condition = step.condition.takeUnless { requireGenericReview },
         screenshotJpeg = screen?.jpeg,
         screenshotFromAdb = screen?.source != null && screen.source != RecordingScreenshotSource.MIRROR_INPUT,
         before = sources.first().row.before,
@@ -545,14 +559,14 @@ private fun buildRewrittenRow(
         inputStartMs = sources.first().row.inputStartMs,
         sourceInputIds = sources.map { it.row.id },
         sourceHint = sourceHintOf(sources),
-        checks = if (fullyUnresolved) emptyList() else step.checks,
+        checks = if (requireGenericReview) emptyList() else step.checks,
         kind = if (external != null) RecordedInputKind.EXTERNAL else null,
         stepKind = step.kind,
         script = step.script,
         manualCompletion = step.manualCompletion,
         intent = step.intent,
         precondition = step.precondition,
-        modelSupported = byAgent && unclearGesture == null && blockingModelReason == null && step.action.isNotBlank(),
+        modelSupported = byAgent && !requireGenericReview && unclearGesture == null && blockingModelReason == null && step.action.isNotBlank(),
         stateChanges = sources.flatMap { it.row.stateChanges }.distinct(),
         reviewReason = rewrittenReviewReason(step, unclearGestures, byAgent),
         screenshotSource = screen?.source,
@@ -561,6 +575,34 @@ private fun buildRewrittenRow(
         screenshotTimingUncertain = screen?.timingUncertain ?: true,
         screenshotVerifiedMoment = screen?.let { "after" },
     )
+}
+
+private fun requiresGenericGestureReview(
+    coordinateOnly: Boolean,
+    unclearGestures: List<RewriteInput>,
+    sources: List<RewriteInput>,
+): Boolean = coordinateOnly || unclearGestures.size == sources.size && sources.isNotEmpty()
+
+private val COORDINATE_PAIR = Regex("""\(?\s*-?\d+(?:\.\d+)?\s*%?\s*[,;]\s*-?\d+(?:\.\d+)?\s*%?\s*\)?""")
+private val GESTURE_WORDS = Regex(
+    """\b(?:tap|click|touch|long|press|swipe|drag|gesture|at|from|to|through|toward|towards|""" +
+        """point|points|coordinate|coordinates|start|end|the|recorded)\b""",
+    RegexOption.IGNORE_CASE,
+)
+private val NON_ACTION_PUNCTUATION = Regex("""[\s%(),;:/._-]+""")
+
+/** True when the action says only how/where the finger moved and supplies no semantic target or goal. */
+internal fun isCoordinateOnlyAction(action: String): Boolean {
+    if (!COORDINATE_PAIR.containsMatchIn(action)) return false
+    val remainder = action.replace(COORDINATE_PAIR, " ").replace(GESTURE_WORDS, " ").replace(NON_ACTION_PUNCTUATION, " ")
+    return remainder.isBlank()
+}
+
+private fun genericGestureAction(sources: List<RewriteInput>): String = when {
+    sources.all { it.row.kind == RecordedInputKind.TAP } -> "Repeat the recorded tap"
+    sources.all { it.row.kind == RecordedInputKind.LONG_PRESS } -> "Repeat the recorded long press"
+    sources.all { it.row.kind == RecordedInputKind.SWIPE } -> "Repeat the recorded swipe"
+    else -> "Repeat the recorded gesture"
 }
 
 /**
@@ -670,6 +712,7 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
             "(${point.x * TARGET_PERCENT_SCALE / point.screenWidth}%,${point.y * TARGET_PERCENT_SCALE / point.screenHeight}%)"
     }
     if (gesturePoints.isNotEmpty()) append(" | normalized path: ").append(gesturePoints.take(10).joinToString("->"))
+    appendTimedPath(row)
     row.targetOrientationQuarterTurns?.let { append(" | source orientation quarter turns: ").append(it) }
     if (row.kind == RecordedInputKind.LONG_PRESS) row.durationMs?.let { append(" | held ").append(it).append(" ms") }
     nextInputStartMs?.let { next ->
@@ -683,6 +726,30 @@ internal fun RewriteInput.describe(mode: RewriteDescription, evidenceIds: Rewrit
     if (row.stateChanges.isNotEmpty()) append(" | device changes after it: ").append(stateChangesText(row.stateChanges))
     if (mode == RewriteDescription.BRIEF) appendBriefDetails(this@describe, evidenceIds)
     append(extra)
+}
+
+/** The samples with the time each was reached, and the rest before the finger lifted: what the `gesture` tool needs to reproduce the input. */
+private fun StringBuilder.appendTimedPath(row: RecordedTestStep) {
+    val complete = timedPercentPoints(row.gesturePath) ?: return
+    val total = maxOf(row.durationMs ?: 0L, complete.last().tMs)
+    val hold = if (row.kind == RecordedInputKind.SWIPE) restBeforeLiftMs(complete, total) else 0L
+    // When a swipe rests at its endpoint, describe the movement through the first arrival there; hold is a separate gesture-tool
+    // argument. Including the release point at total AND holdEndMs would make an agent hold twice.
+    val movement = if (hold >= MIN_REPORTED_HOLD_MS) complete.takeWhile { it.tMs <= total - hold } else complete
+    val path = formatTimedPath(evenlySampleTimedPath(movement.ifEmpty { complete }, MAX_TIMED_PATH_POINTS)) ?: return
+    append(" | timed path (ms from touch-down): ").append(path)
+    if (row.kind != RecordedInputKind.SWIPE) return
+    formatHold(hold)?.let { append(" | ").append(it) }
+}
+
+private const val MAX_TIMED_PATH_POINTS = 12
+
+/** Keep the first, the actual movement endpoint and evenly spaced intermediate samples, even for a dense recorded path. */
+internal fun evenlySampleTimedPath(points: List<TimedPercentPoint>, limit: Int): List<TimedPercentPoint> {
+    if (points.size <= limit || limit < 2) return points
+    return (0 until limit).map { index ->
+        points[Math.round(index.toDouble() * points.lastIndex / (limit - 1)).toInt()]
+    }
 }
 
 private fun recordedTargetText(target: RecordedUiTarget, width: Int?, height: Int?): String = buildString {

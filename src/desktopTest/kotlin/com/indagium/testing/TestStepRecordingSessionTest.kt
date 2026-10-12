@@ -495,24 +495,24 @@ class TestStepRecordingSessionTest {
     }
 
     @Test
-    fun aDragAboveTheLaneLimitIsClampedWithAPreciseWarning() {
+    fun aDragAboveTheOldSwipeLimitKeepsItsRecordedDuration() {
         val session = TestStepRecordingSession("fixture-device")
         swipe(session, downAt = 1_000, upAt = 4_400)
         val snapshot = session.snapshot.value
         val row = snapshot.steps.single()
-        assertEquals(2_000L, row.durationMs)
-        assertTrue(row.action.endsWith("over 2000 ms"))
-        assertEquals(listOf("Step 1: recorded drag took 3400 ms; replay uses 2000 ms."), snapshot.warnings)
+        assertEquals(3_400L, row.durationMs)
+        assertTrue(row.action.endsWith("over 3400 ms"))
+        assertTrue(snapshot.warnings.isEmpty())
         session.close()
     }
 
     @Test
-    fun aVeryShortSwipeClampsToTheLaneMinimumWithoutAWarning() {
+    fun aVeryShortSwipeKeepsItsRecordedDurationWithoutAWarning() {
         val session = TestStepRecordingSession("fixture-device")
         swipe(session, downAt = 1_000, upAt = 1_020)
         val snapshot = session.snapshot.value
-        assertEquals(50L, snapshot.steps.single().durationMs)
-        assertTrue(snapshot.steps.single().action.endsWith("over 50 ms"))
+        assertEquals(20L, snapshot.steps.single().durationMs)
+        assertTrue(snapshot.steps.single().action.endsWith("over 20 ms"))
         assertTrue(snapshot.warnings.isEmpty())
         session.close()
     }

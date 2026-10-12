@@ -217,7 +217,10 @@ class TestRunEngineAccountAgentTest {
         val globalOnly = "list_tabs"
         assertTrue(prompt.contains("Current step 1 of 1"), prompt)
         assertTrue(prompt.contains("QA tester"), "the lane system prompt is part of the request:\n$prompt")
-        assertTrue(prompt.contains("get_current_step, report_observation and finish_step are free"), "promptPreamble applied:\n$prompt")
+        assertTrue(
+            prompt.contains("get_current_step, report_observation, finish_step, list_step_examples and get_step_example are free"),
+            "promptPreamble applied:\n$prompt",
+        )
         assertTrue(prompt.contains("strict 7-call budget"), prompt)
         assertFalse(prompt.contains("Notes and annotation reads/writes are unlimited"), "the sidebar's budget wording is not used for a lane")
         assertTrue(command[command.indexOf("--max-turns") + 1].toInt() > 7, "protocol tools are free but still turns: $command")
@@ -270,7 +273,7 @@ class TestRunEngineAccountAgentTest {
         assertEquals(CaseStatus.PASS, run.caseResult("Via Codex").status)
         assertEquals("Codex saw it", run.caseResult("Via Codex").steps.single().observation)
         val prompt = turnPrompts.single()
-        assertTrue(prompt.contains("finish_step are free"), prompt)
+        assertTrue(prompt.contains("finish_step, list_step_examples and get_step_example are free"), prompt)
         assertTrue(prompt.contains("Current step 1 of 1"), prompt)
         assertTrue(toolLists.single().contains("\"finish_step\"") && !toolLists.single().contains("\"list_tabs\""), toolLists.single())
         assertTrue(commands.single().contains("mcp_servers.indagium.required=true"))

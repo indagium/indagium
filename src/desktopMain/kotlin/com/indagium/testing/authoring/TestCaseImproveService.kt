@@ -218,8 +218,9 @@ internal class TestCaseImproveService(
             planned.copy(runScreenshots = 0, goldenScreenshots = 0, leftOut = planned.screenshots + planned.leftOut)
         } else {
             planned.copy(
-                runScreenshots = images.images.count { image -> image.refs.none { it.role == ImageRole.REFERENCE } },
-                goldenScreenshots = images.images.count { image -> image.refs.any { it.role == ImageRole.REFERENCE } },
+                runScreenshots = images.images.count { image -> image.refs.any { it.role == ImageRole.START || it.role == ImageRole.END } },
+                goldenScreenshots = images.images.count { image -> image.refs.any { it.role == ImageRole.REFERENCE ||
+                    it.role == ImageRole.RECORDED_BEFORE || it.role == ImageRole.RECORDED_AFTER } },
                 leftOut = images.notAttached.size + images.unavailable.size,
             )
         }

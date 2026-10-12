@@ -61,6 +61,7 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.SUITE_SETUP_CASE_ID
 import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
@@ -766,6 +767,7 @@ private fun StepMatrixRow(row: MatrixRow.Step, consensus: ConsensusCell, multiLa
                     (if (row.setup) "setup · " else "") + "${row.number}. ${row.action}",
                     color = tc.ts, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
                 )
+                if (row.cells.any { it.result?.kind == StepKind.REPLAY }) TestsBadge(REPLAY_BADGE)
                 if (row.cells.any { it.result?.agentJudgeDisagrees() == true }) {
                     HintWhen(true, "The agent and the judge disagree about this step.") {
                         AppText("≠", color = tc.warn, fontSize = 12.sp, fontWeight = FontWeight.Bold)

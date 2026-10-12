@@ -19,6 +19,8 @@ internal const val JUDGE_SYSTEM_PROMPT =
         "and expected result, the screen the step started from (when there is one), its final screenshot and any timestamped playback samples, the log " +
         "rows written while it ran, the results of the automatic checks and the reference examples. You were not told what the " +
         "tester claimed and you must not guess it.\n" +
+        "- Attached screenshot roles matter: recorded-before is the baseline, recorded-after is historical context, and only an " +
+        "expected screenshot is an image oracle. Do not treat the recorded baseline or a historical outcome as the required result.\n" +
         "- The first message already carries the evidence: the step brief, an excerpt of the log, the reference examples and the " +
         "screenshots (the screen at the start, the final screen, then timestamped playback samples), attached as images. Read it and answer; do " +
         "not fetch what you were given. If the message says an image is not attached, get it with the tool it names " +

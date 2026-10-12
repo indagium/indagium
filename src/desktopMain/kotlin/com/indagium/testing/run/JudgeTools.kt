@@ -151,7 +151,7 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
 
     private fun exampleTool() = JudgeTool(IndagiumToolDescriptor(
         "get_example",
-        "Read a reference example of the step: a golden screenshot (an image of how the screen should look) or reference log lines.",
+        "Read a reference example of the step: a screenshot with an explicit role (expected, recorded before or recorded after), or reference log lines.",
         schema("exampleId" to "string", required = listOf("exampleId"), descriptions = mapOf("exampleId" to "An exampleId from the brief.")),
     )) { args ->
         val id = args.requiredString("exampleId")
@@ -165,7 +165,8 @@ internal class JudgeTools(private val evidence: JudgeEvidence, private val loadE
     private suspend fun goldenResult(example: StepExample.GoldenScreenshot): Map<String, Any?> {
         val image = loadExample(example) ?: return mapOf("error" to "The image of example '${example.id}' is not available.")
         return mapOf(
-            "message" to "Reference screenshot: ${example.caption.ifBlank { example.id }}",
+            "message" to "${screenshotRoleLabel(example.role)}: ${example.caption.ifBlank { example.id }}",
+            "role" to example.role.name.lowercase(),
             "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
             "mimeType" to image.mimeType,
         )

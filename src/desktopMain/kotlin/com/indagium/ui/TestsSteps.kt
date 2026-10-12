@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.testing.device.replayEligibilityProblem
 import com.indagium.testing.model.DEFAULT_LOG_ABSENT_FOR_MS
 import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
 import com.indagium.testing.model.DEFAULT_MANUAL_STEP_TIMEOUT_MS
@@ -260,6 +261,8 @@ private fun StepRow(step: TestStep, row: ReorderRowScope, ops: StepListOps, sele
             modifier = Modifier.weight(1f),
         )
         TestsBadge(stepKindLabel(step.kind))
+        val screenCount = step.examples.count { it is StepExample.GoldenScreenshot }
+        if (screenCount > 0) TestsBadge(if (screenCount == 1) "Screen" else "Screens $screenCount")
         stepChecksSummary(step)?.let { summary -> StepChecksSummary(step, summary) }
         Box(Modifier.size(STEP_MENU_SLOT).alpha(if (hovered || selected) 1f else 0f)) {
             TestsOverflowMenu(stepMenuItems(ui, ops, step), contentDescription = "Step ${row.index + 1} actions")
@@ -330,16 +333,24 @@ private fun StepScreenshotStrip(step: TestStep, ops: StepListOps) {
         verticalArrangement = Arrangement.spacedBy(6.dp),
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
+        AppText("Screens", color = tc().td, fontSize = 10.sp)
         shots.take(STRIP_MAX_THUMBS).forEachIndexed { index, shot ->
-            GoldenThumbnail(
-                ui.state.testGoldenImageFile(suiteId, shot.assetPath),
-                size = STRIP_THUMB_SIZE,
-                modifier = Modifier.clip(CORNER_SM).clickable {
-                    ui.view.setExamplesExpanded(step.id, true)
-                    ui.view.examplesRevealStepId = step.id
-                    ui.reclaimFocus()
-                }.semantics { contentDescription = "Screenshot ${index + 1} of ${shots.size}. Show in Examples" },
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                GoldenThumbnail(
+                    ui.state.testGoldenImageFile(suiteId, shot.assetPath),
+                    size = STRIP_THUMB_SIZE,
+                    modifier = Modifier.clip(CORNER_SM).clickable {
+                        ui.view.setExamplesExpanded(step.id, true)
+                        ui.view.examplesRevealStepId = step.id
+                        ui.reclaimFocus()
+                    }.semantics { contentDescription = "Screenshot ${index + 1} of ${shots.size}. Show in Examples" },
+                )
+                AppText(when (shot.role) {
+                    com.indagium.testing.model.ScreenshotRole.EXPECTED -> "Expected"
+                    com.indagium.testing.model.ScreenshotRole.RECORDED_BEFORE -> "Before ref"
+                    com.indagium.testing.model.ScreenshotRole.RECORDED_AFTER -> "After ref"
+                }, color = tc().td, fontSize = 9.sp)
+            }
         }
         if (shots.size > STRIP_MAX_THUMBS) TestsHint("+${shots.size - STRIP_MAX_THUMBS} more")
     }
@@ -413,7 +424,7 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
         }
     }
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        StepKindSelector(step.kind, ops.editable) { kind -> changeStepKind(ui, step, kind, update) }
+        StepKindSelector(step.kind, ops.editable, replayAvailable = step.replayEligibilityProblem() == null) { kind -> changeStepKind(ui, step, kind, update) }
         TestsHint(stepKindHint(step.kind))
         TestsLabeled(if (step.kind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
             CommitTextField(
@@ -424,6 +435,7 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
                     StepKind.AGENT -> "What the agent should do"
                     StepKind.MANUAL -> "What the tester should do, such as plug the USB stick into the phone"
                     StepKind.SCRIPT -> "What the script does (shown in the report)"
+                    StepKind.REPLAY -> "What the recorded input does (shown in the report)"
                 },
             )
         }
@@ -464,6 +476,7 @@ private fun StepKindFields(step: TestStep, ops: StepListOps, update: ((TestStep)
     }
     when (step.kind) {
         StepKind.AGENT -> Unit
+        StepKind.REPLAY -> step.recordedInput?.let { TestsHint(recordedInputSummary(it)) }
         StepKind.SCRIPT -> TestsLabeled("Script to run") {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 ScriptCallEditor(step.script, ops.editable, optional = false, onChange = { call -> update { it.copy(script = call) } }, onNewScript = addScript)
@@ -724,7 +737,9 @@ private fun ScreenJudgeBody(check: StepCheck.ScreenJudge, step: TestStep, editab
     )
     WrapRow {
         AppText("Compare with", color = tc().td, fontSize = 10.sp)
-        val options: List<String?> = listOf<String?>(null) + step.examples.map { it.id }
+        val options: List<String?> = listOf<String?>(null) + step.examples
+            .filter { it !is StepExample.GoldenScreenshot || it.role == com.indagium.testing.model.ScreenshotRole.EXPECTED }
+            .map { it.id }
         TestsDropdown(
             selectedLabel = exampleRefLabel(step, check.exampleRef),
             options = options,
@@ -784,7 +799,11 @@ private fun exampleRefLabel(step: TestStep, ref: String?): String {
 
 private fun exampleLabel(example: StepExample, index: Int): String {
     val kind = when (example) {
-        is StepExample.GoldenScreenshot -> "Screenshot"
+        is StepExample.GoldenScreenshot -> when (example.role) {
+            com.indagium.testing.model.ScreenshotRole.EXPECTED -> "Expected screenshot"
+            com.indagium.testing.model.ScreenshotRole.RECORDED_BEFORE -> "Before reference"
+            com.indagium.testing.model.ScreenshotRole.RECORDED_AFTER -> "After reference"
+        }
         is StepExample.ReferenceLog -> "Log"
     }
     return "${index + 1}. " + example.caption.ifBlank { kind }
@@ -890,7 +909,11 @@ private fun GoldenScreenshotBody(example: StepExample.GoldenScreenshot, ops: Ste
     val tc = tc()
     val file = ops.assetSuiteId?.let { ui.state.testGoldenImageFile(it, example.assetPath) }
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-        TestsBadge("Golden screenshot")
+        TestsBadge(when (example.role) {
+            com.indagium.testing.model.ScreenshotRole.EXPECTED -> "Golden screenshot"
+            com.indagium.testing.model.ScreenshotRole.RECORDED_BEFORE -> "Recorded before"
+            com.indagium.testing.model.ScreenshotRole.RECORDED_AFTER -> "Recorded after"
+        })
         CommitTextField(
             example.caption, { c -> update { s -> s.mapExample<StepExample.GoldenScreenshot>(example.id) { it.copy(caption = c) } } },
             Modifier.weight(1f), ops.editable, "caption (optional)",

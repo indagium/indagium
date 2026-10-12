@@ -32,7 +32,12 @@ import com.indagium.testing.store.StoreResult
 // arguments, how a manual step is completed, and the device-state check. They take plain values and callbacks, so the step editor of a
 // case, of a shared step and the recording review all use them; each caller persists the change its own way.
 
-private val KIND_LABELS = mapOf(StepKind.AGENT to "AI step", StepKind.MANUAL to "Manual", StepKind.SCRIPT to "Script")
+/** The badge a REPLAY step carries in the step list and in the run report. */
+internal const val REPLAY_BADGE = "Replay"
+private val KIND_LABELS = mapOf(StepKind.AGENT to "AI step", StepKind.MANUAL to "Manual", StepKind.SCRIPT to "Script", StepKind.REPLAY to REPLAY_BADGE)
+
+/** Shown under the selector while Replay cannot be chosen: only a step made from a recording has the input to replay. */
+internal const val REPLAY_UNAVAILABLE_HINT = "Replay needs recorded input: apply a recording to get it."
 private val COMPLETION_LABELS = mapOf(
     ManualCompletion.TESTER_ONLY to "The tester confirms",
     ManualCompletion.CHECKS_ONLY to "Its checks detect it",
@@ -61,20 +66,26 @@ internal fun WrapRow(content: @Composable () -> Unit) {
 
 internal fun stepKindLabel(kind: StepKind): String = KIND_LABELS.getValue(kind)
 
-/** The three kinds as a segmented control. */
+/**
+ * The kinds as a segmented control. Replay is enabled only when [replayAvailable] (the step has replayable recorded input); the hint
+ * below then says why it is not, so a disabled option is never a mystery.
+ */
 @Composable
-internal fun StepKindSelector(kind: StepKind, enabled: Boolean, onSelect: (StepKind) -> Unit) {
-    // Wraps in a narrow inspector (the three buttons and the label are about 270dp together).
-    WrapRow {
-        AppText("Performed by", color = tc().td, fontSize = 10.sp)
-        StepKind.entries.forEach { option ->
-            AppButton(
-                KIND_LABELS.getValue(option),
-                onClick = { if (option != kind) onSelect(option) },
-                enabled = enabled,
-                variant = if (option == kind) ButtonVariant.Primary else ButtonVariant.Secondary,
-            )
+internal fun StepKindSelector(kind: StepKind, enabled: Boolean, replayAvailable: Boolean = true, onSelect: (StepKind) -> Unit) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        // Wraps in a narrow inspector (the four buttons and the label are about 340dp together).
+        WrapRow {
+            AppText("Performed by", color = tc().td, fontSize = 10.sp)
+            StepKind.entries.forEach { option ->
+                AppButton(
+                    KIND_LABELS.getValue(option),
+                    onClick = { if (option != kind) onSelect(option) },
+                    enabled = enabled && (option != StepKind.REPLAY || replayAvailable || kind == StepKind.REPLAY),
+                    variant = if (option == kind) ButtonVariant.Primary else ButtonVariant.Secondary,
+                )
+            }
         }
+        if (!replayAvailable && kind != StepKind.REPLAY) TestsHint(REPLAY_UNAVAILABLE_HINT)
     }
 }
 
@@ -83,6 +94,7 @@ internal fun stepKindHint(kind: StepKind): String = when (kind) {
     StepKind.AGENT -> "An AI agent (or the client driving an external lane) does the action on the device."
     StepKind.MANUAL -> "A tester does it by hand: the lane waits, showing the action as instructions. An automation script can do it instead."
     StepKind.SCRIPT -> "The run itself runs a library script on this step. No AI agent is involved."
+    StepKind.REPLAY -> "Replays recorded positions, path and timing where the device supports them. The judge still checks the expected result."
 }
 
 /** How a manual step is completed, with a sentence about what each choice does. */
@@ -282,7 +294,7 @@ internal fun RecordedRowKindEditor(session: TestStepRecordingSession, row: Recor
     val addScript: () -> Unit = {
         createScriptForStep(ui, row.id)?.let { script -> edit { it.copy(script = ScriptCall(script.id, defaultArgsFor(script))) } }
     }
-    StepKindSelector(row.stepKind, enabled) { kind ->
+    StepKindSelector(row.stepKind, enabled, replayAvailable = false) { kind ->
         val starting = if (kind == StepKind.SCRIPT && row.script == null) {
             ui.library.scripts.firstOrNull { it.permission != ScriptPermission.SETUP_TEARDOWN_ONLY }?.let { ScriptCall(it.id, defaultArgsFor(it)) }
         } else {
@@ -292,7 +304,7 @@ internal fun RecordedRowKindEditor(session: TestStepRecordingSession, row: Recor
     }
     TestsHint(stepKindHint(row.stepKind))
     when (row.stepKind) {
-        StepKind.AGENT -> Unit
+        StepKind.AGENT, StepKind.REPLAY -> Unit
         StepKind.SCRIPT -> TestsLabeled("Script to run") {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 ScriptCallEditor(row.script, enabled, optional = false, onChange = { call -> edit { it.copy(script = call) } }, onNewScript = addScript)

@@ -282,17 +282,20 @@ entries are active.
   when true, `condition` must explain when to perform it. Recording Apply requires expected text on required
   steps; a conditioned optional step may leave it blank. Existing general API behavior for blank expected text
   remains unchanged. `maxToolCalls` (1..100, default 15) is the step's
-  lane-tool call budget; `onFailure` is `STOP_CASE` (default), `CONTINUE`,
+  lane-tool call budget; protocol and saved-example reads (`list_step_examples`, `get_step_example`) do not spend it or the case allowance.
+  Example reads still obey tool permissions and the step deadline. `onFailure` is `STOP_CASE` (default), `CONTINUE`,
   `CREATE_ISSUE_AND_CONTINUE` or `PAUSE_FOR_USER`. Refused when the case or its suite is locked.
   Three more fields say **who performs the step**: `kind` (`AGENT` — default, an AI agent or the external client; `MANUAL` —
   a tester does it by hand while the lane waits, `action` holds the instructions and the default `timeoutMs` is 10 minutes;
-  `SCRIPT` — the run itself runs a library script, no AI agent is involved), `script` (`{ scriptId, args?, exitCode?,
+  `SCRIPT` — the run itself runs a library script, no AI agent is involved; `REPLAY` — the run injects supported input
+  retained from a recording, then checks and judges the result), `script` (`{ scriptId, args?, exitCode?,
   stdoutContains? }`, required for `SCRIPT`, the optional automation alternative of a `MANUAL` step; `exitCode` defaults to 0
   and `null` accepts any; `null` for the whole field clears it; the script must exist, accept `args`, and not be limited to
   setup and teardown) and `manualCompletion` (`MANUAL` only: `TESTER_ONLY`, `CHECKS_ONLY` — needs a `logAppears` or
   `deviceState` check — or `TESTER_OR_CHECKS`, the default). A manual step is not retried and cannot be `optional`.
-  A suite that holds a manual or script step or a `deviceState` check is written as suite-file version 3, which builds that
-  predate step kinds open read-only; a suite of AI steps only stays at version 2.
+  A suite that holds a manual or script step or a `deviceState` check is written as suite-file version 3. Recorded gesture
+  hints require version 4; replay steps and contextual screenshot roles require version 5. Older builds open newer
+  envelopes read-only; older libraries and reports still load.
 - `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition; an explicit
   `precondition:null` clears that value, while an omitted field is preserved; changing
   `kind` also moves a default timeout (60 s for an AI step, 10 minutes for a manual one);
@@ -303,7 +306,7 @@ entries are active.
 
 Check entries have a `type`: `logAppears` (`regex`, optional `tag`, `withinMs`), `logAbsent` (`regex`,
 optional `tag`, `forMs`), `screenJudge` (`text`, optional `exampleRef` = the id of one of the step's
-examples), `scriptResult` (`scriptId`, optional `args` object, `exitCode` — default 0, `null` for any —
+expected screenshot or reference-log examples; recorded before/after images are contextual), `scriptResult` (`scriptId`, optional `args` object, `exitCode` — default 0, `null` for any —
 and `stdoutContains`), `askJudge` (`text`) and `deviceState` (`key`, `expectedRegex`, optional `withinMs` — the
 property is read repeatedly until its text matches the expression or `withinMs` is up; keys: `usb.devices`, one
 `vvvv:pppp name` line per attached host-mode USB device; `bt.enabled`, `wifi.enabled`, `airplane`, `mobile_data` as
@@ -311,7 +314,8 @@ property is read repeatedly until its text matches the expression or `withinMs` 
 `dock`, `none`); `battery.status` (`charging`, `discharging`, `not_charging`, `full`, `unknown`); `audio.devices` (wired/USB
 audio in use, best effort); `screen.awake` (`true`/`false`); `rotation` (0-3); an unknown key fails the check with a message
 that lists them). Example entries have a `type`: `goldenScreenshot`
-(`assetPath` relative to the suite's asset folder; the image itself is not uploaded over MCP) or
+(`assetPath` relative to the suite's asset folder; optional `role`: `EXPECTED` by default, `RECORDED_BEFORE` or
+`RECORDED_AFTER`; the image itself is not uploaded over MCP) or
 `referenceLog` (`text`), with an optional `caption`. Both accept an optional `id`.
 
 When a lane enters a step, its prompt, `get_current_step`, and next/redo replies identify whether that step has
@@ -416,6 +420,11 @@ or recording is a separate confirmation-required call.
   `discard_test_recording`, and `apply_test_recording` stop/drain, discard without library mutation, or apply the reviewed
   preview at an optional index to its original case. An empty review cannot be applied or rewritten. Rewrites use only
   retained inputs even if the full video timeline shows removed actions.
+  `apply_test_recording.asReplay=true` converts eligible recorded rows to replay steps and reports which rows remain AI
+  steps. Eligible before/after screenshots become contextual reference examples independently of full recording retention;
+  `useScreenshotAsExpected` remains the explicit opt-in for an expected screenshot. Recorded paths preserve sample times
+  and the hold before release. Replay requires a matching screen shape and perform-action intent without a condition or
+  precondition; text, rotation and password-withheld input cannot be replayed.
   `reopen_test_recording` (caseId, optional recordingId) reopens the evidence saved with a case (Settings > Testing > "Keep recording
   evidence with recorded cases") as a stopped recording and returns its `sessionId`: the stored rows, screen readings, screenshots and
   video (a recording in which a password was typed has no video and no screens from that time) are restored without a device, so
@@ -614,11 +623,13 @@ deterministic failures and retains ordered evidence paths; capture timestamps ar
   optional `evidencePaths`, `overwrite`) — writes a local report or selected-artifact ZIP with progress and
   cancellation. Evidence paths must remain inside the run; unsafe, missing and oversized files are refused.
 - `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
-  runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `wait_for_ui`, `perform_input_sequence`, `tap`, `swipe`, `press_key`,
+  runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `wait_for_ui`, `perform_input_sequence`, `tap`, `swipe`, `gesture`, `press_key`,
   `open_system_panel`, `rotate_device`, `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
   `finish_step`, or a script tool) against the lane's current step, behind the same per-step tool-call cap an
   agent has. Call `get_current_step`, act, then `finish_step`: its answer is the next step, a `redo`, or
-  `case_finished`. `wait_for_ui` takes `selectorType` (`text`, `content_description` or `resource_id`), `selector`, optional
+  `case_finished`. `gesture` takes ordered `{x,y,tMs}` points in latest-screenshot pixels, starting at 0 ms, and optional
+  `holdEndMs`. It preserves the path and end hold within Android shell timing limits; older devices report a plain-swipe
+  approximation. `wait_for_ui` takes `selectorType` (`text`, `content_description` or `resource_id`), `selector`, optional
   `matchMode` (`exact`, default, or `contains`) and `timeoutMs` (default 10 seconds, max 30); each hierarchy read is at most
   2 seconds. It returns `found`, `absent` or `unavailable`, distinguishing a missing selector from a failed read. A found node
   includes bounds and a tap point in latest-screenshot pixels when available. `perform_input_sequence` takes an `actions` array

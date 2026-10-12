@@ -6,12 +6,18 @@ import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.testing.authoring.LOCKED_STEP_LABEL
 import com.indagium.testing.authoring.LockedRewriteStep
 import com.indagium.testing.authoring.REWRITE_SYSTEM_PROMPT
+import com.indagium.testing.authoring.RecordedInputKind
+import com.indagium.testing.authoring.RecordedPoint
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.RecordingRewrite
 import com.indagium.testing.authoring.RecordingRewriteService
 import com.indagium.testing.authoring.RecordingRewriteTools
+import com.indagium.testing.authoring.RecordingScreenState
+import com.indagium.testing.authoring.RecordingScreenshotEvidence
+import com.indagium.testing.authoring.RecordingScreenshotSource
 import com.indagium.testing.authoring.RewriteExpectations
 import com.indagium.testing.authoring.RewriteGeneration
+import com.indagium.testing.authoring.RewriteInput
 import com.indagium.testing.authoring.RewriteScope
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.buildRewriteEvidence
@@ -362,6 +368,102 @@ class RecordingRewriteLockedStepsTest {
         assertFalse(RecordedTestStep(action = "Mine", expected = "x", authorAdded = true).isAcceptedRewriteStep())
         assertFalse(RecordedTestStep(action = "Raw").isAcceptedRewriteStep())
         assertFalse(RecordedTestStep(action = "A", sourceInputIds = listOf("x"), reviewReason = "Check").isAcceptedRewriteStep())
+    }
+
+    @Test
+    fun aCoordinateOnlyModelSupportedRowStaysOpenUntilAPersonReviewsIt() {
+        val modelSupported = RecordedTestStep(
+            action = "Tap at (56%, 94%)",
+            expected = "YouTube opens to its Home feed",
+            sourceInputIds = listOf("input-1"),
+            modelSupported = true,
+        )
+        val humanReviewed = modelSupported.copy(humanReviewed = true)
+
+        assertFalse(modelSupported.isAcceptedRewriteStep())
+        assertTrue(humanReviewed.isAcceptedRewriteStep())
+    }
+
+    @Test
+    fun coordinateReviewGuardLeavesFixedAndHumanReviewedLockedTextUntouched() {
+        val action = "Tap at (56%, 94%)"
+        val expected = "The home screen is visible"
+        val fixed = RecordedTestStep(action = action, expected = expected, authorAdded = true)
+        val fixedProposal = parseRewriteResponse(
+            """{"steps":[{"action":"$action","expected":"$expected","sourceInputs":[1]}]}""",
+            RewriteExpectations(inputCount = 1, fixedInputs = mapOf(1 to fixed)),
+        ).steps.single()
+        assertEquals(action, fixedProposal.action)
+        assertEquals(expected, fixedProposal.expected)
+        assertNull(fixedProposal.reviewReason)
+
+        val locked = RecordedTestStep(action = action, expected = expected, humanReviewed = true, sourceInputIds = listOf("input-1"))
+        val lockedProposal = parseRewriteResponse(
+            """{"steps":[{"action":"$action","expected":"$expected","sourceInputs":[1]}]}""",
+            RewriteExpectations(inputCount = 1, lockedSteps = listOf(LockedRewriteStep(listOf(1), locked))),
+        ).steps.single()
+        assertEquals(action, lockedProposal.action)
+        assertEquals(expected, lockedProposal.expected)
+        assertNull(lockedProposal.reviewReason)
+    }
+
+    @Test
+    fun aPostInputScreenshotAloneDoesNotResolveAnUnknownGestureTarget() {
+        val row = RecordedTestStep(
+            action = "Tap at (56%, 94%)",
+            kind = RecordedInputKind.TAP,
+            gesturePath = listOf(RecordedPoint(56, 188, 100, 200)),
+            inputStartMs = 100,
+            inputAtMs = 120,
+            afterScreenshot = RecordingScreenshotEvidence(
+                byteArrayOf(1), RecordingScreenshotSource.SCREEN_PROBE, 125, 130, timingUncertain = false,
+            ),
+        )
+        val input = RewriteInput(1, row, before = null, after = null)
+        val proposal = parseRewriteResponse(
+            """{"steps":[{"action":"Open YouTube","expected":"YouTube Home feed is visible","sourceInputs":[1]}]}""",
+            inputCount = 1,
+        )
+
+        val rewritten = buildRewrittenRows(proposal, listOf(input)).single()
+
+        assertEquals("Repeat the recorded tap", rewritten.action)
+        assertEquals("", rewritten.expected)
+        assertNotNull(rewritten.reviewReason)
+        assertTrue(rewritten.sourceHint?.contains("Tap at (56%, 94%)") == true, rewritten.sourceHint.orEmpty())
+    }
+
+    @Test
+    fun aWithheldAppTransitionCannotSupportAnUnresolvedGesture() {
+        val row = RecordedTestStep(
+            action = "Tap at (56%, 94%)",
+            kind = RecordedInputKind.TAP,
+            gesturePath = listOf(RecordedPoint(56, 188, 100, 200)),
+            inputStartMs = 100,
+            inputAtMs = 120,
+        )
+        val input = RewriteInput(
+            1,
+            row,
+            before = RecordingScreenState(1, 50, 60, "com.android.launcher", "Launcher", emptyList(), 100, 200),
+            after = RecordingScreenState(2, 125, 140, "com.youtube", "HomeActivity", emptyList(), 100, 200),
+        )
+        val passwordInput = RewriteInput(
+            2,
+            RecordedTestStep(action = "Enter text: ••••", kind = RecordedInputKind.TEXT, inputStartMs = 300, inputAtMs = 310),
+            before = null,
+            after = null,
+        )
+        val proposal = parseRewriteResponse(
+            """{"steps":[{"action":"Open YouTube","expected":"YouTube Home feed is visible","sourceInputs":[1]}]}""",
+            inputCount = 1,
+        )
+
+        val rewritten = buildRewrittenRows(proposal, listOf(input, passwordInput)).single()
+
+        assertEquals("Repeat the recorded tap", rewritten.action)
+        assertEquals("", rewritten.expected)
+        assertNotNull(rewritten.reviewReason)
     }
 
     @Test

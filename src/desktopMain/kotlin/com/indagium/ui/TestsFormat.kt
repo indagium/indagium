@@ -1,6 +1,10 @@
 package com.indagium.ui
 
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.model.RecordedInput
+import com.indagium.testing.model.RecordedInputEvent
+import com.indagium.testing.model.RecordedTouchKind
+import com.indagium.testing.model.holdBeforeReleaseMs
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -103,3 +107,31 @@ internal fun formatUsage(usage: AiUsageStats?): String {
     }
     return listOfNotNull(tools, tokens, "partial count".takeIf { usage.partial }).joinToString(" · ")
 }
+
+private const val SUMMARY_MIN_HOLD_MS = 80L
+
+/**
+ * One sentence for what a REPLAY step injects: "Replays 3 recorded inputs: swipe 752 ms (rests 332 ms before it lifts), tap, back key.
+ * Gaps between inputs are kept."
+ */
+internal fun recordedInputSummary(input: RecordedInput): String {
+    val parts = input.events.take(SUMMARY_EVENT_LIMIT).map { event ->
+        when (event) {
+            is RecordedInputEvent.Touch -> when (event.kind) {
+                RecordedTouchKind.TAP -> "tap"
+                RecordedTouchKind.LONG_PRESS -> "long press ${event.durationMs} ms"
+                RecordedTouchKind.SWIPE -> {
+                    val hold = event.holdBeforeReleaseMs()
+                    "swipe ${event.durationMs} ms" + if (hold >= SUMMARY_MIN_HOLD_MS) " (rests $hold ms before it lifts)" else ""
+                }
+            }
+            is RecordedInputEvent.Key -> "${event.key.lowercase().replace('_', ' ')} key"
+            is RecordedInputEvent.Panel -> "${event.panel.replace('_', ' ')} panel"
+        }
+    }
+    val more = (input.events.size - parts.size).takeIf { it > 0 }?.let { ", and $it more" }.orEmpty()
+    val count = input.events.size
+    return "Replays $count recorded input${if (count == 1) "" else "s"}: ${parts.joinToString(", ")}$more. Gaps between inputs are kept."
+}
+
+private const val SUMMARY_EVENT_LIMIT = 6

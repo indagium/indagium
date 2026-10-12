@@ -5,6 +5,7 @@ import com.indagium.ai.isLoopbackHost
 import com.indagium.ai.validateAiProviderProfile
 import com.indagium.edition.EditionLimits
 import com.indagium.model.AiProviderProfile
+import com.indagium.testing.device.replayEligibilityProblem
 import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.decide
@@ -242,6 +243,7 @@ private fun driverStepsOf(suite: TestSuite, cases: List<TestCase>, library: Test
 
 /** A script a step needs must be in the library and startable from a step; a manual step's script only counts when the run uses it. */
 private fun driverStepProblems(steps: List<DriverStepRef>, library: TestLibrary, option: ManualStepsOption): List<String> = steps.mapNotNull { ref ->
+    if (ref.step.kind == StepKind.REPLAY) return@mapNotNull ref.step.replayEligibilityProblem()?.let { "${ref.where}: $it" }
     val call = ref.step.script
     val needsScript = ref.step.kind == StepKind.SCRIPT || (ref.step.kind == StepKind.MANUAL && option == ManualStepsOption.USE_SCRIPT_THEN_WAIT)
     val script = call?.let { library.script(it.scriptId) }

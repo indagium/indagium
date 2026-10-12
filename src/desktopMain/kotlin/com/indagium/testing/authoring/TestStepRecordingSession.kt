@@ -4,8 +4,6 @@ import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
-import com.indagium.debug.SWIPE_DURATION_MAX_MS
-import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.model.AiUsageStats
 import com.indagium.model.sumAiUsage
@@ -16,6 +14,8 @@ import com.indagium.testing.model.NormalizedGestureBounds
 import com.indagium.testing.model.NormalizedGesturePoint
 import com.indagium.testing.model.RecordedGestureHint
 import com.indagium.testing.model.RecordedGestureTarget
+import com.indagium.testing.model.RecordedInput
+import com.indagium.testing.model.ScreenshotRole
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
@@ -123,6 +123,8 @@ data class RecordedTestStep(
     val expectedScreenshotSource: String? = null,
     val expectedScreenshotTimestampMs: Long? = null,
     val expectedScreenshotAlignment: String? = null,
+    /** The name `press_key` knows for a recorded key (BACK, HOME, ...), so a REPLAY step can press it; null for anything else. Appended last. */
+    val keyName: String? = null,
 )
 
 /**
@@ -232,6 +234,8 @@ class TestStepRecordingSession internal constructor(
         val samples: MutableList<RecordedPoint> = mutableListOf(),
         var moveCount: Int = 0,
         var stride: Int = 1,
+        /** When the latest MOVE happened, in ms after [downAt]; the finger rested there from then until it lifted. */
+        var lastMoveAt: Long = 0L,
     )
 
     /** The last mirror or device input that can be a duplicate of the other source's, for [isDuplicateOfOtherSource]. */
@@ -957,8 +961,13 @@ class TestStepRecordingSession internal constructor(
 
     internal fun releaseApplyReservation() = synchronized(lock) { applicationReserved = false }
 
+    internal fun toTestSteps(rows: List<RecordedTestStep>, assetPathFor: (ByteArray) -> String? = { null }): List<TestStep> {
+        val replay = replayContext()
+        return rows.map { row -> toTestStep(row, replay, assetPathFor) }
+    }
+
     @Suppress("CyclomaticComplexMethod") // A saved step combines review choices, retained hints, and evidence provenance in one mapping.
-    internal fun toTestSteps(rows: List<RecordedTestStep>, assetPathFor: (ByteArray) -> String? = { null }): List<TestStep> = rows.map { row ->
+    private fun toTestStep(row: RecordedTestStep, replay: ReplayContext, assetPathFor: (ByteArray) -> String?): TestStep {
         val rewritten = row.sourceInputIds.isNotEmpty()
         val context = row.screenContext?.takeIf(String::isNotBlank)
         val selectedExpected = if (row.useScreenshotAsExpected) row.expectedScreenshotJpeg else null
@@ -978,6 +987,14 @@ class TestStepRecordingSession internal constructor(
             if (byAgent && !rewritten && row.stateChanges.isNotEmpty()) {
                 add(StepExample.ReferenceLog(newExampleId(), caption = STATE_CHANGES_CAPTION, text = row.stateChanges.joinToString("\n") { it.summary() }))
             }
+            // These are observations of the recorded run. They orient the agent and judge, but cannot become the step's oracle by accident.
+            val (recordedBefore, recordedAfter) = referenceScreensFor(row, replay)
+            recordedBefore?.jpeg?.let(assetPathFor)?.let { path ->
+                add(StepExample.GoldenScreenshot(newExampleId(), path, "Recorded screen before input (reference)", ScreenshotRole.RECORDED_BEFORE))
+            }
+            recordedAfter?.jpeg?.let(assetPathFor)?.let { path ->
+                add(StepExample.GoldenScreenshot(newExampleId(), path, "Recorded screen after input (reference)", ScreenshotRole.RECORDED_AFTER))
+            }
             if (assetPath != null && row.useScreenshotAsExpected) {
                 val caption = when {
                     rewritten -> "Reviewed expected screenshot; verified after evidence from ${screenshotSource ?: "screen probe"}"
@@ -988,10 +1005,10 @@ class TestStepRecordingSession internal constructor(
                     row.screenshotTimingUncertain -> "Reviewed expected screenshot; uncertain raw input preview from ${screenshotSource ?: "mirror"}"
                     else -> "Reviewed expected screenshot; raw input preview from ${screenshotSource ?: "adb"}"
                 }
-                add(StepExample.GoldenScreenshot(newExampleId(), caption = caption, assetPath = assetPath))
+                add(StepExample.GoldenScreenshot(newExampleId(), caption = caption, assetPath = assetPath, role = ScreenshotRole.EXPECTED))
             }
         }
-        TestStep(
+        return TestStep(
             id = "",
             action = row.action,
             expected = row.expected,
@@ -1002,6 +1019,7 @@ class TestStepRecordingSession internal constructor(
             intent = row.intent,
             precondition = row.precondition,
             gestureHints = gestureHintsFor(row),
+            recordedInput = recordedInputFor(row, replay),
             script = row.script,
             manualCompletion = row.manualCompletion,
         ).withKind(row.stepKind)
@@ -1024,8 +1042,9 @@ class TestStepRecordingSession internal constructor(
             MirrorTouchAction.MOVE -> touches[event.pointerId]?.let { start ->
                 start.lastX = event.x
                 start.lastY = event.y
+                start.lastMoveAt = (nowMs - start.downAt).coerceAtLeast(0L)
                 if (abs(event.x - start.x) + abs(event.y - start.y) > TOUCH_MOVE_THRESHOLD) start.moved = true
-                sampleMove(start, RecordedPoint(event.x, event.y, event.screenWidth, event.screenHeight))
+                sampleMove(start, RecordedPoint(event.x, event.y, event.screenWidth, event.screenHeight, start.lastMoveAt))
             }
             MirrorTouchAction.UP -> {
                 if (suppressingMultiTouch) {
@@ -1061,30 +1080,46 @@ class TestStepRecordingSession internal constructor(
 
     private fun finishGesture(start: TouchStart, event: MirrorControlCommand.Touch, frame: MirrorFrame?, nowMs: Long) {
         val context = "Device screen ${event.screenWidth}×${event.screenHeight}; coordinates normalized to screen size."
-        val duration = nowMs - start.downAt
-        val end = RecordedPoint(event.x, event.y, event.screenWidth, event.screenHeight)
+        val duration = (nowMs - start.downAt).coerceAtLeast(0L)
+        val end = RecordedPoint(event.x, event.y, event.screenWidth, event.screenHeight, duration)
+        // A press is one position at the moment the finger went down.
+        val pressed = end.copy(tMs = 0L)
         val endText = point(event.x, event.y, event.screenWidth, event.screenHeight)
         when {
             start.moved -> {
-                val replayMs = duration.coerceIn(SWIPE_DURATION_MIN_MS.toLong(), SWIPE_DURATION_MAX_MS.toLong())
-                if (duration > SWIPE_DURATION_MAX_MS) {
-                    warn("Step ${mutableSnapshot.value.steps.size + 1}: recorded drag took $duration ms; replay uses $SWIPE_DURATION_MAX_MS ms.")
+                val replayMs = duration
+                if (duration > com.indagium.testing.device.GESTURE_MAX_DURATION_MS) {
+                    warn("Step ${mutableSnapshot.value.steps.size + 1}: recorded drag took $duration ms, longer than the gesture tool's " +
+                        "${com.indagium.testing.device.GESTURE_MAX_DURATION_MS} ms limit; review or rerecord it before replay.")
                 }
                 val from = point(start.x, start.y, start.width, start.height)
-                val path = listOf(RecordedPoint(start.x, start.y, start.width, start.height)) + start.samples + end
+                val path = listOf(RecordedPoint(start.x, start.y, start.width, start.height, 0L)) + sampledPath(start, event) + end
                 add("Swipe from $from to $endText over $replayMs ms", context, frame, RecordedInputKind.SWIPE, nowMs, replayMs, path, start.downAt)
             }
             duration >= LONG_PRESS_MS ->
-                add("Long press at $endText", context, frame, RecordedInputKind.LONG_PRESS, nowMs, duration, listOf(end), start.downAt)
-            else -> add("Tap at $endText", context, frame, RecordedInputKind.TAP, nowMs, duration, listOf(end), start.downAt)
+                add("Long press at $endText", context, frame, RecordedInputKind.LONG_PRESS, nowMs, duration, listOf(pressed), start.downAt)
+            else -> add("Tap at $endText", context, frame, RecordedInputKind.TAP, nowMs, duration, listOf(pressed), start.downAt)
         }
+    }
+
+    /**
+     * The sampled MOVE points of a touch, with its LAST move always among them (replacing the final sample when the list is full): where
+     * the finger came to rest is what a replayed hold is made of, and the thinning by stride may have skipped it.
+     */
+    private fun sampledPath(start: TouchStart, event: MirrorControlCommand.Touch): List<RecordedPoint> {
+        val samples = start.samples.toMutableList()
+        if (start.moveCount > 0 && samples.lastOrNull()?.tMs != start.lastMoveAt) {
+            val lastMove = RecordedPoint(start.lastX, start.lastY, event.screenWidth, event.screenHeight, start.lastMoveAt)
+            if (samples.size >= MAX_GESTURE_SAMPLES) samples[samples.lastIndex] = lastMove else samples += lastMove
+        }
+        return samples
     }
 
     private fun key(keycode: Int, frame: MirrorFrame?, nowMs: Long) {
         val label = KEY_LABELS[keycode] ?: "Android key $keycode"
         if (label.startsWith("Android key")) warn("Key code $keycode has no friendly label; review this recorded action.")
         val kind = if (keycode == KEYCODE_BACK) RecordedInputKind.BACK else RecordedInputKind.KEY
-        add("Press $label", "Android key input was ${channel()}.", frame, kind, nowMs)
+        add("Press $label", "Android key input was ${channel()}.", frame, kind, nowMs, keyName = replayKeyNameFor(keycode))
     }
 
     private fun addSystem(action: String, kind: RecordedInputKind, frame: MirrorFrame?, nowMs: Long) {
@@ -1147,6 +1182,7 @@ class TestStepRecordingSession internal constructor(
         durationMs: Long? = null,
         path: List<RecordedPoint> = emptyList(),
         startMs: Long = nowMs,
+        keyName: String? = null,
     ) {
         val current = mutableSnapshot.value
         if (current.steps.size >= MAX_RECORDED_STEPS) {
@@ -1173,6 +1209,7 @@ class TestStepRecordingSession internal constructor(
             kind = kind,
             inputAtMs = nowMs,
             inputStartMs = startMs,
+            keyName = keyName,
         )
         publishRows(current.steps + recorded)
         // A row that arrives after stop (the device recorder's last typed text) gets no new probe or image; the screen was read before.
@@ -1669,6 +1706,49 @@ class TestStepRecordingSession internal constructor(
             .mapNotNull { gestureHintOf(it.row) }
             .take(MAX_GESTURE_HINTS)
             .toList()
+    }
+
+    /**
+     * The structured input a step made from [row] can be replayed from: its own recorded input, or every input a rewritten row stands
+     * for in recorded order. Null when any of them cannot be replayed (typed text, rotation, an unnamed key) or was withheld because it
+     * touched a password: a replay of part of a step would do something else than what was recorded.
+     */
+    private fun recordedInputFor(row: RecordedTestStep, context: ReplayContext): RecordedInput? {
+        if (row.stepKind != StepKind.AGENT || row.authorAdded) return null
+        return buildRecordedInput(context.inputs, row.sourceInputIds.ifEmpty { listOf(row.id) }.toSet(), context.sensitivity)
+    }
+
+    /** Every recorded input of the session with its sensitivity windows, read once for all the rows of one conversion. */
+    private class ReplayContext(val inputs: List<RewriteInput>, val sensitivity: RewriteSensitivity)
+
+    /** Only time-aligned, non-sensitive captures become references; a quick after probe is not proof of the settled result. */
+    private fun referenceScreensFor(row: RecordedTestStep, context: ReplayContext): Pair<RecordingScreenshotEvidence?, RecordingScreenshotEvidence?> {
+        val ids = row.sourceInputIds.ifEmpty { listOf(row.id) }.toSet()
+        val sources = context.inputs.filter { it.row.id in ids }
+        if (sources.isEmpty() || sources.any(context.sensitivity::inputWithheld)) return null to null
+        val first = sources.first()
+        val last = sources.last()
+        val before = first.screenshot("before")?.takeIf { shot ->
+            hasEligibleBeforeScreenshot(shot) && !context.sensitivity.screenshotWithheld(shot, first.row.inputStartMs)
+        }
+        val next = context.inputs.firstOrNull { it.number > last.number && !it.fixed && it.row.kind != null }
+        val settled = settledAfterOf(last, next, context.sensitivity)
+        val after = settled.shot?.takeIf { shot ->
+            settled.settled && hasEligibleAfterScreenshot(shot) && !context.sensitivity.screenshotWithheld(shot, last.row.inputAtMs)
+        }
+        return before to after
+    }
+
+    private fun replayContext(): ReplayContext {
+        val snapshot = mutableSnapshot.value
+        val inputs = rewriteInputsOf(snapshot.rawSteps ?: snapshot.steps, ::screenState)
+        return ReplayContext(inputs, RewriteSensitivity(inputs))
+    }
+
+    /** How many of the reviewed rows can be applied as replay steps; the review panel's "Apply as replay steps" says so. */
+    internal fun replayableRowCount(): Int = synchronized(lock) {
+        val context = replayContext()
+        mutableSnapshot.value.steps.count { recordedInputFor(it, context) != null }
     }
 
     private fun gestureHintOf(row: RecordedTestStep): RecordedGestureHint? {

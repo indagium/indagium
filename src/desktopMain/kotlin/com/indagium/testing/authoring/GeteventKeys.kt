@@ -45,6 +45,28 @@ internal const val KEYCODE_MEDIA_PAUSE = 127
 internal const val KEYCODE_VOLUME_MUTE = 164
 internal const val KEYCODE_APP_SWITCH = 187
 
+/** The name `press_key` (and so a REPLAY step) knows for an Android [keycode], or null for a key a lane cannot press. */
+internal fun replayKeyNameFor(keycode: Int): String? = when (keycode) {
+    KEYCODE_HOME -> "HOME"
+    KEYCODE_BACK -> "BACK"
+    KEYCODE_APP_SWITCH -> "RECENTS"
+    KEYCODE_ENTER -> "ENTER"
+    KEYCODE_DELETE -> "DEL"
+    KEYCODE_TAB -> "TAB"
+    KEYCODE_ESCAPE -> "ESCAPE"
+    KEYCODE_DPAD_UP -> "DPAD_UP"
+    KEYCODE_DPAD_DOWN -> "DPAD_DOWN"
+    KEYCODE_DPAD_LEFT -> "DPAD_LEFT"
+    KEYCODE_DPAD_RIGHT -> "DPAD_RIGHT"
+    KEYCODE_VOLUME_UP -> "VOLUME_UP"
+    KEYCODE_VOLUME_DOWN -> "VOLUME_DOWN"
+    KEYCODE_VOLUME_MUTE -> "VOLUME_MUTE"
+    KEYCODE_MENU -> "MENU"
+    KEYCODE_POWER -> "POWER"
+    KEYCODE_MEDIA_PLAY_PAUSE -> "MEDIA_PLAY_PAUSE"
+    else -> null
+}
+
 private val CONTROL_KEYS: Map<String, Int> = mapOf(
     "KEY_BACK" to KEYCODE_BACK,
     "KEY_HOME" to KEYCODE_HOME,

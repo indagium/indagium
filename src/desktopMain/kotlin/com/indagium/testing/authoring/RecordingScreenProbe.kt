@@ -31,8 +31,13 @@ enum class RecordedInputKind {
     EXTERNAL,
 }
 
-/** One sampled touch position in mirror coordinates, with the mirror screen size they refer to. */
-data class RecordedPoint(val x: Int, val y: Int, val screenWidth: Int, val screenHeight: Int)
+/**
+ * One sampled touch position in mirror coordinates, with the mirror screen size they refer to. [tMs] is the time after the touch went
+ * down (appended last); [UNKNOWN_POINT_TIME_MS] on a point recorded before times were kept.
+ */
+data class RecordedPoint(val x: Int, val y: Int, val screenWidth: Int, val screenHeight: Int, val tMs: Long = UNKNOWN_POINT_TIME_MS)
+
+const val UNKNOWN_POINT_TIME_MS = -1L
 
 /** Where a recorded screenshot came from. Mirror timestamps are presentation times, not wall-clock acquisition times. */
 enum class RecordingScreenshotSource { SCREEN_PROBE, ADB_INPUT, MIRROR_INPUT }

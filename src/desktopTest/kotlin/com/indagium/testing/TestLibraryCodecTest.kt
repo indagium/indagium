@@ -16,6 +16,7 @@ import com.indagium.testing.model.TestCase
 import com.indagium.testing.store.TEST_LIBRARY_BASE_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_BASE_FILE_VERSION
 import com.indagium.testing.store.TEST_SUITE_FILE_VERSION
+import com.indagium.testing.store.TEST_SUITE_GESTURE_HINT_FILE_VERSION
 import com.indagium.testing.store.decodeLibraryFile
 import com.indagium.testing.store.decodeSuiteFile
 import com.indagium.testing.store.encodeLibraryFile
@@ -339,7 +340,7 @@ class TestLibraryCodecTest {
         )
         val text = encodeSuiteFile(suite)
 
-        assertEquals(TEST_SUITE_FILE_VERSION, (rootOf(text)["version"] as JsonPrimitive).content.toInt())
+        assertEquals(TEST_SUITE_GESTURE_HINT_FILE_VERSION, (rootOf(text)["version"] as JsonPrimitive).content.toInt())
         assertEquals(hint, decodeSuiteFile(text).getOrThrow().suite.cases.first().steps.first().gestureHints.single())
     }
 

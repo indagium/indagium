@@ -16,11 +16,22 @@ import com.indagium.testing.run.fenceUntrusted
 internal const val REWRITE_SYSTEM_PROMPT =
     "You turn a recording of a person's actions on an Android device into readable QA test steps. You only read the recording: " +
         "you cannot touch a device, run anything or change any library, and you must not claim to have done so.\n" +
-        "- Write what a tester would do and see, in plain words that name the visible element or text, never coordinates, except " +
-        "when a review-required step must preserve its original gesture description.\n" +
+        "- Write what a tester would do and see in plain words. Coordinates and timed paths are recorded-input hints, never the " +
+        "primary action. If evidence supports a broad action and result but not the exact touched control, state that broad action " +
+        "and observed result without guessing a button or icon; the precise path stays in the recorded-input reference. If no " +
+        "meaningful action is supported, use a generic gesture description, leave expected blank and explain the review needed.\n" +
         "- Identify a tap or long-press target from evidence captured before that input. A trustworthy video transition may support " +
         "a broad observed action/result such as opening an app when the launcher changes to that app, but never name a particular " +
         "button or control from the destination alone. Describe results from observed evidence, not incidental playback times.\n" +
+        "- Distinguish the exact touched subcontrol from its clickable parent and nearby label. For a Wi-Fi quick-settings tile, a " +
+        "tap on the small toggle icon may switch Wi-Fi while a tap on the tile body or Wi-Fi label may open details. Use the before " +
+        "screen, touch position and target bounds to name the part actually touched when evidence supports it. If the specific " +
+        "subcontrol is unclear but the broad action/result is visible, describe only that broad action/result; do not guess the " +
+        "subcontrol. Keep coordinates in the recorded-input reference, not the action. Do not infer a toggle merely from the word Wi-Fi on screen.\n" +
+        "- For navigation gestures, use the complete timed path and time resting at its endpoint. A quick upward swipe from the bottom " +
+        "may go Home; an upward swipe that pauses before lift may open Recents. Describe the observed outcome supported by settled " +
+        "after evidence. If that outcome is not visible, use a generic swipe description, leave expected blank and explain the " +
+        "review needed; coordinates remain only in the recorded-input reference.\n" +
         "- Generalize actions to the person's stated test goal. Keep an exact video, song, or item title only when the case goal, " +
         "preconditions, or the person's note explicitly makes that exact item relevant; a title merely visible during navigation is " +
         "not a reason to turn a generic 'play a video' goal into a title-specific test.\n" +
@@ -232,10 +243,12 @@ private val OUTPUT_CONTRACT = """
       number, and copy its action, expected, intent, precondition, optional and condition EXACTLY as shown (the same characters). Give it no checks, no
       reviewReason and a null expectedScreenshot. Never merge it with other inputs, reword it or move it; recorded inputs before and
       after it are rewritten around it. It counts toward the step limit.
-    - action is what the tester does ("Open YouTube", "Tap Search"). expected is what must be visible afterwards, supported by
+    - action is what the tester does ("Open YouTube", "Tap Search"). Coordinates and timed paths belong only in the recorded-input
+      reference, never as the main action. If evidence supports a broad action/result but not an exact control, use that broad action
+      and observed result without guessing the control. expected is what must be visible afterwards, supported by
       eligible post-input evidence or an inspected, timestamped video transition. A transition from launcher to YouTube can support
-      the broad action "Open YouTube"; it cannot identify a specific control. If a tap/long-press remains unresolved, keep its
-      recorded gesture description, set expected to "", and explain what needs checking in reviewReason.
+      the broad action "Open YouTube"; it cannot identify a specific control. If no meaningful action/result is supported, use a
+      generic gesture description such as "Repeat the recorded tap", set expected to "", and explain what needs checking in reviewReason.
       A loading, splash or transition screen right after an action is not its result: use the settled frame, the next input's
       before screen or a later screen. Seeing an app after tapping its icon supports "Open <app>". Use reviewReason only when the
       evidence, video included, cannot tell what happened.
@@ -256,7 +269,7 @@ private val OUTPUT_CONTRACT = """
       input, or null. It is only offered to the reviewer, never applied by you. Never use an uncertain raw input preview here.
     - Omit reviewReason or set it to null for a supported step. Include a non-blank reviewReason only when a person must resolve
       uncertainty; a blank expected value requires either a conditional optional step or that substantive reason. Example uncertain step:
-      {"action":"Tap at (54%, 31%)","expected":"","sourceInputs":[1],"reviewReason":"Identify the tap target and confirm the result."}
+      {"action":"Repeat the recorded tap","expected":"","sourceInputs":[1],"reviewReason":"Identify the tap target and confirm the result."}
     - checks is optional and rarely needed. Allowed: {"type":"askJudge","text":"..."}, {"type":"screenJudge","text":"..."},
       {"type":"logAppears","regex":"..."}, {"type":"logAbsent","regex":"..."}, {"type":"deviceState",...} (below). Do not create script checks,
       golden image or example references.

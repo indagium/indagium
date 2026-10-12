@@ -171,6 +171,7 @@ private fun reproductionLine(step: TestStep): String = when (step.kind) {
     StepKind.AGENT -> oneLine(step.action)
     StepKind.MANUAL -> "(by hand) ${oneLine(step.action)}"
     StepKind.SCRIPT -> "(script) ${oneLine(step.action)}"
+    StepKind.REPLAY -> "(replay) ${oneLine(step.action)}"
 }
 
 private fun describeCheck(check: StepCheck): String = when (check) {
@@ -267,6 +268,7 @@ private fun fileAttachment(kind: IssueAttachmentKind, label: String, fileName: S
 
 private fun goldenOf(step: TestStep): StepExample.GoldenScreenshot? {
     val goldens = step.examples.filterIsInstance<StepExample.GoldenScreenshot>()
+        .filter { it.role == com.indagium.testing.model.ScreenshotRole.EXPECTED }
     val named = step.checks.filterIsInstance<StepCheck.ScreenJudge>().firstNotNullOfOrNull { check -> goldens.firstOrNull { it.id == check.exampleRef } }
     return named ?: goldens.firstOrNull()
 }
