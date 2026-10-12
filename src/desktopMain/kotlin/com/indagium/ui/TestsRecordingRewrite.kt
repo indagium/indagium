@@ -24,6 +24,7 @@ import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.RewriteScope
+import com.indagium.testing.authoring.RewriteStage
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.TestStepRecordingSnapshot
 import com.indagium.testing.authoring.contextHint
@@ -78,6 +79,7 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
     var note by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var rewriting by remember { mutableStateOf(false) }
+    var stage by remember { mutableStateOf<RewriteStage?>(null) }
     var job by remember { mutableStateOf<Job?>(null) }
     val catalog = remember { ModelCatalog() }
     val busy = rewriting || locked || ui.state.isTestStepRecordingRewriting(session.id)
@@ -136,6 +138,10 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             enabled = !busy,
         )
     }
+    if (rewriting) {
+        Spacer(Modifier.height(6.dp))
+        AiWorkProgress("Rewriting", profile?.displayName, selection.modelId ?: profile?.model, stage?.label)
+    }
     error?.let { TestsErrorText(it) }
     snapshot.rewriteUsage?.let { usage ->
         TestsHint("Latest rewrite attempt · ${usage.summaryLabel()}")
@@ -176,15 +182,18 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             val chosen = profile
             if (chosen != null) {
                 rewriting = true
+                stage = null
                 error = null
                 job = ui.scope.launch {
                     try {
                         val result = ui.state.rewriteTestStepRecording(
                             session.id, chosen.id, selection.modelId, selection.reasoningEffort, note, scope,
+                            onStage = { stage = it },
                         )
                         if (result !is StoreResult.Ok) error = result.userMessage()
                     } finally {
                         rewriting = false
+                        stage = null
                     }
                 }
             }

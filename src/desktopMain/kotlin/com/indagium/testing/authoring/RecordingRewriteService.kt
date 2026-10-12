@@ -31,6 +31,23 @@ internal class RewriteAttachment(
     val visualMoments: Map<Int, Set<String>> = emptyMap(),
 )
 
+/** Where a running rewrite is, for a progress display: the evidence is put together, the model works, the answer is applied. */
+internal sealed interface RewriteStage {
+    val label: String
+
+    data object Preparing : RewriteStage {
+        override val label = "Preparing evidence…"
+    }
+
+    data object WaitingForModel : RewriteStage {
+        override val label = "Waiting for the model…"
+    }
+
+    data class Applying(val steps: Int) : RewriteStage {
+        override val label = "Applying $steps step${if (steps == 1) "" else "s"}…"
+    }
+}
+
 /** Everything one agent run for a rewrite needs; [model] / [effort] replace the profile's own when given. */
 internal data class RewriteGeneration(
     val profileId: String,
@@ -86,6 +103,7 @@ internal class RecordingRewriteService(
         effort: String?,
         note: String,
         scope: RewriteScope? = null,
+        onStage: (RewriteStage) -> Unit = {},
     ): StoreResult<RecordingRewrite> {
         if (note.length > MAX_REWRITE_NOTE_CHARS) return StoreResult.Invalid("The note is limited to $MAX_REWRITE_NOTE_CHARS characters.")
         session.rewriteBlockedReason()?.let { return StoreResult.Invalid(it) }
@@ -132,10 +150,14 @@ internal class RecordingRewriteService(
         if (!session.beginRewriteUsageAttempt()) return StoreResult.Invalid("The recording changed while the rewrite was starting.")
         var completed = false
         return try {
+            onStage(RewriteStage.Preparing)
             val response = withTimeout(timeoutMs) {
-                generate(withEvidence(plain, context))
+                val request = withEvidence(plain, context)
+                onStage(RewriteStage.WaitingForModel)
+                generate(request)
             }
             val proposal = parseRewriteResponse(response, rewriteExpectations(inputs, library().scripts))
+            onStage(RewriteStage.Applying(proposal.steps.size))
             val visualCoverage = mergeVideoMoments(deliveredVisualMoments, rewriteTools.visualInspectedMoments())
             AppLogger.info(
                 REWRITE_TIMING_LOG_COMPONENT,

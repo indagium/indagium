@@ -149,11 +149,13 @@ internal enum class RewriteScope {
 
 /**
  * True for a row of an applied rewrite that the person can be taken to have accepted: it stands for recorded inputs, nobody typed it
- * in, and no review reason is left on it (an edit that fills in the expected result ends the reason, see [reviewReasonAfterEdit]).
+ * in, and no review reason is left on it (an edit that fills in the expected result ends the reason, see [reviewReasonAfterEdit]). The
+ * incidental-expected-result flag leaves a row accepted; a specific-action flag does too once a person has reviewed the row, and
+ * otherwise leaves it up for the next rewrite.
  */
 internal fun RecordedTestStep.isAcceptedRewriteStep(): Boolean =
     !authorAdded && sourceInputIds.isNotEmpty() && (humanReviewed || modelSupported) &&
-        (reviewReason == null || reviewReason == INCIDENTAL_EXPECTED_WARNING) &&
+        (reviewReason == null || reviewReason == INCIDENTAL_EXPECTED_WARNING || (humanReviewed && isSoftReviewWarning(reviewReason))) &&
         max(action.length, expected.length) <= MAX_FIXED_STEP_CHARS && action.isNotBlank()
 
 /**
@@ -520,7 +522,7 @@ private fun buildRewrittenRow(
     val unclearGestures = sources.filter { source -> unclearGestureIn(listOf(source), safeVideoMoments, sensitivity) != null }
     val unclearGesture = unclearGestures.firstOrNull()
     val byAgent = step.kind == StepKind.AGENT
-    val blockingModelReason = step.reviewReason?.takeUnless { it == INCIDENTAL_EXPECTED_WARNING }
+    val blockingModelReason = step.reviewReason?.takeUnless(::isSoftReviewWarning)
     val needsReview = byAgent && (unclearGesture != null || blockingModelReason != null)
     val fullyUnresolved = unclearGestures.size == sources.size && sources.isNotEmpty()
     val external = sources.singleOrNull()?.takeIf { it.row.isExternalEvent }
@@ -563,11 +565,12 @@ private fun buildRewrittenRow(
 
 /**
  * Why a rewritten row needs a look: an unclear gesture, else the AI's own reason, else - a flag, never a refusal - the warning that the
- * expected result may name content that changes between runs. Null for a step the AI explained nothing about and nothing flags.
+ * action names a specific item or the expected result may name content that changes between runs. Null for a step the AI explained
+ * nothing about and nothing flags.
  */
 private fun rewrittenReviewReason(step: ProposedStep, unclearGestures: List<RewriteInput>, byAgent: Boolean): String? = when {
     unclearGestures.isNotEmpty() && byAgent -> unclearGestures.joinToString(" ") { unclearGestureReason(it) }
-    step.reviewReason == null && byAgent -> incidentalExpectedWarning(step.expected, step.optional)
+    step.reviewReason == null && byAgent -> softReviewWarning(step.action, step.expected, step.optional)
     else -> step.reviewReason
 }
 

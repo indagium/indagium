@@ -17,6 +17,7 @@ import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.StepAttemptRecord
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.agentJudgeDisagrees
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.summary
 import com.indagium.testing.run.ManualDecision
@@ -366,6 +367,8 @@ internal class TestRunToolOperations(private val appState: AppState) {
         put("verificationState", step.verificationState.name)
         put("provisional", step.verificationState == com.indagium.testing.model.VerificationState.PENDING)
         put("automaticRetryExcluded", step.automaticRetryExcluded)
+        if (step.interrupted) put("interrupted", true)
+        if (step.agentJudgeDisagrees()) put("agentJudgeDisagree", true)
         put("caseId", step.caseId)
         put("iteration", step.iteration)
         put("caseAttempt", step.caseAttempt)

@@ -46,7 +46,7 @@ private fun StringBuilder.quote(label: String, text: String) {
 @Suppress("CyclomaticComplexMethod") // Emits the independent evidence, timing, verification, and history fields of one report row.
 private fun StringBuilder.step(result: StepResult) {
     append("- ").append(if (result.setup) "(setup) " else "").append(result.stepNumber).append(". ").append(result.action.trim())
-        .append(" — **").append(result.status.mark()).append("**")
+        .append(" — **").append(if (result.interrupted) "CANCELLED" else result.status.mark()).append("**")
     if (result.attempts > 1) append(" (").append(result.attempts).append(" attempts)")
     if (result.flaky) append(" · **flaky**")
     if (result.verificationState == com.indagium.testing.model.VerificationState.PENDING) append(" · **provisional: judge pending**")

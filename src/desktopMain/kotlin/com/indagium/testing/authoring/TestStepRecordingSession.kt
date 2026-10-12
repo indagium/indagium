@@ -496,7 +496,7 @@ class TestStepRecordingSession internal constructor(
             if (!changed) old else proposed.copy(
                 humanReviewed = true,
                 reviewReason = if (old.action != proposed.action || old.expected != proposed.expected || old.optional != proposed.optional) {
-                    reviewReasonAfterEdit(old.reviewReason, proposed.expected, proposed.optional)
+                    reviewReasonAfterEdit(old.reviewReason, proposed.action, proposed.expected, proposed.optional)
                 } else {
                     old.reviewReason
                 },
@@ -782,7 +782,7 @@ class TestStepRecordingSession internal constructor(
                 optional = optional,
                 condition = condition,
                 reviewReason = if (action != row.action || expected != row.expected || optional != row.optional) {
-                    reviewReasonAfterEdit(row.reviewReason, expected, optional)
+                    reviewReasonAfterEdit(row.reviewReason, action, expected, optional)
                 } else {
                     row.reviewReason
                 },
@@ -831,7 +831,7 @@ class TestStepRecordingSession internal constructor(
                 val withText = row.copy(action = action, expected = expected, optional = optional, condition = condition)
                 val withReview = withText.copy(
                     reviewReason = if (action != row.action || expected != row.expected || optional != row.optional) {
-                        reviewReasonAfterEdit(row.reviewReason, expected, optional)
+                        reviewReasonAfterEdit(row.reviewReason, action, expected, optional)
                     } else {
                         row.reviewReason
                     },

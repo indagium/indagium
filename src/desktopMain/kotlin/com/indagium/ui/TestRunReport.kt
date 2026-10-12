@@ -61,8 +61,10 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.SUITE_SETUP_CASE_ID
 import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
+import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.agentJudgeDisagrees
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.driverLabel
 import com.indagium.testing.model.summary
@@ -71,6 +73,7 @@ import com.indagium.testing.run.TestRunReportFormat
 import com.indagium.testing.run.availableRunArtifactPaths
 import com.indagium.testing.run.compareTestRuns
 import com.indagium.testing.run.failedCaseIds
+import com.indagium.testing.run.interruptedCaseIds
 import com.indagium.testing.run.previousTerminalRunSummaryOfSameSuite
 import com.indagium.testing.run.rerunFailedCasesConfig
 import kotlinx.coroutines.CancellationException
@@ -97,6 +100,7 @@ private val RUN_MENU_SLOT = 26.dp
 private val RUN_SUITE_MENU_WIDTH = 240.dp
 private val LANE_COLUMN = 92.dp
 private val JUDGE_COLUMN = 104.dp
+private val ATTEMPT_MENU_WIDTH = 190.dp
 private val ROW_HEIGHT = 30.dp
 private val STEP_ROW_START_PADDING = 20.dp
 private val REPORT_TABS_MAX_WIDTH = 420.dp
@@ -323,6 +327,10 @@ internal fun stepColor(status: StepStatus): Color = when (status) {
     StepStatus.SKIPPED -> tc().td
 }
 
+/** A step result's colour: neutral for a step a cancel interrupted (it did not fail), else its status' colour. */
+@Composable
+internal fun stepResultColor(result: StepResult): Color = if (result.interrupted) tc().warn else stepColor(result.status)
+
 @Composable
 internal fun caseColor(status: CaseStatus?): Color = when (status) {
     CaseStatus.PASS -> tc().success
@@ -370,6 +378,9 @@ private fun RunReport(run: TestRun, runDir: File) {
     val ui = LocalTestsUi.current
     val view = ui.view
     var selection by remember(run.id) { mutableStateOf(firstNonPassingSelection(run)) }
+    // Which attempt of a retried case the matrix shows; the default is the latest one. The report's verdict and actions use `run`.
+    var attemptViews by remember(run.id) { mutableStateOf(emptyMap<String, Int>()) }
+    val shown = remember(run, attemptViews) { run.viewingAttempts(attemptViews) }
     var tick by remember(run.id) { mutableIntStateOf(0) }
     var filters by remember(run.id) { mutableStateOf(emptySet<TestRunReportFilter>()) }
     var showExport by remember(run.id) { mutableStateOf(false) }
@@ -378,7 +389,7 @@ private fun RunReport(run: TestRun, runDir: File) {
     DisposableEffect(run.id) { onDispose { view.reportTab = RunReportTab.Results } }
     val tab = view.reportTab
     val active = run.status == RunStatus.QUEUED || run.status == RunStatus.RUNNING
-    val rows = remember(run, filters) { filterReportRows(run, filters) }
+    val rows = remember(shown, filters) { filterReportRows(shown, filters) }
     LaunchedEffect(run.id, active) {
         while (active) {
             delay(LIVE_POLL_MS)
@@ -416,14 +427,16 @@ private fun RunReport(run: TestRun, runDir: File) {
     val verdict = remember(run) { runVerdict(run) }
     val meta = remember(run, profiles) { runMetaLine(run, System.currentTimeMillis(), profileName = { id -> profiles.firstOrNull { it.id == id }?.displayName }) }
     val failedIds = remember(run) { failedCaseIds(run) }
+    val interruptedIds = remember(run) { interruptedCaseIds(run) }
+    val rerunLabel = rerunButtonLabel(failedIds.size, interruptedIds.size)
     var deleteRequest by remember(run.id) { mutableStateOf<RunDeleteRequest?>(null) }
-    TestsScreenScaffold(inspector = { ReportInspector(run, runDir, selection) }) {
+    TestsScreenScaffold(inspector = { ReportInspector(shown, runDir, selection) }) {
         TestsPageHeader(
             title = run.suite.name.ifBlank { "Untitled suite" },
             breadcrumb = { TestsBreadcrumbLink("‹ Runs", onClick = { view.selectedRunId = null }, contentDescription = "Back to runs") },
-            primary = if (failedIds.isNotEmpty() && !active) {
+            primary = if (rerunLabel != null && !active) {
                 {
-                    AppButton("Re-run failed (${failedIds.size})", onClick = {
+                    AppButton(rerunLabel, onClick = {
                         rerunFailedCasesConfig(run).onSuccess { config ->
                             view.runDialog = RunDialogTarget(run.suite.id, initialCaseIds = config.caseIds.orEmpty().toSet(), initialConfig = config)
                         }.onFailure { ui.info(it.message ?: "Failed cases cannot be re-run.") }
@@ -452,9 +465,10 @@ private fun RunReport(run: TestRun, runDir: File) {
         Spacer(Modifier.height(10.dp))
         when (tab) {
             RunReportTab.Results -> ResultsTab(
-                run, runDir, tick, active, rows, filters, selection,
+                shown, runDir, tick, active, rows, filters, selection,
                 onFilters = { filters = it },
                 onSelect = { selection = it },
+                onAttempt = { key, attempt -> attemptViews = attemptViews + (key to attempt) },
             )
             RunReportTab.Compare -> CompareTab(run, active, summaries, comparedRun, wantedCompareId, onPick = { showComparePicker = true })
             RunReportTab.Activity -> ActivityTab(run, runDir)
@@ -540,6 +554,7 @@ private fun ResultsTab(
     selection: StepSelection?,
     onFilters: (Set<TestRunReportFilter>) -> Unit,
     onSelect: (StepSelection) -> Unit,
+    onAttempt: (key: String, attempt: Int) -> Unit,
 ) {
     if (active) {
         TestRunLiveView(run, runDir, tick)
@@ -549,7 +564,7 @@ private fun ResultsTab(
         }
     }
     ReportFilterPills(run, filters, onFilters)
-    ReportMatrix(run, rows, filtered = filters.isNotEmpty(), selection, onSelect)
+    ReportMatrix(run, rows, filtered = filters.isNotEmpty(), selection, onSelect, onAttempt = if (active) null else onAttempt)
 }
 
 @Composable
@@ -600,7 +615,14 @@ private fun consensusColor(tone: ConsensusTone): Color = when (tone) {
 
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun ReportMatrix(run: TestRun, rows: List<MatrixRow>, filtered: Boolean, selection: StepSelection?, onSelect: (StepSelection) -> Unit) {
+private fun ReportMatrix(
+    run: TestRun,
+    rows: List<MatrixRow>,
+    filtered: Boolean,
+    selection: StepSelection?,
+    onSelect: (StepSelection) -> Unit,
+    onAttempt: ((key: String, attempt: Int) -> Unit)? = null,
+) {
     val tc = tc()
     val ui = LocalTestsUi.current
     val profiles = ui.state.settings.aiProviderProfiles
@@ -635,7 +657,7 @@ private fun ReportMatrix(run: TestRun, rows: List<MatrixRow>, filtered: Boolean,
     }
     rows.forEach { row ->
         when (row) {
-            is MatrixRow.Case -> CaseMatrixRow(run, row, improvable = row.caseId in improvable)
+            is MatrixRow.Case -> CaseMatrixRow(run, row, improvable = row.caseId in improvable, onAttempt = onAttempt)
             is MatrixRow.Step -> StepMatrixRow(row, consensusFor(run, row), run.lanes.size > 1, selection, onSelect)
         }
     }
@@ -644,7 +666,7 @@ private fun ReportMatrix(run: TestRun, rows: List<MatrixRow>, filtered: Boolean,
 /** A case header: its name, its result per lane, and a ⋯ (Improve these steps with AI…, Open case) for real library cases. */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun CaseMatrixRow(run: TestRun, row: MatrixRow.Case, improvable: Boolean) {
+private fun CaseMatrixRow(run: TestRun, row: MatrixRow.Case, improvable: Boolean, onAttempt: ((key: String, attempt: Int) -> Unit)? = null) {
     val tc = tc()
     val ui = LocalTestsUi.current
     val location = ui.library.findCase(row.caseId)
@@ -654,11 +676,23 @@ private fun CaseMatrixRow(run: TestRun, row: MatrixRow.Case, improvable: Boolean
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AppText(
-            row.name + if (row.iteration > 1) " (run ${row.iteration})" else "",
-            color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            AppText(
+                row.name + if (row.iteration > 1) " (run ${row.iteration})" else "",
+                color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (row.attemptCount > 1 && onAttempt != null) {
+                TestsDropdown(
+                    selectedLabel = "Attempt ${row.viewingAttempt} of ${row.attemptCount}",
+                    options = (1..row.attemptCount).toList(),
+                    optionLabel = { attempt -> "Attempt $attempt" + (row.attemptStatuses[attempt]?.let { " · ${it.label()}" } ?: "") },
+                    onSelect = { attempt -> onAttempt(caseAttemptKey(row.caseId, row.iteration), attempt) },
+                    isSelected = { it == row.viewingAttempt },
+                    menuWidth = ATTEMPT_MENU_WIDTH,
+                )
+            }
+        }
         row.cells.forEach { cell ->
             Box(Modifier.width(LANE_COLUMN)) {
                 if (cell.present) {
@@ -727,10 +761,17 @@ private fun StepMatrixRow(row: MatrixRow.Step, consensus: ConsensusCell, multiLa
             minHeight = ROW_HEIGHT,
             startPadding = STEP_ROW_START_PADDING,
         ) {
-            AppText(
-                (if (row.setup) "setup · " else "") + "${row.number}. ${row.action}",
-                color = tc.ts, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-            )
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                AppText(
+                    (if (row.setup) "setup · " else "") + "${row.number}. ${row.action}",
+                    color = tc.ts, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+                if (row.cells.any { it.result?.agentJudgeDisagrees() == true }) {
+                    HintWhen(true, "The agent and the judge disagree about this step.") {
+                        AppText("≠", color = tc.warn, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
             row.cells.forEach { cell ->
                 val chosen = multiLane && selected && selection.laneId == cell.laneId
                 val result = cell.result
@@ -753,8 +794,8 @@ private fun StepMatrixRow(row: MatrixRow.Step, consensus: ConsensusCell, multiLa
                         AppText("·", color = tc.td, fontSize = 11.sp)
                     } else {
                         StatusChip(
-                            result.status.label() + (if (result.flaky) " · flaky" else "") + if (result.attempts > 1) " ×${result.attempts}" else "",
-                            stepColor(result.status),
+                            result.matrixLabel() + (if (result.flaky) " · flaky" else "") + if (result.attempts > 1) " ×${result.attempts}" else "",
+                            stepResultColor(result),
                             maxLines = 1,
                         )
                     }

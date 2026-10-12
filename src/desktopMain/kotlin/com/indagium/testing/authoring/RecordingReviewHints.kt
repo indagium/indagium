@@ -13,7 +13,7 @@ internal fun recordingRowIssues(
     condition: String? = row.condition,
     requireExpected: Boolean = true,
 ): Set<RecordingRowIssue> = buildSet {
-    if (!row.reviewReason.isNullOrBlank() && row.reviewReason != INCIDENTAL_EXPECTED_WARNING) add(RecordingRowIssue.REVIEW)
+    if (!row.reviewReason.isNullOrBlank() && !isSoftReviewWarning(row.reviewReason)) add(RecordingRowIssue.REVIEW)
     if (row.action.isBlank()) add(RecordingRowIssue.ACTION)
     if (hasConditionIssue(optional, condition)) {
         add(RecordingRowIssue.CONDITION)

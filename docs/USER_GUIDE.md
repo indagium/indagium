@@ -1445,7 +1445,10 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    step editor. Manual and script steps need no expected result, and a rewrite keeps them as written.
 2. Under **Rewrite with AI**, the last provider, model and reasoning effort used for a rewrite are preselected
    (initially the selected profile). The rewrite panel shows the latest attempt and session usage; known usage from a
-   failed or cancelled attempt remains visible. Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
+   failed or cancelled attempt remains visible. Optionally say what the test was about, and press **Rewrite**. While it runs, a moving
+   line shows which provider and model work, how long they have been at it and the stage ("Preparing evidence…", "Waiting for the
+   model…", "Applying N steps…"); **Draft steps with AI** and **Improve steps with AI** show the same line with the elapsed time.
+   **Cancel** stops it. The chosen provider receives the
    recorded inputs, the screen text, the text you typed and screenshots from the device. Known password text is
    masked in action descriptions and hidden from the AI; password-edit video windows are withheld when they can be
    identified. The video timeline is copied from the mirror's existing stream
@@ -1464,7 +1467,9 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    titles are included only when the case goal, preconditions or your note explicitly make the title part of the requested test.
    Revealing playback controls and then tapping Pause can become one **Pause playback** step. Incidental actions such as
    skipping an ad stay separate and conditional. If evidence still leaves a required action or result uncertain, the row
-   keeps its original gesture and explains what needs review.
+   keeps its original gesture and explains what needs review. A row whose action quotes a long title or text with emoji
+   ("Tap on the video "…") or whose result relies on controls and messages that hide by themselves is flagged "Check this action"
+   or "Check this expected result"; the flag never blocks applying, so generalize the wording unless the test needs that exact item.
    Incidental actions such as dismissing a skippable ad may be optional when their condition says when to perform them;
    they can have no expected result and are skipped without failing the case when absent. The AI's notes (for example an
    input it thought was accidental) are shown above the steps. Edit any action, expected result or condition. The review
@@ -1646,7 +1651,18 @@ Useful actions on a step:
 - **Mark as agent error…** — records that the agent, not the app, got it wrong.
 - **Run again up to this step** — starts a new run of the case from its first step through this one.
 - **Re-run failed** — preselects the union of cases whose final result is failed, blocked or errored, and carries
-  over the original lanes, repeat, judge and evidence settings. It runs the current library after validation.
+  over the original lanes, repeat, judge and evidence settings. It runs the current library after validation. A run you
+  cancelled is not a failed run: a step that was running when you stopped it shows **Cancelled** (not an error), and the button
+  reads **Re-run interrupted (N)** for the cases the cancel stopped, or **Re-run failed and interrupted (N)** when both exist.
+- **Attempt switcher** — a case that was retried automatically shows **Attempt 2 of 2 ▾** on its row; pick another attempt to see
+  that attempt's steps, judge chips and details (the report opens on the latest attempt). A cancelled run's headline says where it
+  stopped and what the earlier attempts got wrong.
+- **Timeout · judge: expected result met** — a step that ran out of time is still looked at by the judge (when your judge setting
+  would have judged it). The judgement is advice only: the step stays a timeout and the case outcome does not change, but you can see
+  that the action actually worked. The note lists the agent's last tool calls.
+- **≠ and Disagreements** — when the agent said a step failed but the judge found it met (or the reverse), the step's note says so,
+  its row shows **≠** and the **Disagreements** filter counts it. With the judge set to run after the case or in the background,
+  the header says so ("judge: every step, after the case").
 - **Compare runs** — defaults to the preceding terminal run of the same suite; choose another saved run to compare
   stable case/step identities, outcome transitions, changed definitions, and added or removed content.
 - **Export report…** — writes JSON or Markdown, or a ZIP of selected saved evidence. Export runs off the UI thread,

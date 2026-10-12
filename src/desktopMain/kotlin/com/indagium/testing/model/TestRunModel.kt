@@ -247,6 +247,12 @@ data class StepResult(
     val judgeQueueWaitMs: Long? = null,
     /** The judge's independent allowance, excluding queue wait. */
     val judgmentDurationMs: Long? = null,
+    /**
+     * The run was cancelled while this step was being worked on. [status] is still ERROR (an older app reads it so), but the step is
+     * neither a failure of the app nor of the test: the report shows it as cancelled and a re-run treats it as interrupted.
+     * Appended last and written only when true: older run files decode as false and older apps ignore the key.
+     */
+    val interrupted: Boolean = false,
 )
 
 data class StepAttemptRecord(

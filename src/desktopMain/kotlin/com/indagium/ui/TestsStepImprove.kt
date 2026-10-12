@@ -147,6 +147,7 @@ internal fun TestStepImproveDialog(target: ImproveStepsTarget, onDismiss: () -> 
                         onNote = { note = it.take(MAX_IMPROVE_NOTE_CHARS) },
                         working = working,
                         usageLine = attemptUsage?.let { "Latest attempt · ${it.summaryLabel()}" },
+                        progress = { AiWorkProgress("Improving steps", profile?.displayName, selection.modelId ?: profile?.model, stage = null) },
                     )
                 } else {
                     ImproveReviewPhase(review = current, working = working)
@@ -220,6 +221,7 @@ private fun ImproveAskPhase(
     onNote: (String) -> Unit,
     working: Boolean,
     usageLine: String?,
+    progress: @Composable () -> Unit,
 ) {
     val tc = tc()
     TestsHint(
@@ -240,6 +242,10 @@ private fun ImproveAskPhase(
             note, onNote, placeholder = "For example: make the expected results independent of what the feed shows",
             modifier = Modifier.fillMaxWidth(), minHeight = NOTE_MIN_HEIGHT, maxHeight = NOTE_MAX_HEIGHT, enabled = !working,
         )
+    }
+    if (working) {
+        Spacer(Modifier.height(10.dp))
+        progress()
     }
 }
 

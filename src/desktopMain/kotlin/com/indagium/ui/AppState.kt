@@ -2570,6 +2570,7 @@ class AppState(
         reasoningEffort: String? = null,
         note: String = "",
         scope: com.indagium.testing.authoring.RewriteScope? = null,
+        onStage: (com.indagium.testing.authoring.RewriteStage) -> Unit = {},
     ): StoreResult<com.indagium.testing.authoring.RecordingRewrite> {
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId }
@@ -2582,7 +2583,7 @@ class AppState(
             active to selectedTarget
         }
         try {
-            return testRecordingRewriteService.rewrite(session, target.first, target.second, profileId, model, reasoningEffort, note, scope)
+            return testRecordingRewriteService.rewrite(session, target.first, target.second, profileId, model, reasoningEffort, note, scope, onStage)
         } finally {
             synchronized(testStepRecordingLock) { recordingRewrites.remove(sessionId) }
         }

@@ -576,7 +576,7 @@ internal class LaneRunner(
             // committed to the sequence. Preserve the current result before the case is finalized.
             withContext(NonCancellable) {
                 sequence.cancelDeferredJudgements()
-                sequence.abort(StepStatus.ERROR, "The run was cancelled while this step was being evaluated.")
+                sequence.abort(StepStatus.ERROR, "The run was cancelled while this step was in progress.", interrupted = true)
             }
             throw cancelled
         }
@@ -621,6 +621,10 @@ internal class LaneRunner(
         if (owner.updateDeferredStep(result) && !result.setup && result.status in MARKED_STEP_STATUSES) {
             markStepInCapture(owner.caseName, result)
         }
+    }
+
+    override fun stepUnjudged(result: StepResult) {
+        recorder?.replaceStep(result)
     }
 
     /**
@@ -781,6 +785,16 @@ internal class LaneRunner(
             )
             publish()
             return true
+        }
+
+        /** Swaps in [step] (same case attempt and step id) without touching usage; used when only its note changed. */
+        @Synchronized
+        fun replaceStep(step: StepResult) {
+            if (step.caseId != caseId || step.iteration != iteration || step.caseAttempt != result.caseAttempt) return
+            val position = result.steps.indexOfFirst { it.stepId == step.stepId && it.setup == step.setup }
+            if (position < 0) return
+            result = result.copy(steps = result.steps.mapIndexed { index, current -> if (index == position) step else current })
+            publish()
         }
 
         @Synchronized
