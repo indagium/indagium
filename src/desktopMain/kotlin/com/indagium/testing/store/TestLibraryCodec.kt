@@ -15,12 +15,19 @@ import com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS
 import com.indagium.testing.model.EXAMPLE_ID_PREFIX
 import com.indagium.testing.model.HOOK_ID_PREFIX
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.MAX_RECORDED_INPUT_DURATION_MS
+import com.indagium.testing.model.MAX_RECORDED_INPUT_EVENTS
+import com.indagium.testing.model.MAX_RECORDED_INPUT_GAP_MS
+import com.indagium.testing.model.MAX_RECORDED_INPUT_POINTS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.NormalizedGestureBounds
 import com.indagium.testing.model.NormalizedGesturePoint
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.RecordedGestureHint
 import com.indagium.testing.model.RecordedGestureTarget
+import com.indagium.testing.model.RecordedInput
+import com.indagium.testing.model.RecordedInputEvent
+import com.indagium.testing.model.RecordedTouchKind
 import com.indagium.testing.model.SCRIPT_ID_PREFIX
 import com.indagium.testing.model.SHARED_STEP_ID_PREFIX
 import com.indagium.testing.model.STEP_ID_PREFIX
@@ -40,9 +47,11 @@ import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.TestVariable
+import com.indagium.testing.model.TimedGesturePoint
 import com.indagium.testing.model.VARIABLE_ID_PREFIX
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newPrefixedId
+import com.indagium.testing.model.usesReplay
 import com.indagium.testing.model.usesStepKinds
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -69,8 +78,13 @@ import kotlinx.serialization.json.put
 // Version policy: files are written at the BASE version (2) unless they hold something an older build would hand to the wrong
 // actor: a MANUAL or SCRIPT step (it would give "plug in the USB device" to an AI agent) or a device-state check. Those are
 // written at the STEP-KINDS version (3), which every build that predates them opens read-only. Recorded gesture hints use version 4,
-// which earlier builds also open read-only to avoid dropping target and geometry provenance. TEST_*_FILE_VERSION is the newest
-// version this build reads. A suite with only AI steps therefore stays byte-identical to what earlier builds wrote.
+// which earlier builds also open read-only to avoid dropping target and geometry provenance. A REPLAY step uses version 5: a build
+// that predates it would read `"kind":"REPLAY"` as an unknown kind (it falls back to AGENT, so an AI agent would perform the step from
+// its text) and could rewrite the file without the step's recorded input, so it must open the file read-only instead. Screenshot roles
+// also require version 5: an older build would mistake a recorded BEFORE reference for an expected result. The optional
+// `recordedInput` object of a step that is not REPLAY does NOT raise the version: an older build ignores it and, if it saves the
+// suite, drops only that enrichment (the step stays a working AI step). TEST_*_FILE_VERSION is the newest version this build reads.
+// A suite with only AI steps therefore stays byte-identical to what earlier builds wrote.
 //
 // Reads are tolerant: unknown keys are ignored, a missing or mistyped field takes its default, an
 // entry of an unknown kind is skipped, and a missing/duplicate/unsafe id is replaced by a fresh one.
@@ -79,8 +93,12 @@ import kotlinx.serialization.json.put
 
 const val TEST_SUITE_FILE_FORMAT = "indagium-test-suite"
 const val TEST_LIBRARY_FILE_FORMAT = "indagium-test-library"
-const val TEST_SUITE_FILE_VERSION = 4
-const val TEST_LIBRARY_FILE_VERSION = 4
+const val TEST_SUITE_FILE_VERSION = 5
+const val TEST_LIBRARY_FILE_VERSION = 5
+const val TEST_SUITE_REPLAY_FILE_VERSION = 5
+const val TEST_LIBRARY_REPLAY_FILE_VERSION = 5
+const val TEST_SUITE_GESTURE_HINT_FILE_VERSION = 4
+const val TEST_LIBRARY_GESTURE_HINT_FILE_VERSION = 4
 const val TEST_SUITE_BASE_FILE_VERSION = 2
 const val TEST_LIBRARY_BASE_FILE_VERSION = 2
 const val TEST_SUITE_STEP_KIND_FILE_VERSION = 3
@@ -197,6 +215,7 @@ internal fun exampleToJson(example: StepExample): JsonObject = buildJsonObject {
         is StepExample.GoldenScreenshot -> {
             put("type", "goldenScreenshot")
             put("assetPath", example.assetPath)
+            if (example.role != com.indagium.testing.model.ScreenshotRole.EXPECTED) put("role", example.role.name.lowercase())
         }
         is StepExample.ReferenceLog -> {
             put("type", "referenceLog")
@@ -236,7 +255,97 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     if (step.gestureHints.isNotEmpty()) {
         put("gestureHints", buildJsonArray { step.gestureHints.take(MAX_GESTURE_HINTS).forEach { add(gestureHintToJson(it)) } })
     }
+    step.recordedInput?.let { put("recordedInput", recordedInputToJson(it)) }
 }
+
+// ── Recorded input (REPLAY steps) ────────────────────────────────────
+
+private const val COORDINATE_DECIMALS_SCALE = 100_000.0
+
+private fun roundedUnit(value: Double): Double = Math.round(value * COORDINATE_DECIMALS_SCALE) / COORDINATE_DECIMALS_SCALE
+
+internal fun recordedInputToJson(input: RecordedInput): JsonObject = buildJsonObject {
+    if (input.settleMs > 0L) put("settleMs", input.settleMs.coerceAtMost(MAX_RECORDED_INPUT_GAP_MS))
+    put("events", buildJsonArray { input.events.forEach { add(recordedEventToJson(it)) } })
+}
+
+private fun recordedEventToJson(event: RecordedInputEvent): JsonObject = buildJsonObject {
+    when (event) {
+        is RecordedInputEvent.Touch -> {
+            put("type", "touch")
+            put("kind", event.kind.name)
+            put("durationMs", event.durationMs)
+            event.sourceScreenWidth?.takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION }?.let { put("screenWidth", it) }
+            event.sourceScreenHeight?.takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION }?.let { put("screenHeight", it) }
+            event.orientationQuarterTurns?.takeIf { it in 0..MAX_GESTURE_ORIENTATION_QUARTER_TURNS }?.let { put("orientation", it) }
+            put(
+                "points",
+                buildJsonArray {
+                    event.points.forEach { point ->
+                        add(buildJsonObject { put("x", roundedUnit(point.x)); put("y", roundedUnit(point.y)); put("t", point.tMs) })
+                    }
+                },
+            )
+        }
+        is RecordedInputEvent.Key -> {
+            put("type", "key")
+            put("key", event.key)
+        }
+        is RecordedInputEvent.Panel -> {
+            put("type", "panel")
+            put("panel", event.panel)
+        }
+    }
+    if (event.gapBeforeMs > 0L) put("gapBeforeMs", event.gapBeforeMs.coerceAtMost(MAX_RECORDED_INPUT_GAP_MS))
+}
+
+@Suppress("ReturnCount") // Invalid recorded fields must reject the entire event before any input can be replayed.
+private fun decodeRecordedEvent(o: JsonObject): RecordedInputEvent? {
+    val gap = o.strictLong("gapBeforeMs", 0L)?.takeIf { it in 0L..MAX_RECORDED_INPUT_GAP_MS } ?: return null
+    return when (o.str("type")) {
+        "touch" -> {
+            val kind = RecordedTouchKind.entries.firstOrNull { it.name == o.str("kind") } ?: return null
+            val rawPoints = o["points"] as? JsonArray ?: return null
+            if (rawPoints.size !in 1..MAX_RECORDED_INPUT_POINTS || rawPoints.any { it !is JsonObject }) return null
+            val points = rawPoints.map { raw ->
+                val point = raw as JsonObject
+                val x = point.safeUnit("x") ?: return null
+                val y = point.safeUnit("y") ?: return null
+                val t = point.strictLong("t")?.takeIf { it in 0L..MAX_RECORDED_INPUT_DURATION_MS } ?: return null
+                TimedGesturePoint(x, y, t)
+            }
+            val duration = o.strictLong("durationMs")?.takeIf { it in 0L..MAX_RECORDED_INPUT_DURATION_MS } ?: return null
+            RecordedInputEvent.Touch(
+                kind = kind,
+                points = points,
+                durationMs = duration,
+                sourceScreenWidth = o.int("screenWidth", 0).takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION },
+                sourceScreenHeight = o.int("screenHeight", 0).takeIf { it in MIN_GESTURE_SCREEN_DIMENSION..MAX_GESTURE_SCREEN_DIMENSION },
+                orientationQuarterTurns = o.int("orientation", -1).takeIf { it in 0..MAX_GESTURE_ORIENTATION_QUARTER_TURNS },
+                gapBeforeMs = gap,
+            )
+        }
+        "key" -> o.str("key").takeIf { it.isNotBlank() }?.let { RecordedInputEvent.Key(it, gap) }
+        "panel" -> o.str("panel").takeIf { it.isNotBlank() }?.let { RecordedInputEvent.Panel(it, gap) }
+        else -> null
+    }
+}
+
+/**
+ * The recorded input of a step, or null when there is none or any of its inputs cannot be understood (an input of a kind a newer build
+ * wrote): a replay of a partial list would do something other than what was recorded, so it is dropped as a whole.
+ */
+internal fun decodeRecordedInput(o: JsonObject?): RecordedInput? {
+    o ?: return null
+    val raw = o["events"] as? JsonArray ?: return null
+    if (raw.isEmpty() || raw.size > MAX_RECORDED_INPUT_EVENTS || raw.any { it !is JsonObject }) return null
+    val events = raw.map { decodeRecordedEvent(it as JsonObject) ?: return null }
+    val settle = o.strictLong("settleMs", 0L)?.takeIf { it in 0L..MAX_RECORDED_INPUT_GAP_MS } ?: return null
+    return RecordedInput(events, settle)
+}
+
+private fun JsonObject.strictLong(key: String, default: Long? = null): Long? =
+    if (key !in this) default else (this[key] as? JsonPrimitive)?.longOrNull
 
 private const val MAX_GESTURE_HINTS = 24
 private const val MAX_GESTURE_HINT_PATH_POINTS = 10
@@ -413,9 +522,13 @@ internal fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject 
     put("steps", buildJsonArray { shared.steps.forEach { add(stepToJson(it)) } })
 }
 
-/** The envelope version [suite] is written with: base, step-kinds, or gesture-hints version as needed. */
+/** The envelope version [suite] is written with: base, step-kinds, gesture-hints or replay version as needed. */
+private fun TestStep.hasRecordedScreenReferences(): Boolean =
+    examples.filterIsInstance<StepExample.GoldenScreenshot>().any { it.role != com.indagium.testing.model.ScreenshotRole.EXPECTED }
+
 fun suiteFileVersionFor(suite: TestSuite): Int = when {
-    suite.cases.any { case -> case.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_SUITE_FILE_VERSION
+    suite.usesReplay() || suite.cases.any { case -> case.steps.any { it.hasRecordedScreenReferences() } } -> TEST_SUITE_REPLAY_FILE_VERSION
+    suite.cases.any { case -> case.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_SUITE_GESTURE_HINT_FILE_VERSION
     suite.usesStepKinds() -> TEST_SUITE_STEP_KIND_FILE_VERSION
     else -> TEST_SUITE_BASE_FILE_VERSION
 }
@@ -423,7 +536,8 @@ fun suiteFileVersionFor(suite: TestSuite): Int = when {
 /** The envelope version a library file with these shared steps is written with. */
 fun libraryFileVersionFor(sharedSteps: List<SharedStep>): Int =
     when {
-        sharedSteps.any { shared -> shared.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_LIBRARY_FILE_VERSION
+        sharedSteps.any { shared -> shared.steps.any { it.usesReplay() || it.hasRecordedScreenReferences() } } -> TEST_LIBRARY_REPLAY_FILE_VERSION
+        sharedSteps.any { shared -> shared.steps.any { it.gestureHints.isNotEmpty() } } -> TEST_LIBRARY_GESTURE_HINT_FILE_VERSION
         sharedSteps.any { shared -> shared.steps.any { it.usesStepKinds() } } -> TEST_LIBRARY_STEP_KIND_FILE_VERSION
         else -> TEST_LIBRARY_BASE_FILE_VERSION
     }
@@ -493,7 +607,13 @@ internal fun decodeScriptCall(o: JsonObject): ScriptCall? {
 internal fun decodeExample(o: JsonObject, ids: IdAllocator): StepExample? {
     val id by lazy { ids.next(o["id"], EXAMPLE_ID_PREFIX) }
     return when (o.str("type")) {
-        "goldenScreenshot" -> StepExample.GoldenScreenshot(id, o.str("assetPath"), o.str("caption"))
+        "goldenScreenshot" -> StepExample.GoldenScreenshot(
+            id, o.str("assetPath"), o.str("caption"),
+            o.optStr("role")?.let { name ->
+                com.indagium.testing.model.ScreenshotRole.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                    ?: throw IllegalArgumentException("Unknown screenshot role '$name'.")
+            } ?: com.indagium.testing.model.ScreenshotRole.EXPECTED,
+        )
         "referenceLog" -> StepExample.ReferenceLog(id, o.str("text"), o.str("caption"))
         else -> null
     }
@@ -520,6 +640,7 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep {
         intent = StepIntent.parse(o.optStr("intent")) ?: StepIntent.PERFORM_ACTION,
         precondition = o.optStr("precondition"),
         gestureHints = o.objects("gestureHints").take(MAX_GESTURE_HINTS).mapNotNull(::decodeGestureHint),
+        recordedInput = decodeRecordedInput(o["recordedInput"] as? JsonObject),
     )
 }
 

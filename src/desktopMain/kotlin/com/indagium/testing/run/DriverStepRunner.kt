@@ -1,8 +1,11 @@
 package com.indagium.testing.run
 
+import com.indagium.testing.device.NO_RECORDED_INPUT_MESSAGE
+import com.indagium.testing.device.replayEligibilityProblem
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ManualStepsOption
+import com.indagium.testing.model.RecordedInput
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
@@ -16,16 +19,22 @@ import com.indagium.testing.model.completionChecks
 import com.indagium.testing.script.ScriptRunOutcome
 import com.indagium.testing.script.ScriptRunResult
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
 // Performs the steps the RUN does itself, between the agent's: a SCRIPT step runs a library script; a MANUAL step waits for a tester
-// (or runs its automation script, or is skipped, depending on the run's manual-steps option). The lane driver calls [runPending]
+// (or runs its automation script, or is skipped, depending on the run's manual-steps option); a REPLAY step injects the input it was
+// recorded from (see ReplayPlan.kt) and waits for the screen to settle. It runs the same on a lane with an agent and on an external lane. The lane driver calls [runPending]
 // whenever the sequence stands on such a step; it returns once the sequence is on an AGENT step again or is over. No AI agent is
 // started for these steps. The outcome is handed to the sequence (finishDriverStep, skipDriverStep, failDriverStep), which records the
 // result, runs the step's other checks and applies retries and onFailure like for any step.
 //
 // SCRIPT: ASK scripts wait for the user's yes (a card in the live view, resolve_test_confirmation); a refusal or no answer BLOCKS the
 // step. A non-zero exit, a timeout or a failed exit-code/stdout expectation fails it.
+// REPLAY: the recorded input is scaled to the device (a device of other proportions is refused: BLOCKED), injected in order with its
+// recorded gaps and gesture timing, and the lane waits a bounded part of the recorded settle time. The claim is PASS when every input
+// went in; the step's checks and the run's judge then decide the result exactly like an AI step's. A failed injection is a FAIL, not a
+// retry: re-injecting after a partial replay could undo a toggle (a replay step has no automatic retry unless its author sets retries).
 // MANUAL (wait): the lane publishes what the tester must do (LaneHandle.beginManualWait) and polls until the tester answers (Done,
 // Failed, Skip), the step's completion checks (log lines, device state) are all true, or the step's time allowance is over; the last
 // is "not confirmed", a problem of the step or the run, never of the app.
@@ -53,6 +62,7 @@ internal class DriverStepRunner(
             when (step.kind) {
                 StepKind.SCRIPT -> performScriptStep(step)
                 StepKind.MANUAL -> performManualStep(step)
+                StepKind.REPLAY -> performReplayStep(step)
                 StepKind.AGENT -> return
             }
             // Whatever happened, the step is closed or redone; a sequence that did not move would loop for ever.
@@ -146,6 +156,108 @@ internal class DriverStepRunner(
             val errorText = result.stderr.trim().replace(Regex("\\s+"), " ").take(OUTPUT_EXCERPT_CHARS)
             ScriptOutcome(LaneStepStatus.FAIL, "$failure; $summary" + if (errorText.isEmpty()) "" else " stderr: $errorText")
         }
+    }
+
+    // ── Replay steps ─────────────────────────────────────────────────
+
+    /** How a replay ended: injected (with the line for the observation), not allowed to run, or failed while injecting. */
+    private sealed interface ReplayOutcome {
+        data class Done(val summary: String) : ReplayOutcome
+
+        data class Refused(val reason: String) : ReplayOutcome
+
+        data class Failed(val reason: String) : ReplayOutcome
+    }
+
+    private suspend fun performReplayStep(step: TestStep) {
+        step.replayEligibilityProblem()?.let { reason ->
+            seq.failDriverStep(DriverReport(LaneStepStatus.BLOCKED, "Replay refused: $reason", null, retryable = false), StepStatus.BLOCKED)
+            return
+        }
+        val input = step.recordedInput
+        if (input == null) {
+            seq.failDriverStep(DriverReport(LaneStepStatus.BLOCKED, NO_RECORDED_INPUT_MESSAGE, null, retryable = false), StepStatus.ERROR)
+            return
+        }
+        // The allowance covers the injection and the checks after it, like a script's.
+        seq.resetStepTimer()
+        val outcome = withTimeoutOrNull(step.timeoutMs) {
+            seq.beforeDeviceMutation()
+            replay(step, input)
+        }
+        when (outcome) {
+            null -> seq.failDriverStep(
+                DriverReport(
+                    LaneStepStatus.FAIL,
+                    "The replay did not finish within the step's time allowance of ${step.timeoutMs} ms.",
+                    null,
+                    retryable = false,
+                ),
+                StepStatus.TIMEOUT,
+            )
+            is ReplayOutcome.Refused -> seq.failDriverStep(
+                DriverReport(LaneStepStatus.BLOCKED, "Replay refused: ${outcome.reason}", null, retryable = false),
+                StepStatus.BLOCKED,
+            )
+            is ReplayOutcome.Failed -> seq.finishDriverStep(
+                DriverReport(LaneStepStatus.FAIL, "Replay failed: ${outcome.reason}", StepCompletion.REPLAY, checks = emptyList(), retryable = false),
+            )
+            is ReplayOutcome.Done -> seq.finishDriverStep(DriverReport(LaneStepStatus.PASS, outcome.summary, StepCompletion.REPLAY))
+        }
+    }
+
+    @Suppress("TooGenericExceptionCaught", "ReturnCount") // Each injection failure has a distinct safe outcome; never crash the lane.
+    private suspend fun replay(step: TestStep, input: RecordedInput): ReplayOutcome {
+        // A fresh screenshot says what the device looks like now (it may have been rotated since the last one).
+        val space = try {
+            env.session.screenshot().space
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            return ReplayOutcome.Failed("the screen could not be read: ${failure.message ?: failure::class.simpleName}")
+        }
+        val plan = when (val planned = planReplay(input, space)) {
+            is ReplayPlan.Refused -> return ReplayOutcome.Refused(planned.reason)
+            is ReplayPlan.Ready -> planned
+        }
+        if (plan.plannedMs + plan.settleMs > step.timeoutMs) {
+            return ReplayOutcome.Refused(
+                "injecting the recorded input takes about ${plan.plannedMs + plan.settleMs} ms, " +
+                    "more than the step's time allowance of ${step.timeoutMs} ms; raise the timeout.",
+            )
+        }
+        env.transcript?.append(
+            "driver_replay_started",
+            mapOf("step" to step.id, "inputs" to plan.descriptions, "plannedMs" to plan.plannedMs, "settleMs" to plan.settleMs),
+        )
+        var failure: String? = null
+        val results = try {
+            env.session.performReplay(plan.actions) { number, result ->
+                seq.reportDriverToolCall(
+                    result.action,
+                    plan.descriptions[number - 1],
+                    result.detail ?: if (result.succeeded) "ok" else "failed",
+                    result.succeeded,
+                    result.durationMs,
+                )
+                if (!result.succeeded) failure = "input $number (${plan.descriptions[number - 1]}) failed: ${result.detail ?: "device input failed"}"
+            }
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (invalid: IllegalArgumentException) {
+            return ReplayOutcome.Refused(invalid.message ?: "the recorded input does not fit this screen.")
+        } catch (failed: Exception) {
+            return ReplayOutcome.Failed(failed.message ?: failed::class.simpleName.orEmpty())
+        }
+        env.transcript?.append("driver_replay_finished", mapOf("step" to step.id, "injected" to results.size, "failure" to failure))
+        failure?.let { return ReplayOutcome.Failed(it) }
+        delay(plan.settleMs)
+        val notes = results.mapNotNull { it.detail }.distinct()
+        val fallback = if (notes.isEmpty()) "" else " " + notes.joinToString(" ")
+        return ReplayOutcome.Done(
+            "Replayed ${results.size} recorded input(s) (${plan.descriptions.joinToString("; ")}); " +
+                "waited ${plan.settleMs} ms for the screen to settle.$fallback",
+        )
     }
 
     // ── Manual steps ─────────────────────────────────────────────────

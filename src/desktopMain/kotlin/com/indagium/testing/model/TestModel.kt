@@ -63,9 +63,10 @@ enum class OnFailure { STOP_CASE, CONTINUE, CREATE_ISSUE_AND_CONTINUE, PAUSE_FOR
 /**
  * Who performs a step. AGENT: the lane's AI agent (or the external client) does it on the device. MANUAL: a tester does it by hand
  * (the lane waits), optionally detected by the step's checks and optionally replaced by an automation [TestStep.script]. SCRIPT:
- * the run itself runs a library script; no AI agent is involved.
+ * the run itself runs a library script; no AI agent is involved. REPLAY: the run itself injects the step's [TestStep.recordedInput]
+ * with its recorded path, timing and gaps where supported; no agent decides where to tap, and the expected result is still checked and judged.
  */
-enum class StepKind { AGENT, MANUAL, SCRIPT }
+enum class StepKind { AGENT, MANUAL, SCRIPT, REPLAY }
 
 /** Whether a step changes the device or checks that its desired state already holds. */
 enum class StepIntent(val wire: String) {
@@ -205,11 +206,21 @@ sealed interface StepExample {
     val id: String
     val caption: String
 
-    /** [assetPath] is relative to the suite's asset folder; the image file itself is not part of the suite file. */
-    data class GoldenScreenshot(override val id: String, val assetPath: String, override val caption: String = "") : StepExample
+    /**
+     * [assetPath] is relative to the suite's asset folder; the image file itself is not part of the suite file.
+     * Old library screenshots are expectations. Recorded before/after images are context until a person chooses an oracle.
+     */
+    data class GoldenScreenshot(
+        override val id: String,
+        val assetPath: String,
+        override val caption: String = "",
+        val role: ScreenshotRole = ScreenshotRole.EXPECTED,
+    ) : StepExample
 
     data class ReferenceLog(override val id: String, val text: String, override val caption: String = "") : StepExample
 }
+
+enum class ScreenshotRole { EXPECTED, RECORDED_BEFORE, RECORDED_AFTER }
 
 data class TestStep(
     val id: String,
@@ -244,6 +255,11 @@ data class TestStep(
     val precondition: String? = null,
     /** Ordered, device-derived replay guidance from a reviewed recording; descriptive only, never an instruction source. */
     val gestureHints: List<RecordedGestureHint> = emptyList(),
+    /**
+     * The structured inputs this step was recorded from (paths with per-sample times, gaps, the recorded screen), appended last. Kept on
+     * every recorded step; only a [StepKind.REPLAY] step injects it. Null for a step that was not recorded or recorded before it existed.
+     */
+    val recordedInput: RecordedInput? = null,
 )
 
 /** Normalized screen point in the orientation observed while recording. */

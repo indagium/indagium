@@ -22,6 +22,7 @@ import com.indagium.testing.limits.activeSuiteIds
 import com.indagium.testing.limits.isCaseLocked
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.RECORDING_ROW_KINDS
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
@@ -151,6 +152,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 rowIds,
                 optionalOverrides,
                 insertAsNew = a.bool("insertAsNew") == true,
+                asReplay = a.bool("asReplay") == true,
             ).toResult { inserted ->
                 mapOf(
                     "sessionId" to a.requiredString("sessionId"),
@@ -846,7 +848,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             val target = current[rowId] ?: toolArgError("$label.id '$rowId' is not a current recording row.")
             val args = ToolArgs(row)
             val edit = RecordedPerformerEdit(
-                stepKind = args.enum("kind", StepKind.entries),
+                stepKind = args.enum("kind", RECORDING_ROW_KINDS),
                 setScript = args.hasKey("script"),
                 script = if (args.hasKey("script")) parseStepScript(args, noStep, label) else null,
                 manualCompletion = args.enum("manualCompletion", ManualCompletion.entries),
@@ -870,7 +872,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             action = action,
             expected = expected,
             authorAdded = true,
-            stepKind = a.enum("kind", StepKind.entries) ?: StepKind.AGENT,
+            stepKind = a.enum("kind", RECORDING_ROW_KINDS) ?: StepKind.AGENT,
             script = if (a.hasKey("script")) parseStepScript(a, noStep, "script") else null,
             manualCompletion = a.enum("manualCompletion", ManualCompletion.entries) ?: ManualCompletion.TESTER_OR_CHECKS,
             checks = a.objects("checks")?.let { parseChecks(it, IdAllocator(), "checks") }.orEmpty(),

@@ -222,7 +222,7 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "test_lane_tool_call",
-        "Drive an \"external\" lane yourself: run one lane tool (get_current_step, take_screenshot, dump_ui_tree, tap, swipe, press_key, " +
+        "Drive an \"external\" lane yourself: run one lane tool (get_current_step, take_screenshot, dump_ui_tree, tap, swipe, press_key, gesture, " +
             "open_system_panel, rotate_device, input_text, launch_app, open_url, wait_for_log, read_log_since_step, report_observation, " +
             "finish_step, or a script tool) " +
             "against the lane's current step. Call get_current_step first, act, then finish_step; its answer names the next step. " +

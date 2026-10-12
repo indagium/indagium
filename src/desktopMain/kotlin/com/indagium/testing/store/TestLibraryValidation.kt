@@ -1,16 +1,19 @@
 package com.indagium.testing.store
 
 import com.indagium.debug.requireValidAndroidPackageName
+import com.indagium.testing.device.replayEligibilityProblem
 import com.indagium.testing.model.MAX_STEP_CONDITION_CHARS
 import com.indagium.testing.model.MAX_STEP_PRECONDITION_CHARS
 import com.indagium.testing.model.MAX_STEP_RETRIES
 import com.indagium.testing.model.MAX_TAG_CHARS
 import com.indagium.testing.model.ManualCompletion
+import com.indagium.testing.model.ScreenshotRole
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
@@ -80,12 +83,24 @@ private fun validateDuration(label: String, value: Long): String? =
  * step and must accept its arguments; without it only the step's own shape is checked (a draft is checked before it has a library).
  */
 internal fun validateStep(step: TestStep, scripts: List<TestScript>? = null): String? =
-    validateStepSettings(step) ?: validateStepCondition(step) ?: validateStepKind(step, scripts) ?: step.checks.firstNotNullOfOrNull { validateCheck(it) }
+    validateStepSettings(step) ?: validateStepCondition(step) ?: validateStepKind(step, scripts)
+        ?: step.checks.firstNotNullOfOrNull { check ->
+            validateCheck(check) ?: if (check is StepCheck.ScreenJudge && check.exampleRef != null &&
+                !step.examples.hasExpectedComparisonExample(check.exampleRef)
+            ) "A screen-judge comparison must name an attached log or expected screenshot; recorded before/after screenshots are references." else null
+        }
+
+private fun List<StepExample>.hasExpectedComparisonExample(ref: String): Boolean =
+    any { it.id == ref && (it !is StepExample.GoldenScreenshot || it.role == ScreenshotRole.EXPECTED) }
 
 private fun validateStepKind(step: TestStep, scripts: List<TestScript>?): String? {
     val call = step.script
     return when (step.kind) {
         StepKind.AGENT -> if (call != null) "Only manual and script steps run a script." else null
+        StepKind.REPLAY -> when {
+            call != null -> "Only manual and script steps run a script."
+            else -> step.replayEligibilityProblem()
+        }
         StepKind.SCRIPT -> when {
             call == null -> "A script step needs a script."
             step.optional -> "Only an AI step can be optional."

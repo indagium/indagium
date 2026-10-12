@@ -11,6 +11,8 @@ import com.indagium.capture.withMirrorMode
 import com.indagium.debug.BoundedDeviceScreenImage
 import com.indagium.debug.DEVICE_KEY_CODES
 import com.indagium.debug.DeviceScreenCoordinateSpace
+import com.indagium.debug.SWIPE_DURATION_MAX_MS
+import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.debug.mapDisplayedScreenCoordinatesToDevice
 import com.indagium.debug.requireDeviceSwipe
@@ -76,6 +78,16 @@ internal sealed interface DeviceInputAction {
     data class Key(val key: String, override val delayMs: Long = 0L) : DeviceInputAction {
         override val tool: String = "press_key"
     }
+
+    /** A finger following [points] (screenshot pixels, times in ms from touch-down) with its timing; see GestureScript.kt. */
+    data class Gesture(val points: List<GesturePoint>, override val delayMs: Long = 0L) : DeviceInputAction {
+        override val tool: String = "gesture"
+    }
+
+    /** The notification shade or quick settings opened, or either closed (`cmd statusbar`), as a replay needs them. */
+    data class Panel(val panel: SystemPanel, override val delayMs: Long = 0L) : DeviceInputAction {
+        override val tool: String = "open_system_panel"
+    }
 }
 
 internal data class DeviceInputActionResult(
@@ -106,6 +118,8 @@ private const val DEFAULT_LOG_READ_ROWS = 100
 private const val MAX_LOG_READ_ROWS = 500
 private const val MAX_LOG_SCAN_BYTES = 16L * 1024 * 1024
 private const val DEFAULT_SWIPE_MS = 350
+private const val MAX_REPLAY_ACTIONS = 100
+private const val MAX_REPLAY_DELAY_MS = 10_000L
 private const val LIVE_CAPTURE_REFUSAL = "is held by the live capture in the main window; stop that capture or choose another device."
 
 /** The system panels a lane can open or close with `cmd statusbar`; [command] is the fixed sub-command, [toolValue] what the agent passes. */
@@ -347,10 +361,9 @@ internal class TestDeviceSession private constructor(
             val actionStarted = System.nanoTime()
             var result: DeviceInputActionResult
             try {
-                val command = inputCommand(action, current)
                 interruptionReason = "Cancelled while action ${index + 1} was running."
-                runInputLocked(command)
-                result = DeviceInputActionResult(action.tool, true, durationMs = elapsedDurationMs(actionStarted))
+                val detail = runActionLocked(action, current)
+                result = DeviceInputActionResult(action.tool, true, detail, durationMs = elapsedDurationMs(actionStarted))
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
                 result = DeviceInputActionResult(action.tool, false, "Cancelled while this input was running.", elapsedDurationMs(actionStarted))
                 results += result
@@ -394,7 +407,152 @@ internal class TestDeviceSession private constructor(
 
     private fun elapsedDurationMs(started: Long): Long = ((System.nanoTime() - started) / NANOS_PER_MILLISECOND).coerceAtLeast(0L)
 
-    private fun validateInputAction(action: DeviceInputAction, current: DeviceScreenCoordinateSpace) {
+    /** Runs one validated action under the input lock; a gesture returns a note when it had to be approximated. */
+    private suspend fun runActionLocked(action: DeviceInputAction, current: DeviceScreenCoordinateSpace): String? =
+        if (action is DeviceInputAction.Gesture) {
+            playGestureLocked(action.points, current).note
+        } else {
+            runInputLocked(inputCommand(action, current))
+            null
+        }
+
+    /**
+     * Plays a recorded or planned input list in order under one input lock, WITHOUT a final screenshot and without the 8-action and
+     * 2-second limits of [performInputSequence]: each action's [DeviceInputAction.delayMs] is the pause after it (up to
+     * [MAX_REPLAY_DELAY_MS]), so a recorded rhythm survives. Stops at the first failing action. Every action is validated first, so
+     * nothing is injected when one is out of the screen. [onActionResult] hears each result as it happens.
+     */
+    @Suppress("TooGenericExceptionCaught") // adb adapters report device-specific input failures through several exception types.
+    suspend fun performReplay(
+        actions: List<DeviceInputAction>,
+        onActionResult: (index: Int, result: DeviceInputActionResult) -> Unit = { _, _ -> },
+    ): List<DeviceInputActionResult> = inputLock.withLock {
+        require(actions.size in 1..MAX_REPLAY_ACTIONS) { "A replay must contain 1 to $MAX_REPLAY_ACTIONS actions." }
+        val current = currentSpace()
+        actions.forEach { action -> validateInputAction(action, current, MAX_REPLAY_DELAY_MS) }
+        val results = ArrayList<DeviceInputActionResult>(actions.size)
+        for ((index, action) in actions.withIndex()) {
+            val started = System.nanoTime()
+            val result = try {
+                val detail = runActionLocked(action, current)
+                DeviceInputActionResult(action.tool, true, detail, elapsedDurationMs(started))
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                DeviceInputActionResult(action.tool, false, failure.message ?: "Device input failed.", elapsedDurationMs(started))
+            }
+            results += result
+            onActionResult(index + 1, result)
+            if (!result.succeeded) break
+            if (action.delayMs > 0) delay(action.delayMs)
+        }
+        results
+    }
+
+    /** The coordinate space of the latest screenshot (one is taken first when there is none): what normalized positions are scaled into. */
+    suspend fun screenSpace(): DeviceScreenCoordinateSpace = currentSpace()
+
+    // ── Gestures ─────────────────────────────────────────────────────
+
+    @Volatile
+    private var motionEventSupport: Boolean? = null
+
+    /** The Android API level read for the gesture decision; null before the first gesture or when the device would not say. */
+    @Volatile
+    var androidApiLevel: Int? = null
+        private set
+
+    /**
+     * Follows [points] (pixels of the latest screenshot, times in ms from touch-down; the first at 0) with their timing: the finger goes
+     * down at the first, is at each point at its time and lifts at the last. Android 10 and newer (`input motionevent`) reproduce the
+     * path and the hold before the lift; an older device gets a straight `input swipe` from the first to the last point over the whole
+     * time, and the result says so ([GesturePlayResult.mode], [GesturePlayResult.note]).
+     */
+    suspend fun gesture(points: List<GesturePoint>): GesturePlayResult {
+        val current = currentSpace()
+        validateInputAction(DeviceInputAction.Gesture(points), current)
+        return inputLock.withLock { playGestureLocked(points, current) }
+    }
+
+    private suspend fun motionEventsSupported(): Boolean {
+        motionEventSupport?.let { return it }
+        val result = adb(listOf("shell", "getprop", "ro.build.version.sdk"), INPUT_TIMEOUT_SECONDS)
+        val sdk = if (!result.timedOut && result.exitCode == 0) parseSdkLevel(result.stdoutText()) else null
+        androidApiLevel = sdk
+        // An answer that cannot be read is not a reason to refuse: try, and the output check of the run itself catches an old device.
+        return (sdk == null || sdk >= MOTION_EVENT_MIN_API).also { motionEventSupport = it }
+    }
+
+    @Suppress("TooGenericExceptionCaught") // A gesture must always try to lift the finger again, whatever failed.
+    private suspend fun playGestureLocked(points: List<GesturePoint>, current: DeviceScreenCoordinateSpace): GesturePlayResult {
+        val device = points.map { point ->
+            mapDisplayedScreenCoordinatesToDevice(point.x, point.y, current).let { (x, y) -> GesturePoint(x, y, point.tMs) }
+        }
+        val duration = device.last().tMs
+        val hold = gestureHoldMs(device)
+        if (!motionEventsSupported()) {
+            val why = "Android API ${androidApiLevel ?: "?"} has no `input motionevent` (it needs API $MOTION_EVENT_MIN_API)"
+            return swipeFallbackLocked(points, device, hold, why)
+        }
+        val script = gestureShellScript(device)
+        val result = try {
+            adb(listOf("shell", script), gestureTimeoutSeconds(device))
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            liftFingerAfterInterruption(device)
+            throw cancelled
+        } catch (failure: Exception) {
+            liftFingerAfterInterruption(device)
+            throw failure
+        }
+        if (result.timedOut) {
+            liftFingerAfterInterruption(device)
+            error("The bounded adb gesture command timed out")
+        }
+        val output = (result.stdoutText() + "\n" + result.stderrText()).trim()
+        if (mayFallbackAfterMotionScript(output)) {
+            motionEventSupport = false
+            return swipeFallbackLocked(points, device, hold, "this device does not know `input motionevent`")
+        }
+        if (looksLikeMotionEventUnsupported(output)) {
+            liftFingerAfterInterruption(device)
+            error("A device rejected a motion event after touch-down; the gesture was not retried to avoid a second action.")
+        }
+        if (result.exitCode != 0) {
+            liftFingerAfterInterruption(device)
+            error("adb device input failed: ${output.take(ADB_ERROR_MESSAGE_MAX_CHARS)}")
+        }
+        return GesturePlayResult(points, device, GestureMode.MOTION_EVENTS, duration, hold)
+    }
+
+    private suspend fun swipeFallbackLocked(
+        points: List<GesturePoint>,
+        device: List<GesturePoint>,
+        hold: Long,
+        why: String,
+    ): GesturePlayResult {
+        runInputLocked(gestureSwipeFallback(device, SWIPE_DURATION_MIN_MS, SWIPE_DURATION_MAX_MS))
+        val lost = if (device.size > 2 || hold > 0L) {
+            "; the intermediate points, the timing along the path and the hold before release were not reproduced"
+        } else {
+            ""
+        }
+        val swipeMs = device.last().tMs.coerceIn(SWIPE_DURATION_MIN_MS.toLong(), SWIPE_DURATION_MAX_MS.toLong())
+        val note = "Fallback: $why, so the gesture was approximated by a straight `input swipe` from its first to its last point over $swipeMs ms$lost."
+        return GesturePlayResult(points, device, GestureMode.SWIPE_FALLBACK, device.last().tMs, hold, note)
+    }
+
+    /** Best effort, never throws: a gesture that was interrupted may have left the finger down; a CANCEL puts it up again. */
+    private suspend fun liftFingerAfterInterruption(device: List<GesturePoint>) {
+        withContext(NonCancellable) {
+            runCatching { adb(listOf("shell") + gestureCancelCommand(device.last()), INPUT_TIMEOUT_SECONDS) }
+        }
+    }
+
+    private fun validateInputAction(
+        action: DeviceInputAction,
+        current: DeviceScreenCoordinateSpace,
+        maxDelayMs: Long = MAX_SEQUENCE_ACTION_DELAY_MS,
+    ) {
         fun point(x: Int, y: Int) {
             require(x in 0 until current.imageWidth && y in 0 until current.imageHeight) {
                 "Input coordinates must be inside the current screenshot (${current.imageWidth}x${current.imageHeight})."
@@ -410,9 +568,14 @@ internal class TestDeviceSession private constructor(
             is DeviceInputAction.Key -> require(DEVICE_KEY_CODES.containsKey(action.key.trim().uppercase())) {
                 "Supported keys are ${DEVICE_KEY_CODES.keys.joinToString(", ")}."
             }
+            is DeviceInputAction.Gesture -> {
+                action.points.forEach { point(it.x, it.y) }
+                gestureProblem(action.points)?.let { throw IllegalArgumentException(it) }
+            }
+            is DeviceInputAction.Panel -> Unit
         }
-        require(action.delayMs in 0L..MAX_SEQUENCE_ACTION_DELAY_MS) {
-            "Each input sequence delay must be between 0 and $MAX_SEQUENCE_ACTION_DELAY_MS ms."
+        require(action.delayMs in 0L..maxDelayMs) {
+            "Each input delay must be between 0 and $maxDelayMs ms."
         }
     }
 
@@ -426,6 +589,8 @@ internal class TestDeviceSession private constructor(
             listOf("input", "swipe", x1.toString(), y1.toString(), x2.toString(), y2.toString(), action.durationMs.toString())
         }
         is DeviceInputAction.Key -> listOf("input", "keyevent", DEVICE_KEY_CODES.getValue(action.key.trim().uppercase()))
+        is DeviceInputAction.Panel -> listOf("cmd", "statusbar", action.panel.command)
+        is DeviceInputAction.Gesture -> throw IllegalArgumentException("A gesture is played by playGestureLocked, not as one command.")
     }
 
     /** A bounded uiautomator read for wait_for_ui; timeout/error is distinct from a successful tree with no selector. */

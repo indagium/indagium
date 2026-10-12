@@ -4,6 +4,7 @@ import com.indagium.edition.Edition
 import com.indagium.testing.device.KNOWN_DEVICE_STATE_KEYS
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.RECORDING_ROW_KINDS
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
@@ -23,6 +24,7 @@ import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 
 private val ON_FAILURE_NAMES = OnFailure.entries.map { it.name }
 private val STEP_KIND_NAMES = StepKind.entries.map { it.name }
+private val RECORDING_ROW_KIND_NAMES = RECORDING_ROW_KINDS.map { it.name }
 private val MANUAL_COMPLETION_NAMES = ManualCompletion.entries.map { it.name }
 private val STEP_INTENT_NAMES = StepIntent.entries.map { it.wire }
 private val SCRIPT_TARGET_NAMES = ScriptTarget.entries.map { it.name }
@@ -40,7 +42,9 @@ private val RECORDING_STEP_FIELDS = listOf(
 
 private const val STEP_KIND_DESCRIPTION =
     "Who performs the step: AGENT (default, an AI agent or the external client on the device), MANUAL (a tester does it by hand while " +
-        "the lane waits; action holds the instructions, default timeout 10 minutes) or SCRIPT (the run runs a library script, no AI)."
+        "the lane waits; action holds the instructions, default timeout 10 minutes), SCRIPT (the run runs a library script, no AI) or " +
+        "REPLAY (the run injects the step's recorded input exactly, with its path, timing and gaps, no AI decides where to tap; only a step " +
+        "made by applying a recording has recorded input, which update_test_step keeps; the expected result is still checked and judged)."
 private const val STEP_SCRIPT_DESCRIPTION =
     "A library script call { scriptId, args?, exitCode? (default 0, null accepts any), stdoutContains? }: required for kind SCRIPT, the " +
         "optional automation alternative of a MANUAL step. The script must exist and not be limited to setup and teardown. Send null to clear."
@@ -136,7 +140,7 @@ private const val RECORDING_PERFORMER_NOTE =
 private val RECORDING_UPDATE_ITEM_SCHEMA = ObjectArrayItemSchema(
     props = RECORDING_STEP_FIELDS + listOf("kind" to "string", "script" to "object", "manualCompletion" to "string", "checks" to "array"),
     required = listOf("action", "expected"),
-    enums = mapOf("kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
+    enums = mapOf("kind" to RECORDING_ROW_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
     descriptions = mapOf(
         "kind" to STEP_KIND_DESCRIPTION + RECORDING_PERFORMER_NOTE,
         "script" to STEP_SCRIPT_DESCRIPTION,
@@ -566,7 +570,7 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "sessionId" to "string", "index" to "integer", "action" to "string", "expected" to "string",
             "kind" to "string", "script" to "object", "manualCompletion" to "string", "checks" to "array",
             required = listOf("sessionId", "index", "action"),
-            enums = mapOf("kind" to STEP_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
+            enums = mapOf("kind" to RECORDING_ROW_KIND_NAMES, "manualCompletion" to MANUAL_COMPLETION_NAMES),
             descriptions = mapOf(
                 "index" to "Where the row goes, from 0 to the current number of rows.",
                 "action" to "What the tester does; must not be blank. For a MANUAL step these are the tester's instructions.",
@@ -608,9 +612,13 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "insertAsNew=true inserts the steps at index instead (the old ones stay). With \"Keep recording evidence with recorded cases\" on, " +
             "a new recording also saves its evidence. Asks for confirmation.",
         schema(
-            "sessionId" to "string", "steps" to "array", "index" to "integer", "insertAsNew" to "boolean",
+            "sessionId" to "string", "steps" to "array", "index" to "integer", "insertAsNew" to "boolean", "asReplay" to "boolean",
             required = listOf("sessionId", "steps"),
-            descriptions = mapOf("insertAsNew" to "Only for a reopened recording whose earlier steps cannot be replaced: insert the steps as new ones."),
+            descriptions = mapOf(
+                "insertAsNew" to "Only for a reopened recording whose earlier steps cannot be replaced: insert the steps as new ones.",
+                "asReplay" to "Make every step that can be replayed (taps, swipes with their timing, keys, panels; not typed text, rotation, optional " +
+                    "or precondition steps) a REPLAY step that injects its recorded input exactly instead of asking an AI agent. Default false.",
+            ),
             objectArrays = mapOf(
                 "steps" to ObjectArrayItemSchema(
                     RECORDING_STEP_FIELDS,

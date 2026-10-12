@@ -1305,14 +1305,16 @@ panel stacks below the editor.
 4. **When it fails** decides what happens once the retries are used up: *Stop the case*, *Continue*,
    *Create issue, continue* (a draft issue is made for you) or *Pause for me* (the run waits and you choose
    retry, continue or stop).
-5. **Who performs a step.** Open a step and choose **AI step** (the default), **Manual** or **Script** under
-   *Performed by* (see the next section). A suite that uses a manual or script step is saved in a newer file version:
+5. **Who performs a step.** Open a step and choose **AI step** (the default), **Manual**, **Script** or
+   **Replay** under *Performed by*. Replay is available when the step has supported recorded input.
+   A suite that uses these newer step kinds is saved in a newer file version:
    an older Indagium opens it read-only instead of giving "plug in the USB device" to an AI agent.
 
-### Manual and script steps
+### Manual, script and replay steps
 
 Some things in a test are not for an AI agent: plugging a USB device into the phone, switching a hub on or off,
-pairing a headset. Two more kinds of step cover them. No AI agent is started for either kind.
+pairing a headset. Manual and script steps cover them; replay steps reproduce input recorded from a device.
+No AI agent is started for these steps.
 
 - **Script.** The run itself runs a library script on this step. Pick it from the list, fill in a field for each of
   the script's parameters, and say what you expect: an exit code (default `0`, empty for any) and, optionally, text
@@ -1329,6 +1331,14 @@ pairing a headset. Two more kinds of step cover them. No AI agent is started for
   its checks** (whichever comes first). A manual step an automation script can do instead has an optional
   **Automation script**. If nobody answers in time the step fails as *not confirmed* and the report blames the step or
   the run, never the app. A manual step is not retried.
+- **Replay recorded input.** The run injects the step's recorded taps, timed gesture paths, keys and system-panel actions
+  in order, then runs its checks and the configured judge. A gesture keeps its hold before release, so a swipe-and-hold
+  remains distinct from a quick swipe. Coordinates scale to the current screenshot; a different screen shape is refused
+  because it can move the target. Start from the same app and layout as the recording. Recorded pauses are bounded to
+  five seconds between inputs and three seconds for settling. Android versions without motion-event input use a plain
+  swipe approximation and report that limitation. Shell input timing can differ from the recording. Replay steps default
+  to no retries; enable retries only when repeating the input is appropriate. Typed text, withheld password input,
+  rotation, conditions and ensure-state steps remain AI steps when applying a recording as replay.
 - **Device state** is a check for any step: a property of the device must match your regular expression within a time:
   `usb.devices` (one `vvvv:pppp name` line for every USB device attached to the phone, for example `0781:5581`),
   `bt.enabled`, `wifi.enabled`, `airplane` and `mobile_data` (`true` or `false`), `bt.connected` (the connected Bluetooth
@@ -1338,7 +1348,7 @@ pairing a headset. Two more kinds of step cover them. No AI agent is started for
   turns). The Bluetooth and audio readings are best effort and depend on the Android version. Indagium asks the device
   with one short `adb` command per reading. An unknown property fails the check and the message lists the supported ones.
 
-In a case that mixes kinds the lane's AI agent does its own steps; when the next step is a manual or script step the
+In a case that mixes kinds the lane's AI agent does its own steps; when the next step is a manual, script or replay step the
 run does it, and the agent is started again at the following AI step with a summary of what happened. In the
 **Run suite** dialog a suite with manual steps shows *Manual steps*: **use the script when there is one, otherwise wait
 for the tester** (the default), **always wait for the tester**, or **skip manual steps** (they are reported as skipped
@@ -1355,8 +1365,8 @@ case to reorder the cases of its suite; `Alt+↑` / `Alt+↓` on a focused case 
 
 ### Checks and examples
 
-A step with examples shows its **Examples** section open and, under its title, a strip of thumbnails of its golden
-screenshots (click one to jump to it). Closing Examples affects only that step. A step made by a recording with
+A step with examples shows its **Examples** section open and, under its title, a strip of screenshot thumbnails
+(click one to jump to it). **Screen** in the step list indicates attached screen references. Closing Examples affects only that step. A step made by a recording with
 *Keep recording evidence* on also shows **Recorded screens**, the stored before / after image.
 
 A step can carry **checks** that are verified without trusting the agent:
@@ -1415,8 +1425,10 @@ media play/pause), `open_system_panel` (notification shade, quick settings, clos
 run is undone when the lane ends. Screenshots with a clean capture interval are labeled as verified
 before/after evidence; a mirror preview with uncertain timing is still available as a raw
 preview but is not treated as either side automatically. An AI rewrite can leave a step for review when it cannot identify
-a tap target or expected result; fill the expected result before applying. Captured images become expected-reference
-examples only if you explicitly opt in while reviewing. Add explicit judge checks separately when you want the judge to
+a tap target or expected result; fill the expected result before applying. Eligible before/after images are attached as
+recorded screen references when you apply, even when full recording retention is off. They help the agent identify the
+specific control and the judge understand the transition; they do not assert that the recorded result was correct.
+A settled after image becomes an expected screenshot only if you explicitly opt in while reviewing. Add explicit judge checks separately when you want the judge to
 evaluate a screen. **Insert shared steps** copies a selected sequence at the chosen
 position with fresh IDs, so later edits are independent; missing referenced images are reported. **Paste log lines**
 parses tag/message pairs into literal, regex-escaped log checks with the default wait duration. Edit the checks and
@@ -1492,12 +1504,24 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    added to the case until you press **Apply recorded steps**. It stays disabled until every required step has an expected
    result and every optional step has a condition.
 
-Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", with the original taps so
-the agent that runs the case has the precise gesture when a label is ambiguous. An MCP client does the same with
+Rewritten actions name the supported goal, such as "Open YouTube". Recorded coordinates belong in the reference hint;
+they do not replace that action. A model-generated coordinate-only action requires review, even when it includes an expected result.
+Applied steps carry a reference note, "Recorded input (hint; prefer what is on screen)", and structured input with
+gesture timing. The agent uses the recorded screens and coordinates to distinguish controls such as a Wi-Fi toggle icon
+from its label or tile, then checks the current layout before acting. Rewritten actions preserve that distinction and
+describe a swipe-and-hold separately from a quick swipe when the evidence supports it. **Apply as replay steps** converts
+eligible rows to replay steps; the review explains how many can be converted. An MCP client does the same with
 `rewrite_test_recording` and `restore_test_recording_raw`, and can reorder rows with `update_test_recording` (send every
 row id in the new order) or add one with `insert_test_recording_row`. `get_test_recording` shows each step's `stateChanges`
 and the detected external events (`inputKind` EXTERNAL); `update_test_recording` and `insert_test_recording_row` can set a
 step's `kind` (manual or script), `script`, `manualCompletion` and `checks`.
+
+For AI steps, an ordinary straight scroll uses a swipe when that fulfills the action. Timed gesture input is used when the path,
+speed changes or hold matter. Explicit Replay steps continue to replay the recorded input.
+
+For steps applied by an older version, reopen a retained recording and apply it again to attach the available screen
+references and structured input. Older recordings without per-point timestamps use estimated timing; record again to
+capture the original end hold. Screens that were not retained cannot be recovered from those older steps.
 
 Recorded target hints distinguish the specific element under the touch from its clickable ancestors and preserve normalized
 coordinates, path, duration, screen orientation and target geometry. They are device observations; the agent must match the
@@ -1599,8 +1623,9 @@ Press **Start**. The **Runs** screen opens on the new run with a **Live** view: 
 bounded recent logcat, current step and progress, persisted tool activity, the judge feed, **Pause all** (lanes stop
 at the next step boundary) and **Stop**. Screenshot capture and deterministic checks share the step execution
 deadline; the blind judge has a separate 60-second allowance. Each lane and case repeat has its own paid-call budget shared across the case's steps, retries and agent
-restarts. It counts agent and external-lane dispatch attempts, including failed executions; free protocol calls
-remain available to report the step, but exhaustion ends that case with an actionable error. When screenshots are kept or a judge is
+restarts. It counts agent and external-lane dispatch attempts, including failed executions. Reading saved step
+examples and protocol calls do not spend the case or step allowance; example reads still obey tool permissions and the step deadline.
+Exhaustion ends that case with an actionable error. When screenshots are kept or a judge is
 enabled, each attempt captures a fresh start screen immediately before its first device mutation, and retries capture again. Playback-related
 steps attempt to capture up to three end samples about 500 ms apart within the execution allowance, because a single frame cannot prove
 playback is paused or resumed; successful earlier samples remain available if time runs out. Screenshot files are saved only when

@@ -157,8 +157,11 @@ val RunConfig.judgeActive: Boolean get() = judge != JudgeMode.OFF && !judgeProfi
 
 enum class StepStatus { PASS, FAIL, BLOCKED, TIMEOUT, SKIPPED, ERROR }
 
-/** Who or what finished a step, for the report: the AI agent, the tester, the step's checks turning true, a script, or nobody (skipped). */
-enum class StepCompletion { AGENT, TESTER, CHECKS, SCRIPT, SKIPPED }
+/**
+ * Who or what finished a step, for the report: the AI agent, the tester, the step's checks turning true, a script, or nobody (skipped).
+ * REPLAY: the run injected the step's recorded input itself (appended last; an older build reads it as "unknown").
+ */
+enum class StepCompletion { AGENT, TESTER, CHECKS, SCRIPT, SKIPPED, REPLAY }
 
 enum class CaseStatus { PASS, FAIL, BLOCKED, SKIPPED, CANCELLED, ERROR }
 
@@ -473,6 +476,7 @@ fun StepResult.kindLabel(): String? = when (kind) {
     StepKind.AGENT -> null
     StepKind.MANUAL -> "Manual step"
     StepKind.SCRIPT -> "Script step"
+    StepKind.REPLAY -> "Replay step"
 }
 
 /** How a manual or script step was finished, in a few words ("confirmed by the tester"), or null when that is not known or not applicable. */
@@ -481,6 +485,7 @@ fun StepResult.completionLabel(): String? = when {
     completedBy == StepCompletion.TESTER -> "confirmed by the tester"
     completedBy == StepCompletion.CHECKS -> "detected by its checks"
     completedBy == StepCompletion.SCRIPT -> "done by a script"
+    completedBy == StepCompletion.REPLAY -> "recorded input replayed"
     completedBy == StepCompletion.SKIPPED -> "skipped"
     status == StepStatus.TIMEOUT && kind == StepKind.MANUAL -> "not confirmed"
     else -> null

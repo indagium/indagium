@@ -616,6 +616,9 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     // What applying a reopened recording does to the steps it made earlier; recomputed whenever the case changes.
     val replacement = remember(case.steps.map { it.id }, session.id) { ui.state.reopenedReplacementPlan(session.id) }
     val keepEvidence = ui.state.settings.testing.keepRecordingEvidence && reopened == null
+    // "Apply as replay steps": steps made from replayable taps, swipes, keys and panels inject their recorded input themselves.
+    var asReplay by remember(session.id) { mutableStateOf(false) }
+    val replayable = remember(snapshot.steps, snapshot.active) { if (snapshot.active) 0 else session.replayableRowCount() }
 
     fun applyRecorded(insertAsNew: Boolean) {
         working = true
@@ -630,6 +633,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     reviewed.map { it.id },
                     reviewed.associate { it.id to (it.optional to it.condition) },
                     insertAsNew,
+                    asReplay = asReplay && replayable > 0,
                 )) {
                     is StoreResult.Ok -> { ui.report(result); onDismiss() }
                     else -> error = result.userMessage()
@@ -804,6 +808,12 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         error?.let { TestsErrorText(it) }
         if (!snapshot.active) {
             if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
+            if (snapshot.steps.isNotEmpty()) {
+                CheckRow(checked = asReplay && replayable > 0, onToggle = { asReplay = !asReplay }, enabled = editable && replayable > 0) {
+                    AppText(APPLY_AS_REPLAY_LABEL, color = tc.ts, fontSize = 10.sp)
+                }
+                TestsHint(replayOptionHint(replayable, snapshot.steps.size))
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id) && !rewriting, variant = ButtonVariant.Ghost)
                 val insertInstead = reopened != null && replacement is ReplacementPlan.Ambiguous
@@ -823,6 +833,17 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         }
     }
 }
+
+internal const val APPLY_AS_REPLAY_LABEL = "Apply as replay steps"
+
+/** What the replay option does for this recording, in one sentence. */
+internal fun replayOptionHint(replayable: Int, steps: Int): String =
+    if (replayable > 0) {
+        "$replayable of $steps step(s) can be replayed: they inject their recorded taps, gesture paths and timing, keys and panels " +
+            "without an AI agent; the judge still checks their expected result. The others stay AI steps."
+    } else {
+        "No step can be replayed (typed text, rotation, an optional or precondition step, or input withheld for a password); all stay AI steps."
+    }
 
 /** What a reopened recording says about itself: where it came from, what was left out, and which steps applying it replaces. */
 @Composable

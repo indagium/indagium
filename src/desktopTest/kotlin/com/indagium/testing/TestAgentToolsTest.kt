@@ -108,7 +108,7 @@ class TestAgentToolsTest {
         assertEquals(BUILT_IN_NAMES, lane.names().toSet(), "built-in lane tools match the names scripts may not take")
         val global = MCP_TOOLS.map { it.name }.toSet()
         assertTrue(lane.names().none { it in global }, "no lane tool is a global tool: ${lane.names().filter { it in global }}")
-        assertEquals(19, lane.names().size)
+        assertEquals(20, lane.names().size)
     }
 
     @Test

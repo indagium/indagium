@@ -222,6 +222,8 @@ private fun pointJson(point: RecordedPoint): JsonObject = buildJsonObject {
     put("y", point.y)
     put("screenWidth", point.screenWidth)
     put("screenHeight", point.screenHeight)
+    // Appended last, only when known: an older build ignores it, a recording stored before it decodes as "unknown".
+    if (point.tMs >= 0L) put("tMs", point.tMs)
 }
 
 private fun uiTargetJson(target: RecordedUiTarget): JsonObject = buildJsonObject {
@@ -273,6 +275,7 @@ private fun rowJson(row: RecordedTestStep, images: RecordingImageStore): JsonObj
     row.targetOrientationQuarterTurns?.let { put("targetOrientationQuarterTurns", it) }
     row.touchWithinTarget?.let { put("touchWithinTarget", buildJsonObject { put("x", it.x); put("y", it.y) }) }
     row.kind?.let { put("kind", it.name) }
+    row.keyName?.let { put("keyName", it) }
     put("inputAtMs", row.inputAtMs)
     put("inputStartMs", row.inputStartMs)
     if (row.sourceInputIds.isNotEmpty()) put("sourceInputIds", buildJsonArray { row.sourceInputIds.forEach { add(JsonPrimitive(it)) } })
@@ -435,7 +438,8 @@ private fun decodeState(o: JsonObject, images: RecordingImageStore) = RecordingS
 private fun decodeScreenRef(o: JsonObject?): RecordingScreenRef? =
     o?.let { RecordingScreenRef(it.int("seq", 0), it.optStr("packageName"), it.optStr("activity")) }
 
-private fun decodePoint(o: JsonObject) = RecordedPoint(o.int("x", 0), o.int("y", 0), o.int("screenWidth", 0), o.int("screenHeight", 0))
+private fun decodePoint(o: JsonObject) =
+    RecordedPoint(o.int("x", 0), o.int("y", 0), o.int("screenWidth", 0), o.int("screenHeight", 0), o.long("tMs", UNKNOWN_POINT_TIME_MS))
 
 private fun decodeUiTarget(o: JsonObject) = RecordedUiTarget(
     text = o.str("text").take(MAX_TARGET_LABEL_CHARS),
@@ -487,6 +491,7 @@ private fun decodeRow(o: JsonObject, context: DecodeContext): RecordedTestStep {
             if (x != null && y != null && x in 0.0..1.0 && y in 0.0..1.0) com.indagium.testing.model.NormalizedGesturePoint(x, y) else null
         },
         kind = kind,
+        keyName = o.optStr("keyName"),
         inputAtMs = o.long("inputAtMs", 0L),
         inputStartMs = o.long("inputStartMs", 0L),
         sourceInputIds = o.strings("sourceInputIds"),

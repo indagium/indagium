@@ -27,7 +27,7 @@ val RESERVED_SCRIPT_PARAM_NAMES: Set<String> = setOf(
 val RESERVED_SCRIPT_TOOL_NAMES: Set<String> = setOf(
     "get_current_step", "dump_ui_tree", "take_screenshot", "tap", "swipe", "press_key", "open_system_panel", "rotate_device",
     "input_text", "launch_app", "open_url", "wait_for_log", "wait_for_ui", "read_log_since_step", "perform_input_sequence", "report_observation", "finish_step",
-    "list_step_examples", "get_step_example",
+    "list_step_examples", "get_step_example", "gesture",
 )
 
 /** An id that is safe to use as a file name and inside a path. */
@@ -145,7 +145,13 @@ fun TestCase.recordingRefs(): List<String> = steps.mapNotNull { it.recordingRef 
 
 // ── Step kinds ───────────────────────────────────────────────────────
 
-/** The run (not an agent) performs this step: a MANUAL step waits for a tester, a SCRIPT step runs a script. */
+/**
+ * The kinds a recording row you add (or an external event) may take: a replay step needs recorded input, which only a recorded
+ * input has, so REPLAY is never chosen for a row; applying a recording "as replay steps" makes it from the recorded rows.
+ */
+val RECORDING_ROW_KINDS: List<StepKind> = StepKind.entries.filter { it != StepKind.REPLAY }
+
+/** The run (not an agent) performs this step: a MANUAL step waits for a tester, a SCRIPT step runs a script, a REPLAY step injects its recorded input. */
 val TestStep.isDriverStep: Boolean get() = kind != StepKind.AGENT
 
 /**
@@ -167,14 +173,31 @@ fun TestStep.withKind(newKind: StepKind): TestStep {
     if (newKind == kind) return this
     val timeout = when {
         newKind == StepKind.MANUAL && timeoutMs == DEFAULT_STEP_TIMEOUT_MS -> DEFAULT_MANUAL_STEP_TIMEOUT_MS
+        // A replay takes as long as it was recorded to take; the default allowance must leave room for that and the checks after it.
+        newKind == StepKind.REPLAY && timeoutMs == DEFAULT_STEP_TIMEOUT_MS ->
+            maxOf(DEFAULT_STEP_TIMEOUT_MS, (recordedInput?.estimatedReplayMs() ?: 0L) + REPLAY_TIMEOUT_MARGIN_MS)
         kind == StepKind.MANUAL && timeoutMs == DEFAULT_MANUAL_STEP_TIMEOUT_MS -> DEFAULT_STEP_TIMEOUT_MS
         else -> timeoutMs
+    }
+    // A replay re-injects its inputs, which a toggle would undo: it is not retried unless the author asks for it.
+    val replayRetries = when {
+        newKind == StepKind.REPLAY && retries == DEFAULT_STEP_RETRIES -> 0
+        kind == StepKind.REPLAY && retries == 0 -> DEFAULT_STEP_RETRIES
+        else -> retries
     }
     return copy(
         kind = newKind,
         timeoutMs = timeout,
-        script = script.takeIf { newKind != StepKind.AGENT },
+        retries = replayRetries,
+        script = script.takeIf { newKind == StepKind.MANUAL || newKind == StepKind.SCRIPT },
         optional = optional && newKind == StepKind.AGENT,
         condition = condition.takeIf { newKind == StepKind.AGENT },
     )
 }
+
+private const val REPLAY_TIMEOUT_MARGIN_MS = 30_000L
+
+/** True when a suite file holding this step must be written at the replay version: an older build would hand a REPLAY step to an AI agent. */
+fun TestStep.usesReplay(): Boolean = kind == StepKind.REPLAY
+
+fun TestSuite.usesReplay(): Boolean = cases.any { case -> case.steps.any { it.usesReplay() } }

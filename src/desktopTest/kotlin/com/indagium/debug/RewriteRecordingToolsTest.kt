@@ -10,6 +10,7 @@ import com.indagium.testing.Turn
 import com.indagium.testing.TurnProvider
 import com.indagium.testing.VALID_SHOP_REWRITE
 import com.indagium.testing.authoring.RecordedTestStep
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.recordedShopSession
 import com.indagium.testing.run.LaneAgentFactory
@@ -455,7 +456,8 @@ class RewriteRecordingToolsTest {
             "steps" to rows.map { mapOf("id" to it["id"], "action" to it["action"], "expected" to it["expected"]) },
         )
         assertNull(applied["error"], applied.toString())
-        val hint = state.testLibrary.suite(suiteId)!!.cases.single { it.id == caseId }.steps.first().examples.single()
+        val hint = state.testLibrary.suite(suiteId)!!.cases.single { it.id == caseId }
+            .steps.first().examples.filterIsInstance<StepExample.ReferenceLog>().single()
         assertEquals("Recorded input (hint; prefer what is on screen)", hint.caption)
     }
 

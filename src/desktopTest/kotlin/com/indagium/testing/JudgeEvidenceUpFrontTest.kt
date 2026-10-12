@@ -184,7 +184,7 @@ class JudgeEvidenceUpFrontTest {
         assertTrue(prompt.contains("I/App(1): started"), "the log excerpt: $prompt")
         assertTrue(prompt.contains("I/App: ready") && prompt.contains("Ready line"), "the reference log text: $prompt")
         assertEquals(listOf(b64(SCREEN), b64(OTHER_SCREEN)), brief.images.map { it.base64 }, "the screen first, then the golden image")
-        assertTrue(prompt.contains("Attached images, in this order:\n1. The screen when the step ended (Lane)\n2. Reference screenshot ex-gold"), prompt)
+        assertTrue(prompt.contains("Attached images, in this order:\n1. The screen when the step ended (Lane)\n2. Expected screenshot ex-gold"), prompt)
         assertTrue(prompt.trimEnd().endsWith("Call submit_verdict now. Use read_step_log only to read a different range of the log."), prompt)
         assertFalse(brief.needsTools)
         assertEquals(1, loaded.get())

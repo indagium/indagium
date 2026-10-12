@@ -1,7 +1,10 @@
 package com.indagium.testing.authoring
 
 import com.indagium.model.AiUsageStats
+import com.indagium.testing.device.replayEligibilityProblem
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.withKind
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
  * What an apply does beyond inserting the reviewed steps at an index (all optional; the default is the plain insert).
  * - [recordingRef] is stamped on every step made ([com.indagium.testing.model.TestStep.recordingRef]).
  * - [replaceStepIds] replaces those steps, in place, instead of inserting (see [planReplacement]).
+ * - [asReplay] makes every step that can be replayed a REPLAY step (it injects its recorded input itself) instead of an AI step; the
+ *   others stay AI steps and the result says how many.
  * - [afterApplied] runs once the steps are in the library, still on the IO thread and while the reviewed rows are frozen; it saves the
  *   recording's evidence and returns warnings for the person. It must not throw for an expected problem.
  */
@@ -21,7 +26,22 @@ internal class RecordingApplyOptions(
     val replaceStepIds: List<String>? = null,
     val afterApplied: ((snapshot: TestStepRecordingSnapshot, inserted: List<TestStep>) -> List<String>)? = null,
     val replaceStepBaseline: List<TestStep>? = null,
-)
+    val asReplay: Boolean = false,
+) {
+    fun withReplay(on: Boolean): RecordingApplyOptions =
+        if (on == asReplay) this else RecordingApplyOptions(recordingRef, replaceStepIds, afterApplied, replaceStepBaseline, on)
+}
+
+/**
+ * [step] as a REPLAY step when it can be one: an AI step with a replayable recorded input, no optional condition (a replay cannot decide
+ * to skip), no stated precondition (a replay cannot establish one) and the perform-action intent (an ensure-state step must look
+ * before it acts). Otherwise [step] unchanged.
+ */
+internal fun asReplayStepOrSame(step: TestStep): TestStep =
+    if (step.canBeReplay()) step.withKind(StepKind.REPLAY) else step
+
+internal fun TestStep.canBeReplay(): Boolean =
+    kind == StepKind.AGENT && replayEligibilityProblem() == null
 
 /** Replaces the steps [replacedIds] of a case with [steps] in one write; see TestLibraryStore.replaceSteps. */
 internal typealias ReplaceStepsWithUsage = (
@@ -31,6 +51,17 @@ internal typealias ReplaceStepsWithUsage = (
     usage: AiUsageStats?,
     baseline: List<TestStep>?,
 ) -> StoreResult<List<TestStep>>
+
+private fun replaySummary(steps: List<TestStep>): List<String> {
+    val replayed = steps.count { it.kind == StepKind.REPLAY }
+    val kept = steps.size - replayed
+    return listOfNotNull(
+        ("$replayed step(s) were applied as replay steps and will inject their recorded path, positions and timing where the device " +
+            "supports it.").takeIf { replayed > 0 },
+        ("$kept step(s) stay AI steps because they cannot be replayed (typed text, rotation, a condition or precondition, or input " +
+            "withheld for a password).").takeIf { kept > 0 },
+    )
+}
 
 /** Shared UI/MCP apply path for a stopped recording. Asset imports are staged and removed if insertion fails. */
 internal class TestStepRecordingApplyService(
@@ -90,7 +121,9 @@ internal class TestStepRecordingApplyService(
                             temporary.delete()
                         }
                     }
-                    val stamped = options.recordingRef?.let { ref -> steps.map { it.copy(recordingRef = ref) } } ?: steps
+                    val shaped = if (options.asReplay) steps.map(::asReplayStepOrSame) else steps
+                    val stamped = options.recordingRef?.let { ref -> shaped.map { it.copy(recordingRef = ref) } } ?: shaped
+                    val replayWarnings = if (options.asReplay) replaySummary(shaped) else emptyList()
                     val replaced = options.replaceStepIds
                     val outcome = when {
                         replaced == null -> insertStepsWithUsage(caseId, stamped, index, snapshot.rewriteUsagePending)
@@ -101,7 +134,7 @@ internal class TestStepRecordingApplyService(
                         is StoreResult.Ok -> {
                             session.markRewriteUsageApplied(snapshot.rewriteAttemptCount)
                             // The steps are in the library now: whatever the evidence save does, the applied screenshots must stay.
-                            val warnings = runCatching { options.afterApplied?.invoke(snapshot, inserted.value).orEmpty() }
+                            val warnings = replayWarnings + runCatching { options.afterApplied?.invoke(snapshot, inserted.value).orEmpty() }
                                 .getOrElse { listOf("The recording's evidence was not saved: ${it.message ?: it::class.simpleName}") }
                             if (warnings.isEmpty()) inserted else StoreResult.Ok(inserted.value, inserted.warnings + warnings)
                         }

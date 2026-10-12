@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
+import com.indagium.testing.model.ScreenshotRole
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestStep
@@ -161,11 +162,14 @@ class TestsStepScreenshotsUiTest {
 
         val screens = assertNotNull(state.recordedStepScreens(suiteId, made[0].recordingRef!!, made[0].id), "the first step has stored screens")
         assertTrue(screens.before!!.contentEquals(SHOP_BEFORE_IMAGE), "its 'before' is the start screen reading's image")
+        assertTrue(made[0].examples.filterIsInstance<StepExample.GoldenScreenshot>().any { it.role == ScreenshotRole.RECORDED_BEFORE })
 
         // At least one recorded step also kept the reading taken after it; it shows both.
         val withAfter = made.first { state.recordedStepScreens(suiteId, it.recordingRef!!, it.id)?.after != null }
         state.testsView.selectedStepId = withAfter.id
         open(suiteId, caseId)
+        assertTrue(withAfter.examples.filterIsInstance<StepExample.GoldenScreenshot>().any { it.role == ScreenshotRole.RECORDED_AFTER })
+        rule.onNodeWithText("Screens", substring = false).assertExists()
         rule.waitUntilAtLeastOneExists(hasText("Recorded screens"), 10_000)
         rule.onNodeWithText("After").assertExists()
         // The fixture images are real JPEGs, so the bounded decoder shows them (otherwise the tile says "no preview").

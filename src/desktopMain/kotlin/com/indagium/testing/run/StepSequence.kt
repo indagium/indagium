@@ -73,8 +73,8 @@ internal const val CASE_BUDGET_EXHAUSTED_NOTE = "The case tool-call budget was e
 // judge sees the evidence only, never the agent's claim. While the run is paused (RunPauseGate) finish_step holds its
 // answer, after the step is recorded, until the run is resumed; the step timer is frozen and restarted meanwhile.
 //
-// A MANUAL or SCRIPT step is performed by the RUN, not by the agent (see DriverStepRunner.kt): the lane driver sees [driverStep] and runs
-// it, then reports the outcome through finishDriverStep. While such a step is current the agent's tools and finish_step are refused,
+// A MANUAL, SCRIPT or REPLAY step is performed by the RUN, not by the agent (see DriverStepRunner.kt): the lane driver sees [driverStep]
+// and runs it, then reports the outcome through finishDriverStep. While such a step is current the agent's tools and finish_step are refused,
 // the watchdog leaves it alone (the driver owns its deadline) and the agent is told, when its finish_step moves the sequence onto
 // one, that the next step is not its own: the driver then restarts an agent segment at the next AGENT step.
 //
@@ -87,9 +87,9 @@ private const val PLAYBACK_SAMPLE_INTERVAL_MS = 500L
 private val PLAYBACK_RELEVANCE = Regex("\\b(play(?:back|ing|ed)?|pause(?:d)?|video|stream(?:ing)?|media)\\b", RegexOption.IGNORE_CASE)
 private const val SCREENSHOT_EXTENSION = "png"
 private const val DRIVER_STEP_MESSAGE =
-    "The app is performing this step itself (a manual or script step); wait for the next step before using device or script tools."
+    "The app is performing this step itself (a manual, script or replay step); wait for the next step before using device or script tools."
 private const val HANDOFF_MESSAGE =
-    "Recorded. The next step is performed by the app, not by you (it is a manual or script step). Stop now and do not call any more " +
+    "Recorded. The next step is performed by the app, not by you (it is a manual, script or replay step). Stop now and do not call any more " +
         "tools; you will be started again for the step after it."
 private const val STEP_PAUSED_MESSAGE = "The run is paused until the user decides what to do with this step; wait."
 private const val CASE_OVER_MESSAGE = "The case is finished. Stop now and do not call any more tools."
@@ -670,19 +670,33 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                     step == null -> null
                     step.isDriverStep -> DRIVER_STEP_MESSAGE
                     finishing.get() || awaitingUser -> "The step is finishing or paused; wait for the next step before using device or script tools."
+                    elapsedMs() >= step.timeoutMs -> "The step execution allowance has expired; do not start another tool call."
+                    tool in LANE_REFERENCE_TOOL_NAMES -> {
+                        // Keep usage/activity accounting and finish ordering, but reference reads spend no action budget.
+                        activePaidDispatches++
+                        paidDispatch = true
+                        null
+                    }
                     tool in LANE_PROTOCOL_TOOL_NAMES && tool != FINISH_STEP_TOOL && toolCalls.get() >= step.maxToolCalls ->
                         STEP_BUDGET_EXHAUSTED_MESSAGE
                     tool in LANE_PROTOCOL_TOOL_NAMES -> null
-                    elapsedMs() >= step.timeoutMs -> "The step execution allowance has expired; do not start another tool call."
                     toolCalls.get() >= step.maxToolCalls -> STEP_BUDGET_EXHAUSTED_MESSAGE
                     tool == "wait_for_ui" && uiRecoveryAttempts >= MAX_UI_RECOVERY_ATTEMPTS ->
                         "This step already used its $MAX_UI_RECOVERY_ATTEMPTS bounded UI-recovery attempts."
                     else -> {
+                        val gestureMs = if (tool == "gesture") plannedGestureMs(arguments) else null
+                        if (gestureMs != null && gestureMs > (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)) {
+                            return ToolAdmission("The requested gesture duration exceeds this step's remaining execution allowance.", false, null, null)
+                        }
                         val cost = if (tool == "perform_input_sequence") {
                             try {
                                 val actions = parseInputSequence(arguments, spec.allowedTools)
                                 plannedDurationMs = actions.sumOf { action ->
-                                    action.delayMs + ((action as? DeviceInputAction.Swipe)?.durationMs ?: 0)
+                                    action.delayMs + when (action) {
+                                        is DeviceInputAction.Swipe -> action.durationMs.toLong()
+                                        is DeviceInputAction.Gesture -> action.points.lastOrNull()?.tMs ?: 0L
+                                        else -> 0L
+                                    }
                                 }
                                 if (plannedDurationMs > (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)) {
                                     return ToolAdmission(
@@ -762,7 +776,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 }
             }
             val remainingMs = remainingExecutionMs(identity)
-            val enforceAttemptDeadline = tool == "perform_input_sequence" || tool == "wait_for_ui"
+            val enforceAttemptDeadline = tool == "perform_input_sequence" || tool == "wait_for_ui" || tool == "gesture"
 
             suspend fun executeWithinAdmission(): AdmittedToolResult {
                 val value = if (mutatesDevice(tool)) {
@@ -898,8 +912,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         env.listener.stepStarted(index + 1, spec.steps[index].action, attempt)
     }
 
+    /** How long a `gesture` call will take, or null when its arguments are not a gesture (the tool itself then explains why). */
+    private fun plannedGestureMs(arguments: Map<String, Any?>): Long? = runCatching { parseGesturePoints(arguments).last().tMs }.getOrNull()
+
     private fun mutatesDevice(tool: String): Boolean = tool in setOf(
-        "tap", "swipe", "press_key", "open_system_panel", "rotate_device", "input_text", "launch_app", "open_url", "perform_input_sequence",
+        "tap", "swipe", "gesture", "press_key", "open_system_panel", "rotate_device", "input_text", "launch_app", "open_url",
+        "perform_input_sequence",
     ) || env.scripts.any { it.toolName == tool }
 
     /** Capture the actual current screen immediately before the attempt's first device mutation. */
@@ -958,7 +976,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     // ── Steps the run performs itself ────────────────────────────────
 
-    /** The current step when the RUN performs it (a manual or script step), else null. Such a step is closed through the methods below. */
+    /** The current step when the RUN performs it (a manual, script or replay step), else null. Such a step is closed through the methods below. */
     val driverStep: TestStep? get() = if (ended || !active) null else spec.steps.getOrNull(index)?.takeIf { it.isDriverStep }
 
     /** What this sequence works with (the device, the script runner, the clock), for whoever performs its driver steps. */
@@ -968,13 +986,35 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     suspend fun finishDriverStep(report: DriverReport) {
         val evaluation = mutex.withLock {
             val step = driverStep ?: return@withLock null
-            // A script's action and deterministic checks share the step allowance. User confirmation
+            // A script's (or a replay's) action and deterministic checks share the step allowance. User confirmation
             // and manual waiting have their own boundary, so their post-confirmation checks start fresh.
-            if (report.completion != StepCompletion.SCRIPT) resetStepTimer()
+            if (report.completion != StepCompletion.SCRIPT && report.completion != StepCompletion.REPLAY) resetStepTimer()
             val completed = evaluateLocked(report.claim, report.observation, report)
             completed ?: timeoutEvaluationLocked(step.id, index, attempt, verifyDeadline = false, submittedObservation = report.observation)
         } ?: return
         decideFlow(evaluation)
+    }
+
+    /**
+     * Reports one input the run injected itself (a replay) in the current step's tool activity, like a tool call of an agent: it is
+     * listed, bounded and redacted the same way. The call is already finished when this is called.
+     */
+    fun reportDriverToolCall(toolName: String, argumentsPreview: String, resultPreview: String, succeeded: Boolean, durationMs: Long) {
+        val step = spec.steps.getOrNull(index) ?: return
+        val started = LaneToolCall(
+            id = UUID.randomUUID().toString(),
+            caseId = spec.caseId,
+            stepId = step.id,
+            iteration = spec.iteration,
+            attempt = attempt,
+            toolName = toolName,
+            argumentsPreview = argumentsPreview,
+            startedAt = (env.wallClock() - durationMs).coerceAtLeast(0L),
+        )
+        attemptToolNames += toolName
+        runCatching { env.listener.toolCallStarted(started) }
+        val status = if (succeeded) LaneToolCallStatus.SUCCEEDED else LaneToolCallStatus.FAILED
+        runCatching { env.listener.toolCallFinished(started.completed(status, resultPreview, durationMs)) }
     }
 
     /** Closes the current driver step as skipped (the tester skipped it, or the run skips manual steps) and continues with the next one. */
@@ -1596,7 +1636,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             requiresVerdict = hasJudgeChecks(step),
             inconclusivePolicy = env.judgeInconclusivePolicy,
         )
-        if (judgement != null && base == StepStatus.PASS && settled.status == StepStatus.FAIL) {
+        if (driver == null && judgement != null && base == StepStatus.PASS && settled.status == StepStatus.FAIL) {
             attemptNotes += JUDGE_FAILED_AGENT_PASS_NOTE
         }
         val unresolved = hasJudgeChecks(step) && (judgement == null || judgement.verdict == JudgeVerdict.INCONCLUSIVE)
@@ -1606,10 +1646,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             judgement?.verdict == JudgeVerdict.PASS && driver == null && claim != LaneStepStatus.PASS -> JUDGE_PASSED_AGENT_FAIL_NOTE
             judgement?.verdict == JudgeVerdict.PASS -> "Independent judge confirmed the expected result."
             judgement?.verdict == JudgeVerdict.INCONCLUSIVE && settled.status == StepStatus.PASS ->
-                "Independent judgment was inconclusive; the agent's pass was retained by policy. Verification remains unresolved."
+                "Independent judgment was inconclusive; the execution pass was retained by policy. Verification remains unresolved."
             judgement?.verdict == JudgeVerdict.INCONCLUSIVE && settled.status == StepStatus.BLOCKED ->
                 "Independent judgment was inconclusive; the run policy blocks this pass. Verification remains unresolved."
             judgement == null && judgeRequested -> VERIFICATION_PENDING_NOTE
+            judgement == null && settled.status == StepStatus.PASS && driver?.completion == StepCompletion.REPLAY ->
+                "Recorded input was injected and deterministic checks passed; the expected screen result was not independently judged."
             judgement == null && settled.status == StepStatus.PASS ->
                 "Passed by the agent and deterministic checks; no independent judge was requested."
             else -> null
@@ -1693,10 +1735,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     /**
      * A manual or script step is only judged for the judge checks it is evaluated with: a tester's "failed" or a script's
-     * verdict needs no second opinion.
+     * verdict needs no second opinion. A REPLAY step is the opposite: the run only injected input, so what it did to the screen is
+     * judged exactly like an AI step's (the run's judge mode and the step's judge checks).
      */
     private fun judgeable(step: TestStep, driver: DriverReport?): Boolean =
-        driver == null || (driver.checks ?: step.checks).any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge }
+        driver == null || driver.completion == StepCompletion.REPLAY ||
+            (driver.checks ?: step.checks).any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge }
 
     /** What the agent said about the step; nobody said anything about a step the run performed. */
     private fun claimText(claim: LaneStepStatus, driver: DriverReport?): String? = claim.name.lowercase().takeIf { driver == null }

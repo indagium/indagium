@@ -7,22 +7,29 @@ import com.indagium.ai.LlmStreamEvent
 import com.indagium.ai.LlmToolCall
 import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.ProviderCapabilities
+import com.indagium.edition.EditionLimits
 import com.indagium.testing.device.DeviceStateReader
 import com.indagium.testing.device.DeviceStateReading
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.JudgeClassification
+import com.indagium.testing.model.JudgeInconclusivePolicy
+import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.ManualCompletion
 import com.indagium.testing.model.ManualStepsOption
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.RecordedInput
+import com.indagium.testing.model.RecordedInputEvent
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.ScriptCall
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepCompletion
+import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
@@ -37,6 +44,7 @@ import com.indagium.testing.run.ManualDecision
 import com.indagium.testing.run.ManualResolveResult
 import com.indagium.testing.run.ProviderLaneAgent
 import com.indagium.testing.run.StartRunResult
+import com.indagium.testing.run.validateRun
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -545,6 +553,116 @@ class ManualScriptStepsTest {
         assertEquals(2, provider.prompts.size)
         assertTrue(provider.prompts[0].contains("Current step 2 of 4"))
         assertTrue(provider.prompts[1].contains("Current step 4 of 4"))
+    }
+
+    private fun keyReplay(retries: Int = 0): TestStep = replayStep(
+        action = "Press Back", expected = "The prior screen is shown",
+        input = RecordedInput(listOf(RecordedInputEvent.Key("BACK")), settleMs = 500), retries = retries,
+    )
+
+    @Test
+    fun aReplayBetweenAgentStepsInjectsThenChecksAndHandsBackToTheAgent() {
+        val provider = StepAwareProvider()
+        val check = StepCheck.DeviceState(newCheckId(), "wifi.enabled", "true", 100L)
+        val replay = keyReplay().copy(checks = listOf(check))
+        val reader = DeviceStateReader {
+            DeviceStateReading.Value((adb.shellCommands.any { it == listOf("input", "keyevent", "KEYCODE_BACK") }).toString())
+        }
+        val suite = suiteOf(caseOf("Replay sandwich", step("Open the app"), replay, step("Inspect the result")))
+        val (h, started) = start(suite, provider = provider, openDevice = deviceWith(reader))
+
+        val run = h.finished(started)
+        val results = run.caseResult("Replay sandwich").steps
+        assertEquals(listOf(StepStatus.PASS, StepStatus.PASS, StepStatus.PASS), results.map { it.status })
+        assertEquals(StepCompletion.REPLAY, results[1].completedBy)
+        assertEquals(CheckStatus.PASS, results[1].checks.single().status, "the deterministic check ran after injection")
+        assertTrue(results[1].note.orEmpty().contains("not independently judged"), results[1].note)
+        assertFalse(results[1].note.orEmpty().contains("Passed by the agent"))
+        assertEquals(1, adb.shellCommands.count { it == listOf("input", "keyevent", "KEYCODE_BACK") })
+        assertEquals(2, provider.prompts.size, "the agent runs before and after Replay, but never for Replay itself")
+        assertTrue(provider.prompts[1].contains("Current step 3 of 3"))
+    }
+
+    @Test
+    fun aFailedReplayIsNotRetriedAndEvenAJudgePassCannotMakeTheInjectionPass() {
+        adb.shellExitCode = 1
+        val replay = keyReplay(retries = 2).copy(checks = listOf(StepCheck.AskJudge(newCheckId(), "Is the prior screen shown?")))
+        val suite = suiteOf(caseOf("Failed replay", replay))
+        val judge = ScriptedJudgeProvider { JudgeAnswer("pass", "unknown", "The picture looks right.") }
+        val h = RunHarness(
+            libraryOf(suite), profile = profileOf(LANE_A_PROFILE_ID), extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(
+                LANE_A_PROFILE_ID to AutoAgentProvider(emptyList()), JUDGE_PROFILE_ID to judge,
+            )),
+            openDevice = LaneDeviceOpener { _, laneDir, _ -> openFixtureSession(adb, laneDir) },
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire)
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val result = h.finished(started).caseResult("Failed replay").steps.single()
+
+        assertEquals(StepStatus.FAIL, result.status)
+        assertEquals(1, result.attempts, "a partially injected action must not be retried automatically")
+        assertEquals(JudgeVerdict.PASS, result.judge?.verdict)
+        assertEquals(1, adb.shellCommands.count { it == listOf("input", "keyevent", "KEYCODE_BACK") })
+        assertFalse(result.note.orEmpty().contains("agent"), "the report never attributes replay to an agent: ${result.note}")
+    }
+
+    @Test
+    fun aJudgeFailureAfterSuccessfulReplayDoesNotReportAnAgentDisagreement() {
+        val replay = keyReplay().copy(checks = listOf(StepCheck.AskJudge(newCheckId(), "Is the prior screen shown?")))
+        val suite = suiteOf(caseOf("Judged replay", replay))
+        val judge = ScriptedJudgeProvider { JudgeAnswer("fail", "app_defect", "The prior screen is absent.") }
+        val h = RunHarness(
+            libraryOf(suite), profile = profileOf(LANE_A_PROFILE_ID), extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(
+                LANE_A_PROFILE_ID to AutoAgentProvider(emptyList()), JUDGE_PROFILE_ID to judge,
+            )),
+            openDevice = LaneDeviceOpener { _, laneDir, _ -> openFixtureSession(adb, laneDir) },
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire)
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val result = h.finished(started).caseResult("Judged replay").steps.single()
+
+        assertEquals(StepStatus.FAIL, result.status)
+        assertEquals(JudgeVerdict.FAIL, result.judge?.verdict)
+        assertEquals(StepCompletion.REPLAY, result.completedBy)
+        assertFalse(result.note.orEmpty().contains("agent", ignoreCase = true), result.note)
+    }
+
+    @Test
+    fun anInconclusiveJudgeKeepsReplayPassWithoutAttributingItToAnAgent() {
+        val replay = keyReplay()
+        val suite = suiteOf(caseOf("Inconclusive replay", replay))
+        val judge = ScriptedJudgeProvider { JudgeAnswer("inconclusive", "unknown", "The prior screen is unclear.") }
+        val h = RunHarness(
+            libraryOf(suite), profile = profileOf(LANE_A_PROFILE_ID), extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(
+                LANE_A_PROFILE_ID to AutoAgentProvider(emptyList()), JUDGE_PROFILE_ID to judge,
+            )),
+            openDevice = LaneDeviceOpener { _, laneDir, _ -> openFixtureSession(adb, laneDir) },
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID,
+            judgeMode = JudgeMode.EVERY_STEP.wire,
+            judgeInconclusivePolicy = JudgeInconclusivePolicy.KEEP_AGENT_PASS,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val result = h.finished(started).caseResult("Inconclusive replay").steps.single()
+
+        assertEquals(StepStatus.PASS, result.status)
+        assertEquals(JudgeVerdict.INCONCLUSIVE, result.judge?.verdict)
+        assertTrue(result.note.orEmpty().contains("execution pass was retained"), result.note)
+        assertFalse(result.note.orEmpty().contains("agent", ignoreCase = true), result.note)
+    }
+
+    @Test
+    fun aLoadedReplayWithEnsureIntentOrPreconditionIsRefusedBeforeRunning() {
+        listOf(keyReplay().copy(intent = StepIntent.ENSURE_STATE), keyReplay().copy(precondition = "The tile is off")).forEach { invalid ->
+            val suite = suiteOf(caseOf("Invalid replay", invalid))
+            val config = RunConfig(suite.id, null, listOf(agentLane()))
+            val validation = validateRun(config, libraryOf(suite), EditionLimits.UNLIMITED, listOf(testProfile)) { "" }
+            assertTrue(validation.errors.any { it.contains("replay step", ignoreCase = true) }, validation.errors.toString())
+        }
     }
 
     @Test

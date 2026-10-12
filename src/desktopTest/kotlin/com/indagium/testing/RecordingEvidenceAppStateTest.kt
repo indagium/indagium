@@ -86,7 +86,7 @@ class RecordingEvidenceAppStateTest {
 
         assertEquals(3, made.size)
         assertTrue(made.all { it.recordingRef == null })
-        assertFalse(File(dir, "testing/assets").exists(), "no evidence folder is created")
+        assertFalse(recordingsDir().exists(), "the full recording is not retained")
         assertEquals(emptyList(), state.storedRecordingIds(caseId))
         assertIs<StoreResult.Invalid>(runBlocking { state.reopenTestStepRecording(caseId) })
     }

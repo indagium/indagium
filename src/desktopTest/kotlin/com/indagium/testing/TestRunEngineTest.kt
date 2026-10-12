@@ -959,6 +959,35 @@ class TestRunEngineTest {
     }
 
     @Test
+    fun exampleReadsAreFreeFromBothActionBudgetsButRemainInUsageAndActivity() {
+        val example = StepExample.ReferenceLog("reference-1", "I/Checkout: receipt saved", "Receipt log")
+        val current = step("Press Home once", maxToolCalls = 1).copy(examples = listOf(example))
+        val suite = suiteOf(
+            caseOf("Read reference", current).copy(allowedTools = setOf("list_step_examples", "get_step_example", "press_key")),
+        )
+        val h = harness(
+            suite,
+            listOf(
+                toolTurn("list_step_examples"),
+                toolTurn("get_step_example", """{"exampleId":"reference-1"}"""),
+                toolTurn("press_key", """{"key":"HOME"}"""),
+                finishTurn("pass", "Home is visible."),
+                textTurn,
+            ),
+        )
+        val run = h.runToEnd(suite, toolLimit = 1)
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(4L, run.caseResult("Read reference").agentUsage?.toolCalls, "both reference reads remain in usage totals")
+        assertEquals(
+            listOf("list_step_examples", "get_step_example", "press_key", "finish_step"),
+            run.lanes.single().toolCalls.map { it.toolName },
+            "reference reads stay visible in the activity log",
+        )
+        assertEquals(1, h.adb.shellCommands.count { it.firstOrNull() == "input" })
+    }
+
+    @Test
     fun playbackStepsKeepTimestampedSamplesInBothIntentModesWhenJudgingIsOff() {
         val ensure = step("Ensure video playback is paused", "The player shows paused").copy(intent = StepIntent.ENSURE_STATE)
         val transition = step("Pause video playback", "Playback changes from playing to paused").copy(intent = StepIntent.PERFORM_ACTION)

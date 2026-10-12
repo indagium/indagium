@@ -68,7 +68,7 @@ class JudgeStartScreenTest {
         assertEquals(listOf(b64(START_SCREEN), b64(END_SCREEN), b64(GOLDEN_SCREEN)), brief.images.map { it.base64 })
         assertContains(
             brief.prompt,
-            "Attached images, in this order:\n1. $START_SCREEN_LABEL (Lane)\n2. The screen when the step ended (Lane)\n3. Reference screenshot g1",
+            "Attached images, in this order:\n1. $START_SCREEN_LABEL (Lane)\n2. The screen when the step ended (Lane)\n3. Expected screenshot g1",
         )
         assertFalse(brief.needsTools)
     }

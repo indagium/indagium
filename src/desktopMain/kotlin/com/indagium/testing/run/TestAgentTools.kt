@@ -12,14 +12,20 @@ import com.indagium.debug.ToolArgs
 import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.debug.schema
 import com.indagium.model.LogEntry
+import com.indagium.testing.authoring.parseReferenceGestures
 import com.indagium.testing.device.DeviceInputAction
 import com.indagium.testing.device.DeviceInputActionResult
+import com.indagium.testing.device.GESTURE_MAX_DURATION_MS
+import com.indagium.testing.device.GESTURE_MAX_POINTS
+import com.indagium.testing.device.GESTURE_MIN_DURATION_MS
+import com.indagium.testing.device.GesturePoint
 import com.indagium.testing.device.LogWaitResult
 import com.indagium.testing.device.SystemPanel
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.device.UiNode
 import com.indagium.testing.device.UiTreeNodeView
 import com.indagium.testing.device.UiTreeRead
+import com.indagium.testing.device.gestureProblem
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
@@ -63,6 +69,7 @@ internal const val MAX_UI_RECOVERY_ATTEMPTS = 2
 private const val DEFAULT_LOG_READ_LIMIT = 100
 private const val MAX_LOG_ROW_MESSAGE_CHARS = 1_000
 private const val DEFAULT_SWIPE_DURATION_MS = 350
+private const val DEFAULT_GESTURE_DURATION_MS = 350L
 private const val SCREEN_MIME_TYPE = "image/jpeg"
 private const val MAX_INPUT_SEQUENCE_ACTIONS = 8
 private const val MAX_INPUT_SEQUENCE_DELAY_MS = 2_000L
@@ -85,11 +92,14 @@ private val INPUT_SEQUENCE_ACTION_SCHEMA = ObjectArrayItemSchema(
 /** The tools every lane has: the three that carry the step protocol. They stay available whatever a case allows. */
 internal val LANE_PROTOCOL_TOOL_NAMES: Set<String> = setOf("get_current_step", "report_observation", "finish_step")
 
+/** Reading attached references is useful context, not a device action and does not spend either action-call budget. */
+internal val LANE_REFERENCE_TOOL_NAMES: Set<String> = setOf("list_step_examples", "get_step_example")
+
 /**
  * The tools that must not spend a run's tool-call budget (pass this as `AiRun(freeTools = ...)`): the agent has to be
  * able to read its step and report its result even after it used up its action allowance.
  */
-internal val LANE_FREE_TOOL_NAMES: Set<String> = LANE_PROTOCOL_TOOL_NAMES
+internal val LANE_FREE_TOOL_NAMES: Set<String> = LANE_PROTOCOL_TOOL_NAMES + LANE_REFERENCE_TOOL_NAMES
 
 private val GLOBAL_TOOL_NAMES: Set<String> by lazy { MCP_TOOLS.map { it.name }.toSet() }
 
@@ -280,6 +290,7 @@ private fun exampleTools(context: LaneToolContext): List<LaneTool> = listOf(
                         "exampleId" to example.id,
                         "kind" to if (example is StepExample.GoldenScreenshot) "goldenScreenshot" else "referenceLog",
                         "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
+                        "role" to (example as? StepExample.GoldenScreenshot)?.role?.name?.lowercase(),
                     )
                 },
             )
@@ -306,7 +317,7 @@ private fun exampleTools(context: LaneToolContext): List<LaneTool> = listOf(
                     "kind" to "referenceLog",
                     "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
                     "text" to fenceUntrusted("reference_log", example.text.take(MAX_REFERENCE_LOG_CHARS)),
-                )
+                ) + recordedGesturesOf(example.text)
                 is StepExample.GoldenScreenshot -> {
                     val bytes = context.loadGoldenImage(example)
                         ?: return@guarded mapOf("error" to "The image for example '${example.id}' is missing or exceeds the safe source-size limit.")
@@ -322,6 +333,7 @@ private fun exampleTools(context: LaneToolContext): List<LaneTool> = listOf(
                         "exampleId" to example.id,
                         "kind" to "goldenScreenshot",
                         "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
+                        "role" to example.role.name.lowercase(),
                         "mimeType" to image.mimeType,
                         "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
                     )
@@ -331,6 +343,30 @@ private fun exampleTools(context: LaneToolContext): List<LaneTool> = listOf(
     ),
 )
 
+/**
+ * The gestures a recorded-input reference log describes, as numbers (percent of the screen and ms from touch-down) next to the text, so
+ * an agent can pass them to the `gesture` tool: positions are untrusted device observations like the rest of the log, but only numbers
+ * are lifted out of it. Nothing for a log that holds no path.
+ */
+internal fun recordedGesturesOf(logText: String): Map<String, Any?> {
+    val gestures = parseReferenceGestures(logText.take(MAX_REFERENCE_LOG_CHARS))
+    if (gestures.isEmpty()) return emptyMap()
+    return mapOf(
+        "recordedGestures" to gestures.take(MAX_RECORDED_GESTURES_RETURNED).map { gesture ->
+            mapOf(
+                "input" to gesture.inputNumber,
+                "timing" to gesture.timing.wire,
+                "durationMs" to gesture.durationMs,
+                "restBeforeLiftMs" to gesture.holdMs,
+                "points" to gesture.points.map { mapOf("xPercent" to it.xPercent, "yPercent" to it.yPercent, "tMs" to it.tMs) },
+            )
+        },
+        "recordedGesturesHowTo" to "Pixel = percent / 100 * (screenshot size - 1). Pass each point's tMs to gesture and set holdEndMs " +
+            "to restBeforeLiftMs. timing even_spacing_assumed means the log has no recorded times: the rhythm and hold are a guess.",
+    )
+}
+
+private const val MAX_RECORDED_GESTURES_RETURNED = 12
 private const val MAX_EXAMPLE_CAPTION_CHARS = 300
 private const val MAX_REFERENCE_LOG_CHARS = 6_000
 private const val MAX_GOLDEN_SOURCE_BYTES = 16 * 1024 * 1024
@@ -472,6 +508,7 @@ private fun uiNodeMap(view: UiTreeNodeView): Map<String, Any?> = buildMap {
     put("tapY", view.tapY)
 }
 
+@Suppress("LongMethod") // Keep the related input tool descriptors and handlers together.
 private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
     inputSequenceTool(context),
     waitForUiTool(context),
@@ -502,6 +539,36 @@ private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
                 args.int("durationMs") ?: DEFAULT_SWIPE_DURATION_MS,
             )
             mapOf("ok" to true, "action" to "swipe", "imageCoordinates" to result.imageCoordinates, "deviceCoordinates" to result.deviceCoordinates)
+        },
+    ),
+    LaneTool(
+        IndagiumToolDescriptor(
+            "gesture",
+            "Move one finger along a path WITH TIMING: down at the first point, at each point at its tMs, up at the last. Unlike swipe " +
+                "(a straight line at constant speed that lifts at once) it keeps curves, speed changes and a pause before the finger " +
+                "lifts, which is what holding a swipe at its end (for example swipe up from the bottom edge and hold to open Recents) " +
+                "needs. Use it to reproduce a recorded gesture from a step's reference log (the 'timed path'). Points are pixels of the " +
+                "latest screenshot, $GESTURE_MAX_POINTS at most; tMs is milliseconds after touch-down, the first at 0 and never " +
+                "decreasing; holdEndMs keeps the finger on the last point that much longer before it lifts. Without any tMs the points " +
+                "are spread evenly over durationMs (default $DEFAULT_GESTURE_DURATION_MS). A gesture lasts $GESTURE_MIN_DURATION_MS.." +
+                "$GESTURE_MAX_DURATION_MS ms in total. Needs Android 10 or newer to follow the path; on older devices it is approximated " +
+                "by a straight swipe and the result says so (fallback=true).",
+            schema(
+                "points" to "array", "durationMs" to "integer", "holdEndMs" to "integer",
+                required = listOf("points"),
+                objectArrays = mapOf("points" to GESTURE_POINT_SCHEMA),
+                descriptions = mapOf(
+                    "points" to "Ordered objects {x, y, tMs?}: x and y in pixels of the latest screenshot, tMs the time after touch-down " +
+                        "in ms. Example (swipe up and hold): [{x:640,y:2350,tMs:0},{x:630,y:1900,tMs:180},{x:620,y:1350,tMs:420}] with holdEndMs 330.",
+                    "durationMs" to "Total time when no point has a tMs; spread evenly (default $DEFAULT_GESTURE_DURATION_MS).",
+                    "holdEndMs" to "Extra time the finger rests on the last point before it lifts (0..$GESTURE_MAX_DURATION_MS).",
+                ),
+            ),
+        ),
+        guarded { args ->
+            val points = parseGesturePoints(args.map)
+            val result = context.session.gesture(points)
+            gestureResultMap(result)
         },
     ),
     LaneTool(
@@ -582,6 +649,63 @@ private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
         },
     ),
 )
+
+private data class RawGesturePoint(val x: Int, val y: Int, val tMs: Long?)
+
+private val GESTURE_POINT_SCHEMA = ObjectArrayItemSchema(
+    props = listOf("x" to "integer", "y" to "integer", "tMs" to "integer"),
+    required = listOf("x", "y"),
+    descriptions = mapOf("tMs" to "Milliseconds after touch-down; the first point at 0, never decreasing. Give it on every point or on none."),
+)
+
+/**
+ * The gesture a `gesture` call describes, in screenshot pixels: points with their times, an even spread when none has a time, a
+ * hold appended on the last point. Throws [ToolArgException] for a call that is not a gesture; the screen bounds are checked by the session.
+ */
+internal fun parseGesturePoints(arguments: Map<String, Any?>): List<GesturePoint> {
+    val args = ToolArgs(arguments)
+    val items = args.objects("points") ?: invalidLaneToolArguments("points must be an array of {x, y, tMs?} objects.")
+    requireLaneToolArgument(items.size in 1..GESTURE_MAX_POINTS) { "A gesture needs 1 to $GESTURE_MAX_POINTS points." }
+    val parsed = items.mapIndexed { index, item ->
+        val point = ToolArgs(item)
+        val time = point.long("tMs")
+        requireLaneToolArgument(time == null || time >= 0L) { "points[${index + 1}].tMs must not be negative." }
+        RawGesturePoint(point.requiredInt("x"), point.requiredInt("y"), time)
+    }
+    val timed = parsed.count { it.tMs != null }
+    requireLaneToolArgument(timed == 0 || timed == parsed.size) { "Give tMs on every point or on none." }
+    val hold = args.long("holdEndMs") ?: 0L
+    requireLaneToolArgument(hold in 0L..GESTURE_MAX_DURATION_MS) { "holdEndMs must be between 0 and $GESTURE_MAX_DURATION_MS." }
+    val base = if (timed == 0) {
+        val total = args.long("durationMs") ?: DEFAULT_GESTURE_DURATION_MS
+        requireLaneToolArgument(total in 1L..GESTURE_MAX_DURATION_MS) { "durationMs must be between 1 and $GESTURE_MAX_DURATION_MS." }
+        val steps = (parsed.size - 1).coerceAtLeast(1)
+        // A single point is a press of durationMs: the same place at 0 and at the end.
+        val spread = if (parsed.size == 1) listOf(parsed.first(), parsed.first()) else parsed
+        spread.mapIndexed { index, point -> GesturePoint(point.x, point.y, if (index == 0) 0L else Math.round(total.toDouble() * index / steps)) }
+    } else {
+        val origin = parsed.first().tMs ?: 0L
+        // One timed point is a press: holdEndMs then adds the moment it is lifted.
+        parsed.map { point -> GesturePoint(point.x, point.y, (point.tMs ?: 0L) - origin) }
+    }
+    val withHold = if (hold > 0L) base + base.last().copy(tMs = base.last().tMs + hold) else base
+    gestureProblem(withHold)?.let { throw ToolArgException(it) }
+    return withHold
+}
+
+private fun gestureResultMap(result: com.indagium.testing.device.GesturePlayResult): Map<String, Any?> = buildMap {
+    put("ok", true)
+    put("action", "gesture")
+    put("mode", result.mode.wire)
+    put("durationMs", result.durationMs)
+    put("holdBeforeReleaseMs", result.holdBeforeReleaseMs)
+    put("imageCoordinates", result.imagePoints.map { listOf(it.x, it.y, it.tMs) })
+    put("deviceCoordinates", result.devicePoints.map { listOf(it.x, it.y, it.tMs) })
+    if (result.note != null) {
+        put("fallback", true)
+        put("note", result.note)
+    }
+}
 
 private fun inputSequenceTool(context: LaneToolContext): LaneTool =
     LaneTool(

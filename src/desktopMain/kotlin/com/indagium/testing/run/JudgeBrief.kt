@@ -3,6 +3,7 @@ package com.indagium.testing.run
 import com.indagium.ai.LlmImage
 import com.indagium.debug.Json
 import com.indagium.testing.model.CheckResult
+import com.indagium.testing.model.ScreenshotRole
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.script.untrustedData
 import java.util.Base64
@@ -84,7 +85,7 @@ internal suspend fun buildJudgeBrief(
         }
     }
     for (example in evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>()) {
-        val label = "Reference screenshot ${example.id}: ${example.caption.ifBlank { "(no caption)" }}"
+        val label = "${screenshotRoleLabel(example.role)} ${example.id}: ${example.caption.ifBlank { "(no caption)" }}"
         val fetchLine = "$label is not attached; call get_example with exampleId \"${example.id}\"."
         // Past the image limit the golden image is not even loaded: the judge is told which tool gets it.
         if (attachment.isFull()) attachment.fetch += fetchLine else attachment.add(loadExample(example), label, fetchLine)
@@ -149,7 +150,8 @@ private fun fetchSection(evidence: JudgeEvidence): String = buildString {
         }
     }
     evidence.examples.filterIsInstance<StepExample.GoldenScreenshot>().forEach { example ->
-        append("\n- Reference screenshot ").append(example.id).append(": ").append(example.caption.ifBlank { "(no caption)" })
+        append("\n- ").append(screenshotRoleLabel(example.role)).append(' ').append(example.id).append(": ")
+            .append(example.caption.ifBlank { "(no caption)" })
         append(": get_example with exampleId \"").append(example.id).append("\".")
     }
 }
@@ -231,7 +233,14 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
                 }
             },
         )
-        put("examples", evidence.examples.map { mapOf("exampleId" to it.id, "kind" to exampleKind(it), "caption" to it.caption) })
+        put("examples", evidence.examples.map { example ->
+            buildMap<String, Any?> {
+                put("exampleId", example.id)
+                put("kind", exampleKind(example))
+                put("caption", example.caption)
+                if (example is StepExample.GoldenScreenshot) put("role", example.role.name.lowercase())
+            }
+        })
         put("lanes", laneMaps)
         putAll(untrustedData("automatic_check_details", mapOf("lanes" to details)))
     }
@@ -241,6 +250,12 @@ private fun deterministicChecksMap(results: List<CheckResult>): List<Map<String,
     results.map { mapOf("checkId" to it.checkId, "kind" to it.kind, "result" to it.status.name.lowercase()) }
 
 private fun exampleKind(example: StepExample): String = if (example is StepExample.GoldenScreenshot) "goldenScreenshot" else "referenceLog"
+
+internal fun screenshotRoleLabel(role: ScreenshotRole): String = when (role) {
+    ScreenshotRole.EXPECTED -> "Expected screenshot"
+    ScreenshotRole.RECORDED_BEFORE -> "Recorded before screen (context, not an expectation)"
+    ScreenshotRole.RECORDED_AFTER -> "Recorded after screen (reference, not an automatic expectation)"
+}
 
 /** What read_step_log returns for [slice]: the position to continue from and the rows, which are untrusted. */
 internal fun judgeLogResult(slice: StepLogSlice): Map<String, Any?> =

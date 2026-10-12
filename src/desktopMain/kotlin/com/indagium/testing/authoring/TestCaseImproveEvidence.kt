@@ -122,7 +122,13 @@ internal class ImproveStepEvidence(
 )
 
 /** Which screen of which step an image shows: [REFERENCE] is a golden screenshot attached to the step. */
-internal enum class ImageRole(val label: String) { START("start screen"), END("end screen"), REFERENCE("reference screenshot") }
+internal enum class ImageRole(val label: String) {
+    START("start screen"),
+    END("end screen"),
+    REFERENCE("expected screenshot"),
+    RECORDED_BEFORE("recorded before reference"),
+    RECORDED_AFTER("recorded after reference"),
+}
 
 internal class ImproveImageRef(val stepId: String, val stepNumber: Int, val role: ImageRole, val caption: String = "") {
     fun describe(): String = "step $stepNumber ${role.label}" + caption.takeIf { it.isNotBlank() }?.let { " ($it)" }.orEmpty()
@@ -271,7 +277,12 @@ private fun imageCandidates(
     case.steps.forEachIndexed { index, step ->
         for (example in step.examples.filterIsInstance<StepExample.GoldenScreenshot>()) {
             val file = goldenFile(example.assetPath)?.takeIf { it.isFile } ?: continue
-            result += ImageCandidate("golden:${file.absolutePath}", true, ImproveImageRef(step.id, index + 1, ImageRole.REFERENCE, example.caption)) {
+            val role = when (example.role) {
+                com.indagium.testing.model.ScreenshotRole.EXPECTED -> ImageRole.REFERENCE
+                com.indagium.testing.model.ScreenshotRole.RECORDED_BEFORE -> ImageRole.RECORDED_BEFORE
+                com.indagium.testing.model.ScreenshotRole.RECORDED_AFTER -> ImageRole.RECORDED_AFTER
+            }
+            result += ImageCandidate("golden:${file.absolutePath}", true, ImproveImageRef(step.id, index + 1, role, example.caption)) {
                 readBoundedTestAsset(file)
             }
         }
