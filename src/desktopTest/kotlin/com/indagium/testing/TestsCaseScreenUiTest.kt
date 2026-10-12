@@ -320,7 +320,7 @@ class TestsCaseScreenUiTest {
 
         assertNull(state.testsView.caseInspectorField)
         assertEquals(ids[0], state.testsView.selectedStepId)
-        assertTrue(state.testsView.stepExamplesExpanded)
+        assertTrue(state.testsView.examplesExpanded(ids[0], hasExamples = false), "an explicit open wins over the default")
         rule.onNodeWithText("Step 1 of 2").assertExists()
     }
 
@@ -340,7 +340,7 @@ class TestsCaseScreenUiTest {
     }
 
     @Test
-    fun theSplitButtonAddsABlankStepAndItsMenuListsTheAuthoringActions() {
+    fun addStepAddsABlankStepAndEveryAuthoringActionIsAVisibleButton() {
         val (suiteId, caseId) = seed()
         open(suiteId, caseId)
 
@@ -349,20 +349,21 @@ class TestsCaseScreenUiTest {
         assertEquals(3, state.testLibrary.findCase(caseId)!!.case.steps.size)
         rule.onNodeWithText("Steps (3)").assertExists()
 
-        rule.onNodeWithContentDescription("+ Add step options").performClick()
-        rule.waitForIdle()
+        // No split-button chevron and no ⋯ menu: the actions are on screen without opening anything.
+        rule.onNodeWithContentDescription("+ Add step options").assertDoesNotExist()
+        rule.onNodeWithContentDescription("More step actions").assertDoesNotExist()
         rule.onNodeWithText("Draft steps with AI…").assertExists()
         rule.onNodeWithText("Record from device…").assertExists()
         rule.onNodeWithText("Paste log lines as checks…").assertExists()
-        rule.onNodeWithText("Improve steps with AI…").assertDoesNotExist()
+        rule.onNodeWithText("Improve steps with AI…").assertExists()
+        rule.onNodeWithText("Insert shared sequence…").assertDoesNotExist()
+        rule.onNodeWithText("Rewrite with AI from saved recording").assertDoesNotExist()
     }
 
     @Test
-    fun theSplitMenuOpensTheDraftDialogAndOffersSharedSequencesOnlyWhenTheLibraryHasThem() {
+    fun theDraftButtonOpensTheDraftDialogAndSharedSequencesAreOfferedOnlyWhenTheLibraryHasThem() {
         val (suiteId, caseId) = seed()
         open(suiteId, caseId)
-        rule.onNodeWithContentDescription("+ Add step options").performClick()
-        rule.waitForIdle()
         rule.onNodeWithText("Insert shared sequence…").assertDoesNotExist()
         rule.onNodeWithText("Draft steps with AI…").performClick()
         rule.waitForIdle()
@@ -370,13 +371,12 @@ class TestsCaseScreenUiTest {
     }
 
     @Test
-    fun aSharedSequenceCanBeInsertedFromTheSplitMenu() {
+    fun aSharedSequenceCanBeInsertedFromItsButton() {
         val sequence = SharedStep(id = "", name = "Log in", steps = listOf(TestStep(newStepId(), "Enter the PIN")))
         check(state.createSharedStep(sequence) is StoreResult.Ok)
         val (suiteId, caseId) = seed()
         open(suiteId, caseId)
 
-        rule.onNodeWithContentDescription("+ Add step options").performClick()
         rule.onNodeWithText("Insert shared sequence…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Insert shared sequence").assertExists()
@@ -388,25 +388,32 @@ class TestsCaseScreenUiTest {
     }
 
     @Test
-    fun improveStepsLivesInTheStepsOverflowMenu() {
-        val (suiteId, caseId) = seed()
-        open(suiteId, caseId)
+    fun aCaseWithoutStepsDisablesTheStepDependentButtonsAndKeepsTheirHints() {
+        val suiteId = (state.createTestSuite("Smoke") as StoreResult.Ok).value.id
+        val case = (state.createTestCase(suiteId, TestCase("", "Empty")) as StoreResult.Ok).value
+        open(suiteId, case.id)
 
-        rule.onNodeWithContentDescription("More step actions").performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("Improve steps with AI…").assertExists()
+        // Paste-log and Improve need a step; they stay visible, disabled, and say so in a tooltip.
+        assertTrue(rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText("Paste log lines as checks…"))).fetchSemanticsNodes().isNotEmpty())
+        assertTrue(rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText("Improve steps with AI…"))).fetchSemanticsNodes().isNotEmpty())
+        rule.onNodeWithText("Draft steps with AI…").assertExists()
+        rule.onNodeWithText("Record from device…").assertExists()
     }
 
     @Test
-    fun aReadOnlyCaseDisablesTheStepAuthoringMenuItems() {
+    fun aReadOnlyCaseDisablesTheStepAuthoringButtons() {
         state.createTestSuite("First")
         val lockedSuiteId = (state.createTestSuite("Second") as StoreResult.Ok).value.id
         val caseId = (state.createTestCase(lockedSuiteId, TestCase("", "Locked", steps = steps())) as StoreResult.Ok).value.id
         assertTrue(state.editionService.setForDev(Edition.FREE))
         open(lockedSuiteId, caseId)
 
-        rule.onNodeWithContentDescription("+ Add step options").performClick()
-        rule.waitForIdle()
+        listOf("+ Add step", "Draft steps with AI…", "Record from device…", "Paste log lines as checks…", "Improve steps with AI…").forEach { label ->
+            assertTrue(
+                rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText(label))).fetchSemanticsNodes().isNotEmpty(),
+                "$label should be disabled for a read-only case",
+            )
+        }
         rule.onNodeWithText("Draft steps with AI…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Draft steps with AI").assertDoesNotExist()

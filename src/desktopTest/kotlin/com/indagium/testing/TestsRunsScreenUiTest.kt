@@ -6,8 +6,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isPopup
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -220,6 +225,179 @@ class TestsRunsScreenUiTest {
 
         assertEquals(run.id, state.testsView.selectedRunId)
         rule.waitUntilAtLeastOneExists(androidx.compose.ui.test.hasContentDescription("Back to runs"), timeoutMillis = 10_000)
+    }
+
+    /** A finished run of [suite] whose single case has [passed] passing steps out of [total]. */
+    private fun saveRunWithSteps(suite: TestSuite, passed: Int, total: Int, createdAt: Long): TestRun {
+        val case = suite.cases.first()
+        val steps = (1..total).map { StepResult("step-$it", it, "Act $it", status = if (it <= passed) StepStatus.PASS else StepStatus.FAIL) }
+        val status = if (passed == total) RunStatus.PASSED else RunStatus.FAILED
+        val caseStatus = if (passed == total) CaseStatus.PASS else CaseStatus.FAIL
+        val run = TestRun(
+            id = newRunId(), suite = suite, scripts = emptyList(), sharedSteps = emptyList(),
+            config = RunConfig(suite.id, null, listOf(lane)),
+            lanes = listOf(LaneResult(lane.id, lane, status, listOf(CaseResult(case.id, case.name, 1, caseStatus, steps, startedAt = 1_000L, finishedAt = 49_000L)), startedAt = 1_000L)),
+            status = status, createdAt = createdAt, finishedAt = createdAt + 50_000L,
+        )
+        TestRunStore { state.activeTestFolders().second }.save(run).getOrThrow()
+        return run
+    }
+
+    private fun runDir(run: TestRun) = File(state.activeTestFolders().second, run.id)
+
+    private fun nodesTagged(tag: String) = rule.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().map { it.boundsInRoot }
+
+    @Test
+    fun everyRowsPassBarAndStepsLabelStartAndEndAtTheSameXWhateverTheCountsSay() {
+        val smoke = suiteNamed("Smoke")
+        val regression = suiteNamed("Regression")
+        val now = System.currentTimeMillis()
+        saveRunWithSteps(smoke, passed = 10, total = 11, createdAt = now - 1_000L)
+        saveRunWithSteps(smoke, passed = 4, total = 10, createdAt = now - 2_000L)
+        saveRunWithSteps(regression, passed = 1, total = 1, createdAt = now - 3_000L)
+        saveRunWithSteps(regression, passed = 0, total = 120, createdAt = yesterdayNoon())
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+
+        val bars = nodesTagged("run-pass-bar")
+        val labels = nodesTagged("run-pass-steps")
+        assertEquals(4, bars.size)
+        assertEquals(1, bars.map { it.left }.distinct().size, "all bars start at one x (also across the day groups): $bars")
+        assertEquals(1, bars.map { it.right }.distinct().size, "all bars end at one x: $bars")
+        assertEquals(1, labels.map { it.left }.distinct().size, "the a/b slots line up: $labels")
+        assertEquals(1, labels.map { it.right }.distinct().size, "the a/b slots line up on the right: $labels")
+        assertTrue(rule.onAllNodesWithText("10/11").fetchSemanticsNodes().isNotEmpty() && rule.onAllNodesWithText("4/10").fetchSemanticsNodes().isNotEmpty())
+    }
+
+    @Test
+    fun theSuitesRunsTabAlignsItsBarsTheSameWay() {
+        val smoke = suiteNamed("Smoke")
+        val now = System.currentTimeMillis()
+        saveRunWithSteps(smoke, passed = 10, total = 11, createdAt = now - 1_000L)
+        saveRunWithSteps(smoke, passed = 4, total = 10, createdAt = now - 2_000L)
+        state.testsView.nav = TestsNav.Suites
+        state.testsView.selectedSuiteId = smoke.id
+        state.testsView.selectedSuiteTab = com.indagium.ui.SuiteTab.Runs
+        rule.setContent { Box(Modifier.size(1200.dp, 800.dp)) { TestsWorkspace(state) } }
+        rule.waitUntilAtLeastOneExists(hasText("10/11"), timeoutMillis = 10_000)
+
+        val bars = nodesTagged("run-pass-bar")
+        assertEquals(2, bars.size)
+        assertEquals(1, bars.map { it.left }.distinct().size, "bars start at one x: $bars")
+        assertEquals(1, bars.map { it.right }.distinct().size, "bars end at one x: $bars")
+    }
+
+    @Test
+    fun theHeaderHintShowsTheRunCountAndTheDiskUsage() {
+        seed()
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+
+        // "4 runs" first, then the size once the folders were measured off the UI thread: "4 runs · 12.3 KB".
+        rule.waitUntilAtLeastOneExists(hasText("4 runs · ", substring = true), timeoutMillis = 10_000)
+        val text = rule.onAllNodes(hasText("4 runs · ", substring = true)).fetchSemanticsNodes().first()
+            .config[androidx.compose.ui.semantics.SemanticsProperties.Text].joinToString { it.text }
+        assertTrue(Regex("""4 runs · \d+(\.\d)? (B|KB|MB|GB)""").matches(text), text)
+    }
+
+    @Test
+    fun aRowMenuDeletesThatRunAfterAConfirmationAndTheListUpdates() {
+        val smoke = suiteNamed("Smoke")
+        val keep = saveRunWithSteps(smoke, 1, 1, System.currentTimeMillis() - 1_000L)
+        val doomed = saveRunWithSteps(smoke, 0, 1, System.currentTimeMillis() - 2_000L)
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+
+        // Newest first: the second row is the doomed run.
+        rule.onAllNodesWithContentDescription("Run actions")[1].performClick()
+        rule.waitForIdle()
+        rule.onNode(hasText("Delete run…") and hasAnyAncestor(isPopup())).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete run?").assertExists()
+        assertTrue(runDir(doomed).exists(), "nothing is deleted before the confirmation")
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        assertTrue(runDir(doomed).exists())
+
+        Thread.sleep(MENU_REOPEN_WAIT_MS)
+        rule.onAllNodesWithContentDescription("Run actions")[1].performClick()
+        rule.waitForIdle()
+        rule.onNode(hasText("Delete run…") and hasAnyAncestor(isPopup())).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete run").performClick()
+
+        rule.waitUntil(timeoutMillis = 10_000) { !runDir(doomed).exists() }
+        assertTrue(runDir(keep).exists(), "the other run stays")
+        rule.waitUntil(timeoutMillis = 10_000) { rule.onAllNodesWithContentDescription("Run actions").fetchSemanticsNodes().size == 1 }
+    }
+
+    @Test
+    fun theReportMenuDeletesTheRunAndGoesBackToTheList() {
+        val smoke = suiteNamed("Smoke")
+        val doomed = saveRunWithSteps(smoke, 0, 1, System.currentTimeMillis() - 2_000L)
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+        clickCentre("Smoke")
+        rule.waitUntilAtLeastOneExists(hasContentDescription("Back to runs"), timeoutMillis = 10_000)
+        assertEquals(doomed.id, state.testsView.selectedRunId)
+
+        rule.onNodeWithContentDescription("More report actions").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete run…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete run?").assertExists()
+        rule.onNodeWithText("Delete run").performClick()
+
+        rule.waitUntil(timeoutMillis = 10_000) { !runDir(doomed).exists() && state.testsView.selectedRunId == null }
+        rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite."), timeoutMillis = 10_000)
+    }
+
+    @Test
+    fun theHeaderMenuDeletesTheShownRunsOfTheFilterAndTheConfirmationStatesCountAndSize() {
+        seed()
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+        val before = state.activeTestFolders().second.listFiles { f -> f.isDirectory }.orEmpty().size
+        assertEquals(4, before)
+
+        rule.onNodeWithContentDescription("Failed, 2").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithContentDescription("More runs actions").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete 2 shown runs…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete 2 runs?").assertExists()
+        rule.waitUntil(timeoutMillis = 10_000) {
+            rule.onAllNodes(hasText("These 2 runs (", substring = true)).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithText("Delete 2 runs").performClick()
+
+        rule.waitUntil(timeoutMillis = 10_000) { state.activeTestFolders().second.listFiles { f -> f.isDirectory }.orEmpty().size == 2 }
+        // The passed and the cancelled run are the ones left.
+        rule.onNodeWithContentDescription("Passed, 1").assertExists()
+        rule.onNodeWithContentDescription("Cancelled, 1").assertExists()
+    }
+
+    @Test
+    fun runningAndQueuedRunsAreNeverOfferedForDeletion() {
+        val smoke = suiteNamed("Smoke")
+        val finished = saveRunWithSteps(smoke, 1, 1, System.currentTimeMillis() - 1_000L)
+        // A run that is still going has its status RUNNING on disk (the app would write it while it runs).
+        val running = saveRunWithSteps(smoke, 0, 1, System.currentTimeMillis() - 2_000L)
+        TestRunStore { state.activeTestFolders().second }.save(running.copy(status = RunStatus.RUNNING, finishedAt = null)).getOrThrow()
+        openRuns()
+        rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
+
+        rule.onNodeWithContentDescription("More runs actions").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete 1 shown run…").assertExists()
+        rule.onNodeWithText("Delete 1 shown run…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete run?").assertExists()
+        rule.onNodeWithText("Delete run").performClick()
+
+        rule.waitUntil(timeoutMillis = 10_000) { !runDir(finished).exists() }
+        assertTrue(runDir(running).exists(), "a running run is excluded from the bulk delete")
     }
 
     private companion object {

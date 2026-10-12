@@ -83,9 +83,22 @@ internal class TestsViewState {
     /** A just-added step whose Action field should take the cursor; the step editor clears it once it did. */
     var focusStepActionId: String? by mutableStateOf(null)
 
-    /** Whether the step inspector's Examples / Advanced sections are open. In memory only, shared by every step. */
-    var stepExamplesExpanded: Boolean by mutableStateOf(false)
+    /** Whether the step inspector's Advanced section is open. In memory only, shared by every step. */
     var stepAdvancedExpanded: Boolean by mutableStateOf(false)
+
+    /** What the user chose for a step's Examples section (by step id); a step without a choice follows [examplesExpanded]'s default. */
+    private var examplesChoice: Map<String, Boolean> by mutableStateOf(emptyMap())
+
+    /** A step whose Examples section should scroll into view (a screenshot thumbnail was clicked); the section clears it once it did. */
+    var examplesRevealStepId: String? by mutableStateOf(null)
+
+    /** Whether the Examples section of [stepId] is open: the user's choice for that step, else open exactly when it has examples. */
+    fun examplesExpanded(stepId: String, hasExamples: Boolean): Boolean = examplesChoice[stepId] ?: hasExamples
+
+    fun setExamplesExpanded(stepId: String, open: Boolean) {
+        examplesChoice = examplesChoice + (stepId to open)
+    }
+
     var selectedScriptId: String? by mutableStateOf(null)
     var selectedSharedStepId: String? by mutableStateOf(null)
 
@@ -570,6 +583,19 @@ internal fun groupRunsByDay(summaries: List<RunSummary>, nowMs: Long, zone: Zone
         .map { (day, runs) -> RunDayGroup(day, runDayLabel(day, today), runs) }
         .sortedByDescending { it.day }
 }
+
+/** What a bulk "Delete N shown runs" did: how many went, how many could not, and the first reason. */
+internal class RunsDeletion(val deleted: Int, val failed: Int, val firstError: String?)
+
+/** Queued and running runs: their folders are being written, so they are never deleted. */
+internal fun RunStatus.isActiveRun(): Boolean = this == RunStatus.QUEUED || this == RunStatus.RUNNING
+
+/**
+ * The runs among [shown] a bulk delete may remove: never one that is queued or running, by its status or because its id is in
+ * [activeRunIds] (the runs of this launch that have not finished). Order is kept.
+ */
+internal fun deletableRuns(shown: List<RunSummary>, activeRunIds: Set<String> = emptySet()): List<RunSummary> =
+    shown.filter { !it.status.isActiveRun() && it.id !in activeRunIds }
 
 /** The status pills of the Runs screen. Queued and running runs only appear under [ALL]. */
 internal enum class RunFilter(val label: String) {

@@ -256,7 +256,7 @@ private fun CaseExamplesList(case: TestCase) {
                         ui.reclaimFocus()
                         ui.view.selectStep(step.id)
                         ui.view.revealStepId = step.id
-                        ui.view.stepExamplesExpanded = true
+                        ui.view.setExamplesExpanded(step.id, true)
                     },
                 ) {
                     AppText(if (example is StepExample.GoldenScreenshot) "Screenshot" else "Reference log", color = tc.ac, fontSize = 10.sp)

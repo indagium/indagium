@@ -79,6 +79,10 @@ internal class RecordingEvidenceService(
 
     fun exists(suiteId: String, recordingId: String): Boolean = files().exists(suiteId, recordingId)
 
+    /** The stored before / after screenshots of one step of a stored recording (blocking; IO thread); null when there are none. */
+    internal fun stepScreens(suiteId: String, recordingId: String, stepId: String): RecordedStepScreens? =
+        loadRecordedStepScreens(files(), suiteId, recordingId, stepId)
+
     /** How many recordings are stored in the Test suites folder and how much disk they use (blocking; IO thread). */
     fun usage(): RecordingEvidenceUsage = files().usage()
 

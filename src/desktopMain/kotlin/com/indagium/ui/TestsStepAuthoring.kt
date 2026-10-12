@@ -67,11 +67,13 @@ private val DRAFT_DIALOG_MAX_HEIGHT = 760.dp
 private val LOG_DIALOG_WIDTH = 620.dp
 private val LOG_DIALOG_MAX_HEIGHT = 760.dp
 private val AI_FIELD_WIDTH = 200.dp
+private val AUTHORING_BUTTON_PADDING = 8.dp
 
 /**
- * The header of a case's step list: the "Steps (N)" title, a "+ Add step" split button (main click: [onAddStep]; menu: draft with
- * AI, record from a device, paste log lines as checks, insert a shared sequence) and a ⋯ menu (improve with AI, rewrite from a saved
- * recording). Under it, while they apply: the recording device picker, the connection progress with Cancel, the last error and
+ * The header of a case's step list: the "Steps (N)" title over a wrapping row of visible buttons ("+ Add step" ([onAddStep]), Draft
+ * steps with AI…, Record from device…, Paste log lines as checks…, Insert shared sequence… when shared steps exist, Improve steps with
+ * AI…, Rewrite with AI from saved recording when stored recordings exist). Under it, while they apply: the recording device picker,
+ * the connection progress with Cancel, the last error and
  * the recording review panel. The dialogs these actions open are composed here too.
  */
 @Composable
@@ -125,7 +127,7 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
     }
 
     val readOnlyHint = "This case is read-only."
-    val addMenu = buildList {
+    val addActions = buildList {
         add(TestsMenuItem("Draft steps with AI…", onClick = { draftOpen = true }, enabled = editable, disabledHint = readOnlyHint))
         add(
             TestsMenuItem(
@@ -148,7 +150,7 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
             )
         }
     }
-    val moreMenu = buildList {
+    val moreActions = buildList {
         add(
             TestsMenuItem(
                 "Improve steps with AI…", onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
@@ -184,10 +186,34 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
         }
     }
 
-    TestsSectionTitle("Steps (${case.steps.size})") {
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            TestsSplitButton("+ Add step", onClick = onAddStep, menuItems = addMenu, enabled = editable, disabledHint = readOnlyHint)
-            TestsOverflowMenu(moreMenu, contentDescription = "More step actions")
+    TestsSectionTitle("Steps (${case.steps.size})")
+    // Every authoring action is a visible compact button; the row wraps at narrow widths. A disabled one keeps its reason as a tooltip.
+    FlowRow(
+        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        HintedButton(
+            "+ Add step",
+            onClick = {
+                onAddStep()
+                ui.reclaimFocus()
+            },
+            enabled = editable,
+            disabledHint = readOnlyHint,
+            horizontalPadding = AUTHORING_BUTTON_PADDING,
+        )
+        (addActions + moreActions).forEach { item ->
+            HintedButton(
+                item.label,
+                onClick = {
+                    item.onClick()
+                    ui.reclaimFocus()
+                },
+                enabled = item.enabled,
+                disabledHint = item.disabledHint,
+                horizontalPadding = AUTHORING_BUTTON_PADDING,
+            )
         }
     }
     if (authoringDevices.size > 1 || preparingRecording) {

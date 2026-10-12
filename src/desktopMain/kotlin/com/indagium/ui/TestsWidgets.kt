@@ -109,9 +109,6 @@ private val LIST_ROW_MIN_HEIGHT = 34.dp
 private val MENU_WIDTH = 230.dp
 private val MENU_ITEM_SHAPE = CORNER_SM
 private val OVERFLOW_BUTTON_SIZE = 26.dp
-private val SPLIT_CHEVRON_WIDTH = 24.dp
-private val SPLIT_START_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
-private val SPLIT_END_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
 private val CHIP_SHAPE = CORNER_MD
 private val PILL_SHAPE = RoundedCornerShape(50)
 private val SUMMARY_CHIP_MAX_WIDTH = 280.dp
@@ -770,7 +767,7 @@ private fun TestsOptionRow(label: String, active: Boolean, onClick: () -> Unit) 
 // ── Menus ────────────────────────────────────────────────────────────
 
 /**
- * One entry of a [TestsOverflowMenu] / [TestsSplitButton] menu. [kbd] is a shortcut hint shown on the right; a
+ * One entry of a [TestsOverflowMenu] menu. [kbd] is a shortcut hint shown on the right; a
  * disabled item shows [disabledHint] in a tooltip; [dividerBefore] draws a separator line above it.
  */
 internal class TestsMenuItem(
@@ -928,41 +925,6 @@ internal fun TestsIconButton(
     }
 }
 
-/**
- * A button with a ▾ part that opens [menuItems], e.g. "+ Add step ▾": the label runs [onClick], the chevron opens the
- * menu. [enabled] covers the label only (with [disabledHint] explaining why); the chevron stays usable while the menu
- * has items, each of which carries its own enabled state.
- */
-@Composable
-internal fun TestsSplitButton(
-    label: String,
-    onClick: () -> Unit,
-    menuItems: List<TestsMenuItem>,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    disabledHint: String? = null,
-    variant: ButtonVariant = ButtonVariant.Secondary,
-) {
-    val menu = rememberTestsMenuState()
-    Row(modifier) {
-        HintWhen(!enabled && disabledHint != null, disabledHint.orEmpty()) {
-            AppButton(label, onClick, variant = variant, enabled = enabled, shape = SPLIT_START_SHAPE)
-        }
-        Box {
-            AppButton(
-                "▾",
-                onClick = { menu.toggle() },
-                variant = variant,
-                enabled = menuItems.isNotEmpty(),
-                modifier = Modifier.width(SPLIT_CHEVRON_WIDTH).semantics { contentDescription = "$label options" },
-                horizontalPadding = 0.dp,
-                shape = SPLIT_END_SHAPE,
-            )
-            if (menu.open) TestsMenuPopup(menuItems, Alignment.TopEnd, OVERFLOW_BUTTON_SIZE + 2.dp, menu::close)
-        }
-    }
-}
-
 // ── Buttons, chips, banners ──────────────────────────────────────────
 
 /** An [AppButton] that explains, in a tooltip, why it is disabled. */
@@ -976,8 +938,11 @@ internal fun HintedButton(
     variant: ButtonVariant = ButtonVariant.Secondary,
     isDanger: Boolean = false,
     leadingIcon: ImageVector? = null,
+    horizontalPadding: Dp = 10.dp,
 ) {
-    val button: @Composable () -> Unit = { AppButton(label, onClick, variant, isDanger, enabled, modifier, leadingIcon) }
+    val button: @Composable () -> Unit = {
+        AppButton(label, onClick, variant, isDanger, enabled, modifier, leadingIcon, horizontalPadding)
+    }
     if (!enabled && disabledHint != null) {
         TooltipArea(tooltip = { ToolbarTooltip(disabledHint, maxLines = BANNER_MAX_LINES) }) { button() }
     } else {

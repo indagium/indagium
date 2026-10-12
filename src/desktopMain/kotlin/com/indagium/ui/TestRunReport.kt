@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package com.indagium.ui
 
@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
@@ -31,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -39,6 +41,11 @@ import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -58,6 +65,7 @@ import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.driverLabel
+import com.indagium.testing.model.summary
 import com.indagium.testing.run.TestRunReportExportProgress
 import com.indagium.testing.run.TestRunReportFormat
 import com.indagium.testing.run.availableRunArtifactPaths
@@ -81,10 +89,11 @@ import java.time.ZoneId
 // never acted on.
 
 private val RUN_STATUS_COLUMN = 72.dp
-private val RUN_BAR_COLUMN = 130.dp
-private val RUN_STEPS_MIN_WIDTH = 34.dp
-private val RUN_META_MAX_WIDTH = 150.dp
+private val RUN_BAR_WIDTH = 72.dp
+private val RUN_STEPS_LABEL_WIDTH = 56.dp
+private val RUN_META_COLUMN = 150.dp
 private val RUN_CLOCK_COLUMN = 40.dp
+private val RUN_MENU_SLOT = 26.dp
 private val RUN_SUITE_MENU_WIDTH = 240.dp
 private val LANE_COLUMN = 92.dp
 private val JUDGE_COLUMN = 104.dp
@@ -124,9 +133,23 @@ private fun TestRunList() {
     val inSuite = remember(summaries, suiteId) { summaries.orEmpty().let { all -> if (suiteId == null) all else all.filter { it.suiteId == suiteId } } }
     val counts = remember(inSuite) { runFilterCounts(inSuite) }
     val shown = remember(inSuite, view.runsFilter) { filterRuns(inSuite, null, view.runsFilter) }
+    val sizes by rememberRunSizes()
+    var deleteRequest by remember { mutableStateOf<RunDeleteRequest?>(null) }
+    val activeRunIds = ui.state.testRuns.filter { !it.isFinished }.mapTo(HashSet()) { it.id }
+    val deletable = remember(shown, activeRunIds) { deletableRuns(shown, activeRunIds) }
     TestsScreenScaffold {
         TestsPageHeader(
             title = "Runs",
+            overflowDescription = "More runs actions",
+            overflowItems = listOf(
+                TestsMenuItem(
+                    "Delete ${deletable.size} shown ${if (deletable.size == 1) "run" else "runs"}…",
+                    onClick = { deleteRequest = RunDeleteRequest(deletable) },
+                    danger = true,
+                    enabled = deletable.isNotEmpty(),
+                    disabledHint = "No finished runs match the current filter.",
+                ),
+            ),
             primary = {
                 TestsDropdown(
                     selectedLabel = suites.firstOrNull { it.id == suiteId }?.name?.ifBlank { "Untitled suite" } ?: "All suites",
@@ -139,6 +162,9 @@ private fun TestRunList() {
             },
         )
         TestsHint("Start a run with “Run suite” on a suite or “Run case” on a case. A run keeps its evidence in the save folder.")
+        if (!summaries.isNullOrEmpty()) {
+            TestsHint(runsUsageLine(summaries.size, sizes, summaries.map { it.id }), Modifier.semantics { contentDescription = "Runs disk usage" })
+        }
         Spacer(Modifier.height(10.dp))
         RunFilterPills(counts, view.runsFilter) { view.runsFilter = it }
         Spacer(Modifier.height(4.dp))
@@ -146,9 +172,13 @@ private fun TestRunList() {
             summaries == null -> TestsHint("Loading runs…", Modifier.padding(top = 8.dp))
             summaries.isEmpty() -> TestsHint("No runs yet. Start one with Run suite.", Modifier.padding(top = 8.dp))
             shown.isEmpty() -> TestsHint("No runs match this filter.", Modifier.padding(top = 8.dp))
-            else -> RunHistoryList(shown, showSuite = true, onOpen = { view.selectedRunId = it })
+            else -> RunHistoryList(
+                shown, showSuite = true, onOpen = { view.selectedRunId = it },
+                onDelete = { deleteRequest = RunDeleteRequest(listOf(it)) },
+            )
         }
     }
+    deleteRequest?.let { request -> RunDeleteDialog(request, onDismiss = { deleteRequest = null }) }
 }
 
 @Composable
@@ -186,6 +216,8 @@ internal fun RunHistoryList(
     modifier: Modifier = Modifier,
     nowMs: Long = System.currentTimeMillis(),
     zone: ZoneId = ZoneId.systemDefault(),
+    /** Gives each row a hover ⋯ with "Delete run…" that hands the run here; null shows no menu. */
+    onDelete: ((RunSummary) -> Unit)? = null,
 ) {
     val tc = tc()
     val groups = remember(runs, nowMs, zone) { groupRunsByDay(runs, nowMs, zone) }
@@ -195,43 +227,73 @@ internal fun RunHistoryList(
                 group.label, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 6.dp, top = 12.dp, bottom = 4.dp),
             )
-            group.runs.forEach { run -> RunHistoryRow(run, showSuite, zone) { onOpen(run.id) } }
+            group.runs.forEach { run -> RunHistoryRow(run, showSuite, zone, onDelete) { onOpen(run.id) } }
         }
     }
 }
 
 @Composable
-private fun RunHistoryRow(run: RunSummary, showSuite: Boolean, zone: ZoneId, onClick: () -> Unit) {
+private fun RunHistoryRow(run: RunSummary, showSuite: Boolean, zone: ZoneId, onDelete: ((RunSummary) -> Unit)?, onClick: () -> Unit) {
     val tc = tc()
+    val ui = LocalTestsUi.current
     val color = runColor(run.status)
-    TestsListRow(selected = false, onClick = onClick, startPadding = 6.dp, spacing = 10.dp) {
+    var hovered by remember { mutableStateOf(false) }
+    TestsListRow(
+        selected = false,
+        onClick = onClick,
+        modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
+        startPadding = 6.dp,
+        spacing = 10.dp,
+    ) {
         Box(Modifier.width(RUN_STATUS_COLUMN)) { StatusChip(run.status.label(), color) }
         AppText(
             if (showSuite) run.suiteName.ifBlank { "Untitled suite" } else countNoun(run.caseCount, "case"),
             color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
         )
         RunPassBar(run, color)
-        AppText(
-            runMetaText(run, showSuite), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = RUN_META_MAX_WIDTH),
-        )
+        // A fixed slot, so the bar and the clock sit at the same x on every row whatever the note says.
+        Box(Modifier.width(RUN_META_COLUMN)) {
+            AppText(runMetaText(run, showSuite), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
         Box(Modifier.width(RUN_CLOCK_COLUMN), contentAlignment = Alignment.CenterEnd) {
             AppText(formatClock(run.createdAt, zone), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+        }
+        if (onDelete != null) {
+            val active = run.status.isActiveRun() || ui.state.testRuns.any { it.id == run.id && !it.isFinished }
+            Box(Modifier.size(RUN_MENU_SLOT).alpha(if (hovered) 1f else 0f)) {
+                TestsOverflowMenu(
+                    listOf(
+                        TestsMenuItem(
+                            "Delete run…", onClick = { onDelete(run) }, danger = true,
+                            enabled = !active, disabledHint = RUN_DELETE_ACTIVE_HINT,
+                        ),
+                    ),
+                    contentDescription = "Run actions",
+                )
+            }
         }
     }
 }
 
-/** A 6 dp rounded track filled with the share of passed steps, and "passed/total" after it. A live run fills in the accent colour. */
+private const val RUN_DELETE_ACTIVE_HINT = "Stop the run before deleting it."
+
+/**
+ * A 6 dp rounded track filled with the share of passed steps, and "passed/total" after it. Both live in fixed-width slots (the bar
+ * [RUN_BAR_WIDTH], the label [RUN_STEPS_LABEL_WIDTH] right-aligned in a monospace face) so every row's bar starts and ends at the same x.
+ * A live run fills in the accent colour.
+ */
 @Composable
 private fun RunPassBar(run: RunSummary, statusColor: Color) {
     val tc = tc()
     val live = run.status == RunStatus.QUEUED || run.status == RunStatus.RUNNING
-    Row(Modifier.width(RUN_BAR_COLUMN), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Box(Modifier.weight(1f).height(6.dp).clip(CORNER_SM).background(tc.br.copy(alpha = BAR_TRACK_ALPHA))) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(Modifier.testTag("run-pass-bar").width(RUN_BAR_WIDTH).height(6.dp).clip(CORNER_SM).background(tc.br.copy(alpha = BAR_TRACK_ALPHA))) {
             val fraction = run.passFraction()
             if (fraction > 0f) Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(if (live) statusColor else tc.success))
         }
-        AppText("${run.passedSteps}/${run.totalSteps}", color = tc.ts, fontSize = 11.sp, maxLines = 1, modifier = Modifier.widthIn(min = RUN_STEPS_MIN_WIDTH))
+        Box(Modifier.testTag("run-pass-steps").width(RUN_STEPS_LABEL_WIDTH), contentAlignment = Alignment.CenterEnd) {
+            AppText("${run.passedSteps}/${run.totalSteps}", color = tc.ts, fontSize = 11.sp, fontFamily = MONO, maxLines = 1)
+        }
     }
 }
 
@@ -354,6 +416,7 @@ private fun RunReport(run: TestRun, runDir: File) {
     val verdict = remember(run) { runVerdict(run) }
     val meta = remember(run, profiles) { runMetaLine(run, System.currentTimeMillis(), profileName = { id -> profiles.firstOrNull { it.id == id }?.displayName }) }
     val failedIds = remember(run) { failedCaseIds(run) }
+    var deleteRequest by remember(run.id) { mutableStateOf<RunDeleteRequest?>(null) }
     TestsScreenScaffold(inspector = { ReportInspector(run, runDir, selection) }) {
         TestsPageHeader(
             title = run.suite.name.ifBlank { "Untitled suite" },
@@ -373,6 +436,11 @@ private fun RunReport(run: TestRun, runDir: File) {
             overflowItems = listOf(
                 TestsMenuItem("Export report…", onClick = { showExport = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
                 TestsMenuItem("Compare with…", onClick = { showComparePicker = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
+                TestsMenuItem(
+                    "Delete run…",
+                    onClick = { deleteRequest = RunDeleteRequest(listOf(run.summary())) { view.selectedRunId = null } },
+                    danger = true, enabled = !active, disabledHint = RUN_DELETE_ACTIVE_HINT, dividerBefore = true,
+                ),
             ),
         )
         Spacer(Modifier.height(8.dp))
@@ -406,6 +474,7 @@ private fun RunReport(run: TestRun, runDir: File) {
         )
     }
     if (showExport) ReportExportDialog(run, runDir, onDismiss = { showExport = false; ui.reclaimFocus() })
+    deleteRequest?.let { request -> RunDeleteDialog(request, onDismiss = { deleteRequest = null }) }
 }
 
 private const val RUN_ACTIVE_HINT = "Available once the run has finished."

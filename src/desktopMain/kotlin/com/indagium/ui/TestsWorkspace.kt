@@ -41,8 +41,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -343,9 +341,16 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
                         onNavigate()
                     }
                     if (expanded) {
-                        entry.cases.forEach { case ->
+                        // Cases reorder inside their own suite; a filtered list is not the stored order, so not while searching.
+                        ReorderableColumn(
+                            items = entry.cases,
+                            idOf = { it.id },
+                            onMove = { id, to -> ui.report(ui.state.moveTestCase(id, to)) },
+                            reorderEnabled = !searching && !library.readOnly && !suite.readOnly,
+                        ) { case, caseRow ->
                             CaseNavRow(
                                 name = case.name.ifBlank { "Untitled case" },
+                                row = caseRow,
                                 selected = view.nav == TestsNav.Suites && suite.id == selectedSuite?.id && case.id == activeCaseId,
                                 locked = limits.isCaseLocked(case.id),
                             ) {
@@ -444,13 +449,7 @@ private fun SuiteNavRow(
 ) {
     val tc = tc()
     val limits = LocalTestsLimits.current
-    var hovered by remember { mutableStateOf(false) }
-    NavRow(
-        selected = selected,
-        onClick = onClick,
-        modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
-        startPadding = 4.dp,
-    ) {
+    NavRow(selected = selected, onClick = onClick, startPadding = 4.dp) {
         if (suite.cases.isEmpty()) {
             Spacer(Modifier.size(NAV_CARET_SIZE))
         } else {
@@ -474,15 +473,13 @@ private fun SuiteNavRow(
         )
         if (locked) LockBadge(limits.hint)
         TestsBadge("${suite.cases.size}")
-        // The grip only shows while hovering (or dragging); its slot is reserved whenever reordering is on so nothing shifts.
-        if (row.enabled) {
-            Box(Modifier.size(NAV_GRIP_SLOT)) { if (hovered || row.dragging) ReorderGrip(row) }
-        }
+        // Always visible (muted, dimmed while reordering is off: a search, a read-only library).
+        ReorderGrip(row, Modifier.size(NAV_GRIP_SLOT))
     }
 }
 
 @Composable
-private fun CaseNavRow(name: String, selected: Boolean, locked: Boolean, onClick: () -> Unit) {
+private fun CaseNavRow(name: String, row: ReorderRowScope, selected: Boolean, locked: Boolean, onClick: () -> Unit) {
     val tc = tc()
     val limits = LocalTestsLimits.current
     NavRow(selected = selected, onClick = onClick, startPadding = NAV_CASE_START_PADDING) {
@@ -495,6 +492,7 @@ private fun CaseNavRow(name: String, selected: Boolean, locked: Boolean, onClick
             modifier = Modifier.weight(1f),
         )
         if (locked) LockBadge(limits.hint)
+        ReorderGrip(row, Modifier.size(NAV_GRIP_SLOT))
     }
 }
 

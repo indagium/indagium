@@ -7,6 +7,8 @@ import com.indagium.testing.model.summary
 import com.indagium.utils.writeFileAtomically
 import java.io.File
 import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.LinkOption
 
 // The run folders of AI test runs:
 //   <base>/<runId>/run.json                       the TestRun (frozen suite + results), written atomically
@@ -113,6 +115,44 @@ class TestRunStore(private val baseDir: () -> File) {
         val summaryOrder = compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id }
         val records = (recent + listOfNotNull(latestTerminal)).distinctBy { it.id }.sortedWith(recordOrder)
         return StoredSuiteRunHistory(records, summaries.sortedWith(summaryOrder))
+    }
+
+    // ── Deleting and sizes ───────────────────────────────────────────
+
+    /** The total size in bytes of one run folder (0 when there is none or the id is unsafe). */
+    fun sizeOf(runId: String): Long {
+        if (!isSafeId(runId)) return 0L
+        return File(baseDir(), runId).takeIf { Files.isDirectory(it.toPath(), LinkOption.NOFOLLOW_LINKS) }?.let(::treeSize) ?: 0L
+    }
+
+    /** The size in bytes of every run folder under the base folder, by run id. Walks the disk: call on an IO thread. */
+    fun sizes(): Map<String, Long> =
+        baseDir().listFiles { file -> file.isDirectory && isSafeId(file.name) }.orEmpty().associate { it.name to sizeOf(it.name) }
+
+    /**
+     * Removes the folder of [runId] and everything in it (its `run.json`, evidence, transcripts). Only a folder directly inside the base
+     * folder that holds a `run.json` is removed: an unsafe id, a symbolic link, a folder whose real location is elsewhere, or a folder
+     * that is not a run folder is refused and nothing is touched. The store cannot tell whether the run is still being written; the
+     * caller ([com.indagium.testing.run.TestRunCoordinator.deleteRun]) refuses a queued or running run before calling this.
+     */
+    fun delete(runId: String): StoreResult<Unit> {
+        if (!isSafeId(runId)) return StoreResult.Invalid("That is not a valid run id.")
+        val dir = File(baseDir(), runId)
+        val path = dir.toPath()
+        if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) return StoreResult.NotFound("run", runId)
+        if (Files.isSymbolicLink(path) || !Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            return StoreResult.Invalid("Run $runId is not a plain run folder, so it was not deleted.")
+        }
+        val inside = runCatching { path.toRealPath().parent == baseDir().toPath().toRealPath() }.getOrDefault(false)
+        if (!inside) return StoreResult.Invalid("Run $runId is outside the test runs folder, so it was not deleted.")
+        if (!File(dir, TEST_RUN_FILE_NAME).isFile) return StoreResult.Invalid("Folder $runId has no $TEST_RUN_FILE_NAME, so it is not treated as a run.")
+        return if (deleteTree(dir)) {
+            lastError = null
+            StoreResult.Ok(Unit)
+        } else {
+            lastError = "Could not delete everything in run $runId."
+            StoreResult.Invalid("Could not delete everything in run $runId. Some files may be in use.")
+        }
     }
 
     fun listRecordsForSuite(suiteId: String): List<TestRun> = listSuiteHistory(suiteId).recentRecords

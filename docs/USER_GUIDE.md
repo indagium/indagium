@@ -1275,7 +1275,12 @@ The Runs tab lists the suite's saved history. Each case row shows the latest ter
 duration, repeat context and linked issues. If that run did not include a case or lane, it says **Not run**; a partial
 or cancelled run does not borrow an older result. These results reload from saved runs after restart.
 
-A **case** is one thing to verify and holds ordered **steps**; a step is one instruction. While editing, use the
+The suite header has **+ New case** next to **▶ Run suite**.
+
+A **case** is one thing to verify and holds ordered **steps**; a step is one instruction. Above its steps the case
+shows buttons for everything that adds or improves steps: **+ Add step**, **Draft steps with AI…**, **Record from
+device…**, **Paste log lines as checks…**, **Improve steps with AI…**, **Insert shared sequence…** (when you have shared steps)
+and **Rewrite with AI from saved recording** (when a recording's evidence was kept). A greyed-out button says why when you point at it. While editing, use the
 left case navigator to move between cases without returning to the suite table. On a wide window the editor keeps
 steps in the center and allowed tools, examples and contextual guidance in a side panel; on a narrow window that
 panel stacks below the editor.
@@ -1342,11 +1347,17 @@ and the case goes on). Each lane waits on its own device. Over MCP the lane's wa
 step · confirmed by the tester · completion: tester or checks*, *detected by its checks*, *done by a script*, *skipped*,
 *not confirmed*), and so does the Markdown export.
 
-Every list — suites, cases, steps, checks, examples, scripts — can be reordered by dragging its handle,
-with `Alt+↑` / `Alt+↓`, or with the up/down buttons. Duplicate, export and import work on whole suites
+Every list — suites, cases, steps, checks, examples, scripts — can be reordered by dragging its **⠿** handle (always
+visible; dimmed while reordering is off, for example in a read-only library or while the search box filters the
+tree), with `Alt+↑` / `Alt+↓`, or with the up/down buttons. In the left tree you can drag a suite to reorder suites and a
+case to reorder the cases of its suite; `Alt+↑` / `Alt+↓` on a focused case moves the case, not its suite. Duplicate, export and import work on whole suites
 (**Duplicate**, **Export…**, **Import…** on the suite page).
 
 ### Checks and examples
+
+A step with examples shows its **Examples** section open and, under its title, a strip of thumbnails of its golden
+screenshots (click one to jump to it). Closing Examples affects only that step. A step made by a recording with
+*Keep recording evidence* on also shows **Recorded screens**, the stored before / after image.
 
 A step can carry **checks** that are verified without trusting the agent:
 
@@ -1610,6 +1621,12 @@ A deferred judge result is provisional while pending and cannot make a case pass
 
 ### Reading the report
 
+**Runs** lists every saved run by day, each with a pass bar and its "passed/total" steps; the header says how many runs
+there are and how much disk they use ("14 runs · 1.2 GB"). Hover a run for its **⋯ → Delete run…**, open the report's **⋯ →
+Delete run…**, or use the Runs header **⋯ → Delete N shown runs…** to delete the runs the suite filter and status pill show
+(never a run that is queued or running). The confirmation states the count and the size; deleting removes the run's whole folder
+(reports, logs, screenshots and the lane recordings) and cannot be undone. Issues made from a deleted run stay.
+
 When a run ends, **Runs → (the run)** shows total tool calls and reported tokens, with a partial marker when a provider
 or cancellation leaves usage incomplete. The report also shows per-lane and per-case agent/inline-judge breakdowns;
 external MCP cases show their uncapped tool count with token usage unavailable. Comparison-judge usage is included in the
@@ -1678,6 +1695,9 @@ evidence you want, then **Send to**:
 | **Notes** | A note with the issue and the step's screenshot is added to the log tab of that lane |
 | **Markdown** | The issue is copied to the clipboard as Markdown |
 | **Tracker** | An AI agent files it in your issue tracker (below) |
+
+**Tests → Issues** has a **Delete…** button next to **Edit…**, a **⋯ → Delete…** on every row, and a header **⋯ → Delete N shown
+issues…** that deletes everything the search box shows (it asks first and states the count).
 
 Tick **Link to case and re-check on next run** and a later run of that case marks the issue **still failing** or **passing now**.
 

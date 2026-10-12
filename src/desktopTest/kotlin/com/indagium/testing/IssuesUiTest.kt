@@ -6,14 +6,19 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
+import androidx.compose.ui.test.isPopup
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
 import com.indagium.testing.model.IssueDraft
@@ -158,7 +163,9 @@ class IssuesUiTest {
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
 
         openIssueMenu()
-        listOf("Copy Markdown", "Add to notes", "Open folder", "Delete…").forEach { rule.onNodeWithText(it).assertExists() }
+        listOf("Copy Markdown", "Add to notes", "Open folder").forEach { rule.onNodeWithText(it).assertExists() }
+        // Delete… is a visible button next to Edit… and is repeated in the menu.
+        assertEquals(2, rule.onAllNodesWithText("Delete…").fetchSemanticsNodes().size)
         rule.onNodeWithText("Edit…").assertExists()
 
         rule.onNodeWithText("Edit…").performClick()
@@ -174,7 +181,7 @@ class IssuesUiTest {
         openIssues()
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
 
-        openIssueMenu()
+        // The visible Delete… button, no menu needed.
         rule.onNodeWithText("Delete…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Delete this issue?").assertExists()
@@ -182,13 +189,73 @@ class IssuesUiTest {
         rule.waitForIdle()
         assertTrue(state.issueStore.load(doomed.id) != null, "nothing is deleted before the confirmation")
 
-        openIssueMenu()
         rule.onNodeWithText("Delete…").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Delete").performClick()
         rule.waitUntil(WAIT_MS) { state.issueStore.load(doomed.id) == null }
         rule.waitUntil(WAIT_MS) { state.testsView.selectedIssueId == keep.id }
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
+    }
+
+    @Test
+    fun theInspectorShowsADeleteButtonBesideEditEvenWithTheMenuClosed() {
+        storeIssue("Login crashes")
+        openIssues()
+        rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
+
+        rule.onNodeWithText("Delete…").assertExists()
+        rule.onNodeWithText("Edit…").assertExists()
+        val edit = rule.onNodeWithText("Edit…").fetchSemanticsNode().boundsInRoot
+        val delete = rule.onNodeWithText("Delete…").fetchSemanticsNode().boundsInRoot
+        assertTrue(delete.left > edit.left && kotlin.math.abs(delete.top - edit.top) < 2f, "Delete… sits in the same action row, after Edit…: $edit vs $delete")
+    }
+
+    @Test
+    fun aRowMenuDeletesThatIssueAfterAConfirmation() {
+        val keep = storeIssue("Login crashes")
+        val doomed = storeIssue("Checkout hangs")
+        state.testsView.selectedIssueId = keep.id
+        openIssues()
+        rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
+
+        val rowMenus = rule.onAllNodesWithContentDescription("Issue actions")
+        assertEquals(2, rowMenus.fetchSemanticsNodes().size, "every row has a ⋯")
+        // Rows list newest first, so the second stored issue is the first row.
+        rowMenus[0].performClick()
+        rule.waitForIdle()
+        rule.onNode(hasText("Delete…") and hasAnyAncestor(isPopup())).performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete this issue?").assertExists()
+        assertTrue(state.issueStore.load(doomed.id) != null, "nothing is deleted before the confirmation")
+        rule.onNodeWithText("Delete").performClick()
+
+        rule.waitUntil(WAIT_MS) { state.issueStore.load(doomed.id) == null }
+        assertTrue(state.issueStore.load(keep.id) != null, "the other issue stays")
+    }
+
+    @Test
+    fun theHeaderMenuDeletesEveryIssueTheSearchShowsAndTheConfirmationStatesTheCount() {
+        val a = storeIssue("Checkout crashes")
+        val b = storeIssue("Checkout hangs")
+        val other = storeIssue("Login fails")
+        openIssues()
+        rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
+
+        // The nav pane has a search field too; the issues search is the one right of it.
+        val fields = rule.onAllNodes(hasSetTextAction()).fetchSemanticsNodes()
+        val index = fields.indices.first { fields[it].boundsInRoot.left >= state.testsView.navWidthDp }
+        rule.onAllNodes(hasSetTextAction())[index].performTextReplacement("checkout")
+        rule.waitForIdle()
+        rule.onNodeWithContentDescription("More issues actions").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete 2 shown issues…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete 2 issues?").assertExists()
+        assertTrue(state.issueStore.load(a.id) != null && state.issueStore.load(b.id) != null, "nothing is deleted before the confirmation")
+        rule.onNodeWithText("Delete 2 issues").performClick()
+
+        rule.waitUntil(WAIT_MS) { state.issueStore.load(a.id) == null && state.issueStore.load(b.id) == null }
+        assertTrue(state.issueStore.load(other.id) != null, "an issue the search did not show stays")
     }
 
     @Test

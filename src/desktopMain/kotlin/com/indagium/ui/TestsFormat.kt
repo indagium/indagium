@@ -45,6 +45,21 @@ internal fun formatTokens(n: Long): String {
     }
 }
 
+private const val BYTES_PER_KIB = 1024L
+private const val KIB_PER_MIB = 1024L
+
+/** "0 B", "340 KB", "12.4 MB", "1.2 GB": a disk size in binary units, one decimal from megabytes up. */
+internal fun formatBytes(bytes: Long): String {
+    val size = bytes.coerceAtLeast(0)
+    val kib = size / BYTES_PER_KIB.toDouble()
+    return when {
+        size < BYTES_PER_KIB -> "$size B"
+        kib < KIB_PER_MIB -> "${kib.toLong()} KB"
+        kib / KIB_PER_MIB < KIB_PER_MIB -> String.format(Locale.ROOT, "%.1f MB", kib / KIB_PER_MIB)
+        else -> String.format(Locale.ROOT, "%.1f GB", kib / KIB_PER_MIB / KIB_PER_MIB)
+    }
+}
+
 private fun trimmedDecimal(value: Double, decimals: Int): String =
     String.format(Locale.ROOT, "%.${decimals}f", value).trimEnd('0').trimEnd('.')
 

@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.border
@@ -37,6 +39,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -147,16 +150,28 @@ internal class ReorderRowScope(
     val canMoveDown: Boolean get() = enabled && index < count - 1
 }
 
-/** The ⠿ grip: drag it to move the row. Greyed out and inert when reordering is disabled. */
+/**
+ * The ⠿ grip: drag it to move the row. Always visible: muted at rest, accent while hovered or dragged; dimmed and
+ * inert (default cursor) when reordering is disabled (read-only library, an active search).
+ */
 @Composable
 internal fun ReorderGrip(row: ReorderRowScope, modifier: Modifier = Modifier) {
     val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val color = when {
+        !row.enabled -> tc.td.copy(alpha = DISABLED_ALPHA)
+        hovered || row.dragging -> tc.ac
+        else -> tc.td
+    }
     Box(
         modifier.size(GRIP_SIZE)
+            .semantics { contentDescription = if (row.enabled) "Drag to reorder" else "Reordering is off" }
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .then(if (row.enabled) row.dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))) else Modifier),
         contentAlignment = Alignment.Center,
     ) {
-        AppText("⠿", color = if (row.enabled) tc.td else tc.td.copy(alpha = DISABLED_ALPHA), fontSize = 12.sp)
+        AppText("⠿", color = color, fontSize = 12.sp)
     }
 }
 

@@ -2500,6 +2500,10 @@ class AppState(
         return location.case.recordingRefs().filter { recordingEvidenceService.exists(location.suite.id, it) }
     }
 
+    /** The stored before / after screenshots of [stepId] in recording [recordingId] of [suiteId] (blocking disk read; not for the UI thread). */
+    internal fun recordedStepScreens(suiteId: String, recordingId: String, stepId: String): com.indagium.testing.authoring.RecordedStepScreens? =
+        recordingEvidenceService.stepScreens(suiteId, recordingId, stepId)
+
     /**
      * Reopens the stored recording [recordingId] of [caseId] (the only one when null) as a stopped recording in the review panel; no
      * device is needed or touched. Refused while another recording exists, for a case that is read-only or locked, and when the files
@@ -2820,6 +2824,37 @@ class AppState(
     /** Every test run of this launch, newest first; observe this from composables. */
     var testRuns by mutableStateOf<List<TestRun>>(emptyList())
         private set
+
+    /**
+     * Deletes the stored run [runId] (its whole folder) and refreshes every screen that lists runs. Refused while the run is queued or
+     * running. Blocking disk work runs on the coordinator's IO dispatcher; safe to call from any coroutine. No lock is held.
+     */
+    internal suspend fun deleteTestRun(runId: String): com.indagium.testing.store.StoreResult<Unit> {
+        val result = testRunCoordinator.deleteRun(runId)
+        testRunsFolderEpoch += 1
+        return result
+    }
+
+    /** Deletes each of [runIds] (see [deleteTestRun]) and tells how many went and the first reason for any that did not. */
+    internal suspend fun deleteTestRuns(runIds: Collection<String>): RunsDeletion {
+        var deleted = 0
+        var failed = 0
+        var firstError: String? = null
+        for (id in runIds) {
+            when (val result = testRunCoordinator.deleteRun(id)) {
+                is com.indagium.testing.store.StoreResult.Ok -> deleted++
+                else -> {
+                    failed++
+                    if (firstError == null) firstError = (result as? com.indagium.testing.store.StoreResult.Invalid)?.reason ?: "Run $id was not found."
+                }
+            }
+        }
+        testRunsFolderEpoch += 1
+        return RunsDeletion(deleted, failed, firstError)
+    }
+
+    /** The size in bytes of every stored run folder, by run id (walks the disk: call off the UI thread). */
+    internal suspend fun testRunSizes(): Map<String, Long> = testRunCoordinator.runSizes()
 
     private fun syncTestRuns() {
         if (!testRunCoordinatorDelegate.isInitialized()) return
