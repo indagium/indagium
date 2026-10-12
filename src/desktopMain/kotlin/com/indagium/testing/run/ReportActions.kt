@@ -5,7 +5,10 @@ import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.SUITE_SETUP_CASE_ID
+import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
 import com.indagium.testing.model.StepFix
+import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
@@ -93,10 +96,13 @@ internal fun rerunConfig(run: TestRun, laneId: String, caseId: String, stepId: S
     )
 }
 
-/** The original run configuration narrowed to the union of cases that failed, blocked, or errored on any lane/repeat. */
+/**
+ * The original run configuration narrowed to the union of cases that failed, blocked or errored on any lane/repeat, and of those a
+ * cancel interrupted ([interruptedCaseIds]).
+ */
 internal fun rerunFailedCasesConfig(run: TestRun): Result<RunConfig> {
-    val failed = failedCaseIds(run).toList()
-    if (failed.isEmpty()) return Result.failure(IllegalArgumentException("This run has no failed, blocked, or errored cases to re-run."))
+    val failed = (failedCaseIds(run) + interruptedCaseIds(run)).toList()
+    if (failed.isEmpty()) return Result.failure(IllegalArgumentException("This run has no failed, blocked, errored, or interrupted cases to re-run."))
     val currentCaseIds = run.suite.cases.map { it.id }.toSet()
     val selected = failed.filter { it in currentCaseIds }
     if (selected.isEmpty()) return Result.failure(IllegalArgumentException("None of the failed cases still exist in the run's suite."))
@@ -111,13 +117,32 @@ internal fun rerunFailedCasesConfig(run: TestRun): Result<RunConfig> {
     )
 }
 
-/** Case outcomes after their final step attempt, unioned across lanes and repeats. */
+private val SUITE_HOOK_CASE_IDS = setOf(SUITE_SETUP_CASE_ID, SUITE_TEARDOWN_CASE_ID)
+
+private fun StepResult.isGenuineFailure(): Boolean =
+    !interrupted && status in setOf(StepStatus.FAIL, StepStatus.BLOCKED, StepStatus.ERROR, StepStatus.TIMEOUT)
+
+/**
+ * Case outcomes after their final step attempt, unioned across lanes and repeats. A step a cancel interrupted is not a failure, and
+ * neither is a cancelled case that failed nowhere else (see [interruptedCaseIds]).
+ */
 internal fun failedCaseIds(run: TestRun): Set<String> = run.lanes.flatMap { it.cases }
-    .filter { it.caseId !in setOf("suite-setup", "suite-teardown") }
+    .filter { it.caseId !in SUITE_HOOK_CASE_IDS }
     .filter { result ->
-        result.status in setOf(CaseStatus.FAIL, CaseStatus.BLOCKED, CaseStatus.ERROR) ||
-            result.steps.any { it.status in setOf(StepStatus.FAIL, StepStatus.BLOCKED, StepStatus.ERROR, StepStatus.TIMEOUT) }
+        result.status in setOf(CaseStatus.FAIL, CaseStatus.BLOCKED, CaseStatus.ERROR) || result.steps.any { it.isGenuineFailure() }
     }.mapTo(LinkedHashSet()) { it.caseId }
+
+/**
+ * Cases a cancel stopped (a CANCELLED result or a step it interrupted) that have no genuine failure: they did not fail, they did not
+ * finish. A case that also failed somewhere is in [failedCaseIds] only.
+ */
+internal fun interruptedCaseIds(run: TestRun): Set<String> {
+    val failed = failedCaseIds(run)
+    return run.lanes.flatMap { it.cases }
+        .filter { it.caseId !in SUITE_HOOK_CASE_IDS && it.caseId !in failed }
+        .filter { result -> result.status == CaseStatus.CANCELLED || result.steps.any { it.interrupted } }
+        .mapTo(LinkedHashSet()) { it.caseId }
+}
 
 /** [this] suite without the steps after [stepId] in the case that has it; unchanged for a null id. */
 internal fun TestSuite.truncatedAfter(stepId: String?): TestSuite {

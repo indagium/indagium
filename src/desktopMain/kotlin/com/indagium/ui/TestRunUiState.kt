@@ -6,6 +6,7 @@ import com.indagium.capture.MICROPHONE_DEFAULT_ID
 import com.indagium.capture.MICROPHONE_OFF_ID
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
+import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
@@ -14,6 +15,7 @@ import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeInconclusivePolicy
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeTiming
+import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
@@ -30,6 +32,7 @@ import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestingSettings
+import com.indagium.testing.model.agentJudgeDisagrees
 import com.indagium.testing.model.driverLabel
 import com.indagium.testing.model.hasUnresolvedJudgeOutcome
 import com.indagium.testing.model.judge
@@ -423,6 +426,33 @@ internal fun CaseStatus?.label(): String = when (this) {
     CaseStatus.ERROR -> "Error"
 }
 
+/** "Cancelled" for a step a cancel interrupted (its stored status is ERROR), else the status' own label. */
+internal fun StepResult.statusLabel(): String = if (interrupted) "Cancelled" else status.label()
+
+/** The advice a judge gave a step that timed out, in words ("judge: expected result met"); null for any other step. */
+internal fun StepResult.timeoutAdviceLabel(): String? {
+    if (status != StepStatus.TIMEOUT) return null
+    return when (judge?.verdict) {
+        JudgeVerdict.PASS -> "judge: expected result met"
+        JudgeVerdict.FAIL -> "judge: expected result not met"
+        JudgeVerdict.INCONCLUSIVE -> "judge: inconclusive"
+        null -> null
+    }
+}
+
+/** The label of a step's chip in the matrix: kept short for a narrow lane column (a timed-out step adds whether its result looked met). */
+internal fun StepResult.matrixLabel(): String {
+    val advice = when (judge?.verdict.takeIf { status == StepStatus.TIMEOUT }) {
+        JudgeVerdict.PASS -> " · met"
+        JudgeVerdict.FAIL -> " · unmet"
+        else -> ""
+    }
+    return statusLabel() + advice
+}
+
+/** The full label ("Timeout · judge: expected result met") for the inspector. */
+internal fun StepResult.detailLabel(): String = listOfNotNull(statusLabel(), timeoutAdviceLabel()).joinToString(" · ")
+
 private const val TIME_PATTERN = "yyyy-MM-dd HH:mm"
 
 internal fun formatRunTime(millis: Long?): String = millis?.let { SimpleDateFormat(TIME_PATTERN, Locale.ROOT).format(Date(it)) } ?: "—"
@@ -445,6 +475,17 @@ internal fun TestRun.progressLine(laneId: String): String {
 
 private const val PROGRESS_ACTION_CHARS = 60
 
+/**
+ * The report's re-run button: "Re-run failed (2)", "Re-run interrupted (1)" for cases a cancel stopped, "Re-run failed and
+ * interrupted (3)" for both; null when there is nothing to re-run.
+ */
+internal fun rerunButtonLabel(failed: Int, interrupted: Int): String? = when {
+    failed > 0 && interrupted > 0 -> "Re-run failed and interrupted (${failed + interrupted})"
+    interrupted > 0 -> "Re-run interrupted ($interrupted)"
+    failed > 0 -> "Re-run failed ($failed)"
+    else -> null
+}
+
 /** A cell of the matrix: what one lane did, or null when the lane has not got there yet. */
 internal data class MatrixStepCell(val laneId: String, val result: StepResult?)
 
@@ -453,7 +494,18 @@ internal data class MatrixCaseCell(val laneId: String, val status: CaseStatus?, 
 /** One row of the report matrix, in display order. */
 internal sealed interface MatrixRow {
     /** The header of a case run (or of the suite's setup / teardown hooks). */
-    data class Case(val key: String, val caseId: String, val name: String, val iteration: Int, val cells: List<MatrixCaseCell>) : MatrixRow
+    data class Case(
+        val key: String,
+        val caseId: String,
+        val name: String,
+        val iteration: Int,
+        val cells: List<MatrixCaseCell>,
+        /** How many attempts the case took on its busiest lane, and which of them the rows below show (see [viewingAttempts]). */
+        val attemptCount: Int = 1,
+        val viewingAttempt: Int = 1,
+        /** The case status of each attempt by number (a running case has null), for the attempt switcher's choices. */
+        val attemptStatuses: Map<Int, CaseStatus?> = emptyMap(),
+    ) : MatrixRow
 
     /** One step of the frozen suite (or one hook step), with the result of every lane. */
     data class Step(
@@ -481,7 +533,7 @@ private fun stepRowMatches(run: TestRun, row: MatrixRow.Step, filter: TestRunRep
     return when (filter) {
         TestRunReportFilter.FAILURES -> results.any { it.status in setOf(StepStatus.FAIL, StepStatus.TIMEOUT) }
         TestRunReportFilter.BLOCKED_OR_ERROR -> results.any { it.status in setOf(StepStatus.BLOCKED, StepStatus.ERROR) }
-        TestRunReportFilter.DISAGREEMENTS -> consensusFor(run, row).tone == ConsensusTone.DISAGREE
+        TestRunReportFilter.DISAGREEMENTS -> consensusFor(run, row).tone == ConsensusTone.DISAGREE || results.any { it.agentJudgeDisagrees() }
         TestRunReportFilter.UNRESOLVED_JUDGING -> results.any { it.hasUnresolvedJudgeOutcome() }
     }
 }
@@ -532,12 +584,17 @@ internal fun buildMatrix(run: TestRun): List<MatrixRow> {
             val reached = run.lanes.indices.any { run.lanes.caseOf(it, case.id, iteration) != null }
             if (!reached && iteration > 1) continue
             val key = "${case.id}#$iteration"
+            val results = run.lanes.indices.mapNotNull { run.lanes.caseOf(it, case.id, iteration) }
+            val attemptCount = results.maxOfOrNull { it.attemptTotal() } ?: 1
             rows += MatrixRow.Case(
                 key, case.id, case.name, iteration,
                 run.lanes.mapIndexed { i, lane ->
                     val result = run.lanes.caseOf(i, case.id, iteration)
                     MatrixCaseCell(lane.laneId, result?.status, result != null, result?.flaky == true, result?.caseAttempt ?: 1)
                 },
+                attemptCount,
+                results.firstOrNull { it.attemptTotal() == attemptCount }?.caseAttempt ?: 1,
+                results.firstOrNull { it.attemptTotal() == attemptCount }?.attemptStatuses().orEmpty(),
             )
             val hookSteps = run.lanes.indices.flatMap { run.lanes.caseOf(it, case.id, iteration)?.steps.orEmpty() }.filter { it.setup }
             hookSteps.distinctBy { it.stepId }.forEach { rows += hookStepRow(run, key, case.id, iteration, it) }
@@ -554,6 +611,54 @@ internal fun buildMatrix(run: TestRun): List<MatrixRow> {
     }
     hookRows(run, SUITE_TEARDOWN_CASE_ID, "Suite teardown")?.let { rows += it }
     return rows
+}
+
+/** How many attempts a case result stands for: the shown one and those before it. */
+private fun CaseResult.attemptTotal(): Int = maxOf(caseAttempt, priorAttempts.size + 1)
+
+private fun CaseResult.attemptStatuses(): Map<Int, CaseStatus?> =
+    priorAttempts.associate { it.attempt to (it.status as CaseStatus?) } + (caseAttempt to status)
+
+/** The key of a case row in the attempt choices of [viewingAttempts]: the case and its repeat. */
+internal fun caseAttemptKey(caseId: String, iteration: Int): String = "$caseId#$iteration"
+
+/**
+ * [run] as it looked at the attempts the reader picked ([chosen] maps [caseAttemptKey] to an attempt number): each case that was
+ * retried shows that attempt's status and steps, and the other attempts (the latest one included) move into its earlier attempts.
+ * A case without that attempt, and every case not named, stays as it is, so the default view is the latest attempt.
+ */
+internal fun TestRun.viewingAttempts(chosen: Map<String, Int>): TestRun {
+    if (chosen.isEmpty()) return this
+    return copy(
+        lanes = lanes.map { lane ->
+            lane.copy(
+                cases = lane.cases.map { case ->
+                    val wanted = chosen[caseAttemptKey(case.caseId, case.iteration)]
+                    if (wanted == null || wanted == case.caseAttempt) case else case.atAttempt(wanted)
+                },
+            )
+        },
+    )
+}
+
+private fun CaseResult.atAttempt(number: Int): CaseResult {
+    val record = priorAttempts.firstOrNull { it.attempt == number } ?: return this
+    val latest = CaseAttemptRecord(
+        caseId, iteration, caseAttempt, status ?: CaseStatus.ERROR, steps, startedAt, finishedAt, note, agentUsage, judgeUsage, externalToolCalls,
+    )
+    return copy(
+        status = record.status,
+        steps = record.steps,
+        startedAt = record.startedAt,
+        finishedAt = record.finishedAt,
+        note = record.note,
+        agentUsage = record.agentUsage,
+        judgeUsage = record.judgeUsage,
+        externalToolCalls = record.externalToolCalls,
+        caseAttempt = number,
+        priorAttempts = (priorAttempts - record + latest).sortedBy { it.attempt },
+        flaky = false,
+    )
 }
 
 private fun hookStepRow(run: TestRun, key: String, caseId: String, iteration: Int, sample: StepResult) = MatrixRow.Step(
@@ -630,7 +735,7 @@ internal fun firstFailure(rows: List<MatrixRow>): FirstFailure? {
     for ((header, steps) in sections) {
         val name = header.name + if (header.iteration > 1) " (run ${header.iteration})" else ""
         for (step in steps) {
-            val cell = step.cells.firstOrNull { it.result?.status in BAD_STEP_STATUSES } ?: continue
+            val cell = step.cells.firstOrNull { cell -> cell.result?.let { it.status in BAD_STEP_STATUSES && !it.interrupted } == true } ?: continue
             return FirstFailure(name, step, cell.laneId, cell.result?.status, null)
         }
         header.cells.firstOrNull { it.status in BAD_CASE_STATUSES }?.let { return FirstFailure(name, null, null, null, it.status) }
@@ -700,12 +805,44 @@ internal fun runVerdict(run: TestRun): RunVerdict {
             }
         }
         RunStatus.FAILED -> firstFailure(rows)?.sentence() ?: run.error?.takeIf { it.isNotBlank() }?.oneLine(VERDICT_ERROR_CHARS) ?: "see the results below"
-        RunStatus.CANCELLED -> if (ran == 0) "stopped before any step ran" else "stopped after $ran of ${stepsText(steps.size)}"
+        RunStatus.CANCELLED -> cancelledAfterRetryText(run) ?: if (ran == 0) "stopped before any step ran" else "stopped after $ran of ${stepsText(steps.size)}"
         RunStatus.ERROR -> errorText(run)
         RunStatus.RUNNING -> "$ran of ${stepsText(steps.size)} done"
         RunStatus.QUEUED -> "waiting to start"
     }
     return RunVerdict(run.status, prefix + body)
+}
+
+private fun StepResult.failedForReport(): Boolean = !interrupted && status in BAD_STEP_STATUSES
+
+/** A step the judge failed although the agent's own outcome was a pass: the judge, not the agent, made it a failure. */
+private fun StepResult.failedByJudge(): Boolean = status == StepStatus.FAIL && judge?.verdict == JudgeVerdict.FAIL && executionStatus == StepStatus.PASS
+
+private fun naturalList(items: List<String>): String = when (items.size) {
+    0, 1 -> items.joinToString()
+    else -> items.dropLast(1).joinToString(", ") + " and " + items.last()
+}
+
+/** "attempt 1 failed at steps 2 and 7 (judge)": what an earlier, completed attempt of a case got wrong. */
+private fun CaseAttemptRecord.failureSentence(): String {
+    val failing = steps.filter { !it.setup && it.failedForReport() }
+    val head = "attempt $attempt ${status.verb()}"
+    if (failing.isEmpty()) return head
+    val allJudge = failing.all { it.failedByJudge() }
+    val numbers = failing.map { step -> step.stepNumber.toString() + if (!allJudge && step.failedByJudge()) " (judge)" else "" }
+    return head + (if (failing.size == 1) " at step " else " at steps ") + naturalList(numbers) + if (allJudge) " (judge)" else ""
+}
+
+/**
+ * The verdict body of a run cancelled while a case was on a retry: where the cancel stopped it and what the attempts before it got
+ * wrong ("stopped during attempt 2 at step 3; attempt 1 failed at steps 2 and 7 (judge)"). Null when no case was retried.
+ */
+internal fun cancelledAfterRetryText(run: TestRun): String? {
+    val case = run.lanes.flatMap { it.cases }.firstOrNull { it.priorAttempts.isNotEmpty() && it.status == CaseStatus.CANCELLED } ?: return null
+    val stopped = case.steps.lastOrNull { it.interrupted } ?: case.steps.lastOrNull { !it.setup }
+    val where = stopped?.let { " at step ${it.stepNumber}" } ?: " before its first step"
+    val earlier = case.priorAttempts.sortedBy { it.attempt }.map { it.failureSentence() }
+    return (listOf("stopped during attempt ${case.caseAttempt}$where") + earlier).joinToString("; ")
 }
 
 /** The glyph in front of a verdict: ✓ passed, ✕ failed, ! error, ■ cancelled, ● running or queued. */
@@ -740,15 +877,29 @@ internal fun runMetaLine(run: TestRun, nowMs: Long, profileName: (String?) -> St
         listOf(lane.config.deviceSerial, driver).filter(String::isNotBlank).joinToString(" · ")
     }
     val laneText = if (run.lanes.size == 1) "1 lane: $lanes" else "${run.lanes.size} lanes: $lanes"
-    val judge = if (run.config.judge == JudgeMode.OFF) "no judge" else "judge: ${run.config.judge.label.lowercase()}"
+    val judge = when (run.config.judge) {
+        JudgeMode.OFF -> "no judge"
+        else -> "judge: ${run.config.judge.label.lowercase()}${judgeTimingSuffix(run.config.judgeTiming)}"
+    }
     return listOfNotNull(time, cases, laneText.takeIf { run.lanes.isNotEmpty() }, judge).joinToString(" · ")
+}
+
+/** Where in time the judge ran, when it was not between the steps: a verdict that lands after the case explains a late FAIL. */
+internal fun judgeTimingSuffix(timing: JudgeTiming): String = when (timing) {
+    JudgeTiming.INLINE -> ""
+    JudgeTiming.AFTER_CASE -> ", after the case"
+    JudgeTiming.BACKGROUND -> ", in the background"
 }
 
 /** The step to show in the inspector when a report opens: the first one that did not pass, or null when every step passed. */
 internal fun firstNonPassingSelection(run: TestRun): StepSelection? {
-    val failure = firstFailure(buildMatrix(run)) ?: return null
-    val step = failure.step ?: return null
-    return failure.laneId?.let { StepSelection(step.key, it) }
+    val rows = buildMatrix(run)
+    val failure = firstFailure(rows)
+    val step = failure?.step
+    if (failure != null && step != null) return failure.laneId?.let { StepSelection(step.key, it) }
+    // A run that was only cancelled has no failing step: show the step the cancel interrupted.
+    val interrupted = rows.filterIsInstance<MatrixRow.Step>().firstOrNull { row -> row.cells.any { it.result?.interrupted == true } } ?: return null
+    return StepSelection(interrupted.key, interrupted.cells.first { it.result?.interrupted == true }.laneId)
 }
 
 /**

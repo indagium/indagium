@@ -35,12 +35,14 @@ import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.agentJudgeDisagrees
 import com.indagium.testing.model.performedByLine
 import com.indagium.testing.run.StartRunResult
 import kotlinx.coroutines.Dispatchers
@@ -102,11 +104,16 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             verticalArrangement = Arrangement.spacedBy(4.dp),
             itemVerticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusChip(step.status.label(), stepColor(step.status))
+            StatusChip(step.detailLabel(), stepResultColor(step))
             val attempts = if (step.attempts == 1) "1 attempt" else "${step.attempts} attempts"
             AppText("$attempts · ${formatDuration(step.durationMs)}", color = tc.td, fontSize = 10.sp)
             if (step.flaky) TestsBadge("flaky")
-            if (step.verificationState == com.indagium.testing.model.VerificationState.PENDING) TestsBadge("provisional · judge pending")
+            if (step.verificationState == com.indagium.testing.model.VerificationState.PENDING) {
+                // A run that is over will never judge it: a cancel stopped the judge before it ran.
+                val over = run.status != RunStatus.QUEUED && run.status != RunStatus.RUNNING
+                TestsBadge(if (over) "not judged · the run ended first" else "provisional · judge pending")
+            }
+            if (step.agentJudgeDisagrees()) TestsBadge("agent and judge disagree")
             if (step.issueId != null) TestsBadge("issue draft created") else if (step.issueRequested) TestsBadge("issue requested")
             if (step.judgeInconclusive) TestsBadge("judge inconclusive")
             if (step.automaticRetryExcluded) TestsBadge("automatic retry unavailable")
@@ -167,7 +174,7 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
 private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneResult, runDir: File) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        AppText("Earlier case attempts", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        AppText("Other case attempts", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
         attempts.forEach { attempt ->
             Column(Modifier.fillMaxWidth().padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {

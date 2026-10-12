@@ -3672,8 +3672,39 @@ attempt identity. It contains the intent/precondition/expected result/checks, bo
 but no agent claim or observation. Missing screenshots stay missing; only evidence actually discarded at the per-case bound
 forces an unavailable/inconclusive result. Results update only the exact matching historical attempt. Execution outcome and
 verification state persist separately, so a pending judgment is provisional, not a final pass. Completed evidence and
-verdicts survive cancellation; unfinished verification remains unresolved. Temporary evidence is bounded and released when
-judgment settles, including when screenshot retention is off.
+verdicts survive cancellation; unfinished verification remains unresolved: `StepSequence.cancelDeferredJudgements` rewrites the
+recorded "Independent verification is pending." note of a judgement that never ran to "Not judged: the run was cancelled before the
+judge ran." (the state stays PENDING; the report badge reads "not judged" once the run is over). Temporary evidence is bounded and
+released when judgment settles, including when screenshot retention is off.
+
+**Agent versus judge.** The status of a step follows the agent's failure or the judge's fail (`settleWithJudge`: a judge never
+turns a non-pass into a pass), so the two can contradict each other. The step's note names it: an agent fail/blocked with a judge
+PASS reads "The agent reported a failure, but the judge found the expected result met. Review this step." (inline in
+`settleEvaluation`, deferred in `deferredVerdictNote`); an agent pass with a judge FAIL keeps "The judge failed a step the agent
+reported as passed.". `StepResult.agentJudgeDisagrees()` (`TestSuiteHistory.kt`) is the predicate; the report counts such a step
+under **Disagreements** beside cross-lane disagreement (`stepRowMatches`) and marks its matrix row with "≠". The run meta line says
+when the judge ran ("judge: every step, after the case" / ", in the background") so a verdict that lands after the case is explained.
+
+**A step that times out is still judged, as advice.** `StepSequence.timeoutEvaluationLocked` takes the end screenshot at the
+deadline (bounded by `TIMEOUT_EVIDENCE_MS`), freezes the evidence (end screenshot, playback samples, log window) and, when the run's
+judge mode would have judged the step (`timeoutAdviceRequested`: `shouldJudge` with a failed claim), asks the judge: inline timing,
+setup hooks, explicit judge checks and PAUSE_FOR_USER steps judge at once; otherwise the frozen judge goes through the deferred
+queue (`FrozenJudge.advisory`). The verdict is stored on the step (`judge`, `verificationState`) but the status stays TIMEOUT, the
+checks are not touched and the case outcome is unchanged; the note says "Advisory judge: the expected result looks met …". The
+timeout note lists the attempt's last tool calls ("The agent did not finish the step within 60 s (last tool calls: wait_for_ui ×2,
+tap, take_screenshot, dump_ui_tree). The action may have succeeded — see the screenshot and the judge's advice."), built from the
+tools admitted during the attempt (`attemptToolNames`, protocol tools left out).
+
+**Interrupted steps.** A cancel that reaches a running step makes `LaneRunner.runSteps` close it with
+`StepSequence.abort(StepStatus.ERROR, …, interrupted = true)`. `StepResult.interrupted` (appended last; written to `run.json` only
+when true, absent keys decode to false, so older runs load and older apps ignore it) keeps the stored status ERROR but the report
+shows "Cancelled" in a neutral colour, `failedCaseIds` ignores such steps and CANCELLED cases without a genuine failure, and
+`interruptedCaseIds` lists them. The report's re-run button (`rerunButtonLabel`) reads "Re-run failed (N)", "Re-run interrupted (N)"
+or "Re-run failed and interrupted (N)"; `rerunFailedCasesConfig` selects both sets. A case retried by `caseRetries` keeps its earlier
+attempts in `priorAttempts`; the report's case row then has an attempt switcher (`TestRunUiState.viewingAttempts` swaps the shown
+attempt's status and steps into the case result, so the matrix, the filters and the inspector work unchanged) and `runVerdict` of a
+cancelled run says where it stopped and what the earlier attempts got wrong ("stopped during attempt 2 at step 3; attempt 1 failed
+at steps 2 and 7 (judge)").
 
 shouldJudge (testing/run/StepJudging.kt:41): OFF never;
 `EVERY_STEP` always; `FAILURES_ONLY` when a deterministic check failed, the agent claimed fail/blocked,
@@ -4576,8 +4607,8 @@ goal line, steps, latest result with one dot per lane and a tooltip, linked-issu
 Delete…; grip always visible for drag-reorder), switching to a compact row below `SUITE_COMPACT_BELOW_DP` (720 dp). Runs reuses the Runs
 screen's `RunHistoryList`. Settings groups Setup & teardown, Agent instructions and Variables.
 
-**Run report** (`TestRunReport.kt`). The header is `TestsPageHeader` with **Re-run failed (N)** (only when N > 0 and the run is not
-active) and ⋯ (Export report…, Compare with…). `runVerdict(run)` (`TestRunUiState.kt:687`, pure) gives the verdict box its status and
+**Run report** (`TestRunReport.kt`). The header is `TestsPageHeader` with the re-run button (**Re-run failed (N)**, **Re-run interrupted (N)** or
+**Re-run failed and interrupted (N)**; only when N > 0 and the run is not active) and ⋯ (Export report…, Compare with…). `runVerdict(run)` (`TestRunUiState.kt:687`, pure) gives the verdict box its status and
 headline; `runMetaLine` gives the meta line (time range, cases × repeats, lanes, judge mode). `RunReportTab` (`:779`) is **Results ·
 Compare · Activity · Usage**. Results shows run warnings, the live view while active (`TestRunLiveView`), multi-select filter pills with
 counts (`TestRunReportFilter`, `reportFilterCounts`) and the case/step matrix (`buildMatrix`). The selected step's detail

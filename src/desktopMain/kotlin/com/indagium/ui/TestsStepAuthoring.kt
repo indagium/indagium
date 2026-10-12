@@ -36,7 +36,6 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.model.AiUsageStats
 import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
-import com.indagium.testing.authoring.INCIDENTAL_EXPECTED_WARNING
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.RecordingPreviewEvidence
 import com.indagium.testing.authoring.RecordingPreviewImage
@@ -46,6 +45,7 @@ import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.contextHint
 import com.indagium.testing.authoring.isExternalEvent
+import com.indagium.testing.authoring.isSoftReviewWarning
 import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
@@ -437,6 +437,10 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                     TestsLabeled("What should the added steps do?") {
                         ScrollableTextArea(prompt, { prompt = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
                     }
+                    if (working) {
+                        Spacer(Modifier.height(10.dp))
+                        AiWorkProgress("Drafting steps", profile?.displayName, selection.modelId ?: profile?.model, stage = null)
+                    }
                 } else {
                     AppText("Review and edit ${editableSteps.size} proposed step(s).", color = tc.ts, fontSize = 11.sp)
                     draft?.creationUsage?.let { usage ->
@@ -789,7 +793,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 row.reviewReason?.let {
                     when {
                         row.expected.isBlank() -> TestsErrorText("Review required: $it")
-                        it == INCIDENTAL_EXPECTED_WARNING -> AppText(it, color = tc.warn, fontSize = 10.sp)
+                        isSoftReviewWarning(it) -> AppText(it, color = tc.warn, fontSize = 10.sp)
                         else -> TestsHint("Recording note: $it")
                     }
                 }

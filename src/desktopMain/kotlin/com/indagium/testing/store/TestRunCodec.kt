@@ -150,6 +150,7 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     put("automaticRetryExcluded", step.automaticRetryExcluded)
     putIfNotNull("judgeQueueWaitMs", step.judgeQueueWaitMs)
     putIfNotNull("judgmentDurationMs", step.judgmentDurationMs)
+    if (step.interrupted) put("interrupted", true)
     putIfNotNull("logStartOffset", step.logStartOffset)
     putIfNotNull("logEndOffset", step.logEndOffset)
     putIfNotNull("transcriptStartOffset", step.transcriptStartOffset)
@@ -382,6 +383,7 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     automaticRetryExcluded = o.bool("automaticRetryExcluded", false),
     judgeQueueWaitMs = o.optLong("judgeQueueWaitMs")?.coerceAtLeast(0L),
     judgmentDurationMs = o.optLong("judgmentDurationMs")?.coerceAtLeast(0L),
+    interrupted = o.bool("interrupted", false),
     logStartOffset = o.optLong("logStartOffset"),
     logEndOffset = o.optLong("logEndOffset"),
     transcriptStartOffset = o.optLong("transcriptStartOffset"),

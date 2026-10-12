@@ -61,6 +61,20 @@ internal fun StepResult.hasUnresolvedJudgeOutcome(): Boolean =
     judgeInconclusive || checks.any { it.status == CheckStatus.NOT_EVALUATED && it.kind in EXPLICIT_JUDGE_CHECK_KINDS }
 
 /**
+ * The agent's claim and the independent judge's verdict point opposite ways: the agent reported a pass the judge failed, or the agent
+ * reported a failure (or a blocker) the judge found met. The step's status follows the agent's failure (or the judge's fail), so
+ * only a person can say which side was right; the report counts such a step as a disagreement.
+ */
+internal fun StepResult.agentJudgeDisagrees(): Boolean {
+    val verdict = judge?.verdict ?: return false
+    return when (agentClaim?.lowercase()) {
+        "pass" -> verdict == JudgeVerdict.FAIL
+        "fail", "blocked" -> verdict == JudgeVerdict.PASS
+        else -> false
+    }
+}
+
+/**
  * Derives current-library case rows from a suite's latest terminal run. In particular, cases absent from a partial latest
  * run stay unrun; an older run is never used to fill those gaps.
  */

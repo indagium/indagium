@@ -1,4 +1,4 @@
-@file:Suppress("MagicNumber") // Fixture counts and timeouts, not tunable constants.
+@file:Suppress("MagicNumber", "ktlint:standard:max-line-length", "MaxLineLength") // Fixture counts and timeouts, not tunable constants; JSON fixtures.
 
 package com.indagium.testing
 
@@ -6,6 +6,8 @@ import com.indagium.testing.authoring.INCIDENTAL_EXPECTED_WARNING
 import com.indagium.testing.authoring.RecordingRewrite
 import com.indagium.testing.authoring.RecordingRewriteService
 import com.indagium.testing.authoring.RewriteGeneration
+import com.indagium.testing.authoring.SPECIFIC_ACTION_AND_INCIDENTAL_WARNING
+import com.indagium.testing.authoring.SPECIFIC_ACTION_WARNING
 import com.indagium.testing.authoring.STABLE_EXPECTED_DRAFT_REMEDY
 import com.indagium.testing.authoring.STABLE_EXPECTED_REWRITE_REMEDY
 import com.indagium.testing.authoring.STABLE_EXPECTED_RULE
@@ -13,8 +15,10 @@ import com.indagium.testing.authoring.TestStepDraftService
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.incidentalExpectedWarning
 import com.indagium.testing.authoring.looksIncidental
+import com.indagium.testing.authoring.looksSpecificAction
 import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.authoring.reviewReasonAfterEdit
+import com.indagium.testing.authoring.specificActionWarning
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
@@ -194,5 +198,98 @@ class ExpectedResultRulesTest {
         assertEquals("Identify the tap.", reviewReasonAfterEdit("Identify the tap.", "", optional = false))
         assertNull(reviewReasonAfterEdit("Identify the tap.", "Search opens", optional = false))
         assertNull(reviewReasonAfterEdit(null, "An ad is playing", optional = false))
+    }
+
+    // ── Transient UI is not a stable result ─────────────────────────
+
+    @Test
+    fun theRuleNamesTransientUiAndTheCheckFlagsItInAnExpectedResult() {
+        assertTrue("playback controls" in STABLE_EXPECTED_RULE && "toasts" in STABLE_EXPECTED_RULE && "snackbars" in STABLE_EXPECTED_RULE, STABLE_EXPECTED_RULE)
+        listOf(
+            "Video starts playing with playback controls visible, including pause button",
+            "A toast says the item was saved",
+            "A snackbar with Undo is shown",
+            "The media controls are displayed",
+        ).forEach { assertTrue(looksIncidental(it), "should be flagged: $it") }
+        assertFalse(looksIncidental("The video is playing and the pause button is available in the toolbar of the page"))
+        assertFalse(looksIncidental("Control center is closed"))
+    }
+
+    // ── An action that names a specific item ────────────────────────
+
+    @Test
+    fun anActionThatQuotesALongOrEmojiTitleIsFlagged() {
+        listOf(
+            "Tap on the video \"Try Not to Laugh \uD83D\uDE05 Funny Cats & Goofy Dogs \uD83D\uDE39\uD83D\uDC36 Hilarious Pet Moments 2026\"",
+            "Open the video \u201CTop 10 Funny Cats Compilation of 2026 You Must See\u201D",
+            "Tap the channel \"MrBeast Gaming \uD83C\uDFAE\"",
+            "Play the song titled Blinding Lights",
+            "Select the playlist \"My Very Long Playlist Name That Nobody Else Has\" from the list",
+        ).forEach { action ->
+            assertTrue(looksSpecificAction(action), "should be flagged: $action")
+            assertEquals(SPECIFIC_ACTION_WARNING, specificActionWarning(action), action)
+        }
+    }
+
+    @Test
+    fun anActionWithAShortLabelTypedTextOrNoQuotesIsNotFlagged() {
+        listOf(
+            "Tap \"Sign in\"",
+            "Tap the \"Search\" button",
+            "Tap the \u201CSettings\u201D tab in the bottom navigation bar",
+            "Type \"how to bake sourdough bread at home today please\" in the search box",
+            "Enter \"a very long password phrase that the author chose\" in the field",
+            "Tap the user's profile photo",
+            "Tap on the video",
+            "Tap the \uD83D\uDC4D button",
+            "Open YouTube",
+        ).forEach { action ->
+            assertFalse(looksSpecificAction(action), "should not be flagged: $action")
+            assertNull(specificActionWarning(action), action)
+        }
+    }
+
+    @Test
+    fun aRewrittenRowWithATitleSpecificActionIsFlaggedForReviewButDoesNotBlockApplying() {
+        val answer = """{"steps":[
+            {"action":"Tap on the video \"Try Not to Laugh \uD83D\uDE05 Funny Cats & Goofy Dogs \uD83D\uDE39\uD83D\uDC36 Hilarious Pet Moments 2026\"","expected":"The video opens and a pause button is visible","sourceInputs":[1,2]},
+            {"action":"Submit the search","expected":"Results for 'lofi' are listed","sourceInputs":[3]}
+        ]}"""
+
+        val snapshot = rewrite(answer).snapshot.value
+
+        assertEquals(SPECIFIC_ACTION_WARNING, snapshot.steps[0].reviewReason)
+        assertNull(snapshot.steps[1].reviewReason)
+        assertFalse(recordingApplyBlockedReason(snapshot).orEmpty().contains("Resolve the rewrite review note"), "a flag, not a blocker")
+    }
+
+    @Test
+    fun theUserReportedRowCarriesBothWarningsAndEachFollowsTheEdits() {
+        val answer = """{"steps":[
+            {"action":"Tap on the video \"Try Not to Laugh \uD83D\uDE05 Funny Cats & Goofy Dogs \uD83D\uDE39\uD83D\uDC36 Hilarious Pet Moments 2026\"","expected":"Video starts playing with playback controls visible, including pause button","sourceInputs":[1,2]},
+            {"action":"Submit the search","expected":"Results for 'lofi' are listed","sourceInputs":[3]}
+        ]}"""
+        val session = rewrite(answer)
+        val rows = session.snapshot.value.steps
+        val ids = rows.map { it.id }
+        assertEquals(SPECIFIC_ACTION_AND_INCIDENTAL_WARNING, rows[0].reviewReason)
+        assertFalse(recordingApplyBlockedReason(session.snapshot.value).orEmpty().contains("Resolve the rewrite review note"))
+
+        val second = rows[1].action to rows[1].expected
+        assertTrue(session.updateReviewedSteps(listOf("Tap on the video" to rows[0].expected, second), expectedRowIds = ids))
+        assertEquals(INCIDENTAL_EXPECTED_WARNING, session.snapshot.value.steps[0].reviewReason, "the action is generalized: only the expected result is still flagged")
+
+        assertTrue(session.updateReviewedSteps(listOf("Tap on the video" to "The video is playing", second), expectedRowIds = ids))
+        assertNull(session.snapshot.value.steps[0].reviewReason)
+    }
+
+    @Test
+    fun theActionWarningFollowsTheTextWhenAnEditKeepsOrFixesIt() {
+        val title = "Tap on the video \"Try Not to Laugh \uD83D\uDE05 Funny Cats & Goofy Dogs\""
+        assertEquals(SPECIFIC_ACTION_WARNING, reviewReasonAfterEdit(SPECIFIC_ACTION_WARNING, title, "The video opens", optional = false))
+        assertNull(reviewReasonAfterEdit(SPECIFIC_ACTION_WARNING, "Tap on the video", "The video opens", optional = false))
+        assertEquals(SPECIFIC_ACTION_WARNING, reviewReasonAfterEdit(SPECIFIC_ACTION_AND_INCIDENTAL_WARNING, title, "The video opens", optional = false))
+        assertNull(reviewReasonAfterEdit("Confirm what appears.", title, "The video opens", optional = false), "any other reason ends with the edit, as before")
+        assertEquals("Identify the tap.", reviewReasonAfterEdit("Identify the tap.", title, "", optional = false))
     }
 }

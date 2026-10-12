@@ -182,7 +182,11 @@ Judging has an independent schedule: judgeTiming accepts inline (default), after
 follow the selected judgeMode; deferred results show executionStatus separately from verificationState and remain provisional
 while verificationState is PENDING. After-case and background results settle before retry or case completion. Setup/teardown,
 Screen judge and Ask judge checks, and PAUSE_FOR_USER steps remain inline. Queue wait and judgment duration are reported
-separately from execution timing. The run summary reports pendingVerificationSteps and flaky.
+separately from execution timing. The run summary reports pendingVerificationSteps and flaky. A step that timed out is judged as
+advice when the judge mode would have judged it: its status stays TIMEOUT while judge and verificationState carry the verdict. A step
+that a cancel interrupted keeps status ERROR and adds `"interrupted": true` (omitted otherwise); a step whose agentClaim and judge
+verdict point opposite ways adds `"agentJudgeDisagree": true` (omitted otherwise). Both appear in the lanes' stepResults of
+get_test_run_status and get_test_run_report; existing fields are unchanged.
 
 Recording review rows carry gestureHints with the observed input kind, normalized path and coordinates, duration, source
 screen geometry/orientation, the leaf under touch and its clickable ancestors. Device-provided target labels are observations.
