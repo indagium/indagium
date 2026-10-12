@@ -314,7 +314,7 @@ private fun StepFixDialog(runId: String, stepId: String, fixRef: String, action:
                 TestsHint("This changes the step in your library. The run keeps its own copy.")
                 if (changes.isEmpty()) TestsHint("The fix would not change anything: the step already says this.")
                 changes.forEach { change ->
-                    AppText(change.field.uppercase(), color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                    AppText(change.field, color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
                     AppText("− ${change.before.ifBlank { "(empty)" }}", color = DANGER_RED, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
                     AppText("+ ${change.after}", color = tc.success, fontSize = 11.sp, maxLines = DETAIL_MAX_LINES)
                 }

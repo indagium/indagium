@@ -163,7 +163,7 @@ private fun TestsNarrowLayout(totalWidth: Dp) {
                 ui.reclaimFocus()
             })
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+        Divider()
         Box(Modifier.weight(1f).fillMaxWidth()) {
             TestsCenter(Modifier.fillMaxSize())
             if (navOpen) {
@@ -378,7 +378,7 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
                 go(TestsNav.Issues) { view.selectedIssueId = null }
             }
         }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+        Divider()
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,

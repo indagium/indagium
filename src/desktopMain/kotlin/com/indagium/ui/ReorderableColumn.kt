@@ -41,6 +41,8 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -164,11 +166,11 @@ internal fun ReorderMoveButtons(row: ReorderRowScope, modifier: Modifier = Modif
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         SquareIconButton(
             "↑", fontSize = 12.sp, onClick = row.moveUp, enabled = row.canMoveUp,
-            modifier = Modifier.graphicsLayer(alpha = if (row.canMoveUp) 1f else DISABLED_ALPHA),
+            modifier = Modifier.graphicsLayer(alpha = if (row.canMoveUp) 1f else DISABLED_ALPHA).semantics { contentDescription = "Move up" },
         )
         SquareIconButton(
             "↓", fontSize = 12.sp, onClick = row.moveDown, enabled = row.canMoveDown,
-            modifier = Modifier.graphicsLayer(alpha = if (row.canMoveDown) 1f else DISABLED_ALPHA),
+            modifier = Modifier.graphicsLayer(alpha = if (row.canMoveDown) 1f else DISABLED_ALPHA).semantics { contentDescription = "Move down" },
         )
     }
 }

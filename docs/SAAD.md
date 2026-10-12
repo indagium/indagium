@@ -3079,7 +3079,7 @@ Where to read about a given source file.
 | `testing/tracker` | [26.8](#268-issues-and-the-tracker), [26.9.4](#2694-the-tracker-connection) |
 | `edition/` | [26.4](#264-editions-and-limits) |
 | `debug/Test*Tool*`, `debug/Issue*Tool*`, `debug/External*Approval.kt` | [26.2](#262-package-layout), [26.9.2](#2692-confirmation-policies), [22.1](#221-add-an-mcp--automation-tool) |
-| `ui/Tests*.kt`, `ui/TestRun*.kt`, `ui/Issue*.kt`, `ui/TrackerWiring.kt` | [26.2](#262-package-layout), [9.3](#93-ui) |
+| `ui/Tests*.kt`, `ui/TestRun*.kt`, `ui/Issue*.kt`, `ui/TrackerWiring.kt` | [26.2](#262-package-layout), [26.15](#2615-the-tests-workspace-ui), [9.3](#93-ui) |
 
 ---
 
@@ -3171,7 +3171,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | `edition` | `Edition.kt` | `Edition`, `EditionLimits`, `EditionService` |
 | `security` | `SecretStore.kt` | OS-keychain secret storage with a session-only fallback |
 | `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `TestRunCaptureArgs.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
-| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `AiModelEffortPickers.kt`, `TestsStepAuthoring.kt`, `TestsRecordingRewrite.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
+| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsStepKinds.kt`, `TestsExternalRows.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsAgentExamplesScreen.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `TestsFormat.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `AiModelEffortPickers.kt`, `TestsStepAuthoring.kt`, `TestsStepImprove.kt`, `TestsStepImproveState.kt`, `TestsRecordingRewrite.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`; layout in §26.15), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
 
 Dependency direction. `testing` depends on `model`, `utils`, `capture`, `edition`, `security`, and —
 for the agent launchers and the gateway type — `ai` and `debug`. It has **no** dependency on `ui`.
@@ -4487,6 +4487,88 @@ down, snapshot `reopened`) and opens the video with `RecordedVideoTimeline.openS
 or deleted (`close()` is a no-op); `AppState.registerTestStepRecording(deviceBound = false)` skips the lane-device check. UI: *Rewrite with AI
 from saved recording* on the case. MCP: `reopen_test_recording` (`CONFIRMATION_REQUIRED` and `PER_CALL_APPROVAL_MCP_TOOLS`, like
 `start_test_recording`), `apply_test_recording.insertAsNew`, and `recordings` on each case of `get_test_suite`.
+
+### 26.15 The Tests workspace UI
+
+The workspace (`ui/TestsWorkspace.kt:85`, `TestsWorkspace`) is a full-tab surface (`ActiveSurface.Tests`). Its only state is
+`TestsViewState` (`ui/TestsUiState.kt`, owned by `AppState`, in memory, never autosaved, so there is no `AutosaveCodec` change); the library
+itself lives in `TestLibraryStore` (§26.3). Every screen reads the shared `TestsUi` (`ui/TestsWidgets.kt:133`: the `AppState`, the view
+state, the root `FocusRequester`, the banner and the key target) through `LocalTestsUi`.
+
+**Shell.** The root `Column` has no header strip: a recording banner (while `testStepRecordingSession` is set), the dismissible error/info
+banner, the edition-limit and read-only notices (`TestsLockedNotice`), then the navigation pane beside the centre. The pane is a tree
+(`TestsNavPane`): a **Suites** header with a count, `+` (New suite) and ⋯ (Import suite…, Agent profiles…); each suite row has a caret
+and lists its cases when expanded (`TestsViewState.expandedSuiteIds`; the selected suite expands itself; `filterNavTree` makes the
+search box filter suites and cases, a case match expanding its suite); a **Library** group (Shared steps, Scripts, Examples for agents);
+an **Activity** group (Runs, Issues, with counts). The edition badge and the case count sit in the pane footer. Dragging a suite row
+reorders suites (`ReorderableColumn`, off while searching); cases reorder in the suite's table. Pane width is `navWidthDp`, dragged
+through the shared `HDivider`. Below `TESTS_NAV_COLLAPSE_BELOW_DP` (600 dp, `testsNavCollapsed`) the pane collapses to a ☰ button that
+opens it as an overlay over a scrim (`TestsNarrowLayout`). `TestsCenter` picks the screen from `TestsViewState.nav` (`TestsNav`) and,
+for `Suites`, from the selected suite and case.
+
+**Split screen and inspector.** Every centre screen is built with `TestsScreenScaffold`, which is `TestsSplitScreen`
+(`ui/TestsWidgets.kt:304`): `main | HDivider | inspector`, the inspector `inspectorWidthDp` wide (default 380, clamped 300–560 by
+`clampTestsInspectorWidth`). When the centre plus inspector are narrower than `TESTS_INSPECTOR_STACK_BELOW_DP` (900 dp,
+`testsInspectorStacked`) the inspector stacks under the main content in one scroll column. A screen without an inspector passes `null`.
+Scrolling is `TestsScrollColumn` (`:278`: `verticalScroll` plus a `VerticalScrollbar` in the app's `appScrollbarStyle`, laid out like
+`BoundedScrollBoxDp` so the scrollbar never takes part in sizing); no Tests screen uses a bare `verticalScroll`. Selectable rows are
+`TestsListRow` (`:343`, `HoverBox`-based, accent background while selected), screen titles `TestsPageHeader` (`:572`: title field, one
+primary button, ⋯ `TestsOverflowMenu`, optional breadcrumb), the inspector's top `TestsInspectorHeader` (`:635`).
+
+**Keyboard routing.** The root `Column` has `onPreviewKeyEvent { ui.routeKey(it) }` (`TestsWorkspace.kt:99`). `TestsUi.routeKey`
+(`TestsWidgets.kt:154`) offers a key-down to the one current `TestsKeyTarget` and only when **no text input has focus**: the shared
+fields (`CommitTextField`, `InlineField`, the multi-line field) report their focus into `TestsUi.textFocus`, a `TextInputFocusTracker`
+(`ui/Components.kt:163`) provided through `LocalTextInputFocusTracker`, so arrows move the caret and Esc cancels an edit while typing. A
+screen registers itself with `TestsKeyTargetEffect` (`:186`) for as long as it is composed (the last one to register wins). Two do:
+the step list (`handleStepKey`, `TestsSteps.kt:161`: ↑/↓ select the previous/next step, ⌥↑/⌥↓ move the selected step through the same
+`StepListOps.move` as the ⋯ menu, Esc closes the case-field editor) and the run report (`TestRunReport.kt`: ↑/↓ move the selected report
+row on the Results tab, `reportSelectionMovedBy`). Every popup, menu and clickable that can take focus calls `TestsUi.reclaimFocus()` when
+it closes (the CLAUDE.md focus gotcha), or the root handler stops receiving keys. The help dialog lists the keys under **Tests**
+(`ui/Shortcuts.kt`, `KeyboardPanel.TESTS`).
+
+**Case screen** (`TestsCaseScreen.kt:42`). Header: a breadcrumb link back to the suite, the case name as a `TestsTitleField`,
+**▶ Run case**, and ⋯ (Duplicate, Delete…); the read-only notice sits directly under it. Then the Goal field, a row of summary chips
+(Preconditions, Instructions, Hooks `setup · teardown`, Tools, Examples; `TestsSummaryChip`, `CaseField`), then the steps. Clicking a chip
+sets `TestsViewState.caseInspectorField`, which replaces the step editor in the inspector with that field's editor (`CaseFieldInspector`);
+selecting a step, Done or Esc clears it. The steps header is "Steps N" with a `TestsSplitButton` **+ Add step** (the main click appends a
+blank step after the selection; the menu holds Draft steps with AI…, Record from device…, Paste log lines as checks…) and a ⋯ with
+Improve steps with AI… (`CaseStepsHeader`, `TestsStepAuthoring.kt`). `StepListSection` (`TestsSteps.kt:110`) draws fixed 34 dp rows
+(`StepRow` in a `ReorderableColumn` with `fixedRowHeight`: grip on hover, number, action, kind badge, check summary, last-result dot, ⋯)
+and keeps one step selected while there are steps (`TestsViewState.selectedStepId`, per case or shared step), so the inspector is never
+empty. The inspector is `SelectedStepInspector` (`:284`): `TestsInspectorHeader` ("Step N of M") over `StepEditor` (Performed by, kind fields,
+Action, Expected, Checks, then collapsible Examples and **Advanced** with a one-line summary when closed). Shared steps reuse the same list
+and inspector (`TestsSharedStepsScreen`); the Scripts screen is a master list over a script editor with Try it and the tool schema in its
+inspector.
+
+**Suite screen** (`TestsSuiteScreen.kt:87`). `TestsPageHeader` (suite name, **▶ Run suite**, ⋯ Duplicate, Export…, Delete…), a last-run
+line (status dot, `formatRunMoment`, cases, lanes, "N of M steps passed", Open report; "Loading runs…" until the history first loads,
+never "Not run yet"), and `UnderlineTabs` **Cases · Runs · Settings** (`SuiteTab`). Cases is a table of `TestsListRow`s (number, case with
+goal line, steps, latest result with one dot per lane and a tooltip, linked-issue count that opens Issues, ⋯ with Move up/down, Duplicate,
+Delete…; grip on hover for drag-reorder), switching to a compact row below `SUITE_COMPACT_BELOW_DP` (720 dp). Runs reuses the Runs
+screen's `RunHistoryList`. Settings groups Setup & teardown, Agent instructions and Variables.
+
+**Run report** (`TestRunReport.kt`). The header is `TestsPageHeader` with **Re-run failed (N)** (only when N > 0 and the run is not
+active) and ⋯ (Export report…, Compare with…). `runVerdict(run)` (`TestRunUiState.kt:687`, pure) gives the verdict box its status and
+headline; `runMetaLine` gives the meta line (time range, cases × repeats, lanes, judge mode). `RunReportTab` (`:779`) is **Results ·
+Compare · Activity · Usage**. Results shows run warnings, the live view while active (`TestRunLiveView`), multi-select filter pills with
+counts (`TestRunReportFilter`, `reportFilterCounts`) and the case/step matrix (`buildMatrix`). The selected step's detail
+(`StepDetailFor`; Apply fix…, Mark as agent error, Create issue…) is the **inspector**; `firstNonPassingSelection` preselects the first
+non-passing step. Compare loads the previous run only while that tab or the picker is open. Activity and Usage are per lane.
+
+**Runs and Issues.** Runs (`TestsRunsScreen`, `:104`) is a suite dropdown, status pills with counts and `RunHistoryList` grouped by day
+(`groupRunsByDay`, `TestsUiState.kt:565`), "Loading runs…" until the first read finished. Issues (`TestsIssuesScreen.kt:53`) lists rows
+in the same anatomy (status, severity, title, origin via `originLine`, time) with search; the selected issue's detail is the inspector
+(Edit… primary, ⋯ for Copy Markdown, Add to notes, Open folder, Delete…), and the newest issue is selected when the screen opens.
+
+**Dialogs.** All Tests dialogs, including the confirmation dialogs, are built on `TestsDialogFrame` (`TestsWidgets.kt:1161`): 8 dp
+corners, 20 dp padding, 14 sp title, scrolling body with a scrollbar, a centred `DialogActionButton` footer; `TestsConfirmDialog`
+(`:1246`) is a thin wrapper that adds the focus reclaim. A `Dialog` wider than 580 dp needs `usePlatformDefaultWidth = false`
+(CLAUDE.md), which every call site sets.
+
+**Theme and formatting.** Pass/success status is `ThemeColors.success` (`ui/Theme.kt:81`, appended last, derived per light/dark family
+in `theme()`, runtime-only like `warn`), not `ok` (a preset's `seq1`, which can be purple); `ThemeSuccessContrastTest` pins ≥ 3:1
+against `bg` and `p` for every preset. `ui/TestsFormat.kt` holds the display formatting (`formatDuration`, `formatTokens`,
+`formatRunMoment`), so no screen prints raw milliseconds, token counts or run ids.
 
 ---
 

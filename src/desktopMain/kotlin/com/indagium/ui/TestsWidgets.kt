@@ -107,12 +107,12 @@ private const val MENU_REOPEN_SUPPRESS_MS = 200L
 private val SCROLLBAR_WIDTH = 6.dp
 private val LIST_ROW_MIN_HEIGHT = 34.dp
 private val MENU_WIDTH = 230.dp
-private val MENU_ITEM_SHAPE = RoundedCornerShape(5.dp)
+private val MENU_ITEM_SHAPE = CORNER_SM
 private val OVERFLOW_BUTTON_SIZE = 26.dp
 private val SPLIT_CHEVRON_WIDTH = 24.dp
 private val SPLIT_START_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
 private val SPLIT_END_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
-private val CHIP_SHAPE = RoundedCornerShape(6.dp)
+private val CHIP_SHAPE = CORNER_MD
 private val PILL_SHAPE = RoundedCornerShape(50)
 private val SUMMARY_CHIP_MAX_WIDTH = 280.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
@@ -316,7 +316,7 @@ internal fun TestsSplitScreen(
         if (testsInspectorStacked(maxWidth.value)) {
             TestsScrollColumn(Modifier.fillMaxSize()) {
                 main()
-                Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                Divider()
                 Column(Modifier.fillMaxWidth().background(tc.p).padding(INSPECTOR_PADDING)) { inspector() }
             }
         } else {
@@ -754,7 +754,7 @@ internal fun <T> TestsDropdown(
 @Composable
 private fun TestsOptionRow(label: String, active: Boolean, onClick: () -> Unit) {
     val tc = tc()
-    HoverBox(Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)), baseBg = if (active) tc.abg else Color.Transparent, onClick = onClick) {
+    HoverBox(Modifier.fillMaxWidth().clip(CORNER_SM), baseBg = if (active) tc.abg else Color.Transparent, onClick = onClick) {
         DisableSelection {
             AppText(
                 label,
@@ -824,7 +824,7 @@ private fun TestsMenuPopup(items: List<TestsMenuItem>, alignment: Alignment, yOf
             contentModifier = Modifier.padding(4.dp),
         ) {
             items.forEach { item ->
-                if (item.dividerBefore) Box(Modifier.fillMaxWidth().padding(vertical = 4.dp, horizontal = 2.dp).height(1.dp).background(tc.br))
+                if (item.dividerBefore) Box(Modifier.padding(vertical = 4.dp, horizontal = 2.dp)) { Divider() }
                 HintWhen(!item.enabled && item.disabledHint != null, item.disabledHint.orEmpty()) {
                     HoverBox(
                         Modifier.fillMaxWidth().clip(MENU_ITEM_SHAPE),
@@ -1013,7 +1013,10 @@ internal fun TestsChip(label: String, modifier: Modifier = Modifier, onRemove: (
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText(label, color = tc.ac, fontSize = 10.sp, modifier = Modifier.padding(vertical = 2.dp))
-        if (onRemove != null) SquareIconButton("×", fontSize = 12.sp, onClick = onRemove, size = 16.dp)
+        if (onRemove != null) SquareIconButton(
+            "×", fontSize = 12.sp, onClick = onRemove, size = 16.dp,
+            modifier = Modifier.semantics { contentDescription = "Remove $label" },
+        )
     }
 }
 
@@ -1127,7 +1130,7 @@ internal fun TestsBannerView(banner: TestsBanner, dismissible: Boolean = true, o
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         AppText(banner.message, color = color, fontSize = SMALL_FONT_SIZE, maxLines = BANNER_MAX_LINES, modifier = Modifier.weight(1f))
-        if (dismissible) SquareIconButton("×", fontSize = 14.sp, onClick = onDismiss)
+        if (dismissible) SquareIconButton("×", fontSize = 14.sp, onClick = onDismiss, modifier = Modifier.semantics { contentDescription = "Dismiss" })
     }
 }
 
@@ -1296,6 +1299,9 @@ internal fun ReorderRowCard(
         content()
         extraActions?.invoke(this)
         ReorderMoveButtons(row, Modifier.padding(top = 4.dp))
-        if (onRemove != null) SquareIconButton("×", fontSize = 14.sp, onClick = onRemove, enabled = enabled, modifier = Modifier.padding(top = 4.dp))
+        if (onRemove != null) SquareIconButton(
+            "×", fontSize = 14.sp, onClick = onRemove, enabled = enabled,
+            modifier = Modifier.padding(top = 4.dp).semantics { contentDescription = "Remove" },
+        )
     }
 }

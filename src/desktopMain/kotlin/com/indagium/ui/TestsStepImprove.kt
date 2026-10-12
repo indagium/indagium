@@ -229,7 +229,7 @@ private fun ImproveAskPhase(
         maxLines = 5,
     )
     Spacer(Modifier.height(8.dp))
-    AppText("EVIDENCE TO SEND", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+    AppText("Evidence to send", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
     AppText(evidenceLine ?: "Reading the case's latest run…", color = tc.tx, fontSize = 11.sp)
     usageLine?.let { TestsHint(it) }
     Spacer(Modifier.height(10.dp))
@@ -259,7 +259,7 @@ private fun ImproveReviewPhase(review: ImproveReview, working: Boolean) {
         val step = row.step
         Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(9.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("STEP ${step.number}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                AppText("Step ${step.number}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
                 if (step.previous.kind != StepKind.AGENT) TestsBadge(step.previous.kind.name)
                 if (row.changed) TestsBadge("CHANGED") else TestsBadge("UNCHANGED")
             }
