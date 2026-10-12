@@ -74,7 +74,7 @@ private const val SCRIPT_COMMAND_MIN_HEIGHT_DP = 90
 private const val SCRIPT_COMMAND_MAX_HEIGHT_DP = 280
 
 /**
- * One row of a library list: the reorder grip (shown on hover), the [title], an optional [badge] and a ⋯ menu with Move up /
+ * One row of a library list: the reorder grip, the [title], an optional [badge] and a ⋯ menu with Move up /
  * Move down (shown on hover or while selected), so the row keeps its column widths whether or not it is hovered.
  */
 @Composable
@@ -101,7 +101,7 @@ private fun LibraryListRow(
         startPadding = 4.dp,
         spacing = 6.dp,
     ) {
-        Box(Modifier.alpha(if (hovered || row.dragging) 1f else 0f)) { ReorderGrip(row) }
+        ReorderGrip(row)
         AppText(
             title,
             color = tc.tx,

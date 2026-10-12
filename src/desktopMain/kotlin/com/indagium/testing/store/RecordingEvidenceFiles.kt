@@ -210,7 +210,8 @@ private fun moveDir(source: File, target: File) {
     }
 }
 
-private fun treeSize(root: File): Long {
+/** The total size in bytes of the regular files under [root] (symbolic links are not followed); 0 when it cannot be read. */
+internal fun treeSize(root: File): Long {
     var total = 0L
     runCatching {
         Files.walkFileTree(
@@ -227,7 +228,7 @@ private fun treeSize(root: File): Long {
 }
 
 /** Deletes [root] and everything in it without following symbolic links; false when something could not be removed. */
-private fun deleteTree(root: File): Boolean {
+internal fun deleteTree(root: File): Boolean {
     if (!Files.exists(root.toPath(), LinkOption.NOFOLLOW_LINKS)) return true
     return runCatching {
         Files.walkFileTree(

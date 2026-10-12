@@ -21,6 +21,7 @@ import com.indagium.testing.model.summary
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RunPersister
+import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.StoredSuiteRunHistory
 import com.indagium.testing.store.TestRunStore
 import kotlinx.coroutines.CancellationException
@@ -435,6 +436,29 @@ internal class TestRunCoordinator(
         val previous = previousTerminalRunSummaryOfSameSuite(listRunSummariesForSuite(current.suite.id), current) ?: return null
         return loadRun(previous.id)
     }
+
+    /**
+     * Deletes the stored run [runId] (its folder and everything in it) and forgets it in memory. Refused while the run is queued or
+     * running (cancel it first), so nothing is deleted under a writer. The in-memory snapshot is dropped first, so the list stops
+     * showing the run even if a file could not be removed. Blocking disk work runs on IO.
+     */
+    suspend fun deleteRun(runId: String): StoreResult<Unit> {
+        val refusal = synchronized(registryLock) {
+            val entry = runs[runId]
+            if (entry != null && (entry.isLive() || !entry.state.current.isFinished)) {
+                StoreResult.Invalid("Run $runId is still queued or running. Stop it before deleting it.")
+            } else {
+                runs.remove(runId)
+                null
+            }
+        }
+        if (refusal != null) return refusal
+        publish()
+        return withContext(Dispatchers.IO) { deps.store.delete(runId) }
+    }
+
+    /** The size in bytes of every stored run folder, by run id (walks the disk on IO). */
+    suspend fun runSizes(): Map<String, Long> = withContext(Dispatchers.IO) { deps.store.sizes() }
 
     /** The folder of [runId] (its screenshots, logs and transcript live under it). */
     fun runDir(runId: String): java.io.File = deps.store.runDir(runId)

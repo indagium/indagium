@@ -139,7 +139,7 @@ private fun openExampleStep(ui: TestsUi, item: AgentExampleRow) {
     }
     view.selectStep(item.step.id)
     view.revealStepId = item.step.id
-    view.stepExamplesExpanded = true
+    view.setExamplesExpanded(item.step.id, true)
     ui.reclaimFocus()
 }
 

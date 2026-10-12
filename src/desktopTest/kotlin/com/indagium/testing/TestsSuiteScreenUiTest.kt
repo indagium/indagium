@@ -354,7 +354,8 @@ class TestsSuiteScreenUiTest {
         state.testsView.selectedSuiteId = empty.id
         rule.waitForIdle()
         rule.onNodeWithText("No cases yet. Add a case to define a workflow for the agent.").assertExists()
-        rule.onNodeWithText("+ New case").assertExists()
+        // Both the header button and the empty state offer it.
+        assertEquals(2, rule.onAllNodesWithText("+ New case").fetchSemanticsNodes().size)
     }
 
     @Test
@@ -378,5 +379,41 @@ class TestsSuiteScreenUiTest {
         // The narrow window hides the nav, so these can only be the centre screen's row.
         rule.onNodeWithText("0 steps ·").assertExists()
         rule.onNodeWithText("Login").assertExists()
+    }
+
+    @Test
+    fun newCaseIsASecondaryButtonInTheHeaderNextToRunSuiteAndNotUnderTheTable() {
+        val suite = suiteWithCases("Login", "Checkout")
+        open(suite)
+
+        val newCase = centre("+ New case")
+        assertEquals(1, newCase.size, "one button, in the header: the ghost button under the table is gone")
+        val run = centre("▶ Run suite").single().boundsInRoot
+        val button = newCase.single().boundsInRoot
+        assertTrue(kotlin.math.abs(button.center.y - run.center.y) < 4f, "same row as Run suite: $button vs $run")
+        assertTrue(button.right <= run.left + 1f, "left of Run suite: $button vs $run")
+        val firstRow = centre("Login").first().boundsInRoot
+        assertTrue(button.top < firstRow.top, "above the table, not below it")
+
+        rule.onAllNodesWithText("+ New case").let { nodes ->
+            val index = nodes.fetchSemanticsNodes().indices.first { nodes.fetchSemanticsNodes()[it].boundsInRoot.left >= state.testsView.navWidthDp }
+            nodes[index].performClick()
+        }
+        rule.waitForIdle()
+        assertEquals(3, state.testLibrary.suite(suite.id)!!.cases.size)
+    }
+
+    @Test
+    fun theHeaderNewCaseButtonIsDisabledWithItsHintForALockedSuiteAndWhenTheLibraryIsReadOnly() {
+        state.createTestSuite("First")
+        val locked = (state.createTestSuite("Second") as StoreResult.Ok).value
+        assertTrue(state.editionService.setForDev(com.indagium.edition.Edition.FREE))
+        open(state.testLibrary.suite(locked.id)!!)
+
+        assertTrue(
+            rule.onAllNodes(androidx.compose.ui.test.isNotEnabled() and androidx.compose.ui.test.hasAnyDescendant(hasText("+ New case")))
+                .fetchSemanticsNodes().isNotEmpty(),
+            "+ New case is disabled for a locked suite",
+        )
     }
 }

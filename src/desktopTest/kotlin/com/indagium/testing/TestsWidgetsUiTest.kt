@@ -25,7 +25,6 @@ import com.indagium.ui.TestsConfirmDialog
 import com.indagium.ui.TestsListRow
 import com.indagium.ui.TestsMenuItem
 import com.indagium.ui.TestsOverflowMenu
-import com.indagium.ui.TestsSplitButton
 import com.indagium.ui.TestsSummaryChip
 import com.indagium.ui.TestsTitleField
 import com.indagium.ui.TestsUi
@@ -93,22 +92,6 @@ class TestsWidgetsUiTest {
         rule.waitForIdle()
         assertEquals(listOf("delete"), clicked)
         rule.onNodeWithText("Delete…").assertDoesNotExist()
-    }
-
-    @Test
-    fun theSplitButtonRunsTheLabelActionOrTheMenuEntry() {
-        val clicked = mutableListOf<String>()
-        setWidgetContent {
-            TestsSplitButton("+ Add step", { clicked += "add" }, listOf(TestsMenuItem("Record from device…", { clicked += "record" })))
-        }
-
-        rule.onNodeWithText("+ Add step").performClick()
-        assertEquals(listOf("add"), clicked)
-
-        rule.onNodeWithContentDescription("+ Add step options").performClick()
-        rule.onNodeWithText("Record from device…").performClick()
-        rule.waitForIdle()
-        assertEquals(listOf("add", "record"), clicked)
     }
 
     @Test

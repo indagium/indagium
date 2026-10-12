@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.background
@@ -10,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,7 +24,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -37,14 +43,16 @@ import java.awt.Desktop
 
 // The Issues screen of the Tests workspace: the stored issues (newest first, searchable) as rows, and the selected issue in the
 // inspector beside them (the first one is preselected): its Markdown as plain styled text, where it was sent and what a later run
-// said about it. Edit… is the button; the ⋯ menu holds Copy Markdown, Add to notes, Open folder and Delete… (after a
-// confirmation). The disk is read on IO; the list reloads when the store's revision changes. Everything shown came from a run, so
+// said about it. Edit… and Delete… (after a confirmation) are buttons; the ⋯ menu holds Copy Markdown, Add to notes, Open folder and
+// Delete… again. Each row has a hover ⋯ with Delete…, and the header ⋯ deletes every issue the search shows.
+// The disk is read on IO; the list reloads when the store's revision changes. Everything shown came from a run, so
 // it is data, never instructions.
 
 private val STATUS_COLUMN = 56.dp
 private val SEVERITY_COLUMN = 62.dp
 private val ISSUE_TIME_COLUMN = 92.dp
 private val ISSUE_ROW_HEIGHT = 40.dp
+private val ISSUE_MENU_SLOT = 26.dp
 private const val CHIP_FIELD_FONT = 12
 private const val MARKDOWN_MAX_LINES = 400
 private const val DETAIL_ALPHA = .85f
@@ -62,10 +70,24 @@ internal fun TestsIssuesScreen() {
         value = ui.state.testRunCoordinator.listRuns().associate { it.id to it.createdAt }
     }
     val selected = view.selectedIssueId
+    var deleteRequest by remember { mutableStateOf<List<IssueRecord>?>(null) }
+    val deletable = remember(shown) { shown.filterNot { it.readOnly } }
     // Opening the screen with nothing selected selects the newest issue, so the inspector is never an empty pane next to a list.
     LaunchedEffect(selected, issues) { if (selected == null) issues.firstOrNull()?.let { view.selectedIssueId = it.id } }
     TestsScreenScaffold(inspector = selected?.let { id -> { IssueInspector(id, runStarts) } }) {
-        TestsPageHeader("Issues")
+        TestsPageHeader(
+            "Issues",
+            overflowDescription = "More issues actions",
+            overflowItems = listOf(
+                TestsMenuItem(
+                    "Delete ${deletable.size} shown ${if (deletable.size == 1) "issue" else "issues"}…",
+                    onClick = { deleteRequest = deletable },
+                    danger = true,
+                    enabled = deletable.isNotEmpty(),
+                    disabledHint = "No issue matches the search.",
+                ),
+            ),
+        )
         TestsHint(
             "Issues are made from failed steps: from a step's “Create issue…” in a run report, " +
                 "or automatically as drafts for steps set to create an issue.",
@@ -81,8 +103,45 @@ internal fun TestsIssuesScreen() {
             issues.isEmpty() -> TestsHint("No issues yet.")
             shown.isEmpty() -> TestsHint("No issue matches the search.")
         }
-        shown.forEach { issue -> IssueRow(issue, issue.id == selected, runStarts[issue.source.runId]) { view.selectedIssueId = issue.id } }
+        shown.forEach { issue ->
+            IssueRow(issue, issue.id == selected, runStarts[issue.source.runId], onDelete = { deleteRequest = listOf(issue) }) {
+                view.selectedIssueId = issue.id
+            }
+        }
     }
+    deleteRequest?.let { issues -> DeleteIssuesDialog(issues, onDismiss = { deleteRequest = null }) }
+}
+
+/** Confirms and deletes [issues] (one from a row's ⋯, or every issue the search shows); the count is in the title and the button. */
+@Composable
+private fun DeleteIssuesDialog(issues: List<IssueRecord>, onDismiss: () -> Unit) {
+    val ui = LocalTestsUi.current
+    val count = issues.size
+    TestsConfirmDialog(
+        title = if (count == 1) "Delete this issue?" else "Delete $count issues?",
+        message = (if (count == 1) "The issue" else "These $count issues") +
+            " and the evidence copied for ${if (count == 1) "it" else "them"} will be removed from Indagium. This cannot be undone.",
+        confirmLabel = if (count == 1) "Delete" else "Delete $count issues",
+        onConfirm = {
+            ui.scope.launch {
+                var deleted = 0
+                var firstError: String? = null
+                for (issue in issues) {
+                    when (val result = ui.state.deleteIssue(issue.id)) {
+                        is IssueActionResult.Done -> deleted++
+                        is IssueActionResult.Failed -> if (firstError == null) firstError = result.message
+                        is IssueActionResult.NeedsLogTab -> Unit
+                    }
+                }
+                if (firstError == null) {
+                    ui.info(if (deleted == 1) "Issue deleted." else "Deleted $deleted issues.")
+                } else {
+                    ui.banner = TestsBanner("Deleted $deleted of $count issues. $firstError", isError = true)
+                }
+            }
+        },
+        onDismiss = onDismiss,
+    )
 }
 
 @Composable
@@ -115,10 +174,18 @@ private fun rememberIssues(): List<IssueRecord>? {
 
 /** One issue: status chip · severity chip · title with the origin line under it · re-check outcome · when it was created. */
 @Composable
-private fun IssueRow(issue: IssueRecord, selected: Boolean, runCreatedAt: Long?, onClick: () -> Unit) {
+private fun IssueRow(issue: IssueRecord, selected: Boolean, runCreatedAt: Long?, onDelete: () -> Unit, onClick: () -> Unit) {
     val tc = tc()
     val nowMs = System.currentTimeMillis()
-    TestsListRow(selected = selected, onClick = onClick, minHeight = ISSUE_ROW_HEIGHT, startPadding = 6.dp, spacing = 10.dp) {
+    var hovered by remember { mutableStateOf(false) }
+    TestsListRow(
+        selected = selected,
+        onClick = onClick,
+        modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
+        minHeight = ISSUE_ROW_HEIGHT,
+        startPadding = 6.dp,
+        spacing = 10.dp,
+    ) {
         Box(Modifier.width(STATUS_COLUMN)) { StatusChip(issue.status.label(), statusColor(issue.status)) }
         Box(Modifier.width(SEVERITY_COLUMN)) { StatusChip(issue.draft.severity.chipLabel(), severityColor(issue.draft.severity)) }
         Column(Modifier.weight(1f).padding(vertical = 3.dp)) {
@@ -129,8 +196,21 @@ private fun IssueRow(issue: IssueRecord, selected: Boolean, runCreatedAt: Long?,
         Box(Modifier.width(ISSUE_TIME_COLUMN), contentAlignment = Alignment.CenterEnd) {
             AppText(formatRunMoment(issue.createdAt, nowMs), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
         }
+        Box(Modifier.size(ISSUE_MENU_SLOT).alpha(if (hovered || selected) 1f else 0f)) {
+            TestsOverflowMenu(
+                listOf(
+                    TestsMenuItem(
+                        "Delete…", onClick = onDelete, danger = true,
+                        enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
+                    ),
+                ),
+                contentDescription = "Issue actions",
+            )
+        }
     }
 }
+
+private const val ISSUE_READ_ONLY_DELETE_HINT = "This issue was saved by a newer version of Indagium and is read-only here."
 
 // ── Inspector ────────────────────────────────────────────────────────
 
@@ -179,14 +259,21 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             TestsMenuItem("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") }),
             TestsMenuItem("Add to notes", onClick = { addToNotes(openLaneLog = false) }),
             TestsMenuItem("Open folder", onClick = { ui.scope.launch(Dispatchers.IO) { openFolder(ui.state.issueStore.issueDir(issue.id)) } }),
-            TestsMenuItem("Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true),
+            TestsMenuItem(
+                "Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true,
+                enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
+            ),
         ),
     )
     Spacer(Modifier.height(6.dp))
     AppText(issue.originLine(runCreatedAt, nowMs), color = tc.td, fontSize = 10.sp, maxLines = 2)
     if (issue.readOnly) TestsLockedNotice("This issue was saved by a newer version of Indagium and is read-only here.", Modifier.padding(top = 6.dp))
-    Row(Modifier.padding(top = 8.dp)) {
+    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         AppButton("Edit…", onClick = { ui.view.issueDialog = IssueDialogTarget.Existing(issue.id) }, enabled = !issue.readOnly, variant = ButtonVariant.Primary)
+        HintedButton(
+            "Delete…", onClick = { deleting = true }, enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
+            variant = ButtonVariant.Secondary, isDanger = true,
+        )
     }
     if (issue.recheck != null) {
         Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {

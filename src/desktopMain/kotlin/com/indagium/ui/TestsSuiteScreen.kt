@@ -152,7 +152,7 @@ private fun deleteSuiteAndSelectNext(ui: TestsUi, suite: TestSuite) {
 
 // ── Header ───────────────────────────────────────────────────────────
 
-/** The suite name, ▶ Run suite and the ⋯ menu (Duplicate, Export…, Delete…), with the read-only notice under it. */
+/** The suite name, + New case, ▶ Run suite and the ⋯ menu (Duplicate, Export…, Delete…), with the read-only notice under it. */
 @Composable
 private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
@@ -165,13 +165,16 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () 
         titleDescription = "Suite name",
         titlePlaceholder = "Suite name",
         primary = {
-            HintedButton(
-                "▶ Run suite",
-                onClick = { ui.view.runDialog = RunDialogTarget(suite.id) },
-                enabled = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) },
-                disabledHint = limits.hint,
-                variant = ButtonVariant.Primary,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                NewCaseButton(suite)
+                HintedButton(
+                    "▶ Run suite",
+                    onClick = { ui.view.runDialog = RunDialogTarget(suite.id) },
+                    enabled = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) },
+                    disabledHint = limits.hint,
+                    variant = ButtonVariant.Primary,
+                )
+            }
         },
         overflowDescription = "Suite actions",
         overflowItems = listOf(
@@ -251,14 +254,29 @@ private fun SuiteTabs(suite: TestSuite, runCount: Int?) {
 
 // ── Cases ────────────────────────────────────────────────────────────
 
+/** "+ New case": the header's Secondary button, and the empty state's ghost one. Disabled (with the reason) when the suite cannot take a case. */
+@Composable
+private fun NewCaseButton(suite: TestSuite, variant: ButtonVariant = ButtonVariant.Secondary) {
+    val ui = LocalTestsUi.current
+    val limits = LocalTestsLimits.current
+    HintedButton(
+        "+ New case",
+        onClick = { createCaseAndOpen(ui, suite) },
+        enabled = !ui.library.readOnly && !suite.readOnly && limits.canCreateCase(suite.id),
+        disabledHint = limits.hint,
+        variant = variant,
+    )
+}
+
 @Composable
 private fun SuiteCasesTab(suite: TestSuite, data: SuiteScreenData) {
     val ui = LocalTestsUi.current
-    val limits = LocalTestsLimits.current
     var caseToDelete by remember(suite.id) { mutableStateOf<TestCase?>(null) }
     Column(Modifier.fillMaxWidth()) {
         if (suite.cases.isEmpty()) {
             TestsHint("No cases yet. Add a case to define a workflow for the agent.")
+            Spacer(Modifier.height(8.dp))
+            Row { NewCaseButton(suite, ButtonVariant.Ghost) }
         } else {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val compact = suiteCasesCompact(maxWidth.value)
@@ -275,16 +293,6 @@ private fun SuiteCasesTab(suite: TestSuite, data: SuiteScreenData) {
                     }
                 }
             }
-        }
-        Spacer(Modifier.height(10.dp))
-        Row {
-            HintedButton(
-                "+ New case",
-                onClick = { createCaseAndOpen(ui, suite) },
-                enabled = !ui.library.readOnly && !suite.readOnly && limits.canCreateCase(suite.id),
-                disabledHint = limits.hint,
-                variant = ButtonVariant.Ghost,
-            )
         }
     }
     caseToDelete?.let { case ->
@@ -321,7 +329,7 @@ private fun TableHeading(text: String, modifier: Modifier, alignment: Alignment 
     Box(modifier, contentAlignment = alignment) { AppText(text, color = tc().td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold) }
 }
 
-/** One case: the grip (hover), its number, name with a goal line, step count, latest result, issues and the ⋯ menu. */
+/** One case: the grip, its number, name with a goal line, step count, latest result, issues and the ⋯ menu. */
 @Composable
 private fun CaseRow(suite: TestSuite, case: TestCase, row: ReorderRowScope, data: SuiteScreenData, compact: Boolean, onDelete: () -> Unit) {
     val tc = tc()
@@ -340,7 +348,7 @@ private fun CaseRow(suite: TestSuite, case: TestCase, row: ReorderRowScope, data
             minHeight = if (goal != null || compact) ROW_MIN_HEIGHT_WITH_GOAL else ROW_MIN_HEIGHT,
             startPadding = ROW_START_PADDING,
         ) {
-            ReorderGrip(row, Modifier.alpha(if (hovered || row.dragging) 1f else 0f))
+            ReorderGrip(row)
             AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(INDEX_COLUMN))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -467,11 +475,16 @@ private fun CaseLatestCell(history: SuiteCaseHistory?, loaded: Boolean, modifier
 private fun SuiteRunsTab(data: SuiteScreenData) {
     val ui = LocalTestsUi.current
     val runs = data.history.runs
+    var deleteRequest by remember { mutableStateOf<RunDeleteRequest?>(null) }
     when {
-        runs.isNotEmpty() -> RunHistoryList(runs, showSuite = false, onOpen = { openSuiteRun(ui, it) })
+        runs.isNotEmpty() -> RunHistoryList(
+            runs, showSuite = false, onOpen = { openSuiteRun(ui, it) },
+            onDelete = { deleteRequest = RunDeleteRequest(listOf(it)) },
+        )
         !data.loaded -> TestsHint("Loading runs…")
         else -> TestsHint("No runs yet. Start one with Run suite.")
     }
+    deleteRequest?.let { request -> RunDeleteDialog(request, onDismiss = { deleteRequest = null }) }
 }
 
 // ── Settings ─────────────────────────────────────────────────────────

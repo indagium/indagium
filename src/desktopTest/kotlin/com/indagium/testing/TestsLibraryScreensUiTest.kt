@@ -270,7 +270,7 @@ class TestsLibraryScreensUiTest {
         assertEquals(suiteId, state.testsView.selectedSuiteId)
         assertEquals(caseId, state.testsView.selectedCaseId)
         assertEquals(first.id, state.testsView.selectedStepId)
-        assertTrue(state.testsView.stepExamplesExpanded)
+        assertTrue(state.testsView.examplesExpanded(first.id, hasExamples = false), "an explicit open wins over the default")
     }
 
     @Test

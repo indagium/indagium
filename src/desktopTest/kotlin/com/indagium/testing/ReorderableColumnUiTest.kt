@@ -11,7 +11,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -137,5 +139,22 @@ class ReorderableColumnUiTest {
 
         assertEquals(listOf("a", "b", "c"), order)
         assertEquals(emptyList(), moves)
+    }
+
+    @Test
+    fun theGripsAreAlwaysVisibleAndSayWhenReorderingIsOff() {
+        install()
+        // No hover anywhere: every grip is on screen and described as a drag handle.
+        listOf("a", "b", "c").forEach { rule.onNodeWithTag("grip-$it").assertIsDisplayed() }
+        assertEquals(3, rule.onAllNodesWithContentDescription("Drag to reorder").fetchSemanticsNodes().size)
+    }
+
+    @Test
+    fun aDisabledColumnKeepsItsGripsVisibleButDescribedAsOff() {
+        install(enabled = false)
+
+        listOf("a", "b", "c").forEach { rule.onNodeWithTag("grip-$it").assertIsDisplayed() }
+        assertEquals(3, rule.onAllNodesWithContentDescription("Reordering is off").fetchSemanticsNodes().size)
+        assertEquals(0, rule.onAllNodesWithContentDescription("Drag to reorder").fetchSemanticsNodes().size)
     }
 }

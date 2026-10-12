@@ -11,12 +11,17 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
 import com.indagium.edition.Edition
@@ -84,7 +89,7 @@ class TestsWorkspaceUiTest {
         rule.setContent { TestsWorkspace(state) }
         state.testsView.selectedSuiteId = suite.id
 
-        rule.onNodeWithText("+ New case").performClick()
+        rule.onAllNodesWithText("+ New case")[0].performClick()
         rule.waitForIdle()
         val case = state.testLibrary.suite(suite.id)!!.cases.single()
         assertEquals(case.id, state.testsView.selectedCaseId)
@@ -179,12 +184,12 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Allowed tools").assertExists()
         state.testsView.caseInspectorField = null
         rule.waitForIdle()
-        // The inspector's Examples start collapsed; opening them shows the editors.
-        rule.onNodeWithText("Golden screenshot").assertDoesNotExist()
-        rule.onNodeWithText("Examples (2)").performScrollTo().performClick()
-        rule.waitForIdle()
+        // The step has examples, so its Examples section is open without a click; the user can still collapse it.
         rule.onNodeWithText("Golden screenshot").assertExists()
         assertTrue(rule.onAllNodesWithText("Reference log").fetchSemanticsNodes().isNotEmpty())
+        rule.onNodeWithText("Examples (2)").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Golden screenshot").assertDoesNotExist()
 
         state.testsView.nav = TestsNav.Scripts
         state.testsView.selectedScriptId = script.id
@@ -364,5 +369,94 @@ class TestsWorkspaceUiTest {
 
         assertEquals(TestsNav.Scripts, state.testsView.nav)
         rule.onNodeWithText("Shared steps").assertDoesNotExist()
+    }
+
+    private val navGripFromEnd = 17f
+
+    private fun threeCaseSuite(): String {
+        val suite = (state.createTestSuite("Alpha") as StoreResult.Ok).value
+        listOf("Login flow", "Checkout", "Profile").forEach { state.createTestCase(suite.id, TestCase("", it)) }
+        state.testsView.selectedSuiteId = suite.id
+        return suite.id
+    }
+
+    private fun caseNames(suiteId: String) = state.testLibrary.suite(suiteId)!!.cases.map { it.name }
+
+    /** The reorder grips in the nav column, top to bottom (the suite's own grip comes first, then one per listed case). */
+    private fun navGrips(description: String = "Drag to reorder") = rule.onAllNodesWithContentDescription(description).let { all ->
+        all.fetchSemanticsNodes().indices.filter { all.fetchSemanticsNodes()[it].boundsInRoot.right <= state.testsView.navWidthDp }
+            .sortedBy { all.fetchSemanticsNodes()[it].boundsInRoot.top }.map { all[it] }
+    }
+
+    @Test
+    fun theGripsOfSuitesAndCasesAreAlwaysVisibleInTheNavTree() {
+        threeCaseSuite()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        // One grip for the suite row and one per case, present (and drawn) without any hover.
+        assertEquals(4, navGrips().size)
+    }
+
+    @Test
+    fun draggingACaseRowInTheNavTreeReordersTheCasesOfItsSuite() {
+        val suiteId = threeCaseSuite()
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        // A row merges its children into one node, so the grip is the 18dp square at the row's end (8dp padding).
+        navGrips()[3].performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(width - navGripFromEnd, center.y))
+            moveBy(androidx.compose.ui.geometry.Offset(0f, -20f))
+            moveBy(androidx.compose.ui.geometry.Offset(0f, -40f))
+            moveBy(androidx.compose.ui.geometry.Offset(0f, -60f))
+            up()
+        }
+        rule.waitForIdle()
+
+        assertEquals(listOf("Profile", "Login flow", "Checkout"), caseNames(suiteId))
+        assertEquals(1, state.testLibrary.suites.size)
+    }
+
+    @Test
+    fun altArrowOnAFocusedNavCaseRowMovesTheCaseNotTheSuite() {
+        val suiteId = threeCaseSuite()
+        val second = state.createTestSuite("Beta")
+        check(second is StoreResult.Ok)
+        rule.setContent { TestsWorkspace(state) }
+        rule.waitForIdle()
+
+        // A press on the row focuses it (the click that follows would hand the focus back to the workspace root).
+        val row = rule.onAllNodesWithText("Checkout").fetchSemanticsNodes().indexOfFirst { it.boundsInRoot.right <= state.testsView.navWidthDp }
+        rule.onAllNodesWithText("Checkout")[row].performTouchInput { down(center) }
+        rule.onRoot().performKeyInput {
+            keyDown(androidx.compose.ui.input.key.Key.AltLeft)
+            pressKey(androidx.compose.ui.input.key.Key.DirectionUp)
+            keyUp(androidx.compose.ui.input.key.Key.AltLeft)
+        }
+        rule.onAllNodesWithText("Checkout")[row].performTouchInput { cancel() }
+        rule.waitForIdle()
+
+        assertEquals(listOf("Checkout", "Login flow", "Profile"), caseNames(suiteId))
+        assertEquals(listOf("Alpha", "Beta"), state.testLibrary.suites.map { it.name }, "the suites keep their order")
+    }
+
+    @Test
+    fun whileSearchingOrReadOnlyTheNavGripsAreDimmedAndInert() {
+        val suiteId = threeCaseSuite()
+        rule.setContent { TestsWorkspace(state) }
+        state.testsView.search = "o"
+        rule.waitForIdle()
+
+        // A filtered list is not the stored order, so the grips say reordering is off and a drag changes nothing.
+        val off = navGrips("Reordering is off")
+        assertTrue(off.size >= 4, "suite and case grips stay visible but dimmed: ${off.size}")
+        off.last().performTouchInput {
+            down(androidx.compose.ui.geometry.Offset(width - navGripFromEnd, center.y))
+            moveBy(androidx.compose.ui.geometry.Offset(0f, -80f))
+            up()
+        }
+        rule.waitForIdle()
+        assertEquals(listOf("Login flow", "Checkout", "Profile"), caseNames(suiteId))
     }
 }

@@ -5,12 +5,14 @@ package com.indagium.ui
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -30,6 +32,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.ImageBitmap
@@ -43,6 +46,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -244,8 +249,8 @@ private fun StepRow(step: TestStep, row: ReorderRowScope, ops: StepListOps, sele
         startPadding = 4.dp,
         spacing = 6.dp,
     ) {
-        // The grip and the ⋯ keep their slots while hidden so the other columns never shift.
-        Box(Modifier.alpha(if (hovered || row.dragging) 1f else 0f)) { ReorderGrip(row) }
+        // The ⋯ keeps its slot while hidden so the other columns never shift; the grip is always visible.
+        ReorderGrip(row)
         AppText("${row.index + 1}", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(STEP_NUMBER_WIDTH))
         AppText(
             step.action.ifBlank { UNTITLED_STEP },
@@ -297,7 +302,96 @@ internal fun SelectedStepInspector(ops: StepListOps) {
                 step.action.ifBlank { UNTITLED_STEP },
                 overflowItems = stepMenuItems(ui, ops, step),
             )
+            StepScreenshotStrip(step, ops)
+            RecordedScreensPanel(step, ops)
             StepEditor(step, ops)
+        }
+    }
+}
+
+// ── Screenshots shown without opening anything ───────────────────────
+
+private val STRIP_THUMB_SIZE = 48.dp
+private val RECORDED_THUMB_SIZE = 96.dp
+private const val STRIP_MAX_THUMBS = 8
+
+/**
+ * A row of small thumbnails of the step's golden screenshots, under the inspector title, so the screenshots are visible
+ * without opening the Examples section. Clicking one opens that section and scrolls it into view.
+ */
+@Composable
+private fun StepScreenshotStrip(step: TestStep, ops: StepListOps) {
+    val ui = LocalTestsUi.current
+    val suiteId = ops.assetSuiteId ?: return
+    val shots = step.examples.filterIsInstance<StepExample.GoldenScreenshot>()
+    if (shots.isEmpty()) return
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        shots.take(STRIP_MAX_THUMBS).forEachIndexed { index, shot ->
+            GoldenThumbnail(
+                ui.state.testGoldenImageFile(suiteId, shot.assetPath),
+                size = STRIP_THUMB_SIZE,
+                modifier = Modifier.clip(CORNER_SM).clickable {
+                    ui.view.setExamplesExpanded(step.id, true)
+                    ui.view.examplesRevealStepId = step.id
+                    ui.reclaimFocus()
+                }.semantics { contentDescription = "Screenshot ${index + 1} of ${shots.size}. Show in Examples" },
+            )
+        }
+        if (shots.size > STRIP_MAX_THUMBS) TestsHint("+${shots.size - STRIP_MAX_THUMBS} more")
+    }
+}
+
+/** A recorded screen read off the disk: its caption and the decoded image (null while it cannot be decoded). */
+private class RecordedScreenImage(val caption: String, val bitmap: ImageBitmap?)
+
+/**
+ * "Recorded screens": the before / after screenshots stored with the recording the step came from ("Keep recording evidence with
+ * recorded cases"). Read and decoded off the UI thread, bounded like every other preview; shows nothing when the step has no
+ * recording or the evidence has no image for it.
+ */
+@Composable
+private fun RecordedScreensPanel(step: TestStep, ops: StepListOps) {
+    val ui = LocalTestsUi.current
+    val tc = tc()
+    val suiteId = ops.assetSuiteId
+    val recordingId = step.recordingRef
+    if (suiteId == null || recordingId == null) return
+    val images by produceState<List<RecordedScreenImage>>(emptyList(), suiteId, recordingId, step.id) {
+        value = withContext(Dispatchers.IO) {
+            val screens = ui.state.recordedStepScreens(suiteId, recordingId, step.id) ?: return@withContext emptyList()
+            buildList {
+                screens.before?.let { add(RecordedScreenImage("Before", decodeBoundedPreviewImage(it))) }
+                screens.after?.let { add(RecordedScreenImage("After", decodeBoundedPreviewImage(it))) }
+                if (screens.before == null && screens.after == null) {
+                    screens.input?.let { add(RecordedScreenImage("Input", decodeBoundedPreviewImage(it))) }
+                }
+            }
+        }
+    }
+    if (images.isEmpty()) return
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        TestsPanelTitle("Recorded screens")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            images.forEach { image ->
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Box(
+                        Modifier.size(RECORDED_THUMB_SIZE).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        image.bitmap?.let {
+                            Image(
+                                it, contentDescription = "Recorded screen: ${image.caption}",
+                                contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize(),
+                            )
+                        } ?: AppText("no preview", color = tc.td, fontSize = 10.sp)
+                    }
+                    AppText(image.caption, color = tc.td, fontSize = 10.sp)
+                }
+            }
         }
     }
 }
@@ -705,25 +799,37 @@ private fun ExamplesEditor(step: TestStep, ops: StepListOps) {
         if (ops.assetSuiteId != null) add(ExampleKind.GOLDEN_SCREENSHOT)
     }
     val view = ui.view
-    val expanded = view.stepExamplesExpanded
-    InspectorDisclosure("Examples (${step.examples.size})", expanded, onToggle = { view.stepExamplesExpanded = !expanded }) {
-        if (expanded && ops.editable) {
-            TestsDropdown(
-                selectedLabel = "+ Add example",
-                options = addOptions,
-                optionLabel = { it.label },
-                onSelect = { kind ->
-                    when (kind) {
-                        ExampleKind.REFERENCE_LOG ->
-                            ui.report(update { it.copy(examples = it.examples + StepExample.ReferenceLog(newExampleId(), "")) })
-                        ExampleKind.GOLDEN_SCREENSHOT -> ops.assetSuiteId?.let { suiteId ->
-                            chooseGoldenImage(ui, suiteId)?.let { name ->
-                                ui.report(update { it.copy(examples = it.examples + StepExample.GoldenScreenshot(newExampleId(), name)) })
+    val expanded = view.examplesExpanded(step.id, step.examples.isNotEmpty())
+    val revealer = remember { BringIntoViewRequester() }
+    LaunchedEffect(view.examplesRevealStepId) {
+        if (view.examplesRevealStepId == step.id) {
+            revealer.bringIntoView()
+            view.examplesRevealStepId = null
+        }
+    }
+    Box(Modifier.fillMaxWidth().bringIntoViewRequester(revealer)) {
+        InspectorDisclosure(
+            "Examples (${step.examples.size})", expanded,
+            onToggle = { view.setExamplesExpanded(step.id, !expanded) },
+        ) {
+            if (expanded && ops.editable) {
+                TestsDropdown(
+                    selectedLabel = "+ Add example",
+                    options = addOptions,
+                    optionLabel = { it.label },
+                    onSelect = { kind ->
+                        when (kind) {
+                            ExampleKind.REFERENCE_LOG ->
+                                ui.report(update { it.copy(examples = it.examples + StepExample.ReferenceLog(newExampleId(), "")) })
+                            ExampleKind.GOLDEN_SCREENSHOT -> ops.assetSuiteId?.let { suiteId ->
+                                chooseGoldenImage(ui, suiteId)?.let { name ->
+                                    ui.report(update { it.copy(examples = it.examples + StepExample.GoldenScreenshot(newExampleId(), name)) })
+                                }
                             }
                         }
-                    }
-                },
-            )
+                    },
+                )
+            }
         }
     }
     if (!expanded) return
@@ -817,7 +923,7 @@ private fun chooseGoldenImage(ui: TestsUi, suiteId: String): String? {
 
 /** The golden screenshot [file] fitted into a square of [size] (a placeholder while it is missing or decoding). */
 @Composable
-internal fun GoldenThumbnail(file: File?, size: Dp = THUMB_HEIGHT) {
+internal fun GoldenThumbnail(file: File?, size: Dp = THUMB_HEIGHT, modifier: Modifier = Modifier) {
     val tc = tc()
     val bitmap by produceState<ImageBitmap?>(null, file) {
         value = if (file == null || !file.isFile) {
@@ -828,7 +934,7 @@ internal fun GoldenThumbnail(file: File?, size: Dp = THUMB_HEIGHT) {
             }
         }
     }
-    Box(Modifier.size(size).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM), contentAlignment = Alignment.Center) {
+    Box(modifier.size(size).background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM), contentAlignment = Alignment.Center) {
         bitmap?.let { Image(it, contentDescription = "Reference screenshot", contentScale = ContentScale.Fit, modifier = Modifier.height(size)) }
             ?: AppText("no preview", color = tc.td, fontSize = 10.sp)
     }
