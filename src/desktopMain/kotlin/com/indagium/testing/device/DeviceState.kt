@@ -79,7 +79,7 @@ internal enum class DeviceStateSource(val section: String, val command: List<Str
     BATTERY("battery", listOf("dumpsys", "battery"), listOf(DEVICE_STATE_POWER_SOURCE, DEVICE_STATE_BATTERY_STATUS)),
     BLUETOOTH_ENABLED("bt_on", listOf("settings", "get", "global", "bluetooth_on"), listOf(DEVICE_STATE_BLUETOOTH_ENABLED)),
     BLUETOOTH_CONNECTED("bt_dump", listOf("dumpsys", "bluetooth_manager"), listOf(DEVICE_STATE_BLUETOOTH_CONNECTED)),
-    WIFI("wifi", listOf("settings", "get", "global", "wifi_on"), listOf(DEVICE_STATE_WIFI_ENABLED)),
+    WIFI("wifi", listOf("cmd", "wifi", "status"), listOf(DEVICE_STATE_WIFI_ENABLED)),
     AIRPLANE("airplane", listOf("settings", "get", "global", "airplane_mode_on"), listOf(DEVICE_STATE_AIRPLANE)),
     MOBILE_DATA("mobile", listOf("settings", "get", "global", "mobile_data"), listOf(DEVICE_STATE_MOBILE_DATA)),
     AUDIO("audio", listOf("dumpsys", "audio"), listOf(DEVICE_STATE_AUDIO_DEVICES)),

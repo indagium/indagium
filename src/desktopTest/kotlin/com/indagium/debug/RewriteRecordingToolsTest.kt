@@ -11,6 +11,7 @@ import com.indagium.testing.TurnProvider
 import com.indagium.testing.VALID_SHOP_REWRITE
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.recordedShopSession
 import com.indagium.testing.run.LaneAgentFactory
@@ -101,6 +102,23 @@ class RewriteRecordingToolsTest {
     @Suppress("UNCHECKED_CAST")
     private fun call(tool: String, vararg args: Pair<String, Any?>): Map<String, Any?> =
         runBlocking { operations.toolGateway.executeSuspending(tool, mapOf(*args)) as Map<String, Any?> }
+
+    @Test
+    fun applyingARecordingCanReplayOneRowWhileKeepingTheRestAsAiSteps() {
+        val session = record()
+        session.stop()
+        val rows = session.snapshot.value.steps
+        val applied = call(
+            "apply_test_recording", "sessionId" to session.id,
+            "steps" to rows.map { mapOf("id" to it.id, "action" to it.action, "expected" to "The expected screen is visible") },
+            "replayRowIds" to listOf(rows.first().id),
+        )
+        assertNull(applied["error"], applied.toString())
+        val steps = state.testLibrary.suite(suiteId)!!.cases.single { it.id == caseId }.steps
+        assertEquals(StepKind.REPLAY, steps.first().kind)
+        assertTrue(steps.drop(1).all { it.kind == StepKind.AGENT })
+        assertNotNull(steps.first().recordedInput)
+    }
 
     // ── The AI run ───────────────────────────────────────────────────
 

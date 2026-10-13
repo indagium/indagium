@@ -161,8 +161,9 @@ class JudgeComparisonTest {
             override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
                 val prompt = request.messages.first { it.role == LlmRole.USER }.content.orEmpty()
                 if (prompt.startsWith("Compare")) {
-                    comparisonStarted.complete(Unit)
                     emit(LlmStreamEvent.Usage(promptTokens = 11, completionTokens = 4, totalTokens = 15))
+                    // The test cancels after usage is known, not while the provider is about to emit it.
+                    comparisonStarted.complete(Unit)
                     awaitCancellation()
                 }
                 emit(LlmStreamEvent.Completed)

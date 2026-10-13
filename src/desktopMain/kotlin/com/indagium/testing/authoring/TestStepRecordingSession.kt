@@ -1745,11 +1745,18 @@ class TestStepRecordingSession internal constructor(
         return ReplayContext(inputs, RewriteSensitivity(inputs))
     }
 
-    /** How many of the reviewed rows can be applied as replay steps; the review panel's "Apply as replay steps" says so. */
-    internal fun replayableRowCount(): Int = synchronized(lock) {
+    /** Which reviewed rows can be replayed; retain row identity through reordering and apply the same eligibility rules as saved steps. */
+    internal fun replayableRowIds(): Set<String> = synchronized(lock) {
         val context = replayContext()
-        mutableSnapshot.value.steps.count { recordedInputFor(it, context) != null }
+        mutableSnapshot.value.steps.filter { row ->
+            TestStep(
+                id = "", action = row.action, kind = row.stepKind, optional = row.optional,
+                intent = row.intent, precondition = row.precondition, recordedInput = recordedInputFor(row, context),
+            ).canBeReplay()
+        }.map { it.id }.toSet()
     }
+
+    internal fun replayableRowCount(): Int = replayableRowIds().size
 
     private fun gestureHintOf(row: RecordedTestStep): RecordedGestureHint? {
         val kind = row.kind?.takeIf { it == RecordedInputKind.TAP || it == RecordedInputKind.LONG_PRESS || it == RecordedInputKind.SWIPE }

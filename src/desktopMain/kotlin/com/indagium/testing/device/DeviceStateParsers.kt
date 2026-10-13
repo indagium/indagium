@@ -25,8 +25,18 @@ internal fun parseSettingsToggle(output: String, onValues: Set<String> = setOf(S
     else -> null
 }
 
-/** `wifi_on` can also be 2: Wi-Fi stays on although airplane mode is. */
-internal fun parseWifiEnabled(output: String): String? = parseSettingsToggle(output, setOf(SETTINGS_ON, SETTINGS_ON_OVERRIDE))
+private val WIFI_STATUS = Regex("""(?im)^\s*Wi-?Fi is (enabled|disabled)\s*$""")
+
+/** Read the Wi-Fi service's current state, rather than its persisted preference. Legacy numeric recordings remain readable. */
+internal fun parseWifiEnabled(output: String): String? {
+    val states = WIFI_STATUS.findAll(output).map { it.groupValues[1].lowercase(java.util.Locale.ROOT) }.toSet()
+    return when {
+        states.size > 1 -> null
+        states.singleOrNull() == "enabled" -> BOOL_TRUE
+        states.singleOrNull() == "disabled" -> BOOL_FALSE
+        else -> parseSettingsToggle(output, setOf(SETTINGS_ON, SETTINGS_ON_OVERRIDE))
+    }
+}
 
 /** The first 200 characters of what a setting answered, for a message. */
 internal fun settingsAnswerExcerpt(output: String): String = output.trim().take(MAX_PARSED_VALUE_CHARS)

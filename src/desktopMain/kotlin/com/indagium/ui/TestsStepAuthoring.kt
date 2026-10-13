@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -616,9 +617,11 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     // What applying a reopened recording does to the steps it made earlier; recomputed whenever the case changes.
     val replacement = remember(case.steps.map { it.id }, session.id) { ui.state.reopenedReplacementPlan(session.id) }
     val keepEvidence = ui.state.settings.testing.keepRecordingEvidence && reopened == null
-    // "Apply as replay steps": steps made from replayable taps, swipes, keys and panels inject their recorded input themselves.
-    var asReplay by remember(session.id) { mutableStateOf(false) }
-    val replayable = remember(snapshot.steps, snapshot.active) { if (snapshot.active) 0 else session.replayableRowCount() }
+    // AI is the default; a reviewer can select individual stable gestures for replay or opt into replaying every eligible row.
+    var selectedReplayRowIds by remember(session.id) { mutableStateOf(emptySet<String>()) }
+    val replayableRowIds = remember(snapshot.steps, snapshot.active) { if (snapshot.active) emptySet() else session.replayableRowIds() }
+    val replayRows = selectedReplayRowIds.intersect(replayableRowIds)
+    LaunchedEffect(replayableRowIds) { selectedReplayRowIds = selectedReplayRowIds.intersect(replayableRowIds) }
 
     fun applyRecorded(insertAsNew: Boolean) {
         working = true
@@ -633,7 +636,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     reviewed.map { it.id },
                     reviewed.associate { it.id to (it.optional to it.condition) },
                     insertAsNew,
-                    asReplay = asReplay && replayable > 0,
+                    replayRowIds = replayRows,
                 )) {
                     is StoreResult.Ok -> { ui.report(result); onDismiss() }
                     else -> error = result.userMessage()
@@ -732,6 +735,23 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 }
                 if (row.authorAdded) RecordedRowKindEditor(session, row, editable)
                 if (row.isExternalEvent) ExternalEventRowEditor(session, row, editable)
+                if (row.stepKind == StepKind.AGENT && !row.authorAdded) {
+                    val replayAvailable = row.id in replayableRowIds
+                    CheckRow(checked = row.id in replayRows, onToggle = {
+                        selectedReplayRowIds = if (row.id in selectedReplayRowIds) selectedReplayRowIds - row.id else selectedReplayRowIds + row.id
+                    }, enabled = editable && replayAvailable) {
+                        AppText("Replay this step", color = tc.ts, fontSize = 10.sp)
+                    }
+                    if (replayAvailable) {
+                        TestsHint(if (row.id in replayRows) {
+                            "Uses the recorded input on a similar layout. Turn off to let AI adapt this step to the current screen."
+                        } else {
+                            "AI uses the recording as guidance and can adapt to the current screen."
+                        })
+                    } else if (!snapshot.active) {
+                        TestsHint("Replay needs eligible recorded input and cannot evaluate optional conditions or establish a precondition.")
+                    }
+                }
                 TestsLabeled(if (row.stepKind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
                     CommitTextField(
                         row.action,
@@ -809,10 +829,12 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
         if (!snapshot.active) {
             if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
             if (snapshot.steps.isNotEmpty()) {
-                CheckRow(checked = asReplay && replayable > 0, onToggle = { asReplay = !asReplay }, enabled = editable && replayable > 0) {
+                CheckRow(checked = replayableRowIds.isNotEmpty() && replayRows.size == replayableRowIds.size, onToggle = {
+                    selectedReplayRowIds = if (replayRows.size == replayableRowIds.size) emptySet() else replayableRowIds
+                }, enabled = editable && replayableRowIds.isNotEmpty()) {
                     AppText(APPLY_AS_REPLAY_LABEL, color = tc.ts, fontSize = 10.sp)
                 }
-                TestsHint(replayOptionHint(replayable, snapshot.steps.size))
+                TestsHint(replayOptionHint(replayableRowIds.size, snapshot.steps.size, replayRows.size))
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id) && !rewriting, variant = ButtonVariant.Ghost)
@@ -834,13 +856,13 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     }
 }
 
-internal const val APPLY_AS_REPLAY_LABEL = "Apply as replay steps"
+internal const val APPLY_AS_REPLAY_LABEL = "Replay all eligible steps"
 
 /** What the replay option does for this recording, in one sentence. */
-internal fun replayOptionHint(replayable: Int, steps: Int): String =
+internal fun replayOptionHint(replayable: Int, steps: Int, selected: Int = 0): String =
     if (replayable > 0) {
-        "$replayable of $steps step(s) can be replayed: they inject their recorded taps, gesture paths and timing, keys and panels " +
-            "without an AI agent; the judge still checks their expected result. The others stay AI steps."
+        "$selected selected for replay; $replayable of $steps step(s) are eligible. Choose Replay this step on individual rows, " +
+            "or select all here. Replay scales recorded coordinates but does not adapt to a changed layout. Other recorded steps use AI."
     } else {
         "No step can be replayed (typed text, rotation, an optional or precondition step, or input withheld for a password); all stay AI steps."
     }

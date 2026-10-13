@@ -56,17 +56,21 @@ internal class DeterministicChecks(
     suspend fun evaluateAll(
         checks: List<StepCheck>,
         stepLogOffset: Long,
+        onProgress: (CheckResult) -> Unit = {},
         onResult: (CheckResult) -> Unit = {},
-    ): List<CheckResult> = checks.map { evaluate(it, stepLogOffset).also(onResult) }
+    ): List<CheckResult> = checks.map { evaluate(it, stepLogOffset, onProgress).also(onResult) }
 
-    suspend fun evaluate(check: StepCheck, stepLogOffset: Long): CheckResult {
+    suspend fun evaluate(check: StepCheck, stepLogOffset: Long, onProgress: (CheckResult) -> Unit = {}): CheckResult {
         val startedNanos = System.nanoTime()
         val outcome = try {
             when (check) {
                 is StepCheck.LogAppears -> logAppears(check, stepLogOffset)
                 is StepCheck.LogAbsent -> logAbsent(check, stepLogOffset)
                 is StepCheck.ScriptResult -> scriptResult(check)
-                is StepCheck.DeviceState -> deviceState(check)
+                is StepCheck.DeviceState -> deviceState(check) { detail ->
+                    onProgress(CheckResult(check.id, check.kindName(), CheckStatus.NOT_EVALUATED, detail,
+                        (System.nanoTime() - startedNanos) / NANOS_PER_MILLI))
+                }
                 is StepCheck.ScreenJudge, is StepCheck.AskJudge -> Outcome(CheckStatus.NOT_EVALUATED, JUDGE_PENDING_DETAIL)
             }
         } catch (cancelled: CancellationException) {
@@ -104,7 +108,7 @@ internal class DeterministicChecks(
     }
 
     /** Reads the device property until its text matches the check's expression (searched in it) or [StepCheck.DeviceState.withinMs] is up. */
-    private suspend fun deviceState(check: StepCheck.DeviceState): Outcome {
+    private suspend fun deviceState(check: StepCheck.DeviceState, onProgress: (String) -> Unit): Outcome {
         val expected = Regex(check.expectedRegex)
         val startedNanos = System.nanoTime()
         val window = check.withinMs.coerceIn(0L, MAX_CHECK_WAIT_MS)
@@ -112,6 +116,10 @@ internal class DeterministicChecks(
         while (true) {
             last = session.readDeviceState(check.key)
             val reading = last
+            onProgress(when (reading) {
+                is DeviceStateReading.Value -> "Last reading: ${check.key} = ${stateText(reading)}; waiting for /${check.expectedRegex}/."
+                is DeviceStateReading.Unavailable -> "Last reading unavailable: ${reading.reason}"
+            })
             if (reading is DeviceStateReading.Value && expected.containsMatchIn(reading.text)) {
                 return Outcome(CheckStatus.PASS, "${check.key} = ${stateText(reading)} matches /${check.expectedRegex}/.")
             }

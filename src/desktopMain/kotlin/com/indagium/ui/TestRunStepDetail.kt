@@ -123,6 +123,15 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
         if (step.action.length > HEADER_ACTION_CHARS) DetailLine("Action", step.action)
         step.performedByLine()?.let { DetailLine("Performed by", it) }
         DetailLine("Expected", step.expected)
+        run.suite.cases.firstOrNull { it.id == row.caseId }?.steps?.firstOrNull { it.id == row.stepId }?.let { definition ->
+            DetailLine("Intent", if (definition.intent == com.indagium.testing.model.StepIntent.ENSURE_STATE) {
+                "Ensure state: accepts the expected state when it is already true."
+            } else {
+                "Perform action: verifies the transition caused by the action."
+            })
+            definition.precondition?.let { DetailLine("Required starting state", it) }
+            if (definition.optional) DetailLine("Run only when", definition.condition.orEmpty())
+        }
         step.executionStatus?.let { if (it != step.status) DetailLine("Execution outcome", it.name.lowercase()) }
         if (step.verificationState != com.indagium.testing.model.VerificationState.NOT_REQUESTED) {
             DetailLine("Verification", step.verificationState.name.lowercase().replace('_', ' '))

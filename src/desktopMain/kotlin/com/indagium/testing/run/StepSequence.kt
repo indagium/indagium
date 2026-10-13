@@ -66,8 +66,8 @@ internal const val CASE_BUDGET_EXHAUSTED_NOTE = "The case tool-call budget was e
 //      CREATE_ISSUE_AND_CONTINUE advance (the latter flags issueRequested), PAUSE_FOR_USER waits for the user's
 //      decision (retry / continue / stop) through the listener;
 //   3. the answer names the next step, a redo, or that the case is over.
-// A step that outlives its timeout is closed by the watchdog (checkTimeout) as TIMEOUT and the same onFailure applies;
-// the sequence then reports a SequenceEvent so a running agent can be restarted at the next step.
+// A step that outlives its timeout reaches a verification checkpoint: a judge-confirmed AI action with satisfied checks can
+// recover as PASS (executionStatus remains TIMEOUT). Otherwise onFailure applies. The old agent is replaced before the next step.
 //
 // With a judge (see StepJudging.kt for the rules) finish_step also asks it, inline, after the deterministic checks; the
 // judge sees the evidence only, never the agent's claim. While the run is paused (RunPauseGate) finish_step holds its
@@ -219,6 +219,7 @@ private const val STAYS_A_TIMEOUT = "The step stays a timeout."
 
 private const val TIMEOUT_NOTE_TOOL_RUNS = 6
 private const val TIMEOUT_EVIDENCE_MS = 10_000L
+private const val TIMEOUT_STATE_RECHECK_MS = 2_000L
 
 /** "60 s", "2.5 s" or "250 ms". */
 private fun formatTimeoutLabel(timeoutMs: Long): String = when {
@@ -230,11 +231,13 @@ private fun formatTimeoutLabel(timeoutMs: Long): String = when {
 private const val MILLIS_PER_SECOND = 1_000L
 
 /** What a step's screenshot became: the file kept as evidence (relative to the run folder) and the image the judge looks at. */
-private class Shot(val path: String?, val jpeg: ByteArray?, val capturedAtMs: Long)
+private class Shot(val path: String?, val jpeg: ByteArray?, val capturedAtMs: Long, val uiStructure: Map<String, Any?>? = null)
+
+private class TimeoutEvidence(val shot: Shot, val fresh: Boolean)
 
 private class Evaluation(
     val step: TestStep,
-    val status: StepStatus,
+    var status: StepStatus,
     var result: StepResult,
     val failedChecks: List<String>,
     val stepIndex: Int,
@@ -610,6 +613,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             precondition = step.precondition,
             gestureHint = step.gestureHints.compactDescription().takeIf(String::isNotBlank),
             dispatchEpoch = epoch.get(),
+            recordedInput = step.recordedInput,
         )
     }
 
@@ -945,7 +949,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             val current = env.session.screenshot()
             val capturedAtMs = env.wallClock()
             val path = if (env.evidence.screenshots) saveScreenshot(current.png, "start", capturedFor.first, capturedFor.second) else null
-            Shot(path, current.image.bytes.takeIf { env.judge != null }, capturedAtMs)
+            val structure = captureUiStructure(spec.steps[capturedFor.first], path)
+            Shot(path, current.image.bytes.takeIf { env.judge != null }, capturedAtMs, structure)
         } catch (cancelled: CancellationException) {
             withContext(NonCancellable) {
                 if (stateLocked) resetCaptureFlag() else mutex.withLock { resetCaptureFlag() }
@@ -1198,9 +1203,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             "optional" to brief.optional,
             "condition" to brief.condition,
             "attempt" to brief.attempt,
-        ) + brief.exampleMetadata() + brief.gestureHint?.let {
-            untrustedData("recorded_gesture_hint", mapOf("summary" to it))
-        }.orEmpty()
+        ) + brief.exampleMetadata() + brief.recordedGestureContext() + brief.optionalGuidance()
     }
 
     // ── Evaluating a step ────────────────────────────────────────────
@@ -1477,9 +1480,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val shot = samples.lastOrNull() ?: captureScreenshot()
         val evidenceDone = env.nanoTime()
         val checksStarted = env.nanoTime()
-        val automatic = checks.evaluateAll(driver?.checks ?: step.checks, attemptLogOffset) { result ->
-            lastAttemptChecks = lastAttemptChecks + result
-        }
+        val automatic = checks.evaluateAll(
+            driver?.checks ?: step.checks, attemptLogOffset,
+            onProgress = ::retainCheckResult, onResult = ::retainCheckResult,
+        )
         val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
         val checksDone = env.nanoTime()
         val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
@@ -1492,6 +1496,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             evidenceDone - evaluationStart,
             checksDone - checksStarted,
         )
+    }
+
+    private fun retainCheckResult(result: CheckResult) {
+        lastAttemptChecks = lastAttemptChecks.filterNot { it.checkId == result.checkId } + result
     }
 
     private fun freezeDeferredJudge(
@@ -1805,6 +1813,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             startScreenshot = { startImage?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
             startScreenshotCapturedAtMs = startShot?.capturedAtMs,
             screenshotCapturedAtMs = shot.capturedAtMs,
+            startUiStructure = startShot?.uiStructure,
+            endUiStructure = shot.uiStructure,
             samples = frozenSamples.mapIndexed { index, sample ->
                 JudgeScreenshotSample(index + 1, sample.first) { sample.second?.let { JudgeImage(it, SCREEN_MIME_TYPE) } }
             },
@@ -1813,6 +1823,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane),
             step.intent, step.precondition,
             attemptIdentity = JudgeAttemptIdentity(spec.caseId, spec.iteration, spec.caseAttempt, step.id, attempt),
+            optional = step.optional,
+            condition = step.condition,
         )
     }
 
@@ -1878,13 +1890,24 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return try {
             val shot = env.session.screenshot()
             val path = if (keep) saveScreenshot(shot.png, suffix) else null
-            Shot(path, shot.image.bytes.takeIf { env.judge != null }, env.wallClock()).also { lastAttemptShot = it }
+            val capturedAtMs = env.wallClock()
+            val structure = captureUiStructure(spec.steps[index], path)
+            Shot(path, shot.image.bytes.takeIf { env.judge != null }, capturedAtMs, structure).also { lastAttemptShot = it }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
             attemptNotes += "Screenshot failed: ${failure.message ?: failure::class.simpleName}."
             Shot(null, null, env.wallClock())
         }
+    }
+
+    private suspend fun captureUiStructure(step: TestStep, screenshotPath: String?): Map<String, Any?>? {
+        if (env.judge == null || !com.indagium.testing.device.needsUiStructure(step.action, step.expected, step.condition)) return null
+        val structure = env.session.readUiStructure()
+        screenshotPath?.let { path ->
+            runCatching { File(env.runDir, "$path.ui.json").writeText(com.indagium.debug.Json.encode(structure)) }
+        }
+        return structure
     }
 
     private fun saveScreenshot(png: ByteArray, suffix: String? = null, stepIndex: Int = index, attemptNumber: Int = attempt): String {
@@ -2108,27 +2131,33 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val reportObservation = explicitObservation ?: submittedReportObservation.takeIf { hasCurrentSubmittedReport }
         val reported = (reportObservation ?: observations.joinToString("\n")).ifBlank { TIMEOUT_OBSERVATION }
         val reportClaim = submittedClaim ?: submittedReportClaim.takeIf { hasCurrentSubmittedReport }
-        val completedIds = lastAttemptChecks.mapTo(HashSet()) { it.checkId }
+        val timedChecks = lastAttemptChecks.map { result ->
+            if (result.status == CheckStatus.NOT_EVALUATED) {
+                result.copy(detail = "${result.detail} Evaluation stopped when the step deadline expired.")
+            } else result
+        }
+        val completedIds = timedChecks.mapTo(HashSet()) { it.checkId }
         val pending = step.checks.filterNot { it.id in completedIds }.map { check ->
             CheckResult(check.id, check.kindName(), CheckStatus.NOT_EVALUATED, "Evaluation stopped when the step deadline expired.", 0)
         }
         val advised = timeoutAdviceRequested(step)
         // The device is still on whatever the agent left: take the end screenshot now so the advice (and the reader) can see it.
-        val endShot = if (advised) captureTimeoutShot() else null
+        val timeoutEvidence = if (advised) captureTimeoutShot() else null
+        val endShot = timeoutEvidence?.shot
         val result = buildResult(
-            step, StepStatus.TIMEOUT, reportClaim, reported, lastAttemptChecks + pending, endShot?.path ?: screenshotPath,
+            step, StepStatus.TIMEOUT, reportClaim, reported, timedChecks + pending, endShot?.path ?: screenshotPath,
             knownLogEnd = lastKnownLogEnd, startScreenshotPath = attemptStartShot?.path,
             sampleScreenshotPaths = attemptPlaybackSamples.mapNotNull { it.path },
         )
             .copy(note = (attemptNotes + timeoutNote(step, advised)).joinToString(" "))
         val evaluation = Evaluation(step, StepStatus.TIMEOUT, result, emptyList(), expectedIndex, expectedAttempt)
-        if (endShot != null) adviseOnTimeoutLocked(evaluation, endShot)
+        if (endShot != null) resolveTimeoutLocked(evaluation, endShot, freshEndEvidence = timeoutEvidence.fresh)
         return evaluation
     }
 
     /**
      * Whether a judge gives its opinion on a step that timed out: when the run's judge would have judged the step had the agent
-     * finished it. The opinion is advice for the reader; it never changes the step's status.
+     * finished it. A conclusive pass can recover an AI step once all explicit checks are satisfied.
      */
     private fun timeoutAdviceRequested(step: TestStep): Boolean =
         (env.judgeRequested || env.judge != null) && judgeable(step, null) && shouldJudge(env.judgeMode, step, LaneStepStatus.FAIL, false)
@@ -2136,9 +2165,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** "The agent did not finish the step within 60 s (last tool calls: wait_for_ui ×2, tap). The action may have succeeded …" */
     private fun timeoutNote(step: TestStep, advised: Boolean): String {
         val tools = recentToolSummary()
-        return "The agent did not finish the step within ${formatTimeoutLabel(step.timeoutMs)}" +
+        val phase = if (submittedReportStepId == step.id && submittedReportAttempt == attempt) {
+            "Step verification did not finish"
+        } else "The agent did not finish the step"
+        return "$phase within ${formatTimeoutLabel(step.timeoutMs)}" +
             (if (tools.isEmpty()) "" else " (last tool calls: $tools)") +
-            ". The action may have succeeded — see the screenshot" + (if (advised) " and the judge's advice." else ".")
+            ". The action may have succeeded — see the screenshot" + (if (advised) " and the judge's verdict." else ".")
     }
 
     /** The last few device and script tools of the attempt, runs of the same tool collapsed ("wait_for_ui ×2"). */
@@ -2151,44 +2183,48 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return runs.takeLast(TIMEOUT_NOTE_TOOL_RUNS).joinToString(", ") { (name, count) -> if (count > 1) "$name ×$count" else name }
     }
 
-    /** The screen at the moment of the timeout, bounded so a stuck device cannot hold the timeout open. Null when nothing could be taken. */
-    private suspend fun captureTimeoutShot(): Shot? {
+    /** Bounded fresh evidence; an older fallback is useful for advice but cannot recover the timeout. */
+    private suspend fun captureTimeoutShot(): TimeoutEvidence {
         val taken = withTimeoutOrNull(TIMEOUT_EVIDENCE_MS) { captureScreenshot("timeout") }
-        return (taken ?: lastAttemptShot)?.takeIf { it.path != null || it.jpeg != null }
-            ?: Shot(null, null, env.wallClock())
+        if (taken?.jpeg != null) return TimeoutEvidence(taken, fresh = true)
+        val fallback = taken?.takeIf { it.path != null } ?: lastAttemptShot ?: Shot(null, null, env.wallClock())
+        return TimeoutEvidence(fallback, fresh = false)
     }
 
     /**
-     * Asks the judge about the evidence of a timed-out step: now (inline timing, a pause, a setup hook or explicit judge checks) or
-     * through the deferred queue. The verdict is recorded next to TIMEOUT; the status, the checks and the case outcome stay as they are.
+     * A timeout is a verification checkpoint, even with deferred judging: decide before stopping or moving the device.
+     * Explicit checks still govern success, and an old screenshot or an input still running cannot recover the timeout.
      */
-    private suspend fun adviseOnTimeoutLocked(evaluation: Evaluation, shot: Shot) {
+    private suspend fun resolveTimeoutLocked(evaluation: Evaluation, shot: Shot, freshEndEvidence: Boolean) {
         val step = evaluation.step
-        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it } ?: lastKnownLogEnd
-        val evidence = ActionEvidence(shot, attemptPlaybackSamples, evaluation.result.checks, false, logEnd, 0L, 0L)
-        val deferrable = env.judgeTiming != JudgeTiming.INLINE && !spec.setup && !hasJudgeChecks(step) &&
-            step.onFailure != OnFailure.PAUSE_FOR_USER
-        if (deferrable) {
-            val frozen = freezeDeferredJudge(
-                step, LaneStepStatus.FAIL, null, evaluation.result.observation, evidence, env.wallClock(), advisory = true,
-            )
-            evaluation.deferredJudge = frozen
-            evaluation.result = evaluation.result.copy(
-                executionStatus = StepStatus.TIMEOUT,
-                verificationState = VerificationState.PENDING,
-                note = listOfNotNull(evaluation.result.note, VERIFICATION_PENDING_NOTE).joinToString(" "),
-            )
-            return
+        // Only current-state reads are safe to repeat. Do not rerun scripts or shorten a log-observation window.
+        withTimeoutOrNull(TIMEOUT_STATE_RECHECK_MS) {
+            step.checks.filterIsInstance<StepCheck.DeviceState>().forEach { check ->
+                val previous = evaluation.result.checks.firstOrNull { it.checkId == check.id }
+                if (previous?.status == CheckStatus.NOT_EVALUATED) {
+                    val reading = checks.evaluate(check.copy(withinMs = 0L), attemptLogOffset)
+                    evaluation.result = evaluation.result.copy(checks = evaluation.result.checks.map {
+                        if (it.checkId == check.id) reading else it
+                    })
+                }
+            }
         }
+        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it } ?: lastKnownLogEnd
         val frozen = FrozenJudge(
             step, index, attempt, LaneStepStatus.FAIL, null, submittedObservation = "",
-            evidence = judgeEvidence(step, evidence.checks, shot, logEnd, evidence.samples),
+            evidence = judgeEvidence(step, evaluation.result.checks, shot, logEnd, attemptPlaybackSamples),
             site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt, spec.iteration, spec.caseAttempt),
-            advisory = true,
         )
         val outcome = evaluateFrozenJudge(frozen, background = false)
         val judgement = outcome.judgement ?: return
+        val recovered = freshEndEvidence && shot.jpeg != null && spec.caseBudget?.exhausted() != true &&
+            canRecoverTimeout(step, evaluation.result.checks, judgement, inputsIdle = activePaidDispatches == 0)
+        val judgeCheckIds = step.checks.filter { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge }.mapTo(HashSet()) { it.id }
+        val judgedChecks = applyJudgementToChecks(evaluation.result.checks.filter { it.checkId in judgeCheckIds }, judgement).associateBy { it.checkId }
+        evaluation.status = if (recovered) StepStatus.PASS else StepStatus.TIMEOUT
         evaluation.result = evaluation.result.copy(
+            status = evaluation.status,
+            checks = evaluation.result.checks.map { judgedChecks[it.checkId] ?: it },
             judge = judgement,
             executionStatus = StepStatus.TIMEOUT,
             verificationState = when (judgement.verdict) {
@@ -2198,7 +2234,14 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             },
             judgeQueueWaitMs = outcome.queueWaitNanos?.div(NANOS_PER_MILLI),
             judgmentDurationMs = outcome.durationNanos?.div(NANOS_PER_MILLI),
-            note = listOfNotNull(evaluation.result.note, advisoryJudgeNote(judgement), judgement.error).joinToString(" "),
+            note = listOfNotNull(
+                evaluation.result.note,
+                if (recovered) {
+                    "Recovered after timeout: the judge confirmed the expected result and all explicit checks are satisfied. " +
+                        "Continuing with the next step."
+                } else advisoryJudgeNote(judgement),
+                judgement.error,
+            ).joinToString(" "),
         )
     }
 
@@ -2218,7 +2261,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 }
             }
         }
-        if (step.onFailure == OnFailure.PAUSE_FOR_USER) {
+        if (evaluation.status != StepStatus.PASS && step.onFailure == OnFailure.PAUSE_FOR_USER) {
             val flow = pauseFlow(evaluation) {
                 // Invalidate the current lane agent in the same critical section that accepts
                 // the timeout. It may otherwise dispatch against the next step before the
@@ -2236,7 +2279,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return withContext(NonCancellable) {
             mutex.withLock {
                 if (!isCurrentLocked(evaluation)) return@withLock Flow.End
-                val requested = when (step.onFailure) {
+                val requested = if (evaluation.status == StepStatus.PASS) Flow.Next(index + 1) else when (step.onFailure) {
                     OnFailure.PAUSE_FOR_USER -> error("Pause policy is handled above")
                     OnFailure.STOP_CASE -> Flow.End
                     OnFailure.CONTINUE, OnFailure.CREATE_ISSUE_AND_CONTINUE -> Flow.Next(index + 1)
@@ -2247,7 +2290,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 val settled = settleLocked(
                     evaluation,
                     requested,
-                    issue = step.onFailure == OnFailure.CREATE_ISSUE_AND_CONTINUE,
+                    issue = evaluation.status != StepStatus.PASS && step.onFailure == OnFailure.CREATE_ISSUE_AND_CONTINUE,
                     afterRecord = { events.trySend(SequenceEvent.TimedOut()) },
                 )
                 when (settled) {

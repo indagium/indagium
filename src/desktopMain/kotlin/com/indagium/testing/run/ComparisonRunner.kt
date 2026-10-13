@@ -1,5 +1,7 @@
 package com.indagium.testing.run
 
+import com.indagium.debug.asObject
+
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepResult
@@ -61,6 +63,8 @@ internal fun comparisonEvidence(runDir: File, target: ComparisonTarget): JudgeEv
             startScreenshot = { loadScreenshot(runDir, result.startScreenshotPath) },
             log = { offset, limit -> logFile?.let { withContext(Dispatchers.IO) { readStepLogSlice(it, start, end, offset, limit) } } },
             logBytes = if (start != null && end != null) end - start else null,
+            startUiStructure = loadUiStructure(runDir, result.startScreenshotPath),
+            endUiStructure = loadUiStructure(runDir, result.screenshotPath),
         )
     }
     return JudgeEvidence(
@@ -74,8 +78,22 @@ internal fun comparisonEvidence(runDir: File, target: ComparisonTarget): JudgeEv
         lanes = lanes,
         intent = target.step.intent,
         precondition = target.step.precondition,
+        optional = target.step.optional,
+        condition = target.step.condition,
     )
 }
+
+/** Read only the bounded sidecar captured with this saved frame; comparisons must not query the device after execution. */
+internal fun loadUiStructure(runDir: File, screenshotPath: String?): Map<String, Any?>? = runCatching {
+    if (screenshotPath.isNullOrBlank()) return@runCatching null
+    val file = File(runDir, "$screenshotPath.ui.json").canonicalFile
+    if (!file.toPath().startsWith(runDir.canonicalFile.toPath()) || !file.isFile) return@runCatching null
+    val bytes = file.inputStream().use { it.readNBytes(MAX_UI_STRUCTURE_BYTES + 1) }
+    if (bytes.size > MAX_UI_STRUCTURE_BYTES) return@runCatching null
+    com.indagium.debug.Json.decode(bytes.toString(Charsets.UTF_8)).asObject("uiStructure")
+}.getOrNull()
+
+private const val MAX_UI_STRUCTURE_BYTES = 16 * 1024
 
 private suspend fun loadScreenshot(runDir: File, relativePath: String?): JudgeImage? {
     val file = relativePath?.takeIf { it.isNotBlank() }?.let { File(runDir, it) }?.takeIf { it.isFile } ?: return null

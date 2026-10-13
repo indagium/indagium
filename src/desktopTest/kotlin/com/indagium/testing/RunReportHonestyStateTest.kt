@@ -181,6 +181,9 @@ class RunReportHonestyStateTest {
 
         assertEquals("Timeout · judge: expected result met", met.detailLabel())
         assertEquals("Timeout · met", met.matrixLabel())
+        val recovered = met.copy(status = StepStatus.PASS, executionStatus = StepStatus.TIMEOUT)
+        assertEquals("Pass · recovered", recovered.matrixLabel())
+        assertEquals("Pass · recovered after timeout", recovered.detailLabel())
         assertEquals("Timeout · judge: expected result not met", met.copy(judge = met.judge?.copy(verdict = JudgeVerdict.FAIL)).detailLabel())
         assertEquals("Timeout", met.copy(judge = null).detailLabel())
         assertEquals("Fail", result(tap, 2, StepStatus.FAIL, judge = JudgeVerdict.PASS).detailLabel(), "advice belongs to a timeout only")

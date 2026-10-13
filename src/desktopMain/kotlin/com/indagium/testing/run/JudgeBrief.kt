@@ -200,6 +200,9 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
             put("logBytes", lane.logBytes)
             put("startScreenshotCapturedAtMs", lane.startScreenshotCapturedAtMs)
             put("endScreenshotCapturedAtMs", lane.screenshotCapturedAtMs)
+            if (lane.startUiStructure != null || lane.endUiStructure != null) {
+                putAll(untrustedData("android_ui_structure", mapOf("startUiStructure" to lane.startUiStructure, "endUiStructure" to lane.endUiStructure)))
+            }
             if (lane.samples.isNotEmpty()) {
                 put("playbackSamples", lane.samples.map { mapOf("moment" to "sample_${it.number}", "capturedAtMs" to it.capturedAtMs) })
             }
@@ -222,6 +225,8 @@ internal fun judgeBriefMap(evidence: JudgeEvidence): Map<String, Any?> {
         put("expected", evidence.expected)
         put("intent", evidence.intent.wire)
         put("precondition", evidence.precondition)
+        put("optional", evidence.optional)
+        put("condition", evidence.condition)
         put(
             "judgeChecks",
             evidence.judgeChecks.map { check ->

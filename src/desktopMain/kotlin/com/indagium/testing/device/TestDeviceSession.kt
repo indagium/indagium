@@ -464,8 +464,9 @@ internal class TestDeviceSession private constructor(
 
     /**
      * Follows [points] (pixels of the latest screenshot, times in ms from touch-down; the first at 0) with their timing: the finger goes
-     * down at the first, is at each point at its time and lifts at the last. Android 10 and newer (`input motionevent`) reproduce the
-     * path and the hold before the lift; an older device gets a straight `input swipe` from the first to the last point over the whole
+     * down at the first, is at each point at its time and lifts at the last. A live embedded capture uses the manual mirror's continuous
+     * control stream. Otherwise Android 10 and newer (`input motionevent`) approximate the path and hold with process timing overhead;
+     * an older device gets a straight `input swipe` from the first to the last point over the whole
      * time, and the result says so ([GesturePlayResult.mode], [GesturePlayResult.note]).
      */
     suspend fun gesture(points: List<GesturePoint>): GesturePlayResult {
@@ -490,6 +491,11 @@ internal class TestDeviceSession private constructor(
         }
         val duration = device.last().tMs
         val hold = gestureHoldMs(device)
+        capture.gestureControl()?.let { control ->
+            val stream = mirrorGesturePoints(device, current.deviceWidth, current.deviceHeight, control.width, control.height)
+            withContext(Dispatchers.IO) { playMirrorGesture(stream, control.width, control.height, control.send) }
+            return GesturePlayResult(points, device, GestureMode.MIRROR_CONTROL, duration, hold)
+        }
         if (!motionEventsSupported()) {
             val why = "Android API ${androidApiLevel ?: "?"} has no `input motionevent` (it needs API $MOTION_EVENT_MIN_API)"
             return swipeFallbackLocked(points, device, hold, why)
@@ -613,6 +619,19 @@ internal class TestDeviceSession private constructor(
         val parsed = parseUiAutomatorDump(result.stdoutText())
             ?: return UiTreeRead.Unavailable("The device returned no UI hierarchy.")
         return UiTreeRead.Available(parsed)
+    }
+
+    /** A separate, bounded hierarchy observation near a screenshot; its own timestamp prevents treating them as one atomic frame. */
+    @Suppress("TooGenericExceptionCaught") // Supplemental structure must not discard a usable screenshot when parsing fails.
+    suspend fun readUiStructure(): Map<String, Any?> {
+        val read = try {
+            readUiTreeBounded()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            UiTreeRead.Unavailable(failure.message ?: "The UI hierarchy could not be parsed.")
+        }
+        return uiStructureEvidence(read, System.currentTimeMillis())
     }
 
     private suspend fun adb(arguments: List<String>, timeoutSeconds: Long, outputLimitBytes: Int? = null) = runInterruptible(Dispatchers.IO) {

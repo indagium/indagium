@@ -51,6 +51,7 @@ internal data class JudgeAttemptIdentity(
  * when this kind of evidence has no start screen at all (a comparison is built from the screens kept on disk), so the judge is not told
  * about one. Appended last so existing constructions keep their meaning.
  */
+@Suppress("LongParameterList") // Frozen observations have separate providers and timestamps; no mutable agent report is included.
 internal class JudgeLaneEvidence(
     val label: String,
     val laneId: String,
@@ -62,8 +63,11 @@ internal class JudgeLaneEvidence(
     val samples: List<JudgeScreenshotSample> = emptyList(),
     val startScreenshotCapturedAtMs: Long? = null,
     val screenshotCapturedAtMs: Long? = null,
+    val startUiStructure: Map<String, Any?>? = null,
+    val endUiStructure: Map<String, Any?>? = null,
 )
 
+@Suppress("LongParameterList") // A frozen step definition and its blind evidence; keep optional execution semantics explicit.
 internal class JudgeEvidence(
     val caseName: String,
     val stepNumber: Int,
@@ -76,6 +80,8 @@ internal class JudgeEvidence(
     val intent: StepIntent = StepIntent.PERFORM_ACTION,
     val precondition: String? = null,
     val attemptIdentity: JudgeAttemptIdentity = JudgeAttemptIdentity(),
+    val optional: Boolean = false,
+    val condition: String? = null,
 ) {
     val caseId: String? get() = attemptIdentity.caseId
     val iteration: Int get() = attemptIdentity.iteration

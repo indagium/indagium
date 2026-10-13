@@ -14,6 +14,20 @@ internal const val JUDGE_CHANCE_CLASSIFICATION_RULE =
         "item, picture-in-picture or background behaviour, the network, timing) and the app otherwise behaved sensibly, classify it " +
         "agent_or_step_problem, not app_defect, and give suggestedStepFix with a stable rewording of the expected result."
 
+internal const val JUDGE_OPTIONAL_RULE =
+    "For an optional step, evaluate its stated condition against the starting evidence. The condition defines when the action applies; " +
+        "do not invent another prerequisite from a recorded example. If the condition is absent, the action may be skipped. If present, " +
+        "evaluate the action using its explicit intent and expected result. Optional does not mean ensure_state: an already satisfied " +
+        "destination alone does not prove a perform_action transition. Do not require a different starting screen solely because a " +
+        "historical recording started there."
+
+internal const val JUDGE_UI_STRUCTURE_RULE =
+    "Read the frozen Android UI structure when supplied. An overview_panel/recents_view containing task_view cards identifies " +
+        "Recent apps, even when wallpaper, a dock and changing video are visible. It does not establish Home or picture-in-picture. " +
+        "The hierarchy has its own timestamp because it is captured separately from the image. If structural evidence and an " +
+        "image disagree, consider their timestamps and return inconclusive when the state cannot be established; do not guess. " +
+        "Unavailable or unclassified structure does not establish the absence of a UI element."
+
 internal const val JUDGE_SYSTEM_PROMPT =
     "You are an impartial QA judge. You decide whether ONE step of an automated test passed, from evidence alone: the step's action " +
         "and expected result, the screen the step started from (when there is one), its final screenshot and any timestamped playback samples, the log " +
@@ -32,6 +46,8 @@ internal const val JUDGE_SYSTEM_PROMPT =
         "- For ensure_state, check that the goal is true in the evidence; do not require a transition when it was already true. For " +
         "perform_action, look for evidence that the requested transition occurred after its precondition. Identical frames alone do not " +
         "prove playback is paused or that a state remained stable: use timestamped samples, and return inconclusive when they cannot establish it.\n" +
+        "- $JUDGE_OPTIONAL_RULE\n" +
+        "- $JUDGE_UI_STRUCTURE_RULE\n" +
         "- Classification: app_defect when the app misbehaves; agent_or_step_problem when the tester did the wrong thing or the step is " +
         "unclear, outdated or impossible as written; unknown otherwise. $JUDGE_CHANCE_CLASSIFICATION_RULE Add suggestedStepFix only " +
         "when the step's action or expected text is likely wrong.\n" +
@@ -48,6 +64,8 @@ internal const val COMPARISON_SYSTEM_PROMPT =
         "you were given. If the message says an image is not attached, get it with the tool it names (get_step_screenshot and " +
         "read_step_log take a lane argument). If the first message carries no evidence, start with get_step_brief.\n" +
         "- The evidence tools are for extras only. You have a small tool budget.\n" +
+        "- $JUDGE_OPTIONAL_RULE\n" +
+        "- $JUDGE_UI_STRUCTURE_RULE\n" +
         "- Then explain why the lanes differ and who is to blame: app_defect (the app behaves differently on a device), " +
         "agent_or_step_problem (a tester took another path, or the step is unclear, outdated or impossible as written), unknown. " +
         "$JUDGE_CHANCE_CLASSIFICATION_RULE Add suggestedStepFix only when the step's action or expected text is likely wrong.\n" +
@@ -82,6 +100,7 @@ internal fun judgeHeader(evidence: JudgeEvidence): String = buildString {
     }
     append("\nIntent: ").append(evidence.intent.wire).append(".")
     evidence.precondition?.let { append(" Precondition: ").append(it).append('.') }
+    if (evidence.optional) append(" Optional condition (run only when present): ").append(evidence.condition.orEmpty()).append('.')
     if (evidence.lanes.any { it.samples.isNotEmpty() }) {
         append(" Playback goal: compare timestamped samples; a single or identical frame does not establish a paused state.")
     }

@@ -32,6 +32,10 @@ internal const val REWRITE_SYSTEM_PROMPT =
         "may go Home; an upward swipe that pauses before lift may open Recents. Describe the observed outcome supported by settled " +
         "after evidence. If that outcome is not visible, use a generic swipe description, leave expected blank and explain the " +
         "review needed; coordinates remain only in the recorded-input reference.\n" +
+        "- Distinguish Recent apps from Home and picture-in-picture. A scaled card containing the whole app page with an app-name " +
+        "header is not evidence of a floating video player. Wallpaper, a dock, and changing video alone do not establish Home. " +
+        "Use available UI resource IDs (overview_panel/recents_view together with task_view cards) to resolve ambiguous launcher " +
+        "screens, or leave the outcome for review. Do not label a swipe as going Home when the observed settled result is Recents.\n" +
         "- Generalize actions to the person's stated test goal. Keep an exact video, song, or item title only when the case goal, " +
         "preconditions, or the person's note explicitly makes that exact item relevant; a title merely visible during navigation is " +
         "not a reason to turn a generic 'play a video' goal into a title-specific test.\n" +

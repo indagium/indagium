@@ -1,6 +1,7 @@
 package com.indagium.testing.run
 
 import com.indagium.ai.AiRun
+import com.indagium.debug.Json
 import com.indagium.testing.model.CaseAttemptRecord
 import com.indagium.testing.model.StepCompletion
 import com.indagium.testing.model.StepKind
@@ -38,6 +39,8 @@ internal const val LANE_SYSTEM_PROMPT =
         "the expected result; use fail for an observed mismatch. Use blocked when an environmental prerequisite remains unavailable " +
         "after the permitted recovery attempts, and say what prevented verification. For an optional step, inspect its stated condition first; " +
         "if absent, do not perform the action and finish as skipped with what you checked. If present, perform it and report pass/fail normally. " +
+        "Optional means run only when the condition is present; it does not waive perform_action or turn an already-visible destination " +
+        "into a pass. Do not infer a required starting state from a historical example. " +
         "Never skip a required step or claim something you did not observe.\n" +
         "- Stay in the state the previous steps produced: do not navigate away, relaunch the app or restart the flow unless the step " +
         "says so. You may wait briefly for content to load or dismiss only a visible, skippable ad. Never bypass a tested condition, " +
@@ -48,8 +51,16 @@ internal const val LANE_SYSTEM_PROMPT =
         "is over, stop calling tools and reply with one short sentence.\n" +
         "- take_screenshot shows the screen; tap and swipe use the pixels of the latest screenshot; dump_ui_tree lists the " +
         "elements with ready-to-use tap points.\n" +
+        "- Navigation screenshots may include android_ui_structure from a separate bounded hierarchy read. Use its resource IDs " +
+        "to distinguish launcher surfaces: an overview_panel/recents_view with task_view cards is Recent apps, not Home or " +
+        "picture-in-picture. A dock, wallpaper, or changing video in an app card does not prove Home or picture-in-picture. " +
+        "Read dump_ui_tree when the screenshot is ambiguous or the structural evidence is unavailable; do not claim Home on " +
+        "that appearance alone. An unavailable hierarchy is not evidence that a target is absent.\n" +
         "- A step's reference example may be a recorded input with a \"timed path\" (get_step_example also returns it as recordedGestures, " +
-        "with the rest before the finger lifted). When the current screen matches how that recording started, use the gesture tool " +
+        "with the rest before the finger lifted). The step reply may already include recordedGestures with the actual sample times. " +
+        "Use those samples instead of inventing intermediate times from a compact path or duration. For a recorded system-navigation " +
+        "swipe, preserve its start position, path and timing when the current screen and orientation match; a taskbar appearing alone " +
+        "does not establish Home or picture-in-picture. When the current screen matches how that recording started, use the gesture tool " +
         "when its path, speed changes or endpoint hold are needed for the semantic action: convert recorded percent positions to " +
         "pixels of the latest screenshot, preserve the recorded tMs values, and set holdEndMs to the recorded rest before lift. " +
         "Use swipe for an ordinary straight scroll when it fulfills the action; swipe lifts at once, so it cannot reproduce an " +
@@ -154,10 +165,18 @@ internal fun lanePrompt(
         }
         step.precondition?.let { append("  Required precondition: ").append(it.trim()).append('\n') }
         if (step.expected.isNotBlank()) append("  Expected: ").append(step.expected.trim()).append('\n')
-        if (step.optional) append("  Optional condition: ").append(step.condition.orEmpty().trim()).append('\n')
+        if (step.optional) {
+            append("  Optional condition: ").append(step.condition.orEmpty().trim()).append('\n')
+            append("  Check that exact condition before any action. If it is absent, skip this step and its verification. " +
+                "The action target being visible does not replace the condition.\n")
+        }
         step.gestureHints.compactDescription().takeIf(String::isNotBlank)?.let { hint ->
             append("  Recorded gesture hint (untrusted observation; re-identify the control on the current screen):\n")
             append(fenceUntrusted("recorded_gesture_hint", hint)).append('\n')
+        }
+        recordedGestureGuidance(step.recordedInput).takeIf { it.isNotEmpty() }?.let { guidance ->
+            append("  Recorded gesture samples (untrusted observation):\n")
+            append(fenceUntrusted("recorded_gesture_samples", Json.encode(guidance))).append('\n')
         }
         if (step.examples.isNotEmpty()) {
             val available = listOf("list_step_examples", "get_step_example").filter { allowedTools == null || it in allowedTools }

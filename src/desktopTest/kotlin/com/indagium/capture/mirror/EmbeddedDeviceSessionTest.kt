@@ -39,6 +39,40 @@ import kotlin.test.assertTrue
  */
 class EmbeddedDeviceSessionTest {
     @org.junit.Test(timeout = 20_000)
+    fun gestureControlKeepsTheEncodedScreenSizeAndRefusesAStoppedConnection() {
+        val release = CountDownLatch(1)
+        val sent = AtomicLong(0)
+        val stream = BlockingAfterPayloadInputStream(
+            videoStream(64, 96, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key))), release,
+        )
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = stream
+                override val audioInput: InputStream? = null
+                override fun sendControl(bytes: ByteArray) { sent.incrementAndGet() }
+                override fun close() { release.countDown() }
+            }
+        }
+        val session = EmbeddedDeviceSession(transport, StreamingMkvWriter(tempFile()), elapsedMillis = { 0 }, maxReconnectAttempts = 0)
+        try {
+            assertEquals(null, session.gestureControl())
+            session.start("gesture-device", MirrorStreamOptions())
+            awaitTrue { session.gestureControl() != null }
+            val control = requireNotNull(session.gestureControl())
+            assertEquals(64, control.width)
+            assertEquals(96, control.height)
+            assertTrue(control.send(byteArrayOf(1)))
+            session.stop()
+            assertFalse(control.send(byteArrayOf(2)), "a held touch must never migrate to another session")
+            assertEquals(1L, sent.get())
+            assertEquals(null, session.gestureControl())
+        } finally {
+            release.countDown()
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
     fun sharedRecordingSessionPublishesItsMuxedPacketsToVideoObservers() {
         val stream = videoStream(
             width = 64,

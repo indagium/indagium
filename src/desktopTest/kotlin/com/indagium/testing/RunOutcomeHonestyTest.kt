@@ -2,6 +2,7 @@
 
 package com.indagium.testing
 
+import com.indagium.capture.CompletedFakeProcess
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeTiming
@@ -53,18 +54,20 @@ class RunOutcomeHonestyTest {
             agentFactory = agentsByProfile(buildMap { put(LANE_A_PROFILE_ID, agent); if (judge != null) put(JUDGE_PROFILE_ID, judge) }),
         ).also { harness = it }
 
-    private fun RunHarness.runToEnd(suite: com.indagium.testing.model.TestSuite, timing: JudgeTiming?, retries: Int = 0): TestRun {
+    private fun RunHarness.runToEnd(
+        suite: com.indagium.testing.model.TestSuite, timing: JudgeTiming?, retries: Int = 0, mode: JudgeMode = JudgeMode.EVERY_STEP,
+    ): TestRun {
         val base = config(suite, agentLane(LANE_A_PROFILE_ID)).copy(caseRetries = retries)
         val config = if (timing == null) {
             base
         } else {
-            base.copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire, judgeTiming = timing)
+            base.copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = mode.wire, judgeTiming = timing)
         }
         val started = assertIs<StartRunResult.Started>(runBlocking { coordinator.start(config) })
         return runBlocking { withTimeout(AWAIT_MS) { assertNotNull(coordinator.awaitFinished(started.runId)) } }
     }
 
-    // ── A step that times out is still judged, as advice ────────────
+    // ── A timeout is resolved before the case stops ────────────────
 
     private fun timeoutSuite() = suiteOf(caseOf("Slow video", step("Tap the video", "Playback starts", timeoutMs = 500)))
 
@@ -82,30 +85,135 @@ class RunOutcomeHonestyTest {
         val note = result.note.orEmpty()
         assertTrue("did not finish the step within 500 ms" in note, note)
         assertTrue("last tool calls: press_key" in note, note)
-        assertTrue("The action may have succeeded" in note && "judge's advice" in note, note)
+        assertTrue("The action may have succeeded" in note && "judge's verdict" in note, note)
         val screenshot = assertNotNull(result.screenshotPath, "the end screenshot was taken at the timeout")
         assertTrue(File(harness!!.store.runDir(run.id), screenshot).isFile)
     }
 
     @Test
-    fun aTimedOutStepIsJudgedInlineAsAdviceAndKeepsItsTimeoutStatus() {
+    fun aTimedOutStepRecoversWhenTheInlineJudgeConfirmsSuccess() {
         val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass", reasoning = "Playback is visible.") }
         val suite = timeoutSuite()
         val run = harnessWith(suite, hangingAgent(), judge).runToEnd(suite, JudgeTiming.INLINE)
 
-        assertAdvisory(run, JudgeVerdict.PASS, VerificationState.VERIFIED)
-        assertEquals(1, judge.requests.map { it.messages.first().content }.distinct().size.coerceAtLeast(1))
-        assertTrue("Advisory judge: the expected result looks met" in run.caseResult("Slow video").steps.single().note.orEmpty())
+        assertRecovered(run)
+        assertEquals(1, judge.requests.map { it.messages.first().content }.distinct().size)
     }
 
     @Test
-    fun aTimedOutStepIsJudgedAfterTheCaseWhenThatIsTheRunsTiming() {
+    fun afterCaseTimingStillResolvesATimeoutBeforeStopping() {
         val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass") }
         val suite = timeoutSuite()
         val run = harnessWith(suite, hangingAgent(), judge).runToEnd(suite, JudgeTiming.AFTER_CASE)
 
-        assertAdvisory(run, JudgeVerdict.PASS, VerificationState.VERIFIED)
+        assertRecovered(run)
         assertFalse("Independent verification is pending" in run.caseResult("Slow video").steps.single().note.orEmpty())
+    }
+
+    private fun assertRecovered(run: TestRun) {
+        val result = run.caseResult("Slow video").steps.single()
+        assertEquals(StepStatus.PASS, result.status)
+        assertEquals(StepStatus.TIMEOUT, result.executionStatus, "retain the actual execution deadline in the report")
+        assertEquals(JudgeVerdict.PASS, result.judge?.verdict)
+        assertEquals(VerificationState.VERIFIED, result.verificationState)
+        assertEquals(CaseStatus.PASS, run.caseResult("Slow video").status)
+        assertEquals(RunStatus.PASSED, run.status)
+        assertTrue("Recovered after timeout" in result.note.orEmpty(), result.note)
+        val loaded = decodeRunFile(encodeRunFile(run)).getOrThrow().caseResult("Slow video").steps.single()
+        assertEquals(StepStatus.TIMEOUT, loaded.executionStatus)
+        assertEquals(StepStatus.PASS, loaded.status)
+    }
+
+    @Test
+    fun aRecoveredTimeoutContinuesUnderStopCasePolicyForEveryJudgeTiming() {
+        for (timing in JudgeTiming.entries) {
+            harness?.close()
+            val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass") }
+            val suite = suiteOf(caseOf("Continue", step("First action", timeoutMs = 500), step("Next action")))
+            val agent = TurnProvider(listOf(hangingTurn, finishTurn("pass"), textTurn))
+            val run = harnessWith(suite, agent, judge).runToEnd(suite, timing)
+            assertEquals(listOf(StepStatus.PASS, StepStatus.PASS), run.caseResult("Continue").steps.map { it.status }, timing.name)
+            assertEquals(StepStatus.TIMEOUT, run.caseResult("Continue").steps.first().executionStatus)
+            assertEquals(RunStatus.PASSED, run.status, timing.name)
+            assertTrue(agent.requests.any { request ->
+                request.messages.filter { it.role == com.indagium.ai.LlmRole.USER }.any { "Current step 2 of 2" in it.content.orEmpty() }
+            }, timing.name)
+        }
+    }
+
+    @Test
+    fun aPassingTimeoutJudgeDoesNotWaiveAnUnfinishedLogCheck() {
+        val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass") }
+        val suite = suiteOf(caseOf("Checked", step("Do action", timeoutMs = 500, checks = listOf(logAppears("never", 10_000))), step("Next")))
+        val run = harnessWith(suite, TurnProvider(listOf(finishTurn("pass"), textTurn)), judge).runToEnd(suite, JudgeTiming.BACKGROUND)
+        val result = run.caseResult("Checked").steps.first()
+        assertEquals(StepStatus.TIMEOUT, result.status)
+        assertEquals(com.indagium.testing.model.CheckStatus.NOT_EVALUATED, result.checks.single().status)
+        assertEquals(JudgeVerdict.PASS, result.judge?.verdict)
+        assertEquals(StepStatus.SKIPPED, run.caseResult("Checked").steps.last().status)
+        assertTrue("Step verification did not finish" in result.note.orEmpty(), result.note)
+    }
+
+    @Test
+    fun aPendingWifiCheckCanRecoverAfterAConfirmedCurrentReadingInFailedOnlyMode() {
+        for (timing in JudgeTiming.entries) {
+            harness?.close()
+            val reads = java.util.concurrent.atomic.AtomicInteger()
+            val submitted = java.util.concurrent.atomic.AtomicInteger()
+            val judge = ScriptedJudgeProvider(onSubmitted = { submitted.incrementAndGet() }) { JudgeAnswer(verdict = "pass") }
+            val check = com.indagium.testing.model.StepCheck.DeviceState(com.indagium.testing.model.newCheckId(), "wifi.enabled", "false", 600_000)
+            val visual = com.indagium.testing.model.StepCheck.AskJudge(com.indagium.testing.model.newCheckId(), "Wi-Fi is off")
+            val suite = suiteOf(caseOf("Wi-Fi", step("Disable Wi-Fi", timeoutMs = 500, checks = listOf(check, visual)), step("Next")))
+            // A stale agent may answer once before cancellation reaches its model; its gateway must refuse that finish.
+            val h = harnessWith(
+                suite, TurnProvider(listOf(finishTurn("pass"), finishTurn("pass"), finishTurn("pass"), textTurn)), judge,
+            )
+            h.adb.shellResponder = { args ->
+                if (args == listOf("cmd", "wifi", "status")) {
+                    CompletedFakeProcess(if (reads.incrementAndGet() == 1) "Wifi is enabled\n" else "Wifi is disabled\n")
+                } else null
+            }
+            val run = h.runToEnd(suite, timing, mode = JudgeMode.FAILURES_ONLY)
+            val result = run.caseResult("Wi-Fi").steps.first()
+            assertEquals(StepStatus.PASS, result.status, timing.name)
+            assertEquals(StepStatus.TIMEOUT, result.executionStatus, timing.name)
+            assertTrue(result.checks.all { it.status == com.indagium.testing.model.CheckStatus.PASS }, result.checks.toString())
+            assertEquals(2, reads.get(), "one initial reading and one bounded deadline recheck")
+            assertEquals(StepStatus.PASS, run.caseResult("Wi-Fi").steps.last().status, timing.name)
+            assertEquals(1, submitted.get(), "the timeout checkpoint must not queue a duplicate verdict")
+        }
+    }
+
+    @Test
+    fun aTimedOutWifiCheckRecordsTheLastReadingAndCannotBeOverriddenByTheJudge() {
+        val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass") }
+        val check = com.indagium.testing.model.StepCheck.DeviceState(com.indagium.testing.model.newCheckId(), "wifi.enabled", "false", 600_000)
+        val suite = suiteOf(caseOf("Wi-Fi", step("Disable Wi-Fi", timeoutMs = 500, checks = listOf(check)), step("Next")))
+        val h = harnessWith(suite, TurnProvider(listOf(finishTurn("pass"), textTurn)), judge)
+        h.adb.shellStdout = "Wifi is enabled\nWifi is not connected\n"
+        val run = h.runToEnd(suite, JudgeTiming.INLINE)
+        val result = run.caseResult("Wi-Fi").steps.first()
+        assertEquals(StepStatus.TIMEOUT, result.status)
+        assertEquals(com.indagium.testing.model.CheckStatus.FAIL, result.checks.single().status)
+        assertTrue("true" in result.checks.single().detail, result.checks.toString())
+        assertEquals(StepStatus.SKIPPED, run.caseResult("Wi-Fi").steps.last().status)
+    }
+
+    @Test
+    fun anOldScreenshotCannotRecoverATimeoutEvenIfTheJudgePassesIt() {
+        val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass") }
+        val suite = timeoutSuite()
+        lateinit var h: RunHarness
+        val agent = TurnProvider(listOf(toolTurn("press_key", """{"key":"HOME"}"""), {
+            h.adb.png = byteArrayOf()
+            delay(AWAIT_MS)
+        }))
+        h = harnessWith(suite, agent, judge)
+        val run = h.runToEnd(suite, JudgeTiming.BACKGROUND)
+        val result = run.caseResult("Slow video").steps.single()
+        assertEquals(StepStatus.TIMEOUT, result.status)
+        assertEquals(JudgeVerdict.PASS, result.judge?.verdict)
+        assertEquals(RunStatus.FAILED, run.status)
     }
 
     @Test
