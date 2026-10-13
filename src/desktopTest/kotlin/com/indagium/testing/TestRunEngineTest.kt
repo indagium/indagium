@@ -462,6 +462,64 @@ class TestRunEngineTest {
     }
 
     @Test
+    fun aFailingCaseTeardownMakesAPassingBodyFailAndKeepsHookEvidence() {
+        val teardown = hostScript("broken_teardown", "exit 7")
+        val suite = suiteOf(caseOf("Cleanup", step("Open the app"), teardown = listOf(scriptHook(teardown))))
+        val h = harness(suite, listOf(finishTurn("pass"), textTurn), scripts = listOf(teardown))
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Cleanup")
+
+        assertEquals(CaseStatus.FAIL, result.status, run.toString())
+        assertEquals(RunStatus.FAILED, run.status, run.toString())
+        assertEquals(StepStatus.PASS, result.steps.single { !it.setup }.status)
+        assertEquals(StepStatus.FAIL, result.steps.single { it.setup }.status)
+        assertTrue(result.note.orEmpty().contains("Teardown failed."), result.note.orEmpty())
+    }
+
+    @Test
+    fun aTimedOutCaseTeardownFailsAPassingBody() {
+        assumeFalse("the fixture host shell uses POSIX sleep", System.getProperty("os.name").lowercase().contains("win"))
+        val teardown = hostScript("slow_teardown", "sleep 10").copy(timeoutMs = 30L)
+        val suite = suiteOf(caseOf("Slow cleanup", step("Open the app"), teardown = listOf(scriptHook(teardown))))
+        val h = harness(suite, listOf(finishTurn("pass"), textTurn), scripts = listOf(teardown))
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Slow cleanup")
+
+        assertEquals(CaseStatus.FAIL, result.status, run.toString())
+        assertEquals(StepStatus.TIMEOUT, result.steps.single { it.setup }.status)
+        assertEquals(RunStatus.FAILED, run.status, run.toString())
+    }
+
+    @Test
+    fun aFailedTeardownDoesNotSuppressCaseRetryAndAppliesAfterThePassingRetry() {
+        val marker = File.createTempFile("retry-teardown", ".txt").also { it.delete() }
+        val teardown = hostScript(
+            "fail_second_teardown",
+            "if [ -f '${marker.absolutePath}' ]; then exit 1; else printf first > '${marker.absolutePath}'; fi",
+        )
+        val suite = suiteOf(caseOf("Retry cleanup", step("Open the app"), teardown = listOf(scriptHook(teardown))))
+        val h = harness(suite, listOf(finishTurn("fail"), textTurn, finishTurn("pass"), textTurn), scripts = listOf(teardown))
+        try {
+            val started = assertIs<StartRunResult.Started>(runBlocking {
+                h.coordinator.start(h.config(suite).copy(caseRetries = 1))
+            })
+            val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+            val result = run.caseResult("Retry cleanup")
+
+            assertEquals(2, result.caseAttempt)
+            assertEquals(CaseStatus.FAIL, result.status, run.toString())
+            assertEquals(CaseStatus.FAIL, result.priorAttempts.single().status)
+            assertEquals(StepStatus.PASS, result.steps.single { !it.setup }.status)
+            assertEquals(StepStatus.FAIL, result.steps.single { it.setup }.status)
+            assertEquals(RunStatus.FAILED, run.status, run.toString())
+        } finally {
+            marker.delete()
+        }
+    }
+
+    @Test
     fun continueAndCreateIssueAndContinueMoveOnAndFlagTheIssue() {
         val suite = suiteOf(
             caseOf(
@@ -573,7 +631,7 @@ class TestRunEngineTest {
     fun cancellingMidStepStopsTheAgentRunsTeardownAndReleasesTheDevice() {
         assumeFalse(System.getProperty("os.name").lowercase().contains("win"))
         val marker = File.createTempFile("teardown", ".txt").also { it.delete() }
-        val teardown = hostScript("tidy_up", "printf done > '${marker.absolutePath}'")
+        val teardown = hostScript("tidy_up", "printf done > '${marker.absolutePath}'; exit 1")
         val suite = suiteOf(caseOf("Cancel me", step("Never finishes")), teardown = listOf(scriptHook(teardown)))
         val h = harness(suite, listOf(hangingTurn), scripts = listOf(teardown))
         val run = runBlocking {
@@ -585,6 +643,7 @@ class TestRunEngineTest {
         assertEquals(RunStatus.CANCELLED, run.status)
         assertEquals(CaseStatus.CANCELLED, run.caseResult("Cancel me").status)
         assertEquals("done", marker.readText(), "the teardown script ran although the run was cancelled")
+        assertEquals(CaseStatus.FAIL, run.lanes.single().cases.single { it.caseName == "Suite teardown" }.status)
         assertFalse(h.adb.logcat.isAlive, "the recorder was stopped")
         marker.delete()
         // The device is free again.
@@ -1027,7 +1086,8 @@ class TestRunEngineTest {
 
     @Test
     fun overBudgetAgentDispatchCannotBeFollowedByAFalsePass() {
-        val suite = suiteOf(caseOf("Over budget", step("Press once", maxToolCalls = 8)))
+        val teardown = hostScript("broken_teardown", "exit 2")
+        val suite = suiteOf(caseOf("Over budget", step("Press once", maxToolCalls = 8), teardown = listOf(scriptHook(teardown))))
         val h = harness(
             suite,
             listOf(
@@ -1036,6 +1096,7 @@ class TestRunEngineTest {
                 finishTurn("pass", "pretend it worked"),
                 textTurn,
             ),
+            scripts = listOf(teardown),
         )
         val run = h.runToEnd(suite, toolLimit = 1)
 
@@ -1043,6 +1104,8 @@ class TestRunEngineTest {
         assertEquals(CaseStatus.ERROR, run.caseResult("Over budget").status)
         assertEquals(1, h.adb.shellCommands.count { it.firstOrNull() == "input" }, "the refused call never reached adb")
         assertTrue(run.caseResult("Over budget").note.orEmpty().contains("case tool-call budget"), run.caseResult("Over budget").toString())
+        assertTrue(run.caseResult("Over budget").note.orEmpty().contains("Teardown failed."), run.caseResult("Over budget").toString())
+        assertEquals(StepStatus.FAIL, run.caseResult("Over budget").steps.single { it.setup }.status)
     }
 
     @Test
@@ -1336,5 +1399,22 @@ class TestRunEngineTest {
         assertEquals(CaseStatus.BLOCKED, result.status)
         assertEquals(listOf(StepStatus.FAIL, StepStatus.SKIPPED), result.steps.map { it.status })
         assertEquals(RunStatus.FAILED, run.status)
+    }
+
+    @Test
+    fun aBlockedSharedTeardownBlocksAPassingCaseBody() {
+        val shared = SharedStep(newSharedStepId(), "Verify cleanup", steps = listOf(step("Close the dialog")))
+        val case = caseOf("Shared cleanup", step("Open the app"), teardown = listOf(HookItem.Shared(newHookId(), shared.id)))
+        val suite = suiteOf(case)
+        val turns = listOf(finishTurn("pass"), textTurn, finishTurn("blocked", "The dialog would not close"), textTurn)
+        val h = RunHarness(TestLibrary(suites = listOf(suite), sharedSteps = listOf(shared)), TurnProvider(turns)).also { harness = it }
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Shared cleanup")
+
+        assertEquals(CaseStatus.BLOCKED, result.status, run.toString())
+        assertEquals(StepStatus.PASS, result.steps.single { !it.setup }.status)
+        assertEquals(StepStatus.BLOCKED, result.steps.single { it.setup }.status)
+        assertEquals(RunStatus.FAILED, run.status, run.toString())
     }
 }

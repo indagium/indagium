@@ -28,12 +28,12 @@ import com.indagium.testing.device.UiTreeRead
 import com.indagium.testing.device.gestureProblem
 import com.indagium.testing.device.needsUiStructure
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
+import com.indagium.testing.model.RecordedInput
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepExample
-import com.indagium.testing.model.RecordedInput
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.isValidScriptToolName
 import com.indagium.testing.script.AdbScriptTarget
@@ -154,10 +154,19 @@ internal data class LaneStepExampleBrief(val exampleId: String, val kind: String
 
 /** What the lane's owner (the run engine) does with the agent's report. */
 internal interface LaneCallbacks {
-    fun reportObservation(text: String)
+    suspend fun reportObservation(text: String)
+
+    /** Identity-aware protocol entry points let a sequence reject a late free tool from an earlier attempt. */
+    suspend fun reportObservation(identity: LaneStepIdentity?, text: String): Boolean {
+        reportObservation(text)
+        return true
+    }
 
     /** Ends the step; the returned map is the tool result (the engine answers with the next step, a redo or a stop). */
     suspend fun finishStep(status: LaneStepStatus, observation: String): Map<String, Any?>
+
+    suspend fun finishStep(identity: LaneStepIdentity?, status: LaneStepStatus, observation: String): Map<String, Any?> =
+        finishStep(status, observation)
 }
 
 /** The default: remembers what the agent reported and answers "ok". */
@@ -168,7 +177,7 @@ internal class RecordingLaneCallbacks : LaneCallbacks {
     val observations: List<String> get() = recorded.toList()
     val finishes: List<Pair<LaneStepStatus, String>> get() = finished.toList()
 
-    override fun reportObservation(text: String) {
+    override suspend fun reportObservation(text: String) {
         recorded += text
     }
 
@@ -413,8 +422,12 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
             schema("text" to "string", required = listOf("text"), descriptions = mapOf("text" to "What you observed, in plain words.")),
         ),
         guarded { args ->
-            context.callbacks.reportObservation(args.requiredString("text"))
-            mapOf("recorded" to true)
+            val accepted = context.callbacks.reportObservation(
+                context.inputSequence.dispatchIdentity(),
+                args.requiredString("text"),
+            )
+            if (accepted) mapOf("recorded" to true)
+            else mapOf("error" to "This step attempt ended before the observation was accepted; inspect the current step.")
         },
     ),
     LaneTool(
@@ -437,7 +450,11 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
         ),
         guarded { args ->
             val status = args.enum("status", LaneStepStatus.entries) ?: throw ToolArgException("status is required.")
-            context.callbacks.finishStep(status, args.string("observation").orEmpty())
+            context.callbacks.finishStep(
+                context.inputSequence.dispatchIdentity(),
+                status,
+                args.string("observation").orEmpty(),
+            )
         },
     ),
 )
@@ -470,7 +487,9 @@ private fun screenTools(context: LaneToolContext): List<LaneTool> = listOf(
             val step = context.currentStep()
             val structure = if (step != null && needsUiStructure(step.action, step.expected, step.condition)) {
                 untrustedData("android_ui_structure", mapOf("uiStructure" to context.session.readUiStructure()))
-            } else emptyMap()
+            } else {
+                emptyMap()
+            }
             mapOf(
                 "message" to "Current Android device screen",
                 "imageBase64" to Base64.getEncoder().encodeToString(shot.image.bytes),

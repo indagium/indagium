@@ -664,6 +664,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
     put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
     put("lastSupportPromptAt", lastSupportPromptAt)
+    put("suppressSupportPrompt", suppressSupportPrompt)
     put("homeRecentsLayout", homeRecentsLayout.name)
     saveRootDir?.let { put("saveRootDir", it) }
     captureSessionsDir?.let { put("captureSessionsDir", it) }
@@ -992,6 +993,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
         suppressTagPrefixConflictPrompt = o.boolOrDefault("suppressTagPrefixConflictPrompt", false),
         lastSupportPromptAt = o.longOrDefault("lastSupportPromptAt", 0L),
+        suppressSupportPrompt = o.boolOrDefault("suppressSupportPrompt", false),
         homeRecentsLayout = o.stringOrNull("homeRecentsLayout")
             ?.let { raw -> runCatching { HomeRecentsLayout.valueOf(raw) }.getOrNull() }
             ?: HomeRecentsLayout.GRID,

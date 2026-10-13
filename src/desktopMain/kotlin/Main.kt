@@ -131,8 +131,8 @@ fun main(args: Array<String>) {
     val singleInstance: SingleInstanceHandle? =
         if (isMacOs) null else (SingleInstance.acquire(DesktopStorage.appDataDir(), args) ?: return)
 
-    // Builds default to the Unlimited edition; -Dindagium.edition=free (or INDAGIUM_EDITION=free)
-    // lowers the AI test-suite limits for testing the Free edition. Resolved once, outside application{}.
+    // Packaged releases default to Free; development runs to Unlimited. Property/env overrides
+    // select an explicit edition. Resolve once, outside application{}.
     val editionService = EditionService().also { it.resolveStartup() }
 
     application {

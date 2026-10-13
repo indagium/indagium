@@ -8,14 +8,18 @@ import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.newCheckId
 import com.indagium.testing.model.newHookId
+import com.indagium.testing.store.MAX_TEST_FILE_BYTES
 import com.indagium.testing.store.StoreResult
+import com.indagium.testing.store.TEST_ASSETS_DIR_NAME
 import com.indagium.testing.store.TEST_LIBRARY_FILE_VERSION
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.decodeSuiteFile
+import com.indagium.testing.store.encodeLibraryFile
 import com.indagium.testing.store.encodeSuiteFile
 import com.indagium.testing.store.testAssetDir
 import java.io.File
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -566,6 +570,181 @@ class TestLibraryStoreTest {
         assertIs<StoreResult.Invalid>(store.createSuite("S"))
         assertIs<StoreResult.Invalid>(store.createScript(sampleScript()))
         assertEquals(text, File(dir, "library.json").readText())
+    }
+
+    @Test
+    fun oversizedScriptAndSharedStepMutationsLeaveMemoryAndDiskUntouchedUsingUtf8ByteCounts() {
+        val scriptDir = tempTestingDir()
+        val scriptStore = newStore(scriptDir)
+        val beforeScript = scriptStore.library.value
+        val multibyteScript = sampleScript().copy(commandTemplate = "界".repeat((MAX_TEST_FILE_BYTES / 3L).toInt()))
+        val scriptJson = encodeLibraryFile(emptyList(), listOf(multibyteScript), emptyList())
+        assertTrue(scriptJson.length.toLong() < MAX_TEST_FILE_BYTES, "the test string is shorter in characters than the byte limit")
+        assertTrue(scriptJson.toByteArray(StandardCharsets.UTF_8).size.toLong() > MAX_TEST_FILE_BYTES)
+
+        val scriptResult = scriptStore.createScript(multibyteScript)
+
+        assertTrue(scriptResult is StoreResult.Invalid && scriptResult.reason.contains("16 MiB"))
+        assertEquals(beforeScript, scriptStore.library.value)
+        assertFalse(File(scriptDir, "library.json").exists())
+
+        val sharedDir = tempTestingDir()
+        val sharedStore = newStore(sharedDir)
+        val beforeShared = sharedStore.library.value
+        val hugeShared = sampleSharedStep().copy(description = "x".repeat(MAX_TEST_FILE_BYTES.toInt()))
+
+        val sharedResult = sharedStore.createSharedStep(hugeShared)
+
+        assertTrue(sharedResult is StoreResult.Invalid && sharedResult.reason.contains("16 MiB"))
+        assertEquals(beforeShared, sharedStore.library.value)
+        assertFalse(File(sharedDir, "library.json").exists())
+    }
+
+    @Test
+    fun oversizedMultibyteImportIsRejectedBeforeCreatingLibraryOrAssetFiles() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val before = store.library.value
+        val imported = fullSuite().copy(description = "界".repeat((MAX_TEST_FILE_BYTES / 3L).toInt()))
+        val text = encodeSuiteFile(imported)
+        assertTrue(text.length.toLong() < MAX_TEST_FILE_BYTES)
+        assertTrue(text.toByteArray(StandardCharsets.UTF_8).size.toLong() > MAX_TEST_FILE_BYTES)
+
+        val result = store.importSuite(text)
+
+        assertTrue(result is StoreResult.Invalid && result.reason.contains("too large"))
+        assertEquals(before, store.library.value)
+        assertFalse(File(dir, "library.json").exists())
+        assertFalse(File(dir, TEST_ASSETS_DIR_NAME).exists())
+    }
+
+    @Test
+    fun anOversizedLibraryCandidateIsRejectedBeforeAddingItsSuiteOrWritingAnyFile() {
+        val dir = tempTestingDir()
+        val emptyTemplate = sampleScript().copy(commandTemplate = "")
+        val baseBytes = encodeLibraryFile(emptyList(), listOf(emptyTemplate), emptyList())
+            .toByteArray(StandardCharsets.UTF_8).size
+        val nearLimitScript = emptyTemplate.copy(commandTemplate = "x".repeat(MAX_TEST_FILE_BYTES.toInt() - baseBytes - 20))
+        val libraryText = encodeLibraryFile(emptyList(), listOf(nearLimitScript), emptyList())
+        assertEquals(MAX_TEST_FILE_BYTES - 20L, libraryText.toByteArray(StandardCharsets.UTF_8).size.toLong())
+        val libraryFile = File(dir, "library.json").also { it.writeText(libraryText) }
+        val originalBytes = libraryFile.readBytes()
+        val store = newStore(dir)
+        val before = store.library.value
+
+        val result = store.createSuite("Would exceed library limit")
+
+        assertTrue(result is StoreResult.Invalid && result.reason.contains("16 MiB"))
+        assertEquals(before, store.library.value)
+        assertTrue(originalBytes.contentEquals(libraryFile.readBytes()))
+        assertFalse(File(dir, "suites").exists())
+    }
+
+    @Test
+    fun anOversizedSuiteCandidateIsRejectedWithoutChangingItsStoredMetadata() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("S").ok()
+        val file = suiteFile(dir, suite.id)
+        val original = file.readBytes()
+        val before = store.library.value
+
+        val result = store.updateSuite(suite.id) { it.copy(description = "x".repeat(MAX_TEST_FILE_BYTES.toInt())) }
+
+        assertTrue(result is StoreResult.Invalid && result.reason.contains("16 MiB"))
+        assertEquals(before, store.library.value)
+        assertTrue(original.contentEquals(file.readBytes()))
+    }
+
+    @Test
+    fun duplicateSuiteSizeRejectionLeavesNoStagedOrPublishedAssets() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("Assets").ok()
+        val case = store.createCase(suite.id, plainCase("image")).ok()
+        val step = store.createStep(case.id, plainStep()).ok()
+        store.updateStep(step.id) {
+            it.copy(examples = listOf(StepExample.GoldenScreenshot("example-one", "image.png")))
+        }.ok()
+        val sourceAsset = File(testAssetDir(dir, suite.id), "image.png").also {
+            it.parentFile.mkdirs()
+            it.writeBytes(byteArrayOf(1, 2, 3))
+        }
+        val emptyDescriptionBytes = encodeSuiteFile(store.suite(suite.id)!!.copy(description = ""))
+            .toByteArray(StandardCharsets.UTF_8).size
+        val description = "x".repeat(MAX_TEST_FILE_BYTES.toInt() - emptyDescriptionBytes)
+        store.updateSuite(suite.id) { it.copy(description = description) }.ok()
+        assertEquals(MAX_TEST_FILE_BYTES, suiteFile(dir, suite.id).length())
+        val before = store.library.value
+        val libraryFile = File(dir, "library.json")
+        val libraryBytes = libraryFile.readBytes()
+        val suiteBytes = suiteFile(dir, suite.id).readBytes()
+
+        val result = store.duplicateSuite(suite.id)
+
+        assertTrue(result is StoreResult.Invalid && result.reason.contains("16 MiB"))
+        assertEquals(before, store.library.value)
+        assertTrue(libraryBytes.contentEquals(libraryFile.readBytes()))
+        assertTrue(suiteBytes.contentEquals(suiteFile(dir, suite.id).readBytes()))
+        assertTrue(sourceAsset.isFile)
+        assertEquals(listOf(suite.id), File(dir, TEST_ASSETS_DIR_NAME).listFiles()!!.map { it.name })
+    }
+
+    @Test
+    fun oversizedLibraryReloadIsReadOnlyAndKnownSuiteEditsDoNotReplaceItsBytes() {
+        val dir = tempTestingDir()
+        val originalStore = newStore(dir)
+        val suite = originalStore.createSuite("Known suite").ok()
+        val libraryFile = File(dir, "library.json")
+        val oversizedBytes = ByteArray(MAX_TEST_FILE_BYTES.toInt() + 1) { (it % 251).toByte() }
+        libraryFile.writeBytes(oversizedBytes)
+
+        val reloaded = newStore(dir)
+
+        assertTrue(reloaded.library.value.readOnly)
+        assertTrue(reloaded.loadIssues.any { it.contains("16 MiB") && it.contains("library.json") })
+        assertIs<StoreResult.Invalid>(reloaded.createSuite("Refused"))
+        reloaded.updateSuite(suite.id) { it.copy(name = "Known suite edited") }.ok()
+        assertEquals("Known suite edited", reloaded.suite(suite.id)!!.name)
+        assertTrue(oversizedBytes.contentEquals(libraryFile.readBytes()))
+    }
+
+    @Test
+    fun unreadableLibraryPathIsPreservedAndPreventsLibraryLevelWrites() {
+        val dir = tempTestingDir()
+        val originalStore = newStore(dir)
+        val suite = originalStore.createSuite("Known suite").ok()
+        val libraryFile = File(dir, "library.json")
+        assertTrue(libraryFile.delete())
+        assertTrue(libraryFile.mkdir())
+        val marker = File(libraryFile, "keep.bin").also { it.writeBytes(byteArrayOf(7, 8, 9)) }
+        val markerBytes = marker.readBytes()
+
+        val reloaded = newStore(dir)
+
+        assertTrue(reloaded.library.value.readOnly)
+        assertTrue(reloaded.loadIssues.any { it.contains("Could not read library.json") })
+        assertIs<StoreResult.Invalid>(reloaded.createScript(sampleScript()))
+        reloaded.updateSuite(suite.id) { it.copy(name = "Still editable") }.ok()
+        assertTrue(libraryFile.isDirectory)
+        assertTrue(markerBytes.contentEquals(marker.readBytes()))
+    }
+
+    @Test
+    fun failedCorruptLibraryBackupKeepsOriginalAndReturnsReadOnlyMetadata() {
+        val dir = tempTestingDir()
+        val originalStore = newStore(dir)
+        val suite = originalStore.createSuite("Known suite").ok()
+        val original = "{ broken library metadata".toByteArray(StandardCharsets.UTF_8)
+        val libraryFile = File(dir, "library.json").also { it.writeBytes(original) }
+
+        val reloaded = TestLibraryStore(dir, backupCorruptLibrary = { _, _ -> throw IOException("backup denied") })
+
+        assertTrue(reloaded.library.value.readOnly)
+        assertTrue(reloaded.loadIssues.any { it.contains("backup failed") && it.contains("Library-level edits are disabled") })
+        assertIs<StoreResult.Invalid>(reloaded.createSuite("Refused"))
+        reloaded.updateSuite(suite.id) { it.copy(name = "Known suite edited") }.ok()
+        assertTrue(original.contentEquals(libraryFile.readBytes()))
     }
 
     @Test

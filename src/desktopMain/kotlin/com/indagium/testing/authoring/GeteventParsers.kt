@@ -211,13 +211,11 @@ internal class GeteventTouchParser(
         var pendingUp = false
         var moved = false
 
-        /** The contact is over: its position is forgotten so the next one in this slot waits for its own. */
+        /** The contact is over; protocol B retains this slot's coordinates for its next tracking id. */
         fun release() {
             active = false
             pendingDown = false
             pendingUp = false
-            contact.hasX = false
-            contact.hasY = false
         }
     }
 

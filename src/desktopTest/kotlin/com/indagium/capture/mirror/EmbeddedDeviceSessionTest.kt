@@ -49,7 +49,9 @@ class EmbeddedDeviceSessionTest {
             object : EmbeddedMirrorConnection {
                 override val videoInput: InputStream = stream
                 override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) { sent.incrementAndGet() }
+
                 override fun close() { release.countDown() }
             }
         }

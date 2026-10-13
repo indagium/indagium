@@ -128,6 +128,9 @@ internal fun TestsWorkspace(state: AppState) {
             ui.banner?.let { TestsBannerView(it) { ui.banner = null } }
             limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
+            state.testLibraryLoadIssues.forEach { issue ->
+                TestsBannerView(TestsBanner(issue, isError = true), dismissible = false) { }
+            }
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true), dismissible = false) { } }
             state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false), dismissible = false) { } }
             view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }

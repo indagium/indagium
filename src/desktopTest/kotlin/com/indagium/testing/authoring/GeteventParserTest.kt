@@ -195,6 +195,117 @@ class GeteventParserTest {
     }
 
     @Test
+    fun protocolBRepeatedTapReusesTheSlotCoordinates() {
+        val parser = emulatorParser()
+        val touches = parser.feed(
+            *slotFrame(1, null, 7, 16384, 16384).toTypedArray(),
+            *slotFrame(2, null, -1, null, null).toTypedArray(),
+            *slotFrame(3, null, 8, null, null).toTypedArray(),
+            *slotFrame(4, null, -1, null, null).toTypedArray(),
+        )
+
+        assertEquals(
+            listOf(MirrorTouchAction.DOWN, MirrorTouchAction.UP, MirrorTouchAction.DOWN, MirrorTouchAction.UP),
+            touches.map { it.command.action },
+        )
+        assertEquals(
+            listOf(540 to 1200, 540 to 1200, 540 to 1200, 540 to 1200),
+            touches.map { it.command.x to it.command.y },
+        )
+        assertEquals(listOf(0L, 0L, 0L, 0L), touches.map { it.command.pointerId })
+    }
+
+    @Test
+    fun protocolBTapsWithOnlyOneChangedAxisReuseTheOtherAxis() {
+        val parser = emulatorParser()
+        val touches = parser.feed(
+            *slotFrame(1, null, 1, 1000, 2000).toTypedArray(),
+            *slotFrame(2, null, -1, null, null).toTypedArray(),
+            *slotFrame(3, null, 2, 3000, null).toTypedArray(),
+            *slotFrame(4, null, -1, null, null).toTypedArray(),
+            *slotFrame(5, null, 3, null, 5000).toTypedArray(),
+            *slotFrame(6, null, -1, null, null).toTypedArray(),
+        )
+
+        assertEquals(
+            listOf(
+                MirrorTouchAction.DOWN, MirrorTouchAction.UP,
+                MirrorTouchAction.DOWN, MirrorTouchAction.UP,
+                MirrorTouchAction.DOWN, MirrorTouchAction.UP,
+            ),
+            touches.map { it.command.action },
+        )
+        assertEquals(
+            listOf(32 to 146, 32 to 146, 98 to 146, 98 to 146, 98 to 366, 98 to 366),
+            touches.map { it.command.x to it.command.y },
+        )
+    }
+
+    @Test
+    fun protocolBSlotCoordinatesStayIndependentWhenContactsAlternate() {
+        val parser = emulatorParser()
+        val touches = parser.feed(
+            *slotFrame(1, 0, 1, 1000, 2000).toTypedArray(),
+            *slotFrame(2, 1, 2, 10000, 20000).toTypedArray(),
+            *slotFrame(3, 0, -1, null, null).toTypedArray(),
+            *slotFrame(4, 1, -1, null, null).toTypedArray(),
+            *slotFrame(5, 1, 3, 11000, null).toTypedArray(),
+            *slotFrame(6, 1, -1, null, null).toTypedArray(),
+            *slotFrame(7, 0, 4, null, 3000).toTypedArray(),
+            *slotFrame(8, 0, -1, null, null).toTypedArray(),
+        )
+
+        assertEquals(
+            listOf(
+                MirrorTouchAction.DOWN, MirrorTouchAction.DOWN, MirrorTouchAction.UP, MirrorTouchAction.UP,
+                MirrorTouchAction.DOWN, MirrorTouchAction.UP, MirrorTouchAction.DOWN, MirrorTouchAction.UP,
+            ),
+            touches.map { it.command.action },
+        )
+        assertEquals(
+            listOf(0L, 1L, 0L, 1L, 1L, 1L, 0L, 0L),
+            touches.map { it.command.pointerId },
+        )
+        assertEquals(362 to 1464, touches[4].command.x to touches[4].command.y, "slot 1 keeps its own Y")
+        assertEquals(32 to 219, touches[6].command.x to touches[6].command.y, "slot 0 keeps its own X")
+    }
+
+    @Test
+    fun protocolBFirstContactWaitsUntilBothCoordinatesHaveBeenSeen() {
+        val parser = emulatorParser()
+        assertTrue(parser.feed(*slotFrame(1, null, 1, 1200, null).toTypedArray()).isEmpty())
+
+        val touches = parser.feed(
+            *slotFrame(2, null, null, null, 2000).toTypedArray(),
+            *slotFrame(3, null, -1, null, null).toTypedArray(),
+        )
+
+        assertEquals(listOf(MirrorTouchAction.DOWN, MirrorTouchAction.UP), touches.map { it.command.action })
+        assertEquals(listOf(39 to 146, 39 to 146), touches.map { it.command.x to it.command.y })
+    }
+
+    @Test
+    fun aRecreatedParserStartsWithUnknownSlotCoordinates() {
+        val devices = GeteventDeviceParser.parse(EMULATOR_DUMP).touchScreens
+        val geometry = DisplayGeometry(1080, 2400)
+        val previousParser = GeteventTouchParser(devices, geometry) { 0 }
+        previousParser.feed(
+            *slotFrame(1, null, 1, 16384, 16384).toTypedArray(),
+            *slotFrame(2, null, -1, null, null).toTypedArray(),
+        )
+
+        val parser = GeteventTouchParser(devices, geometry) { 0 }
+        assertTrue(parser.feed(*slotFrame(3, null, 2, 1000, null).toTypedArray()).isEmpty())
+
+        val touches = parser.feed(
+            *slotFrame(4, null, null, null, 2000).toTypedArray(),
+            *slotFrame(5, null, -1, null, null).toTypedArray(),
+        )
+        assertEquals(listOf(MirrorTouchAction.DOWN, MirrorTouchAction.UP), touches.map { it.command.action })
+        assertEquals(listOf(32 to 146, 32 to 146), touches.map { it.command.x to it.command.y })
+    }
+
+    @Test
     fun protocolBSwipeMovesAndTwoFingersGetOwnPointers() {
         val parser = emulatorParser()
         val touches = parser.feed(
@@ -297,12 +408,17 @@ class GeteventParserTest {
             event(2, path, "EV_SYN", "SYN_REPORT", "00000000"),
             event(3, path, "EV_KEY", "BTN_TOUCH", "UP"),
             event(3, path, "EV_SYN", "SYN_REPORT", "00000000"),
+            event(4, path, "EV_KEY", "BTN_TOUCH", "DOWN"),
+            event(4, path, "EV_SYN", "SYN_REPORT", "00000000"),
+            event(5, path, "EV_KEY", "BTN_TOUCH", "UP"),
+            event(5, path, "EV_SYN", "SYN_REPORT", "00000000"),
         )
         assertEquals(
-            listOf(MirrorTouchAction.DOWN, MirrorTouchAction.MOVE, MirrorTouchAction.UP),
+            listOf(MirrorTouchAction.DOWN, MirrorTouchAction.MOVE, MirrorTouchAction.UP, MirrorTouchAction.DOWN, MirrorTouchAction.UP),
             touches.map { it.command.action },
         )
         assertEquals(400 to 240, touches.first().command.x to touches.first().command.y)
+        assertEquals(420 to 240, touches[3].command.x to touches[3].command.y, "single-touch axes also persist for the next tap")
     }
 
     // ── bounded line reader and clock ────────────────────────────────

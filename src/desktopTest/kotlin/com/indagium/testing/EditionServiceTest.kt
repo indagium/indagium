@@ -36,6 +36,38 @@ class EditionServiceTest {
     }
 
     @Test
+    fun packagedBuildsDefaultToFreeBeforeAndAfterStartupResolution() {
+        val packaged = service(props = lookup("jpackage.app-path" to "/Applications/Indagium"))
+        assertEquals(Edition.FREE, packaged.current.value)
+        assertEquals(Edition.FREE, packaged.resolveStartup())
+        assertEquals(EditionLimits.FREE, packaged.limits())
+    }
+
+    @Test
+    fun invalidEditionDoesNotUnlockAPackagedRelease() {
+        val packaged = service(props = lookup("jpackage.app-path" to "/Applications/Indagium", "indagium.edition" to "typo"))
+        assertEquals(Edition.FREE, packaged.resolveStartup())
+    }
+
+    @Test
+    fun aPackagedEditionCanBeConfiguredExplicitlyWithoutShowingDevelopmentButtons() {
+        for (edition in Edition.entries) {
+            val packaged = service(props = lookup("jpackage.app-path" to "/Applications/Indagium", "indagium.edition" to edition.name))
+            assertEquals(edition, packaged.resolveStartup())
+            assertFalse(packaged.devSwitchAllowed())
+        }
+        assertEquals(Edition.PREMIUM, service(
+            props = lookup("jpackage.app-path" to "/Applications/Indagium"), env = lookup("INDAGIUM_EDITION" to "premium"),
+        ).resolveStartup())
+    }
+
+    @Test
+    fun onlyNonFreeEditionsCanDisableSupportReminders() {
+        assertFalse(Edition.FREE.canDisableSupportReminders)
+        listOf(Edition.PREMIUM, Edition.FRIENDS_FAMILY, Edition.UNLIMITED).forEach { assertTrue(it.canDisableSupportReminders) }
+    }
+
+    @Test
     fun startupReadsTheSystemProperty() {
         val s = service(props = lookup("indagium.edition" to "free"))
 
@@ -98,7 +130,7 @@ class EditionServiceTest {
 
         assertFalse(s.devSwitchAllowed())
         assertFalse(s.setForDev(Edition.FREE))
-        assertEquals(Edition.UNLIMITED, s.current.value)
+        assertEquals(Edition.FREE, s.current.value)
     }
 
     @Test

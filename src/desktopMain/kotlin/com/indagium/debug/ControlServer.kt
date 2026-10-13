@@ -10,6 +10,8 @@ import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.LogLevel
 import com.indagium.model.RuleTarget
+import com.indagium.testing.script.ScriptRunOutcome
+import com.indagium.testing.script.toToolResult
 import com.indagium.testing.script.untrustedData
 import com.indagium.ui.AppState
 import io.ktor.http.Headers
@@ -565,6 +567,22 @@ class ControlServer(
         clientName: String?,
     ): Any? {
         val client = clientName?.takeIf(String::isNotBlank) ?: "MCP client"
+        if (name == "try_test_script") {
+            return when (val prepared = prepareTryScriptCall(appState, arguments, client)) {
+                is TryScriptPreparation.Invalid -> mapOf("error" to prepared.message)
+                is TryScriptPreparation.Ready -> appState.executeExternalApprovedAction(sessionId, client, prepared.details) {
+                    when (val outcome = appState.runApprovedExternalTestScript(prepared.script, prepared.arguments, prepared.deviceSerial)) {
+                        is ScriptRunOutcome.Rejected -> mapOf("error" to outcome.message)
+                        is ScriptRunOutcome.Finished -> mapOf(
+                            "scriptId" to prepared.script.id,
+                            "toolName" to prepared.script.toolName,
+                            "target" to prepared.script.target.name,
+                            "deviceSerial" to prepared.deviceSerial,
+                        ) + outcome.result.toToolResult()
+                    }
+                }
+            }
+        }
         val details = describePerCallApproval(appState, name, arguments, client)
             ?: return runCatching { toolGateway.executeSuspending(name, arguments) }
                 .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }

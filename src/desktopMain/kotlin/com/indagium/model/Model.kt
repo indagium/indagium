@@ -1350,6 +1350,9 @@ data class AppSettings(
     // treats that as "not due yet" rather than "overdue", so a fresh install waits out one full
     // interval before ever prompting. JSON form ONLY, same rule as the field above.
     val lastSupportPromptAt: Long = 0L,
+    // Saved separately from the reminder timer. Only non-Free editions expose the opt-out;
+    // once chosen it remains respected after restart or an edition change. JSON form ONLY.
+    val suppressSupportPrompt: Boolean = false,
     val captureSettings: com.indagium.capture.CaptureSettings = com.indagium.capture.CaptureSettings(),
     // Grid vs. list for the home tab's Recent files section (ui/HomeScreen.kt). JSON form ONLY,
     // same rule as the other settings-JSON-only fields above — the frozen legacy positional

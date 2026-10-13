@@ -1859,7 +1859,7 @@ class AppState(
     // resolves it under the sandboxed user.home build.gradle.kts sets for every test run, and nothing is written until a
     // mutation. Data found here is moved to the resolved folders once (testing/store/TestStorageLayout.kt).
     private val testingDir: File = DesktopStorage.testingDir(),
-    // The edition that sets the test-suite limits. Defaults to Unlimited; Main.kt resolves the real
+    // The edition that sets the test-suite limits. Packaged default: Free; development: Unlimited. Main.kt resolves the real
     // one from -Dindagium.edition / INDAGIUM_EDITION. A per-AppState instance, never a global.
     val editionService: EditionService = EditionService(),
     // Where the issue tracker's access token lives (security/SecretStore.kt): the OS keychain, or memory for the session when
@@ -2747,6 +2747,20 @@ class AppState(
         testStoreOp { updateScript(scriptId, transform) }
 
     fun deleteTestScript(scriptId: String): StoreResult<Unit> = testStoreOp { deleteScript(scriptId) }
+
+    /** Revalidates a script after external approval, then executes the captured snapshot without resolving it by id. */
+    internal suspend fun runApprovedExternalTestScript(
+        approvedScript: TestScript,
+        arguments: Map<String, String>,
+        deviceSerial: String?,
+    ): com.indagium.testing.script.ScriptRunOutcome {
+        if (testLibrary.script(approvedScript.id) != approvedScript) {
+            return com.indagium.testing.script.ScriptRunOutcome.Rejected(
+                "The approved script changed or was deleted while awaiting approval. Request it again for fresh approval.",
+            )
+        }
+        return tryTestScript(approvedScript, arguments.toMap(), deviceSerial)
+    }
 
     fun moveTestScript(scriptId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveScript(scriptId, toIndex) }
 
@@ -3810,13 +3824,18 @@ class AppState(
      * remembered, so a client that was allowed once cannot run a different command afterwards. Uses the same
      * pending list, dialog, 5-minute timeout and session revocation as the device approval.
      */
-    internal suspend fun awaitExternalActionApproval(sessionId: String, clientName: String, details: ExternalActionDetails): Boolean {
+    internal suspend fun awaitExternalActionApproval(
+        sessionId: String,
+        clientName: String,
+        details: ExternalActionDetails,
+        timeoutMs: Long = DEVICE_AI_APPROVAL_TIMEOUT_MS,
+    ): Boolean {
         val requestId = "$sessionId\u0000action:${UUID.randomUUID()}"
         val deferred = CompletableDeferred<Boolean>()
         externalDeviceApprovalDecisions[requestId] = deferred
         externalDeviceAiApprovals = externalDeviceAiApprovals + ExternalDeviceAiApproval(requestId, sessionId, clientName, "", details)
         return try {
-            withTimeoutOrNull(DEVICE_AI_APPROVAL_TIMEOUT_MS) { deferred.await() } ?: false
+            withTimeoutOrNull(timeoutMs) { deferred.await() } ?: false
         } finally {
             externalDeviceApprovalDecisions.remove(requestId, deferred)
             externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.requestId == requestId }
@@ -3828,9 +3847,10 @@ class AppState(
         sessionId: String,
         clientName: String,
         details: ExternalActionDetails,
+        approvalTimeoutMs: Long = DEVICE_AI_APPROVAL_TIMEOUT_MS,
         action: suspend () -> Any?,
     ): Any? {
-        if (!awaitExternalActionApproval(sessionId, clientName, details)) return mapOf("error" to details.declinedMessage)
+        if (!awaitExternalActionApproval(sessionId, clientName, details, approvalTimeoutMs)) return mapOf("error" to details.declinedMessage)
         return runCatching { action() }.getOrElse { error ->
             if (error is kotlinx.coroutines.CancellationException) throw error
             mapOf("error" to (error.message ?: "The action failed"))
@@ -6481,6 +6501,7 @@ class AppState(
      * isn't blocking the UI yet.
      */
     fun maybeShowSupportPromptOnStartup(now: Long = System.currentTimeMillis()) {
+        if (settings.suppressSupportPrompt) return
         val last = settings.lastSupportPromptAt
         if (last == 0L) {
             updateSettings { it.copy(lastSupportPromptAt = now) }
@@ -6534,6 +6555,13 @@ class AppState(
     /** Every dismissal path (Star, Sponsor, Already starred, Not now, Esc) routes through here. */
     fun dismissSupportDialog() {
         supportDialogOpen = false
+    }
+
+    /** Edition-gated mutation; a saved choice suppresses automatic prompts but leaves manual support access available. */
+    fun setSupportPromptSuppressed(suppressed: Boolean): Boolean {
+        if (!editionService.current.value.canDisableSupportReminders) return false
+        updateSettings { it.copy(suppressSupportPrompt = suppressed) }
+        return true
     }
 
     internal fun pickDirectory(title: String, initialDirectory: File? = null): File? =

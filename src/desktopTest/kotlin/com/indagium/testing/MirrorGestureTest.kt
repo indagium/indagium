@@ -1,13 +1,13 @@
 package com.indagium.testing
 
-import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.capture.mirror.MirrorGestureControl
+import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.device.GestureMode
 import com.indagium.testing.device.GesturePoint
 import com.indagium.testing.device.LaneCapture
 import com.indagium.testing.device.TestDeviceSession
-import com.indagium.testing.device.playMirrorGesture
 import com.indagium.testing.device.mirrorGesturePoints
+import com.indagium.testing.device.playMirrorGesture
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import java.nio.ByteBuffer
@@ -18,6 +18,7 @@ import kotlin.test.assertTrue
 
 class MirrorGestureTest {
     private val points = listOf(GesturePoint(100, 900, 0), GesturePoint(110, 800, 36), GesturePoint(200, 350, 201), GesturePoint(200, 350, 577))
+
     private fun action(bytes: ByteArray) = bytes[1].toInt()
 
     @Test

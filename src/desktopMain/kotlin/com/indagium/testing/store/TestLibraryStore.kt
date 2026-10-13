@@ -33,8 +33,10 @@ import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.nio.charset.StandardCharsets
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -45,11 +47,14 @@ import kotlin.concurrent.withLock
 const val TEST_LIBRARY_FILE_NAME = "library.json"
 const val TEST_SUITES_DIR_NAME = "suites"
 const val MAX_TEST_FILE_BYTES = 16L * 1024L * 1024L
+private const val FILE_READ_BUFFER_BYTES = 8 * 1024
 private const val SUITE_FILE_EXTENSION = ".json"
 private const val LIBRARY_READ_ONLY_REASON =
-    "The test library was saved by a newer version of Indagium and is read-only here. Update Indagium to change it."
+    "The test library is read-only here to protect its saved data. " +
+        "Resolve the library load issue or update Indagium if it was saved by a newer version."
 private const val SUITE_READ_ONLY_REASON =
     "This suite was saved by a newer version of Indagium and is read-only here. Update Indagium to change it."
+private const val LIBRARY_TOO_LARGE_REASON = "The test library would exceed the 16 MiB test file limit. No changes were made."
 private const val DEFAULT_IMPORTED_SUITE_NAME = "Imported suite"
 
 /** One step of [TestLibraryStore.updateSteps]: [to] replaces the stored step only while the stored step still equals [from]. */
@@ -76,6 +81,8 @@ class TestLibraryStore(
     private val copyAsset: (File, File) -> Unit = { source, target -> Files.copy(source.toPath(), target.toPath()) },
     /** Where the removal of a deleted case's or suite's stored recordings runs; tests pass an inline runner. */
     private val cleanup: (() -> Unit) -> Unit = RecordingCleanup::run,
+    /** A narrow seam for testing recovery when a corrupt library file cannot be moved aside. */
+    private val backupCorruptLibrary: (File, File) -> Unit = { original, backup -> Files.move(original.toPath(), backup.toPath()) },
 ) {
     /** The recordings stored beside this library's golden screenshots (see [RecordingEvidenceFiles]). */
     val evidence = RecordingEvidenceFiles(rootDir)
@@ -150,6 +157,8 @@ class TestLibraryStore(
         val now = clock()
         // The copy does not share the original's stored recording evidence: a link would make two cases own one folder.
         val copy = source.withFreshIds().withoutRecordingRefs().copy(name = copyName(source.name), createdAt = now, updatedAt = now)
+        val initialSuites = initial.suites.toMutableList().apply { add(sourceIndex + 1, copy) }
+        dirtyFileRejection(initial.copy(suites = initialSuites), Dirty(setOf(copy.id), libraryFile = true))?.let { return it.result }
         val staged = stageSuiteAssets(initial, source, copy.id)
         if (staged.error != null) return StoreResult.Invalid(staged.error)
 
@@ -183,8 +192,8 @@ class TestLibraryStore(
                     else -> {
                         val suites = current.suites.toMutableList().apply { add(liveIndex + 1, copy) }
                         val outcome = Outcome.Apply(current.copy(suites = suites), copy, Dirty(setOf(copy.id), libraryFile = true))
-                        state.value = outcome.library
-                        outcome
+                        dirtyFileRejection(outcome.library, outcome.dirty)?.let { Outcome.Reject(it.result) }
+                            ?: outcome.also { state.value = it.library }
                     }
                 }
             }
@@ -252,7 +261,9 @@ class TestLibraryStore(
      * than the edition allows is imported anyway; the extra cases are locked and a warning says so.
      */
     fun importSuite(text: String): StoreResult<TestSuite> {
-        if (text.length > MAX_TEST_FILE_BYTES) return StoreResult.Invalid("This file is too large to be a test suite.")
+        if (text.toByteArray(StandardCharsets.UTF_8).size.toLong() > MAX_TEST_FILE_BYTES) {
+            return StoreResult.Invalid("This file is too large to be a test suite.")
+        }
         val decoded = decodeSuiteFile(text).getOrElse { return StoreResult.Invalid(it.message ?: "This file is not a test suite.") }
         if (decoded.readOnly) return StoreResult.Invalid("This suite was saved by a newer version of Indagium. Update Indagium to import it.")
         val lim = limits()
@@ -644,6 +655,26 @@ class TestLibraryStore(
 
     private fun libraryFileRejection(lib: TestLibrary): Outcome.Reject? = if (lib.readOnly) invalid(LIBRARY_READ_ONLY_REASON) else null
 
+    /** Checks every file this mutation would rewrite before publishing its in-memory state. */
+    private fun dirtyFileRejection(lib: TestLibrary, dirty: Dirty): Outcome.Reject? {
+        for (id in dirty.suiteIds) {
+            val suite = lib.suite(id) ?: continue
+            if (!suite.readOnly) {
+                if (exceedsFileLimit(encodeSuiteFile(suite))) {
+                    return invalid("Suite '${suite.name}' would exceed the 16 MiB test file limit. No changes were made.")
+                }
+            }
+        }
+        if (dirty.libraryFile && !lib.readOnly) {
+            val encoded = encodeLibraryFile(lib.suites.map { it.id }, lib.scripts, lib.sharedSteps)
+            if (exceedsFileLimit(encoded)) return invalid(LIBRARY_TOO_LARGE_REASON)
+        }
+        return null
+    }
+
+    private fun exceedsFileLimit(encoded: String): Boolean =
+        encoded.toByteArray(StandardCharsets.UTF_8).size.toLong() > MAX_TEST_FILE_BYTES
+
     private fun readOnlySuiteRejection(suite: TestSuite): Outcome.Reject? = if (suite.readOnly) invalid(SUITE_READ_ONLY_REASON) else null
 
     /** A [LimitDecision.Refused] as a rejected outcome; null for Allowed and AllowedWithWarning. */
@@ -655,7 +686,10 @@ class TestLibraryStore(
         val applied = synchronized(lock) {
             when (val outcome = block(state.value)) {
                 is Outcome.Reject -> return outcome.result
-                is Outcome.Apply -> outcome.also { state.value = it.library }
+                is Outcome.Apply -> {
+                    dirtyFileRejection(outcome.library, outcome.dirty)?.let { return it.result }
+                    outcome.also { state.value = it.library }
+                }
             }
         }
         persist(applied.dirty)
@@ -825,8 +859,40 @@ class TestLibraryStore(
 
     private class Loaded(val library: TestLibrary, val issues: List<String>)
 
-    private fun readCapped(file: File): String? =
-        if (file.isFile && file.length() <= MAX_TEST_FILE_BYTES) runCatching { file.readText() }.getOrNull() else null
+    private sealed interface CappedRead {
+        class Data(val bytes: ByteArray) : CappedRead
+
+        data object TooLarge : CappedRead
+
+        data object Failed : CappedRead
+    }
+
+    private fun readCappedBytes(file: File): CappedRead {
+        return try {
+            if (!file.isFile) return CappedRead.Failed
+            if (file.length() > MAX_TEST_FILE_BYTES) return CappedRead.TooLarge
+            Files.newInputStream(file.toPath()).use { input ->
+                val output = ByteArrayOutputStream()
+                val buffer = ByteArray(FILE_READ_BUFFER_BYTES)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (output.size().toLong() + count > MAX_TEST_FILE_BYTES) return CappedRead.TooLarge
+                    output.write(buffer, 0, count)
+                }
+                CappedRead.Data(output.toByteArray())
+            }
+        } catch (_: IOException) {
+            CappedRead.Failed
+        } catch (_: SecurityException) {
+            CappedRead.Failed
+        }
+    }
+
+    private fun readCapped(file: File): String? = when (val result = readCappedBytes(file)) {
+        is CappedRead.Data -> String(result.bytes, StandardCharsets.UTF_8)
+        CappedRead.TooLarge, CappedRead.Failed -> null
+    }
 
     private fun loadFromDisk(): Loaded {
         val issues = mutableListOf<String>()
@@ -852,18 +918,50 @@ class TestLibraryStore(
 
     private fun loadLibraryFile(issues: MutableList<String>): DecodedLibraryFile {
         val empty = DecodedLibraryFile(emptyList(), emptyList(), emptyList(), readOnly = false)
-        if (!libraryFile.exists()) return empty
-        val text = readCapped(libraryFile)
-        if (text == null) {
-            issues += "Could not read $TEST_LIBRARY_FILE_NAME."
-            return empty
+        val path = libraryFile.toPath()
+        val presence = try {
+            when {
+                Files.exists(path, LinkOption.NOFOLLOW_LINKS) -> true
+                Files.notExists(path, LinkOption.NOFOLLOW_LINKS) -> false
+                else -> null
+            }
+        } catch (_: SecurityException) {
+            null
+        }
+        if (presence == false) return empty
+        if (presence == null) {
+            issues += "Could not determine whether $TEST_LIBRARY_FILE_NAME can be read. " +
+                "Library-level edits are disabled; check file access and restart Indagium."
+            return empty.copy(readOnly = true)
+        }
+        val read = readCappedBytes(libraryFile)
+        val text = when (read) {
+            is CappedRead.Data -> String(read.bytes, StandardCharsets.UTF_8)
+            CappedRead.TooLarge -> {
+                issues += "$TEST_LIBRARY_FILE_NAME exceeds the 16 MiB test file limit. It was left in place and " +
+                    "library-level edits are disabled; back it up, reduce or repair it, then restart Indagium."
+                return empty.copy(readOnly = true)
+            }
+            CappedRead.Failed -> {
+                issues += "Could not read $TEST_LIBRARY_FILE_NAME. It was left in place and library-level edits are disabled; " +
+                    "check its permissions or restore a readable backup, then restart Indagium."
+                return empty.copy(readOnly = true)
+            }
         }
         return decodeLibraryFile(text).getOrElse { failure ->
-            // Set the damaged file aside so the next save does not overwrite it with an empty library.
+            // Keep the original protected if recovery cannot move it; a failed backup must never expose an editable empty library.
             val aside = File(rootDir, "$TEST_LIBRARY_FILE_NAME.corrupt-${clock()}")
-            runCatching { Files.move(libraryFile.toPath(), aside.toPath()) }
-            issues += "$TEST_LIBRARY_FILE_NAME was unreadable (${failure.message}); it was moved to ${aside.name}."
-            empty
+            val backupFailure = runCatching { backupCorruptLibrary(libraryFile, aside) }.exceptionOrNull()
+            if (backupFailure == null) {
+                issues += "$TEST_LIBRARY_FILE_NAME was unreadable (${failure.message}); it was moved to ${aside.name}."
+                empty
+            } else {
+                issues += "$TEST_LIBRARY_FILE_NAME was unreadable (${failure.message}); the original was kept because " +
+                    "its recovery backup failed (${backupFailure.message ?: "file operation failed"}). " +
+                    "Library-level edits are disabled; " +
+                    "check disk permissions and repair or restore the file before restarting Indagium."
+                empty.copy(readOnly = true)
+            }
         }
     }
 

@@ -171,7 +171,9 @@ class RunOutcomeHonestyTest {
             h.adb.shellResponder = { args ->
                 if (args == listOf("cmd", "wifi", "status")) {
                     CompletedFakeProcess(if (reads.incrementAndGet() == 1) "Wifi is enabled\n" else "Wifi is disabled\n")
-                } else null
+                } else {
+                    null
+                }
             }
             val run = h.runToEnd(suite, timing, mode = JudgeMode.FAILURES_ONLY)
             val result = run.caseResult("Wi-Fi").steps.first()

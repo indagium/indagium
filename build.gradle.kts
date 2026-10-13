@@ -741,7 +741,9 @@ ktlint {
     }
 }
 
-tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configureEach {
+tasks.matching {
+    it.name == "runKtlintCheckOverDesktopMainSourceSet" || it.name == "runKtlintFormatOverDesktopMainSourceSet"
+}.configureEach {
     dependsOn(generateBuildInfo)
 }
 

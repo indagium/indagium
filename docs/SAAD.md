@@ -2759,10 +2759,13 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Video frame-drop policy | `FrameDropPolicyTest` |
 | MCP and REST contract behaviour | `ControlServerTest`, `ControlServerMcpTest`, `IndagiumToolGatewayTest` |
 | Every AI provider's stream parsing | `AnthropicMessagesProviderTest`, `OpenAiCompatibleProviderTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
-| Test-library codec (tolerant decode, newer-version read-only) and store (reorder, limits, atomic write, damaged file) | `TestLibraryCodecTest`, `TestLibraryStoreTest`, `TestModelReorderTest`, `TestAssetsTest` |
+| Test-library codec (tolerant decode, newer-version read-only) and store (reorder, UTF-8 size bounds, atomic write, protected recovery) | `TestLibraryCodecTest`, `TestLibraryStoreTest`, `TestModelReorderTest`, `TestAssetsTest` |
 | Edition limits and the dev switch | `TestLimitsTest`, `EditionServiceTest`, `TestsLimitsUiStateTest` |
 | Script safety: injection stays literal, type validation, adb quoting, timeout, output cap, process-tree kill | `TestScriptRunnerTest`, `HostCommandRunnerTest` |
 | The step protocol, retries, `onFailure`, timeouts, cancellation, and agent restarts | `TestRunEngineTest`, `TestRunEngineAccountAgentTest`, `DeterministicChecksTest`, `LaneGatewayTest`, `TestAgentToolsTest` |
+| Stale completion/observation rejection and case teardown outcome aggregation | `StepSequenceProtocolIdentityTest`, `TestRunEngineTest` |
+| Input coordinates retained across contacts and privacy-safe recording rewrites | `GeteventParserTest`, `RecordedVideoTimelineTest` |
+| Credential redaction in new previews and historical JSON/Markdown/ZIP exports | `LaneToolPreviewTest`, `TestRunReportExportTest` |
 | Lane scheduling (parallel across devices, sequential on one) and the confirmation timeout | `TestLaneSchedulingTest`, `ConfirmationGateTimeoutTest` |
 | The judge is blind, and comparison of disagreeing lanes | `JudgeBlindnessTest`, `JudgeComparisonTest` |
 | The judge's evidence and images come with its first message, for every agent kind | `JudgeEvidenceUpFrontTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
@@ -3015,7 +3018,7 @@ is `ASK`; the full list with owners is in [§26.11](#2611-known-risks-and-limita
 | **Case** | A previously written analysis note, indexed for similarity search so an engineer can find "have we seen this before?" |
 | **Compute cache** | The per-tab memoisation of `computeItems` output, keyed by tab id and filter-applied flag. |
 | **Confirmation-required tool** | A catalog-defined operation that pauses for explicit user approval before executing inside Indagium's own AI panel. Per-lane `ASK` scripts are also confirmed. An external MCP client is gated separately, per call (`PER_CALL_APPROVAL_MCP_TOOLS`). |
-| **Edition** | `FREE`, `PREMIUM`, `FRIENDS_FAMILY` or `UNLIMITED`: sets how many AI test suites and cases are *active*; the rest are locked (readable, never dropped). Builds default to `UNLIMITED` (§26.4). |
+| **Edition** | `FREE`, `PREMIUM`, `FRIENDS_FAMILY` or `UNLIMITED`: sets how many AI test suites and cases are *active*; the rest are locked (readable, never dropped). Packaged releases default to `FREE`; development runs default to `UNLIMITED` (§26.4). |
 | **Highlighter** | A pattern that colours matching text, or the whole line, without filtering anything out. Optionally limited to a tag, and matched against the tag, the message or the whole rendered line. |
 | **Judge** | A separate, *blind* AI run that decides whether one test step met its expected result from evidence alone (never the agent's words). A conclusive FAIL can downgrade a pass; explicit `ScreenJudge`/`AskJudge` checks require a usable judge, and an inconclusive mandatory verdict blocks the step (§26.7). |
 | **Lane** | One device driven through a test case by one agent (or by an MCP client, for an `external` lane). Lanes on different devices run in parallel; lanes sharing a device run in turn (§26.5). |
@@ -3276,10 +3279,14 @@ directory stops later starts from moving it into a different folder. A layout wh
   (`libraryFileRejection`, `testing/store/TestLibraryStore.kt:438`), so fields this build does not
   understand are not silently lost. A newer record can still be read, exported and deleted.
 - **A damaged `library.json` is set aside, not overwritten** (`…corrupt-<millis>`,
-  `testing/store/TestLibraryStore.kt:598`); suites that fail to load are skipped and listed in
-  `TestLibraryStore.loadIssues`.
+  `testing/store/TestLibraryStore.kt`); if that backup fails, the original stays in place and library
+  metadata remains read-only. Oversized or unreadable metadata is also preserved read-only, with an
+  actionable `TestLibraryStore.loadIssues` entry; suites that fail to load are skipped and listed there.
 - **Atomic writes.** Library, run and issue files all go through `writeFileAtomically` (§13.3).
-  Files over their cap (16 MB library/suite, 4 MB issue, 64 MB run) are treated as unreadable.
+  Files over their cap (16 MB library/suite, 4 MB issue, 64 MB run) are treated as unreadable. Library
+  mutations preflight every dirty library/suite document using serialized UTF-8 bytes before publishing
+  in-memory state. An oversized edit leaves memory and disk unchanged; rejected imports and duplicates
+  clean up staged assets.
 - **Settings are JSON-only and secret-free.** `AppSettings.tracker` and `.testing` are appended
   last to the settings JSON (`ui/AutosaveCodec.kt:682-684`), never to the frozen positional form
   (§22.4). The tracker's access token has no field anywhere in settings, autosave, `run.json`,
@@ -3305,14 +3312,22 @@ maps FREE to `EditionLimits(maxSuites = 1, maxCasesPerSuite = 5)` and the rest t
 An `EditionService` instance (not a global) lives on `AppState` (`ui/AppState.kt:1837`) so tests never
 leak an edition into each other.
 
-- **Default and resolution.** Builds default to `UNLIMITED`. `resolveStartup()` reads
-  `-Dindagium.edition` then `INDAGIUM_EDITION` (first non-blank wins, unknown → `UNLIMITED`)
-  (`edition/Edition.kt:68`); `Main.kt:136` calls it once. `desktopRun` forwards both
+- **Default and resolution.** Packaged releases (`jpackage.app-path` present) default to `FREE`; unpackaged
+  development runs default to `UNLIMITED`. The constructor and `resolveStartup()` use the same default. Startup reads
+  `-Dindagium.edition` then `INDAGIUM_EDITION` (first non-blank wins; an unknown value uses that build's default,
+  so a typo cannot unlock a Free release); `Main.kt` calls it once. `desktopRun` forwards both
   `indagium.edition` and `indagium.dev` into the run JVM (`build.gradle.kts:595-598`).
 - **Dev switch.** `setForDev()` (and the `set_edition` MCP tool) works only when
   `devSwitchAllowed()`: the build is not packaged (no `jpackage.app-path` property) or
   `-Dindagium.dev=true` is set (`edition/Edition.kt:76-83`). A packaged release can therefore never
-  be lowered or raised from outside.
+  be changed through the development buttons or MCP tool without an explicit development override. Startup edition
+  overrides still exist; this is edition configuration, not purchase or license validation.
+- **Support reminders.** `Edition.canDisableSupportReminders` enables the support dialog's real checkbox in
+  Premium, Friends & Family and Unlimited; Free shows the lock and explanation. The dialog observes edition changes
+  through StateFlow. `AppState.setSupportPromptSuppressed()` also gates the mutation, and `suppressSupportPrompt` is
+  persisted in keyed settings JSON (old/malformed settings default false, legacy positional settings unchanged).
+  Startup respects a saved opt-out, including after an edition change; the manual Support project link still opens
+  the dialog and lets an eligible edition re-enable reminders. Selecting an edition in development is session-only.
 - **`decide()` is the only decision point.** It is a pure function of the library, an operation and
   the limits (`testing/limits/TestLimits.kt:146`); the store, the MCP tools, import, duplicate, the
   UI controls and the run engine all call it, so the rules cannot diverge.
@@ -3365,6 +3380,11 @@ with an explanatory `error`; the run and the other lanes go on. A failing setup 
 steps are `SKIPPED`). Hooks leave their results in pseudo cases (`suite-setup`, `suite-teardown`) or as
 `setup`-flagged step results. Script hooks run directly — no agent, no confirmation: the suite's
 author wrote them and whoever started the run accepted them.
+
+Case teardown results are tracked separately from the body's expected-step count. Failed or timed-out
+teardown changes a passing body to FAIL; blocked or errored teardown retains that non-pass status.
+An existing body failure, setup block or cancellation takes precedence. Teardown evidence and notes
+remain available, and ordinary case retry and lane failure policies apply.
 
 #### 26.5.3 The step protocol
 
@@ -3419,6 +3439,10 @@ flowchart TB
   carries a summary of the steps already done, **fenced as untrusted data**. A stale run is cut off by
   an **epoch**: `newEpoch()` (`StepSequence.kt:216`) invalidates every earlier run's tool calls
   (`REPLACED_RUN_MESSAGE`).
+- **Protocol admission identity.** Free observation and completion calls carry the admitted step,
+  attempt and epoch. The sequence validates that identity under the same lock that accepts the result,
+  before recording observations or evaluating checks. A timeout, retry, advance or replacement rejects
+  an old call without changing the following step, including on external lanes.
 - **Current-step examples.** Agents can list and retrieve the active step's golden images and
   reference logs through lane-scoped example tools; transition replies identify examples on the next
   step. Image reads have byte and pixel limits, and example calls obey case tool permissions. A saved
@@ -3994,6 +4018,11 @@ There are two audiences, with two gates:
   for a *script* tool; a built-in lane tool needs no approval, since the run itself was approved.
   `create_issue_from_step` asks only for destination `tracker`.
 
+`try_test_script` prepares an immutable script snapshot, validated arguments (including defaults) and
+device serial before opening approval. An edited or deleted script requires a fresh request and approval.
+Accepted calls execute the captured snapshot without another lookup by ID; invalid preparation returns
+an error directly, and denied, expired or cancelled approvals execute nothing.
+
 The device tools keep their own, older per-session approval (§14.1).
 
 #### 26.9.3 Secrets
@@ -4015,6 +4044,11 @@ their existing memory-only treatment, §18.4).
   `issue.json`, `judge.jsonl` or a transcript. `TrackerConnection` keeps the header value in a private
   field and its `toString` prints the URL and header *name* only. Transcripts pass every string through
   `redactDiagnosticSecrets` (`testing/store/TranscriptWriter.kt:45`).
+- **Tool previews and reports.** String values are diagnostically redacted before preview truncation
+  and JSON encoding; credential-key masking remains in place. JSON, Markdown and evidence ZIP exports
+  sanitize historical cached previews and complete activity streams, including selected `run.json`
+  and tool-activity metadata files. Export sanitization leaves stored historical runs and ordinary
+  screenshot/video evidence unchanged.
 
 #### 26.9.4 The tracker connection
 
@@ -4235,7 +4269,10 @@ process helper the logcat reader uses; stderr merged, descendant kill on close).
 runs `DeviceInputPipeline` (the only thread that asks the device anything again); a 2 s rotation poller. The reader never blocks
 on the device. getevent timestamps are kernel uptime: `KernelClock` maps them to wall clock with the smallest observed offset and
 never runs backwards. `GeteventTouchParser` handles protocol B (slots, tracking ids), protocol A (`SYN_MT_REPORT` groups) and
-single-touch (`BTN_TOUCH` + `SYN_REPORT`), scales a raw axis position to natural display pixels (`value * size / (max - min + 1)`),
+single-touch (`BTN_TOUCH` + `SYN_REPORT`). Protocol B preserves each slot's last coordinates across
+contact releases because unchanged axes may be omitted from later contacts; a fresh parser starts with
+unknown coordinates. Single-touch also retains its axes, while protocol A behavior remains unchanged.
+The parser scales a raw axis position to natural display pixels (`value * size / (max - min + 1)`),
 then turns it by the display rotation read at that moment (Android's own rule: 90 gives `(y, W-1-x)`, 180 `(W-1-x, H-1-y)`,
 270 `(H-1-y, x)`), and emits the `MirrorControlCommand.Touch` values the mirror produces, with `screenWidth/Height` set to the
 logical size, so tap/long-press/swipe/multi-touch handling, probes, the rewrite and the video logic are shared unchanged. The
@@ -4655,7 +4692,9 @@ by `loadRecordedStepScreens`, which decodes `recording.json` with a store that r
 files; it needs no model change). The Examples section is open when the step has examples unless the user closed it for that step
 (`TestsViewState.examplesExpanded` / `setExamplesExpanded`, per step id, in memory). Shared steps reuse the same list
 and inspector (`TestsSharedStepsScreen`); the Scripts screen is a master list over a script editor with Try it and the tool schema in its
-inspector.
+inspector. Each script row's ⋯ menu includes **Delete…** beside Move up/down, so a newly created script can be removed directly
+from the list. The row and editor header share one confirmation dialog, bound to the requested script ID; deleting another row
+preserves the current selection, and references in steps, hooks and checks are described before confirmation.
 
 **Suite screen** (`TestsSuiteScreen.kt:87`). `TestsPageHeader` (suite name, **+ New case** (Secondary `HintedButton`, same enable rules and hint; the empty state offers a ghost one too), **▶ Run suite**, ⋯ Duplicate, Export…, Delete…), a last-run
 line (status dot, `formatRunMoment`, cases, lanes, "N of M steps passed", Open report; "Loading runs…" until the history first loads,

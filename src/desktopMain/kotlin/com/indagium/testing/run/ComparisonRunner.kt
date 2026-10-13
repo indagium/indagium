@@ -1,7 +1,6 @@
 package com.indagium.testing.run
 
 import com.indagium.debug.asObject
-
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepResult

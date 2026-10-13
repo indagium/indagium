@@ -75,7 +75,7 @@ private const val SCRIPT_COMMAND_MAX_HEIGHT_DP = 280
 
 /**
  * One row of a library list: the reorder grip, the [title], an optional [badge] and a ⋯ menu with Move up /
- * Move down (shown on hover or while selected), so the row keeps its column widths whether or not it is hovered.
+ * Move down and item-specific [actions] (shown on hover or while selected), keeping column widths stable.
  */
 @Composable
 private fun LibraryListRow(
@@ -85,6 +85,7 @@ private fun LibraryListRow(
     selected: Boolean,
     row: ReorderRowScope,
     menuDescription: String,
+    actions: List<TestsMenuItem> = emptyList(),
     onClick: () -> Unit,
 ) {
     val tc = tc()
@@ -118,7 +119,7 @@ private fun LibraryListRow(
                 listOf(
                     TestsMenuItem("Move up", onClick = row.moveUp, enabled = row.canMoveUp, disabledHint = readOnlyHint),
                     TestsMenuItem("Move down", onClick = row.moveDown, enabled = row.canMoveDown, disabledHint = readOnlyHint),
-                ),
+                ) + actions,
                 contentDescription = menuDescription,
             )
         }
@@ -165,6 +166,7 @@ internal fun TestsScriptsScreen() {
     val access = libraryEditAccess(library)
     val selected = library.scripts.firstOrNull { it.id == ui.view.selectedScriptId } ?: library.scripts.firstOrNull()
     var importError by remember { mutableStateOf<String?>(null) }
+    var deleteScriptId by remember { mutableStateOf<String?>(null) }
     TestsScreenScaffold(inspector = selected?.let { script -> { key(script.id) { ScriptInspector(script) } } }) {
         access.reason?.let {
             TestsLockedNotice(it)
@@ -210,6 +212,12 @@ internal fun TestsScriptsScreen() {
             LibraryListRow(
                 script.toolName, "used in $uses".takeIf { uses > 0 }, mono = true, selected = script.id == selected?.id, row = row,
                 menuDescription = "${script.toolName} actions",
+                actions = listOf(
+                    TestsMenuItem(
+                        "Delete…", onClick = { deleteScriptId = script.id }, danger = true,
+                        enabled = access.editable, disabledHint = access.reason, dividerBefore = true,
+                    ),
+                ),
             ) { ui.view.selectedScriptId = script.id }
         }
         if (selected == null) {
@@ -218,9 +226,30 @@ internal fun TestsScriptsScreen() {
             Spacer(Modifier.height(12.dp))
             Divider()
             Spacer(Modifier.height(12.dp))
-            key(selected.id) { ScriptEditor(selected, access.editable) }
+            key(selected.id) { ScriptEditor(selected, access.editable, onDelete = { deleteScriptId = selected.id }) }
         }
     }
+    library.scripts.firstOrNull { it.id == deleteScriptId }?.let { script ->
+        ScriptDeleteDialog(script, onDismiss = { deleteScriptId = null })
+    }
+}
+
+@Composable
+private fun ScriptDeleteDialog(script: TestScript, onDismiss: () -> Unit) {
+    val ui = LocalTestsUi.current
+    val uses = scriptUsageCount(ui.library, script.id)
+    TestsConfirmDialog(
+        title = "Delete script?",
+        message = "\"${script.toolName}\" will be deleted." +
+            if (uses > 0) " $uses step(s), hook(s) and check(s) that use it will keep pointing at it until you change them." else "",
+        confirmLabel = "Delete",
+        onConfirm = {
+            if (ui.report(ui.state.deleteTestScript(script.id)) is StoreResult.Ok && ui.view.selectedScriptId == script.id) {
+                ui.view.selectedScriptId = null
+            }
+        },
+        onDismiss = onDismiss,
+    )
 }
 
 private fun createScriptAndSelect(ui: TestsUi) {
@@ -266,9 +295,8 @@ private fun ScriptReturnBar(ui: TestsUi) {
  */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun ScriptEditor(script: TestScript, editable: Boolean) {
+private fun ScriptEditor(script: TestScript, editable: Boolean, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
-    var confirmDelete by remember { mutableStateOf(false) }
     var actionError by remember { mutableStateOf<String?>(null) }
     val update: ((TestScript) -> TestScript) -> StoreResult<*> = { transform -> ui.state.updateTestScript(script.id, transform) }
     TestsPageHeader(
@@ -290,25 +318,12 @@ private fun ScriptEditor(script: TestScript, editable: Boolean) {
                 enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE,
             ),
             TestsMenuItem("Export JSON…", onClick = { exportScriptJson(ui, script) { actionError = it } }),
-            TestsMenuItem("Delete…", onClick = { confirmDelete = true }, danger = true, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, dividerBefore = true),
+            TestsMenuItem("Delete…", onClick = onDelete, danger = true, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, dividerBefore = true),
         ),
     )
     actionError?.let { TestsErrorText(it) }
     Spacer(Modifier.height(HEADER_GAP))
     ScriptFields(script, editable, update)
-    if (confirmDelete) {
-        val uses = scriptUsageCount(ui.library, script.id)
-        TestsConfirmDialog(
-            title = "Delete script?",
-            message = "\"${script.toolName}\" will be deleted." +
-                if (uses > 0) " $uses hook(s) and check(s) that use it will keep pointing at it until you change them." else "",
-            confirmLabel = "Delete",
-            onConfirm = {
-                if (ui.report(ui.state.deleteTestScript(script.id)) is StoreResult.Ok) ui.view.selectedScriptId = null
-            },
-            onDismiss = { confirmDelete = false },
-        )
-    }
 }
 
 private fun exportScriptJson(ui: TestsUi, script: TestScript, onError: (String) -> Unit) {
