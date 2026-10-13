@@ -442,6 +442,7 @@ internal fun StepResult.timeoutAdviceLabel(): String? {
 
 /** The label of a step's chip in the matrix: kept short for a narrow lane column (a timed-out step adds whether its result looked met). */
 internal fun StepResult.matrixLabel(): String {
+    if (status == StepStatus.PASS && executionStatus == StepStatus.TIMEOUT) return "Pass · recovered"
     val advice = when (judge?.verdict.takeIf { status == StepStatus.TIMEOUT }) {
         JudgeVerdict.PASS -> " · met"
         JudgeVerdict.FAIL -> " · unmet"
@@ -451,7 +452,9 @@ internal fun StepResult.matrixLabel(): String {
 }
 
 /** The full label ("Timeout · judge: expected result met") for the inspector. */
-internal fun StepResult.detailLabel(): String = listOfNotNull(statusLabel(), timeoutAdviceLabel()).joinToString(" · ")
+internal fun StepResult.detailLabel(): String =
+    if (status == StepStatus.PASS && executionStatus == StepStatus.TIMEOUT) "Pass · recovered after timeout"
+    else listOfNotNull(statusLabel(), timeoutAdviceLabel()).joinToString(" · ")
 
 private const val TIME_PATTERN = "yyyy-MM-dd HH:mm"
 

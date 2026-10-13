@@ -2422,6 +2422,7 @@ class AppState(
         optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
         insertAsNew: Boolean = false,
         asReplay: Boolean = false,
+        replayRowIds: Set<String> = emptySet(),
     ): StoreResult<List<TestStep>> {
         val (session, target) = synchronized(testStepRecordingLock) {
             val active = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
@@ -2434,7 +2435,7 @@ class AppState(
         }
         val result = try {
             val options = when (val prepared = recordingApplyOptions(session, target, insertAsNew)) {
-                is StoreResult.Ok -> prepared.value.withReplay(asReplay)
+                is StoreResult.Ok -> prepared.value.withReplay(asReplay).withReplayRows(replayRowIds)
                 is StoreResult.Invalid -> return prepared
                 is StoreResult.NotFound -> return prepared
                 is StoreResult.LimitReached -> return prepared

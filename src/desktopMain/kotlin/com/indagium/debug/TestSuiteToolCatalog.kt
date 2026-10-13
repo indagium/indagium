@@ -613,11 +613,14 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "a new recording also saves its evidence. Asks for confirmation.",
         schema(
             "sessionId" to "string", "steps" to "array", "index" to "integer", "insertAsNew" to "boolean", "asReplay" to "boolean",
+            "replayRowIds" to "array",
             required = listOf("sessionId", "steps"),
             descriptions = mapOf(
                 "insertAsNew" to "Only for a reopened recording whose earlier steps cannot be replaced: insert the steps as new ones.",
                 "asReplay" to "Make every step that can be replayed (taps, swipes with their timing, keys, panels; not typed text, rotation, optional " +
                     "or precondition steps) a REPLAY step that injects its recorded input exactly instead of asking an AI agent. Default false.",
+                "replayRowIds" to "Replay only these reviewed recording-row IDs. Others keep their reviewed type. " +
+                    "Missing or ineligible IDs are rejected. Omit or send [] for AI steps by default; asReplay=true selects all eligible rows.",
             ),
             objectArrays = mapOf(
                 "steps" to ObjectArrayItemSchema(

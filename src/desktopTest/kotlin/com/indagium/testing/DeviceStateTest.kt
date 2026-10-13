@@ -65,6 +65,32 @@ class DeviceStateTest {
     }
 
     @Test
+    fun wifiEnabledReadsTheServiceStateAndDoesNotConfuseDisconnectedWithDisabled() {
+        val commands = ArrayList<List<String>>()
+        val reader = AdbDeviceStateReader { command ->
+            commands += command
+            DeviceShellOutput(0, "Wifi is enabled\nWifi is not connected\n", "", false)
+        }
+        assertEquals(DeviceStateReading.Value("true"), runBlocking { reader.read("wifi.enabled") })
+        assertEquals(listOf(listOf("cmd", "wifi", "status")), commands)
+        assertEquals(DeviceStateReading.Value("false"), parseDeviceState("wifi.enabled", "Wifi is disabled\n"))
+        assertIs<DeviceStateReading.Unavailable>(parseDeviceState("wifi.enabled", "Wifi is not connected\n"))
+        assertIs<DeviceStateReading.Unavailable>(parseDeviceState("wifi.enabled", "Wifi is enabled\nWifi is disabled\n"))
+    }
+
+    @Test
+    fun anInterruptedDeviceStateCheckRetainsItsLastReading() = runBlocking {
+        val subject = checks { DeviceStateReading.Value("true") }
+        val updates = ArrayList<com.indagium.testing.model.CheckResult>()
+        val completed = kotlinx.coroutines.withTimeoutOrNull(150) {
+            subject.evaluate(StepCheck.DeviceState(newCheckId(), "wifi.enabled", "false", 600_000), 0L, updates::add)
+        }
+        assertEquals(null, completed)
+        assertEquals(CheckStatus.NOT_EVALUATED, updates.last().status)
+        assertTrue("wifi.enabled = true" in updates.last().detail, updates.last().detail)
+    }
+
+    @Test
     fun anUnknownKeyIsPermanentlyUnavailableAndNamesTheSupportedOnes() {
         val reading = assertIs<DeviceStateReading.Unavailable>(runBlocking { AdbDeviceStateReader { error("must not run") }.read("battery.level") })
 
@@ -98,7 +124,7 @@ class DeviceStateTest {
         adb.shellStdout = "1\n"
 
         assertEquals(DeviceStateReading.Value("true"), runBlocking { lane.readDeviceState("wifi.enabled") })
-        assertTrue(adb.shellCommands.any { it.takeLast(4) == listOf("settings", "get", "global", "wifi_on") }, adb.shellCommands.toString())
+        assertTrue(adb.shellCommands.any { it.takeLast(3) == listOf("cmd", "wifi", "status") }, adb.shellCommands.toString())
 
         lane.deviceStateReader = DeviceStateReader { DeviceStateReading.Value("0781:5581 Ultra") }
         assertEquals(DeviceStateReading.Value("0781:5581 Ultra"), runBlocking { lane.readDeviceState("usb.devices") })
@@ -110,7 +136,7 @@ class DeviceStateTest {
         DeviceStateSource.BATTERY to deviceStateFixture("dumpsys_battery_ac.txt"),
         DeviceStateSource.BLUETOOTH_ENABLED to "1\n",
         DeviceStateSource.BLUETOOTH_CONNECTED to deviceStateFixture("dumpsys_bluetooth_manager_on.txt"),
-        DeviceStateSource.WIFI to "0\n",
+        DeviceStateSource.WIFI to "Wifi is disabled\n",
         DeviceStateSource.AIRPLANE to "0\n",
         DeviceStateSource.MOBILE_DATA to "1\n",
         DeviceStateSource.AUDIO to deviceStateFixture("dumpsys_audio_speaker.txt").replace("Devices: speaker(2)", "Devices: headset(4)"),

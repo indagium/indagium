@@ -116,11 +116,9 @@ private fun touchAction(event: RecordedInputEvent.Touch, space: DeviceScreenCoor
     }
 }
 
-/** Bound shell process overhead while keeping first, movement endpoint and lift; dense samples cannot run at their recorded cadence. */
+/** Preserve every recorded sample that fits the gesture tool, including short swipes; bound only paths over the tool's point limit. */
 internal fun thin(points: List<GesturePoint>): List<GesturePoint> {
-    if (points.size <= 2) return points
-    val duration = points.last().tMs
-    val budget = (duration / MIN_MOTION_SAMPLE_INTERVAL_MS + 2).toInt().coerceIn(3, GESTURE_MAX_POINTS.coerceAtMost(MAX_REPLAY_MOTION_POINTS))
+    val budget = GESTURE_MAX_POINTS
     if (points.size <= budget) return points
     val last = points.last()
     var movementEnd = points.lastIndex
@@ -134,9 +132,6 @@ internal fun thin(points: List<GesturePoint>): List<GesturePoint> {
     }
     return (selected + if (includesLift) listOf(last) else emptyList()).distinct()
 }
-
-private const val MIN_MOTION_SAMPLE_INTERVAL_MS = 120L
-private const val MAX_REPLAY_MOTION_POINTS = 16
 
 /** The screenshot pixel a recorded fraction of the screen falls on: the inclusive mapping the session's own conversions invert. */
 internal fun toImage(fraction: Double, imageSize: Int): Int =

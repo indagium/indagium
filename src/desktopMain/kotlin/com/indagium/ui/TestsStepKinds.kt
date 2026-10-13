@@ -91,10 +91,10 @@ internal fun StepKindSelector(kind: StepKind, enabled: Boolean, replayAvailable:
 
 /** What the kind means, in one sentence under the selector. */
 internal fun stepKindHint(kind: StepKind): String = when (kind) {
-    StepKind.AGENT -> "An AI agent (or the client driving an external lane) does the action on the device."
+    StepKind.AGENT -> "An AI agent chooses actions to achieve the expected result. Recorded inputs are hints; use Replay to execute the recorded sequence."
     StepKind.MANUAL -> "A tester does it by hand: the lane waits, showing the action as instructions. An automation script can do it instead."
     StepKind.SCRIPT -> "The run itself runs a library script on this step. No AI agent is involved."
-    StepKind.REPLAY -> "Replays recorded positions, path and timing where the device supports them. The judge still checks the expected result."
+    StepKind.REPLAY -> "Replays recorded positions, path and timing where the device supports them. Configured checks and judge settings verify the result."
 }
 
 /** How a manual step is completed, with a sentence about what each choice does. */

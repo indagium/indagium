@@ -153,6 +153,7 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 optionalOverrides,
                 insertAsNew = a.bool("insertAsNew") == true,
                 asReplay = a.bool("asReplay") == true,
+                replayRowIds = a.strings("replayRowIds").orEmpty().toSet(),
             ).toResult { inserted ->
                 mapOf(
                     "sessionId" to a.requiredString("sessionId"),

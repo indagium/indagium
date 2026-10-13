@@ -3409,8 +3409,9 @@ flowchart TB
   happen under a coroutine `Mutex` (`:135`).
 - **Timeouts.** A watchdog polls every `watchdogPollMs` = 250 ms (`EngineTuning`,
   `testing/run/EngineSupport.kt:24`); `checkTimeout` (`StepSequence.kt:528`) closes a step that
-  outlives its `timeoutMs` as `TIMEOUT` and applies the same `onFailure`, then announces a
-  `SequenceEvent` so the driver can restart the agent.
+  outlives its `timeoutMs` at a verification checkpoint. A judge-confirmed AI action with satisfied checks
+  can recover as PASS; otherwise TIMEOUT applies the same `onFailure`. The sequence announces a
+  `SequenceEvent` so the driver replaces the expired agent before proceeding (see timeout recovery below).
 - **Agent segments and restarts.** `LaneDriver.agentLoop` (`testing/run/LaneDriver.kt:73`) runs one
   agent *run* (a segment) at a time. A new segment starts after a step timeout (resuming at the next
   step) or after the agent failed or stopped without finishing its step (resuming at that same step, at
@@ -3436,6 +3437,21 @@ flowchart TB
   and MCP all carry both fields. `ensure_state` checks the goal before mutation and passes when it already holds. `perform_action`
   establishes its precondition and verifies the specified transition, not only the destination state; retries inspect transition
   evidence and reestablish the precondition before repeating a toggle. The lane may wait for transient UI state at most twice per step.
+  Optional steps run only when their condition is present; optional does not replace the intent with `ensure_state`. Single-step,
+  background and comparison judges receive that flag and condition from the frozen step definition, independently of the agent's claim.
+- **Recorded gestures.** Initial lane prompts and current/next/redo replies carry structured recorded swipe samples with their actual
+  times, in addition to compact hints. Release is included once, with no extra endpoint hold. With a live embedded capture, gestures
+  use the same continuous scrcpy touch stream as the manual mirror, scaled to the encoded video resolution. A gesture pins its connection
+  and screen geometry, uses absolute sample deadlines, and attempts CANCEL on interruption without injecting a replacement gesture.
+  Captures without that stream retain the adb motion-event path (with process timing overhead) or the older-device straight-swipe fallback.
+  The recording review defaults to AI steps, where recordings guide action selection rather than enforcing an input sequence. Reviewers
+  may select individual eligible row IDs for Replay, or opt into replaying all eligible rows. Eligibility excludes optional/precondition
+  rows and inputs that cannot be replayed; invalid or stale explicit selections are refused before importing assets. Row IDs retain the
+  selection through reordering. Replay preserves all samples up to the gesture tool's point limit instead of coarsening short swipes.
+- **Navigation evidence.** For Home/Recents/launcher/floating-player steps, agent screenshots include a bounded Android hierarchy summary.
+  Start/end judge frames retain independent, timestamped summaries, also saved as bounded `.ui.json` screenshot sidecars for comparison judges.
+  A visible overview container together with task cards identifies Recent apps; launcher package, wallpaper, a dock or live video alone
+  cannot establish Home or picture-in-picture. Missing/unclassified hierarchy is unavailable evidence, never proof that a target is absent.
 - **Atomic input sequences.** `perform_input_sequence` accepts 1..8 already-known taps, swipes or keys with delays ≤1 s each
   and ≤2 s total. Parsing, per-case allow-lists, coordinates, deadline and aggregate step/case budget are checked before input;
   admission reserves the batch and final screenshot atomically, then charges only dispatched primitives and capture. It runs
@@ -3521,8 +3537,9 @@ shares the step's execution deadline with deterministic checks; configured judgi
 step. Injection failure must remain an execution failure even if the resulting screen happens to match the expected text.
 New replay steps default to zero retries because repeating a partly completed toggle can reverse its result.
 
-`testing/device/GestureScript.kt` sends ordered Android motion-event input with the path's times and the hold before release.
-Android shell command overhead limits timing accuracy; this is recorded-path replay rather than hardware-level timing.
+With a live embedded capture, `testing/device/MirrorGesture.kt` sends timed touch events through the manual mirror's control stream.
+Without that stream, `GestureScript.kt` sends ordered Android motion-event commands; shell process overhead limits timing accuracy.
+Both are recorded-path replay rather than hardware-level timing.
 Devices without motion-event support fall back to a straight swipe with a reported approximation. Failure or cancellation
 attempts to release the finger; a partially injected gesture is not automatically injected again as a fallback.
 
@@ -3714,15 +3731,22 @@ reported as passed.". `StepResult.agentJudgeDisagrees()` (`TestSuiteHistory.kt`)
 under **Disagreements** beside cross-lane disagreement (`stepRowMatches`) and marks its matrix row with "≠". The run meta line says
 when the judge ran ("judge: every step, after the case" / ", in the background") so a verdict that lands after the case is explained.
 
-**A step that times out is still judged, as advice.** `StepSequence.timeoutEvaluationLocked` takes the end screenshot at the
-deadline (bounded by `TIMEOUT_EVIDENCE_MS`), freezes the evidence (end screenshot, playback samples, log window) and, when the run's
-judge mode would have judged the step (`timeoutAdviceRequested`: `shouldJudge` with a failed claim), asks the judge: inline timing,
-setup hooks, explicit judge checks and PAUSE_FOR_USER steps judge at once; otherwise the frozen judge goes through the deferred
-queue (`FrozenJudge.advisory`). The verdict is stored on the step (`judge`, `verificationState`) but the status stays TIMEOUT, the
-checks are not touched and the case outcome is unchanged; the note says "Advisory judge: the expected result looks met …". The
-timeout note lists the attempt's last tool calls ("The agent did not finish the step within 60 s (last tool calls: wait_for_ui ×2,
-tap, take_screenshot, dump_ui_tree). The action may have succeeded — see the screenshot and the judge's advice."), built from the
-tools admitted during the attempt (`attemptToolNames`, protocol tools left out).
+**Timeout verification and recovery.** `StepSequence.timeoutEvaluationLocked` takes a bounded end screenshot and retains
+completed checks plus the last device-state reading. The note distinguishes an agent that never submitted a result from an
+agent whose `finish_step` was waiting for verification. When a judge is configured for that step, timeout verification runs
+inline even with BACKGROUND or AFTER_CASE timing: its answer is needed before stopping the case or changing the device.
+Pending DeviceState checks receive one current-state read, bounded together by `TIMEOUT_STATE_RECHECK_MS`; scripts are never
+rerun and log-observation windows are never shortened. Wi-Fi checks and recording probes read the Wi-Fi service's current
+state with `cmd wifi status`, rather than the persisted `wifi_on` preference; disconnected does not mean disabled.
+
+A conclusive, error-free judge PASS recovers an AGENT step only with fresh end-image evidence, no input/script tool still
+running, an unexhausted case budget and every explicit deterministic check PASS (`canRecoverTimeout`). Judge-only checks take
+the verdict. The final step becomes PASS and advances even under STOP_CASE or PAUSE_FOR_USER; `executionStatus = TIMEOUT`,
+its attempt history and the explanatory note retain the exceeded deadline. The UI says **Pass · recovered** and the inspector
+**Pass · recovered after timeout**. The old lane agent is invalidated and cancelled before a fresh segment starts on the next
+step. Failed, unfinished or unavailable checks, an inconclusive/unavailable/failed judge, stale screenshot, running input or a
+driver step retain TIMEOUT and apply the configured failure policy; a PASS verdict in that situation remains advisory and
+never silently waives the unresolved requirement. Historical saved timeout runs keep their original outcome.
 
 **Interrupted steps.** A cancel that reaches a running step makes `LaneRunner.runSteps` close it with
 `StepSequence.abort(StepStatus.ERROR, …, interrupted = true)`. `StepResult.interrupted` (appended last; written to `run.json` only
@@ -4268,7 +4292,7 @@ section with `DeviceStateSource.parse`, the parsers of the run-time `DeviceState
 proto-style dump prints one field per line inside `{ }` records, a list of one without brackets - and only a record in the
 `devices` of `host_manager` counts, only with its own fields; `vendor_id=-1` filters, `device_manager`, `port_manager` and nested
 configurations/interfaces never do; the one-line layout of older Android is read outside any `{ }`), `power.source` and
-`battery.status` (`dumpsys battery`), `bt.enabled`, `wifi.enabled`, `airplane`, `mobile_data` (`settings get global`),
+`battery.status` (`dumpsys battery`), `wifi.enabled` (`cmd wifi status`), `bt.enabled`, `airplane`, `mobile_data` (`settings get global`),
 `bt.connected` (the device lines under `Connected devices: N` of `dumpsys bluetooth_manager`, else the adapter's `ConnectionState`;
 best effort), `audio.devices` (the wired/USB names in the `Devices:` line of each stream of `dumpsys audio`; best effort),
 `screen.awake` (`mWakefulness`) and `rotation`. A section that is missing, empty, a service complaint or not understood is dropped

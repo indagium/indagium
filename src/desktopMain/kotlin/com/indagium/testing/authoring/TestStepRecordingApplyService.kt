@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap
  * - [replaceStepIds] replaces those steps, in place, instead of inserting (see [planReplacement]).
  * - [asReplay] makes every step that can be replayed a REPLAY step (it injects its recorded input itself) instead of an AI step; the
  *   others stay AI steps and the result says how many.
+ * - [replayRowIds] selects only those reviewed rows for replay. Invalid or ineligible selections are refused before importing assets.
  * - [afterApplied] runs once the steps are in the library, still on the IO thread and while the reviewed rows are frozen; it saves the
  *   recording's evidence and returns warnings for the person. It must not throw for an expected problem.
  */
@@ -27,9 +28,13 @@ internal class RecordingApplyOptions(
     val afterApplied: ((snapshot: TestStepRecordingSnapshot, inserted: List<TestStep>) -> List<String>)? = null,
     val replaceStepBaseline: List<TestStep>? = null,
     val asReplay: Boolean = false,
+    val replayRowIds: Set<String> = emptySet(),
 ) {
     fun withReplay(on: Boolean): RecordingApplyOptions =
-        if (on == asReplay) this else RecordingApplyOptions(recordingRef, replaceStepIds, afterApplied, replaceStepBaseline, on)
+        if (on == asReplay) this else RecordingApplyOptions(recordingRef, replaceStepIds, afterApplied, replaceStepBaseline, on, replayRowIds)
+
+    fun withReplayRows(ids: Set<String>): RecordingApplyOptions =
+        if (ids == replayRowIds) this else RecordingApplyOptions(recordingRef, replaceStepIds, afterApplied, replaceStepBaseline, asReplay, ids.toSet())
 }
 
 /**
@@ -52,14 +57,18 @@ internal typealias ReplaceStepsWithUsage = (
     baseline: List<TestStep>?,
 ) -> StoreResult<List<TestStep>>
 
-private fun replaySummary(steps: List<TestStep>): List<String> {
+private fun replaySummary(steps: List<TestStep>, allEligible: Boolean): List<String> {
     val replayed = steps.count { it.kind == StepKind.REPLAY }
     val kept = steps.size - replayed
     return listOfNotNull(
         ("$replayed step(s) were applied as replay steps and will inject their recorded path, positions and timing where the device " +
             "supports it.").takeIf { replayed > 0 },
-        ("$kept step(s) stay AI steps because they cannot be replayed (typed text, rotation, a condition or precondition, or input " +
-            "withheld for a password).").takeIf { kept > 0 },
+        (if (allEligible) {
+            "$kept step(s) stay AI steps because they cannot be replayed (typed text, rotation, a condition or precondition, or input " +
+                "withheld for a password)."
+        } else {
+            "$kept step(s) keep their reviewed type; unselected rows are not converted to replay."
+        }).takeIf { kept > 0 },
     )
 }
 
@@ -99,6 +108,12 @@ internal class TestStepRecordingApplyService(
                 if (snapshot.steps.any { recordingRowIssues(it).isNotEmpty() }) {
                     return@withContext StoreResult.Invalid("Add an action and expected result to every required step, and a condition to each optional step.")
                 }
+                val eligibleRows = session.replayableRowIds()
+                if (!eligibleRows.containsAll(options.replayRowIds)) {
+                    return@withContext StoreResult.Invalid(
+                        "A selected replay row is missing or cannot be replayed. Select recorded inputs without optional conditions or preconditions.",
+                    )
+                }
                 when (val allowed = preflight(suiteId, caseId)) {
                     is StoreResult.Ok -> Unit
                     is StoreResult.Invalid -> return@withContext StoreResult.Invalid(allowed.reason)
@@ -121,9 +136,11 @@ internal class TestStepRecordingApplyService(
                             temporary.delete()
                         }
                     }
-                    val shaped = if (options.asReplay) steps.map(::asReplayStepOrSame) else steps
+                    val shaped = steps.mapIndexed { rowIndex, step ->
+                        if (options.asReplay || snapshot.steps[rowIndex].id in options.replayRowIds) asReplayStepOrSame(step) else step
+                    }
                     val stamped = options.recordingRef?.let { ref -> shaped.map { it.copy(recordingRef = ref) } } ?: shaped
-                    val replayWarnings = if (options.asReplay) replaySummary(shaped) else emptyList()
+                    val replayWarnings = if (options.asReplay || options.replayRowIds.isNotEmpty()) replaySummary(shaped, options.asReplay) else emptyList()
                     val replaced = options.replaceStepIds
                     val outcome = when {
                         replaced == null -> insertStepsWithUsage(caseId, stamped, index, snapshot.rewriteUsagePending)

@@ -7,6 +7,7 @@ import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureRecorder
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.RecorderState
+import com.indagium.capture.mirror.MirrorGestureControl
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import java.io.File
@@ -57,6 +58,9 @@ internal interface LaneCapture {
     /** The current screen as PNG bytes. Blocking. */
     fun readScreen(): ByteArray
 
+    /** A live mirror input stream pinned for one gesture, or null when the capture has no embedded control connection. */
+    fun gestureControl(): MirrorGestureControl? = null
+
     /** Writes a marker like the Mark issue button does, in the lane's notes. */
     suspend fun addMarker(request: LaneMarkerRequest): LaneMarkerOutcome
 
@@ -91,6 +95,8 @@ internal class StandaloneLaneCapture(
     override fun flushedLogLength(): Long = recorder.snapshotForExport(session.id).logLength
 
     override fun readScreen(): ByteArray = recorder.readScreen()
+
+    override fun gestureControl(): MirrorGestureControl? = recorder.activeEmbeddedSession()?.gestureControl()
 
     override suspend fun addMarker(request: LaneMarkerRequest): LaneMarkerOutcome = LaneMarkerOutcome.Skipped(NO_LANE_NOTES_REASON)
 

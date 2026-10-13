@@ -26,12 +26,14 @@ import com.indagium.testing.device.UiNode
 import com.indagium.testing.device.UiTreeNodeView
 import com.indagium.testing.device.UiTreeRead
 import com.indagium.testing.device.gestureProblem
+import com.indagium.testing.device.needsUiStructure
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepExample
+import com.indagium.testing.model.RecordedInput
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.isValidScriptToolName
 import com.indagium.testing.script.AdbScriptTarget
@@ -123,6 +125,7 @@ internal data class LaneStepBrief(
     val precondition: String? = null,
     val gestureHint: String? = null,
     internal val dispatchEpoch: Long = 0L,
+    val recordedInput: RecordedInput? = null,
 )
 
 /** Immutable attempt identity carried through an admitted tool, including work that completes after a timeout. */
@@ -400,9 +403,7 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "intent" to step.intent,
                 "precondition" to step.precondition,
                 "attempt" to step.attempt,
-            ) + step.exampleMetadata() + step.gestureHint?.let {
-                untrustedData("recorded_gesture_hint", mapOf("summary" to it))
-            }.orEmpty()
+            ) + step.exampleMetadata() + step.recordedGestureContext() + step.optionalGuidance()
         },
     ),
     LaneTool(
@@ -451,6 +452,12 @@ internal fun LaneStepBrief.exampleMetadata(): Map<String, Any?> = if (examples.i
     )
 }
 
+internal fun LaneStepBrief.optionalGuidance(): Map<String, Any?> = if (!optional) emptyMap() else mapOf(
+    "optionalGuidance" to "Before any action, check the exact condition: ${condition.orEmpty()}. " +
+        "Run and verify only when that condition is present. Otherwise finish_step skipped with what you checked; " +
+        "do not run merely because the action's target is visible. An unavailable observation is not proof of absence.",
+)
+
 private fun screenTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
         IndagiumToolDescriptor(
@@ -460,6 +467,10 @@ private fun screenTools(context: LaneToolContext): List<LaneTool> = listOf(
         ),
         guarded {
             val shot = context.session.screenshot()
+            val step = context.currentStep()
+            val structure = if (step != null && needsUiStructure(step.action, step.expected, step.condition)) {
+                untrustedData("android_ui_structure", mapOf("uiStructure" to context.session.readUiStructure()))
+            } else emptyMap()
             mapOf(
                 "message" to "Current Android device screen",
                 "imageBase64" to Base64.getEncoder().encodeToString(shot.image.bytes),
@@ -469,7 +480,7 @@ private fun screenTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "coordinateSpace" to "returned-image-pixels",
                 "coordinateInstructions" to "Tap and swipe coordinates use this returned image's top-left origin and pixel " +
                     "dimensions; they are mapped to physical device pixels automatically.",
-            )
+            ) + structure
         },
     ),
     LaneTool(

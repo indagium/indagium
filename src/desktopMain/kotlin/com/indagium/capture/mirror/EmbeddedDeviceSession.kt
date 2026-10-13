@@ -328,6 +328,23 @@ internal class EmbeddedDeviceSession(
         return runCatching { connection.sendControl(bytes); true }.getOrDefault(false)
     }
 
+    /** Pins a sequence of input events to one live connection; a reconnect must never split a held touch across servers. */
+    fun gestureControl(): MirrorGestureControl? {
+        val active = synchronized(lock) {
+            currentConnection.takeIf { !stopping && connectionSnapshotValue.state == EmbeddedMirrorState.LIVE }
+        } ?: return null
+        val screen = synchronized(videoObserverLock) { recentVideoPackets.lastOrNull() ?: latestVideoConfigPacket } ?: return null
+        if (screen.width <= 0 || screen.height <= 0) return null
+        return MirrorGestureControl(screen.width, screen.height) { bytes ->
+            val current = synchronized(lock) { !stopping && currentConnection === active }
+            val sameScreen = synchronized(videoObserverLock) {
+                val latest = recentVideoPackets.lastOrNull() ?: latestVideoConfigPacket
+                latest?.connectionEpoch == screen.connectionEpoch && latest.width == screen.width && latest.height == screen.height
+            }
+            current && sameScreen && runCatching { active.sendControl(bytes); true }.getOrDefault(false)
+        }
+    }
+
     /**
      * Attaches a live mirror decoder to this same device stream. Safe to call whether or not the
      * session is currently connected — frames simply resume once a connection exists. Detaches any

@@ -23,6 +23,8 @@ import com.indagium.testing.authoring.restBeforeLiftMs
 import com.indagium.testing.authoring.rewriteInputsOf
 import com.indagium.testing.device.DeviceInputAction
 import com.indagium.testing.model.RecordedInputEvent
+import com.indagium.testing.model.RecordedInput
+import com.indagium.testing.model.TimedGesturePoint
 import com.indagium.testing.model.RecordedTouchKind
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.holdBeforeReleaseMs
@@ -41,6 +43,17 @@ import kotlin.test.assertTrue
  * input of a step, and the reference-log text with the timing (and the old text without it).
  */
 class ReplayRecordingTest {
+    @Test
+    fun replayDoesNotReduceTheUsersShortRecordedSwipeToAGuessedCoarsePath() {
+        val times = listOf(0L, 6L, 13L, 59L, 97L, 143L, 188L, 208L)
+        val points = times.mapIndexed { index, time -> TimedGesturePoint(0.61 + index * 0.005, 0.35 - index * 0.02, time) }
+        val input = RecordedInput(listOf(RecordedInputEvent.Touch(RecordedTouchKind.SWIPE, points, 208, 1234, 1280)))
+        val plan = planReplay(input, DeviceScreenCoordinateSpace(1038, 1076, 2076, 2152)) as ReplayPlan.Ready
+        val gesture = plan.actions.single() as DeviceInputAction.Gesture
+        assertEquals(times, gesture.points.map { it.tMs })
+        assertEquals(points.size, gesture.points.size)
+    }
+
     private fun touch(action: MirrorTouchAction, x: Int, y: Int, pointer: Long = 1) = MirrorControlCommand.Touch(
         action = action, pointerId = pointer, x = x, y = y, screenWidth = 100, screenHeight = 200,
     )

@@ -422,6 +422,12 @@ private fun JudgeRow(
             "without seeing what the agent claimed.",
         Modifier.padding(top = 4.dp),
     )
+    if (model.judgeMode == JudgeMode.FAILURES_ONLY) {
+        TestsHint(
+            "Successful steps are only judged if they have a judge check. " +
+                "Choose Every step to verify all reported passes. Optional skips are not judged.",
+        )
+    }
     if (model.judgeMode != JudgeMode.OFF) {
         TestsLabeled("Judgment schedule", Modifier.padding(top = 8.dp)) {
             TestsDropdown(

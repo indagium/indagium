@@ -14,8 +14,9 @@ package com.indagium.testing.device
 /** A position of a gesture and the time, in milliseconds after the finger went down, the finger is there. */
 internal data class GesturePoint(val x: Int, val y: Int, val tMs: Long)
 
-/** How a gesture reached the device: the faithful path, or the straight-swipe approximation older Android versions force. */
+/** How a gesture reached the device: the live mirror stream, individual motion commands, or a straight swipe. */
 internal enum class GestureMode(val wire: String) {
+    MIRROR_CONTROL("mirror_control"),
     MOTION_EVENTS("motionevent"),
     SWIPE_FALLBACK("swipe_fallback"),
 }

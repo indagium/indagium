@@ -16,7 +16,8 @@ import com.indagium.testing.model.TestStep
 // FINAL STEP STATUS (a judgment is requested):
 //   1. The base status is the one without a judge: PASS when the agent claimed pass and no check failed, BLOCKED when it
 //      claimed blocked, FAIL otherwise. A deterministic failure (a log, script or judge check that failed) is therefore FAIL,
-//      and a judge can never turn a failure, a block or a timeout into a pass.
+//      and a judge cannot override those failures or blocks. Timeout recovery is a separate checkpoint in StepSequence,
+//      requiring fresh end evidence, idle inputs and every deterministic check satisfied (TimeoutRecovery.kt).
 //   2. Only a base PASS is revisited: a judge verdict of FAIL makes it FAIL; INCONCLUSIVE becomes BLOCKED under the
 //      configured BLOCK policy or keeps PASS as advisory under KEEP_AGENT_PASS. An unavailable requested judge is inconclusive;
 //      explicit judge checks always require a verdict.

@@ -2,6 +2,7 @@ package com.indagium.testing
 
 import com.indagium.ai.LlmRole
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeTiming
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestRun
@@ -9,6 +10,7 @@ import com.indagium.testing.run.COMPARISON_SYSTEM_PROMPT
 import com.indagium.testing.run.JUDGE_CHANCE_CLASSIFICATION_RULE
 import com.indagium.testing.run.JUDGE_MAX_ATTACHED_IMAGES
 import com.indagium.testing.run.JUDGE_SYSTEM_PROMPT
+import com.indagium.testing.run.JUDGE_OPTIONAL_RULE
 import com.indagium.testing.run.JudgeEvidence
 import com.indagium.testing.run.JudgeImage
 import com.indagium.testing.run.JudgeLaneEvidence
@@ -220,5 +222,34 @@ class JudgeStartScreenTest {
         assertEquals(2, second.images.size)
         assertContains(second.content.orEmpty(), "1. $START_SCREEN_LABEL (Lane)\n2. The screen when the step ended (Lane)")
         assertNotEquals(first.images[1].base64, second.images[0].base64, "the second attempt captures its current screen instead of reusing the prior end")
+    }
+
+    @Test
+    fun backgroundJudgeReceivesTheAuthorsOptionalConditionWithoutTheAgentsClaim() {
+        val condition = "home screen is shown already"
+        val suite = suiteOf(caseOf("YouTube", step("Swipe up").copy(optional = true, condition = condition, expected = "The Home screen is visible.")))
+        val judge = ScriptedJudgeProvider { JudgeAnswer(verdict = "pass", reasoning = "The evidence matches.") }
+        val agent = AutoAgentProvider(listOf("pass" to "private agent observation"))
+        val h = RunHarness(
+            libraryOf(suite), profile = profileOf(LANE_A_PROFILE_ID), extraProfiles = listOf(judgeProfile),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent, JUDGE_PROFILE_ID to judge)), tuning = FAST_TUNING,
+        ).also { harness = it }
+        h.adb.uiDump = overviewUiDump()
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(
+            judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire, judgeTiming = JudgeTiming.BACKGROUND,
+        )
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+        val request = judge.requests.first()
+        val prompt = request.messages.first { it.role == LlmRole.USER }.content.orEmpty()
+        assertContains(prompt, "\"optional\":true")
+        assertContains(prompt, "\"condition\":\"$condition\"")
+        assertContains(prompt, "\"intent\":\"perform_action\"")
+        assertFalse("private agent observation" in prompt)
+        assertContains(prompt, "\"surface\":\"recent_apps\"")
+        assertContains(prompt, "overview_panel")
+        assertContains(prompt, "task_view_single")
+        assertContains(JUDGE_SYSTEM_PROMPT, JUDGE_OPTIONAL_RULE)
+        assertContains(COMPARISON_SYSTEM_PROMPT, JUDGE_OPTIONAL_RULE)
     }
 }

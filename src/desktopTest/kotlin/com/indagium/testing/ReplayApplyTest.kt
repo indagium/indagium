@@ -11,6 +11,7 @@ import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.asReplayStepOrSame
 import com.indagium.testing.authoring.canBeReplay
 import com.indagium.testing.model.RecordedInputEvent
+import com.indagium.testing.model.RecordedTouchKind
 import com.indagium.testing.model.StepIntent
 import com.indagium.testing.model.StepKind
 import com.indagium.testing.model.TestStep
@@ -84,6 +85,79 @@ class ReplayApplyTest {
         assertNotNull(inserted[0].recordedInput)
         assertTrue(ok.warnings.any { it.contains("2 step(s) were applied as replay steps") }, ok.warnings.toString())
         assertTrue(ok.warnings.any { it.contains("1 step(s) stay AI steps") }, ok.warnings.toString())
+        session.close()
+    }
+
+    @Test
+    fun onlyTheSelectedRecordedSwipeIsReplayedWhileOtherStepsStayAi() = runBlocking {
+        val session = reviewedSession()
+        val swipeId = session.snapshot.value.steps[1].id
+        val inserted = mutableListOf<TestStep>()
+        val result = service(inserted).apply(
+            session, "suite-fixture", "case-fixture", options = RecordingApplyOptions().withReplayRows(setOf(swipeId)),
+        ) as StoreResult.Ok
+
+        assertEquals(listOf(StepKind.AGENT, StepKind.REPLAY, StepKind.AGENT), inserted.map { it.kind })
+        assertEquals(RecordedTouchKind.SWIPE, (assertNotNull(inserted[1].recordedInput).events.single() as RecordedInputEvent.Touch).kind)
+        assertNotNull(inserted[0].recordedInput, "unselected AI steps retain recording guidance")
+        assertTrue(result.warnings.any { "1 step(s) were applied as replay steps" in it })
+        assertTrue(result.warnings.any { "unselected rows are not converted" in it })
+        session.close()
+    }
+
+    @Test
+    fun replaySelectionFollowsTheRowIdWhenTheReviewIsReordered() = runBlocking {
+        val session = reviewedSession()
+        val swipeId = session.snapshot.value.steps[1].id
+        assertTrue(session.moveReviewedRow(swipeId, 0))
+        val inserted = mutableListOf<TestStep>()
+        assertTrue(service(inserted).apply(
+            session, "suite-fixture", "case-fixture", options = RecordingApplyOptions().withReplayRows(setOf(swipeId)),
+        ) is StoreResult.Ok)
+
+        assertEquals(listOf(StepKind.REPLAY, StepKind.AGENT, StepKind.AGENT), inserted.map { it.kind })
+        assertEquals("Swipe up and hold", inserted.first().action)
+        session.close()
+    }
+
+    @Test
+    fun missingAndIneligibleReplaySelectionsAreRejectedWithoutInsertingSteps() = runBlocking {
+        val session = reviewedSession()
+        val typedTextId = session.snapshot.value.steps[2].id
+        val inserted = mutableListOf<TestStep>()
+        for (id in listOf("missing-row", typedTextId)) {
+            val result = service(inserted).apply(
+                session, "suite-fixture", "case-fixture", options = RecordingApplyOptions().withReplayRows(setOf(id)),
+            )
+            assertTrue(result is StoreResult.Invalid)
+            assertTrue(inserted.isEmpty())
+        }
+        assertTrue(service(inserted).apply(session, "suite-fixture", "case-fixture") is StoreResult.Ok, "a refusal releases the review reservation")
+        assertTrue(inserted.all { it.kind == StepKind.AGENT })
+        session.close()
+    }
+
+    @Test
+    fun optionalRecordedRowsCannotBeSelectedForReplayAndRemainOptionalAiSteps() = runBlocking {
+        val session = reviewedSession()
+        val rows = session.snapshot.value.steps
+        val tapId = rows.first().id
+        assertTrue(session.updateReviewedSteps(
+            rows.map { it.action to it.expected }, optionalOverrides = mapOf(tapId to (true to "Wi-Fi is on")),
+        ))
+        assertEquals(setOf(rows[1].id), session.replayableRowIds())
+        val inserted = mutableListOf<TestStep>()
+        assertTrue(service(inserted).apply(
+            session, "suite-fixture", "case-fixture", options = RecordingApplyOptions().withReplayRows(setOf(tapId)),
+        ) is StoreResult.Invalid)
+        assertTrue(inserted.isEmpty())
+        assertTrue(service(inserted).apply(
+            session, "suite-fixture", "case-fixture", options = RecordingApplyOptions().withReplay(true),
+        ) is StoreResult.Ok)
+        assertEquals(StepKind.AGENT, inserted.first().kind)
+        assertTrue(inserted.first().optional)
+        assertEquals("Wi-Fi is on", inserted.first().condition)
+        assertEquals(StepKind.REPLAY, inserted[1].kind)
         session.close()
     }
 
