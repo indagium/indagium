@@ -187,7 +187,9 @@ private fun StringBuilder.lane(lane: LaneResult) {
     lane.toolActivityPath?.let { append("Full tool activity stream: `").append(it).append("`\n") }
 }
 
-internal fun TestRun.toMarkdown(): String = buildString {
+internal fun TestRun.toMarkdown(): String = withRedactedToolPreviews().renderMarkdown()
+
+private fun TestRun.renderMarkdown(): String = buildString {
     append("# Test run: ").append(suite.name).append('\n')
     append("\n- Status: **").append(status.name).append("**\n")
     append("- Run id: `").append(id).append("`\n")
@@ -200,7 +202,7 @@ internal fun TestRun.toMarkdown(): String = buildString {
     lanes.forEach { lane(it) }
     if (comparisons.isNotEmpty()) {
         append("\n### Where the lanes disagreed\n")
-        comparisons.forEach { comparison(this@toMarkdown, it) }
+        comparisons.forEach { comparison(this@renderMarkdown, it) }
     }
 }
 

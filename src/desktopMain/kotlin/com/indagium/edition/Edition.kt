@@ -25,6 +25,8 @@ enum class Edition(val label: String) {
             PREMIUM, FRIENDS_FAMILY, UNLIMITED -> EditionLimits.UNLIMITED
         }
 
+    val canDisableSupportReminders: Boolean get() = this != FREE
+
     companion object {
         /** Case-insensitive; `friends_family`, `friends-family` and `friends family` are all accepted. Null when unknown. */
         fun parse(raw: String?): Edition? {
@@ -46,15 +48,15 @@ data class EditionLimits(val maxSuites: Int?, val maxCasesPerSuite: Int?) {
  * Holds the active [Edition]. A plain instance (owned by AppState), not a global, so tests never leak
  * an edition into each other. The property/env lookups are injectable for the same reason.
  *
- * Builds default to [Edition.UNLIMITED]; [resolveStartup] can lower that with `-Dindagium.edition=free`
- * or `INDAGIUM_EDITION=free`, and [setForDev] can switch at runtime in an unpackaged or `-Dindagium.dev=true` run.
+ * Packaged builds default to [Edition.FREE], unpackaged development runs to [Edition.UNLIMITED].
+ * [resolveStartup] accepts an explicit property/env edition; [setForDev] switches only in development.
  */
 class EditionService(
-    initial: Edition = Edition.UNLIMITED,
+    initial: Edition? = null,
     private val props: (String) -> String? = System::getProperty,
     private val env: (String) -> String? = System::getenv,
 ) {
-    private val state = MutableStateFlow(initial)
+    private val state = MutableStateFlow(initial ?: defaultEdition(props))
 
     val current: StateFlow<Edition> = state.asStateFlow()
 
@@ -62,12 +64,12 @@ class EditionService(
 
     /**
      * Reads the edition from the system property, else the environment variable: the first non-blank
-     * one wins, and an unrecognised value falls back to [Edition.UNLIMITED] rather than failing.
+     * one wins; a missing or unrecognised value uses the packaged/development default.
      * Publishes and returns the result.
      */
     fun resolveStartup(propLookup: (String) -> String? = props, envLookup: (String) -> String? = env): Edition {
         val raw = propLookup(EDITION_PROPERTY)?.takeIf { it.isNotBlank() } ?: envLookup(EDITION_ENV)?.takeIf { it.isNotBlank() }
-        val resolved = Edition.parse(raw) ?: Edition.UNLIMITED
+        val resolved = Edition.parse(raw) ?: defaultEdition(propLookup)
         state.value = resolved
         return resolved
     }
@@ -82,3 +84,6 @@ class EditionService(
         return true
     }
 }
+
+private fun defaultEdition(props: (String) -> String?): Edition =
+    if (props(PACKAGED_APP_PROPERTY) != null) Edition.FREE else Edition.UNLIMITED

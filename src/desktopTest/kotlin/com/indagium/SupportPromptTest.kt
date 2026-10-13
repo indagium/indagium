@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.edition.Edition
 import com.indagium.ui.AppState
 import com.indagium.update.SponsorChecker
 import io.ktor.client.HttpClient
@@ -129,6 +130,50 @@ class SupportPromptTest {
             state.dismissSupportDialog()
 
             assertFalse(state.supportDialogOpen)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun nonFreeEditionsCanSaveAnOptOutThatStopsAutomaticPromptsButAllowsManualSupport() {
+        for (edition in listOf(Edition.PREMIUM, Edition.FRIENDS_FAMILY, Edition.UNLIMITED)) {
+            val state = newState()
+            try {
+                state.acceptLicenseAgreement()
+                state.editionService.setForDev(edition)
+                state.maybeShowSupportPromptOnStartup(ANCHOR_MS)
+                assertTrue(state.setSupportPromptSuppressed(true))
+                assertTrue(state.settings.suppressSupportPrompt)
+                state.maybeShowSupportPromptOnStartup(ANCHOR_MS + 11 * DAY_MS)
+                assertFalse(state.supportDialogOpen)
+                assertEquals(ANCHOR_MS, state.settings.lastSupportPromptAt)
+                state.openSupportDialog()
+                assertTrue(state.supportDialogOpen)
+                state.dismissSupportDialog()
+                assertTrue(state.setSupportPromptSuppressed(false))
+                state.maybeShowSupportPromptOnStartup(ANCHOR_MS + 11 * DAY_MS)
+                assertTrue(state.supportDialogOpen)
+            } finally {
+                state.close()
+            }
+        }
+    }
+
+    @Test
+    fun freeCannotSetAnOptOutButAPreviousChoiceIsStillRespected() {
+        val state = newState()
+        try {
+            state.acceptLicenseAgreement()
+            state.editionService.setForDev(Edition.FREE)
+            assertFalse(state.setSupportPromptSuppressed(true))
+            assertFalse(state.settings.suppressSupportPrompt)
+            state.editionService.setForDev(Edition.UNLIMITED)
+            assertTrue(state.setSupportPromptSuppressed(true))
+            state.editionService.setForDev(Edition.FREE)
+            state.maybeShowSupportPromptOnStartup(ANCHOR_MS + 11 * DAY_MS)
+            assertFalse(state.supportDialogOpen)
+            assertTrue(state.settings.suppressSupportPrompt)
         } finally {
             state.close()
         }

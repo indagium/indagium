@@ -15,6 +15,13 @@ class SupportPromptSettingCodecTest {
         assertEquals(epochMs, decoded.lastSupportPromptAt)
     }
 
+    @Test
+    fun reminderOptOutRoundTripsAndOlderSettingsKeepRemindersEnabled() {
+        assertEquals(true, settingsFromJson(AppSettings(suppressSupportPrompt = true).settingsJson())!!.suppressSupportPrompt)
+        assertEquals(false, settingsFromJson("{}")!!.suppressSupportPrompt)
+        assertEquals(false, settingsFromJson("""{"suppressSupportPrompt":"yes"}""")!!.suppressSupportPrompt)
+    }
+
     // JSON form only (see AppSettings.lastSupportPromptAt's own doc) — a blob predating this field,
     // or any other key missing from it, must default to 0 (never prompted), same as a fresh
     // AppSettings().

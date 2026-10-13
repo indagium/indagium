@@ -7,8 +7,10 @@ import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.decide
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.ScriptTarget
+import com.indagium.testing.model.TestScript
 import com.indagium.testing.run.rerunFailedCasesConfig
-import com.indagium.testing.script.ScriptArgsResult
+import com.indagium.testing.script.ScriptArgsResult.Invalid
+import com.indagium.testing.script.ScriptArgsResult.Valid
 import com.indagium.testing.script.scriptArgsFromToolValues
 import com.indagium.testing.script.validateScriptArgs
 import com.indagium.testing.store.StoreResult
@@ -16,6 +18,7 @@ import com.indagium.ui.AppState
 import com.indagium.ui.ExternalActionDetails
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.util.Collections
 
 private const val APPROVAL_INSTRUCTION_PREVIEW_CHARS = 180
 
@@ -391,6 +394,42 @@ private const val MAX_ARG_VALUE_CHARS = 200
 private const val MAX_ARGS_SHOWN = 20
 private const val ELLIPSIS = "…"
 private const val DECLINED_SCRIPT_MESSAGE = "The user declined to run this script, or did not answer in time; nothing was run."
+private const val INVALID_SCRIPT_ARGUMENTS_MESSAGE = "The script call arguments are invalid."
+
+/** The full, immutable script call captured before showing its approval prompt. */
+internal sealed interface TryScriptPreparation {
+    data class Ready(
+        val script: TestScript,
+        val arguments: Map<String, String>,
+        val deviceSerial: String?,
+        val details: ExternalActionDetails,
+    ) : TryScriptPreparation
+
+    data class Invalid(val message: String) : TryScriptPreparation
+}
+
+/** Resolves the script, defaults and target once so approval and execution refer to the same call. */
+internal fun prepareTryScriptCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): TryScriptPreparation {
+    return try {
+        val toolArgs = ToolArgs(arguments)
+        val id = toolArgs.requiredString("scriptId")
+        val current = requireNotNull(appState.testLibrary.script(id)) { "Script '$id' not found." }
+        val script = current.copy(params = Collections.unmodifiableList(current.params.map { it.copy() }))
+        val rawArgs = if (toolArgs.has("args")) toolArgs.map["args"].asObject("args") else emptyMap()
+        val converted = scriptArgsFromToolValues(rawArgs)
+        val values = when (val checked = validateScriptArgs(script, converted)) {
+            is Valid -> Collections.unmodifiableMap(LinkedHashMap(checked.values))
+            is Invalid -> throw IllegalArgumentException(checked.message)
+        }
+        val serial = toolArgs.string("deviceSerial")?.trim()?.takeIf(String::isNotEmpty)
+        require(script.target != ScriptTarget.ADB_SHELL || serial != null) {
+            "This script runs on a device; choose a device to run it on."
+        }
+        TryScriptPreparation.Ready(script, values, serial, tryScriptApprovalDetails(script, values, serial, clientName))
+    } catch (error: IllegalArgumentException) {
+        TryScriptPreparation.Invalid(error.message ?: INVALID_SCRIPT_ARGUMENTS_MESSAGE)
+    }
+}
 
 /**
  * The approval dialog content for a `try_test_script` call, or null when the call would be refused anyway (unknown
@@ -398,20 +437,16 @@ private const val DECLINED_SCRIPT_MESSAGE = "The user declined to run this scrip
  * runs, so the user is not asked about it.
  */
 internal fun describeTryScriptCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
-    val script = (arguments["scriptId"] as? String)?.let(appState.testLibrary::script) ?: return null
-    val rawArgs = when (val given = arguments["args"]) {
-        null -> emptyMap()
-        is Map<*, *> -> given.entries.associate { (key, value) -> key.toString() to value }
-        else -> return null
-    }
-    val converted = try {
-        scriptArgsFromToolValues(rawArgs)
-    } catch (_: IllegalArgumentException) {
-        return null
-    }
-    val values = (validateScriptArgs(script, converted) as? ScriptArgsResult.Valid)?.values ?: return null
-    val serial = (arguments["deviceSerial"] as? String)?.trim()?.takeIf(String::isNotEmpty)
-    if (script.target == ScriptTarget.ADB_SHELL && serial == null) return null
+    val prepared = prepareTryScriptCall(appState, arguments, clientName) as? TryScriptPreparation.Ready ?: return null
+    return prepared.details
+}
+
+private fun tryScriptApprovalDetails(
+    script: TestScript,
+    values: Map<String, String>,
+    serial: String?,
+    clientName: String,
+): ExternalActionDetails {
     val target = when {
         script.target == ScriptTarget.ADB_SHELL -> "Android device $serial (inside the device, through adb shell)"
         serial != null -> "This computer (DEVICE=$serial)"

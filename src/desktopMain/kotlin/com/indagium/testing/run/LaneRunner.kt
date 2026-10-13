@@ -408,6 +408,7 @@ internal class LaneRunner(
         var sequence: StepSequence? = null
         var setupBlocked: CaseStatus? = null
         var caseBodyCompleted = false
+        var teardownStatus: CaseStatus? = null
         try {
             val setupOk = hooks.run(
                 case.setup,
@@ -435,6 +436,7 @@ internal class LaneRunner(
             throw stop
         } finally {
             withContext(NonCancellable) {
+                val teardownStartsAt = owner.snapshot().steps.size
                 val tornDown = hooks.run(
                     case.teardown,
                     case.id,
@@ -446,6 +448,7 @@ internal class LaneRunner(
                     caseAttempt,
                     priorAttempts,
                 )
+                teardownStatus = caseTeardownStatus(owner.snapshot().steps.drop(teardownStartsAt), tornDown)
                 if (!tornDown) owner.note("Teardown failed.")
                 if (!caseBodyCompleted) recorder = null
             }
@@ -455,9 +458,14 @@ internal class LaneRunner(
                 owner.finish(checkNotNull(setupBlocked))
             } else {
                 sequence?.finishDeferredJudgements()
-                owner.finish(
-                    caseStatus(owner.snapshot().steps.filterNot { it.setup }, case.steps.size, budget),
+                val bodyStatus = caseStatus(owner.snapshot().steps.filterNot { it.setup }, case.steps.size, budget)
+                val finalNote = listOfNotNull(
+                    owner.snapshot().note,
                     CASE_BUDGET_EXHAUSTED_NOTE.takeIf { budget.exhausted() },
+                ).distinct().joinToString(" ").takeIf(String::isNotBlank)
+                owner.finish(
+                    if (bodyStatus == CaseStatus.PASS) teardownStatus ?: bodyStatus else bodyStatus,
+                    finalNote,
                 )
             }
         } catch (stop: CancellationException) {
@@ -594,6 +602,15 @@ internal class LaneRunner(
         results.any { it.status == StepStatus.ERROR } -> CaseStatus.ERROR
         results.size < stepCount -> CaseStatus.FAIL
         else -> CaseStatus.PASS
+    }
+
+    /** A passing body inherits a teardown failure; body failures, setup blocks, and cancellation keep their own status. */
+    private fun caseTeardownStatus(results: List<StepResult>, passed: Boolean): CaseStatus? = when {
+        results.any { it.status == StepStatus.ERROR } -> CaseStatus.ERROR
+        results.any { it.status == StepStatus.BLOCKED } -> CaseStatus.BLOCKED
+        results.any { it.status == StepStatus.FAIL || it.status == StepStatus.TIMEOUT } -> CaseStatus.FAIL
+        !passed -> CaseStatus.FAIL
+        else -> null
     }
 
     // ── SequenceListener ─────────────────────────────────────────────

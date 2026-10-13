@@ -142,6 +142,26 @@ class ExternalScriptApprovalTest {
     }
 
     @Test
+    fun theApprovedSnapshotIncludesDefaultArguments() {
+        val marker = File(dir, "default-argument.txt")
+        val saved = script(
+            "printf '%s' \"\$word\" > '${marker.absolutePath}'",
+            listOf(ScriptParam("word", ScriptParamType.STRING, required = false, defaultValue = "captured default")),
+        )
+        val response = callTry(session(), """{"scriptId":"${saved.id}"}""")
+        val approval = awaitApproval()
+
+        assertEquals("word = captured default", assertNotNull(approval.action).fields.toMap()["Arguments"])
+        assertFalse(marker.exists())
+        state.resolveExternalDeviceAiApproval(approval.requestId, true)
+
+        val body = response.get().body()
+        assertTrue(body.contains("exitCode"), body)
+        assertTrue(marker.isFile)
+        assertEquals("captured default", marker.readText())
+    }
+
+    @Test
     fun aDenialReturnsTheDeclinedErrorAndNothingRuns() {
         val marker = File(dir, "ran.txt")
         val saved = script("touch '${marker.absolutePath}'")
@@ -153,6 +173,38 @@ class ExternalScriptApprovalTest {
         assertTrue(body.contains("declined"), body)
         assertFalse(marker.exists())
         assertTrue(state.externalDeviceAiApprovals.isEmpty())
+    }
+
+    @Test
+    fun aChangedScriptIsRejectedAfterApprovalAndDoesNotRunEitherVersion() {
+        val originalMarker = File(dir, "original-ran.txt")
+        val editedMarker = File(dir, "edited-ran.txt")
+        val saved = script("touch '${originalMarker.absolutePath}'")
+        val response = callTry(session(), """{"scriptId":"${saved.id}"}""")
+        awaitApproval()
+
+        state.updateTestScript(saved.id) { it.copy(commandTemplate = "touch '${editedMarker.absolutePath}'") }
+        answer(true)
+
+        val body = response.get().body()
+        assertTrue(body.contains("changed or was deleted"), body)
+        assertFalse(originalMarker.exists())
+        assertFalse(editedMarker.exists())
+    }
+
+    @Test
+    fun aDeletedScriptIsRejectedAfterApprovalWithoutRunningTheCapturedCommand() {
+        val marker = File(dir, "deleted-ran.txt")
+        val saved = script("touch '${marker.absolutePath}'")
+        val response = callTry(session(), """{"scriptId":"${saved.id}"}""")
+        awaitApproval()
+
+        state.deleteTestScript(saved.id)
+        answer(true)
+
+        val body = response.get().body()
+        assertTrue(body.contains("changed or was deleted"), body)
+        assertFalse(marker.exists())
     }
 
     @Test
@@ -194,7 +246,8 @@ class ExternalScriptApprovalTest {
 
     @Test
     fun closingTheSessionDeniesAPendingApproval() {
-        val saved = script("true")
+        val marker = File(dir, "cancelled-ran.txt")
+        val saved = script("touch '${marker.absolutePath}'")
         val sessionId = session()
         val response = callTry(sessionId, """{"scriptId":"${saved.id}"}""")
         val pending = awaitApproval()
@@ -204,6 +257,27 @@ class ExternalScriptApprovalTest {
 
         val body = response.get().body()
         assertTrue(body.contains("declined"), body)
+        assertFalse(marker.exists())
+    }
+
+    @Test
+    fun anExpiredApprovalNeverRunsItsAction() = runBlocking {
+        val marker = File(dir, "expired-ran.txt")
+        val details = ExternalActionDetails("Run a script?", "one command", emptyList(), "Run once", "approval expired")
+
+        val result = state.executeExternalApprovedAction(
+            sessionId = "expired-session",
+            clientName = "Rogue Client",
+            details = details,
+            approvalTimeoutMs = 1,
+        ) {
+            marker.writeText("ran")
+            mapOf("ran" to true)
+        }
+
+        assertEquals(mapOf("error" to "approval expired"), result)
+        assertFalse(marker.exists())
+        assertTrue(state.externalDeviceAiApprovals.isEmpty())
     }
 
     @Test

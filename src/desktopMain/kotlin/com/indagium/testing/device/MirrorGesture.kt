@@ -16,6 +16,7 @@ internal fun mirrorGesturePoints(points: List<GesturePoint>, deviceWidth: Int, d
     require(abs(deviceAspect / streamAspect - 1) <= MIRROR_ASPECT_TOLERANCE) {
         "The mirror and screenshot orientations differ; take a fresh screenshot before gesturing."
     }
+
     fun scale(value: Int, from: Int, to: Int) = (value.toDouble() * (to - 1) / (from - 1).coerceAtLeast(1)).roundToInt().coerceIn(0, to - 1)
     return points.map { GesturePoint(scale(it.x, deviceWidth, width), scale(it.y, deviceHeight, height), it.tMs) }
 }

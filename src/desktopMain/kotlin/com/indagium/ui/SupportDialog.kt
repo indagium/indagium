@@ -5,6 +5,7 @@ package com.indagium.ui
 import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -12,11 +13,15 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,7 +56,7 @@ internal fun SupportDialog(state: AppState) {
         ) {
             SupportDialogHeader(tc)
             SupportDialogBody(state, tc)
-            SupportDialogFooter(tc)
+            SupportDialogFooter(state, tc)
         }
     }
 }
@@ -139,27 +144,36 @@ private fun SupportDialogBody(state: AppState, tc: ThemeColors) {
 }
 
 @Composable
-private fun SupportDialogFooter(tc: ThemeColors) {
+private fun SupportDialogFooter(state: AppState, tc: ThemeColors) {
+    val edition by state.editionService.current.collectAsState()
+    val enabled = edition.canDisableSupportReminders
+    val toggle = { state.setSupportPromptSuppressed(!state.settings.suppressSupportPrompt); Unit }
     Divider()
-    // Not clickable by design: this preference isn't available on the free version, so the whole
-    // row exists only to show the disabled checkbox + lock + a hover tooltip explaining why.
-    TooltipArea(tooltip = { ToolbarTooltip("Not available on the free version") }) {
+    val choice: @Composable () -> Unit = {
         Row(
             Modifier.fillMaxWidth().background(tc.p2).padding(start = 32.dp, end = 32.dp, top = 12.dp, bottom = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Box(Modifier.size(13.dp).border(1.dp, tc.td.copy(alpha = 0.5f), RoundedCornerShape(3.dp)))
-            Spacer(Modifier.width(6.dp))
-            Icon(
+            CompactCheckBox(
+                checked = state.settings.suppressSupportPrompt,
+                onToggle = toggle,
+                enabled = enabled,
+                modifier = Modifier.semantics { contentDescription = "Don't remind me again" },
+            )
+            if (!enabled) Icon(
                 Icons.Outlined.Lock,
                 contentDescription = null,
                 modifier = Modifier.size(11.dp),
                 tint = tc.td.copy(alpha = 0.5f),
             )
-            Spacer(Modifier.width(6.dp))
-            AppText("Don't remind me again", color = tc.td.copy(alpha = 0.5f), fontSize = 11.sp, fontFamily = MONO)
+            AppText(
+                "Don't remind me again", color = if (enabled) tc.tx else tc.td.copy(alpha = 0.5f), fontSize = 11.sp, fontFamily = MONO,
+                modifier = if (enabled) Modifier.clickable(onClick = toggle) else Modifier,
+            )
         }
     }
+    if (enabled) choice() else TooltipArea(tooltip = { ToolbarTooltip("Not available on the free version") }) { choice() }
 }
 
 /** Shared browser-open helper — same Desktop.browse + runCatching shape as

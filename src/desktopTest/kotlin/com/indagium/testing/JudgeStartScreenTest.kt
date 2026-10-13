@@ -9,8 +9,8 @@ import com.indagium.testing.model.TestRun
 import com.indagium.testing.run.COMPARISON_SYSTEM_PROMPT
 import com.indagium.testing.run.JUDGE_CHANCE_CLASSIFICATION_RULE
 import com.indagium.testing.run.JUDGE_MAX_ATTACHED_IMAGES
-import com.indagium.testing.run.JUDGE_SYSTEM_PROMPT
 import com.indagium.testing.run.JUDGE_OPTIONAL_RULE
+import com.indagium.testing.run.JUDGE_SYSTEM_PROMPT
 import com.indagium.testing.run.JudgeEvidence
 import com.indagium.testing.run.JudgeImage
 import com.indagium.testing.run.JudgeLaneEvidence

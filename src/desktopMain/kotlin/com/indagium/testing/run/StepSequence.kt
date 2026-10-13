@@ -630,6 +630,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         active && !ended && epoch.get() == identity.epoch && attempt == identity.attempt &&
             spec.steps.getOrNull(index)?.id == identity.stepId
 
+    /** Direct engine callbacks omit identity; admitted tool callbacks must still belong to this attempt. */
+    private fun acceptsProtocolIdentityLocked(identity: LaneStepIdentity?): Boolean =
+        identity == null || isCurrentLocked(identity)
+
     private suspend fun isCurrent(identity: LaneStepIdentity?): Boolean =
         identity != null && mutex.withLock { isCurrentLocked(identity) }
 
@@ -765,7 +769,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             val tool = initial?.toolName.orEmpty()
             val identity = admission.identity
             if (!admission.paid) {
-                val result = execute()
+                // Protocol tools are free, but their admission still belongs to one step attempt. Carry that
+                // identity through the callback so a held finish/report cannot affect the successor.
+                val result = if (identity == null) execute() else withContext(LaneDispatchIdentityElement(identity)) { execute() }
                 completed = initial?.completed(
                     if (laneToolResultError(result) == null) LaneToolCallStatus.SUCCEEDED else LaneToolCallStatus.FAILED,
                     laneToolPreview(result), elapsedMs(startNanos),
@@ -1049,16 +1055,26 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     // ── LaneCallbacks ────────────────────────────────────────────────
 
-    override fun reportObservation(text: String) {
-        if (active) {
-            val bounded = text.take(MAX_OBSERVATION_CHARS)
-            observations += bounded
-            env.transcript?.append("step_observation", mapOf("step" to spec.steps.getOrNull(index)?.id, "attempt" to attempt, "text" to bounded))
-        }
+    override suspend fun reportObservation(text: String) {
+        reportObservation(null, text)
     }
 
+    override suspend fun reportObservation(identity: LaneStepIdentity?, text: String): Boolean = mutex.withLock {
+        if (!active || !acceptsProtocolIdentityLocked(identity)) return@withLock false
+        val bounded = text.take(MAX_OBSERVATION_CHARS)
+        observations += bounded
+        env.transcript?.append(
+            "step_observation",
+            mapOf("step" to spec.steps.getOrNull(index)?.id, "attempt" to attempt, "text" to bounded),
+        )
+        true
+    }
+
+    override suspend fun finishStep(status: LaneStepStatus, observation: String): Map<String, Any?> =
+        finishStep(null, status, observation)
+
     @Suppress("ReturnCount") // Distinct protocol guards refuse without settling a stale step.
-    override suspend fun finishStep(status: LaneStepStatus, observation: String): Map<String, Any?> {
+    override suspend fun finishStep(identity: LaneStepIdentity?, status: LaneStepStatus, observation: String): Map<String, Any?> {
         finishRefusal()?.let { return mapOf("error" to it) }
         if (!finishing.compareAndSet(false, true)) return mapOf("error" to "finish_step is already running; wait for its answer.")
         try {
@@ -1067,7 +1083,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             }
             var timedOut = false
             var skipRefusal: String? = null
+            var staleRefusal = false
             val evaluation = mutex.withLock {
+                if (!acceptsProtocolIdentityLocked(identity)) {
+                    staleRefusal = true
+                    return@withLock null
+                }
                 val step = spec.steps.getOrNull(index) ?: return@withLock null
                 if (status == LaneStepStatus.SKIPPED) {
                     if (!step.optional) {
@@ -1088,6 +1109,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                     submittedClaim = status.name.lowercase(), submittedObservation = observation,
                 )
             }
+            if (staleRefusal) return mapOf("error" to "This step attempt ended before finish_step was accepted; inspect the current step.")
             skipRefusal?.let { return mapOf("error" to it) }
             val currentEvaluation = evaluation ?: return mapOf("error" to "No step is active.")
             scheduleDeferredJudge(currentEvaluation)
@@ -2134,7 +2156,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val timedChecks = lastAttemptChecks.map { result ->
             if (result.status == CheckStatus.NOT_EVALUATED) {
                 result.copy(detail = "${result.detail} Evaluation stopped when the step deadline expired.")
-            } else result
+            } else {
+                result
+            }
         }
         val completedIds = timedChecks.mapTo(HashSet()) { it.checkId }
         val pending = step.checks.filterNot { it.id in completedIds }.map { check ->
@@ -2167,7 +2191,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         val tools = recentToolSummary()
         val phase = if (submittedReportStepId == step.id && submittedReportAttempt == attempt) {
             "Step verification did not finish"
-        } else "The agent did not finish the step"
+        } else {
+            "The agent did not finish the step"
+        }
         return "$phase within ${formatTimeoutLabel(step.timeoutMs)}" +
             (if (tools.isEmpty()) "" else " (last tool calls: $tools)") +
             ". The action may have succeeded — see the screenshot" + (if (advised) " and the judge's verdict." else ".")
@@ -2239,7 +2265,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 if (recovered) {
                     "Recovered after timeout: the judge confirmed the expected result and all explicit checks are satisfied. " +
                         "Continuing with the next step."
-                } else advisoryJudgeNote(judgement),
+                } else {
+                    advisoryJudgeNote(judgement)
+                },
                 judgement.error,
             ).joinToString(" "),
         )

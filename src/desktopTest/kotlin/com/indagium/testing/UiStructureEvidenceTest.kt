@@ -26,7 +26,7 @@ internal fun overviewUiDump(): String = """
       </node>
     </node>
     </hierarchy>
-""".trimIndent()
+    """.trimIndent()
 
 class UiStructureEvidenceTest {
     @Test

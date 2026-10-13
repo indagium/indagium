@@ -168,6 +168,49 @@ class TestsLibraryScreensUiTest {
         rule.onNodeWithText("Try it").assertExists()
     }
 
+    @Test
+    fun aNewScriptCanBeDeletedDirectlyFromItsListRow() {
+        open(TestsNav.Scripts)
+        rule.onNodeWithText("+ New script").performClick()
+        rule.waitForIdle()
+        val created = state.testLibrary.scripts.single()
+        val menu = "${created.toolName} actions"
+
+        rule.onNodeWithContentDescription(menu).performClick()
+        rule.onNodeWithText("Delete…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete script?").assertExists()
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        assertEquals(created.id, state.testLibrary.scripts.single().id)
+
+        reopenMenu(menu)
+        rule.onNodeWithText("Delete…").performClick()
+        rule.onNodeWithText("Delete").performClick()
+        rule.waitForIdle()
+        assertTrue(state.testLibrary.scripts.isEmpty())
+        rule.onNodeWithText("Scripts (0)").assertExists()
+    }
+
+    @Test
+    fun deletingAnotherRowKeepsTheSelectedScriptAndTargetsTheRequestedRow() {
+        val selected = sampleScript("keep_script")
+        val target = sampleScript("delete_script")
+        state.createTestScript(selected)
+        state.createTestScript(target)
+        state.testsView.selectedScriptId = selected.id
+        open(TestsNav.Scripts)
+
+        rule.onNodeWithContentDescription("${target.toolName} actions").performClick()
+        rule.onNodeWithText("Delete…").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("\"delete_script\" will be deleted.").assertExists()
+        rule.onNodeWithText("Delete").performClick()
+        rule.waitForIdle()
+        assertEquals(selected.id, state.testLibrary.scripts.single().id)
+        assertEquals(selected.id, state.testsView.selectedScriptId)
+    }
+
     // ── Shared steps ─────────────────────────────────────────────────
 
     @Test

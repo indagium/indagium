@@ -12,9 +12,9 @@ import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
 import com.indagium.capture.DEFAULT_VIDEO_COVERAGE_WAIT_MS
 import com.indagium.capture.RecorderState
+import com.indagium.capture.mirror.MirrorGestureControl
 import com.indagium.capture.readCaptureSessionDirectory
 import com.indagium.capture.sessionJson
-import com.indagium.capture.mirror.MirrorGestureControl
 import com.indagium.model.Annotations
 import com.indagium.model.TestLaneTabRef
 import com.indagium.testing.device.LANE_CAPTURE_DIRECTORY
@@ -121,6 +121,7 @@ internal class AppLaneCapture(
         get() = !stopRequested.get() && handle.controller.snapshot.value.state == RecorderState.RECORDING
 
     override fun gestureControl(): MirrorGestureControl? = handle.controller.activeEmbeddedSession()?.gestureControl()
+
     override val diagnostics: List<String>
         get() = handle.controller.snapshot.value.diagnostics + borrowedCopyDiagnostics
 

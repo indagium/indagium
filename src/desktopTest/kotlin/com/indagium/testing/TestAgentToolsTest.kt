@@ -15,7 +15,7 @@ import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.newScriptId
 import com.indagium.testing.run.InputSequenceCallbacks
-import com.indagium.testing.run.LANE_FREE_TOOL_NAMES
+import com.indagium.testing.run.LANE_PROTOCOL_TOOL_NAMES
 import com.indagium.testing.run.LaneStepBrief
 import com.indagium.testing.run.LaneStepStatus
 import com.indagium.testing.run.LaneToolContext
@@ -170,14 +170,17 @@ class TestAgentToolsTest {
     }
 
     @Test
-    fun aCaseThatAllowsOnlySomeToolsHidesTheRestExceptTheProtocolTools() {
+    fun aCaseThatAllowsOnlySomeToolsKeepsProtocolToolsAndOmitsUnavailableReferences() {
         val lane = tools(
             listOf(script("auto_tool", ScriptPermission.AUTO), script("other_tool", ScriptPermission.AUTO)),
             allowed = setOf("tap", "auto_tool"),
         )
-        assertEquals(setOf("tap", "auto_tool") + LANE_FREE_TOOL_NAMES, lane.names().toSet())
+        assertEquals(setOf("tap", "auto_tool") + LANE_PROTOCOL_TOOL_NAMES, lane.names().toSet())
+        assertTrue(lane.names().containsAll(LANE_PROTOCOL_TOOL_NAMES))
+        assertFalse("list_step_examples" in lane.names())
+        assertFalse("get_step_example" in lane.names())
         assertEquals(mapOf("other_tool" to "the case does not allow it"), lane.skippedScripts)
-        assertEquals(setOf("get_current_step", "report_observation", "finish_step"), LANE_FREE_TOOL_NAMES)
+        assertEquals(setOf("get_current_step", "report_observation", "finish_step"), LANE_PROTOCOL_TOOL_NAMES)
     }
 
     // ── Behaviour ──────────────────────────────────────────────────

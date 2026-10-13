@@ -175,7 +175,7 @@ class RecordedVideoTimelineTest {
             videoInspectedMoments = mapOf(1 to setOf("before", "after")),
         ).single()
 
-        assertEquals("Tap the Continue button", rewritten.action)
+        assertEquals("Repeat the recorded tap", rewritten.action)
         assertEquals("", rewritten.expected)
         assertTrue(rewritten.reviewReason.orEmpty().contains("Input 1"))
         assertFalse(rewritten.modelSupported)

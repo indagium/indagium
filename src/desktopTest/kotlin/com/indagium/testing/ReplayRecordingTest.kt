@@ -22,11 +22,11 @@ import com.indagium.testing.authoring.parseReferenceGestures
 import com.indagium.testing.authoring.restBeforeLiftMs
 import com.indagium.testing.authoring.rewriteInputsOf
 import com.indagium.testing.device.DeviceInputAction
-import com.indagium.testing.model.RecordedInputEvent
 import com.indagium.testing.model.RecordedInput
-import com.indagium.testing.model.TimedGesturePoint
+import com.indagium.testing.model.RecordedInputEvent
 import com.indagium.testing.model.RecordedTouchKind
 import com.indagium.testing.model.StepKind
+import com.indagium.testing.model.TimedGesturePoint
 import com.indagium.testing.model.holdBeforeReleaseMs
 import com.indagium.testing.run.ReplayPlan
 import com.indagium.testing.run.planReplay

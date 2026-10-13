@@ -14,8 +14,12 @@ internal fun recordedGestureGuidance(input: RecordedInput?): Map<String, Any?> {
         // Keep release as a timed sample. No extra hold may be added, or the recording's endpoint rest would be doubled.
         val complete = if (touch.points.isNotEmpty() && touch.durationMs > touch.points.last().tMs) {
             touch.points + touch.points.last().copy(tMs = touch.durationMs)
-        } else touch.points
-        val indices = if (complete.size <= GESTURE_MAX_POINTS) complete.indices.toList() else {
+        } else {
+            touch.points
+        }
+        val indices = if (complete.size <= GESTURE_MAX_POINTS) {
+            complete.indices.toList()
+        } else {
             (0 until GESTURE_MAX_POINTS).map { (it.toDouble() * complete.lastIndex / (GESTURE_MAX_POINTS - 1)).roundToInt() }
         }
         mapOf(

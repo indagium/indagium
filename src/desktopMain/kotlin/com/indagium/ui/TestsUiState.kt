@@ -304,7 +304,7 @@ internal fun testsLimitsUiState(library: TestLibrary, limits: EditionLimits): Te
 // ── Edit access ──────────────────────────────────────────────────────
 
 internal const val LIBRARY_READ_ONLY_MESSAGE =
-    "The test library was saved by a newer version of Indagium and is read-only here. Update Indagium to change it."
+    "The test library could not be loaded safely and is read-only here. Check its version, file size and access permissions before editing it."
 internal const val SUITE_READ_ONLY_MESSAGE =
     "This suite was saved by a newer version of Indagium and is read-only here. Update Indagium to change it."
 
