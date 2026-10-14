@@ -2,6 +2,13 @@
 
 package com.indagium.testing
 
+import com.indagium.ai.LlmProvider
+import com.indagium.ai.LlmRequest
+import com.indagium.ai.LlmRole
+import com.indagium.ai.LlmStreamEvent
+import com.indagium.ai.LlmToolCall
+import com.indagium.ai.ModelDiscoveryResult
+import com.indagium.ai.ProviderCapabilities
 import com.indagium.capture.CompletedFakeProcess
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.JudgeMode
@@ -18,10 +25,15 @@ import com.indagium.testing.run.interruptedCaseIds
 import com.indagium.testing.store.decodeRunFile
 import com.indagium.testing.store.encodeRunFile
 import com.indagium.ui.runVerdict
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -35,6 +47,55 @@ private const val AWAIT_MS = 20_000L
 private const val POLL_MS = 10L
 
 /**
+ * The timeout test lets the first Wi-Fi check remain pending and then needs a fresh agent segment for the next step.
+ * If the stale first-step segment gets another model turn before cancellation reaches it, keep that request pending
+ * until it is canceled; do not consume the next step's scripted response.
+ */
+private class PendingWifiAgentProvider : LlmProvider {
+    private val firstStepRequests = AtomicInteger()
+    private val secondStepRequests = AtomicInteger()
+    private val toolCallIds = AtomicInteger()
+
+    override val capabilities = ProviderCapabilities(streaming = true, toolCalls = true, modelDiscovery = false)
+
+    override suspend fun listModels(): ModelDiscoveryResult = ModelDiscoveryResult.Unavailable("not used")
+
+    override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
+        val prompt = request.messages.lastOrNull { it.role == LlmRole.USER }?.content.orEmpty()
+        when {
+            "Current step 1 of 2" in prompt -> {
+                if (firstStepRequests.getAndIncrement() == 0) {
+                    emitFinishPass()
+                } else {
+                    awaitCancellation()
+                }
+            }
+
+            "Current step 2 of 2" in prompt -> {
+                if (secondStepRequests.getAndIncrement() == 0) {
+                    emitFinishPass()
+                } else {
+                    emit(LlmStreamEvent.TextDelta("The case is over."))
+                    emit(LlmStreamEvent.Completed)
+                }
+            }
+
+            else -> emit(LlmStreamEvent.Error("Unexpected step prompt in pending Wi-Fi timeout test."))
+        }
+    }
+
+    private suspend fun FlowCollector<LlmStreamEvent>.emitFinishPass() {
+        val callId = "wifi-finish-${toolCallIds.incrementAndGet()}"
+        emit(
+            LlmStreamEvent.ToolCall(
+                LlmToolCall(callId, "finish_step", """{"status":"pass","observation":"ok"}"""),
+            ),
+        )
+        emit(LlmStreamEvent.Completed)
+    }
+}
+
+/**
  * What a run reports when it did not simply pass: a step that timed out although the action worked, a run the user cancelled, an
  * agent and a judge that disagree. Every run here is synthetic (a scripted agent and judge on a fake adb).
  */
@@ -46,7 +107,7 @@ class RunOutcomeHonestyTest {
         harness?.close()
     }
 
-    private fun harnessWith(suite: com.indagium.testing.model.TestSuite, agent: TurnProvider, judge: ScriptedJudgeProvider?): RunHarness =
+    private fun harnessWith(suite: com.indagium.testing.model.TestSuite, agent: LlmProvider, judge: ScriptedJudgeProvider?): RunHarness =
         RunHarness(
             libraryOf(suite),
             profile = profileOf(LANE_A_PROFILE_ID),
@@ -163,10 +224,10 @@ class RunOutcomeHonestyTest {
             val judge = ScriptedJudgeProvider(onSubmitted = { submitted.incrementAndGet() }) { JudgeAnswer(verdict = "pass") }
             val check = com.indagium.testing.model.StepCheck.DeviceState(com.indagium.testing.model.newCheckId(), "wifi.enabled", "false", 600_000)
             val visual = com.indagium.testing.model.StepCheck.AskJudge(com.indagium.testing.model.newCheckId(), "Wi-Fi is off")
+            // Keep the deadline below DeviceState's 1s poll interval so the current reading is rechecked only at timeout.
             val suite = suiteOf(caseOf("Wi-Fi", step("Disable Wi-Fi", timeoutMs = 500, checks = listOf(check, visual)), step("Next")))
-            // A stale agent may answer once before cancellation reaches its model; its gateway must refuse that finish.
             val h = harnessWith(
-                suite, TurnProvider(listOf(finishTurn("pass"), finishTurn("pass"), finishTurn("pass"), textTurn)), judge,
+                suite, PendingWifiAgentProvider(), judge,
             )
             h.adb.shellResponder = { args ->
                 if (args == listOf("cmd", "wifi", "status")) {
@@ -177,7 +238,11 @@ class RunOutcomeHonestyTest {
             }
             val run = h.runToEnd(suite, timing, mode = JudgeMode.FAILURES_ONLY)
             val result = run.caseResult("Wi-Fi").steps.first()
-            assertEquals(StepStatus.PASS, result.status, timing.name)
+            assertEquals(
+                StepStatus.PASS,
+                result.status,
+                "${timing.name}: note=${result.note}; checks=${result.checks}; run=${run.status}",
+            )
             assertEquals(StepStatus.TIMEOUT, result.executionStatus, timing.name)
             assertTrue(result.checks.all { it.status == com.indagium.testing.model.CheckStatus.PASS }, result.checks.toString())
             assertEquals(2, reads.get(), "one initial reading and one bounded deadline recheck")
