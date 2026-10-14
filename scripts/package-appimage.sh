@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Creates an AppImage from Compose Desktop's createDistributable output.  The appimagetool
-# release assets are addressed by immutable GitHub asset IDs and verified before execution.
+# Creates an AppImage from Compose Desktop's createDistributable output. The appimagetool
+# binaries are pinned to upstream release 1.9.1 by GitHub asset ID and SHA-256 before execution.
 set -euo pipefail
 
 readonly APP_ID='com.indagium.Indagium'
-readonly APPIMAGETOOL_X86_64_ASSET_ID='324406882'
-readonly APPIMAGETOOL_X86_64_SHA256='a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0'
-readonly APPIMAGETOOL_AARCH64_ASSET_ID='324406837'
-readonly APPIMAGETOOL_AARCH64_SHA256='1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe'
+readonly APPIMAGETOOL_X86_64_ASSET_ID='324406736'
+readonly APPIMAGETOOL_X86_64_SHA256='ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0'
+readonly APPIMAGETOOL_AARCH64_ASSET_ID='324406707'
+readonly APPIMAGETOOL_AARCH64_SHA256='f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158'
 
 usage() {
     echo "Usage: $0 --input COMPOSE_APP_DIR --output OUTPUT.AppImage --version VERSION --arch x86_64|aarch64" >&2
@@ -59,7 +59,7 @@ case "$arch" in
         ;;
 esac
 
-tool_cache="$project_dir/build/tools/appimagetool"
+tool_cache="$project_dir/build/tools/appimagetool/$asset_id"
 tool_path=${INDAGIUM_APPIMAGETOOL_PATH:-"$tool_cache/$tool_name"}
 if [[ -z ${INDAGIUM_APPIMAGETOOL_PATH:-} && ! -f "$tool_path" ]]; then
     mkdir -p "$tool_cache"
