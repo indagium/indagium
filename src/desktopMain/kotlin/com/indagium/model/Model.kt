@@ -1480,6 +1480,11 @@ data class AppSettings(
     val testing: com.indagium.testing.model.TestingSettings = com.indagium.testing.model.TestingSettings(),
     /** Last AI choices per tests workflow; JSON-only and deliberately independent from the global selected profile. */
     val workflowAiSelections: Map<String, WorkflowAiSelection> = emptyMap(),
+    // Revision of the setup assistant the user has acknowledged. A missing key means revision 0,
+    // which lets a completed older wizard show its newly added Search step once. JSON-only; the
+    // frozen positional settings decoder must not gain a field. Kept last to preserve positional
+    // AppSettings source callers as well.
+    val setupAssistantRevision: Int = 0,
 )
 
 /** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,

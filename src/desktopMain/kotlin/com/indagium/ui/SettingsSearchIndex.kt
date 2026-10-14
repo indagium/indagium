@@ -106,7 +106,7 @@ private fun general() = listOf(
     ),
     entry(
         SettingsSection.General, "Setup assistant",
-        "Walk through profile, theme, folders and capture again (Run setup again).",
+        "Walk through workspace, look, folders, search and capture again (Run setup again).",
         listOf("setup", "wizard", "onboarding", "first run", "assistant", "welcome", "run setup"),
     ),
 )

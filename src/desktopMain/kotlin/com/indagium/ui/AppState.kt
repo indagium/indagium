@@ -303,6 +303,9 @@ private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
  */
 private const val CLOSED_TAB_ROWS_RELEASE_DELAY_MS = 1_500L
 
+/** Bump when setup gains a section that completed users should see once on their next launch. */
+private const val SETUP_ASSISTANT_CURRENT_REVISION = 2
+
 /**
  * A reader's claim on a tab's row store (see [AppState.pinRows]): while any pin on a store is open,
  * closing the tab does not release the rows (they stay readable); the last [close] performs the
@@ -6592,12 +6595,29 @@ class AppState(
     // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────
     var setupAssistantOpen by mutableStateOf(false)
         private set
+    private var setupAssistantStartsAtSearch by mutableStateOf(false)
 
     /** Called once at startup (see Main.kt). App.kt holds the dialog back until the license and
      *  update dialogs are out of the way. */
     fun maybeShowSetupAssistantOnStartup() {
-        if (!settings.setupAssistantDone) setupAssistantOpen = true
+        when {
+            !settings.setupAssistantDone -> {
+                setupAssistantStartsAtSearch = false
+                setupAssistantOpen = true
+            }
+            settings.setupAssistantRevision < SETUP_ASSISTANT_CURRENT_REVISION -> {
+                setupAssistantStartsAtSearch = true
+                setupAssistantOpen = true
+            }
+        }
     }
+
+    /**
+     * The startup destination remains available for the lifetime of this wizard session. App.kt
+     * can temporarily unmount the dialog while a license or update window is shown, then mount it
+     * again; clearing this flag on the first composition would send a migrated user back to step 1.
+     */
+    fun shouldSetupAssistantStartAtSearch(): Boolean = setupAssistantStartsAtSearch
 
     /** Finishing and skipping both count as done, so the assistant never comes back on its own. */
     fun finishSetupAssistant() = closeSetupAssistant()
@@ -6606,12 +6626,19 @@ class AppState(
 
     private fun closeSetupAssistant() {
         setupAssistantOpen = false
-        updateSettings { it.copy(setupAssistantDone = true) }
+        setupAssistantStartsAtSearch = false
+        updateSettings {
+            it.copy(
+                setupAssistantDone = true,
+                setupAssistantRevision = maxOf(it.setupAssistantRevision, SETUP_ASSISTANT_CURRENT_REVISION),
+            )
+        }
     }
 
     /** "Run setup again" from Settings: works whether or not it was done before. */
     fun rerunSetupAssistant() {
         settingsOpen = false
+        setupAssistantStartsAtSearch = false
         setupAssistantOpen = true
     }
 

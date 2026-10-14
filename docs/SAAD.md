@@ -957,6 +957,8 @@ classDiagram
         +SearchMode lastManualSearchMode
         +Boolean syncSplitPanelSelectionAndScroll
         +String acceptedLicenseVersion
+        +Boolean setupAssistantDone
+        +Int setupAssistantRevision
     }
 
     class AiProviderProfile {
@@ -1030,6 +1032,15 @@ classDiagram
 `AiProviderProfile` **has no secret field**, by design (`model/Model.kt:580`). Because `AppSettings`
 is the only settings object serialised into the autosave, a pasted API key structurally cannot reach
 disk. See [§18.4](#184-ai-provider-credentials).
+
+The five-step setup assistant (Workspace, Look, Folders, Search, Capture) records `setupAssistantDone`
+and `setupAssistantRevision` in keyed settings JSON only (`ui/AutosaveCodec.kt`). Revision 2 adds the
+Search step: an unfinished assistant starts at Workspace, a completed assistant below revision 2
+opens at Search with the current profile kept, and revision 2 or later stays closed. Finish, Skip,
+Escape and window close acknowledge revision 2 while preserving any higher revision. The Search
+controls write settings as they are changed, and completed older users start with Keep Current
+selected. Manually running the assistant always starts at Workspace. The legacy positional settings
+decoder remains frozen.
 
 `LogItem` is the render model — the output of the filter pipeline and the input to the `LazyColumn`.
 It is never persisted and never leaves the process.

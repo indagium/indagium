@@ -44,13 +44,14 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.ProfileSpec
 
-// First-run setup assistant: four short steps that apply the same choices Settings offers, through
+// First-run setup assistant: five short steps that apply the same choices Settings offers, through
 // the same AppState functions (applyWorkspaceProfile, updateSettings, pickSaveFolder, ...), so there
 // is no draft to keep in sync. Skipping (button, Esc, closing) and finishing both mark it done —
 // AppState.finishSetupAssistant/skipSetupAssistant. Existing users see it once too, with a "Keep my
@@ -61,6 +62,7 @@ private enum class SetupStep(val title: String) {
     Workspace("Workspace"),
     Look("Look"),
     Folders("Folders"),
+    Search("Search"),
     Capture("Capture"),
 }
 
@@ -78,8 +80,10 @@ internal fun SetupAssistantDialog(state: AppState) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     val steps = SetupStep.entries
-    var step by remember { mutableStateOf(0) }
-    var visited by remember { mutableStateOf(setOf(0)) }
+    val startAtSearch = remember { state.shouldSetupAssistantStartAtSearch() }
+    val startingStep = if (startAtSearch) SetupStep.Search.ordinal else 0
+    var step by remember { mutableStateOf(startingStep) }
+    var visited by remember { mutableStateOf(setOf(startingStep)) }
     // Someone who already has a setup to keep: an upgrade from an earlier version, or a re-run
     // after finishing this assistant once.
     val offerKeep = state.startedWithExistingData || state.settings.setupAssistantDone
@@ -152,7 +156,7 @@ internal fun SetupAssistantDialog(state: AppState) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     AppText("Set up Indagium", color = tc.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     AppText(
-                        "Four quick choices. You can change any of them later in Settings › General.",
+                        "Five quick choices. You can change any of them later in Settings.",
                         color = tc.td, fontSize = 11.sp, maxLines = 1,
                     )
                 }
@@ -192,6 +196,7 @@ internal fun SetupAssistantDialog(state: AppState) {
                         )
                         SetupStep.Look -> LookStep(state)
                         SetupStep.Folders -> FoldersStep(state)
+                        SetupStep.Search -> SearchStep(state, ::reclaimFocus)
                         SetupStep.Capture -> CaptureStep(state, ::reclaimFocus)
                     }
                 }
@@ -362,6 +367,100 @@ private fun FoldersStep(state: AppState) {
         }
     }
     AppText("More folders in Settings › General", color = tc.td, fontSize = 10.sp)
+}
+
+@Composable
+private fun SearchStep(state: AppState, reclaimFocus: () -> Unit) {
+    StepHeading("Choose how search works", "These choices apply right away and start with your current settings.")
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        SearchSettingCard(
+            title = "Search scope behavior",
+            description = "Choose which Find field Ctrl+F opens and how scope follows the current view. " +
+                "Two searches keeps queries independent.",
+        ) {
+            SearchScopeBehaviorSelector(
+                selected = state.settings.searchScopeBehavior,
+                onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
+                onInteraction = reclaimFocus,
+            )
+        }
+        SearchSettingCard(
+            title = "Ctrl+F opens",
+            description = "Open the Find bar, or jump to the Tags or Regex filter.",
+        ) {
+            CtrlFTargetSelector(
+                selected = state.settings.ctrlFTarget,
+                onSelected = { target -> state.updateSettings { it.copy(ctrlFTarget = target) } },
+                onInteraction = reclaimFocus,
+            )
+        }
+        SearchSettingCard(
+            title = "Ctrl+F also shows Original",
+            description = "Reveal unfiltered rows whenever Ctrl+F opens.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                onToggle = { index ->
+                    state.updateSettings { it.copy(openUnfilteredOnCtrlF = index == 0) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.fillMaxWidth().testTag("setup-search-open-unfiltered-on-ctrl-f"),
+                fillWidth = true,
+                segmentHeight = 25.dp,
+                segmentFontSize = 10.sp,
+            )
+        }
+        SearchSettingCard(
+            title = "Original panel for new files",
+            description = "Choose whether new files open with unfiltered rows visible.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                onToggle = { index ->
+                    state.updateSettings { it.copy(openNewFilesWithUnfiltered = index == 0) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.fillMaxWidth().testTag("setup-search-open-new-files-unfiltered"),
+                fillWidth = true,
+                segmentHeight = 25.dp,
+                segmentFontSize = 10.sp,
+            )
+        }
+        SearchSettingCard(
+            title = "Link split selection and Find",
+            description = "Filtered row selection mirrors to Original; Find navigation may mirror either way. " +
+                "Queries stay separate.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
+                onToggle = { index ->
+                    state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = index == 0) }
+                    reclaimFocus()
+                },
+                modifier = Modifier.fillMaxWidth().testTag("setup-search-link-split-selection-and-find"),
+                fillWidth = true,
+                segmentHeight = 25.dp,
+                segmentFontSize = 10.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchSettingCard(title: String, description: String, control: @Composable () -> Unit) {
+    val tc = tc()
+    val shape = RoundedCornerShape(6.dp)
+    Column(
+        Modifier.fillMaxWidth().background(tc.p2, shape).border(1.dp, tc.br, shape).padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        AppText(title, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        AppText(description, color = tc.td, fontSize = 10.sp, maxLines = 2)
+        control()
+    }
 }
 
 @Composable
