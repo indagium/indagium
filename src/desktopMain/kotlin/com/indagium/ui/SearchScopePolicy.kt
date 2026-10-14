@@ -26,12 +26,11 @@ internal fun resolveSearchPolicy(
 }
 
 /** Auto mode follows only deliberate visibility changes. Search-triggered reveals must not call
- *  this transition, which prevents a fallback or all-lines open from feeding itself. */
+ *  this transition, which prevents an Unfiltered open from feeding itself. */
 internal fun modeAfterOriginalVisibilityChange(
     current: SearchMode,
     originalVisible: Boolean,
     behavior: SearchScopeBehavior,
-    lastManualMode: SearchMode,
 ): SearchMode = when {
     !originalVisible -> SearchMode.FILTERED
     behavior == SearchScopeBehavior.FOLLOW_VIEW -> SearchMode.UNFILTERED

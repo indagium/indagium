@@ -559,13 +559,6 @@ enum class SearchMode { FILTERED, UNFILTERED, TWO_SEARCHES }
 /** How a normal Find invocation chooses its presentation mode. */
 enum class SearchScopeBehavior { FILTERED, UNFILTERED, LAST_USED, FOLLOW_VIEW }
 
-data class SearchFallbackState(
-    val sourceRevision: Long,
-    val isActive: Boolean = false,
-    val suppressedRevision: Long? = null,
-    val originalVisibleBeforeFallback: Boolean = false,
-)
-
 /** Two stable per-tab slots. Match arrays, cursor positions, case options and focus nonces never
  *  cross between concrete scopes. */
 data class LogSearchSessions(
@@ -826,7 +819,6 @@ data class LogTab(
     val searches: LogSearchSessions = LogSearchSessions(),
     val searchMode: SearchMode = SearchMode.FILTERED,
     val focusedSearchScope: SearchScope = SearchScope.FILTERED,
-    val searchFallback: SearchFallbackState? = null,
     // Per-row "time since X" gutter column (ui/LogViewer.kt's LogRow, utils/LogTime.kt) — a
     // per-TAB toggle (not a global AppSettings field: it's a working-set choice for whatever log
     // you're currently staring at, same category as showUnfiltered/expanded/manualBlocks, not a
@@ -1282,8 +1274,6 @@ data class AppSettings(
     val lastManualSearchMode: SearchMode = SearchMode.FILTERED,
     /** Keep the existing Filtered-to-Original selection/scroll mirroring when split. */
     val syncSplitPanelSelectionAndScroll: Boolean = true,
-    /** In single-field Filtered mode, retry a valid zero-result search against all lines. */
-    val broadenSearchWhenFilteredEmpty: Boolean = false,
     // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
     // a default so old settings tokens (without this field) still parse — see settingsFromToken.

@@ -21,10 +21,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.FilterAlt
-import androidx.compose.material.icons.outlined.FilterAltOff
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -96,8 +92,9 @@ internal fun SearchBar(
     onModeChange: (SearchMode) -> Unit = {},
     onFocused: (SearchScope) -> Unit = {},
     autoFocus: Boolean = false,
-    statusMessage: String? = null,
-    onReturnToFiltered: (() -> Unit)? = null,
+    /** Non-null only where a Filtered field may hand its query to the Unfiltered field (FileView's
+     *  single-field Filtered mode); shown as a "Search all lines" action when nothing matched. */
+    onSearchAllLines: (() -> Unit)? = null,
     showSyncToggle: Boolean = false,
     syncEnabled: Boolean = true,
     onSyncToggle: () -> Unit = {},
@@ -132,24 +129,33 @@ internal fun SearchBar(
             fieldValue = fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
             handledFocusNonce = search.focusNonce
         } else {
-            // Fallback and mode changes can move a field between composition branches. A live
+            // Mode changes can move a field between composition branches. A live
             // focus owner is restored without select-all; inactive fields never claim focus from
             // an older restore request after another scope is chosen.
             if (autoFocus) runCatching { focusRequester.requestFocus() }
         }
     }
 
+    // While a query edit recomputes, the previous count stays visible (dimmed) instead of
+    // switching to a wider "Searching…" label on every keystroke; the label is only used when there
+    // is no previous result to show.
     val counterText = when {
-        search.isSearching && search.query.isNotEmpty() -> "Searching…"
-        search.timedOut -> "Search timed out"
+        search.query.isEmpty() -> ""
+        search.isSearching && search.matchCount == 0 -> "Searching…"
+        search.isSearching -> "${search.currentIdx + 1}/${search.matchCount}"
+        search.timedOut -> "Timed out"
         search.invalidPattern -> "Invalid regex"
-        search.query.isNotEmpty() -> (if (search.matchCount == 0) "0" else (search.currentIdx + 1).toString()) + "/" + search.matchCount
-        else -> ""
+        search.matchCount == 0 -> "0/0"
+        else -> "${search.currentIdx + 1}/${search.matchCount}"
     }
     val counterColor = when {
+        search.isSearching -> tc.td.copy(alpha = 0.55f)
         search.invalidPattern || search.timedOut -> DANGER_RED
         else -> tc.td
     }
+    val showSearchAllLines = onSearchAllLines != null && search.scope == SearchScope.FILTERED &&
+        search.query.isNotEmpty() && !search.isSearching && !search.invalidPattern && !search.timedOut &&
+        search.matchCount == 0
 
     Row(
         modifier
@@ -234,26 +240,23 @@ internal fun SearchBar(
                 )
             }
         }
-        if (statusMessage != null) {
-            TooltipArea(
-                tooltip = { ToolbarTooltip(statusMessage, maxLines = 2) },
-                modifier = Modifier.widthIn(max = 92.dp),
-            ) {
-                AppText("All-lines", color = tc.warn, fontSize = 10.sp, maxLines = 1)
-            }
-            if (counterText.isNotEmpty()) {
-                AppText(counterText, color = counterColor, fontSize = 10.sp, fontFamily = MONO)
-            }
-            if (onReturnToFiltered != null) {
-                PillBtn("Filtered", active = false, onClick = { withSearchFocus(onReturnToFiltered) })
-            }
-        } else if (counterText.isNotEmpty()) {
+        if (counterText.isNotEmpty()) {
             AppText(
                 counterText,
                 color = counterColor,
                 fontSize = 10.sp,
                 fontFamily = MONO,
-                modifier = Modifier.widthIn(min = 38.dp),
+                modifier = Modifier.widthIn(min = 52.dp).testTag("search-counter-${search.scope.name.lowercase()}"),
+            )
+        }
+        if (showSearchAllLines) {
+            PillBtn(
+                "Search all lines",
+                active = false,
+                modifier = Modifier.testTag("search-all-lines"),
+                // No withSearchFocus: this field leaves composition, and the Unfiltered field that
+                // replaces it claims focus itself (its slot becomes the focused scope).
+                onClick = { onSearchAllLines?.invoke() },
             )
         }
         PillBtn("Aa", active = search.caseSensitive, onClick = { withSearchFocus { onToggleCase(search.scope) } })

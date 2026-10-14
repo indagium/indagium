@@ -410,8 +410,10 @@ on/off toggle. They survive a restart.
 
 ## 10. Finding text
 
-`⌘F` / `Ctrl+F` opens Find using **Settings → Editor behavior → Search scope behavior**. The Find
-bar's dropdown offers **Filtered**, **Unfiltered**, and **Two searches**:
+`⌘F` / `Ctrl+F` opens Find using **Settings → Editor behavior → Search scope behavior**. Pressing it
+again while Find is open only puts the cursor back in the field you were using; it never changes the
+mode. The toolbar Find button opens Find, or closes it when it is already open. The Find bar's
+dropdown offers **Filtered**, **Unfiltered**, and **Two searches**:
 
 - **Filtered** searches rows admitted by the current filters. Matches inside collapsed groups are
   included.
@@ -420,35 +422,37 @@ bar's dropdown offers **Filtered**, **Unfiltered**, and **Two searches**:
   result count, current match, focus, and Next/Previous navigation. For example, Filtered can search
   `timeout` while Original searches `socket closed`; neither field replaces the other's draft.
 
-Use `Enter` and `⇧Enter` in a field to move to its next or previous match. `Escape` closes only that
+Use `Enter` and `⇧Enter` in a field to move to its next or previous match; pressed while a new query
+is still being searched, the move is applied as soon as the results arrive. `Escape` closes only that
 field; closing Find does not hide Original. The `Aa` button toggles case sensitivity, and queries can
-use regular expressions.
+use regular expressions. While you type, the previous matches stay highlighted until the new ones
+are ready.
+
+When a Filtered search finds nothing, a **Search all lines** button appears next to the `0/0`
+counter. It copies the query into the Unfiltered field and switches to Unfiltered, opening Original.
 
 The Search scope behavior setting has four choices. **Filtered** and **Unfiltered** always use that
 mode for a normal Find open. **Last search mode** restores the last mode you chose manually,
-including Two searches. **Auto-switch by open view** follows Original visibility: Unfiltered when
-Original is open, Filtered when it is hidden. In Auto mode a manual mode choice lasts until the next
-normal Find open or a visibility change. The Find dropdown tooltip summarizes the active policy and
-the remembered manual mode.
+including Two searches; `⌘⌥F` counts as choosing Unfiltered. **Auto-switch by open view** follows
+Original visibility: Unfiltered when Original is open, Filtered when it is hidden, switching as you
+show or hide Original. A changed setting applies the next time Find opens. The Find dropdown tooltip
+summarizes the active policy and the remembered manual mode.
 
 `⌘⌥F` / `Ctrl+Alt+F` always opens or focuses Unfiltered. In Two searches it opens that field without
-closing Filtered. Compare mode searches each displayed log with its Filtered field.
-
-When **Search all lines if Filtered has no matches** is On, a completed, valid Filtered search with
-zero matches also checks Original. If matches exist, Find opens Original and shows an inline
-**All-lines** status beside the Filtered field. The **Filtered** button restores the pre-fallback
-view and suppresses the fallback until the query changes. This option applies only to the single
-Filtered field; Two searches keeps both queries independent.
+closing Filtered. Compare mode searches each displayed log with its Filtered field only; entering
+Compare does not hide or show any Original panel.
 
 **Link split selection and Find** is On by default. The saved preference applies in every
-Filtered/Original split view, including single-field modes and Two searches. Linked mirrors a
+Filtered/Original split view, including single-field modes and Two searches. On mirrors a
 Filtered row selection into Original when that row exists, and Find navigation can mirror a match
 in either direction. Original row clicks and free scrolling stay local, and the two queries remain
-separate. Independent keeps each panel's selection and Find navigation local. Explicit annotation,
+separate. Off keeps each panel's selection and Find navigation local. Explicit annotation,
 crash, and video jumps still go to their requested row.
 
-Settings → Editor behavior can also retarget `⌘F` to the tag filter or the keyword/regex filter
-box. That setting controls the destination of normal `⌘F`; the scope policy controls Find only.
+Settings → Editor behavior groups the Ctrl+F settings in one row. **Ctrl+F opens** can retarget
+`⌘F` to the tag filter or the keyword/regex filter box instead of Find. **Ctrl+F also shows
+Original** reveals the Original panel whenever `⌘F` opens; it does not pick the Find field, so with
+Auto-switch Find then opens Unfiltered.
 
 ---
 

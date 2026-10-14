@@ -41,7 +41,6 @@ class SearchScopePolicyTest {
                     SearchMode.TWO_SEARCHES,
                     originalVisible = false,
                     behavior = behavior,
-                    lastManualMode = SearchMode.TWO_SEARCHES,
                 ),
             )
         }
@@ -51,7 +50,6 @@ class SearchScopePolicyTest {
                 SearchMode.TWO_SEARCHES,
                 originalVisible = true,
                 behavior = SearchScopeBehavior.FOLLOW_VIEW,
-                lastManualMode = SearchMode.FILTERED,
             ),
         )
         listOf(
@@ -65,7 +63,6 @@ class SearchScopePolicyTest {
                     SearchMode.TWO_SEARCHES,
                     originalVisible = true,
                     behavior = behavior,
-                    lastManualMode = SearchMode.FILTERED,
                 ),
             )
         }
