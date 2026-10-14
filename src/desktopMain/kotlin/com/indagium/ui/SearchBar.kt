@@ -246,7 +246,7 @@ internal fun SearchBar(
                 color = counterColor,
                 fontSize = 10.sp,
                 fontFamily = MONO,
-                modifier = Modifier.widthIn(min = 52.dp).testTag("search-counter-${search.scope.name.lowercase()}"),
+                modifier = Modifier.widthIn(min = 38.dp).testTag("search-counter-${search.scope.name.lowercase()}"),
             )
         }
         onSearchAllLines?.takeIf { showSearchAllLines }?.let { searchAllLines ->
