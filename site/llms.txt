@@ -1,13 +1,14 @@
-# Indagium (version 1.8.7)
+# Indagium (version 1.8.10)
 
 > Indagium is an analysis-first Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens saved logcat files and adb bugreports, and can also capture live Android logcat with screen video over USB or Android 11+ wireless debugging. It filters, folds, compares, annotates, and investigates evidence, then exports notes and logs. Capture snapshots are portable ZIP files that include a synchronization anchor so an included video is linked to its log when reopened. Indagium is source-available under the PolyForm Perimeter License, not open source.
 
 ## Pages
 
-- [Home](https://indagium.com/): Analysis-focused overview, application metadata for version 1.8.7, features, and downloads.
+- [Home](https://indagium.com/): Analysis-focused overview, application metadata for version 1.8.10, features, and downloads.
 - [Android Logcat Viewer](https://indagium.com/android-logcat-viewer/): Open and read large logcat text files, use the minimap and thread map, and compare tabs.
 - [Android Logcat Analyzer](https://indagium.com/logcat-analyzer/): Filter, highlight, search, fold sequences, and export findings.
 - [Android Logcat Capture](https://indagium.com/android-logcat-capture/): Record Android logs and screen video together by USB or wireless debugging, mark issues, save snapshots without stopping, and reopen the ZIP with synchronized evidence.
+- [AI Tests](https://indagium.com/ai-tests/): Build Android suites with reusable steps, scripts, checks, and setup hooks; run cases on device lanes, inspect saved evidence and reports, and follow up with issues.
 - [Android Bug Report Viewer](https://indagium.com/android-bug-report-viewer/): Open adb bugreport .zip/.7z archives and choose logs to analyze.
 - [Log Analysis Workflow](https://indagium.com/log-analysis-workflow/): Compare the analysis workspace with generic log viewers and manual video attachment.
 - [Analyze Android Logcat Guide](https://indagium.com/guides/analyze-android-logcat/): A repeatable workflow for logcat, bugreports, and DLT.
@@ -19,6 +20,7 @@
 
 - [README](https://github.com/indagium/indagium/blob/master/README.md): Features, installation, live capture, and limitations.
 - [User Guide](https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md): Setup, log analysis, capture, shortcuts, storage, and troubleshooting.
+- [Release 1.8.10](https://github.com/indagium/indagium/blob/master/docs/releases/1.8.10.md): AI test suites, configurable Find behavior, setup migration, and walkthrough documentation.
 - [Release 1.8.7](https://github.com/indagium/indagium/blob/master/docs/releases/1.8.7.md): Concise summary of device capture and other user-facing changes.
 - [MCP Guide](https://github.com/indagium/indagium/blob/master/docs/mcp/README.md): Connect an external MCP client and understand device-capture approvals.
 

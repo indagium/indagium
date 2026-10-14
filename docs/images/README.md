@@ -1,11 +1,9 @@
 # Documentation images — recording guide
 
-This folder holds the screenshots and animations referenced by
-[USER_GUIDE.md](../USER_GUIDE.md). Each entry below is already linked from the guide, so dropping a
-correctly-named file here makes it appear with no edit to the Markdown.
-
-Until a file exists, GitHub renders a broken-image placeholder and the alt text — the guide still
-reads correctly.
+This folder contains the screenshots and animations referenced by [USER_GUIDE.md](../USER_GUIDE.md).
+The assets in the shot list are present in the repository and linked from their guide sections. The
+four AI test animations are GIF-12 through GIF-15; they were converted from the supplied recordings
+without copying the original screen-recording files into the repository.
 
 ---
 
@@ -83,6 +81,21 @@ seconds off the clip. Reducing the palette below 80 colours is the last resort �
 large flat areas that dither badly. Keeping `stats_mode=full`, an opaque RGB input, and `dither=none`
 prevents static teal controls from being quantized to black.
 
+### AI test suite walkthrough clips
+
+The AI test clips use the supplied originals **Screen Recording 2026-10-14 at 20.15.04.mov**
+(60.343 s, recording and rewrite) and **Screen Recording 2026-10-14 at 20.16.36.mov**
+(101.697 s, run and results). Both originals are 3840×2192 window-only captures; no crop was applied.
+The GIFs are 1280×731, 10 fps, opaque, looped, and use the 80-color full-statistics palette with
+`dither=none` and rectangle diffing. All four are 3.6 MiB combined and under 1.1 MiB each.
+
+| GIF | Source cut | Speed | Finished loop |
+|---|---|---|---|
+| GIF-12 recording | First recording, 5–25 s | 1.5× plus 1 s final-frame hold | 14.4 s; 846 KiB (866,549 bytes) |
+| GIF-13 review | First recording, 26–32 s, 40–47 s, and 55–60.343 s concatenated | 1.5× plus 1 s final-frame hold | 12.7 s; 912 KiB (933,640 bytes) |
+| GIF-14 run | Second recording, 16–34 s | 1.5× plus 1 s final-frame hold | 13.1 s; 1.02 MiB (1,073,595 bytes) |
+| GIF-15 results | Second recording, 90–101.697 s | Real time plus 2 s final-frame hold | 13.6 s; 848 KiB (868,675 bytes) |
+
 ---
 
 ## Shot list
@@ -103,6 +116,10 @@ Names are exact — the guide links these paths.
 | **GIF-10** | `gif-10-ai-assistant.gif` | [22. AI assistant](../USER_GUIDE.md#22-ai-assistant) | 19 s | Right-click a crash line → **Ask AI** → **Find root cause** → watch the **Investigation** section stream tool activity while the analysis runs |
 | **GIF-10 result** | `gif-10-ai-assistant-result.gif` | [22. AI assistant](../USER_GUIDE.md#22-ai-assistant) | 12.8 s | Show the completed analysis in Markdown Preview, including evidence, then click **Copy**. **Make sure no API key is visible.** |
 | **GIF-11** | `gif-11-sequence-diagram-workspace.gif` | [15. Notes — sequence-diagram workspaces](../USER_GUIDE.md#sequence-diagram-workspaces) | 20 s | Open a diagram from selected rows → inspect the message queue and canvas → select linked queue/canvas content → open image/source export choices |
+| **GIF-12** | `gif-12-ai-test-recording.gif` | [30. AI test suites — readable steps from a recording](../USER_GUIDE.md#readable-steps-from-a-recording) | 14.4 s | Record a Chrome workflow on an Android emulator while the recording view follows device input; edited to 1.5× |
+| **GIF-13** | `gif-13-ai-test-review.gif` | [30. AI test suites — readable steps from a recording](../USER_GUIDE.md#readable-steps-from-a-recording) | 12.7 s | Review rewritten actions and expected results, then apply the edited steps; edited excerpts at 1.5×, with rewrite wait omitted |
+| **GIF-14** | `gif-14-ai-test-run.gif` | [30. AI test suites — running](../USER_GUIDE.md#running) | 13.1 s | Watch an AI agent run the Android workflow with live evidence and a judge; edited to 1.5× |
+| **GIF-15** | `gif-15-ai-test-results.gif` | [30. AI test suites — reading the report](../USER_GUIDE.md#reading-the-report) | 13.6 s | Show the completed five-step case with passing agent and judge results; real-time excerpt with final-frame hold |
 
 ---
 

@@ -17,3 +17,43 @@ The device-capture source frame includes a 3104x2024 desktop recording. Its web
 video removes the surrounding black desktop margins with a 2880x1800 crop at
 x=112, y=76, then scales to 1920x1200. The clip is H.264, silent, and 30 fps;
 the launcher and video-poster WebPs are 1600x1000.
+
+## Homepage workspace screenshot and workflow
+
+The homepage workspace screenshot and workflow recording were supplied as
+Desktop originals:
+
+- `Screenshot 2026-10-14 at 19.51.12.png`
+- `Screen Recording 2026-10-14 at 19.48.12.mov`
+
+The originals remain on the source machine and are not copied or published.
+The screenshot uses a 3840x2188 crop at x=112, y=76. The homepage preview is
+1920x1094 (`posters/homepage-workspace.webp`), and the full-resolution zoom
+image is 3840x2188 (`posters/homepage-workspace-full.webp`).
+
+The workflow recording is a 1920x1094 H.264 MP4, silent, 30 fps, with faststart
+enabled; its duration is 43.6 seconds (`web/homepage-workflow.mp4`). The
+1600x912 WebP poster (`posters/homepage-workflow.webp`) is from the 0.5-second
+frame.
+
+## AI tests page videos and screenshots
+
+The AI tests walkthroughs use two Desktop originals, both 3840x2192; the full
+desktop frames are used without cropping. The original `.mov` files are not
+copied or published:
+
+- `Screen Recording 2026-10-14 at 20.15.04.mov` — recording and reviewing steps
+- `Screen Recording 2026-10-14 at 20.16.36.mov` — running a test case
+
+The web videos scale the full frame to 1920x1096 and use H.264, silent, 30 fps,
+faststart MP4 encoding:
+`web/ai-tests-recording.mp4` (60.333008 seconds) and
+`web/ai-tests-running.mp4` (101.633333 seconds). Their 1600x914 WebP posters
+are `posters/ai-tests-recording.webp` (frame at 13 seconds) and
+`posters/ai-tests-running.webp` (frame at 37 seconds).
+
+The full-resolution screenshot `posters/ai-tests-authoring-full.webp` is a
+3840x2192 frame at 42 seconds from the recording walkthrough; its 1920x1096
+preview is `posters/ai-tests-authoring.webp`. The run results image
+`posters/ai-tests-results-full.webp` is a 3840x2192 frame at 100 seconds from
+the test run; its 1920x1096 preview is `posters/ai-tests-results.webp`.

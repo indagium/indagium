@@ -12677,12 +12677,16 @@ class AppState(
                 activeTestSuitesDir = suites
                 testLibraryStore = TestLibraryStore(suites, limits = { editionService.limits() })
             }
+            if (runsChanged && testRunCoordinatorDelegate.isInitialized()) {
+                // A folder switch also drops this launch's finished run snapshots. Publish that empty list before
+                // exposing the new folder: callers use activeTestFolders() to observe when the switch is complete.
+                testRunCoordinator.forgetFinishedRuns()
+            }
             if (runsChanged) activeTestRunsDir = runs
             if (issuesChanged) activeTestIssuesDir = issues
         }
         if (suitesChanged) syncTestLibrary()
         if (runsChanged) {
-            if (testRunCoordinatorDelegate.isInitialized()) testRunCoordinator.forgetFinishedRuns()
             testRunsFolderEpoch += 1
         }
         if (issuesChanged) issueStore.folderChanged()
