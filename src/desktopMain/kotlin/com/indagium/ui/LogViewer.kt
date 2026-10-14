@@ -2109,7 +2109,10 @@ fun LogViewer(
                     rowClickSyncRevision = null
                 }
             }
-            LaunchedEffect(rowClickSyncId, computedAllItems.expandedAt, computedAllItems.loading, effectiveSyncSelectionAndScroll, syncSelectionAndScrollRevision) {
+            LaunchedEffect(
+                rowClickSyncId, computedAllItems.expandedAt, computedAllItems.loading,
+                effectiveSyncSelectionAndScroll, syncSelectionAndScrollRevision,
+            ) {
                 val id = rowClickSyncId ?: return@LaunchedEffect
                 if (!effectiveSyncSelectionAndScroll || rowClickSyncRevision != syncSelectionAndScrollRevision) {
                     rowClickSyncId = null
@@ -2396,9 +2399,8 @@ fun LogViewer(
                         scrollForCursor(allLazyState, syncScope, originalTarget.index, navScrollMargin)
                     }
                 }
-                if (filteredTarget == null && originalTarget == null &&
-                    (computedItems.loading || (maySyncOtherPanel && computedAllItems.loading))
-                ) {
+                val listsStillLoading = computedItems.loading || (maySyncOtherPanel && computedAllItems.loading)
+                if (filteredTarget == null && originalTarget == null && listsStillLoading) {
                     // Items are still being computed or stale — don't give up on this request yet;
                     // the loading/expandedAt flags above are in this effect's keys, so it re-runs
                     // once they settle.
