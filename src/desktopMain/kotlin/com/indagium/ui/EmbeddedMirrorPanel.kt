@@ -2300,9 +2300,8 @@ private suspend fun PointerInputScope.trackMirrorTouchGestures(
                 // Null only before the element has been measured; nothing to map yet.
                 val mapper = currentMapper()
                 val active = pointer
-                if (mapper == null) {
-                    Unit
-                } else if (active == null) {
+                if (mapper == null) continue
+                if (active == null) {
                     event.changes.firstOrNull { it.changedToDown() }?.let { down ->
                         pointer = down.id
                         downX = down.position.x

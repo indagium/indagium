@@ -232,7 +232,7 @@ private fun VideoHeaderFollowActions(
     val captureLinked = attachment.captureSourcePath != null && tab.captureTimeline != null
     val hasMapping = anchor != null || captureLinked
     val clearTooltip = if (captureLinked) {
-        val timeline = tab.captureTimeline!!
+        val timeline = tab.captureTimeline
         val uncertainty = timeline.uncertaintyMs?.let { " ±${it}ms" }.orEmpty()
         "Portable capture mapping (${timeline.quality}$uncertainty). Click to unlink the mapping; the video stays attached."
     } else if (anchor != null) {

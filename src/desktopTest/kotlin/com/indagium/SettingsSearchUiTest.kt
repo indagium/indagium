@@ -11,11 +11,13 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import com.indagium.model.SearchScopeBehavior
 import com.indagium.ui.AppState
 import com.indagium.ui.SettingsDialog
 import com.indagium.ui.isMacOs
 import org.junit.Rule
 import org.junit.Test
+import kotlin.test.assertEquals
 
 /** Drives the real Settings dialog: typing into the nav search, Esc, and opening a result. */
 @OptIn(ExperimentalTestApi::class)
@@ -74,6 +76,17 @@ class SettingsSearchUiTest {
         rule.onNodeWithText("All results").assertDoesNotExist()
         // Editor behavior is now the open section: one of its other rows is on screen.
         rule.onNodeWithText("Keyboard scroll margin").assertExists()
+    }
+
+    @Test
+    fun scopeBehaviorOffersAFixedTwoSearchesDefault() {
+        val state = AppState()
+        rule.setContent { SettingsDialog(state, onDismiss = {}) }
+        type("scope behavior")
+        rule.onNodeWithText("Search scope behavior").performClick()
+        rule.onNodeWithTag("search-scope-behavior-selector").performClick()
+        rule.onNodeWithText("Two searches").performClick()
+        rule.runOnIdle { assertEquals(SearchScopeBehavior.TWO_SEARCHES, state.settings.searchScopeBehavior) }
     }
 
     @Test

@@ -6665,8 +6665,8 @@ class AppState(
             (before.logData !== candidate.logData ||
                 before.analysis.stackTraceGroups !== candidate.analysis.stackTraceGroups)
         val after = if (compositionInputsChanged) {
-            candidate!!.copy(
-                messageCompositionRevision = before!!.messageCompositionRevision + 1,
+            candidate.copy(
+                messageCompositionRevision = before.messageCompositionRevision + 1,
                 messageComposition = MessageCompositionState.NotComputed,
             )
         } else {

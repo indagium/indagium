@@ -431,8 +431,9 @@ are ready.
 When a Filtered search finds nothing, a **Search all lines** button appears next to the `0/0`
 counter. It copies the query into the Unfiltered field and switches to Unfiltered, opening Original.
 
-The Search scope behavior setting has four choices. **Filtered** and **Unfiltered** always use that
-mode for a normal Find open. **Last search mode** restores the last mode you chose manually,
+The Search scope behavior setting has five choices. **Filtered**, **Unfiltered**, and **Two searches**
+always use that mode for a normal Find open. Two searches opens both independent fields and reveals
+Original. **Last search mode** restores the last mode you chose manually,
 including Two searches; `⌘⌥F` counts as choosing Unfiltered. **Auto-switch by open view** follows
 Original visibility: Unfiltered when Original is open, Filtered when it is hidden, switching as you
 show or hide Original. A changed setting applies the next time Find opens. The Find dropdown tooltip

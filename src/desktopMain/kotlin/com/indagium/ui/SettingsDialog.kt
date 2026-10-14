@@ -50,6 +50,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -1502,16 +1503,17 @@ private fun SearchScopeBehaviorSelector(
     val behaviors = listOf(
         SearchScopeBehavior.FILTERED,
         SearchScopeBehavior.UNFILTERED,
+        SearchScopeBehavior.TWO_SEARCHES,
         SearchScopeBehavior.LAST_USED,
         SearchScopeBehavior.FOLLOW_VIEW,
     )
-    val labels = listOf("Filtered", "Unfiltered", "Last search mode", "Auto-switch by open view")
+    val labels = listOf("Filtered", "Unfiltered", "Two searches", "Last search mode", "Auto-switch by open view")
     val selectedIndex = behaviors.indexOf(selected).coerceAtLeast(0)
     var open by remember { mutableStateOf(false) }
     var suppressToggleUntilMs by remember { mutableStateOf(0L) }
     Box(Modifier.fillMaxWidth()) {
         HoverBox(
-            modifier = Modifier.fillMaxWidth().height(26.dp)
+            modifier = Modifier.fillMaxWidth().height(26.dp).testTag("search-scope-behavior-selector")
                 .clip(CORNER_SM)
                 .background(tc.p2, CORNER_SM)
                 .border(1.dp, tc.br, CORNER_SM),

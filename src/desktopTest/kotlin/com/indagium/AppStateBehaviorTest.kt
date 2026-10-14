@@ -9228,6 +9228,30 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun fixedTwoSearchesPolicyOpensBothFieldsAndSurvivesRestartSettings() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        val configured = state.settings.copy(searchScopeBehavior = SearchScopeBehavior.TWO_SEARCHES)
+        state.settings = settingsFromJson(configured.settingsJson())!!
+        assertEquals(SearchScopeBehavior.TWO_SEARCHES, state.settings.searchScopeBehavior)
+        state.openSearch("log")
+        val opened = state.tab("log")!!
+        assertEquals(SearchMode.TWO_SEARCHES, opened.searchMode)
+        assertTrue(opened.showUnfiltered)
+        assertTrue(opened.searchFor(SearchScope.FILTERED).active)
+        assertTrue(opened.searchFor(SearchScope.UNFILTERED).active)
+        assertEquals(SearchMode.FILTERED, state.settings.lastManualSearchMode)
+
+        // Explicitly closing Original is respected; the default is reapplied on a fresh open.
+        state.toggleUnfiltered("log")
+        assertEquals(SearchMode.FILTERED, state.tab("log")!!.searchMode)
+        state.closeSearch("log")
+        state.openSearch("log")
+        assertEquals(SearchMode.TWO_SEARCHES, state.tab("log")!!.searchMode)
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
     fun changingSearchScopeBehaviorLeavesOpenFindSessionsUntouched() {
         val state = AppState()
         state.tabs = scopeTestTabs()
