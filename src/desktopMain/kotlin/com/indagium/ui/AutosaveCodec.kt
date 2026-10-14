@@ -681,6 +681,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("deviceLoggingPanelExpanded", deviceLoggingPanelExpanded)
     workspaceProfileId?.let { put("workspaceProfileId", it) }
     put("setupAssistantDone", setupAssistantDone)
+    put("setupAssistantRevision", setupAssistantRevision)
     put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
     put("captureMirrorLayouts", captureMirrorLayoutsJson(captureMirrorLayouts))
     lastCaptureMirrorLayout?.let { put("lastCaptureMirrorLayout", captureMirrorLayoutJson(it)) }
@@ -1024,6 +1025,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         lastCaptureMirrorLayout = (o["lastCaptureMirrorLayout"] as? JsonObject)?.captureMirrorLayoutFromJson(),
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
         setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
+        setupAssistantRevision = o.intOrDefault("setupAssistantRevision", 0).coerceAtLeast(0),
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
         tracker = trackerSettingsFromJson(o["tracker"]),
         testing = testingSettingsFromJson(o["testing"]),

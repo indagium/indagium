@@ -14,40 +14,96 @@ import kotlin.test.assertTrue
 
 class SetupAssistantTest {
     @Test
-    fun setupAssistantDoneRoundTripsAndAMissingKeyMeansNotDone() {
-        val done = settingsFromJson(AppSettings(setupAssistantDone = true).settingsJson())!!
+    fun setupAssistantCompletionAndRevisionRoundTripAndMissingKeysUseDefaults() {
+        val done = settingsFromJson(AppSettings(setupAssistantDone = true, setupAssistantRevision = 2).settingsJson())!!
         assertTrue(done.setupAssistantDone)
+        assertEquals(2, done.setupAssistantRevision)
 
-        assertFalse(settingsFromJson(AppSettings().settingsJson())!!.setupAssistantDone)
-        // A blob written before the assistant existed: existing users see it once.
+        val defaults = settingsFromJson(AppSettings().settingsJson())!!
+        assertFalse(defaults.setupAssistantDone)
+        assertEquals(0, defaults.setupAssistantRevision)
+        // A completed blob written before the revision existed upgrades from revision zero.
+        val oldCompleted = settingsFromJson("""{"setupAssistantDone":true}""")!!
+        assertTrue(oldCompleted.setupAssistantDone)
+        assertEquals(0, oldCompleted.setupAssistantRevision)
         assertFalse(settingsFromJson("{}")!!.setupAssistantDone)
     }
 
     @Test
-    fun startupOpensTheAssistantOnlyWhenItIsNotDone() {
+    fun startupRoutesFreshAndOlderCompletedUsersAndLeavesCurrentRevisionClosed() {
         val fresh = AppState()
         fresh.maybeShowSetupAssistantOnStartup()
         assertTrue(fresh.setupAssistantOpen)
+        assertFalse(fresh.shouldSetupAssistantStartAtSearch())
 
-        val done = AppState()
-        done.updateSettings { it.copy(setupAssistantDone = true) }
-        done.maybeShowSetupAssistantOnStartup()
-        assertFalse(done.setupAssistantOpen)
+        val olderDone = AppState()
+        olderDone.updateSettings { it.copy(setupAssistantDone = true, setupAssistantRevision = 1) }
+        olderDone.maybeShowSetupAssistantOnStartup()
+        assertTrue(olderDone.setupAssistantOpen)
+        assertTrue(olderDone.shouldSetupAssistantStartAtSearch())
+        // The app can temporarily unmount the wizard while license/update dialogs are shown.
+        assertTrue(olderDone.shouldSetupAssistantStartAtSearch(), "The route survives a temporary remount")
+        olderDone.skipSetupAssistant()
+        assertFalse(olderDone.shouldSetupAssistantStartAtSearch(), "Closing the wizard clears its startup route")
+
+        val current = AppState()
+        current.updateSettings { it.copy(setupAssistantDone = true, setupAssistantRevision = 2) }
+        current.maybeShowSetupAssistantOnStartup()
+        assertFalse(current.setupAssistantOpen)
+
+        val future = AppState()
+        future.updateSettings { it.copy(setupAssistantDone = true, setupAssistantRevision = 9) }
+        future.maybeShowSetupAssistantOnStartup()
+        assertFalse(future.setupAssistantOpen)
     }
 
     @Test
     fun skippingAndFinishingBothMarkItDoneAndCloseIt() {
         for (finish in listOf(false, true)) {
-            val state = AppState()
-            state.maybeShowSetupAssistantOnStartup()
+            val dir = createTempDirectory("setup-assistant-dismissal").toFile()
+            val autosave = File(dir, "autosave.cache")
+            try {
+                val state = AppState(autosaveFile = autosave, restoreOnCreate = false)
+                state.maybeShowSetupAssistantOnStartup()
+                state.updateSettings {
+                    it.copy(openNewFilesWithUnfiltered = true, openUnfilteredOnCtrlF = true)
+                }
+                if (finish) state.finishSetupAssistant() else state.skipSetupAssistant()
 
-            if (finish) state.finishSetupAssistant() else state.skipSetupAssistant()
+                assertFalse(state.setupAssistantOpen, "finish=$finish")
+                assertTrue(state.settings.setupAssistantDone, "finish=$finish")
+                assertEquals(2, state.settings.setupAssistantRevision, "finish=$finish")
+                state.autosaveNow()
+                state.close()
 
-            assertFalse(state.setupAssistantOpen, "finish=$finish")
-            assertTrue(state.settings.setupAssistantDone, "finish=$finish")
-            // What autosave writes carries the flag, so it survives a relaunch.
-            assertTrue(settingsFromJson(state.settings.settingsJson())!!.setupAssistantDone, "finish=$finish")
+                val restored = AppState(autosaveFile = autosave, restoreOnCreate = true)
+                try {
+                    restored.maybeShowSetupAssistantOnStartup()
+                    assertFalse(restored.setupAssistantOpen, "finish=$finish")
+                    assertTrue(restored.settings.setupAssistantDone, "finish=$finish")
+                    assertEquals(2, restored.settings.setupAssistantRevision, "finish=$finish")
+                    assertTrue(restored.settings.openNewFilesWithUnfiltered, "finish=$finish")
+                    assertTrue(restored.settings.openUnfilteredOnCtrlF, "finish=$finish")
+                } finally {
+                    restored.close()
+                }
+            } finally {
+                dir.deleteRecursively()
+            }
         }
+    }
+
+    @Test
+    fun dismissingAssistantPreservesARevisionHigherThanTheCurrentOne() {
+        val state = AppState()
+        state.updateSettings { it.copy(setupAssistantRevision = 12) }
+        state.maybeShowSetupAssistantOnStartup()
+
+        state.skipSetupAssistant()
+
+        assertTrue(state.settings.setupAssistantDone)
+        assertEquals(12, state.settings.setupAssistantRevision)
+        assertEquals(12, settingsFromJson(state.settings.settingsJson())!!.setupAssistantRevision)
     }
 
     @Test
@@ -60,6 +116,7 @@ class SetupAssistantTest {
 
         assertTrue(state.setupAssistantOpen)
         assertFalse(state.settingsOpen)
+        assertFalse(state.shouldSetupAssistantStartAtSearch(), "Manual reruns always start at Workspace")
     }
 
     @Test
@@ -82,5 +139,6 @@ class SetupAssistantTest {
     fun aFreshAppStateStartsWithoutExistingData() {
         assertFalse(AppState().startedWithExistingData)
         assertEquals(false, AppState().settings.setupAssistantDone)
+        assertEquals(0, AppState().settings.setupAssistantRevision)
     }
 }
