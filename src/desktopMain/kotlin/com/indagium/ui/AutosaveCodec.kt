@@ -620,6 +620,10 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("ctrlFTarget", ctrlFTarget.name)
     put("openNewFilesWithUnfiltered", openNewFilesWithUnfiltered)
     put("openUnfilteredOnCtrlF", openUnfilteredOnCtrlF)
+    put("searchScopeBehavior", searchScopeBehavior.name)
+    put("lastManualSearchMode", lastManualSearchMode.name)
+    put("syncSplitPanelSelectionAndScroll", syncSplitPanelSelectionAndScroll)
+    put("broadenSearchWhenFilteredEmpty", broadenSearchWhenFilteredEmpty)
     put("sourceFolders", buildJsonArray { sourceFolders.forEach { add(it) } })
     put("editorCommand", editorCommand)
     put("editorChoice", editorChoice)
@@ -940,6 +944,14 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         },
         openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
         openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
+        searchScopeBehavior = o.stringOrNull("searchScopeBehavior")
+            ?.let { runCatching { SearchScopeBehavior.valueOf(it) }.getOrNull() }
+            ?: SearchScopeBehavior.FILTERED,
+        lastManualSearchMode = o.stringOrNull("lastManualSearchMode")
+            ?.let { runCatching { SearchMode.valueOf(it) }.getOrNull() }
+            ?: SearchMode.FILTERED,
+        syncSplitPanelSelectionAndScroll = o.boolOrDefault("syncSplitPanelSelectionAndScroll", true),
+        broadenSearchWhenFilteredEmpty = o.boolOrDefault("broadenSearchWhenFilteredEmpty", false),
         sourceFolders = o.stringArray("sourceFolders"),
         editorCommand = editorCommandValue,
         // Migration default: a legacy blob (predates editorChoice) with a typed editorCommand keeps

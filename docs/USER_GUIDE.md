@@ -410,17 +410,45 @@ on/off toggle. They survive a restart.
 
 ## 10. Finding text
 
-`⌘F` / `Ctrl+F` opens the **Find bar** over the filtered log. `Enter` and `⇧Enter` jump between
-matches; `Escape` closes it. Case sensitivity is a toggle in the bar.
+`⌘F` / `Ctrl+F` opens Find using **Settings → Editor behavior → Search scope behavior**. The Find
+bar's dropdown offers **Filtered**, **Unfiltered**, and **Two searches**:
 
-By default Find searches the **fully expanded filtered view**, so a match inside a collapsed group is
-still found. Use the scope toggle in the Find bar to search **all lines** in the Original panel,
-including rows hidden by filters; this opens or reveals the unfiltered split as needed. The scope is
-shown in the bar so it is clear whether a match is outside the current filtered view.
+- **Filtered** searches rows admitted by the current filters. Matches inside collapsed groups are
+  included.
+- **Unfiltered** searches every line and opens the Original panel.
+- **Two searches** shows one field in each panel. Each field keeps its own query, case setting,
+  result count, current match, focus, and Next/Previous navigation. For example, Filtered can search
+  `timeout` while Original searches `socket closed`; neither field replaces the other's draft.
 
-`⌘F` / `Ctrl+F` finds within the filtered view. `⌘⌥F` / `Ctrl+Alt+F` opens Find in all lines
-(the Original panel). Settings → Editor behavior lets you retarget `⌘F` to the tag box, a message rule,
-the keyword/regex box, or Find, and choose whether Find reveals the unfiltered split automatically.
+Use `Enter` and `⇧Enter` in a field to move to its next or previous match. `Escape` closes only that
+field; closing Find does not hide Original. The `Aa` button toggles case sensitivity, and queries can
+use regular expressions.
+
+The Search scope behavior setting has four choices. **Filtered** and **Unfiltered** always use that
+mode for a normal Find open. **Last search mode** restores the last mode you chose manually,
+including Two searches. **Auto-switch by open view** follows Original visibility: Unfiltered when
+Original is open, Filtered when it is hidden. In Auto mode a manual mode choice lasts until the next
+normal Find open or a visibility change. The Find dropdown tooltip summarizes the active policy and
+the remembered manual mode.
+
+`⌘⌥F` / `Ctrl+Alt+F` always opens or focuses Unfiltered. In Two searches it opens that field without
+closing Filtered. Compare mode searches each displayed log with its Filtered field.
+
+When **Search all lines if Filtered has no matches** is On, a completed, valid Filtered search with
+zero matches also checks Original. If matches exist, Find opens Original and shows an inline
+**All-lines** status beside the Filtered field. The **Filtered** button restores the pre-fallback
+view and suppresses the fallback until the query changes. This option applies only to the single
+Filtered field; Two searches keeps both queries independent.
+
+**Link split selection and Find** is On by default. The saved preference applies in every
+Filtered/Original split view, including single-field modes and Two searches. Linked mirrors a
+Filtered row selection into Original when that row exists, and Find navigation can mirror a match
+in either direction. Original row clicks and free scrolling stay local, and the two queries remain
+separate. Independent keeps each panel's selection and Find navigation local. Explicit annotation,
+crash, and video jumps still go to their requested row.
+
+Settings → Editor behavior can also retarget `⌘F` to the tag filter or the keyword/regex filter
+box. That setting controls the destination of normal `⌘F`; the scope policy controls Find only.
 
 ---
 
@@ -934,8 +962,8 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 | `⌘⇧F` / `Ctrl+Shift+F` | Toggle filter panel |
 | `⌘⇧A` / `Ctrl+Shift+A` | Toggle notes panel |
 | `⌘⇧D` / `Ctrl+Shift+D` | Toggle compare mode |
-| `⌘F` / `Ctrl+F` | Find in filtered log (or focus Settings search when Settings is open) |
-| `⌘⌥F` / `Ctrl+Alt+F` | Find in all lines in the Original panel |
+| `⌘F` / `Ctrl+F` | Open Find using Search scope behavior (or focus Settings search when Settings is open) |
+| `⌘⌥F` / `Ctrl+Alt+F` | Open or focus Find in Unfiltered / Original |
 | `⌘1` / `⌘2` / `⌘3` | Focus Filters / Log / Notes |
 | `⌘]` / `Ctrl+]` | Next tab |
 | `⌘[` / `Ctrl+[` | Previous tab |
@@ -965,8 +993,8 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 | `⌘⇧N` | Add annotation for selected rows |
 | `Enter` / `⇧F10` | Open context menu for selected row |
 | `Space` | Toggle current row selection |
-| `Enter` / `⇧Enter` | Jump to next / previous Find match |
-| `Escape` | Close the Find bar |
+| `Enter` / `⇧Enter` in Find | Jump to next / previous match in that field |
+| `Escape` in Find | Close that field |
 
 ### Filters
 

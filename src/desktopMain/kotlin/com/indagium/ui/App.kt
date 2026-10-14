@@ -365,7 +365,10 @@ fun App(
                                 } else {
                                     state.activeTab()?.id
                                 }
-                                targetTabId?.let { tabId -> state.openSearch(tabId, scope) }
+                                targetTabId?.let { tabId ->
+                                    if (scope == SearchScope.FILTERED) state.openSearch(tabId)
+                                    else state.openSearch(tabId, scope)
+                                }
                             } else {
                                 if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                                 state.updateFilterVisible(true)

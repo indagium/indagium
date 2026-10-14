@@ -42,6 +42,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -1252,6 +1254,7 @@ fun LogViewer(
     // LaunchedEffect instead of always centering, so Enter/Next/Prev doesn't visibly flash when the
     // match is already on screen.
     searchNavigationRequest: SearchNavigationRequest? = null,
+    searchNavigationRequests: Map<SearchScope, SearchNavigationRequest> = emptyMap(),
     onConsumeSearchNavigation: (Long) -> Unit = {},
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
@@ -1284,15 +1287,18 @@ fun LogViewer(
     // CompareView.kt. Defaults keep every other call site (previews, tests) unaffected:
     // tab.search.active stays false unless AppState.openSearch was actually called, so SearchBar
     // simply never renders for them.
-    onSearchQueryChange: (String) -> Unit = {},
-    onSearchToggleCase: () -> Unit = {},
-    onSearchNext: () -> Unit = {},
-    onSearchPrev: () -> Unit = {},
-    onSearchClose: () -> Unit = {},
-    // Filtered | Unfiltered scope chip inside the Find field — only FileView.kt turns it on
-    // (compare mode has no Original panel to search).
+    onSearchQueryChange: (SearchScope, String) -> Unit = { _, _ -> },
+    onSearchToggleCase: (SearchScope) -> Unit = {},
+    onSearchNext: (SearchScope) -> Unit = {},
+    onSearchPrev: (SearchScope) -> Unit = {},
+    onSearchClose: (SearchScope) -> Unit = {},
     showSearchScopeChip: Boolean = false,
-    onSearchToggleScope: () -> Unit = {},
+    onSearchToggleScope: (SearchMode) -> Unit = {},
+    onToggleSearchSync: () -> Unit = {},
+    onSearchFocused: (SearchScope) -> Unit = {},
+    onReturnToFiltered: () -> Unit = {},
+    syncSelectionAndScroll: Boolean = true,
+    syncSelectionAndScrollRevision: Long = 0L,
     // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
     // and single-panel layouts below. `null` (the default) keeps CompareView, previews, and every
     // other existing LogViewer call site unchanged: FileView.kt is the only real caller that wires
@@ -1307,6 +1313,24 @@ fun LogViewer(
     val mono      = monoFont()
     val toolbarDensity = LocalDensity.current
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
+    // The Original panel owns a separate selection. A pre-existing Filtered selection (including
+    // a queued Find result) must not silently seed it when the split first opens.
+    var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
+    val filteredSearch = tab.searchFor(SearchScope.FILTERED)
+    val unfilteredSearch = tab.searchFor(SearchScope.UNFILTERED)
+    val searchFieldStates = remember(tab.id) { SearchBarFieldStateStore() }
+    val fallbackActive = tab.searchFallback?.isActive == true
+    // This setting governs automatic cross-panel mirroring in every Filtered/Original split,
+    // independent of how many Find fields are open. CompareView has separate tabs and does not
+    // use this same-tab split path.
+    val effectiveSyncSelectionAndScroll = syncSelectionAndScroll
+    val selectedSearchModeIsFullyOpen = when (tab.searchMode) {
+        SearchMode.FILTERED -> filteredSearch.active && !fallbackActive
+        SearchMode.UNFILTERED -> tab.showUnfiltered && unfilteredSearch.active
+        SearchMode.TWO_SEARCHES -> tab.showUnfiltered && filteredSearch.active && unfilteredSearch.active
+    }
+    val latestSyncEnabled by rememberUpdatedState(effectiveSyncSelectionAndScroll)
+    val latestSyncRevision by rememberUpdatedState(syncSelectionAndScrollRevision)
     // `by`, not `=`: keeps this a live-readable delegated property so the LaunchedEffects further
     // down can snapshotFlow { computedItems.expandedAt } and wait on the real recompute landing —
     // see rememberComputedLogItems's doc.
@@ -1440,7 +1464,7 @@ fun LogViewer(
             AppButton(
                 "",
                 onClick = onOpenSearch,
-                variant = if (tab.search.active) ButtonVariant.Primary else ButtonVariant.Secondary,
+                variant = if (filteredSearch.active || unfilteredSearch.active) ButtonVariant.Primary else ButtonVariant.Secondary,
                 leadingIcon = Icons.Outlined.Search,
                 horizontalPadding = 10.dp,
                 modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("search")) tc.ac else Color.Transparent, CORNER_MD),
@@ -1899,6 +1923,7 @@ fun LogViewer(
                                         is LogItem.Row -> LogRow(
                                             item = item,
                                             tab = effectiveTab,
+                                            panelKey = panelKey,
                                             mono = mono,
                                             tc = tc,
                                             wrapLimitChars = effectiveWrapLimitChars,
@@ -2061,6 +2086,7 @@ fun LogViewer(
 
             // Hoisted lazy state for the Original panel so the Filtered panel can scroll it.
             val allLazyState = scrollStates.lazyState("${tab.id}:original")
+            val originalFocusRequester = remember(tab.id) { FocusRequester() }
             // Same key as the single-view panel below (":main") — both render the exact same
             // `items` list, just in different layouts, so they must share one scroll state.
             // Using a distinct ":filtered" key here used to reset to the top every time
@@ -2075,23 +2101,42 @@ fun LogViewer(
             // list lands instead of resolving once against a possibly-stale one with no staleness
             // guard (the bug this replaces — see the itemOnSelRow call site's comment).
             var rowClickSyncId by remember(tab.id) { mutableStateOf<Int?>(null) }
-            LaunchedEffect(rowClickSyncId, computedAllItems.expandedAt, computedAllItems.loading) {
+            var rowClickSyncRevision by remember(tab.id) { mutableStateOf<Long?>(null) }
+            LaunchedEffect(effectiveSyncSelectionAndScroll) {
+                if (!effectiveSyncSelectionAndScroll) {
+                    rowClickSyncId = null
+                    rowClickSyncRevision = null
+                }
+            }
+            LaunchedEffect(rowClickSyncId, computedAllItems.expandedAt, computedAllItems.loading, effectiveSyncSelectionAndScroll, syncSelectionAndScrollRevision) {
                 val id = rowClickSyncId ?: return@LaunchedEffect
+                if (!effectiveSyncSelectionAndScroll || rowClickSyncRevision != syncSelectionAndScrollRevision) {
+                    rowClickSyncId = null
+                    rowClickSyncRevision = null
+                    return@LaunchedEffect
+                }
                 if (computedAllItems.expandedAt != tab.expanded || computedAllItems.loading) return@LaunchedEffect
+                val requestedSyncRevision = rowClickSyncRevision
                 val target = withContext(Dispatchers.Default) {
                     expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = computedAllItems.items)
+                }
+                if (!latestSyncEnabled || latestSyncRevision != requestedSyncRevision) {
+                    rowClickSyncId = null
+                    rowClickSyncRevision = null
+                    return@LaunchedEffect
                 }
                 if (target != null) {
                     (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
                     awaitExpandedAt(target.expanded) { computedAllItems.expandedAt }
+                    if (!latestSyncEnabled || latestSyncRevision != requestedSyncRevision) return@LaunchedEffect
                     allLazyState.centerOnItem(target.index)
                 }
                 rowClickSyncId = null
+                rowClickSyncRevision = null
             }
 
-            // Independent selection for the "Original" panel so clicks there don't
-            // highlight rows in the "Filtered" panel and vice-versa.
-            var localAllSelected by remember(tab.id) { mutableStateOf(emptySet<Int>()) }
+            // Independent selection state is hoisted above the split conditional so close/reopen
+            // preserves Original's selection and scroll anchor.
             val allOnSelRow: (Int, Boolean, Boolean) -> Unit = { id, multi, range ->
                 val visIds = computedAllItems.summary.allIds
                 localAllSelected = when {
@@ -2283,11 +2328,23 @@ fun LogViewer(
             // would otherwise re-expand a group the user had since manually collapsed.
             var satisfiedSearchNavId by remember(tab.id) { mutableStateOf(-1L) }
             LaunchedEffect(
-                searchNavigationRequest?.id, itemsVersion, allItemsVersion, tab.expanded,
+                searchNavigationRequests[SearchScope.FILTERED]?.id,
+                searchNavigationRequest?.takeIf { it.scope == SearchScope.FILTERED }?.id,
+                itemsVersion, allItemsVersion, tab.expanded,
                 computedItems.loading, computedAllItems.loading, computedItems.expandedAt, computedAllItems.expandedAt,
+                effectiveSyncSelectionAndScroll,
+                syncSelectionAndScrollRevision,
             ) {
-                val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+                val request = searchNavigationRequests[SearchScope.FILTERED]
+                    ?: searchNavigationRequest?.takeIf { it.scope == SearchScope.FILTERED }
+                    ?: return@LaunchedEffect
+                if (request.tabId != tab.id) return@LaunchedEffect
                 if (request.id == satisfiedSearchNavId) return@LaunchedEffect
+                val maySyncOtherPanel = effectiveSyncSelectionAndScroll && request.syncRevision == syncSelectionAndScrollRevision
+                if (tab.searchFor(request.ownerScope).inputRevision != request.inputRevision) {
+                    onConsumeSearchNavigation(request.id)
+                    return@LaunchedEffect
+                }
                 // CHANGE B: see the split-view annotation-nav effect above for why this must run
                 // before any resolution — a stale item list would otherwise center on the wrong
                 // index and still consume the request, so the user's click would need a second press.
@@ -2317,19 +2374,21 @@ fun LogViewer(
                 // tab.copy(expanded = opened) / computedAllItems.items: resolved AFTER
                 // filteredTarget's own toggle (if any) has landed, not against the pre-toggle
                 // expanded set — see 1.3(c).
-                val originalTarget = withContext(Dispatchers.Default) {
+                val originalTarget = if (maySyncOtherPanel) withContext(Dispatchers.Default) {
                     expansionAndIndexForEntry(
                         tab.copy(expanded = opened), applyFilter = false,
                         entryId = request.entryId, currentItems = computedAllItems.items,
                     )
-                }
+                } else null
                 if (originalTarget != null) {
+                    if (!latestSyncEnabled || latestSyncRevision != request.syncRevision) return@LaunchedEffect
                     // Original panel has its own independent selection (localAllSelected) — keep it
                     // in sync with the match too, same as a Filtered-panel row click does.
                     localAllSelected = setOf(request.entryId)
                     if (originalTarget.expanded != opened) {
                         (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                         awaitExpandedAt(originalTarget.expanded) { computedAllItems.expandedAt }
+                        if (!latestSyncEnabled || latestSyncRevision != request.syncRevision) return@LaunchedEffect
                         opened = opened + originalTarget.expanded
                         allLazyState.centerOnItem(originalTarget.index)
                     } else {
@@ -2337,7 +2396,7 @@ fun LogViewer(
                     }
                 }
                 if (filteredTarget == null && originalTarget == null &&
-                    (computedItems.loading || computedAllItems.loading)
+                    (computedItems.loading || (maySyncOtherPanel && computedAllItems.loading))
                 ) {
                     // Items are still being computed or stale — don't give up on this request yet;
                     // the loading/expandedAt flags above are in this effect's keys, so it re-runs
@@ -2348,12 +2407,75 @@ fun LogViewer(
                 onConsumeSearchNavigation(request.id)
             }
 
+            var satisfiedOriginalSearchNavId by remember(tab.id) { mutableStateOf(-1L) }
+            LaunchedEffect(
+                searchNavigationRequests[SearchScope.UNFILTERED]?.id,
+                searchNavigationRequest?.takeIf { it.scope == SearchScope.UNFILTERED }?.id,
+                allItemsVersion, itemsVersion, tab.expanded,
+                computedAllItems.loading, computedItems.loading,
+                computedAllItems.expandedAt, computedItems.expandedAt,
+                effectiveSyncSelectionAndScroll,
+                syncSelectionAndScrollRevision,
+            ) {
+                val request = searchNavigationRequests[SearchScope.UNFILTERED]
+                    ?: searchNavigationRequest?.takeIf { it.scope == SearchScope.UNFILTERED }
+                    ?: return@LaunchedEffect
+                if (request.tabId != tab.id || request.id == satisfiedOriginalSearchNavId) return@LaunchedEffect
+                if (tab.searchFor(request.ownerScope).inputRevision != request.inputRevision) {
+                    onConsumeSearchNavigation(request.id)
+                    return@LaunchedEffect
+                }
+                val maySyncOtherPanel = effectiveSyncSelectionAndScroll && request.syncRevision == syncSelectionAndScrollRevision
+                if (computedAllItems.expandedAt != tab.expanded) return@LaunchedEffect
+                if (maySyncOtherPanel && computedItems.expandedAt != tab.expanded) return@LaunchedEffect
+                var opened = tab.expanded
+                val originalTarget = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = request.entryId, currentItems = allItems)
+                }
+                if (originalTarget == null && computedAllItems.loading) return@LaunchedEffect
+                if (originalTarget != null) {
+                    localAllSelected = setOf(request.entryId)
+                    if (originalTarget.expanded != opened) {
+                        (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                        awaitExpandedAt(originalTarget.expanded) { computedAllItems.expandedAt }
+                        opened = opened + originalTarget.expanded
+                        allLazyState.centerOnItem(originalTarget.index)
+                    } else {
+                        scrollForCursor(allLazyState, syncScope, originalTarget.index, navScrollMargin)
+                    }
+                }
+                if (maySyncOtherPanel) {
+                    if (!latestSyncEnabled || latestSyncRevision != request.syncRevision) return@LaunchedEffect
+                    val filteredTarget = withContext(Dispatchers.Default) {
+                        expansionAndIndexForEntry(
+                            tab.copy(expanded = opened), applyFilter = true,
+                            entryId = request.entryId, currentItems = computedItems.items,
+                        )
+                    }
+                    if (filteredTarget != null && latestSyncEnabled && latestSyncRevision == request.syncRevision) {
+                        onSelRowRange(listOf(request.entryId))
+                        if (filteredTarget.expanded != opened) {
+                            (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
+                            awaitExpandedAt(filteredTarget.expanded) { computedItems.expandedAt }
+                            if (!latestSyncEnabled || latestSyncRevision != request.syncRevision) return@LaunchedEffect
+                            filteredLazyState.centerOnItem(filteredTarget.index)
+                        } else {
+                            scrollForCursor(filteredLazyState, syncScope, filteredTarget.index, navScrollMargin)
+                        }
+                    }
+                }
+                if (originalTarget != null) satisfiedOriginalSearchNavId = request.id
+                onConsumeSearchNavigation(request.id)
+            }
+
             // Fires once each time the split view is freshly opened (Compose disposes/recreates
             // this whole branch on every showUnfiltered toggle, so LaunchedEffect(Unit) re-runs
             // on every open) — centers both panels on whatever was already selected before
             // Unfiltered was pressed, instead of leaving the selection wherever it happened to
             // land in the preserved scroll position.
-            LaunchedEffect(Unit) {
+            LaunchedEffect(tab.id, tab.showUnfiltered) {
+                val openSyncRevision = syncSelectionAndScrollRevision
+                if (!effectiveSyncSelectionAndScroll) return@LaunchedEffect
                 val targetId = tab.selected.minOrNull() ?: return@LaunchedEffect
                 // containerH starts at 0 and only gets its real value from the split Column's
                 // own onGloballyPositioned, one or more frames after this branch first composes.
@@ -2362,13 +2484,16 @@ fun LogViewer(
                 // against that transient, too-small viewport and never gets a chance to redo it
                 // once the real (larger) size arrives, so it doesn't end up actually centered.
                 snapshotFlow { containerH }.first { it > 0f }
+                if (!latestSyncEnabled || latestSyncRevision != openSyncRevision) return@LaunchedEffect
                 var opened = tab.expanded
                 val originalTarget = withContext(Dispatchers.Default) {
                     expansionAndIndexForEntry(tab, applyFilter = false, entryId = targetId, currentItems = allItems)
                 }
+                if (!latestSyncEnabled || latestSyncRevision != openSyncRevision) return@LaunchedEffect
                 if (originalTarget != null) {
                     (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                     awaitExpandedAt(originalTarget.expanded) { computedAllItems.expandedAt }
+                    if (!latestSyncEnabled || latestSyncRevision != openSyncRevision) return@LaunchedEffect
                     opened = opened + originalTarget.expanded
                     allLazyState.centerOnItem(originalTarget.index)
                 }
@@ -2380,9 +2505,11 @@ fun LogViewer(
                         entryId = targetId, currentItems = computedItems.items,
                     )
                 }
+                if (!latestSyncEnabled || latestSyncRevision != openSyncRevision) return@LaunchedEffect
                 if (filteredTarget != null) {
                     (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
                     awaitExpandedAt(filteredTarget.expanded) { computedItems.expandedAt }
+                    if (!latestSyncEnabled || latestSyncRevision != openSyncRevision) return@LaunchedEffect
                     filteredLazyState.centerOnItem(filteredTarget.index)
                 }
             }
@@ -2394,6 +2521,40 @@ fun LogViewer(
                 // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
                 Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
+                    if (!fallbackActive &&
+                        ((tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES) && unfilteredSearch.active)
+                    ) {
+                        val originalFieldSearch = unfilteredSearch
+                        SearchBar(
+                            tabId = tab.id,
+                            search = originalFieldSearch,
+                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES && !fallbackActive) "Find in Unfiltered" else null,
+                            mode = tab.searchMode,
+                            // The remaining Original field must still be able to reopen Filtered
+                            // after the user closes its sibling in Two searches mode.
+                            showModeSelector = tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active,
+                            sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                            onModeChange = onSearchToggleScope,
+                            statusMessage = null,
+                            onReturnToFiltered = null,
+                            showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
+                            syncEnabled = settings.syncSplitPanelSelectionAndScroll,
+                            onSyncToggle = onToggleSearchSync,
+                            searchScopeBehavior = settings.searchScopeBehavior,
+                            lastManualSearchMode = settings.lastManualSearchMode,
+                            fieldState = searchFieldStates.field(originalFieldSearch.scope, originalFieldSearch.query),
+                            onQueryChange = onSearchQueryChange,
+                            onToggleCase = onSearchToggleCase,
+                            onNext = onSearchNext,
+                            onPrev = onSearchPrev,
+                            onClose = { scope ->
+                                onSearchClose(scope)
+                                runCatching { originalFocusRequester.requestFocus() }
+                            },
+                            onFocused = onSearchFocused,
+                            autoFocus = fallbackActive || tab.focusedSearchScope == originalFieldSearch.scope,
+                        )
+                    }
                     // Original panel's Δt values use its local selection, independent of the
                     // Filtered panel's tab.selected below; the gutter width itself stays fixed.
                     val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
@@ -2412,7 +2573,10 @@ fun LogViewer(
                         listSummary = computedAllItems.summary,
                         boundsMap = allBoundsAbs,
                         posY = allBoxPosY,
-                        effectiveTab = tab.copy(selected = localAllSelected),
+                        effectiveTab = tab.copy(
+                            selected = localAllSelected,
+                            search = if (fallbackActive) filteredSearch else unfilteredSearch,
+                        ),
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
                         itemOnSelectAll = allOnSelectAll,
@@ -2423,6 +2587,7 @@ fun LogViewer(
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
                         listState = allLazyState,
+                        externalFr = originalFocusRequester,
                         timeDeltaChars = originalTimeDeltaChars,
                     )
                 }
@@ -2431,7 +2596,7 @@ fun LogViewer(
                     splitDp = (cur + delta).coerceIn(50f, (containerH - 60f).coerceAtLeast(100f))
                 }
                 // Panel2 fills the rest with weight(1f).
-                // Clicking a row here scrolls the Original panel to the same entry.
+                // Find fields and selection mirror are independently controlled for each panel.
                 Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
                     // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view, not
@@ -2451,18 +2616,28 @@ fun LogViewer(
                             logFocusRequester = focusRequester,
                         )
                     }
-                    // Split view shows the Find bar over the Filtered panel only (not Original) —
-                    // one search state per tab (see LogTab.search), no independent per-panel state
-                    // in v1 (plan's explicit scope note in AppState.openSearch's doc comment).
-                    if (tab.search.active) {
+                    if ((tab.searchMode == SearchMode.FILTERED || tab.searchMode == SearchMode.TWO_SEARCHES) && filteredSearch.active
+                    ) {
                         SearchBar(
-                            search = tab.search,
+                            tabId = tab.id,
+                            search = filteredSearch,
+                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Filtered" else null,
+                            mode = tab.searchMode,
+                            showModeSelector = true,
+                            sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                            onModeChange = onSearchToggleScope,
+                            showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES,
+                            syncEnabled = settings.syncSplitPanelSelectionAndScroll,
+                            onSyncToggle = onToggleSearchSync,
+                            searchScopeBehavior = settings.searchScopeBehavior,
+                            lastManualSearchMode = settings.lastManualSearchMode,
+                            fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
+                            statusMessage = if (fallbackActive) "No matches in Filtered; searching all lines" else null,
+                            onReturnToFiltered = if (fallbackActive) ({ onReturnToFiltered() }) else null,
                             onQueryChange = onSearchQueryChange,
                             onToggleCase = onSearchToggleCase,
                             onNext = onSearchNext,
                             onPrev = onSearchPrev,
-                            showScopeChip = showSearchScopeChip,
-                            onToggleScope = onSearchToggleScope,
                             // Same fix as the single-view branch below: Escape removes the
                             // focused find field entirely, so without an explicit refocus here
                             // keyboard focus falls off the tree and App.kt's root
@@ -2470,9 +2645,11 @@ fun LogViewer(
                             // click restores focus somewhere — reusing this panel's own
                             // externalFr (wired to the Filtered ItemList below) fixes that.
                             onClose = {
-                                onSearchClose()
+                                onSearchClose(filteredSearch.scope)
                                 runCatching { focusRequester?.requestFocus() }
                             },
+                            onFocused = onSearchFocused,
+                            autoFocus = tab.focusedSearchScope == filteredSearch.scope,
                         )
                     }
                     val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
@@ -2491,9 +2668,10 @@ fun LogViewer(
                         listSummary = computedItems.summary,
                         boundsMap = rowBoundsAbs,
                         posY = boxPosY,
+                        effectiveTab = tab.copy(search = filteredSearch),
                         itemOnSelRow = { id, multi, range ->
                             onSelRow(id, multi, range)
-                            if (!multi && !range) {
+                            if (effectiveSyncSelectionAndScroll && !multi && !range) {
                                 localAllSelected = setOf(id)
                                 // Resolved by the rowClickSync LaunchedEffect below, not inline in
                                 // this callback (1.3(a)) — that used to run on syncScope with no
@@ -2502,11 +2680,12 @@ fun LogViewer(
                                 // pressing an Issues-panel entry does) would resolve against a
                                 // stale allItems and scroll to the wrong row with no retry.
                                 rowClickSyncId = id
+                                rowClickSyncRevision = syncSelectionAndScrollRevision
                             }
                         },
                         itemOnSelRowRange = { ids ->
                             onSelRowRange(ids)
-                            localAllSelected = ids.toSet()
+                            if (effectiveSyncSelectionAndScroll) localAllSelected = ids.toSet()
                         },
                         panelKey = "${tab.id}:main",
                         listState = filteredLazyState,
@@ -2599,8 +2778,19 @@ fun LogViewer(
             // restart landing right after the user manually collapsed the very group this request
             // just opened would see it collapsed again and re-expand it, exactly bug (B).
             var satisfiedSearchNavId by remember(tab.id) { mutableStateOf(-1L) }
-            LaunchedEffect(searchNavigationRequest?.id, itemsVersion, computedItems.loading, computedItems.expandedAt) {
-                val request = searchNavigationRequest?.takeIf { it.tabId == tab.id } ?: return@LaunchedEffect
+            LaunchedEffect(
+                searchNavigationRequests[SearchScope.FILTERED]?.id,
+                searchNavigationRequest?.takeIf { it.scope == SearchScope.FILTERED }?.id,
+                itemsVersion, computedItems.loading, computedItems.expandedAt,
+            ) {
+                val request = searchNavigationRequests[SearchScope.FILTERED]
+                    ?: searchNavigationRequest?.takeIf { it.scope == SearchScope.FILTERED }
+                    ?: return@LaunchedEffect
+                if (request.tabId != tab.id || request.scope != SearchScope.FILTERED) return@LaunchedEffect
+                if (tab.searchFor(request.ownerScope).inputRevision != request.inputRevision) {
+                    onConsumeSearchNavigation(request.id)
+                    return@LaunchedEffect
+                }
                 if (request.id == satisfiedSearchNavId) return@LaunchedEffect
                 // CHANGE B: see the split-view annotation-nav effect above for the full rationale —
                 // bail before resolving against a possibly-stale list so a single click can't resolve
@@ -2643,22 +2833,30 @@ fun LogViewer(
                     logFocusRequester = focusRequester,
                 )
             }
-            if (tab.search.active) {
+            if (filteredSearch.active && tab.searchMode == SearchMode.FILTERED) {
                 SearchBar(
-                    search = tab.search,
+                    tabId = tab.id,
+                    search = filteredSearch,
+                    mode = tab.searchMode,
+                    showModeSelector = showSearchScopeChip,
+                    sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                    onModeChange = onSearchToggleScope,
+                    searchScopeBehavior = settings.searchScopeBehavior,
+                    lastManualSearchMode = settings.lastManualSearchMode,
+                    fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
                     onQueryChange = onSearchQueryChange,
                     onToggleCase = onSearchToggleCase,
                     onNext = onSearchNext,
                     onPrev = onSearchPrev,
-                    showScopeChip = showSearchScopeChip,
-                    onToggleScope = onSearchToggleScope,
                     // Escape (SearchBar's own key handler) closes and returns focus to the log
                     // row list — reusing this view's own externalFr rather than a second
                     // FocusRequester the caller would otherwise need to hoist and manage.
-                    onClose = {
-                        onSearchClose()
+                    onClose = { scope ->
+                        onSearchClose(scope)
                         runCatching { focusRequester?.requestFocus() }
                     },
+                    onFocused = onSearchFocused,
+                    autoFocus = tab.focusedSearchScope == SearchScope.FILTERED,
                 )
             }
             val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
@@ -2674,6 +2872,7 @@ fun LogViewer(
             )
             ItemList(
                 items, computedItems.summary, rowBoundsAbs, boxPosY,
+                effectiveTab = tab.copy(search = filteredSearch),
                 panelKey = "${tab.id}:main", listState = mainLazyState,
                 externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
                 timeDeltaChars = mainTimeDeltaChars,
@@ -3126,6 +3325,7 @@ internal fun pointerInsidePidFieldX(pointerX: Float, fieldStartX: Float, fieldEn
 private fun LogRow(
     item: LogItem.Row,
     tab: LogTab,
+    panelKey: String,
     mono: FontFamily,
     tc: ThemeColors,
     wrapLimitChars: Int,
@@ -3301,6 +3501,8 @@ private fun LogRow(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 22.dp)
+            .testTag("log-row-$panelKey-${entry.id}")
+            .semantics { selected = isSel }
             .pointerHoverIcon(PointerIcon(AwtCursor.getDefaultCursor()), overrideDescendants = true)
             .background(bg)
             .drawWithContent {

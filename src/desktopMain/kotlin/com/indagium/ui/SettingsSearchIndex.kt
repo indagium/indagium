@@ -210,6 +210,21 @@ private fun editorBehavior() = listOf(
         listOf("unfiltered", "split", "new files"),
     ),
     entry(
+        SettingsSection.EditorBehavior, "Search scope behavior",
+        "Choose Filtered, Unfiltered, Last search mode, or Auto-switch by open view for normal Find opens.",
+        listOf("find", "search", "two searches", "dual", "scope", "cmd+f", "ctrl+f", "filtered", "unfiltered", "last used", "auto"),
+    ),
+    entry(
+        SettingsSection.EditorBehavior, "Link split selection and Find",
+        "In any Filtered and Original split view, mirror row selection and Find navigation, or keep each panel independent.",
+        listOf("find", "search", "original", "filtered", "two searches", "dual", "selection", "scroll", "sync"),
+    ),
+    entry(
+        SettingsSection.EditorBehavior, "Search all lines if Filtered has no matches",
+        "Optionally check Original after a completed valid Filtered search finds no rows; disabled in Two searches mode.",
+        listOf("find", "search", "fallback", "zero results", "no matches", "unfiltered", "all lines", "two searches"),
+    ),
+    entry(
         SettingsSection.EditorBehavior, "Row number",
         "Shows a left gutter with each row's original row number.",
         listOf("line number", "gutter"),

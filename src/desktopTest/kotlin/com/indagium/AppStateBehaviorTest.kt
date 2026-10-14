@@ -25,6 +25,8 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
+import com.indagium.model.LogSearchSessions
+import com.indagium.model.LogSearchState
 import com.indagium.model.MAX_INTERFACE_SCALE_PERCENT
 import com.indagium.model.MIN_INTERFACE_SCALE_PERCENT
 import com.indagium.model.ManualCollapseBlock
@@ -32,7 +34,9 @@ import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.MessageRule
 import com.indagium.model.ProcessNameMode
 import com.indagium.model.RuleTarget
+import com.indagium.model.SearchMode
 import com.indagium.model.SearchScope
+import com.indagium.model.SearchScopeBehavior
 import com.indagium.model.SequenceDef
 import com.indagium.model.SourceFolderInfo
 import com.indagium.model.SourceLogConfiguration
@@ -69,6 +73,7 @@ import com.indagium.ui.sequenceRenderY
 import com.indagium.ui.sequenceRowBaseBackground
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
+import com.indagium.model.searchFor
 import com.indagium.ui.shouldSyncSequenceVisualOrder
 import com.indagium.ui.summarizeItems
 import com.indagium.ui.tabDisplayLabel
@@ -9106,22 +9111,411 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun switchingScopeWhileOpenRecomputesMatches() {
+    fun twoSearchSlotsKeepIndependentQueriesAndResults() {
         val state = AppState()
         state.tabs = scopeTestTabs()
         state.toggleLevel("log", LogLevel.W)
         state.openSearch("log")
-        state.setSearchQuery("log", "needle")
+        state.setSearchQuery("log", "shown", SearchScope.FILTERED)
         waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
 
-        state.setSearchScope("log", SearchScope.UNFILTERED)
-        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        state.setSearchQuery("log", "hidden by filter", SearchScope.UNFILTERED)
+        waitUntil { state.tab("log")!!.searchFor(SearchScope.UNFILTERED).matchIds.size == 1 }
+        state.setSearchQuery("log", "also shown", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.size == 1 }
+
+        val tab = state.tab("log")!!
+        assertEquals("also shown", tab.searchFor(SearchScope.FILTERED).query)
+        assertEquals("hidden by filter", tab.searchFor(SearchScope.UNFILTERED).query)
+        assertEquals(listOf(3), tab.searchFor(SearchScope.FILTERED).matchIds.toList())
+        assertEquals(listOf(2), tab.searchFor(SearchScope.UNFILTERED).matchIds.toList())
         assertTrue(state.tab("log")!!.showUnfiltered)
 
-        state.setSearchScope("log", SearchScope.FILTERED)
-        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
-        // Going back to Filtered leaves the Original panel the user may still want open.
+        state.closeSearch("log", SearchScope.FILTERED)
+        val remaining = state.tab("log")!!
+        assertFalse(remaining.searchFor(SearchScope.FILTERED).active)
+        assertTrue(remaining.searchFor(SearchScope.UNFILTERED).active)
+        assertEquals(SearchScope.FILTERED, remaining.focusedSearchScope)
+        assertTrue(state.isSearchOpen("log"))
+    }
+
+    @Test
+    fun allLinesFallbackKeepsOriginalOpenWhileFilteredQueryIsEdited() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "hidden", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+
         assertTrue(state.tab("log")!!.showUnfiltered)
+        assertEquals(listOf(2), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+
+        // This is another keystroke in the still-mounted Filtered field. Original must remain
+        // visible during debounce, and the query/result must survive the fallback refresh.
+        state.setSearchQuery("log", "hidden ", SearchScope.FILTERED)
+        val editing = state.tab("log")!!
+        assertTrue(editing.showUnfiltered)
+        assertTrue(editing.searchFallback?.isActive == true)
+        assertEquals("hidden ", editing.searchFor(SearchScope.FILTERED).query)
+        waitUntil {
+            val latest = state.tab("log")!!
+            !latest.searchFor(SearchScope.FILTERED).isSearching && latest.searchFallback?.isActive == true
+        }
+        assertEquals(listOf(2), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+
+        state.setSearchQuery("log", "hidden by filter", SearchScope.FILTERED)
+        waitUntil {
+            val latest = state.tab("log")!!
+            !latest.searchFor(SearchScope.FILTERED).isSearching && latest.searchFallback?.isActive == true
+        }
+        assertEquals(listOf(2), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+        assertEquals("hidden by filter", state.tab("log")!!.searchFor(SearchScope.FILTERED).query)
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun closingAndReopeningFindDuringFallbackKeepsOriginalVisibleAndDraftEligible() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "hidden", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+
+        state.closeSearch("log", SearchScope.FILTERED)
+        val closed = state.tab("log")!!
+        assertFalse(closed.searchFor(SearchScope.FILTERED).active)
+        assertTrue(closed.showUnfiltered)
+        assertFalse(closed.searchFallback?.isActive == true)
+        assertNull(closed.searchFallback?.suppressedRevision)
+        assertTrue(closed.searchFallback?.originalVisibleBeforeFallback == true)
+
+        state.openSearch("log", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+
+        val reopened = state.tab("log")!!
+        assertTrue(reopened.showUnfiltered)
+        assertEquals("hidden", reopened.searchFor(SearchScope.FILTERED).query)
+        assertEquals(listOf(2), reopened.searchFor(SearchScope.FILTERED).matchIds.toList())
+    }
+
+    @Test
+    fun filteredResultDoesNotUndoUserOpeningOriginalWhileSearchIsPending() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle shown", SearchScope.FILTERED)
+        state.toggleUnfiltered("log")
+
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+
+        assertTrue(state.tab("log")!!.showUnfiltered)
+        assertEquals(listOf(1), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+        assertFalse(state.tab("log")!!.searchFallback?.isActive == true)
+    }
+
+    @Test
+    fun hidingOriginalDuringPendingAllLinesFallbackSuppressesThatInputRevision() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle hidden", SearchScope.FILTERED)
+        // Show and immediately hide Original before the debounced scan completes. The explicit
+        // hide must win even though the fallback has not yet activated its temporary reveal.
+        state.toggleUnfiltered("log")
+        state.toggleUnfiltered("log")
+        val revision = state.tab("log")!!.searchFor(SearchScope.FILTERED).inputRevision
+
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+
+        val tab = state.tab("log")!!
+        assertFalse(tab.showUnfiltered)
+        assertFalse(tab.searchFallback?.isActive == true)
+        assertEquals(revision, tab.searchFallback?.suppressedRevision)
+        assertTrue(tab.searchFor(SearchScope.FILTERED).matchIds.isEmpty())
+    }
+
+    @Test
+    fun hidingOriginalAfterFallbackInvalidatesResultsAndDropsQueuedNavigation() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle hidden", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+        val revision = state.tab("log")!!.searchFor(SearchScope.FILTERED).inputRevision
+        assertEquals(listOf(2), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+
+        state.searchNext("log", SearchScope.FILTERED)
+        assertEquals(SearchScope.UNFILTERED, state.pendingSearchNavigation?.scope)
+        state.toggleUnfiltered("log")
+
+        val hiding = state.tab("log")!!
+        assertFalse(hiding.showUnfiltered)
+        assertFalse(hiding.searchFallback?.isActive == true)
+        assertEquals(revision, hiding.searchFallback?.suppressedRevision)
+        assertTrue(hiding.searchFor(SearchScope.FILTERED).isSearching)
+        assertTrue(hiding.searchFor(SearchScope.FILTERED).matchIds.isEmpty())
+        assertNull(state.searchNavigationFor("log", SearchScope.UNFILTERED))
+        state.searchNext("log", SearchScope.FILTERED)
+        assertNull(state.pendingSearchNavigation, "stale fallback results must not be navigable while the base scan runs")
+
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+        val filtered = state.tab("log")!!.searchFor(SearchScope.FILTERED)
+        assertTrue(filtered.matchIds.isEmpty(), "hidden all-lines matches must not remain in the Filtered slot")
+        assertFalse(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun splitSyncRevisionTracksTheGlobalPreferenceInsteadOfFindMode() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        val initialRevision = state.splitSyncRevision
+
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        assertEquals(initialRevision, state.splitSyncRevision)
+        state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = false) }
+        val disabledRevision = state.splitSyncRevision
+        assertTrue(disabledRevision > initialRevision)
+
+        state.setSearchMode("log", SearchMode.FILTERED)
+        assertEquals(disabledRevision, state.splitSyncRevision)
+        state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = true) }
+        assertTrue(state.splitSyncRevision > disabledRevision)
+    }
+
+    @Test
+    fun allLinesFallbackCanReturnAndIsSuppressedUntilTheQueryChanges() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "hidden", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+
+        val revision = state.tab("log")!!.searchFor(SearchScope.FILTERED).inputRevision
+        state.returnToFiltered("log")
+        val returned = state.tab("log")!!
+        assertFalse(returned.showUnfiltered)
+        assertFalse(returned.searchFallback?.isActive == true)
+        assertEquals(revision, returned.searchFallback?.suppressedRevision)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+        assertFalse(state.tab("log")!!.searchFallback?.isActive == true)
+
+        state.setSearchQuery("log", "hidden by filter", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun returningFromFallbackBlocksNavigationUntilFilteredResultsAreFresh() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "hidden", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFallback?.isActive == true }
+        assertEquals(listOf(2), state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.toList())
+
+        state.setSearchMode("log", SearchMode.FILTERED)
+        state.searchNext("log", SearchScope.FILTERED)
+
+        assertTrue(state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching)
+        assertNull(state.pendingSearchNavigation)
+        assertTrue(state.tab("log")!!.selected.isEmpty())
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+        assertTrue(state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.isEmpty())
+    }
+
+    @Test
+    fun allLinesFallbackDoesNotRevealOriginalWhenBothScopesHaveNoMatches() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "not present", SearchScope.FILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+
+        val tab = state.tab("log")!!
+        assertFalse(tab.showUnfiltered)
+        assertFalse(tab.searchFallback?.isActive == true)
+        assertTrue(tab.searchFor(SearchScope.FILTERED).matchIds.isEmpty())
+    }
+
+    @Test
+    fun allLinesFallbackNeverReplacesIndependentUnfilteredDraftInTwoSearches() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        state.setSearchQuery("log", "needle", SearchScope.UNFILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.UNFILTERED).isSearching }
+        state.setSearchQuery("log", "hidden", SearchScope.FILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+
+        val tab = state.tab("log")!!
+        assertEquals(SearchMode.TWO_SEARCHES, tab.searchMode)
+        assertFalse(tab.searchFallback?.isActive == true)
+        assertTrue(tab.showUnfiltered)
+        assertEquals("needle", tab.searchFor(SearchScope.UNFILTERED).query)
+        assertEquals(listOf(1, 2, 3), tab.searchFor(SearchScope.UNFILTERED).matchIds.toList())
+    }
+
+    @Test
+    fun explicitUnfilteredFindInTwoSearchesDoesNotReopenClosedFilteredField() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        state.closeSearch("log", SearchScope.FILTERED)
+        assertFalse(state.tab("log")!!.searchFor(SearchScope.FILTERED).active)
+
+        // App.kt's Ctrl+Alt+F route calls openSearch with the explicit Unfiltered scope.
+        state.openSearch("log", SearchScope.UNFILTERED)
+
+        val tab = state.tab("log")!!
+        assertTrue(tab.searchFor(SearchScope.UNFILTERED).active)
+        assertFalse(tab.searchFor(SearchScope.FILTERED).active)
+        assertEquals(SearchMode.TWO_SEARCHES, tab.searchMode)
+        assertEquals(SearchScope.UNFILTERED, tab.focusedSearchScope)
+    }
+
+    @Test
+    fun selectingTheOpenModeRemembersItWithoutInvalidatingSearchResultsOrFocus() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle", SearchScope.FILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        waitUntil {
+            val tab = state.tab("log")!!
+            !tab.searchFor(SearchScope.FILTERED).isSearching && !tab.searchFor(SearchScope.UNFILTERED).isSearching
+        }
+        state.setSearchQuery("log", "needle", SearchScope.UNFILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.UNFILTERED).isSearching }
+
+        state.updateSettings { it.copy(lastManualSearchMode = SearchMode.FILTERED) }
+        val before = state.tab("log")!!
+        val filteredBefore = before.searchFor(SearchScope.FILTERED)
+        val unfilteredBefore = before.searchFor(SearchScope.UNFILTERED)
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        val after = state.tab("log")!!
+
+        assertEquals(SearchMode.TWO_SEARCHES, state.settings.lastManualSearchMode)
+        assertEquals(filteredBefore, after.searchFor(SearchScope.FILTERED))
+        assertEquals(unfilteredBefore, after.searchFor(SearchScope.UNFILTERED))
+        assertEquals(before.focusedSearchScope, after.focusedSearchScope)
+        assertFalse(after.searchFor(SearchScope.FILTERED).isSearching)
+        assertFalse(after.searchFor(SearchScope.UNFILTERED).isSearching)
+    }
+
+    @Test
+    fun selectingCurrentTwoSearchesReopensAClosedSiblingWithoutRescanningTheActiveSlot() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle", SearchScope.FILTERED)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.FILTERED).isSearching }
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        waitUntil {
+            val tab = state.tab("log")!!
+            !tab.searchFor(SearchScope.FILTERED).isSearching && !tab.searchFor(SearchScope.UNFILTERED).isSearching
+        }
+        val activeBeforeClose = state.tab("log")!!.searchFor(SearchScope.FILTERED)
+        state.closeSearch("log", SearchScope.UNFILTERED)
+
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        val reopened = state.tab("log")!!
+        assertTrue(reopened.searchFor(SearchScope.UNFILTERED).active)
+        assertTrue(reopened.searchFor(SearchScope.FILTERED).active)
+        assertEquals(activeBeforeClose, reopened.searchFor(SearchScope.FILTERED))
+        assertTrue(reopened.searchFor(SearchScope.UNFILTERED).isSearching)
+        waitUntil { !state.tab("log")!!.searchFor(SearchScope.UNFILTERED).isSearching }
+    }
+
+    @Test
+    fun lastUsedAndFollowViewPoliciesKeepTheirDistinctVisibilityTransitions() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.updateSettings { it.copy(searchScopeBehavior = SearchScopeBehavior.LAST_USED) }
+        state.setSearchMode("log", SearchMode.TWO_SEARCHES)
+        state.openSearch("log")
+        assertEquals(SearchMode.TWO_SEARCHES, state.tab("log")!!.searchMode)
+        assertEquals(SearchMode.TWO_SEARCHES, state.settings.lastManualSearchMode)
+
+        state.closeSearch("log")
+        state.updateSettings { it.copy(searchScopeBehavior = SearchScopeBehavior.FOLLOW_VIEW) }
+        state.openSearch("log")
+        assertEquals(SearchMode.UNFILTERED, state.tab("log")!!.searchMode)
+        state.closeSearch("log")
+        state.toggleUnfiltered("log")
+        assertEquals(SearchMode.FILTERED, state.tab("log")!!.searchMode)
+        state.openSearch("log")
+        assertEquals(SearchMode.FILTERED, state.tab("log")!!.searchMode)
+        state.toggleUnfiltered("log")
+        assertEquals(SearchMode.UNFILTERED, state.tab("log")!!.searchMode)
+        assertEquals(SearchMode.TWO_SEARCHES, state.settings.lastManualSearchMode)
+    }
+
+    @Test
+    fun dualSearchSlotsAndSelectionAreAbsentFromPersistedSnapshot() {
+        val tab = scopeTestTabs().single().copy(
+            selected = setOf(101, 202),
+            search = LogSearchState(query = "transient focused projection"),
+            searches = LogSearchSessions(
+                filtered = LogSearchState(query = "transient filtered query", matchIds = intArrayOf(1)),
+                unfiltered = LogSearchState(query = "transient unfiltered query", matchIds = intArrayOf(2)),
+            ),
+            searchMode = SearchMode.TWO_SEARCHES,
+            focusedSearchScope = SearchScope.UNFILTERED,
+        )
+        val snapshot = tab.persistedSnapshot()
+
+        assertFalse(snapshot.any { it is LogSearchState || it is LogSearchSessions })
+        assertFalse(snapshot.any { it is String && it.startsWith("transient") })
+        assertFalse(snapshot.contains(setOf(101, 202)))
+    }
+
+    @Test
+    fun searchScopeSettingsRoundTripAndDefaultSafelyForOldOrUnknownJson() {
+        val settings = AppSettings(
+            searchScopeBehavior = SearchScopeBehavior.FOLLOW_VIEW,
+            lastManualSearchMode = SearchMode.TWO_SEARCHES,
+            syncSplitPanelSelectionAndScroll = false,
+            broadenSearchWhenFilteredEmpty = true,
+        )
+        val restored = settingsFromJson(settings.settingsJson())!!
+        assertEquals(settings.searchScopeBehavior, restored.searchScopeBehavior)
+        assertEquals(settings.lastManualSearchMode, restored.lastManualSearchMode)
+        assertEquals(settings.syncSplitPanelSelectionAndScroll, restored.syncSplitPanelSelectionAndScroll)
+        assertEquals(settings.broadenSearchWhenFilteredEmpty, restored.broadenSearchWhenFilteredEmpty)
+
+        val defaults = settingsFromJson("{}")!!
+        assertEquals(SearchScopeBehavior.FILTERED, defaults.searchScopeBehavior)
+        assertEquals(SearchMode.FILTERED, defaults.lastManualSearchMode)
+        assertTrue(defaults.syncSplitPanelSelectionAndScroll)
+        assertFalse(defaults.broadenSearchWhenFilteredEmpty)
+
+        val unknown = settingsFromJson(
+            """{"searchScopeBehavior":"FUTURE","lastManualSearchMode":"FUTURE","syncSplitPanelSelectionAndScroll":null,"broadenSearchWhenFilteredEmpty":null}""",
+        )!!
+        assertEquals(SearchScopeBehavior.FILTERED, unknown.searchScopeBehavior)
+        assertEquals(SearchMode.FILTERED, unknown.lastManualSearchMode)
+        assertTrue(unknown.syncSplitPanelSelectionAndScroll)
+        assertFalse(unknown.broadenSearchWhenFilteredEmpty)
     }
 
     @Test
@@ -9129,8 +9523,12 @@ class AppStateBehaviorTest {
         val state = AppState()
         state.tabs = scopeTestTabs()
         state.toggleLevel("log", LogLevel.W)
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.searchFor(SearchScope.FILTERED).matchIds.size == 2 }
+        state.setSearchMode("log", SearchMode.UNFILTERED)
         state.openSearch("log", SearchScope.UNFILTERED)
-        state.setSearchQuery("log", "needle")
+        state.setSearchQuery("log", "needle", SearchScope.UNFILTERED)
         waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
 
         state.toggleUnfiltered("log")
@@ -9227,6 +9625,82 @@ class AppStateBehaviorTest {
         assertEquals(0, state.tab("right")!!.search.currentIdx, "right's only match wraps back to itself")
         assertEquals("right", state.pendingSearchNavigation?.tabId)
         assertEquals(1, state.pendingSearchNavigation?.entryId)
+    }
+
+    @Test
+    fun closingCompareFindStaysClosedAfterLeavingCompareAndRetainsItsDraft() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("left", "left.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle"))),
+            mkTab("right", "right.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "other"))),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.openSearch("left")
+        state.setSearchQuery("left", "needle")
+        waitUntil { state.tab("left")!!.search.matchIds.size == 1 }
+
+        state.updateCompareMode(true)
+        assertTrue(state.tab("left")!!.search.active)
+        state.closeSearch("left", SearchScope.FILTERED)
+        assertFalse(state.tab("left")!!.search.active)
+        assertEquals("needle", state.tab("left")!!.search.query)
+
+        state.updateCompareMode(false)
+
+        assertFalse(state.tab("left")!!.search.active)
+        assertEquals("needle", state.tab("left")!!.search.query)
+    }
+
+    @Test
+    fun findOpenedDuringCompareRestoresConfiguredScopeWhenCompareEnds() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("left", "left.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle"))),
+            mkTab("right", "right.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "other"))),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateSettings { it.copy(searchScopeBehavior = SearchScopeBehavior.UNFILTERED) }
+        state.updateCompareMode(true)
+
+        state.openSearch("left")
+        assertTrue(state.isSearchOpen("left"))
+        assertEquals(SearchMode.FILTERED, state.tab("left")!!.searchMode)
+
+        state.updateCompareMode(false)
+
+        val tab = state.tab("left")!!
+        assertTrue(state.isSearchOpen("left"))
+        assertEquals(SearchMode.UNFILTERED, tab.searchMode)
+        assertFalse(tab.searchFor(SearchScope.FILTERED).active)
+        assertTrue(tab.searchFor(SearchScope.UNFILTERED).active)
+        assertTrue(tab.showUnfiltered)
+    }
+
+    @Test
+    fun closingCompareTabRunsTheNormalCompareExitRestoration() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab("review", "review.log", listOf(LogEntry(90, "10:00:00.090", LogLevel.W, "App", "needle"))),
+            mkTab("other", "other.log", emptyList()),
+        )
+        state.activeTabId = "review"
+        state.compareTabId = "other"
+        state.updateSettings { it.copy(searchScopeBehavior = SearchScopeBehavior.UNFILTERED) }
+        state.openSearch("review")
+        assertTrue(state.tab("review")!!.showUnfiltered)
+        assertEquals(SearchMode.UNFILTERED, state.tab("review")!!.searchMode)
+
+        state.updateCompareMode(true)
+        assertFalse(state.tab("review")!!.showUnfiltered)
+        state.closeTab("other")
+
+        val restored = state.tab("review")!!
+        assertFalse(state.compareMode)
+        assertTrue(restored.showUnfiltered)
+        assertEquals(SearchMode.UNFILTERED, restored.searchMode)
+        assertTrue(restored.searchFor(SearchScope.UNFILTERED).active)
     }
 
     @Test
