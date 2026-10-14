@@ -46,6 +46,9 @@ import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+private const val POPUP_TEST_WINDOW_HEIGHT_DP = 700
+private const val MIN_READABLE_POPUP_WIDTH_DP = 150f
+
 /** The Find field stays editable and focused while results recompute, and its mode controls behave. */
 @OptIn(ExperimentalTestApi::class)
 class SearchBarUiTest {
@@ -259,10 +262,16 @@ class SearchBarUiTest {
 
         rule.onNodeWithTag("search-mode-dropdown").performClick()
         rule.onNodeWithText("Link selection & Find navigation").assertExists()
-        rule.onNodeWithText("In any split view, selecting a Filtered row or finding a row can move both panels. Original row clicks stay local; queries stay separate.").assertExists()
+        rule.onNodeWithText(
+            "In any split view, selecting a Filtered row or finding a row can move both panels. " +
+                "Original row clicks stay local; queries stay separate.",
+        ).assertExists()
         rule.onNodeWithTag("search-link-toggle").performClick()
         rule.onNodeWithText("Independent").assertExists()
-        rule.onNodeWithText("Each panel keeps its own selection and scroll position in every Find mode. Selecting or finding a row does not move the other panel. Queries stay separate.").assertExists()
+        rule.onNodeWithText(
+            "Each panel keeps its own selection and scroll position in every Find mode. " +
+                "Selecting or finding a row does not move the other panel. Queries stay separate.",
+        ).assertExists()
         savePopupImage("independent")
         filtered.assertTextEquals("timeout")
         unfiltered.assertTextEquals("socket closed")
@@ -330,7 +339,7 @@ class SearchBarUiTest {
         rule.setContent {
             density = LocalDensity.current.density
             window = remember {
-                TestWindowInfo(IntSize((windowWidthDp * density).toInt(), (700 * density).toInt()))
+                TestWindowInfo(IntSize((windowWidthDp * density).toInt(), (POPUP_TEST_WINDOW_HEIGHT_DP * density).toInt()))
             }
             CompositionLocalProvider(LocalWindowInfo provides window) {
                 Box(Modifier.width(rootWidthDp.dp).height(620.dp)) {
@@ -354,7 +363,7 @@ class SearchBarUiTest {
         val trigger = rule.onNodeWithTag("search-mode-dropdown").fetchSemanticsNode().boundsInRoot
         val widthDp = popup.width / density
         assertTrue(widthDp <= maxExpectedWidthDp + 1f, "$name popup width is $widthDp dp, expected <= $maxExpectedWidthDp dp")
-        assertTrue(widthDp > 150f, "$name popup should remain wide enough for readable mode labels")
+        assertTrue(widthDp > MIN_READABLE_POPUP_WIDTH_DP, "$name popup should remain wide enough for readable mode labels")
         if (name == "narrow") {
             // When the menu is wider than the space between the window edge and its trigger,
             // Compose clamps it to the left edge while keeping the full menu inside the window.

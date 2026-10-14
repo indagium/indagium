@@ -775,6 +775,10 @@ private fun JsonObject.boolOrDefault(key: String, default: Boolean): Boolean =
 // cases must be told apart rather than collapsed into one default.
 private fun JsonObject.boolOrNull(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
+// Missing, non-string or unknown (e.g. written by a newer version) values fall back to [default].
+private inline fun <reified E : Enum<E>> JsonObject.enumOrDefault(key: String, default: E): E =
+    stringOrNull(key)?.let { runCatching { enumValueOf<E>(it) }.getOrNull() } ?: default
+
 private fun JsonObject.intOrDefault(key: String, default: Int): Int = this[key]?.jsonPrimitive?.intOrNull ?: default
 
 private fun JsonObject.longOrDefault(key: String, default: Long): Long = this[key]?.jsonPrimitive?.longOrNull ?: default
@@ -943,12 +947,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         },
         openNewFilesWithUnfiltered = o.boolOrDefault("openNewFilesWithUnfiltered", false),
         openUnfilteredOnCtrlF = o.boolOrDefault("openUnfilteredOnCtrlF", false),
-        searchScopeBehavior = o.stringOrNull("searchScopeBehavior")
-            ?.let { runCatching { SearchScopeBehavior.valueOf(it) }.getOrNull() }
-            ?: SearchScopeBehavior.FILTERED,
-        lastManualSearchMode = o.stringOrNull("lastManualSearchMode")
-            ?.let { runCatching { SearchMode.valueOf(it) }.getOrNull() }
-            ?: SearchMode.FILTERED,
+        searchScopeBehavior = o.enumOrDefault("searchScopeBehavior", SearchScopeBehavior.FILTERED),
+        lastManualSearchMode = o.enumOrDefault("lastManualSearchMode", SearchMode.FILTERED),
         syncSplitPanelSelectionAndScroll = o.boolOrDefault("syncSplitPanelSelectionAndScroll", true),
         sourceFolders = o.stringArray("sourceFolders"),
         editorCommand = editorCommandValue,

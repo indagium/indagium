@@ -9421,7 +9421,8 @@ class AppStateBehaviorTest {
         val unknown = settingsFromJson(
             // broadenSearchWhenFilteredEmpty is a retired key: an old settings blob that still
             // carries it must keep decoding.
-            """{"searchScopeBehavior":"FUTURE","lastManualSearchMode":"FUTURE","syncSplitPanelSelectionAndScroll":null,"broadenSearchWhenFilteredEmpty":true}""",
+            """{"searchScopeBehavior":"FUTURE","lastManualSearchMode":"FUTURE",""" +
+                """"syncSplitPanelSelectionAndScroll":null,"broadenSearchWhenFilteredEmpty":true}""",
         )!!
         assertEquals(SearchScopeBehavior.FILTERED, unknown.searchScopeBehavior)
         assertEquals(SearchMode.FILTERED, unknown.lastManualSearchMode)

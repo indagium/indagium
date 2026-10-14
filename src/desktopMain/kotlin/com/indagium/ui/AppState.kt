@@ -5681,7 +5681,10 @@ class AppState(
     // Excludes the home tab (LogTab.isCaptureLauncher) — it is always present (see ensureHomeTab)
     // and has no log content to compare, so a home tab plus exactly one real log must not enable
     // Compare, and the home tab itself must never be selectable as a compare pane.
-    val canCompare: Boolean get() = tabs.count { !it.isCaptureLauncher } > 1
+    val canCompare: Boolean get() = canCompareTabs(tabs)
+
+    // The home tab (isCaptureLauncher) never counts towards a comparable pair.
+    private fun canCompareTabs(candidates: List<LogTab>): Boolean = candidates.count { !it.isCaptureLauncher } > 1
 
     // ── Transient UI ─────────────────────────────────────────────────
     // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
@@ -5809,11 +5812,6 @@ class AppState(
 
     fun searchNavigationFor(tabId: String, scope: SearchScope): SearchNavigationRequest? =
         pendingSearchNavigations[SearchNavigationKey(tabId, scope)]
-
-    private fun discardSearchNavigation(tabId: String, scope: SearchScope) {
-        pendingSearchNavigations = pendingSearchNavigations - SearchNavigationKey(tabId, scope)
-        pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
-    }
 
     private fun discardSearchNavigationsForScope(tabId: String, scope: SearchScope) {
         pendingSearchNavigations = pendingSearchNavigations.filterNot { (key, request) ->
@@ -8111,11 +8109,7 @@ class AppState(
         }
         val newlyActive = mutableListOf<SearchScope>()
         upTab(tabId) { t ->
-            val focus = when (nextMode) {
-                SearchMode.UNFILTERED -> SearchScope.UNFILTERED
-                SearchMode.FILTERED -> SearchScope.FILTERED
-                SearchMode.TWO_SEARCHES -> t.focusedSearchScope
-            }
+            val focus = focusScopeFor(nextMode, t.focusedSearchScope)
             var sessions = t.searches
             if (switchingVisibleSearch) {
                 (SearchScope.entries - nextScopes.toSet()).forEach { target ->
@@ -9496,44 +9490,13 @@ class AppState(
             return
         }
         if (!compareMode && scope == SearchScope.UNFILTERED && before.searchMode == SearchMode.TWO_SEARCHES) {
-            if (!before.showUnfiltered) setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
-            val wasActive = before.searchFor(SearchScope.UNFILTERED).active
-            upTab(tabId) { current ->
-                val unfiltered = current.searchFor(SearchScope.UNFILTERED).copy(
-                    active = true,
-                    focusNonce = current.searchFor(SearchScope.UNFILTERED).focusNonce + 1,
-                )
-                current.copy(
-                    focusedSearchScope = SearchScope.UNFILTERED,
-                    searches = current.searches.with(SearchScope.UNFILTERED, unfiltered),
-                    search = unfiltered,
-                )
-            }
-            if (!wasActive) scheduleSearchRecompute(tabId, SearchScope.UNFILTERED)
+            openUnfilteredBesideFiltered(tabId, before)
             return
         }
-        val mode: SearchMode
-        val focusScope: SearchScope
-        if (compareMode) {
-            mode = SearchMode.FILTERED
-            focusScope = SearchScope.FILTERED
-        } else if (scope != null) {
-            mode = if (scope == SearchScope.FILTERED) SearchMode.FILTERED else SearchMode.UNFILTERED
-            focusScope = scope
-            updateSettings { it.copy(lastManualSearchMode = mode) }
-        } else {
-            mode = resolveSearchPolicy(
-                settings.searchScopeBehavior,
-                settings.lastManualSearchMode,
-                before.showUnfiltered,
-                compareMode,
-            ).mode
-            focusScope = when (mode) {
-                SearchMode.TWO_SEARCHES -> before.focusedSearchScope
-                SearchMode.UNFILTERED -> SearchScope.UNFILTERED
-                SearchMode.FILTERED -> SearchScope.FILTERED
-            }
-        }
+        val mode = findOpenMode(before, scope)
+        val focusScope = if (scope != null && !compareMode) scope else focusScopeFor(mode, before.focusedSearchScope)
+        // An explicit scope (⌘⌥F) counts as a manual mode choice for "Last search mode".
+        if (scope != null && !compareMode) updateSettings { it.copy(lastManualSearchMode = mode) }
         if (mode != SearchMode.FILTERED && !compareMode) {
             setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
         }
@@ -9568,6 +9531,25 @@ class AppState(
         newlyActive.forEach { scheduleSearchRecompute(tabId, it) }
     }
 
+    // ⌘⌥F in Two searches opens (or refocuses) the Unfiltered field without touching Filtered,
+    // even if the user had closed Filtered.
+    private fun openUnfilteredBesideFiltered(tabId: String, before: LogTab) {
+        if (!before.showUnfiltered) setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+        val wasActive = before.searchFor(SearchScope.UNFILTERED).active
+        upTab(tabId) { current ->
+            val unfiltered = current.searchFor(SearchScope.UNFILTERED).copy(
+                active = true,
+                focusNonce = current.searchFor(SearchScope.UNFILTERED).focusNonce + 1,
+            )
+            current.copy(
+                focusedSearchScope = SearchScope.UNFILTERED,
+                searches = current.searches.with(SearchScope.UNFILTERED, unfiltered),
+                search = unfiltered,
+            )
+        }
+        if (!wasActive) scheduleSearchRecompute(tabId, SearchScope.UNFILTERED)
+    }
+
     // Bumps focusNonce on the field that owns focus (or the first open field of the current mode),
     // which makes ui/SearchBar.kt refocus it and select its text — nothing else changes.
     private fun refocusOpenSearch(tabId: String) {
@@ -9595,11 +9577,7 @@ class AppState(
             setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
         }
         val before = tab(tabId) ?: return
-        val focusScope = when (targetMode) {
-            SearchMode.UNFILTERED -> SearchScope.UNFILTERED
-            SearchMode.TWO_SEARCHES -> before.focusedSearchScope.takeIf { it in scopes } ?: SearchScope.FILTERED
-            SearchMode.FILTERED -> SearchScope.FILTERED
-        }
+        val focusScope = focusScopeFor(targetMode, before.focusedSearchScope)
         val scopesToRecompute = scopes.filter { !before.searchFor(it).active }
         (SearchScope.entries - scopes.toSet()).forEach {
             cancelSearchJob(tabId, it)
@@ -9671,6 +9649,37 @@ class AppState(
         searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L }
         searchJobs.remove(key)?.cancel()
         pendingSearchSteps.remove(key)
+    }
+
+    // Tab close: stop both scopes' jobs and drop every navigation still queued for the tab.
+    private fun releaseSearchState(tabId: String) {
+        SearchScope.entries.forEach { scope ->
+            cancelSearchJob(tabId, scope)
+            pendingSearchNavigations = pendingSearchNavigations - SearchNavigationKey(tabId, scope)
+        }
+        pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
+    }
+
+    // The field that takes focus in [mode]: the single field, or in Two searches whichever field
+    // already owned focus.
+    private fun focusScopeFor(mode: SearchMode, current: SearchScope): SearchScope = when (mode) {
+        SearchMode.TWO_SEARCHES -> current
+        SearchMode.UNFILTERED -> SearchScope.UNFILTERED
+        SearchMode.FILTERED -> SearchScope.FILTERED
+    }
+
+    // Which mode a Find open lands on: Compare always uses Filtered, an explicit scope (⌘⌥F)
+    // picks its single field, and a plain open follows the scope policy.
+    private fun findOpenMode(before: LogTab, scope: SearchScope?): SearchMode = when {
+        compareMode -> SearchMode.FILTERED
+        scope == SearchScope.FILTERED -> SearchMode.FILTERED
+        scope == SearchScope.UNFILTERED -> SearchMode.UNFILTERED
+        else -> resolveSearchPolicy(
+            settings.searchScopeBehavior,
+            settings.lastManualSearchMode,
+            before.showUnfiltered,
+            compareMode,
+        ).mode
     }
 
     /** True while any Find field of the tab's current mode is showing. */
@@ -10345,11 +10354,7 @@ class AppState(
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
                 // These two scan the tab's rows off-thread and were never cancelled at close, so a
                 // late one would run into the row release below (or just burn CPU on a dead tab).
-                SearchScope.entries.forEach { scope ->
-                    cancelSearchJob(tabId, scope)
-                    pendingSearchNavigations = pendingSearchNavigations - SearchNavigationKey(tabId, scope)
-                }
-                pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
+                releaseSearchState(tabId)
                 compositionJobs.remove(tabId)?.cancel()
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
@@ -10379,8 +10384,7 @@ class AppState(
                 activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
             }
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
-            // The home tab (isCaptureLauncher) never counts towards a comparable pair.
-            exitCompare = compareMode && next.count { !it.isCaptureLauncher } < 2
+            exitCompare = !canCompareTabs(next) // updateCompareMode(false) no-ops outside Compare
             tabs = next
         }
         // Outside stateLock: updateCompareMode takes it again through upTab and autosaves.
