@@ -29,7 +29,8 @@ private class SerialRoutingRunner(private val farm: DeviceFarm, private val defa
 }
 
 internal const val HARNESS_RUN_ID = "run-harness"
-private const val HARNESS_MARKER_WINDOW_MS = 300L
+private const val HARNESS_MARKER_PRE_MS = 5_000L
+private const val HARNESS_MARKER_POST_MS = 300L
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 
 internal class LaneCaptureHarness(vararg serials: String) {
@@ -53,8 +54,8 @@ internal class LaneCaptureHarness(vararg serials: String) {
         recordVideo = false,
         includeBufferedLogs = false,
         freeSpaceReserveBytes = 0,
-        markerPreMs = HARNESS_MARKER_WINDOW_MS,
-        markerPostMs = HARNESS_MARKER_WINDOW_MS,
+        markerPreMs = HARNESS_MARKER_PRE_MS,
+        markerPostMs = HARNESS_MARKER_POST_MS,
         markerScreenshot = false,
     ).withMirrorMode(CaptureMirrorMode.DISABLED)
 
