@@ -240,11 +240,16 @@ class ManualScriptStepsTest {
         val card = h.coordinator.pendingConfirmations().single()
         assertEquals("ask_hub", card.toolName)
         assertTrue(card.description.contains("Run script 'ask_hub'"), card.description)
-        assertTrue(h.coordinator.resolveConfirmation(started.runId, card.confirmationId, false))
+        val deniedConfirmationId = card.confirmationId
+        assertTrue(h.coordinator.resolveConfirmation(started.runId, deniedConfirmationId, false))
         assertFalse(marker.exists(), "a denied script is never run")
 
-        awaitTrue("the second card") { h.coordinator.pendingConfirmations().isNotEmpty() }
-        assertTrue(h.coordinator.resolveConfirmation(started.runId, h.coordinator.pendingConfirmations().single().confirmationId, true))
+        awaitTrue("a new confirmation card") {
+            h.coordinator.pendingConfirmations().any { it.confirmationId != deniedConfirmationId }
+        }
+        val allowedCard = h.coordinator.pendingConfirmations().single { it.confirmationId != deniedConfirmationId }
+        assertEquals("ask_hub", allowedCard.toolName)
+        assertTrue(h.coordinator.resolveConfirmation(started.runId, allowedCard.confirmationId, true))
         val run = h.finished(started)
 
         assertEquals(StepStatus.BLOCKED, run.caseResult("Denied").steps.single().status)

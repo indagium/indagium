@@ -34,6 +34,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.FutureTask
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -62,6 +63,7 @@ class EmbeddedMirrorLifecycleTest {
         /** Models a native surface: its close needs the real EDT ([runOnEdtBounded]), like
          * [EmbeddedMirrorMacSurface.close], and is idempotent with the same already-closed fast path. */
         private val hasEdtSurface: Boolean = false,
+        private val closeGate: CountDownLatch? = null,
     ) : MirrorBackend {
         private val lifecycleLock = Any()
         private val decoderCount = AtomicInteger()
@@ -76,6 +78,7 @@ class EmbeddedMirrorLifecycleTest {
         val closes = AtomicInteger()
         val maxAttachedDecoders = AtomicInteger()
         val stopEntered = CountDownLatch(1)
+        val closeEntered = CountDownLatch(1)
         val startsAfterClose = AtomicInteger()
         val liveAudioEnables = AtomicInteger()
         val surfaceCloseTimeouts = AtomicInteger()
@@ -128,6 +131,8 @@ class EmbeddedMirrorLifecycleTest {
                 attached = false
                 closes.incrementAndGet()
                 closeNativeSurfaces()
+                closeEntered.countDown()
+                closeGate?.await()
                 if (closeDelayMs > 0) Thread.sleep(closeDelayMs) // adb/scrcpy cleanup, decoder join
                 closeFinished = true
                 onCloseFinished()
@@ -135,12 +140,17 @@ class EmbeddedMirrorLifecycleTest {
         }
     }
 
-    private class Harness(detachDelayMs: Long, closeDelayMs: Long = 0, hasEdtSurface: Boolean = false) : AutoCloseable {
+    private class Harness(
+        detachDelayMs: Long,
+        closeDelayMs: Long = 0,
+        hasEdtSurface: Boolean = false,
+        closeGate: CountDownLatch? = null,
+    ) : AutoCloseable {
         val root = createTempDirectory("embedded-mirror-lifecycle").toFile()
         val fakeEdt: ExecutorService = Executors.newSingleThreadExecutor { task ->
             Thread(task, "fake-edt").apply { isDaemon = true }
         }
-        val backend = LockingFakeBackend(fakeEdt, detachDelayMs, closeDelayMs, hasEdtSurface)
+        val backend = LockingFakeBackend(fakeEdt, detachDelayMs, closeDelayMs, hasEdtSurface, closeGate)
         val recorderProcess = StreamingFakeProcess()
         private val runner = FakeCaptureRunner().also { it.enqueue(recorderProcess) }
         val controller = TabCaptureController(root, runner = runner)
@@ -503,15 +513,28 @@ class EmbeddedMirrorLifecycleTest {
 
     @org.junit.Test(timeout = 30_000)
     fun quittingTheAppOnTheEdtDoesNotFreezeForTheMirrorCloseTimeout() {
-        Harness(detachDelayMs = 0, closeDelayMs = 100, hasEdtSurface = true).use { h ->
-            h.connectAndWaitUntilAttached()
+        val closeGate = CountDownLatch(1)
+        Harness(detachDelayMs = 0, hasEdtSurface = true, closeGate = closeGate).use { h ->
+            try {
+                h.connectAndWaitUntilAttached()
 
-            val ms = onRealEdt { h.app.close() }
-            assertTrue(ms < 1_000, "AppState.close() on the EDT froze the window for $ms ms")
-            assertTrue(h.backend.surfaceClosed)
-            assertEquals(0, h.backend.surfaceCloseTimeouts.get())
-            assertEquals(1, h.backend.closes.get())
-            assertFalse(h.recorderProcess.isAlive, "the recorder is stopped after the mirror close")
+                val closeTask = FutureTask<Unit> {
+                    check(EventQueue.isDispatchThread())
+                    h.app.close()
+                }
+                EventQueue.invokeLater(closeTask)
+
+                assertTrue(h.backend.closeEntered.await(5, TimeUnit.SECONDS), "the mirror close should reach its blocked backend")
+                assertTrue(h.backend.surfaceClosed, "the EDT-bound surface is closed inline before lane cleanup")
+                assertEquals(0, h.backend.surfaceCloseTimeouts.get())
+                closeTask.get(8, TimeUnit.SECONDS)
+                assertFalse(h.backend.closeFinished, "AppState.close() must not wait for the blocked mirror lane to finish")
+                assertEquals(1, h.backend.closes.get())
+                assertFalse(h.recorderProcess.isAlive, "the recorder is stopped after the bounded mirror wait")
+            } finally {
+                closeGate.countDown()
+            }
+            awaitCondition(5_000) { h.backend.closeFinished }
         }
     }
 
