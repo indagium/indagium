@@ -13,8 +13,6 @@ import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.assert
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -23,8 +21,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.semantics.SemanticsProperties
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.Filter
@@ -386,39 +382,36 @@ class LogViewerSearchSessionsUiTest {
     }
 
     @Test
-    fun actualFallbackKeepsFilteredFieldFocusedAndEditableAsOriginalOpens() {
-        val tabId = "search-fallback-ui"
+    fun searchAllLinesMovesTheQueryToAFocusedUnfilteredFieldInOriginal() {
+        val tabId = "search-all-lines-ui"
         val rows = listOf(
             LogEntry(1, "10:00:00.001", LogLevel.I, "App", "visible row"),
             LogEntry(2, "10:00:00.002", LogLevel.W, "App", "hidden target"),
             LogEntry(3, "10:00:00.003", LogLevel.I, "App", "another visible row"),
         )
         val state = AppState()
-        state.tabs = listOf(mkTab(tabId, "fallback.log", rows))
+        state.tabs = listOf(mkTab(tabId, "all-lines.log", rows))
         state.toggleLevel(tabId, LogLevel.W)
-        state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = true) }
         state.openSearch(tabId, SearchScope.FILTERED)
 
         rule.setContent { StateBackedLogViewer(state, tabId) }
         val field = rule.onNodeWithTag("search-field-filtered")
         field.performTextInput("hidden")
-        rule.waitUntil(5_000) { state.tab(tabId)?.searchFallback?.isActive == true }
-
-        field.assertIsDisplayed()
-        field.assertIsFocused()
-        rule.onNodeWithText("All-lines").assertExists()
-        rule.onNodeWithTag("log-row-$tabId:original-2").assertExists()
-
-        // Fallback changes the Original panel and result status, but does not recreate the
-        // Filtered field or re-select its existing query while the user continues typing.
-        field.assert(SemanticsMatcher.expectValue(SemanticsProperties.TextSelectionRange, TextRange("hidden".length)))
-        field.performTextInput(" target")
-        field.assertTextEquals("hidden target")
-        field.assertIsFocused()
         rule.waitUntil(5_000) {
-            state.tab(tabId)?.searchFallback?.isActive == true &&
-                state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.query == "hidden target"
+            val slot = state.tab(tabId)?.searchFor(SearchScope.FILTERED)
+            slot != null && slot.query == "hidden" && !slot.isSearching
         }
+        // Nothing changes on its own: Original stays hidden until the user asks.
+        assertFalse(state.tab(tabId)!!.showUnfiltered)
+
+        rule.onNodeWithTag("search-all-lines").performClick()
+        rule.waitUntil(5_000) { state.tab(tabId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.toList() == listOf(2) }
+
+        val original = rule.onNodeWithTag("search-field-unfiltered")
+        original.assertTextEquals("hidden")
+        original.assertIsFocused()
+        rule.onNodeWithTag("log-row-$tabId:original-2").assertExists()
+        rule.onAllNodesWithTag("search-field-filtered").assertCountEquals(0)
     }
 }
 
@@ -462,7 +455,7 @@ private fun StateBackedLogViewer(
             state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = !it.syncSplitPanelSelectionAndScroll) }
         },
         onSearchFocused = { state.focusSearch(tabId, it) },
-        onReturnToFiltered = { state.returnToFiltered(tabId) },
+        onSearchAllLines = { state.searchAllLines(tabId) },
         syncSelectionAndScroll = state.settings.syncSplitPanelSelectionAndScroll,
         syncSelectionAndScrollRevision = state.splitSyncRevision,
         onVisibleItems = { state.noteVisibleItems(tabId, it) },

@@ -1292,11 +1292,13 @@ fun LogViewer(
     onSearchNext: (SearchScope) -> Unit = {},
     onSearchPrev: (SearchScope) -> Unit = {},
     onSearchClose: (SearchScope) -> Unit = {},
+    // Mode dropdown, Original-panel Find field and "Search all lines" — only FileView.kt turns
+    // this on. CompareView exposes just the Filtered field, even when a pane shows Original.
     showSearchScopeChip: Boolean = false,
     onSearchToggleScope: (SearchMode) -> Unit = {},
     onToggleSearchSync: () -> Unit = {},
     onSearchFocused: (SearchScope) -> Unit = {},
-    onReturnToFiltered: () -> Unit = {},
+    onSearchAllLines: () -> Unit = {},
     syncSelectionAndScroll: Boolean = true,
     syncSelectionAndScrollRevision: Long = 0L,
     // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
@@ -1319,13 +1321,12 @@ fun LogViewer(
     val filteredSearch = tab.searchFor(SearchScope.FILTERED)
     val unfilteredSearch = tab.searchFor(SearchScope.UNFILTERED)
     val searchFieldStates = remember(tab.id) { SearchBarFieldStateStore() }
-    val fallbackActive = tab.searchFallback?.isActive == true
     // This setting governs automatic cross-panel mirroring in every Filtered/Original split,
     // independent of how many Find fields are open. CompareView has separate tabs and does not
     // use this same-tab split path.
     val effectiveSyncSelectionAndScroll = syncSelectionAndScroll
     val selectedSearchModeIsFullyOpen = when (tab.searchMode) {
-        SearchMode.FILTERED -> filteredSearch.active && !fallbackActive
+        SearchMode.FILTERED -> filteredSearch.active
         SearchMode.UNFILTERED -> tab.showUnfiltered && unfilteredSearch.active
         SearchMode.TWO_SEARCHES -> tab.showUnfiltered && filteredSearch.active && unfilteredSearch.active
     }
@@ -2521,22 +2522,20 @@ fun LogViewer(
                 // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
                 Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
                     SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                    if (!fallbackActive &&
-                        ((tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES) && unfilteredSearch.active)
+                    if (showSearchScopeChip && unfilteredSearch.active &&
+                        (tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES)
                     ) {
                         val originalFieldSearch = unfilteredSearch
                         SearchBar(
                             tabId = tab.id,
                             search = originalFieldSearch,
-                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES && !fallbackActive) "Find in Unfiltered" else null,
+                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Unfiltered" else null,
                             mode = tab.searchMode,
                             // The remaining Original field must still be able to reopen Filtered
                             // after the user closes its sibling in Two searches mode.
                             showModeSelector = tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active,
                             sameModeIsNoop = selectedSearchModeIsFullyOpen,
                             onModeChange = onSearchToggleScope,
-                            statusMessage = null,
-                            onReturnToFiltered = null,
                             showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
                             syncEnabled = settings.syncSplitPanelSelectionAndScroll,
                             onSyncToggle = onToggleSearchSync,
@@ -2552,7 +2551,7 @@ fun LogViewer(
                                 runCatching { originalFocusRequester.requestFocus() }
                             },
                             onFocused = onSearchFocused,
-                            autoFocus = fallbackActive || tab.focusedSearchScope == originalFieldSearch.scope,
+                            autoFocus = tab.focusedSearchScope == originalFieldSearch.scope,
                         )
                     }
                     // Original panel's Δt values use its local selection, independent of the
@@ -2575,7 +2574,7 @@ fun LogViewer(
                         posY = allBoxPosY,
                         effectiveTab = tab.copy(
                             selected = localAllSelected,
-                            search = if (fallbackActive) filteredSearch else unfilteredSearch,
+                            search = unfilteredSearch,
                         ),
                         itemOnSelRow = allOnSelRow,
                         itemOnSelRowRange = allOnSelRowRange,
@@ -2623,17 +2622,16 @@ fun LogViewer(
                             search = filteredSearch,
                             fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Filtered" else null,
                             mode = tab.searchMode,
-                            showModeSelector = true,
+                            showModeSelector = showSearchScopeChip,
                             sameModeIsNoop = selectedSearchModeIsFullyOpen,
                             onModeChange = onSearchToggleScope,
-                            showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES,
+                            showSyncToggle = showSearchScopeChip && tab.searchMode == SearchMode.TWO_SEARCHES,
                             syncEnabled = settings.syncSplitPanelSelectionAndScroll,
                             onSyncToggle = onToggleSearchSync,
                             searchScopeBehavior = settings.searchScopeBehavior,
                             lastManualSearchMode = settings.lastManualSearchMode,
                             fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
-                            statusMessage = if (fallbackActive) "No matches in Filtered; searching all lines" else null,
-                            onReturnToFiltered = if (fallbackActive) ({ onReturnToFiltered() }) else null,
+                            onSearchAllLines = if (showSearchScopeChip && tab.searchMode == SearchMode.FILTERED) onSearchAllLines else null,
                             onQueryChange = onSearchQueryChange,
                             onToggleCase = onSearchToggleCase,
                             onNext = onSearchNext,
@@ -2841,6 +2839,7 @@ fun LogViewer(
                     showModeSelector = showSearchScopeChip,
                     sameModeIsNoop = selectedSearchModeIsFullyOpen,
                     onModeChange = onSearchToggleScope,
+                    onSearchAllLines = if (showSearchScopeChip) onSearchAllLines else null,
                     searchScopeBehavior = settings.searchScopeBehavior,
                     lastManualSearchMode = settings.lastManualSearchMode,
                     fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),

@@ -43,9 +43,10 @@ import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
 import kotlin.math.abs
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** The field must remain editable and focused as the result status changes into all-lines fallback. */
+/** The Find field stays editable and focused while results recompute, and its mode controls behave. */
 @OptIn(ExperimentalTestApi::class)
 class SearchBarUiTest {
     @get:Rule
@@ -113,14 +114,16 @@ class SearchBarUiTest {
     }
 
     @Test
-    fun typingContinuesInTheFilteredFieldWhileFallbackStatusIsVisible() {
+    fun typingContinuesInTheFieldWhileAnEditIsRecomputingAndTheCounterKeepsThePreviousCount() {
         rule.setContent {
             var query by remember { mutableStateOf("hidden") }
-            var fallback by remember { mutableStateOf(true) }
+            var searching by remember { mutableStateOf(false) }
             val search = LogSearchState(
                 active = true,
                 query = query,
-                matchIds = intArrayOf(2),
+                isSearching = searching,
+                matchIds = intArrayOf(1, 2, 3),
+                currentIdx = 1,
                 focusNonce = 1,
                 scope = SearchScope.FILTERED,
             )
@@ -128,10 +131,9 @@ class SearchBarUiTest {
                 tabId = "test-tab",
                 search = search,
                 autoFocus = true,
-                statusMessage = if (fallback) "No matches in Filtered; searching all lines" else null,
                 onQueryChange = { _, value ->
                     query = value
-                    fallback = true
+                    searching = true
                 },
                 onToggleCase = {},
                 onNext = {},
@@ -143,17 +145,50 @@ class SearchBarUiTest {
         val field = rule.onNodeWithTag("search-field-filtered")
         rule.waitForIdle()
         field.assertIsFocused()
-        rule.onNodeWithText("All-lines").assertExists()
+        rule.onNodeWithTag("search-counter-filtered").assertTextEquals("2/3")
 
         // Opening Find selects the existing query. Put the caret at its end before simulating
-        // further typing; a fallback status update must not select the whole field again.
+        // further typing; a recomputing result must not select the whole field again.
         field.performTextInputSelection(TextRange("hidden".length))
-        field.performTextInput(" ")
-        field.assertTextEquals("hidden ")
-        field.performTextInput("by filter")
+        field.performTextInput(" by filter")
         field.assertTextEquals("hidden by filter")
         field.assertIsFocused()
-        rule.onNodeWithText("All-lines").assertExists()
+        // Still the previous count (dimmed), not a wider "Searching…" label.
+        rule.onNodeWithTag("search-counter-filtered").assertTextEquals("2/3")
+    }
+
+    @Test
+    fun searchAllLinesAppearsOnlyForAFinishedValidFilteredSearchWithNoMatches() {
+        var clicks = 0
+        var search by mutableStateOf(
+            LogSearchState(active = true, query = "hidden", isSearching = true, scope = SearchScope.FILTERED),
+        )
+        rule.setContent {
+            SearchBar(
+                tabId = "test-tab",
+                search = search,
+                onSearchAllLines = { clicks++ },
+                onQueryChange = { _, _ -> },
+                onToggleCase = {},
+                onNext = {},
+                onPrev = {},
+                onClose = {},
+            )
+        }
+
+        rule.onAllNodesWithTag("search-all-lines").assertCountEquals(0)
+        search = search.copy(isSearching = false, invalidPattern = true)
+        rule.waitForIdle()
+        rule.onAllNodesWithTag("search-all-lines").assertCountEquals(0)
+
+        search = search.copy(invalidPattern = false)
+        rule.waitForIdle()
+        rule.onNodeWithTag("search-all-lines").performClick()
+        assertEquals(1, clicks)
+
+        search = search.copy(matchIds = intArrayOf(2))
+        rule.waitForIdle()
+        rule.onAllNodesWithTag("search-all-lines").assertCountEquals(0)
     }
 
     @Test

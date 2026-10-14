@@ -1172,10 +1172,11 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Four rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
+        // Rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
         // so cells line up as columns and the last column ends on the right content edge.
-        // Reserve an identical two-line label area in every cell of the last row so its controls
-        // align even though one label wraps.
+        // The fourth row groups every Ctrl+F / Find setting. It and the last row reserve an
+        // identical two-line label area in every cell so their controls align even though some
+        // labels wrap.
         val finalRowLabelAreaHeight = 28.dp
 
         SettingsGrid(columns = 4, rowSpacing = 16.dp) {
@@ -1298,50 +1299,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
             CompactSettingWithTooltip(
-                label = "Search scope behavior",
-                tooltip = "Chooses the mode for a normal Find open. Filtered and Unfiltered open one field; " +
-                    "Two searches opens independent fields. Last search mode restores the last manual choice. " +
-                    "Auto-switch by open view uses Unfiltered while Original is visible and Filtered while it is hidden. " +
-                    "Ctrl/Cmd+Alt+F always opens the Unfiltered field. Compare mode uses Filtered.",
-                modifier = Modifier.width(178.dp),
-                labelMaxLines = 1,
-            ) {
-                SearchScopeBehaviorSelector(
-                    selected = state.settings.searchScopeBehavior,
-                    onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Link split selection and Find",
-                tooltip = "This preference applies in every Filtered/Original split view, including single-field and Two searches modes. When Linked, clicking a row in Filtered mirrors its selection and scroll position in " +
-                    "Original when that row exists. Find navigation may mirror a match in either direction. " +
-                    "Original row clicks and free scrolling stay local, and queries remain separate. Independent " +
-                    "keeps each panel's selection and Find navigation local. " +
-                    "Deliberate annotation, crash and video jumps remain explicit.",
-                modifier = Modifier.width(178.dp),
-                labelMaxLines = 2,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Search all lines if Filtered has no matches",
-                tooltip = "After a valid, completed Filtered search finds no rows, optionally check all lines and " +
-                    "show Original when matches exist. Two searches always keeps both independent fields and does not use this fallback. " +
-                    "Return to Filtered suppresses the fallback until the search changes.",
-                modifier = Modifier.width(178.dp),
-                labelMaxLines = 2,
-            ) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.broadenSearchWhenFilteredEmpty) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = idx == 0) } },
-                )
-            }
-            CompactSettingWithTooltip(
                 label = "Process names in new tabs",
                 tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
                     "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
@@ -1360,7 +1317,7 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 label = "Ctrl+F opens",
                 tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
                     "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                    "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
+                    "non-matching rows. \"Ctrl+F also shows Original\" applies to all three.",
                 modifier = Modifier.width(112.dp),
                 labelMaxLines = 1,
                 labelAreaHeight = finalRowLabelAreaHeight,
@@ -1443,10 +1400,11 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 }
             }
             CompactSettingWithTooltip(
-                label = "Ctrl+F opens Original",
+                label = "Ctrl+F also shows Original",
                 tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-                    "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
-                    "Original/Filtered split to reveal.",
+                    "of Find bar / Tags / Regex it opens. It only shows the panel: Search scope behavior still " +
+                    "picks the Find field, so with Auto-switch by open view Find then opens Unfiltered. " +
+                    "Single-tab view only — compare mode has no Original/Filtered split to reveal.",
                 labelMaxLines = 2,
                 labelAreaHeight = finalRowLabelAreaHeight,
             ) {
@@ -1454,6 +1412,39 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     options = listOf("On", "Off"),
                     selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
                     onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Search scope behavior",
+                tooltip = "Chooses the mode for a normal Find open. Filtered and Unfiltered open one field; " +
+                    "Two searches opens independent fields. Last search mode restores the last manual choice. " +
+                    "Auto-switch by open view uses Unfiltered while Original is visible and Filtered while it is hidden. " +
+                    "Pressing Ctrl+F again while Find is open only refocuses it. " +
+                    "Ctrl/Cmd+Alt+F always opens the Unfiltered field. Compare mode uses Filtered.",
+                modifier = Modifier.width(178.dp),
+                labelMaxLines = 1,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SearchScopeBehaviorSelector(
+                    selected = state.settings.searchScopeBehavior,
+                    onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Link split selection and Find",
+                tooltip = "This preference applies in every Filtered/Original split view, including single-field and " +
+                    "Two searches modes. When On, clicking a row in Filtered mirrors its selection and scroll position in " +
+                    "Original when that row exists. Find navigation may mirror a match in either direction. " +
+                    "Original row clicks and free scrolling stay local, and queries remain separate. Off " +
+                    "keeps each panel's selection and Find navigation local. " +
+                    "Deliberate annotation, crash and video jumps remain explicit.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = idx == 0) } },
                 )
             }
             CompactSettingWithTooltip(

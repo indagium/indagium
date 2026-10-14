@@ -386,7 +386,7 @@ internal fun FileView(
                 onCollapseAll = { state.collapseAll(tab.id) },
                 onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
                 onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-                onOpenSearch = { state.openSearch(tab.id) },
+                onOpenSearch = { if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id) },
                 onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
                 onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
                 onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
@@ -432,7 +432,7 @@ internal fun FileView(
                     }
                 },
                 onSearchFocused = { scope -> state.focusSearch(tab.id, scope) },
-                onReturnToFiltered = { state.returnToFiltered(tab.id) },
+                onSearchAllLines = { state.searchAllLines(tab.id) },
                 syncSelectionAndScroll = state.settings.syncSplitPanelSelectionAndScroll,
                 syncSelectionAndScrollRevision = state.splitSyncRevision,
                 filterBar = filterBarModel,
