@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Record Android workflows as editable test steps, rewrite them with a selected AI profile, and run cases on a connected device or emulator with evidence in Indagium." />
+    <link rel="canonical" href="https://indagium.com/ai-tests/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content="Record and Run AI Tests on Android | Indagium" />
+    <meta property="og:description" content="Turn a device walkthrough into an editable Android test case, then run it with an AI agent and review its evidence." />
+    <meta property="og:url" content="https://indagium.com/ai-tests/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/ai-tests-results.webp" />
+    <meta property="og:image:alt" content="Indagium results matrix showing a five-step Android case passed with per-step agent and judge verdicts." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Record and Run AI Tests on Android | Indagium" />
+    <meta name="twitter:description" content="Turn a device walkthrough into an editable Android test case, then run it with an AI agent and review its evidence." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/ai-tests-results.webp" />
+    <meta name="twitter:image:alt" content="Indagium results matrix showing a five-step Android case passed with per-step agent and judge verdicts." />
+    <title>Record and Run AI Tests on Android | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/zoom.js" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "AI Tests", "item": "https://indagium.com/ai-tests/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "VideoObject",
+        "name": "Record and Rewrite an Android Test in Indagium",
+        "description": "A walkthrough of recording a manual Android workflow, reviewing the captured steps, and rewriting them into editable actions and expected results with a selected AI profile.",
+        "thumbnailUrl": ["https://indagium.com/assets/media/posters/ai-tests-recording.webp"],
+        "uploadDate": "2026-10-14",
+        "duration": "PT60.33S",
+        "contentUrl": "https://indagium.com/assets/media/web/ai-tests-recording.mp4",
+        "encodingFormat": "video/mp4",
+        "inLanguage": "en",
+        "publisher": { "@type": "Organization", "name": "Indagium", "url": "https://indagium.com/" }
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "VideoObject",
+        "name": "Run an Android Test Case with Live Evidence in Indagium",
+        "description": "A walkthrough of running a five-step Android test case on an emulator, showing live screenshots and logcat, per-step results, and a separate judge.",
+        "thumbnailUrl": ["https://indagium.com/assets/media/posters/ai-tests-running.webp"],
+        "uploadDate": "2026-10-14",
+        "duration": "PT101.63S",
+        "contentUrl": "https://indagium.com/assets/media/web/ai-tests-running.mp4",
+        "encodingFormat": "video/mp4",
+        "inLanguage": "en",
+        "publisher": { "@type": "Organization", "name": "Indagium", "url": "https://indagium.com/" }
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/" aria-current="page">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero ai-tests-hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">AI test suites <span>/</span> Record and run Android workflows</p>
+          <h1 id="page-title">Record Android tests. Let an AI agent run them.</h1>
+          <p class="page-lede">Record a workflow on a connected Android phone or emulator, review the captured steps, and use a selected AI profile to rewrite them as editable actions and expected results. Then run a case or suite with an agent on an authorized device, review its live evidence, and add a separate judge if you want another check.</p>
+          <div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="#record">Watch the recording walkthrough <span aria-hidden="true">↓</span></a></div>
+        </div>
+        <figure class="page-hero-figure ai-tests-hero-figure"><img src="/assets/media/posters/ai-tests-results.webp" data-full="/assets/media/posters/ai-tests-results-full.webp" width="1920" height="1096" alt="Indagium results matrix showing a five-step Android case passed with per-step agent and judge verdicts." /><figcaption>Completed run matrix: five passing steps, with agent and judge results for each.</figcaption></figure>
+      </section>
+
+      <section class="section ai-test-section" id="record" aria-labelledby="record-title">
+        <p class="eyebrow">01 <span>/</span> Record and review</p>
+        <h2 id="record-title">Turn a device walkthrough into <em>editable test steps.</em></h2>
+        <p class="section-lede">Connect an authorized adb device or emulator and perform the workflow. Indagium records the inputs as a draft; you can inspect, edit, reorder, or remove steps before applying them to a case.</p>
+        <div class="ai-test-grid">
+          <figure class="ai-test-media">
+            <video controls muted playsinline preload="none" poster="/assets/media/posters/ai-tests-recording.webp" width="1920" height="1096" aria-label="Recording an Android workflow, reviewing its captured steps, and rewriting them with an AI profile" aria-describedby="recording-caption">
+              <source src="/assets/media/web/ai-tests-recording.mp4" type="video/mp4" />
+              <a href="/assets/media/web/ai-tests-recording.mp4">Download the Android test recording walkthrough</a>
+            </video>
+            <figcaption id="recording-caption">1-minute walkthrough: record a device workflow, review the draft, and rewrite it into readable actions and expected results. <a class="inline-link" href="/assets/media/web/ai-tests-recording.mp4">Download video</a>.</figcaption>
+          </figure>
+          <div class="ai-test-aside">
+            <ol class="ai-test-steps">
+              <li><span>01</span><div><h3>Perform the workflow</h3><p>Use the device, emulator window, or Indagium mirror. The recorder observes input and prepares ordered rows for review; it does not inject actions.</p></div></li>
+              <li><span>02</span><div><h3>Review or rewrite</h3><p>Edit the captured rows yourself or ask a selected AI profile to turn them into human-readable actions and expected results. Check each suggestion against the evidence.</p></div></li>
+              <li><span>03</span><div><h3>Apply the case steps</h3><p>Nothing is added to the case until you apply the reviewed steps. The actions and expected results remain editable in the case editor.</p></div></li>
+            </ol>
+            <figure class="ai-tests-authoring image-card"><img src="/assets/media/posters/ai-tests-authoring.webp" data-full="/assets/media/posters/ai-tests-authoring-full.webp" width="1920" height="1096" alt="Reviewing recorded Android actions as editable test steps in Indagium." /><figcaption>Review the rewritten steps and expected results before applying them to a case.</figcaption></figure>
+            <p class="ai-test-note">The recording shows a Codex account for the rewrite. Use any AI profile configured in Indagium; the provider and model are selected in the app.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section ai-test-section ai-test-section-run" id="run" aria-labelledby="run-title">
+        <p class="eyebrow">02 <span>/</span> Run and inspect</p>
+        <h2 id="run-title">Run the case on Android. <em>Keep the evidence close.</em></h2>
+        <p class="section-lede">Choose a case or suite, an agent profile, and a connected authorized device. The run view follows progress and evidence; a separate judge is optional and can check every step or only failed steps.</p>
+        <div class="ai-test-grid">
+          <div class="ai-test-aside">
+            <ol class="ai-test-steps">
+              <li><span>01</span><div><h3>Choose where and how</h3><p>Select the AI agent profile and adb device or emulator. Configure recording and evidence retention, then choose whether to use a separate judge.</p></div></li>
+              <li><span>02</span><div><h3>Watch live progress</h3><p>See the current step, latest screenshot, recent logcat, and agent activity as the lane runs. Runs can also be paused or stopped.</p></div></li>
+              <li><span>03</span><div><h3>Review results and evidence</h3><p>Inspect each step's outcome and the evidence retained for that run. Failed results can be turned into issues kept locally or filed through a configured tracker.</p></div></li>
+            </ol>
+            <p class="ai-test-note">This recording uses a Codex agent and a separate judge. Configure agent and judge profiles independently; a judge is optional.</p>
+          </div>
+          <figure class="ai-test-media">
+            <video controls muted playsinline preload="none" poster="/assets/media/posters/ai-tests-running.webp" width="1920" height="1096" aria-label="Running a five-step Android test case with live screenshots, logcat, step results, and a separate judge" aria-describedby="running-caption">
+              <source src="/assets/media/web/ai-tests-running.mp4" type="video/mp4" />
+              <a href="/assets/media/web/ai-tests-running.mp4">Download the Android test run walkthrough</a>
+            </video>
+            <figcaption id="running-caption">1-minute 42-second walkthrough: an agent runs a five-step emulator case while Indagium shows live evidence and judge results. <a class="inline-link" href="/assets/media/web/ai-tests-running.mp4">Download video</a>.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section ai-test-details" aria-labelledby="details-title">
+        <p class="eyebrow">Configure the workflow</p>
+        <h2 id="details-title">Your device, provider, and <em>verification choices.</em></h2>
+        <p class="section-lede">Start with a case, then choose how its steps are authored, run, checked, and retained. The map below links to the full <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#30-ai-test-suites">AI test suite guide</a>.</p>
+        <nav class="ai-test-feature-nav" aria-label="AI test features">
+          <a href="#suite-design">Suite design</a><a href="#step-authoring">Authoring</a><a href="#step-types">Step types</a><a href="#checks-examples">Checks</a><a href="#run-controls">Run controls</a><a href="#run-evidence">Evidence and reports</a><a href="#scripts-issues">Scripts and issues</a><a href="#storage-mcp">Storage and MCP</a>
+        </nav>
+        <div class="feature-matrix">
+          <article class="evidence-card" id="suite-design"><span>SUITE DESIGN</span><h3>Describe the app and reusable setup</h3><p>Group cases under a suite with a target package, agent instructions, goals, and preconditions. Reuse shared step sequences in cases or setup and teardown hooks; named suite values are included as plain context for the agent. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#suites-cases-and-steps">Suite guide</a>.</p></article>
+          <article class="evidence-card" id="step-authoring"><span>AUTHORING</span><h3>Choose how to build each case</h3><p>Add steps by hand, draft them with AI, record a device workflow, paste log lines as checks, improve saved steps, or rewrite a retained recording. Review and edit previews before applying them. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#checks-and-examples">Authoring guide</a>.</p></article>
+          <article class="evidence-card" id="step-types"><span>STEP TYPES</span><h3>Mix AI and direct device work</h3><p>Steps can be performed by an AI agent, a tester, a script, or eligible recorded-input replay. Optional steps run only when their condition is present. Set step timeouts and retries, then stop, continue, create a draft issue, or pause after a failure. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#manual-script-and-replay-steps">Step types</a>.</p></article>
+          <article class="evidence-card" id="checks-examples"><span>CHECKS</span><h3>Combine direct checks and AI judgment</h3><p>Check for matching or absent logs, script results, and device state. Screen judge and Ask the judge checks use AI and need a configured judge. Add golden screenshots or reference logs as examples for a step. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#checks-and-examples">Checks and examples</a>.</p></article>
+          <article class="evidence-card" id="run-controls"><span>RUN CONTROLS</span><h3>Set up lanes and repeat behavior</h3><p>Choose agent profiles, model and reasoning effort, or an external MCP lane. Up to four distinct devices can run in parallel; lanes sharing a device run in sequence. Repeat cases 1, 3, or 5 times, set case and step retries plus tool-call budgets, and choose no judge, failed-step or every-step judging with inline, after-case, or background timing. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#running">Run guide</a>.</p></article>
+          <article class="evidence-card" id="run-evidence"><span>EVIDENCE AND REPORTS</span><h3>Follow progress and compare outcomes</h3><p>Inspect live screenshots, logcat, and agent activity. Choose capture tabs and saved evidence. Reports include a case-and-step matrix, attempts, agent/judge disagreements, and flaky outcomes; compare runs, rerun failed cases or through a step, or export JSON, Markdown, and evidence ZIPs. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#reading-the-report">Reports</a>.</p></article>
+          <article class="evidence-card" id="scripts-issues"><span>SCRIPTS AND ISSUES</span><h3>Add custom tools and follow-up</h3><p>Expose typed-parameter scripts from the host shell or adb shell with ask-first, automatic, or setup/teardown-only permissions. Keep issues locally, add them to Notes, copy Markdown, or file through a configured tracker MCP server. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#scripts-your-own-tools-for-the-agent">Scripts</a> · <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#issues">Issues</a>.</p></article>
+          <article class="evidence-card" id="storage-mcp"><span>STORAGE AND MCP</span><h3>Keep libraries and evidence where you choose</h3><p>Configure separate suite, run, and issue folders. The Free edition allows one suite with five cases; additional entries are locked, not deleted. MCP clients can author, run, compare, export reports, and handle issue evidence, with approval required for gated actions. <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#editions-and-limits">Limits</a> · <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#from-an-mcp-client">MCP guide</a>.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="faq" aria-labelledby="ai-tests-faq-title">
+        <p class="eyebrow">Questions</p>
+        <h2 id="ai-tests-faq-title">Android AI tests, <em>answered.</em></h2>
+        <div class="faq-list">
+          <div><h3>Can I choose AI steps or replay recorded input?</h3><p>Yes. A recording starts as a reviewable draft. You can ask AI to turn it into editable actions and expected results that use the current screen and recording as guidance, or apply the recorded input as replay steps. A case can contain either kind.</p></div>
+          <div><h3>Do I need a separate judge?</h3><p>No. Choose No judge, failed steps only, or every step when configuring a run. The judge has its own AI profile when enabled.</p></div>
+          <div><h3>Where are suites and run data stored?</h3><p>Suites, saved runs, and issues are kept in their configured folders on your computer. You can change those folders in Settings → General.</p></div>
+          <div><h3>What test data is sent to AI providers?</h3><p>Suites, saved runs, and issues stay in their configured folders. When you ask an AI profile to rewrite a recording or run a test, Indagium sends the relevant prompts and evidence to the provider you selected. A recording rewrite can include captured inputs, screen readings, text entered, screenshots, and requested video frames; recognized password content is masked or withheld. AI use and judging are optional.</p></div>
+        </div>
+      </section>
+
+      <section class="section guide-band" aria-labelledby="ai-tests-next-title">
+        <p class="eyebrow">Continue exploring</p>
+        <h2 id="ai-tests-next-title">From a device workflow to <em>log evidence.</em></h2>
+        <div class="guide-links"><a href="/android-logcat-capture/"><span>Capture</span><b>Record logcat and screen video together →</b></a><a href="/guides/analyze-android-logcat/"><span>Investigate</span><b>Follow the Android logcat analysis workflow →</b></a><a href="/logcat-mcp-server/"><span>Automate</span><b>Explore the optional MCP control server →</b></a></div>
+      </section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/" aria-current="page">AI tests</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>

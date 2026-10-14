@@ -923,7 +923,7 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **General** | Workspace profile, first-run/setup assistant, and the default parent plus separate analysis, capture-session, snapshot, and saved-ZIP folders |
 | **Capture** | adb and optional scrcpy paths, log buffers, mirror mode, recording/audio options, video limits, naming, storage guard, and capture troubleshooting |
 | **Appearance** | Theme (20 built in), independent interface and log fonts, log font size, interface scale, row numbers, minimap, icon-only toolbar |
-| **Editor behavior** | What `⌘F` targets, whether new files open with the unfiltered split, row wrapping limits, navigation scroll margin, tag list sizes |
+| **Editor behavior** | Search scope behavior, what `⌘F` opens, whether it also shows Original, whether new files open with Original, split selection/Find linking, row wrapping limits, navigation scroll margin, tag list sizes |
 | **Export & annotations** | Default save directory, Markdown vs Jira log-block style, block numbering, prefix label, auto-export, copy-masking rules |
 | **Automation** | MCP control server on/off, port, allow browser clients, regenerate token, connection info, diagnostic logging |
 | **AI providers** | Provider profiles, models, reasoning effort, API keys, remote-disclosure acknowledgement, max tool calls per request, connection test |
@@ -943,9 +943,13 @@ the corresponding default while retaining the selected name.
 Use the Settings search field to find a setting by name or task; activate a result to jump to its
 section and control. `⌘F` / `Ctrl+F` focuses the Settings search while Settings is open. Workspace
 profiles can be applied, customized and saved under a new name, renamed, updated from the current
-layout, or exported/imported as JSON. The setup assistant offers four guided steps—Workspace, Look,
-Folders, and Capture—and keeps the current setup by default for an existing workspace. Run it again
-from Settings → General.
+layout, or exported/imported as JSON. The setup assistant offers five steps—Workspace, Look, Folders,
+Search, and Capture. Its Search step contains five preferences: **Search scope behavior**, **Ctrl+F opens**,
+**Ctrl+F also shows Original**, **Original panel for new files**, and **Link split selection and Find**.
+They are prefilled with current values and take effect as you edit them.
+Users who completed the earlier wizard are shown the new Search step once, with their current workspace
+profile kept. Finish, Skip, Escape, or closing the window acknowledges the current wizard revision; use
+**Run setup again** in Settings → General to start from Workspace.
 
 Save folders are independent: the default parent folder, analysis artifacts, retained capture sessions,
 live snapshots, and portable ZIP exports. Changing the capture-session folder affects new sessions;
@@ -1283,6 +1287,39 @@ Open the **Tests** tab from the toolbar. The workspace links **Suites**, **Share
 **Agent profiles**, **Scripts**, **Runs** and **Issues**. Examples for agents is an index of examples already
 attached to steps and shared sequences; selecting one opens its owner. Agent profiles opens provider settings.
 
+### Feature map
+
+| Area | What it covers | Guide |
+|---|---|---|
+| Suite design | Target package, suite and case instructions, goals, preconditions, shared sequences, named values, and setup/teardown hooks | [Suites, cases, and steps](#suites-cases-and-steps) · [Shared sequences, variables, and hooks](#shared-sequences-suite-variables-and-hooks) |
+| Authoring | Manual steps, AI drafts, device recording and rewrite, pasted log checks, saved recording rewrites, and step improvement | [Checks and examples](#checks-and-examples) · [Readable recording steps](#readable-steps-from-a-recording) · [Improving saved steps](#improving-the-steps-of-a-saved-case) |
+| Step execution | AI, manual, script, and eligible recorded-input replay steps; optional conditions and failure policies | [Manual, script, and replay](#manual-script-and-replay-steps) |
+| Verification | Log, script-result and device-state checks; AI-based screen and question checks; golden screenshots and reference logs | [Checks and examples](#checks-and-examples) · [Scripts](#scripts-your-own-tools-for-the-agent) |
+| Runs | Agent or external MCP lanes, device parallelism, repeat and retry controls, call budgets, and judge mode/timing | [Running](#running) |
+| Evidence and reports | Live capture, saved evidence, result matrix, disagreements, flaky attempts, comparison, reruns, and exports | [Keeping recording evidence](#keeping-a-recordings-evidence) · [Reading the report](#reading-the-report) |
+| Issues and automation | Local, Notes, Markdown, and configured tracker destinations; MCP authoring, runs, reports, and evidence | [Issues](#issues) · [Tracker delivery](#filing-issues-in-your-tracker) · [MCP client](#from-an-mcp-client) |
+| Storage and limits | Separate library, run, and issue folders; Free-edition entry limits | [Editions and limits](#editions-and-limits) |
+
+See the [AI tests walkthrough page](https://indagium.com/ai-tests/) and its [record-and-rewrite video](../site/assets/media/web/ai-tests-recording.mp4),
+[run video](../site/assets/media/web/ai-tests-running.mp4), [results screenshot](../site/assets/media/posters/ai-tests-results.webp),
+and [step-authoring screenshot](../site/assets/media/posters/ai-tests-authoring.webp).
+
+### Quick start
+
+For AI drafting or agent-driven steps, configure an AI provider profile in *Settings → AI providers*. Connect an authorized
+Android device or emulator that Indagium can see through `adb`; choose a judge profile only if you want judged results or
+use a *Screen judge* or *Ask the judge* check.
+
+1. In **Tests → Suites**, create a suite with a name, target package, and any context shared by its cases.
+2. Add a case with its goal, preconditions, and agent instructions. Add steps yourself, choose **Draft steps with AI…**,
+   or choose **Record from device…** and perform the workflow.
+3. For a recording, stop and review the draft. Edit or rewrite its steps, verify actions and expected results, then **Apply**;
+   the recording does not change the case until you apply it.
+4. Choose **Run case** or **Run suite**, select the cases, device lane, and agent profile. Set repeat, retries, evidence,
+   and judge options for the run, then press **Start**.
+5. Follow the live lane view, then inspect the saved result matrix and evidence. Compare or rerun work, export a report,
+   or create an issue for follow-up.
+
 **Where the test data is kept.** Three folders in *Settings → General*, each with *Browse* (and *Reset* once you chose
 your own), by default subfolders of your *Default save folder* (for example `…/Documents/Indagium/test-suites  (default)`):
 
@@ -1342,6 +1379,21 @@ panel stacks below the editor.
    **Replay** under *Performed by*. Replay is available when the step has supported recorded input.
    A suite that uses these newer step kinds is saved in a newer file version:
    an older Indagium opens it read-only instead of giving "plug in the USB device" to an AI agent.
+
+#### Shared sequences, suite variables, and hooks
+
+Create a named sequence in **Shared steps** when the same ordered actions are useful in more than one case. **Insert shared
+sequence…** copies its steps into the case with fresh IDs; changing that inserted copy does not edit the library sequence.
+Hooks can instead refer to a shared sequence directly, so it runs as setup or teardown without copying it into the case.
+
+Suite and case hooks can run a shared sequence or a library script. Suite setup runs once for the suite run, followed by
+the selected cases; case setup and teardown wrap each case attempt, including an eligible automatic retry. Teardown still
+runs its scripts when a run is cancelled; shared-sequence teardown is skipped. Keep device preparation or cleanup in
+these hooks when it should happen outside the case's ordinary action steps.
+
+**Variables** are named values shown to the agent as plain suite context, for example `account = test-user`. They are not
+template substitutions into action text or script parameters; mention the value by name in the instructions where the agent
+needs to use it.
 
 ### Manual, script and replay steps
 
@@ -1474,6 +1526,10 @@ interval separate from the full UI/activity probe: a fast image can still be use
 input, but it will not be labeled with that later app or activity. The app/activity before and after an input are reported
 separately and may be unavailable. A slow swipe keeps its duration. To get steps a person can read:
 
+![Recording an Android workflow in Indagium before reviewing its captured inputs](images/gif-12-ai-test-recording.gif)
+
+*The recording view follows device input as the workflow is performed. Edited to 1.5× speed.*
+
 1. **Record from device**, perform the test on the device, the emulator window or the mirror, then **Stop and review**. Wait for the bounded screen snapshots
    to finish before removing inputs. Use **Remove** to exclude an unnecessary raw row or rewritten step; removing a
    rewritten step excludes every input it represents. The source history and evidence stay in the session, and **Restore
@@ -1536,6 +1592,10 @@ separately and may be unavailable. A slow swipe keeps its duration. To get steps
    not taken for the result. Nothing is
    added to the case until you press **Apply recorded steps**. It stays disabled until every required step has an expected
    result and every optional step has a condition.
+
+![Reviewing rewritten Android test steps and applying them to a case](images/gif-13-ai-test-review.gif)
+
+*Review the rewritten actions and expected results before applying. Edited excerpts at 1.5× speed.*
 
 Rewritten actions name the supported goal, such as "Open YouTube". Recorded coordinates belong in the reference hint;
 they do not replace that action. A model-generated coordinate-only action requires review, even when it includes an expected result.
@@ -1652,6 +1712,10 @@ The cases, recording and *More* rows show a one-line summary; **Change ▸** ope
   to keep**: screenshots and the agent transcript (the log and the screen recording are part of the lane's
   recording above).
 
+![An AI agent performing an Android test while Indagium shows live run evidence](images/gif-14-ai-test-run.gif)
+
+*The live run view follows the agent and judge alongside device evidence. Edited to 1.5× speed.*
+
 Press **Start**. The **Runs** screen opens on the new run with a **Live** view: each lane's latest screenshot,
 bounded recent logcat, current step and progress, persisted tool activity, the judge feed, **Pause all** (lanes stop
 at the next step boundary) and **Stop**. Screenshot capture and deterministic checks share the step execution
@@ -1701,6 +1765,10 @@ an agent/check-only pass or an advisory pass with unresolved verification. The s
 start/playback evidence paths; the Markdown report lists those paths, while capture timestamps are in the evidence and transcript records.
 Deferred results show execution and verification separately, including queue wait and judge duration. Recovered runs, cases
 and steps are marked **flaky**, while their earlier attempt details remain available.
+
+![Completed five-step Android test results with agent and judge verdicts](images/gif-15-ai-test-results.gif)
+
+*A completed run report with all five case steps passed. This excerpt plays at real-time speed.*
 
 Useful actions on a step:
 
