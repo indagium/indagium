@@ -1608,6 +1608,7 @@ data class SearchNavigationRequest(
 private enum class OriginalVisibilityOrigin { USER, SEARCH_REVEAL }
 
 private data class SearchJobKey(val tabId: String, val scope: SearchScope)
+
 private data class SearchNavigationKey(val tabId: String, val scope: SearchScope)
 
 // Video candidates deliberately stay out of the picker rows: it is a log-selection UI. Keeping
@@ -3213,9 +3214,11 @@ class AppState(
     // UI thread while a previously-scheduled recompute for that same tabId is still in flight.
     private val searchJobs = ConcurrentHashMap<SearchJobKey, Job>()
     private val searchJobRevisions = ConcurrentHashMap<SearchJobKey, Long>()
+
     // Only one search item list may be materialized at a time. In Two searches mode this bounds
     // peak memory on very large logs. The lock is cancellation-aware.
     private val searchScanMutex = Mutex()
+
     // Enter/Shift+Enter pressed while a slot's query/case edit is still being recomputed. Summed
     // and replayed by applySearchResult once the fresh matches land, so a fast "type, Enter" never
     // silently drops the key press.
@@ -5819,6 +5822,7 @@ class AppState(
         }
         pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
     }
+
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
     var pendingFolderPicker by mutableStateOf<PendingFolderPicker?>(null)
     var pendingSplitPrompt by mutableStateOf<PendingSplitPrompt?>(null)
@@ -8038,6 +8042,7 @@ class AppState(
         var expanded = t.expanded
         while (true) {
             cancellationCheck()
+
             fun idsFrom(filtered: Boolean): Set<String> =
                 computeItems(
                     t.copy(expanded = expanded),
@@ -8099,7 +8104,9 @@ class AppState(
         if (current.showUnfiltered == visible) return
         val nextMode = if (origin == OriginalVisibilityOrigin.USER && !compareMode) {
             modeAfterOriginalVisibilityChange(current.searchMode, visible, settings.searchScopeBehavior)
-        } else current.searchMode
+        } else {
+            current.searchMode
+        }
         val nextScopes = scopesForMode(nextMode)
         val switchingVisibleSearch = nextMode != current.searchMode &&
             scopesForMode(current.searchMode).any { current.searchFor(it).active }
@@ -9475,7 +9482,6 @@ class AppState(
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(entryId))
     }
 
-
     // ── In-view search ("Find" bar, ui/SearchBar.kt) ──────────────────
     // Each concrete panel scope owns a stable query/result/cursor slot. The legacy LogTab.search
     // property is maintained as a projection of focusedSearchScope for older diagnostics.
@@ -9756,6 +9762,7 @@ class AppState(
     }
 
     fun searchNext(tabId: String, scope: SearchScope? = null) = moveSearchMatch(tabId, +1, scope)
+
     fun searchPrev(tabId: String, scope: SearchScope? = null) = moveSearchMatch(tabId, -1, scope)
 
     private fun moveSearchMatch(tabId: String, delta: Int, scope: SearchScope?) {

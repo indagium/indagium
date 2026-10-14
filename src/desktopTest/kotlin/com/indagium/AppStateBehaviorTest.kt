@@ -42,6 +42,7 @@ import com.indagium.model.SourceFolderInfo
 import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
 import com.indagium.model.ThemePreset
+import com.indagium.model.searchFor
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
@@ -73,7 +74,6 @@ import com.indagium.ui.sequenceRenderY
 import com.indagium.ui.sequenceRowBaseBackground
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
-import com.indagium.model.searchFor
 import com.indagium.ui.shouldSyncSequenceVisualOrder
 import com.indagium.ui.summarizeItems
 import com.indagium.ui.tabDisplayLabel
