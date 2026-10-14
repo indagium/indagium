@@ -249,14 +249,14 @@ internal fun SearchBar(
                 modifier = Modifier.widthIn(min = 52.dp).testTag("search-counter-${search.scope.name.lowercase()}"),
             )
         }
-        if (showSearchAllLines) {
+        onSearchAllLines?.takeIf { showSearchAllLines }?.let { searchAllLines ->
             PillBtn(
                 "Search all lines",
                 active = false,
                 modifier = Modifier.testTag("search-all-lines"),
                 // No withSearchFocus: this field leaves composition, and the Unfiltered field that
                 // replaces it claims focus itself (its slot becomes the focused scope).
-                onClick = { onSearchAllLines?.invoke() },
+                onClick = searchAllLines,
             )
         }
         PillBtn("Aa", active = search.caseSensitive, onClick = { withSearchFocus { onToggleCase(search.scope) } })
