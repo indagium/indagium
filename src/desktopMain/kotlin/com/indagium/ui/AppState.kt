@@ -9633,6 +9633,8 @@ class AppState(
         if (source.query.isEmpty()) return
         val target = tab(tabId)?.searchFor(SearchScope.UNFILTERED) ?: return
         val inputChanged = target.query != source.query || target.caseSensitive != source.caseSensitive
+        // setSearchMode below already schedules a recompute for a slot it newly activates.
+        val needsOwnRecompute = inputChanged && target.active
         if (inputChanged) {
             discardSearchNavigationsForScope(tabId, SearchScope.UNFILTERED)
             pendingSearchSteps.remove(SearchJobKey(tabId, SearchScope.UNFILTERED))
@@ -9655,7 +9657,7 @@ class AppState(
             }
         }
         setSearchMode(tabId, SearchMode.UNFILTERED)
-        if (inputChanged) scheduleSearchRecompute(tabId, SearchScope.UNFILTERED)
+        if (needsOwnRecompute) scheduleSearchRecompute(tabId, SearchScope.UNFILTERED)
     }
 
     private fun scopesForMode(mode: SearchMode): List<SearchScope> = when (mode) {
@@ -9756,7 +9758,14 @@ class AppState(
         // jump to a stale match (or drop the key press), queue the step and let applySearchResult
         // replay it against the fresh matches.
         if (state.isSearching) {
-            pendingSearchSteps.merge(SearchJobKey(tabId, ownerScope), delta, Int::plus)
+            val key = SearchJobKey(tabId, ownerScope)
+            pendingSearchSteps.merge(key, delta, Int::plus)
+            // The result may have landed (and drained the queue) between the isSearching read
+            // above and the merge; replay right away instead of stranding the step until some
+            // unrelated later result.
+            if (tab(tabId)?.searchFor(ownerScope)?.isSearching == false) {
+                pendingSearchSteps.remove(key)?.takeIf { it != 0 }?.let { moveSearchMatch(tabId, it, ownerScope) }
+            }
             return
         }
         val matches = state.matchIds
