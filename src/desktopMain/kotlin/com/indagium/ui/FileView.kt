@@ -386,7 +386,7 @@ internal fun FileView(
                 onCollapseAll = { state.collapseAll(tab.id) },
                 onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
                 onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-                onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
+                onOpenSearch = { state.openSearch(tab.id) },
                 onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
                 onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
                 onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
@@ -396,7 +396,9 @@ internal fun FileView(
                 scrollStateStore = state.logViewerScrollStateStore,
                 annotationNavigationRequest = state.pendingAnnotationNavigation,
                 onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                searchNavigationRequest = state.pendingSearchNavigation,
+                searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
+                    state.searchNavigationFor(tab.id, scope)?.let { scope to it }
+                }.toMap(),
                 onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
                 onSelectAll = { state.selectAll(tab.id) },
                 onClearSelection = { state.clearSelection(tab.id) },
@@ -417,16 +419,22 @@ internal fun FileView(
                 keyboardFocusVisible = state.keyboardFocusVisible,
                 onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
                 onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
-                onSearchToggleCase = { state.toggleSearchCase(tab.id) },
-                onSearchNext = { state.searchNext(tab.id) },
-                onSearchPrev = { state.searchPrev(tab.id) },
-                onSearchClose = { state.closeSearch(tab.id) },
+                onSearchQueryChange = { scope, query -> state.setSearchQuery(tab.id, query, scope) },
+                onSearchToggleCase = { scope -> state.toggleSearchCase(tab.id, scope) },
+                onSearchNext = { scope -> state.searchNext(tab.id, scope) },
+                onSearchPrev = { scope -> state.searchPrev(tab.id, scope) },
+                onSearchClose = { scope -> state.closeSearch(tab.id, scope) },
                 showSearchScopeChip = true,
-                onSearchToggleScope = {
-                    val next = if (tab.search.scope == SearchScope.FILTERED) SearchScope.UNFILTERED else SearchScope.FILTERED
-                    state.setSearchScope(tab.id, next)
+                onSearchToggleScope = { mode -> state.setSearchMode(tab.id, mode) },
+                onToggleSearchSync = {
+                    state.updateSettings {
+                        it.copy(syncSplitPanelSelectionAndScroll = !it.syncSplitPanelSelectionAndScroll)
+                    }
                 },
+                onSearchFocused = { scope -> state.focusSearch(tab.id, scope) },
+                onReturnToFiltered = { state.returnToFiltered(tab.id) },
+                syncSelectionAndScroll = state.settings.syncSplitPanelSelectionAndScroll,
+                syncSelectionAndScrollRevision = state.splitSyncRevision,
                 filterBar = filterBarModel,
                 filterBarActions = filterBarActions,
                 filterBarVisible = state.filterBarVisible,

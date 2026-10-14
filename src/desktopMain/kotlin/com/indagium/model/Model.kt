@@ -552,6 +552,34 @@ data class Annotations(
  *  what the Original split panel — LogTab.showUnfiltered — displays). */
 enum class SearchScope { FILTERED, UNFILTERED }
 
+/** Which Find fields are presented. Kept separate from [SearchScope], which names the concrete
+ *  item list searched by one field. */
+enum class SearchMode { FILTERED, UNFILTERED, TWO_SEARCHES }
+
+/** How a normal Find invocation chooses its presentation mode. */
+enum class SearchScopeBehavior { FILTERED, UNFILTERED, LAST_USED, FOLLOW_VIEW }
+
+data class SearchFallbackState(
+    val sourceRevision: Long,
+    val isActive: Boolean = false,
+    val suppressedRevision: Long? = null,
+    val originalVisibleBeforeFallback: Boolean = false,
+)
+
+/** Two stable per-tab slots. Match arrays, cursor positions, case options and focus nonces never
+ *  cross between concrete scopes. */
+data class LogSearchSessions(
+    val filtered: LogSearchState = LogSearchState.EMPTY.copy(scope = SearchScope.FILTERED),
+    val unfiltered: LogSearchState = LogSearchState.EMPTY.copy(scope = SearchScope.UNFILTERED),
+) {
+    operator fun get(scope: SearchScope): LogSearchState =
+        if (scope == SearchScope.FILTERED) filtered else unfiltered
+
+    fun with(scope: SearchScope, value: LogSearchState): LogSearchSessions =
+        if (scope == SearchScope.FILTERED) copy(filtered = value.copy(scope = scope))
+        else copy(unfiltered = value.copy(scope = scope))
+}
+
 // ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────
 // Non-destructive: unlike Filter's kwText/kwRegex (which removes non-matching rows), this only
 // highlights matches within whatever's already visible and moves the row selection between them.
@@ -559,6 +587,7 @@ enum class SearchScope { FILTERED, UNFILTERED }
 // the AppSettings.ctrlFTarget == FIND_BAR switch that governs whether Ctrl/Cmd+F opens this at all.
 data class LogSearchState(
     val active: Boolean = false,
+    val isSearching: Boolean = false,
     val query: String = "",
     val caseSensitive: Boolean = false,
     /** Ascending-by-id entry ids of every currently-matching row/header, computed off the UI
@@ -573,6 +602,7 @@ data class LogSearchState(
      *  LaunchedEffect can refocus + select-all on a repeat Ctrl/Cmd+F, not just the first open. */
     val focusNonce: Int = 0,
     val scope: SearchScope = SearchScope.FILTERED,
+    val inputRevision: Long = 0,
 ) {
     val matchCount: Int get() = matchIds.size
 
@@ -592,6 +622,8 @@ data class LogSearchState(
             timedOut == other.timedOut &&
             focusNonce == other.focusNonce &&
             scope == other.scope &&
+            isSearching == other.isSearching &&
+            inputRevision == other.inputRevision &&
             matchIds.contentEquals(other.matchIds)
     }
 
@@ -604,6 +636,8 @@ data class LogSearchState(
         result = 31 * result + timedOut.hashCode()
         result = 31 * result + focusNonce
         result = 31 * result + scope.hashCode()
+        result = 31 * result + isSearching.hashCode()
+        result = 31 * result + inputRevision.hashCode()
         result = 31 * result + matchIds.contentHashCode()
         return result
     }
@@ -787,6 +821,12 @@ data class LogTab(
     // Session-only, like `tailing` above — never persisted (see AutosaveCodec.persistedSnapshot,
     // which deliberately omits this field) and always resets to LogSearchState.EMPTY on relaunch.
     val search: LogSearchState = LogSearchState.EMPTY,
+    // The legacy `search` field above remains a projection of the focused slot for existing
+    // diagnostics and callers. All new behavior reads/writes these stable per-scope slots.
+    val searches: LogSearchSessions = LogSearchSessions(),
+    val searchMode: SearchMode = SearchMode.FILTERED,
+    val focusedSearchScope: SearchScope = SearchScope.FILTERED,
+    val searchFallback: SearchFallbackState? = null,
     // Per-row "time since X" gutter column (ui/LogViewer.kt's LogRow, utils/LogTime.kt) — a
     // per-TAB toggle (not a global AppSettings field: it's a working-set choice for whatever log
     // you're currently staring at, same category as showUnfiltered/expanded/manualBlocks, not a
@@ -924,6 +964,21 @@ data class LogTab(
     // the lane ended and the capture stopped. Deliberately ABSENT from AutosaveCodec like captureSessionId: a restored tab is just
     // an ordinary (stopped) capture tab. Do not add it there. Appended last to preserve positional LogTab construction.
     val testLane: TestLaneTabRef? = null,
+)
+
+fun LogTab.searchFor(scope: SearchScope): LogSearchState = searches[scope]
+
+fun LogTab.withSearch(scope: SearchScope, value: LogSearchState): LogTab {
+    val nextSessions = searches.with(scope, value)
+    return copy(
+        searches = nextSessions,
+        search = if (focusedSearchScope == scope) nextSessions[scope] else search,
+    )
+}
+
+fun LogTab.withFocusedSearchScope(scope: SearchScope): LogTab = copy(
+    focusedSearchScope = scope,
+    search = searches[scope],
 )
 
 /** Which lane of which AI test run opened a capture tab. */
@@ -1221,6 +1276,14 @@ data class AppSettings(
      *  that split, see LogViewer.kt). Single-tab mode only: compare mode has no Original/Filtered
      *  split for one tab to reveal (see App.kt's onFocusFilterSearch). */
     val openUnfilteredOnCtrlF: Boolean = false,
+    /** Default scope behavior for normal Find openings. JSON-only migration-safe setting. */
+    val searchScopeBehavior: SearchScopeBehavior = SearchScopeBehavior.FILTERED,
+    /** Last mode explicitly chosen by the user, shared by new tabs and persisted globally. */
+    val lastManualSearchMode: SearchMode = SearchMode.FILTERED,
+    /** Keep the existing Filtered-to-Original selection/scroll mirroring when split. */
+    val syncSplitPanelSelectionAndScroll: Boolean = true,
+    /** In single-field Filtered mode, retry a valid zero-result search against all lines. */
+    val broadenSearchWhenFilteredEmpty: Boolean = false,
     // Source roots scanned by SourceIndexer to resolve a log line back to the Log/Timber call site
     // that could have emitted it (source/SourceIndexer.kt, AppState.reindexSources). Trailing with
     // a default so old settings tokens (without this field) still parse — see settingsFromToken.

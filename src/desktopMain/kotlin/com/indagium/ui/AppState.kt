@@ -1595,7 +1595,20 @@ fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
 // target is already comfortably visible; centering is reserved for when a collapsed group actually
 // had to be expanded to reveal the match at all, i.e. a real state change big enough that jumping
 // to it deserves recentering the same way expand-all or annotation navigation does.
-data class SearchNavigationRequest(val id: Long, val tabId: String, val entryId: Int)
+data class SearchNavigationRequest(
+    val id: Long,
+    val tabId: String,
+    val entryId: Int,
+    val scope: SearchScope = SearchScope.FILTERED,
+    val inputRevision: Long = 0L,
+    val ownerScope: SearchScope = scope,
+    val syncRevision: Long = 0L,
+)
+
+private enum class OriginalVisibilityOrigin { USER, SEARCH_REVEAL }
+
+private data class SearchJobKey(val tabId: String, val scope: SearchScope)
+private data class SearchNavigationKey(val tabId: String, val scope: SearchScope)
 
 // Video candidates deliberately stay out of the picker rows: it is a log-selection UI. Keeping
 // them alongside the log candidates lets the picker offer an explicit, optional attachment
@@ -3198,7 +3211,14 @@ class AppState(
     // by tabId, same cancel-and-relaunch shape as TailCoordinator's tailAnalysisJobs and AppState's
     // own autosave debounce. ConcurrentHashMap since a tab can be closed (removing its job) from the
     // UI thread while a previously-scheduled recompute for that same tabId is still in flight.
-    private val searchJobs = ConcurrentHashMap<String, Job>()
+    private val searchJobs = ConcurrentHashMap<SearchJobKey, Job>()
+    private val searchJobRevisions = ConcurrentHashMap<SearchJobKey, Long>()
+    // Only one search item list may be materialized at a time. In Two searches mode (and during
+    // fallback) this bounds peak memory on very large logs. The lock is cancellation-aware, and
+    // each pass releases it before another scope or fallback pass begins.
+    private val searchScanMutex = Mutex()
+    private var compareOriginalVisibility = emptyMap<String, Boolean>()
+    private var compareHadOpenSearch = emptyMap<String, Boolean>()
 
     // internal, not private: TailCoordinator (Task 12 slice 2) synchronizes on this exact monitor
     // object so its tabs-list writes stay atomic with AppState's own — see upTab's doc comment.
@@ -5653,6 +5673,8 @@ class AppState(
     internal var tabOrder by mutableStateOf(emptyList<TabRef>())
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
+    var splitSyncRevision by mutableStateOf(0L)
+        private set
     var loadingStatus by mutableStateOf<String?>(null)
 
     // Excludes the home tab (LogTab.isCaptureLauncher) — it is always present (see ensureHomeTab)
@@ -5782,6 +5804,22 @@ class AppState(
     // is separate from pendingAnnotationNavigation above rather than reusing it.
     var pendingSearchNavigation by mutableStateOf<SearchNavigationRequest?>(null)
         private set
+    private var pendingSearchNavigations by mutableStateOf<Map<SearchNavigationKey, SearchNavigationRequest>>(emptyMap())
+
+    fun searchNavigationFor(tabId: String, scope: SearchScope): SearchNavigationRequest? =
+        pendingSearchNavigations[SearchNavigationKey(tabId, scope)]
+
+    private fun discardSearchNavigation(tabId: String, scope: SearchScope) {
+        pendingSearchNavigations = pendingSearchNavigations - SearchNavigationKey(tabId, scope)
+        pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
+    }
+
+    private fun discardSearchNavigationsForScope(tabId: String, scope: SearchScope) {
+        pendingSearchNavigations = pendingSearchNavigations.filterNot { (key, request) ->
+            key.tabId == tabId && (key.scope == scope || request.ownerScope == scope)
+        }
+        pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
+    }
     var pendingZipPicker by mutableStateOf<PendingZipPicker?>(null)
     var pendingFolderPicker by mutableStateOf<PendingFolderPicker?>(null)
     var pendingSplitPrompt by mutableStateOf<PendingSplitPrompt?>(null)
@@ -6116,11 +6154,80 @@ class AppState(
     fun updateCompareMode(enabled: Boolean) {
         val next = enabled && canCompare
         if (compareMode == next) return
+        val beforeCompare = tabs.associate { t ->
+            t.id to (t.showUnfiltered to SearchScope.entries.any { t.searchFor(it).active })
+        }
         compareMode = next
         if (next && compareTabId == activeTabId) {
             // Left and right panes must never show the same tab — they'd share one
             // LazyListState (keyed by tab id) and silently fight over scroll ownership.
             compareTabId = tabs.firstOrNull { it.id != activeTabId }?.id ?: ""
+        }
+        if (next) {
+            compareOriginalVisibility = beforeCompare.mapValues { it.value.first }
+            compareHadOpenSearch = beforeCompare.mapValues { it.value.second }
+            tabs.map { it.id }.forEach { tabId ->
+                SearchScope.entries.forEach { cancelSearchJob(tabId, it) }
+                upTab(tabId) { t ->
+                    val hadSearch = compareHadOpenSearch[tabId] == true
+                    val filtered = t.searchFor(SearchScope.FILTERED).copy(
+                        active = hadSearch,
+                        isSearching = false,
+                    )
+                    val unfiltered = t.searchFor(SearchScope.UNFILTERED).copy(active = false, isSearching = false)
+                    t.copy(
+                        showUnfiltered = false,
+                        searchMode = SearchMode.FILTERED,
+                        focusedSearchScope = SearchScope.FILTERED,
+                        searches = t.searches.with(SearchScope.FILTERED, filtered)
+                            .with(SearchScope.UNFILTERED, unfiltered),
+                        search = filtered,
+                        searchFallback = t.searchFallback?.copy(isActive = false),
+                    )
+                }
+                if (compareHadOpenSearch[tabId] == true) scheduleSearchRecompute(tabId, SearchScope.FILTERED)
+            }
+        } else {
+            tabs.map { it.id }.forEach { tabId ->
+                val hadSearch = compareHadOpenSearch[tabId] == true
+                val originalVisible = compareOriginalVisibility[tabId] ?: false
+                val resolution = resolveSearchPolicy(
+                    settings.searchScopeBehavior,
+                    settings.lastManualSearchMode,
+                    originalVisible,
+                    compareMode = false,
+                )
+                val revealOriginal = originalVisible || (hadSearch && resolution.revealOriginal)
+                val restoredMode = if (hadSearch) resolution.mode else SearchMode.FILTERED
+                val restoredScopes = scopesForMode(restoredMode)
+                SearchScope.entries.forEach { cancelSearchJob(tabId, it) }
+                upTab(tabId) { t ->
+                    var sessions = t.searches
+                    SearchScope.entries.forEach { scope ->
+                        sessions = sessions.with(
+                            scope,
+                            sessions[scope].copy(
+                                active = hadSearch && scope in restoredScopes,
+                                isSearching = false,
+                            ),
+                        )
+                    }
+                    val focus = if (restoredMode == SearchMode.TWO_SEARCHES) t.focusedSearchScope
+                        else if (restoredMode == SearchMode.UNFILTERED) SearchScope.UNFILTERED
+                        else SearchScope.FILTERED
+                    t.copy(
+                        showUnfiltered = revealOriginal,
+                        searchMode = restoredMode,
+                        focusedSearchScope = focus,
+                        searches = sessions,
+                        search = sessions[focus],
+                        searchFallback = t.searchFallback?.copy(isActive = false),
+                    )
+                }
+                restoredScopes.filter { hadSearch }.forEach { scheduleSearchRecompute(tabId, it) }
+            }
+            compareOriginalVisibility = emptyMap()
+            compareHadOpenSearch = emptyMap()
         }
         autosaveNow()
     }
@@ -6128,6 +6235,10 @@ class AppState(
     fun updateCompareFilterRight(visible: Boolean) {
         if (compareFilterRight == visible) return
         compareFilterRight = visible
+        if (compareMode) {
+            tab(compareTabId)?.takeIf { it.searchFor(SearchScope.FILTERED).active }
+                ?.let { scheduleSearchRecompute(it.id, SearchScope.FILTERED, inputChanged = true) }
+        }
         autosaveNow()
     }
 
@@ -6338,6 +6449,37 @@ class AppState(
         val next = transform(settings)
         if (settings == next) return
         settings = next
+        if (next.syncSplitPanelSelectionAndScroll != prev.syncSplitPanelSelectionAndScroll) {
+            splitSyncRevision += 1L
+        }
+        if (next.searchScopeBehavior != prev.searchScopeBehavior) {
+            tabs.filter { t -> SearchScope.entries.any { t.searchFor(it).active } }
+                .map { it.id }.forEach { id -> openSearch(id) }
+        }
+        if (next.broadenSearchWhenFilteredEmpty != prev.broadenSearchWhenFilteredEmpty) {
+            tabs.filter { it.searchFor(SearchScope.FILTERED).active }.forEach { current ->
+                val fallback = current.searchFallback
+                val revision = current.searchFor(SearchScope.FILTERED).inputRevision
+                upTab(current.id) { t ->
+                    var updated = t
+                    if (fallback?.isActive == true && !next.broadenSearchWhenFilteredEmpty) {
+                        updated = updated.copy(showUnfiltered = fallback.originalVisibleBeforeFallback)
+                    }
+                    updated.copy(
+                        searchFallback = fallback?.let { prior ->
+                            prior.copy(
+                                isActive = false,
+                                // Enabling fallback does not undo an explicit Return-to-Filtered
+                                // choice for the current input. A new query revision clears it.
+                                suppressedRevision = if (next.broadenSearchWhenFilteredEmpty)
+                                    prior.suppressedRevision else revision,
+                            )
+                        },
+                    )
+                }
+                scheduleSearchRecompute(current.id, SearchScope.FILTERED)
+            }
+        }
         if (next.theme != prev.theme) recomputeTidMapColorsForThemeChange()
         if (next.customIssueRules != prev.customIssueRules) recomputeIssueAnalysis(next.customIssueRules)
         if (testFolderSettingsChanged(prev, next)) reconcileTestStorage()
@@ -6597,8 +6739,10 @@ class AppState(
             candidate
         }
         tabs = tabs.map { if (it.id == tabId) after ?: it else it }
-        if (before != null && after != null && searchNeedsRecompute(before, after)) {
-            scheduleSearchRecompute(tabId)
+        if (before != null && after != null) {
+            searchScopesNeedingRecompute(before, after).forEach { scope ->
+                scheduleSearchRecompute(tabId, scope, inputChanged = true)
+            }
         }
     }
 
@@ -6608,9 +6752,23 @@ class AppState(
     // common case — a tab that never opened Find — costs one boolean check, and so opening Find
     // itself (which only touches the `search` field, not filter/expanded/logData) never schedules
     // a redundant recompute of an as-yet-empty query.
-    private fun searchNeedsRecompute(before: LogTab, after: LogTab): Boolean {
-        if (!after.search.active) return false
-        return before.filter != after.filter || before.expanded != after.expanded || before.logData !== after.logData
+    private fun searchScopesNeedingRecompute(before: LogTab, after: LogTab): Set<SearchScope> {
+        val changedData = before.logData !== after.logData ||
+            before.analysis.stackTraceGroups !== after.analysis.stackTraceGroups
+        val changedFilter = before.filter != after.filter
+        val changedGroups = before.filter.sequences != after.filter.sequences ||
+            before.filter.seqOn != after.filter.seqOn || before.manualBlocks != after.manualBlocks
+        return buildSet {
+            if (changedData) {
+                if (after.searchFor(SearchScope.FILTERED).active) add(SearchScope.FILTERED)
+                if (after.searchFor(SearchScope.UNFILTERED).active) add(SearchScope.UNFILTERED)
+            } else if (changedFilter && after.searchFor(SearchScope.FILTERED).active) {
+                add(SearchScope.FILTERED)
+            }
+            if (!changedData && changedGroups && after.searchFor(SearchScope.UNFILTERED).active) {
+                add(SearchScope.UNFILTERED)
+            }
+        }
     }
 
     fun upFlt(tabId: String, fn: (Filter) -> Filter) = upFlt(tabId, trackDraft = true, fn)
@@ -7883,7 +8041,10 @@ class AppState(
     }
 
     fun consumeSearchNavigation(id: Long) {
-        if (pendingSearchNavigation?.id == id) pendingSearchNavigation = null
+        pendingSearchNavigations = pendingSearchNavigations.filterValues { it.id != id }
+        if (pendingSearchNavigation?.id == id) {
+            pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
+        }
     }
 
     // Reuses the same jump-to-log-lines mechanism as annotation navigation — a crash-panel entry
@@ -7940,28 +8101,37 @@ class AppState(
         t.copy(expanded = if (gid in t.expanded) t.expanded - gid else t.expanded + gid)
     }
 
-    private fun visibleExpandableGroupIds(t: LogTab): Set<String> {
+    private fun visibleExpandableGroupIds(
+        t: LogTab,
+        applyFilter: Boolean? = null,
+        cancellationCheck: CancellationCheck = CancellationCheck {},
+    ): Set<String> {
         val regexContext = RegexEvaluationContext()
         var expanded = t.expanded
         while (true) {
-            fun idsFrom(applyFilter: Boolean): Set<String> =
-                // storeInCache = false: this walks a HYPOTHETICAL, progressively-more-expanded
-                // copy of `t`, never the tab's actually-rendered fold state — storing it would
-                // clobber the render path's own cache entry for `t.expanded` (see the doc on the
-                // computeItems overload this calls).
-                computeItems(t.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
-                    .mapNotNull { item ->
-                        when (item) {
-                            is LogItem.SeqHeader -> item.gid
-                            is LogItem.ManualHeader -> item.gid
-                            is LogItem.StackTraceHeader -> item.gid
-                            is LogItem.Row -> null
-                        }
+            cancellationCheck()
+            fun idsFrom(filtered: Boolean): Set<String> =
+                computeItems(
+                    t.copy(expanded = expanded),
+                    filtered,
+                    cancellationCheck,
+                    regexContext,
+                    storeInCache = false,
+                ).mapNotNull { item ->
+                    when (item) {
+                        is LogItem.SeqHeader -> item.gid
+                        is LogItem.ManualHeader -> item.gid
+                        is LogItem.StackTraceHeader -> item.gid
+                        is LogItem.Row -> null
                     }
-                    .toSet()
+                }.toSet()
 
-            val next = expanded + idsFrom(applyFilter = true) +
-                if (t.showUnfiltered) idsFrom(applyFilter = false) else emptySet()
+            val discovered = when (applyFilter) {
+                true -> idsFrom(filtered = true)
+                false -> idsFrom(filtered = false)
+                null -> idsFrom(filtered = true) + if (t.showUnfiltered) idsFrom(filtered = false) else emptySet()
+            }
+            val next = expanded + discovered
             if (next == expanded) return expanded
             expanded = next
         }
@@ -7988,21 +8158,97 @@ class AppState(
 
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
 
-    // Hiding Original while Find is scoped to all lines would leave matches the user can no longer
-    // see, so it drops the scope back to FILTERED. upTab's searchNeedsRecompute doesn't watch
-    // showUnfiltered, hence the explicit recompute.
     fun toggleUnfiltered(tabId: String) {
-        var scopeReset = false
-        upTab(tabId) { t ->
-            val show = !t.showUnfiltered
-            if (!show && t.search.scope == SearchScope.UNFILTERED) {
-                scopeReset = true
-                t.copy(showUnfiltered = false, search = t.search.copy(scope = SearchScope.FILTERED))
-            } else {
-                t.copy(showUnfiltered = show)
-            }
+        val current = tab(tabId) ?: return
+        setOriginalVisible(tabId, !current.showUnfiltered, OriginalVisibilityOrigin.USER)
+    }
+
+    /** Search-triggered reveals do not feed back into Auto mode. User-driven visibility changes
+     *  resolve the active presentation from the configured policy and preserve both search slots. */
+    private fun setOriginalVisible(tabId: String, visible: Boolean, origin: OriginalVisibilityOrigin) {
+        val current = tab(tabId) ?: return
+        if (current.showUnfiltered == visible) return
+        val nextMode = if (origin == OriginalVisibilityOrigin.USER) {
+            modeAfterOriginalVisibilityChange(
+                current.searchMode,
+                visible,
+                settings.searchScopeBehavior,
+                settings.lastManualSearchMode,
+            )
+        } else current.searchMode
+        val currentScopes = scopesForMode(current.searchMode)
+        val nextScopes = scopesForMode(nextMode)
+        val switchingVisibleSearch = currentScopes.any { current.searchFor(it).active }
+        (SearchScope.entries - nextScopes.toSet()).forEach {
+            cancelSearchJob(tabId, it)
+            discardSearchNavigationsForScope(tabId, it)
         }
-        if (scopeReset) scheduleSearchRecompute(tabId)
+        val filteredSearch = current.searchFor(SearchScope.FILTERED)
+        val suppressCurrentFallback = origin == OriginalVisibilityOrigin.USER && !visible &&
+            current.searchFallback?.sourceRevision == filteredSearch.inputRevision
+        val recomputeFilteredAfterFallbackHide = suppressCurrentFallback &&
+            (current.searchFallback?.isActive == true || filteredSearch.isSearching)
+        if (suppressCurrentFallback) {
+            // A fallback Find navigation targets Original even though its owning query lives in
+            // Filtered. Drop that target before hiding the panel so it cannot land after close.
+            discardSearchNavigationsForScope(tabId, SearchScope.UNFILTERED)
+        }
+        var scopesToRecompute: List<SearchScope> = emptyList()
+        upTab(tabId) { t ->
+            val mode = nextMode
+            val focus = when (mode) {
+                SearchMode.UNFILTERED -> SearchScope.UNFILTERED
+                SearchMode.FILTERED -> SearchScope.FILTERED
+                SearchMode.TWO_SEARCHES -> t.focusedSearchScope
+            }
+            var sessions = t.searches
+            var fallback = t.searchFallback
+            if (origin == OriginalVisibilityOrigin.USER) {
+                if (fallback?.sourceRevision == t.searchFor(SearchScope.FILTERED).inputRevision) {
+                    val revision = t.searchFor(SearchScope.FILTERED).inputRevision
+                    // A user visibility choice made while the all-lines pass is still pending is
+                    // just as authoritative as closing an already revealed fallback. Preserve the
+                    // user's desired visibility for Return/setting changes and suppress this input
+                    // revision when they explicitly hide Original.
+                    fallback = fallback.copy(
+                        isActive = if (visible) fallback.isActive else false,
+                        suppressedRevision = if (visible) fallback.suppressedRevision else revision,
+                        originalVisibleBeforeFallback = visible,
+                    )
+                    if (!visible && recomputeFilteredAfterFallbackHide) {
+                        sessions = sessions.with(
+                            SearchScope.FILTERED,
+                            sessions[SearchScope.FILTERED].copy(
+                                isSearching = true,
+                                matchIds = IntArray(0),
+                                currentIdx = 0,
+                            ),
+                        )
+                    }
+                }
+                if (mode != t.searchMode && switchingVisibleSearch) {
+                    (SearchScope.entries - nextScopes.toSet()).forEach { target ->
+                        sessions = sessions.with(target, sessions[target].copy(active = false, isSearching = false))
+                    }
+                    scopesForMode(mode).forEach { target ->
+                        sessions = sessions.with(target, sessions[target].copy(active = true))
+                    }
+                    scopesToRecompute = scopesForMode(mode)
+                }
+            }
+            t.copy(
+                showUnfiltered = visible,
+                searchMode = mode,
+                focusedSearchScope = focus,
+                searches = sessions,
+                search = sessions[focus],
+                searchFallback = fallback,
+            )
+        }
+        if (recomputeFilteredAfterFallbackHide) {
+            scopesToRecompute = (scopesToRecompute + SearchScope.FILTERED).distinct()
+        }
+        scopesToRecompute.forEach { scheduleSearchRecompute(tabId, it) }
     }
 
     // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
@@ -8122,7 +8368,7 @@ class AppState(
     fun ensureActiveTabUnfiltered() {
         val tabId = activeTabId
         if (tabId.isBlank()) return
-        upTab(tabId) { tab -> if (tab.showUnfiltered) tab else tab.copy(showUnfiltered = true) }
+        setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
     }
 
     // ── Video (video/VideoPlayerController.kt, model/Model.kt's VideoAttachment/VideoAnchor) ────
@@ -9349,110 +9595,368 @@ class AppState(
         pendingAnnotationNavigation = AnnotationNavigationRequest(annotationNavigationCounter, tabId, listOf(entryId))
     }
 
+
     // ── In-view search ("Find" bar, ui/SearchBar.kt) ──────────────────
-    // Non-destructive alternative to the filter's own keyword/regex search: highlights matches in
-    // place instead of hiding non-matching rows. See onFocusFilterSearch in App.kt for the
-    // Settings.ctrlFTarget == FIND_BAR branch that routes Ctrl/Cmd+F here instead of to a filter
-    // field.
+    // Each concrete panel scope owns a stable query/result/cursor slot. The legacy LogTab.search
+    // property is maintained as a projection of focusedSearchScope for older diagnostics.
 
-    // Reopening an already-open bar (a repeat Ctrl/Cmd+F) deliberately keeps the existing
-    // query/matches — only `active` and `focusNonce` change — so ui/SearchBar.kt's
-    // LaunchedEffect(focusNonce) can refocus + select-all without losing what was already found.
-    //
-    // [scope] non-null switches what the bar searches (see setSearchScope); null keeps the tab's
-    // last scope, which is what the toolbar Find button and a plain reopen want.
     fun openSearch(tabId: String, scope: SearchScope? = null) {
-        val scopeChanged = applySearchScope(tabId, scope)
-        upTab(tabId) { t ->
-            t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+        val before = tab(tabId) ?: return
+        if (!compareMode && scope == SearchScope.UNFILTERED && before.searchMode == SearchMode.TWO_SEARCHES) {
+            if (!before.showUnfiltered) setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+            upTab(tabId) { current ->
+                val unfiltered = current.searchFor(SearchScope.UNFILTERED).copy(
+                    active = true,
+                    focusNonce = current.searchFor(SearchScope.UNFILTERED).focusNonce + 1,
+                )
+                current.copy(
+                    focusedSearchScope = SearchScope.UNFILTERED,
+                    searches = current.searches.with(SearchScope.UNFILTERED, unfiltered),
+                    search = unfiltered,
+                )
+            }
+            scheduleSearchRecompute(tabId, SearchScope.UNFILTERED)
+            return
         }
-        if (scopeChanged) scheduleSearchRecompute(tabId)
-    }
-
-    /** Switches the Find bar between the filtered view and every line. UNFILTERED also reveals the
-     *  Original panel (LogTab.showUnfiltered) — the panel that actually displays those extra
-     *  matches — and leaves it open after Find closes. Compare mode has no Original panel, so it
-     *  always stays FILTERED. */
-    fun setSearchScope(tabId: String, scope: SearchScope) {
-        if (applySearchScope(tabId, scope)) scheduleSearchRecompute(tabId)
-    }
-
-    // Returns true when the scope actually changed (the caller then recomputes matches). The scope
-    // and showUnfiltered are written in one upTab so a recompute never sees one without the other.
-    private fun applySearchScope(tabId: String, requested: SearchScope?): Boolean {
-        if (requested == null) return false
-        val scope = if (compareMode) SearchScope.FILTERED else requested
-        var changed = false
+        var mode: SearchMode
+        var focusScope: SearchScope
+        if (compareMode) {
+            mode = SearchMode.FILTERED
+            focusScope = SearchScope.FILTERED
+        } else if (scope != null) {
+            if (scope == SearchScope.UNFILTERED && before.searchMode == SearchMode.TWO_SEARCHES) {
+                mode = SearchMode.TWO_SEARCHES
+                focusScope = SearchScope.UNFILTERED
+            } else {
+                mode = if (scope == SearchScope.FILTERED) SearchMode.FILTERED else SearchMode.UNFILTERED
+                focusScope = scope
+                updateSettings { it.copy(lastManualSearchMode = mode) }
+            }
+        } else {
+            val resolved = resolveSearchPolicy(
+                settings.searchScopeBehavior,
+                settings.lastManualSearchMode,
+                before.showUnfiltered,
+                compareMode,
+            )
+            mode = resolved.mode
+            focusScope = if (mode == SearchMode.TWO_SEARCHES) before.focusedSearchScope else
+                if (mode == SearchMode.UNFILTERED) SearchScope.UNFILTERED else SearchScope.FILTERED
+            if (resolved.revealOriginal && !before.showUnfiltered) {
+                setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+            }
+        }
+        if (mode != SearchMode.FILTERED && !compareMode) {
+            setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+        }
+        val scopes = scopesForMode(mode)
+        val inactive = (SearchScope.entries - scopes.toSet())
+        inactive.forEach {
+            cancelSearchJob(tabId, it)
+            discardSearchNavigationsForScope(tabId, it)
+        }
         upTab(tabId) { t ->
-            val revealOriginal = scope == SearchScope.UNFILTERED && !t.showUnfiltered
-            if (t.search.scope == scope && !revealOriginal) return@upTab t
-            changed = t.search.scope != scope
+            var sessions = t.searches.with(SearchScope.FILTERED, t.searchFor(SearchScope.FILTERED).copy(active = false, isSearching = false))
+                .with(SearchScope.UNFILTERED, t.searchFor(SearchScope.UNFILTERED).copy(active = false, isSearching = false))
+            scopes.forEach { target ->
+                val old = sessions[target]
+                sessions = sessions.with(
+                    target,
+                    old.copy(active = true, focusNonce = old.focusNonce + if (target == focusScope) 1 else 0),
+                )
+            }
             t.copy(
-                showUnfiltered = t.showUnfiltered || scope == SearchScope.UNFILTERED,
-                search = t.search.copy(scope = scope),
+                searchMode = mode,
+                focusedSearchScope = focusScope,
+                searches = sessions,
+                search = sessions[focusScope],
+                searchFallback = if (mode != SearchMode.FILTERED) t.searchFallback?.copy(isActive = false) else t.searchFallback,
             )
         }
-        return changed
+        if (compareMode) compareHadOpenSearch = compareHadOpenSearch + (tabId to true)
+        scopes.forEach { scheduleSearchRecompute(tabId, it) }
     }
 
-    // Deliberately keeps query/matchIds (only flips `active` off) rather than resetting to
-    // LogSearchState.EMPTY — reopening the bar later in the same session restores exactly where
-    // the user left off instead of forcing them to retype. Session-only either way: LogTab.search
-    // is never persisted (see AutosaveCodec.persistedSnapshot), so a relaunch always starts blank.
-    fun closeSearch(tabId: String) {
-        searchJobs.remove(tabId)?.cancel()
-        upTab(tabId) { it.copy(search = it.search.copy(active = false)) }
+    /** Manual mode selection reopens its field(s), remembers the choice globally, and clears any
+     *  temporary all-lines fallback. */
+    fun setSearchMode(tabId: String, mode: SearchMode) {
+        val targetMode = if (compareMode) SearchMode.FILTERED else mode
+        val initial = tab(tabId) ?: return
+        val scopes = scopesForMode(targetMode)
+        val targetModeAlreadyOpen = initial.searchMode == targetMode &&
+            scopes.all { initial.searchFor(it).active } &&
+            initial.searchFallback?.isActive != true &&
+            (targetMode == SearchMode.FILTERED || initial.showUnfiltered)
+        if (targetModeAlreadyOpen) {
+            // A click on the selected menu item is still an explicit manual choice, but it must
+            // not invalidate results or replay the explicit-open select-all focus request.
+            if (!compareMode) updateSettings { it.copy(lastManualSearchMode = targetMode) }
+            return
+        }
+        if (!compareMode) updateSettings { it.copy(lastManualSearchMode = targetMode) }
+        if (targetMode != SearchMode.FILTERED && !compareMode) {
+            setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+        }
+        val before = tab(tabId) ?: return
+        val focusScope = when (targetMode) {
+            SearchMode.UNFILTERED -> SearchScope.UNFILTERED
+            SearchMode.TWO_SEARCHES -> before.focusedSearchScope.takeIf { it in scopes } ?: SearchScope.FILTERED
+            SearchMode.FILTERED -> SearchScope.FILTERED
+        }
+        val fallbackWasActive = before.searchFallback?.isActive == true
+        val scopesToRecompute = scopes.filter { scope ->
+            val old = before.searchFor(scope)
+            !old.active || old.isSearching || (fallbackWasActive && scope == SearchScope.FILTERED)
+        }
+        (SearchScope.entries - scopes.toSet()).forEach {
+            cancelSearchJob(tabId, it)
+            discardSearchNavigationsForScope(tabId, it)
+        }
+        upTab(tabId) { t ->
+            val fallback = t.searchFallback
+            var sessions = t.searches.with(SearchScope.FILTERED, t.searchFor(SearchScope.FILTERED).copy(active = false, isSearching = false))
+                .with(SearchScope.UNFILTERED, t.searchFor(SearchScope.UNFILTERED).copy(active = false, isSearching = false))
+            scopes.forEach { target ->
+                val old = sessions[target]
+                sessions = sessions.with(target, old.copy(active = true))
+            }
+            t.copy(
+                searchMode = targetMode,
+                focusedSearchScope = focusScope,
+                searches = sessions,
+                search = sessions[focusScope],
+                showUnfiltered = if (targetMode == SearchMode.FILTERED && fallback?.isActive == true)
+                    fallback.originalVisibleBeforeFallback else t.showUnfiltered,
+                searchFallback = fallback?.copy(
+                    isActive = false,
+                    suppressedRevision = if (targetMode == SearchMode.FILTERED && fallback.isActive)
+                        t.searchFor(SearchScope.FILTERED).inputRevision else fallback.suppressedRevision,
+                ),
+            )
+        }
+        if (compareMode) compareHadOpenSearch = compareHadOpenSearch + (tabId to true)
+        scopesToRecompute.forEach { scheduleSearchRecompute(tabId, it) }
     }
 
-    fun setSearchQuery(tabId: String, query: String) {
-        upTab(tabId) { t -> t.copy(search = t.search.copy(query = query, active = true)) }
-        scheduleSearchRecompute(tabId)
+    private fun scopesForMode(mode: SearchMode): List<SearchScope> = when (mode) {
+        SearchMode.FILTERED -> listOf(SearchScope.FILTERED)
+        SearchMode.UNFILTERED -> listOf(SearchScope.UNFILTERED)
+        SearchMode.TWO_SEARCHES -> listOf(SearchScope.FILTERED, SearchScope.UNFILTERED)
     }
 
-    fun toggleSearchCase(tabId: String) {
-        upTab(tabId) { t -> t.copy(search = t.search.copy(caseSensitive = !t.search.caseSensitive)) }
-        scheduleSearchRecompute(tabId)
+    private fun cancelSearchJob(tabId: String, scope: SearchScope) {
+        val key = SearchJobKey(tabId, scope)
+        searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L }
+        searchJobs.remove(key)?.cancel()
     }
 
-    fun searchNext(tabId: String) = moveSearchMatch(tabId, +1)
+    fun isSearchOpen(tabId: String): Boolean {
+        val t = tab(tabId) ?: return false
+        val visible = if (t.searchFallback?.isActive == true) listOf(SearchScope.FILTERED) else scopesForMode(t.searchMode)
+        return visible.any { t.searchFor(it).active }
+    }
 
-    fun searchPrev(tabId: String) = moveSearchMatch(tabId, -1)
+    /** Tracks which independently-owned field currently owns keyboard focus. */
+    fun focusSearch(tabId: String, scope: SearchScope) {
+        upTab(tabId) { t ->
+            if (t.focusedSearchScope == scope) t else t.copy(
+                focusedSearchScope = scope,
+                search = t.searchFor(scope),
+            )
+        }
+    }
 
-    private fun moveSearchMatch(tabId: String, delta: Int) {
+    fun setSearchScope(tabId: String, scope: SearchScope) =
+        setSearchMode(tabId, if (scope == SearchScope.FILTERED) SearchMode.FILTERED else SearchMode.UNFILTERED)
+
+    /** Close one field in Two searches; a no-scope toolbar close dismisses both fields. */
+    fun closeSearch(tabId: String, scope: SearchScope? = null) {
         val t = tab(tabId) ?: return
-        val matches = t.search.matchIds
+        val closing = scope?.let(::listOf) ?: listOf(SearchScope.FILTERED, SearchScope.UNFILTERED)
+        closing.forEach { target ->
+            val key = SearchJobKey(tabId, target)
+            searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L }
+            searchJobs.remove(key)?.cancel()
+            discardSearchNavigationsForScope(tabId, target)
+        }
+        upTab(tabId) { current ->
+            var sessions = current.searches
+            closing.forEach { target ->
+                sessions = sessions.with(target, sessions[target].copy(active = false, isSearching = false))
+            }
+            // Keep focus ownership on the field that closed. Its panel-level FocusRequester is
+            // restored by LogViewer; moving this scope to the remaining Find field would make that
+            // sibling's auto-focus effect immediately steal focus back.
+            val focus = scope ?: current.focusedSearchScope
+            val fallback = current.searchFallback
+            val endFallback = fallback?.isActive == true && SearchScope.FILTERED in closing
+            current.copy(
+                searches = sessions,
+                focusedSearchScope = focus,
+                search = sessions[focus],
+                searchFallback = if (endFallback) fallback!!.copy(
+                    isActive = false,
+                    // Closing Find ends its temporary fallback session, but it does not undo
+                    // the reveal: Original remains visible after the Find controls close. Rebase
+                    // the reveal origin so reopening this same draft can use fallback again and
+                    // never restore a stale hidden state later.
+                    suppressedRevision = null,
+                    originalVisibleBeforeFallback = current.showUnfiltered,
+                ) else fallback,
+            )
+        }
+        // Compare mode exposes only the Filtered Find field. If the user closes that field while
+        // comparing, remember the explicit dismissal so exiting Compare does not resurrect the
+        // session from the snapshot taken when Compare was entered. Drafts remain in their slots.
+        if (compareMode && SearchScope.FILTERED in closing &&
+            scopesForMode(t.searchMode).none { it !in closing && t.searchFor(it).active }
+        ) {
+            compareHadOpenSearch = compareHadOpenSearch + (tabId to false)
+        }
+    }
+
+    fun setSearchQuery(tabId: String, query: String, scope: SearchScope? = null) {
+        val current = tab(tabId) ?: return
+        val target = scope ?: current.focusedSearchScope
+        discardSearchNavigationsForScope(tabId, target)
+        upTab(tabId) { t ->
+            val old = t.searchFor(target)
+            val revision = old.inputRevision + 1L
+            val previousFallback = t.searchFallback
+            val fallbackOriginVisible = if (previousFallback?.isActive == true)
+                previousFallback.originalVisibleBeforeFallback else t.showUnfiltered
+            val next = old.copy(
+                query = query,
+                active = true,
+                isSearching = true,
+                matchIds = IntArray(0),
+                currentIdx = 0,
+                invalidPattern = false,
+                timedOut = false,
+                inputRevision = revision,
+            )
+            t.withSearch(target, next).let { updated ->
+                if (target == SearchScope.FILTERED) updated.copy(
+                    // Keep the revealed Original panel mounted while fallback is being refreshed;
+                    // otherwise every keystroke disposes and recreates the field in another panel.
+                    showUnfiltered = t.showUnfiltered,
+                    searchFallback = SearchFallbackState(
+                        revision,
+                        isActive = previousFallback?.isActive == true,
+                        suppressedRevision = previousFallback?.suppressedRevision,
+                        originalVisibleBeforeFallback = fallbackOriginVisible,
+                    ),
+                ) else updated
+            }
+        }
+        scheduleSearchRecompute(tabId, target)
+    }
+
+    fun toggleSearchCase(tabId: String, scope: SearchScope? = null) {
+        val current = tab(tabId) ?: return
+        val target = scope ?: current.focusedSearchScope
+        discardSearchNavigationsForScope(tabId, target)
+        upTab(tabId) { t ->
+            val old = t.searchFor(target)
+            val revision = old.inputRevision + 1L
+            val previousFallback = t.searchFallback
+            val fallbackOriginVisible = if (previousFallback?.isActive == true)
+                previousFallback.originalVisibleBeforeFallback else t.showUnfiltered
+            val next = old.copy(
+                caseSensitive = !old.caseSensitive,
+                active = true,
+                isSearching = true,
+                matchIds = IntArray(0),
+                currentIdx = 0,
+                invalidPattern = false,
+                timedOut = false,
+                inputRevision = revision,
+            )
+            t.withSearch(target, next).let { updated ->
+                if (target == SearchScope.FILTERED) updated.copy(
+                    showUnfiltered = t.showUnfiltered,
+                    searchFallback = SearchFallbackState(
+                        revision,
+                        isActive = previousFallback?.isActive == true,
+                        suppressedRevision = previousFallback?.suppressedRevision,
+                        originalVisibleBeforeFallback = fallbackOriginVisible,
+                    ),
+                ) else updated
+            }
+        }
+        scheduleSearchRecompute(tabId, target)
+    }
+
+    fun returnToFiltered(tabId: String) {
+        val t = tab(tabId) ?: return
+        val slot = t.searchFor(SearchScope.FILTERED)
+        upTab(tabId) { current ->
+            current.copy(
+                showUnfiltered = if (t.searchFallback?.isActive == true)
+                    t.searchFallback.originalVisibleBeforeFallback else current.showUnfiltered,
+                searchMode = SearchMode.FILTERED,
+                focusedSearchScope = SearchScope.FILTERED,
+                searchFallback = SearchFallbackState(
+                    slot.inputRevision,
+                    isActive = false,
+                    suppressedRevision = slot.inputRevision,
+                    originalVisibleBeforeFallback = if (t.searchFallback?.isActive == true)
+                        t.searchFallback.originalVisibleBeforeFallback else current.showUnfiltered,
+                ),
+            ).withSearch(
+                SearchScope.FILTERED,
+                current.searchFor(SearchScope.FILTERED).copy(isSearching = true, matchIds = IntArray(0), currentIdx = 0),
+            )
+        }
+        scheduleSearchRecompute(tabId, SearchScope.FILTERED)
+    }
+
+    fun searchNext(tabId: String, scope: SearchScope? = null) = moveSearchMatch(tabId, +1, scope)
+    fun searchPrev(tabId: String, scope: SearchScope? = null) = moveSearchMatch(tabId, -1, scope)
+
+    private fun moveSearchMatch(tabId: String, delta: Int, scope: SearchScope?) {
+        val t = tab(tabId) ?: return
+        val ownerScope = scope ?: t.focusedSearchScope
+        val state = t.searchFor(ownerScope)
+        // Match ids describe the last completed target scope. While a new query/scope is being
+        // recomputed they may belong to the old view (for example a fallback result after the
+        // user returns to Filtered), so navigation must wait for the owning slot's fresh result.
+        if (!state.active || state.isSearching) return
+        val matches = state.matchIds
         if (matches.isEmpty()) return
         val n = matches.size
-        // Plain modulo can return negative for delta=-1 at index 0 in Kotlin/Java (remainder, not
-        // Python-style floor-mod) — the extra `+ n) % n` wraps it back into [0, n).
-        val newIdx = ((t.search.currentIdx + delta) % n + n) % n
-        upTab(tabId) { it.copy(search = it.search.copy(currentIdx = newIdx)) }
-        // Deliberately NOT requestScrollAnchor/pendingAnnotationNavigation: that path always
-        // centers via the two-phase scroll-to-top-then-recenter centerOnItem, which reads as a
-        // jarring flash for a frequent, often-repeated action like Enter/Next/Prev — including
-        // when the match is already fully on screen (e.g. a single match, currentIdx wrapping
-        // back to itself). requestSearchScrollAnchor still selects the row and auto-expands
-        // whatever collapsed group owns it, but scrolls only the minimum needed (or not at all)
-        // — see SearchNavigationRequest's doc comment and LogViewer.kt's handling LaunchedEffect.
-        requestSearchScrollAnchor(tabId, matches[newIdx])
+        val newIdx = ((state.currentIdx + delta) % n + n) % n
+        upTab(tabId) { it.withSearch(ownerScope, it.searchFor(ownerScope).copy(currentIdx = newIdx)) }
+        val targetScope = if (ownerScope == SearchScope.FILTERED && t.searchFallback?.isActive == true) {
+            SearchScope.UNFILTERED
+        } else ownerScope
+        requestSearchScrollAnchor(tabId, targetScope, matches[newIdx], state.inputRevision, ownerScope)
     }
 
-    private fun requestSearchScrollAnchor(tabId: String, entryId: Int) {
-        setSelectedRows(tabId, listOf(entryId))
+    private fun requestSearchScrollAnchor(
+        tabId: String,
+        targetScope: SearchScope,
+        entryId: Int,
+        inputRevision: Long,
+        ownerScope: SearchScope,
+    ) {
+        if (targetScope == SearchScope.FILTERED) setSelectedRows(tabId, listOf(entryId))
         searchNavigationCounter += 1
-        pendingSearchNavigation = SearchNavigationRequest(searchNavigationCounter, tabId, entryId)
+        val request = SearchNavigationRequest(
+            id = searchNavigationCounter,
+            tabId = tabId,
+            entryId = entryId,
+            scope = targetScope,
+            inputRevision = inputRevision,
+            ownerScope = ownerScope,
+            syncRevision = splitSyncRevision,
+        )
+        val key = SearchNavigationKey(tabId, targetScope)
+        pendingSearchNavigations = pendingSearchNavigations + (key to request)
+        pendingSearchNavigation = request
     }
 
-    // Compare mode's right panel never renders its own stored `.filter` — CompareView.kt's
-    // effectiveRightTab mirrors the left (activeTabId) tab's filter when compareFilterRight is on,
-    // or shows everything unfiltered (Filter()) when it's off. Search must match against that same
-    // *displayed* filter or its highlights/jumps would target rows the right panel doesn't actually
-    // show. Common-case only: mirrors CompareView.kt's own leftTab/rightTab resolution
-    // (activeTabId/compareTabId) directly, without also replicating its same-tab-id collision
-    // fallback (CompareView reassigns rightTab to some other open tab if compareTabId ever collided
-    // with activeTabId) — that fallback only matters in the rare case a caller sets compareTabId
-    // equal to activeTabId without going through updateCompareMode (which already prevents it), so
-    // duplicating it here was left as a follow-up rather than done speculatively.
+    // Compare mode searches each tab's displayed view, using its Filtered slot only.
     private fun effectiveSearchFilter(tabId: String, stored: LogTab): Filter {
         if (!compareMode) return stored.filter
         return when (tabId) {
@@ -9461,58 +9965,149 @@ class AppState(
         }
     }
 
-    // CompareView.kt calls this when the right panel's *effective* displayed filter changes —
-    // compareFilterRight toggling, the left tab's filter changing while mirrored, or which tab is
-    // on the right changing. None of those mutate the right tab's own stored `.filter`, so upTab's
-    // searchNeedsRecompute hook (which only watches a tab's own fields) can't see them; this is the
-    // explicit trigger for that case. A cheap no-op if that tab's search isn't active.
-    fun notifyEffectiveFilterChanged(tabId: String) = scheduleSearchRecompute(tabId)
+    fun notifyEffectiveFilterChanged(tabId: String) =
+        scheduleSearchRecompute(tabId, SearchScope.FILTERED, inputChanged = true)
 
-    // Cancel-and-relaunch on ioScope, same shape as TailCoordinator's tailAnalysisJobs debounce —
-    // every call (a keystroke, a case-sensitivity toggle, the upTab hook noticing the tab's
-    // filter/expanded/logData changed, or notifyEffectiveFilterChanged above) supersedes whatever
-    // recompute was already in flight.
-    //
-    // Deliberately searches over a *fully expanded* copy of the tab (visibleExpandableGroupIds),
-    // not tab.expanded as actually rendered — a match hidden inside a currently-collapsed group
-    // must still be found so Enter/Next can jump to it (which is what then actually expands that
-    // one group, via requestScrollAnchor above). The real tab.expanded is never mutated here — nor
-    // is the real stored `.filter` (effectiveSearchFilter only affects this local computation).
-    private fun scheduleSearchRecompute(tabId: String) {
-        searchJobs[tabId]?.cancel()
-        searchJobs[tabId] = ioScope.launch {
+    /** One cancellable worker per (tab, concrete scope). The second all-lines pass only runs after
+     *  a completed, valid, non-empty Filtered search returns zero matches. */
+    private fun scheduleSearchRecompute(tabId: String, scope: SearchScope, inputChanged: Boolean = false) {
+        val key = SearchJobKey(tabId, scope)
+        if (inputChanged) discardSearchNavigationsForScope(tabId, scope)
+        val currentTab = tab(tabId) ?: return
+        var slot = currentTab.searchFor(scope)
+        if (inputChanged) {
+            val revision = slot.inputRevision + 1L
+            val previousFallback = currentTab.searchFallback
+            val fallbackOriginVisible = if (previousFallback?.isActive == true)
+                previousFallback.originalVisibleBeforeFallback else currentTab.showUnfiltered
+            upTab(tabId) { t ->
+                val updated = t.withSearch(scope, t.searchFor(scope).copy(inputRevision = revision, isSearching = true))
+                if (scope == SearchScope.FILTERED) updated.copy(
+                    showUnfiltered = t.showUnfiltered,
+                    searchFallback = SearchFallbackState(
+                        revision,
+                        isActive = previousFallback?.isActive == true,
+                        suppressedRevision = previousFallback?.suppressedRevision,
+                        originalVisibleBeforeFallback = fallbackOriginVisible,
+                    ),
+                ) else updated
+            }
+            slot = tab(tabId)?.searchFor(scope) ?: return
+        }
+        val generation = searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L } ?: 1L
+        searchJobs.remove(key)?.cancel()
+        upTab(tabId) { t ->
+            val old = t.searchFor(scope)
+            if (!old.active) t else t.withSearch(scope, old.copy(isSearching = true))
+        }
+        searchJobs[key] = ioScope.launch {
             delay(SEARCH_RECOMPUTE_DEBOUNCE_MS)
             val stored = tab(tabId) ?: return@launch
-            if (!stored.search.active) return@launch
+            val request = stored.searchFor(scope)
+            if (!request.active || request.inputRevision != slot.inputRevision) return@launch
+            if (request.query.isEmpty() || !isValidRegexPattern(request.query, ignoreCase = !request.caseSensitive)) {
+                val quickResult = computeSearchMatches(
+                    emptyList(), request.query, request.caseSensitive, RegexEvaluationContext(),
+                )
+                if (searchJobRevisions[key] == generation) {
+                    applySearchResult(tabId, scope, request.inputRevision, generation, quickResult, useFallback = false)
+                }
+                return@launch
+            }
             val t = stored.copy(filter = effectiveSearchFilter(tabId, stored))
-            val regexContext = RegexEvaluationContext()
-            val fullyExpanded = visibleExpandableGroupIds(t)
-            ensureActive()
-            // storeInCache = false: `t` carries the search-only effectiveSearchFilter and a
-            // fully-expanded fold state, neither of which is what's actually rendered — see the
-            // doc above computeItems' storeInCache parameter.
             val cancellationCheck = CancellationCheck { ensureActive() }
-            val searchItems = computeItems(
-                t.copy(expanded = fullyExpanded),
-                stored.search.scope == SearchScope.FILTERED || compareMode,
-                cancellationCheck,
-                regexContext,
-                storeInCache = false,
-            )
+            val result = searchScanMutex.withLock {
+                ensureActive()
+                val fullyExpanded = visibleExpandableGroupIds(
+                    t,
+                    applyFilter = scope == SearchScope.FILTERED || compareMode,
+                    cancellationCheck = cancellationCheck,
+                )
+                ensureActive()
+                val regexContext = RegexEvaluationContext()
+                val searchItems = computeItems(
+                    t.copy(expanded = fullyExpanded),
+                    scope == SearchScope.FILTERED || compareMode,
+                    cancellationCheck,
+                    regexContext,
+                    storeInCache = false,
+                )
+                ensureActive()
+                computeSearchMatches(
+                    searchItems, request.query, request.caseSensitive, regexContext, cancellationCheck,
+                )
+            }
             ensureActive()
-            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext, cancellationCheck)
+            var committed = result
+            var useFallback = false
+            val fallbackState = stored.searchFallback
+            val fallbackEligible = scope == SearchScope.FILTERED && !compareMode &&
+                stored.searchMode == SearchMode.FILTERED && settings.broadenSearchWhenFilteredEmpty &&
+                request.query.isNotEmpty() && !result.invalidPattern && !result.timedOut && result.matchIds.isEmpty() &&
+                fallbackState?.suppressedRevision != request.inputRevision
+            if (fallbackEligible) {
+                val allResult = searchScanMutex.withLock {
+                    ensureActive()
+                    val allExpanded = visibleExpandableGroupIds(
+                        t,
+                        applyFilter = false,
+                        cancellationCheck = cancellationCheck,
+                    )
+                    val allCtx = RegexEvaluationContext()
+                    val allItems = computeItems(
+                        t.copy(expanded = allExpanded),
+                        false,
+                        cancellationCheck,
+                        allCtx,
+                        storeInCache = false,
+                    )
+                    ensureActive()
+                    computeSearchMatches(
+                        allItems, request.query, request.caseSensitive, allCtx, cancellationCheck,
+                    )
+                }
+                ensureActive()
+                if (!allResult.invalidPattern && !allResult.timedOut && allResult.matchIds.isNotEmpty()) {
+                    committed = allResult
+                    useFallback = true
+                }
+            }
             ensureActive()
-            applySearchResult(tabId, result)
+            if (searchJobRevisions[key] == generation) {
+                val latest = tab(tabId)
+                val fallbackStillAllowed = useFallback && settings.broadenSearchWhenFilteredEmpty && !compareMode &&
+                    latest?.searchMode == SearchMode.FILTERED &&
+                    latest.searchFor(SearchScope.FILTERED).inputRevision == request.inputRevision &&
+                    latest.searchFallback?.suppressedRevision != request.inputRevision
+                applySearchResult(
+                    tabId,
+                    scope,
+                    request.inputRevision,
+                    generation,
+                    if (useFallback && !fallbackStillAllowed) result else committed,
+                    useFallback = fallbackStillAllowed,
+                )
+            }
         }
     }
 
-    private fun applySearchResult(tabId: String, result: SearchComputeResult) {
+    private fun applySearchResult(
+        tabId: String,
+        scope: SearchScope,
+        inputRevision: Long,
+        generation: Long,
+        result: SearchComputeResult,
+        useFallback: Boolean,
+    ) {
+        val key = SearchJobKey(tabId, scope)
+        if (searchJobRevisions[key] != generation) return
         upTab(tabId) { cur ->
-            val old = cur.search
-            if (!old.active) return@upTab cur // closed while this recompute was in flight
-            // Sticky current match (plan requirement): if the entry the user was parked on is still
-            // among the new matches, stay on it (by id, not index — recomputation can shuffle
-            // indices even when the set of matches barely changes) instead of snapping back to 0.
+            val old = cur.searchFor(scope)
+            if (!old.active || old.inputRevision != inputRevision || searchJobRevisions[key] != generation) return@upTab cur
+            if (useFallback && (!settings.broadenSearchWhenFilteredEmpty || compareMode ||
+                    cur.searchMode != SearchMode.FILTERED ||
+                    cur.searchFallback?.suppressedRevision == inputRevision)
+            ) return@upTab cur
             val stickyId = old.matchIds.getOrNull(old.currentIdx)
             val stickyIdx = stickyId?.let { result.matchIds.indexOfId(it) } ?: -1
             val newIdx = when {
@@ -9520,14 +10115,31 @@ class AppState(
                 stickyIdx >= 0 -> stickyIdx
                 else -> old.currentIdx.coerceIn(0, result.matchIds.size - 1)
             }
-            cur.copy(
-                search = old.copy(
+            var updated = cur.withSearch(
+                scope,
+                old.copy(
                     matchIds = result.matchIds,
                     currentIdx = newIdx,
                     invalidPattern = result.invalidPattern,
                     timedOut = result.timedOut,
+                    isSearching = false,
                 ),
             )
+            if (scope == SearchScope.FILTERED && cur.searchFallback?.sourceRevision == inputRevision) {
+                val priorFallback = cur.searchFallback
+                updated = updated.copy(
+                    // Starting fallback owns a temporary reveal. Only an already-active fallback
+                    // may restore its saved visibility; an ordinary Filtered result must not undo a
+                    // user opening Original while this query was pending.
+                    showUnfiltered = when {
+                        useFallback -> true
+                        priorFallback.isActive -> priorFallback.originalVisibleBeforeFallback
+                        else -> cur.showUnfiltered
+                    },
+                    searchFallback = priorFallback.copy(isActive = useFallback),
+                )
+            }
+            updated
         }
     }
 
@@ -9904,6 +10516,13 @@ class AppState(
         loadsToFinishAfterClose: Set<String> = emptySet(),
     ) {
         if (tabIds.isEmpty()) return
+        // Compare owns a visibility/search snapshot that must be restored through the same exit
+        // transition as the toolbar toggle. Leave that snapshot intact until updateCompareMode
+        // has restored each surviving tab's view and Find session.
+        val shouldRestoreCompare = synchronized(stateLock) {
+            compareMode && tabs.count { it.id !in tabIds && !it.isCaptureLauncher } < 2
+        }
+        if (shouldRestoreCompare) updateCompareMode(false)
         // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
         // captured under stateLock, but stopped before entering the tab-removal lock below so a
         // close action never performs process/file IO while stateLock is held. Controllers are taken
@@ -9956,6 +10575,7 @@ class AppState(
         val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
         var trimHeapAfterClose = false
         var rowsToRelease: List<AppendOnlyLogList> = emptyList()
+        var restoreCompareAfterConcurrentRemoval = false
         synchronized(stateLock) {
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
@@ -9973,7 +10593,13 @@ class AppState(
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
                 // These two scan the tab's rows off-thread and were never cancelled at close, so a
                 // late one would run into the row release below (or just burn CPU on a dead tab).
-                searchJobs.remove(tabId)?.cancel()
+                SearchScope.entries.forEach { scope ->
+                    val key = SearchJobKey(tabId, scope)
+                    searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L }
+                    searchJobs.remove(key)?.cancel()
+                    pendingSearchNavigations = pendingSearchNavigations - SearchNavigationKey(tabId, scope)
+                }
+                pendingSearchNavigation = pendingSearchNavigations.values.maxByOrNull { it.id }
                 compositionJobs.remove(tabId)?.cancel()
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
@@ -10003,9 +10629,10 @@ class AppState(
                 activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
             }
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
-            if (next.size < 2) compareMode = false
+            restoreCompareAfterConcurrentRemoval = compareMode && next.count { !it.isCaptureLauncher } < 2
             tabs = next
         }
+        if (restoreCompareAfterConcurrentRemoval) updateCompareMode(false)
         stragglerMirrors.forEach { mirror -> mirror.requestClose() }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
@@ -14407,6 +15034,10 @@ class AppState(
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
+        // Autosave restoration has no live compare snapshot to restore: session-only Find state
+        // was deliberately not persisted, while each tab's Original visibility was. If a stale
+        // saved compare flag cannot be honored, discard only that flag and preserve the persisted
+        // per-tab view state instead of running the interactive compare-exit transition.
         if (!canCompare) compareMode = false
         tabCounter.set((tabs.mapNotNull { it.id.removePrefix("t").toIntOrNull() }.maxOrNull() ?: 0) + 1)
         // Shells restore synchronously with every user-visible piece of metadata (filter,

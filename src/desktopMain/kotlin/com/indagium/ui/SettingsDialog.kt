@@ -1298,6 +1298,50 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
             CompactSettingWithTooltip(
+                label = "Search scope behavior",
+                tooltip = "Chooses the mode for a normal Find open. Filtered and Unfiltered open one field; " +
+                    "Two searches opens independent fields. Last search mode restores the last manual choice. " +
+                    "Auto-switch by open view uses Unfiltered while Original is visible and Filtered while it is hidden. " +
+                    "Ctrl/Cmd+Alt+F always opens the Unfiltered field. Compare mode uses Filtered.",
+                modifier = Modifier.width(178.dp),
+                labelMaxLines = 1,
+            ) {
+                SearchScopeBehaviorSelector(
+                    selected = state.settings.searchScopeBehavior,
+                    onSelected = { behavior -> state.updateSettings { it.copy(searchScopeBehavior = behavior) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Link split selection and Find",
+                tooltip = "This preference applies in every Filtered/Original split view, including single-field and Two searches modes. When Linked, clicking a row in Filtered mirrors its selection and scroll position in " +
+                    "Original when that row exists. Find navigation may mirror a match in either direction. " +
+                    "Original row clicks and free scrolling stay local, and queries remain separate. Independent " +
+                    "keeps each panel's selection and Find navigation local. " +
+                    "Deliberate annotation, crash and video jumps remain explicit.",
+                modifier = Modifier.width(178.dp),
+                labelMaxLines = 2,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.syncSplitPanelSelectionAndScroll) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Search all lines if Filtered has no matches",
+                tooltip = "After a valid, completed Filtered search finds no rows, optionally check all lines and " +
+                    "show Original when matches exist. Two searches always keeps both independent fields and does not use this fallback. " +
+                    "Return to Filtered suppresses the fallback until the search changes.",
+                modifier = Modifier.width(178.dp),
+                labelMaxLines = 2,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.broadenSearchWhenFilteredEmpty) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(broadenSearchWhenFilteredEmpty = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
                 label = "Process names in new tabs",
                 tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
                     "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
@@ -1455,6 +1499,85 @@ internal fun SettingsControlRow(modifier: Modifier = Modifier, content: @Composa
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) { content() }
+}
+
+@Composable
+private fun SearchScopeBehaviorSelector(
+    selected: SearchScopeBehavior,
+    onSelected: (SearchScopeBehavior) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current
+    val behaviors = listOf(
+        SearchScopeBehavior.FILTERED,
+        SearchScopeBehavior.UNFILTERED,
+        SearchScopeBehavior.LAST_USED,
+        SearchScopeBehavior.FOLLOW_VIEW,
+    )
+    val labels = listOf("Filtered", "Unfiltered", "Last search mode", "Auto-switch by open view")
+    val selectedIndex = behaviors.indexOf(selected).coerceAtLeast(0)
+    var open by remember { mutableStateOf(false) }
+    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+    Box(Modifier.fillMaxWidth()) {
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().height(26.dp)
+                .clip(CORNER_SM)
+                .background(tc.p2, CORNER_SM)
+                .border(1.dp, tc.br, CORNER_SM),
+            onClick = {
+                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+            },
+        ) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 9.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(labels[selectedIndex], color = tc.tx, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
+            }
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                onDismissRequest = {
+                    open = false
+                    suppressToggleUntilMs = System.currentTimeMillis() + 200
+                },
+                properties = PopupProperties(focusable = false),
+            ) {
+                Column(
+                    Modifier.widthIn(min = 176.dp, max = 220.dp)
+                        .shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                        .padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    behaviors.forEachIndexed { index, behavior ->
+                        val active = behavior == selected
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            baseBg = if (active) tc.abg else Color.Transparent,
+                            onClick = {
+                                open = false
+                                onSelected(behavior)
+                            },
+                        ) {
+                            AppText(
+                                labels[index],
+                                color = if (active) tc.ac else tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /**

@@ -675,6 +675,10 @@ classDiagram
         +Boolean tailing
         +ZipLogCandidate archiveCandidate
         +LogSearchState search
+        +LogSearchSessions searches
+        +SearchMode searchMode
+        +SearchScope focusedSearchScope
+        +SearchFallbackState searchFallback
         +Boolean showTimeDelta
         +TidMapState tidMap
         +VideoAttachment attachedVideo
@@ -831,6 +835,33 @@ classDiagram
         +String query
         +IntArray matchIds
         +Int currentIdx
+        +Boolean caseSensitive
+        +Long inputRevision
+    }
+
+    class LogSearchSessions {
+        +LogSearchState filtered
+        +LogSearchState unfiltered
+    }
+
+    class SearchFallbackState {
+        +Long sourceRevision
+        +Boolean isActive
+        +Long suppressedRevision
+        +Boolean originalVisibleBeforeFallback
+    }
+
+    class SearchMode {
+        <<enumeration>>
+        FILTERED
+        UNFILTERED
+        TWO_SEARCHES
+    }
+
+    class SearchScope {
+        <<enumeration>>
+        FILTERED
+        UNFILTERED
     }
 
     LogTab "1" *-- "many" LogEntry : logData
@@ -840,7 +871,9 @@ classDiagram
     LogTab "1" *-- "many" ManualCollapseBlock
     LogTab "1" o-- "0..1" VideoAttachment
     LogTab "1" o-- "0..1" TidMapState
-    LogTab "1" *-- "1" LogSearchState
+    LogTab "1" *-- "1" LogSearchSessions
+    LogSearchSessions "1" *-- "2" LogSearchState
+    LogTab "1" o-- "0..1" SearchFallbackState
     LogEntry --> LogLevel
     Filter "1" *-- "many" SequenceDef
     Filter "1" *-- "many" Highlighter
@@ -869,7 +902,8 @@ classDiagram
   (`model/Model.kt:254-269`). With the default array-reference comparison, the debounced autosave in
   `ui/App.kt:102` would re-arm forever.
 - **Session-only fields are deliberately excluded from persistence:** `selected`, `tailing`,
-  `search`, `tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and
+  the legacy `search` projection, both `searches` slots, `searchMode`, `focusedSearchScope`,
+  `searchFallback`, `tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and
   `isCaptureLauncher`, plus the derived `logData`, `rmap`, `analysis`, and `largeFileMode`.
   A live capture cannot resume after relaunch because `adb`/`scrcpy` processes are not persisted;
   the raw capture directory is recovered as an interrupted retained session instead. See
@@ -928,6 +962,10 @@ classDiagram
         +List~CustomIssueRule~ customIssueRules
         +List~CopyMaskRule~ copyMaskRules
         +Boolean autoCheckUpdates
+        +SearchScopeBehavior searchScopeBehavior
+        +SearchMode lastManualSearchMode
+        +Boolean syncSplitPanelSelectionAndScroll
+        +Boolean broadenSearchWhenFilteredEmpty
         +String acceptedLicenseVersion
     }
 
@@ -1634,7 +1672,7 @@ from any single file:
 |---|---|---|---|
 | Content autosave | 400 ms | `ui/App.kt:102-113` | Rapid edits into one write; suppressed entirely while tailing |
 | Background autosave | 150 ms | `ui/AutosaveScheduler.kt:20` | Drag bursts (panel resize) into one write |
-| Search recompute | 150 ms | `ui/AppState.kt:4064` | Keystrokes in the Find bar |
+| Find recompute | 150 ms | `ui/AppState.kt:1027` | Keystrokes in one `(tabId, scope)` field; each slot has its own cancellable job and results |
 | Tail re-analysis | 1500 ms | `ui/TailCoordinator.kt:128` | Continuous appends into periodic crash re-detection |
 | AI UI update | 75 ms | `ai/AiSidebarRuntime.kt:281-288` | Token deltas, so Markdown is not reparsed per token |
 | Diagram session generate | 180 ms | `ui/Seq3Session.kt` | Range/option edits into one cancellable `generateSeq3` build; never metadata-only edits |
@@ -1662,7 +1700,7 @@ flowchart LR
         save["Autosave write"]
         tail["File tailing"]
         index["Source indexing"]
-        search["Search recompute"]
+        search["Per-scope Find jobs<br/>serialized item scans"]
     end
 
     subgraph ktor["Ktor CIO request coroutines"]
@@ -1811,11 +1849,24 @@ existing autosave — the worst case is a stale but valid file plus an orphaned 
 `noteTargetName`.
 
 **Deliberately not persisted:** `logData` and `rmap` (re-parsed from the file), `analysis`
-(recomputed), `largeFileMode` (re-derived from the file size), `selected`, `tailing`, `search`,
-`tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and `isCaptureLauncher`
+(recomputed), `largeFileMode` (re-derived from the file size), `selected`, `tailing`, the legacy
+`search` projection, both per-scope `searches` slots, `searchMode`, `focusedSearchScope`,
+`searchFallback`, `tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and `isCaptureLauncher`
 (session-only state — `model/Model.kt`). A live recorder is therefore never resumed from autosave;
 its session directory is recovered as interrupted capture data. After Stop, the same tab carries a
 durable `attachedVideo`/capture descriptor link, so the finalized capture can be restored normally.
+Find work is keyed by `(tabId, SearchScope)`; Filtered and Unfiltered keep separate query, case,
+matches, cursor, focus, and navigation requests. A cancellation-aware mutex bounds concurrent full
+item-list materializations, and the optional all-lines fallback scans Original only after a valid,
+completed Filtered scan returns no matches. The saved split-view link preference applies in every
+Filtered/Original split mode: it mirrors Filtered row selection into Original and can mirror Find
+navigation in either direction; free scrolling and ordinary Original row clicks remain local.
+Compare mode uses separate tabs and does not couple their selections. The monotonic split-sync
+revision advances when the saved link preference changes, so suspended row/Find work cannot apply
+using stale linking semantics. The scope
+behavior, last manually selected mode, split-panel link preference, and fallback preference are
+global `AppSettings` values stored in keyed JSON; the legacy positional settings decoder remains
+unchanged.
 `AppSettings.captureSettings` is persisted in the keyed settings JSON and is applied immediately by
 the Capture section of Settings. `workflowAiSelections` remembers the provider, optional model and
 reasoning-effort override independently for test-step drafting, recording rewrite, test lanes and the

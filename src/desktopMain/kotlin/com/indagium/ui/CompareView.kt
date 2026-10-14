@@ -160,7 +160,7 @@ internal fun CompareView(
                         onCollapseAll = { state.collapseAll(leftTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
                         onToggleTimeDelta = { state.toggleTimeDelta(leftTab.id) },
-                        onOpenSearch = { if (leftTab.search.active) state.closeSearch(leftTab.id) else state.openSearch(leftTab.id) },
+                        onOpenSearch = { state.openSearch(leftTab.id) },
                         onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
                         onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
                         onSetProcessNameMode = { mode -> state.setProcessNameMode(leftTab.id, mode) },
@@ -170,7 +170,9 @@ internal fun CompareView(
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                        searchNavigationRequest = state.pendingSearchNavigation,
+                        searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
+                            state.searchNavigationFor(leftTab.id, scope)?.let { scope to it }
+                        }.toMap(),
                         onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
@@ -191,14 +193,15 @@ internal fun CompareView(
                         keyboardFocusVisible = state.keyboardFocusVisible,
                         onVisibleItems = { summary -> state.noteVisibleItems(leftTab.id, summary) },
                         onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                        onSearchQueryChange = { query -> state.setSearchQuery(leftTab.id, query) },
-                        onSearchToggleCase = { state.toggleSearchCase(leftTab.id) },
-                        onSearchNext = { state.searchNext(leftTab.id) },
-                        onSearchPrev = { state.searchPrev(leftTab.id) },
-                        onSearchClose = {
-                            state.closeSearch(leftTab.id)
+                        onSearchQueryChange = { scope, query -> state.setSearchQuery(leftTab.id, query, scope) },
+                        onSearchToggleCase = { scope -> state.toggleSearchCase(leftTab.id, scope) },
+                        onSearchNext = { scope -> state.searchNext(leftTab.id, scope) },
+                        onSearchPrev = { scope -> state.searchPrev(leftTab.id, scope) },
+                        onSearchClose = { scope ->
+                            state.closeSearch(leftTab.id, scope)
                             runCatching { leftLogFr.requestFocus() }
                         },
+                        onSearchFocused = { scope -> state.focusSearch(leftTab.id, scope) },
                     )
                 }
             }
@@ -246,7 +249,7 @@ internal fun CompareView(
                         onCollapseAll = { state.collapseAll(rightTab.id) },
                         onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
                         onToggleTimeDelta = { state.toggleTimeDelta(rightTab.id) },
-                        onOpenSearch = { if (rightTab.search.active) state.closeSearch(rightTab.id) else state.openSearch(rightTab.id) },
+                        onOpenSearch = { state.openSearch(rightTab.id) },
                         onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
                         onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
                         onSetProcessNameMode = { mode -> state.setProcessNameMode(rightTab.id, mode) },
@@ -256,7 +259,9 @@ internal fun CompareView(
                         scrollStateStore = state.logViewerScrollStateStore,
                         annotationNavigationRequest = state.pendingAnnotationNavigation,
                         onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                        searchNavigationRequest = state.pendingSearchNavigation,
+                        searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
+                            state.searchNavigationFor(rightTab.id, scope)?.let { scope to it }
+                        }.toMap(),
                         onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
@@ -282,14 +287,15 @@ internal fun CompareView(
                         // tab.search lives on rightTab (LogTab.search), unaffected by
                         // effectiveRightTab's filter override — see AppState.effectiveSearchFilter
                         // for how the recompute itself accounts for that override.
-                        onSearchQueryChange = { query -> state.setSearchQuery(rightTab.id, query) },
-                        onSearchToggleCase = { state.toggleSearchCase(rightTab.id) },
-                        onSearchNext = { state.searchNext(rightTab.id) },
-                        onSearchPrev = { state.searchPrev(rightTab.id) },
-                        onSearchClose = {
-                            state.closeSearch(rightTab.id)
+                        onSearchQueryChange = { scope, query -> state.setSearchQuery(rightTab.id, query, scope) },
+                        onSearchToggleCase = { scope -> state.toggleSearchCase(rightTab.id, scope) },
+                        onSearchNext = { scope -> state.searchNext(rightTab.id, scope) },
+                        onSearchPrev = { scope -> state.searchPrev(rightTab.id, scope) },
+                        onSearchClose = { scope ->
+                            state.closeSearch(rightTab.id, scope)
                             runCatching { rightLogFr.requestFocus() }
                         },
+                        onSearchFocused = { scope -> state.focusSearch(rightTab.id, scope) },
                     )
                     // Tied to leftTab, matching RightSidebarPanel's own AnnotationPanel below — the
                     // top TabBar (not this view) owns which tab is "primary," and there is one
