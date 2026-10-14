@@ -219,7 +219,7 @@ private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
                                         is IssueActionResult.NeedsLogTab -> return@launch
                                     }
                                 }
-                                val result = ui.state.collectIssueBugreport(issueId!!) { text -> bugreportProgress = text }
+                                val result = ui.state.collectIssueBugreport(issueId) { text -> bugreportProgress = text }
                                 result.fold(
                                     onSuccess = { record ->
                                         form = form.copy(attachments = record.draft.attachments)
@@ -279,7 +279,7 @@ private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
                                             is IssueActionResult.NeedsLogTab -> return@launch
                                         }
                                     }
-                                    val savedIssueId = issueId ?: return@launch
+                                    val savedIssueId = issueId
                                     val result = ui.state.exportIssueStepClip(savedIssueId, start, end) { message -> clipProgress = message }
                                     result.fold(
                                         onSuccess = { exported ->

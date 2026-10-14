@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 
 class SearchScopePolicyTest {
     @Test
-    fun openPolicyResolvesAllFourChoicesAndRememberedDualMode() {
+    fun openPolicyResolvesAllFiveChoicesAndRememberedDualMode() {
         assertEquals(
             SearchPolicyResolution(SearchMode.FILTERED, false),
             resolveSearchPolicy(SearchScopeBehavior.FILTERED, SearchMode.TWO_SEARCHES, originalVisible = true),
@@ -17,6 +17,10 @@ class SearchScopePolicyTest {
         assertEquals(
             SearchPolicyResolution(SearchMode.UNFILTERED, true),
             resolveSearchPolicy(SearchScopeBehavior.UNFILTERED, SearchMode.FILTERED, originalVisible = false),
+        )
+        assertEquals(
+            SearchPolicyResolution(SearchMode.TWO_SEARCHES, true),
+            resolveSearchPolicy(SearchScopeBehavior.TWO_SEARCHES, SearchMode.FILTERED, originalVisible = false),
         )
         assertEquals(
             SearchPolicyResolution(SearchMode.TWO_SEARCHES, true),
@@ -55,6 +59,7 @@ class SearchScopePolicyTest {
         listOf(
             SearchScopeBehavior.FILTERED,
             SearchScopeBehavior.UNFILTERED,
+            SearchScopeBehavior.TWO_SEARCHES,
             SearchScopeBehavior.LAST_USED,
         ).forEach { behavior ->
             assertEquals(

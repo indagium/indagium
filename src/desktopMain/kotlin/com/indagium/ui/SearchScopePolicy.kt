@@ -19,6 +19,7 @@ internal fun resolveSearchPolicy(
     val mode = when (behavior) {
         SearchScopeBehavior.FILTERED -> SearchMode.FILTERED
         SearchScopeBehavior.UNFILTERED -> SearchMode.UNFILTERED
+        SearchScopeBehavior.TWO_SEARCHES -> SearchMode.TWO_SEARCHES
         SearchScopeBehavior.LAST_USED -> lastManualMode
         SearchScopeBehavior.FOLLOW_VIEW -> if (originalVisible) SearchMode.UNFILTERED else SearchMode.FILTERED
     }

@@ -2103,6 +2103,17 @@ fun LogViewer(
             // guard (the bug this replaces — see the itemOnSelRow call site's comment).
             var rowClickSyncId by remember(tab.id) { mutableStateOf<Int?>(null) }
             var rowClickSyncRevision by remember(tab.id) { mutableStateOf<Long?>(null) }
+            // Mirror the selection AFTER the callback updates AppState. The clicked id alone is
+            // insufficient: clicking an already-selected row can clear it, and modifier clicks
+            // can add/remove rows or extend a range. The event revision prevents a queued mirror
+            // from applying after the user turns linking off (or off and back on).
+            var selectionSyncRevision by remember(tab.id) { mutableStateOf<Long?>(null) }
+            LaunchedEffect(tab.selected, selectionSyncRevision, syncSelectionAndScrollRevision) {
+                if (selectionSyncRevision == syncSelectionAndScrollRevision && latestSyncEnabled) {
+                    localAllSelected = tab.selected
+                }
+                selectionSyncRevision = null
+            }
             LaunchedEffect(effectiveSyncSelectionAndScroll) {
                 if (!effectiveSyncSelectionAndScroll) {
                     rowClickSyncId = null
@@ -2671,8 +2682,8 @@ fun LogViewer(
                         effectiveTab = tab.copy(search = filteredSearch),
                         itemOnSelRow = { id, multi, range ->
                             onSelRow(id, multi, range)
+                            if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
                             if (effectiveSyncSelectionAndScroll && !multi && !range) {
-                                localAllSelected = setOf(id)
                                 // Resolved by the rowClickSync LaunchedEffect below, not inline in
                                 // this callback (1.3(a)) — that used to run on syncScope with no
                                 // staleness guard, so a click landing inside the 250ms
@@ -2685,7 +2696,7 @@ fun LogViewer(
                         },
                         itemOnSelRowRange = { ids ->
                             onSelRowRange(ids)
-                            if (effectiveSyncSelectionAndScroll) localAllSelected = ids.toSet()
+                            if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
                         },
                         panelKey = "${tab.id}:main",
                         listState = filteredLazyState,
@@ -3391,6 +3402,7 @@ private fun LogRow(
     var sel      by remember(tab.id, entry.id) { mutableStateOf(TextRange.Zero) }
     val latestIsSelected by rememberUpdatedState(isSel)
     val latestSelection by rememberUpdatedState(sel)
+    val latestOnSelRow by rememberUpdatedState(onSelRow)
     val fontSize = baseSp()
     DisposableEffect(entry.id, rowBoundsAbs) {
         onDispose { rowBoundsAbs.remove(entry.id) }
@@ -3608,14 +3620,23 @@ private fun LogRow(
                                     // (the second half of the double-click) immediately deselected it
                                     // again, and the Δt column's anchor mode flipped on then off inside
                                     // one user gesture — visible as the flicker this guards against.
-                                    if (!doubleClickInProgress && !pressDragged && pressPos != null && latestSelection.collapsed) {
+                                    // Modified clicks select rows even when BasicTextField also
+                                    // extends its text selection. Unmodified word selection still
+                                    // suppresses the row toggle during a double-click.
+                                    val selectsRows = latestSelection.collapsed || pressMulti || pressShift
+                                    if (!doubleClickInProgress && !pressDragged && pressPos != null && selectsRows) {
+                                        // The delayed plain deselection belongs to this click's sync
+                                        // policy. Capture its callback now so re-linking during the
+                                        // double-click window cannot turn an earlier Independent
+                                        // click into a new Linked selection event.
+                                        val selectionHandler = latestOnSelRow
                                         if (latestIsSelected && !pressMulti && !pressShift) {
                                             pendingSelectedRowToggle = clickScope.launch {
                                                 kotlinx.coroutines.delay(DOUBLE_CLICK_WINDOW_MS)
-                                                onSelRow(entry.id, false, false)
+                                                selectionHandler(entry.id, false, false)
                                             }
                                         } else {
-                                            onSelRow(entry.id, pressMulti, pressShift)
+                                            selectionHandler(entry.id, pressMulti, pressShift)
                                         }
                                     }
                                     // Run alongside (rather than instead of) BasicTextField's own
@@ -4184,6 +4205,7 @@ private fun SeqHeaderRow(
     pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
+    val latestOnSelRow by rememberUpdatedState(onSelRow)
     val sc  = item.color
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4236,12 +4258,12 @@ private fun SeqHeaderRow(
                                     }
                                     ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
-                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
+                                        latestOnSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
                                     }
                                     ev.buttons.isPrimaryPressed -> {
                                         val now = System.currentTimeMillis()
                                         if (now - lastClickMs < 350) onToggleGroup(item.gid)
-                                        else onSelRow(item.entry.id, false, false)
+                                        else latestOnSelRow(item.entry.id, false, false)
                                         lastClickMs = now
                                     }
                                 }
@@ -4294,6 +4316,7 @@ private fun ManualHeaderRow(
     pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
+    val latestOnSelRow by rememberUpdatedState(onSelRow)
     val sc = item.color
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4341,12 +4364,12 @@ private fun ManualHeaderRow(
                                     }
                                     ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
-                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
+                                        latestOnSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
                                     }
                                     ev.buttons.isPrimaryPressed -> {
                                         val now = System.currentTimeMillis()
                                         if (now - lastClickMs < 350) onToggleGroup(item.gid)
-                                        else onSelRow(item.entry.id, false, false)
+                                        else latestOnSelRow(item.entry.id, false, false)
                                         lastClickMs = now
                                     }
                                 }
@@ -4405,6 +4428,7 @@ private fun StackTraceHeaderRow(
     pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
+    val latestOnSelRow by rememberUpdatedState(onSelRow)
     val sc = DANGER_RED
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4457,12 +4481,12 @@ private fun StackTraceHeaderRow(
                                     }
                                     ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
-                                        onSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
+                                        latestOnSelRow(item.entry.id, mods.isCtrlPressed || mods.isMetaPressed, mods.isShiftPressed)
                                     }
                                     ev.buttons.isPrimaryPressed -> {
                                         val now = System.currentTimeMillis()
                                         if (now - lastClickMs < 350) onToggleGroup(item.gid)
-                                        else onSelRow(item.entry.id, false, false)
+                                        else latestOnSelRow(item.entry.id, false, false)
                                         lastClickMs = now
                                     }
                                 }

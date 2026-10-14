@@ -231,7 +231,7 @@ private fun editorBehavior() = listOf(
     ),
     entry(
         SettingsSection.EditorBehavior, "Search scope behavior",
-        "Choose Filtered, Unfiltered, Last search mode, or Auto-switch by open view for normal Find opens.",
+        "Choose Filtered, Unfiltered, Two searches, Last search mode, or Auto-switch by open view for normal Find opens.",
         listOf("find", "search", "two searches", "dual", "scope", "cmd+f", "ctrl+f", "filtered", "unfiltered", "last used", "auto"),
     ),
     entry(

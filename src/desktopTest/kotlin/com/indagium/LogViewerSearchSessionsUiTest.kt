@@ -3,8 +3,10 @@ package com.indagium
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -13,14 +15,18 @@ import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.text.TextRange
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -44,6 +50,338 @@ import kotlin.test.assertTrue
 class LogViewerSearchSessionsUiTest {
     @get:Rule
     val rule = createComposeRule()
+
+    @Test
+    fun linkedFilteredDeselectionClearsOriginalSelection() {
+        val tabId = "linked-deselect-ui"
+        val rows = (1..40).map { id -> LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id") }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "linked.log", rows).copy(showUnfiltered = true, selected = setOf(2)))
+        state.openSearch(tabId)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        rule.onNodeWithTag("log-row-$tabId:main-2").assertIsSelected().performClick()
+        rule.waitUntil(5_000) { state.tab(tabId)!!.selected.isEmpty() }
+        rule.onNodeWithTag("log-row-$tabId:original-2").assertIsNotSelected()
+    }
+
+    @Test
+    fun unmodifiedDoubleClickStillSelectsTextWithoutDeselectingTheRow() {
+        val tabId = "unmodified-word-selection-ui"
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(tabId, "word-selection.log", listOf(
+                LogEntry(1, "10:00:00.001", LogLevel.I, "App", "alpha beta gamma"),
+            )),
+        )
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        val row = rule.onNodeWithTag("log-row-$tabId:main-1")
+        row.performMouseInput { doubleClick(Offset(180f, center.y)) }
+        val text = rule.onNodeWithText("alpha beta gamma", substring = true)
+        rule.waitUntil(5_000) {
+            runCatching {
+                !text.fetchSemanticsNode().config[SemanticsProperties.TextSelectionRange].collapsed
+            }.getOrDefault(false)
+        }
+        rule.runOnIdle { assertEquals(setOf(1), state.tab(tabId)!!.selected) }
+        row.assertIsSelected()
+        val selectedTextRange = text.fetchSemanticsNode().config[SemanticsProperties.TextSelectionRange]
+        assertFalse(selectedTextRange.collapsed)
+        assertTrue(selectedTextRange != TextRange.Zero)
+    }
+
+    @Test
+    fun linkedModifierClicksMirrorTheFullFilteredSelection() {
+        val tabId = "linked-modifiers-ui"
+        val rows = (1..40).map { id -> LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id") }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "modifiers.log", rows).copy(showUnfiltered = true))
+        state.openSearch(tabId)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        rule.onNodeWithTag("log-row-$tabId:main-2").performClick()
+        rule.onNodeWithTag("log-row-$tabId:original-2").assertIsSelected()
+        rule.onRoot().performKeyInput { keyDown(Key.CtrlLeft) }
+        rule.onNodeWithTag("log-row-$tabId:main-3").performClick()
+        rule.onRoot().performKeyInput { keyUp(Key.CtrlLeft) }
+        rule.runOnIdle { assertEquals(setOf(2, 3), state.tab(tabId)!!.selected) }
+        rule.onNodeWithTag("log-row-$tabId:original-2").assertIsSelected()
+        rule.onNodeWithTag("log-row-$tabId:original-3").assertIsSelected()
+
+        rule.onRoot().performKeyInput { keyDown(Key.ShiftLeft) }
+        rule.onNodeWithTag("log-row-$tabId:main-5").performClick()
+        rule.onRoot().performKeyInput { keyUp(Key.ShiftLeft) }
+        rule.runOnIdle { assertEquals(setOf(3, 4, 5), state.tab(tabId)!!.selected) }
+        rule.onNodeWithTag("log-row-$tabId:original-2").assertIsNotSelected()
+        for (id in 3..5) rule.onNodeWithTag("log-row-$tabId:original-$id").assertIsSelected()
+    }
+
+    @Test
+    fun syncToggleDoesNotReplaySelectionAndResumesMirroringOnNextFilteredClick() {
+        val tabId = "linked-toggle-roundtrip-ui"
+        val rows = (1..100).map { id -> LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id") }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "linked-toggle.log", rows))
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        val store = state.logViewerScrollStateStore
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(54) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 54 }
+        val originalRow = rule.onNodeWithTag("log-row-$tabId:original-55")
+        originalRow.performClick()
+        originalRow.assertIsSelected()
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(49) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
+        var originalAnchor = 0
+        rule.runOnIdle { originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex }
+
+        // Turn linking off through the real Find dropdown. A subsequent Filtered click must keep
+        // Original's independent selection and scroll anchor local.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Independent").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        rule.onNodeWithTag("log-row-$tabId:main-50").performClick()
+        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(50) }
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+        originalRow.assertIsSelected()
+        rule.onNodeWithTag("log-row-$tabId:original-50").assertIsNotSelected()
+
+        // Re-enabling is not itself a selection event: Original stays where it was until the next
+        // Filtered click, which resumes both selection and scroll mirroring.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Linked").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+        originalRow.assertIsSelected()
+        rule.onNodeWithTag("log-row-$tabId:original-50").assertIsNotSelected()
+
+        rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(69) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 69 }
+        rule.onNodeWithTag("log-row-$tabId:main-70").performClick()
+        rule.waitUntil(5_000) {
+            state.tab(tabId)!!.selected == setOf(70) &&
+                store.lazyState("$tabId:original").firstVisibleItemIndex > originalAnchor
+        }
+        rule.onNodeWithTag("log-row-$tabId:original-70").assertIsDisplayed().assertIsSelected()
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(49) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
+        rule.onNodeWithTag("log-row-$tabId:original-55").assertIsNotSelected()
+    }
+
+    @Test
+    fun syncToggleRefreshesCallbacksForRowsThatStayMounted() {
+        val tabId = "linked-toggle-mounted-row-ui"
+        val rows = (1..100).map { id -> LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id") }
+        val state = AppState()
+        // Start with row 50 selected only in Filtered. Original then gets its own selection while
+        // linking is on, and that local selection must survive turning linking off.
+        state.tabs = listOf(mkTab(tabId, "linked-toggle-mounted-row.log", rows).copy(selected = setOf(50)))
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        val store = state.logViewerScrollStateStore
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(79) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
+        val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
+        originalRow.performClick()
+        originalRow.assertIsSelected()
+
+        // Keep Filtered row 50 composed at the same viewport position for the whole round trip.
+        rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        val filteredRow = rule.onNodeWithTag("log-row-$tabId:main-50")
+        filteredRow.assertIsDisplayed().assertIsSelected()
+        val originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex
+
+        // Off click deselects the already-selected Filtered row. It must not clear Original's
+        // independent selection or move its anchor.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Independent").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick() // dismiss the native popup
+        filteredRow.assertIsDisplayed()
+        val firstClickAt = System.currentTimeMillis()
+        filteredRow.performClick()
+        rule.waitUntil(5_000) {
+            state.tab(tabId)!!.selected.isEmpty() && System.currentTimeMillis() - firstClickAt >= 600
+        }
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+        originalRow.assertIsSelected()
+
+        // Re-enabling alone must not replay Filtered's current empty selection into Original.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Linked").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        filteredRow.assertIsDisplayed()
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+        originalRow.assertIsSelected()
+
+        // This is the exact same already-composed row. Its next click selects it again and must
+        // use the latest Linked callback, mirroring selection and scrolling Original to row 50.
+        filteredRow.performClick()
+        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(50) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
+        rule.onNodeWithTag("log-row-$tabId:original-50").assertIsDisplayed().assertIsSelected()
+        rule.runOnIdle { assertEquals(setOf(50), state.tab(tabId)!!.selected) }
+    }
+
+    @Test
+    fun delayedDeselectionKeepsTheSyncPolicyFromItsClick() {
+        val tabId = "linked-delayed-toggle-ui"
+        val rows = (1..100).map { id -> LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id") }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "linked-delayed-toggle.log", rows).copy(selected = setOf(50)))
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        val store = state.logViewerScrollStateStore
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(79) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
+        val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
+        originalRow.performClick()
+        originalRow.assertIsSelected()
+        val originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex
+        rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        val filteredRow = rule.onNodeWithTag("log-row-$tabId:main-50")
+        filteredRow.assertIsDisplayed().assertIsSelected()
+
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Independent").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+
+        // Freeze Compose time so the selected-row delay stays pending while the UI toggles back
+        // to Linked. The delayed Off click must retain its original policy when it finally runs.
+        rule.mainClock.autoAdvance = false
+        filteredRow.performClick()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.mainClock.advanceTimeByFrame()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.mainClock.advanceTimeByFrame()
+        rule.onNodeWithText("Linked").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.mainClock.advanceTimeByFrame()
+        rule.mainClock.advanceTimeBy(600)
+        rule.waitForIdle()
+
+        rule.runOnIdle {
+            assertTrue(state.tab(tabId)!!.selected.isEmpty())
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+        originalRow.assertIsSelected()
+        rule.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun syncToggleRefreshesCallbacksForMountedGroupHeaders() {
+        val tabId = "linked-toggle-header-ui"
+        val rows = buildList {
+            add(LogEntry(1, "10:00:00.001", LogLevel.I, "App", "start marker"))
+            add(LogEntry(2, "10:00:00.002", LogLevel.I, "App", "inside group"))
+            add(LogEntry(3, "10:00:00.003", LogLevel.I, "App", "end marker"))
+            for (id in 4..100) add(LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id"))
+        }
+        val sequence = SequenceDef(
+            "header-sync", "start marker", priority = 1, color = Color.Red,
+            tag = "App", endMatchText = "end marker",
+        )
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(tabId, "linked-toggle-header.log", rows)
+                .copy(filter = Filter(sequences = listOf(sequence)), selected = setOf(1)),
+        )
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+
+        val store = state.logViewerScrollStateStore
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(77) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
+        val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
+        originalRow.performClick()
+        originalRow.assertIsSelected()
+        val filteredHeader = rule.onNodeWithText("start marker", substring = true)
+        filteredHeader.assertExists()
+        val originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex
+
+        // The header remains at the top of Filtered while the independent setting changes twice.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Independent").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        val firstClickAt = System.currentTimeMillis()
+        filteredHeader.performClick() // deselect the preselected header while Independent
+        rule.waitUntil(5_000) {
+            state.tab(tabId)!!.selected.isEmpty() && System.currentTimeMillis() - firstClickAt >= 600
+        }
+        originalRow.assertIsSelected()
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Linked").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        originalRow.assertIsSelected()
+        rule.runOnIdle {
+            assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
+        }
+
+        // The same header is still composed. Its next click must mirror selection and scroll.
+        filteredHeader.performClick()
+        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(1) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
+        rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(77) }
+        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
+        originalRow.assertIsNotSelected()
+    }
+
+    @Test
+    fun linkedFindMovesBothPanelsWithoutChangingTheOtherQuery() {
+        val tabId = "linked-find-ui"
+        val rows = (1..100).map { id ->
+            LogEntry(id, "10:00:00.$id", LogLevel.I, "App", when (id) {
+                70 -> "filtered needle"
+                90 -> "original needle"
+                else -> "row $id"
+            })
+        }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "linked-find.log", rows))
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        state.setSearchQuery(tabId, "filtered needle", SearchScope.FILTERED)
+        state.setSearchQuery(tabId, "original needle", SearchScope.UNFILTERED)
+        rule.waitUntil(5_000) {
+            state.tab(tabId)!!.searchFor(SearchScope.FILTERED).matchIds.toList() == listOf(70) &&
+                state.tab(tabId)!!.searchFor(SearchScope.UNFILTERED).matchIds.toList() == listOf(90)
+        }
+        rule.setContent { StateBackedLogViewer(state, tabId) }
+        rule.onNodeWithTag("search-next-filtered").performClick()
+        rule.waitUntil(5_000) { state.searchNavigationFor(tabId, SearchScope.FILTERED) == null }
+        rule.onNodeWithTag("log-row-$tabId:original-70").assertIsDisplayed().assertIsSelected()
+        rule.onNodeWithTag("search-next-unfiltered").performClick()
+        rule.waitUntil(5_000) { state.searchNavigationFor(tabId, SearchScope.UNFILTERED) == null }
+        rule.onNodeWithTag("log-row-$tabId:main-90").assertIsDisplayed().assertIsSelected()
+        rule.onNodeWithTag("log-row-$tabId:original-90").assertIsDisplayed().assertIsSelected()
+        rule.onNodeWithTag("search-field-filtered").assertTextEquals("filtered needle")
+        rule.onNodeWithTag("search-field-unfiltered").assertTextEquals("original needle")
+    }
 
     @Test
     fun twoSearchesKeepPanelNavigationAndSelectionLocalWhenSyncIsTurnedOff() {

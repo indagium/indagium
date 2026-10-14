@@ -557,7 +557,7 @@ enum class SearchScope { FILTERED, UNFILTERED }
 enum class SearchMode { FILTERED, UNFILTERED, TWO_SEARCHES }
 
 /** How a normal Find invocation chooses its presentation mode. */
-enum class SearchScopeBehavior { FILTERED, UNFILTERED, LAST_USED, FOLLOW_VIEW }
+enum class SearchScopeBehavior { FILTERED, UNFILTERED, TWO_SEARCHES, LAST_USED, FOLLOW_VIEW }
 
 /** Two stable per-tab slots. Match arrays, cursor positions, case options and focus nonces never
  *  cross between concrete scopes. */

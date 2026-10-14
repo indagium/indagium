@@ -325,6 +325,7 @@ private fun SearchModeDropdown(
     val openPolicy = when (searchScopeBehavior) {
         SearchScopeBehavior.FILTERED -> "opens Filtered"
         SearchScopeBehavior.UNFILTERED -> "opens Unfiltered"
+        SearchScopeBehavior.TWO_SEARCHES -> "opens Two searches"
         SearchScopeBehavior.LAST_USED -> "last mode ($lastModeName)"
         SearchScopeBehavior.FOLLOW_VIEW -> "follows Original view"
     }
