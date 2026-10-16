@@ -95,9 +95,13 @@ class IssueStore(
     }
 
     /** The file of [attachment] inside [record]'s folder, or null when it has none, it is gone, or its path would leave the folder. */
-    fun attachmentFile(record: IssueRecord, attachment: IssueAttachment): File? {
+    fun attachmentFile(record: IssueRecord, attachment: IssueAttachment): File? = attachmentFile(record.id, attachment)
+
+    /** Same as [attachmentFile] for an issue known only by its id (an editor that stored the issue but holds no record). */
+    fun attachmentFile(issueId: String, attachment: IssueAttachment): File? {
         val stored = attachment.storedPath ?: return null
-        val dir = issueDir(record.id).canonicalFile
+        if (!isSafeId(issueId)) return null
+        val dir = issueDir(issueId).canonicalFile
         val file = File(dir, stored).canonicalFile
         return file.takeIf { it.isFile && it.path.startsWith(dir.path + File.separator) }
     }
