@@ -14,6 +14,7 @@ import kotlinx.serialization.json.put
 /** Stable keys keep selectors in one authoring workflow independent from every other workflow. */
 internal object AiWorkflow {
     const val TEST_STEP_DRAFT = "testStepDraft"
+    const val TEST_SCRIPT_DRAFT = "testScriptDraft"
     const val RECORDING_REWRITE = "recordingRewrite"
     const val TEST_CASE_IMPROVE = "testCaseImprove"
     const val TEST_RUN_LANE = "testRunLane"

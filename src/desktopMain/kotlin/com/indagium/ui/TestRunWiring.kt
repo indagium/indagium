@@ -136,6 +136,39 @@ internal suspend fun AppState.generateTestStepDraft(
         ),
     )
 
+private val SCRIPT_DRAFT_WORDING = AgentTextWording(
+    sessionPrefix = "test-script-draft",
+    failure = "The provider could not draft the script",
+    unfinished = "The provider did not finish the script request.",
+    empty = "The provider returned no script draft.",
+)
+
+/** Drafts one library script through an existing profile with an empty MCP gateway and no host tools or device session. */
+internal suspend fun AppState.generateTestScriptDraft(
+    profileId: String,
+    prompt: String,
+    model: String? = null,
+    reasoningEffort: String? = null,
+    onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
+): String =
+    runAgentForText(
+        AgentTextRequest(
+            profileId = profileId,
+            model = model,
+            reasoningEffort = reasoningEffort,
+            prompt = prompt,
+            systemPrompt =
+                "You write shell scripts for an Android QA test library. Return only the requested JSON object. You have no device " +
+                    "or tools and cannot run anything; do not claim to have run or tested the command.",
+            gateway = IndagiumToolGateway(emptyList(), emptyMap()),
+            toolCallLimit = 1,
+            maxTurns = 2,
+            timeoutMs = TEST_STEP_DRAFT_TIMEOUT_MS,
+            wording = SCRIPT_DRAFT_WORDING,
+            onUsage = onUsage,
+        ),
+    )
+
 private val RECORDING_REWRITE_WORDING = AgentTextWording(
     sessionPrefix = "test-recording-rewrite",
     failure = "The provider could not rewrite the recording",

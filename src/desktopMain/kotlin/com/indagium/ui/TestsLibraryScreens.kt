@@ -167,6 +167,8 @@ internal fun TestsScriptsScreen() {
     val selected = library.scripts.firstOrNull { it.id == ui.view.selectedScriptId } ?: library.scripts.firstOrNull()
     var importError by remember { mutableStateOf<String?>(null) }
     var deleteScriptId by remember { mutableStateOf<String?>(null) }
+    var generateOpen by remember { mutableStateOf(false) }
+    var regenerateScriptId by remember { mutableStateOf<String?>(null) }
     TestsScreenScaffold(inspector = selected?.let { script -> { key(script.id) { ScriptInspector(script) } } }) {
         access.reason?.let {
             TestsLockedNotice(it)
@@ -180,6 +182,13 @@ internal fun TestsScriptsScreen() {
             HintedButton(
                 "+ New script",
                 onClick = { createScriptAndSelect(ui) },
+                enabled = access.editable,
+                disabledHint = access.reason,
+                variant = ButtonVariant.Ghost,
+            )
+            HintedButton(
+                "Generate with AI…",
+                onClick = { generateOpen = true },
                 enabled = access.editable,
                 disabledHint = access.reason,
                 variant = ButtonVariant.Ghost,
@@ -226,11 +235,31 @@ internal fun TestsScriptsScreen() {
             Spacer(Modifier.height(12.dp))
             Divider()
             Spacer(Modifier.height(12.dp))
-            key(selected.id) { ScriptEditor(selected, access.editable, onDelete = { deleteScriptId = selected.id }) }
+            key(selected.id) {
+                ScriptEditor(
+                    selected, access.editable,
+                    onDelete = { deleteScriptId = selected.id },
+                    onRegenerate = { regenerateScriptId = selected.id },
+                )
+            }
         }
     }
     library.scripts.firstOrNull { it.id == deleteScriptId }?.let { script ->
         ScriptDeleteDialog(script, onDismiss = { deleteScriptId = null })
+    }
+    if (generateOpen) {
+        TestScriptDraftDialog(
+            existing = null,
+            onApplied = { ui.view.selectedScriptId = it.id },
+            onDismiss = { generateOpen = false; ui.reclaimFocus() },
+        )
+    }
+    library.scripts.firstOrNull { it.id == regenerateScriptId }?.let { script ->
+        TestScriptDraftDialog(
+            existing = script,
+            onApplied = { ui.view.selectedScriptId = it.id },
+            onDismiss = { regenerateScriptId = null; ui.reclaimFocus() },
+        )
     }
 }
 
@@ -290,12 +319,12 @@ private fun ScriptReturnBar(ui: TestsUi) {
 }
 
 /**
- * The selected script's editor: the tool name as the title with the ⋯ menu (Duplicate, Import JSON…, Export JSON…, Delete…), then
+ * The selected script's editor: the tool name as the title with the ⋯ menu (Duplicate, Import JSON…, Regenerate with AI…, Export JSON…, Delete…), then
  * its description, parameters, command and settings.
  */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun ScriptEditor(script: TestScript, editable: Boolean, onDelete: () -> Unit) {
+private fun ScriptEditor(script: TestScript, editable: Boolean, onDelete: () -> Unit, onRegenerate: () -> Unit) {
     val ui = LocalTestsUi.current
     var actionError by remember { mutableStateOf<String?>(null) }
     val update: ((TestScript) -> TestScript) -> StoreResult<*> = { transform -> ui.state.updateTestScript(script.id, transform) }
@@ -315,6 +344,10 @@ private fun ScriptEditor(script: TestScript, editable: Boolean, onDelete: () -> 
             TestsMenuItem(
                 "Import JSON…",
                 onClick = { importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { actionError = it }) },
+                enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE,
+            ),
+            TestsMenuItem(
+                "Regenerate with AI…", onClick = onRegenerate,
                 enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE,
             ),
             TestsMenuItem("Export JSON…", onClick = { exportScriptJson(ui, script) { actionError = it } }),

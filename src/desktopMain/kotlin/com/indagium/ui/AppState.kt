@@ -2845,6 +2845,11 @@ class AppState(
             insertWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
         )
     }
+    internal val testScriptDraftService by lazy {
+        com.indagium.testing.authoring.TestScriptDraftService(
+            generate = { profileId, prompt, model, effort, onUsage -> generateTestScriptDraft(profileId, prompt, model, effort, onUsage) },
+        )
+    }
     internal val testCaseImproveService by lazy {
         com.indagium.testing.authoring.TestCaseImproveService(
             library = { testLibrary },
