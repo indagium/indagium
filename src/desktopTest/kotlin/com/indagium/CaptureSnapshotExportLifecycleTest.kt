@@ -8,15 +8,19 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.indagium.capture.CaptureArchiveExporter
+import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
-import com.indagium.capture.CaptureDevice
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
 import com.indagium.ui.captureExportStatusFor
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import org.junit.Rule
 import java.io.File
 import java.io.IOException
 import java.util.concurrent.CountDownLatch
@@ -28,12 +32,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import org.junit.Rule
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 
 @OptIn(ExperimentalTestApi::class)
+@Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
 class CaptureSnapshotExportLifecycleTest {
     @get:Rule
     val composeRule = createComposeRule()

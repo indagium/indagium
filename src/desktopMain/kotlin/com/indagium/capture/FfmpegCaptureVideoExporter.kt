@@ -1,5 +1,6 @@
 package com.indagium.capture
 
+import com.indagium.video.configureCaptureMkvOpusDecoder
 import org.bytedeco.ffmpeg.avcodec.AVPacket
 import org.bytedeco.ffmpeg.avformat.AVFormatContext
 import org.bytedeco.ffmpeg.avformat.AVIOContext
@@ -41,10 +42,9 @@ import org.bytedeco.javacpp.Pointer
 import org.bytedeco.javacpp.PointerPointer
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.FFmpegFrameRecorder
-import org.bytedeco.javacv.FrameGrabber
 import org.bytedeco.javacv.Frame
+import org.bytedeco.javacv.FrameGrabber
 import org.bytedeco.javacv.Java2DFrameConverter
-import com.indagium.video.configureCaptureMkvOpusDecoder
 import java.awt.Color
 import java.awt.Font
 import java.awt.RenderingHints
@@ -53,8 +53,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.nio.ByteBuffer
-import java.nio.channels.FileChannel
 import java.nio.ShortBuffer
+import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -350,7 +350,7 @@ private const val GAP_CARD_FALLBACK_HEIGHT = 720
  * the raw recorder's mixed microphone/device-audio stream already contains microphone samples and
  * device silence where that source was unavailable.
  */
-@Suppress("LongParameterList", "TooGenericExceptionCaught")
+@Suppress("LongParameterList")
 private fun renderAvailabilityTimeline(
     source: File?,
     destination: File,
@@ -362,32 +362,22 @@ private fun renderAvailabilityTimeline(
     sourceDecoderPath: String?,
 ): CaptureVideoClip {
     checkInterrupted()
-    val videoEncoder = findEncoder(GAP_VIDEO_ENCODER_CANDIDATES)
-        ?: throw IOException("No H.264 encoder is available to render device-unavailable cards")
+    val videoEncoder = requireEncoder(GAP_VIDEO_ENCODER_CANDIDATES, "No H.264 encoder is available to render device-unavailable cards")
     var input = source?.let(::boundedSnapshotGrabber)
     var recorder: FFmpegFrameRecorder? = null
     var recorderStarted = false
     val converter = Java2DFrameConverter()
-    var outputFrames = 0L
     var grabberStarted = false
     try {
         if (input != null) {
-            sourceDecoderPath?.let { configureCaptureMkvOpusDecoder(input, it) }
-            input.sampleMode = FrameGrabber.SampleMode.SHORT
-            input.sampleFormat = AV_SAMPLE_FMT_S16
-            input.start()
+            startAvailabilityGrabber(input, sourceDecoderPath)
             grabberStarted = true
         }
 
-        val videoStreamPresent = input != null && input.videoStream >= 0 && input.imageWidth > 0 && input.imageHeight > 0
-        if (input != null && !videoStreamPresent && !availabilityCoversRange(gaps, timelineStartElapsedMs, timelineEndElapsedMs)) {
+        val media = availabilityMediaInfo(input)
+        if (input != null && !media.videoPresent && !availabilityCoversRange(gaps, timelineStartElapsedMs, timelineEndElapsedMs)) {
             throw IOException("Capture video has no readable image stream outside the device-unavailable intervals")
         }
-        val width = (if (videoStreamPresent) input!!.imageWidth else GAP_CARD_FALLBACK_WIDTH).coerceAtLeast(2)
-        val height = (if (videoStreamPresent) input!!.imageHeight else GAP_CARD_FALLBACK_HEIGHT).coerceAtLeast(2)
-        val audioStreamPresent = input != null && input.audioStream >= 0 && input.audioChannels > 0 && input.sampleRate > 0
-        val audioChannels = if (audioStreamPresent) input!!.audioChannels else 0
-        val sourceSampleRate = if (audioStreamPresent) input!!.sampleRate else 0
         val startUs = elapsedMillisToMicros(timelineStartElapsedMs)
         val endUs = elapsedMillisToMicros(timelineEndElapsedMs)
         val originUs = elapsedMillisToMicros(sourceElapsedOriginMs)
@@ -400,185 +390,32 @@ private fun renderAvailabilityTimeline(
             input = positionForAvailabilityExport(input, requireNotNull(source), sourceStartUs, sourceDecoderPath)
         }
 
-        val recorderInstance = FFmpegFrameRecorder(destination, width, height, audioChannels).apply {
-            format = muxFormatFor(mp4)
-            videoCodec = videoEncoder.second
-            videoCodecName = videoEncoder.first
-            frameRate = GAP_CARD_FPS
-            gopSize = GAP_CARD_GOP_SIZE
-            videoBitrate = REENCODE_FALLBACK_BITRATE
-            pixelFormat = AV_PIX_FMT_YUV420P
-            setVideoOption("threads", EXPORT_FFMPEG_THREADS)
-            if (videoStreamPresent) setDisplayRotation(input!!.displayRotation)
-            if (audioChannels > 0) {
-                sampleRate = sourceSampleRate
-                audioBitrate = GAP_AUDIO_BITRATE
-                val audioEncoder = findEncoder(if (mp4) GAP_MP4_AUDIO_ENCODERS else GAP_MKV_AUDIO_ENCODERS)
-                    ?: throw IOException("No compatible audio encoder is available to preserve capture audio")
-                audioCodec = audioEncoder.second
-                audioCodecName = audioEncoder.first
-                setAudioOption("threads", EXPORT_FFMPEG_THREADS)
-            }
-            if (mp4) setOption("movflags", "faststart")
-        }
+        val recorderInstance = createAvailabilityRecorder(
+            destination,
+            media,
+            mp4,
+            videoEncoder,
+            displayRotation = if (media.videoPresent) input!!.displayRotation else null,
+        )
         recorder = recorderInstance
         recorderInstance.start()
         recorderStarted = true
 
-        var nextGapIndex = 0
-        var nextGapFrameUs = gaps.firstOrNull()?.let { elapsedMillisToMicros(it.startElapsedMs) }
-        var activeCardGapIndex = -1
-        var activeCard: BufferedImage? = null
-        var lastRenderedVideoUs = Long.MIN_VALUE
-        var lastEncodedVideoTick = Long.MIN_VALUE
-        var lastConnectedImageUs = Long.MIN_VALUE
-        var heldImage: BufferedImage? = null
-        var timelineStartFrameWritten = false
-        val latestOfflineEndUs = gaps.lastOrNull()?.let { elapsedMillisToMicros(it.endElapsedMs) }
-        val audioWriter = if (audioStreamPresent) {
-            AvailabilityAudioWriter(recorderInstance, sourceSampleRate, audioChannels, startUs, endUs)
+        val writer = AvailabilityTimelineWriter(recorderInstance, converter, gaps, media.width, media.height, startUs, endUs)
+        val audioWriter = if (media.audioPresent) {
+            AvailabilityAudioWriter(recorderInstance, media.sampleRate, media.audioChannels, startUs, endUs)
         } else {
             null
         }
 
-        fun writeImageFrame(image: BufferedImage, captureUs: Long): Boolean {
-            checkInterrupted()
-            if (captureUs < startUs || captureUs >= endUs) return false
-            val deltaUs = captureUs - startUs
-            val frameTick = kotlin.math.round(deltaUs.toDouble() * GAP_CARD_FPS / MICROS_PER_SECOND).toLong()
-            // FFmpegFrameRecorder's video timebase is 1/frameRate. A source frame can quantize to
-            // the same tick as a generated card (or another source frame, especially if the
-            // device briefly emits above 30fps). Keep one packet per output tick; coalescing keeps
-            // source timing intact, while forcing duplicate timestamps would make the muxer reject
-            // DTS or stretch a dense source past the selected capture duration.
-            if (frameTick <= lastEncodedVideoTick) return false
-            if (frameTick > Int.MAX_VALUE) throw IOException("Capture video duration exceeds the encoder's frame range")
-            val frame = converter.convert(image)
-                ?: throw IOException("FFmpeg could not convert a capture video frame")
-            recorderInstance.frameNumber = frameTick.toInt()
-            recorderInstance.record(frame)
-            outputFrames++
-            lastEncodedVideoTick = frameTick
-            lastRenderedVideoUs = captureUs
-            return true
-        }
-
-        fun writeCardFrame(gapIndex: Int, captureUs: Long) {
-            val gap = gaps[gapIndex]
-            if (activeCardGapIndex != gapIndex) {
-                activeCard = unavailableCardImage(width, height, gap)
-                activeCardGapIndex = gapIndex
-            }
-            writeImageFrame(requireNotNull(activeCard), captureUs)
-        }
-
-        fun writeConnectedImageAt(captureUs: Long) {
-            if (captureUs < startUs || captureUs >= endUs) return
-            val gapIndex = unavailableGapIndex(captureUs / MICROS_PER_MILLI, gaps)
-            if (gapIndex >= 0) return
-            writeImageFrame(heldImage ?: BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR), captureUs)
-            timelineStartFrameWritten = true
-        }
-
-        fun advanceVideoTimelineBefore(captureUs: Long) {
-            if (captureUs > startUs && !timelineStartFrameWritten && unavailableGapIndex(startUs / MICROS_PER_MILLI, gaps) < 0) {
-                writeConnectedImageAt(startUs)
-            }
-            while (nextGapIndex < gaps.size) {
-                val gap = gaps[nextGapIndex]
-                val gapStartUs = elapsedMillisToMicros(gap.startElapsedMs)
-                val gapEndUs = elapsedMillisToMicros(gap.endElapsedMs)
-                if (nextGapFrameUs == null) nextGapFrameUs = gapStartUs
-                val frameLimitUs = minOf(captureUs, gapEndUs)
-                var cursor = requireNotNull(nextGapFrameUs)
-                while (cursor < frameLimitUs) {
-                    writeCardFrame(nextGapIndex, cursor)
-                    cursor = saturatingAddTimestamp(cursor, GAP_CARD_STEP_US)
-                }
-                nextGapFrameUs = cursor
-                if (captureUs < gapEndUs) return
-                // Keep the card on screen after the interval closes until an actual post-reconnect
-                // video frame arrives. A connected device may not emit a frame immediately, and
-                // restoring the pre-gap image here would falsely imply we observed the screen.
-                nextGapIndex++
-                nextGapFrameUs = gaps.getOrNull(nextGapIndex)?.let { elapsedMillisToMicros(it.startElapsedMs) }
-            }
-        }
-
         if (input != null) {
-            while (true) {
-                checkInterrupted()
-                val frame = try {
-                    input.grab()
-                } catch (failure: Exception) {
-                    if (Thread.currentThread().isInterrupted) throw InterruptedIOException("Availability export cancelled")
-                    throw IOException("Could not decode the capture while rendering unavailable intervals", failure)
-                } ?: break
-                val sourcePtsUs = frame.timestamp.coerceAtLeast(0L)
-                val captureUs = saturatingAddTimestamp(sourcePtsUs, originUs)
-                if (captureUs >= endUs) break
-                advanceVideoTimelineBefore(captureUs)
-                if (!frame.image.isNullOrEmpty()) {
-                    val image = converter.convert(frame)
-                        ?: throw IOException("FFmpeg could not convert a decoded capture frame")
-                    val inOfflineInterval = unavailableGapIndex(captureUs / MICROS_PER_MILLI, gaps) >= 0
-                    if (!inOfflineInterval) {
-                        heldImage = copyImage(image)
-                        lastConnectedImageUs = captureUs
-                    }
-                    if (captureUs >= startUs && !inOfflineInterval) {
-                        if (writeImageFrame(image, captureUs)) timelineStartFrameWritten = true
-                    }
-                }
-                if (!frame.samples.isNullOrEmpty()) {
-                    // Capture audio is already a continuous mixed stream: microphone PCM continues
-                    // during an offline device interval and missing device audio is silence. Rebase
-                    // and fill any timestamp holes by sample count so audio never collapses gaps.
-                    audioWriter?.write(frame, captureUs)
-                }
-            }
-            // If the final decoded image predates an online tail, hold it through that tail. This
-            // covers scrcpy's static-screen behavior, where no new packet is emitted until pixels
-            // change, without inventing unavailable intervals.
-            val finalGap = unavailableGapIndex((endUs - 1L) / MICROS_PER_MILLI, gaps)
-            val sourceHasResumedAfterLatestGap = latestOfflineEndUs == null || lastConnectedImageUs >= latestOfflineEndUs
-            if (finalGap < 0 && heldImage != null && sourceHasResumedAfterLatestGap && lastConnectedImageUs < endUs - GAP_CARD_STEP_US) {
-                if (!timelineStartFrameWritten && unavailableGapIndex(startUs / MICROS_PER_MILLI, gaps) < 0) {
-                    writeConnectedImageAt(startUs)
-                }
-                writeConnectedImageAt((endUs - GAP_CARD_STEP_US).coerceAtLeast(startUs))
-            }
+            decodeAvailabilityFrames(input, converter, writer, audioWriter, originUs, endUs)
+            writer.holdFinalImageThroughOnlineTail()
         }
 
-        advanceVideoTimelineBefore(endUs)
-        // A gap can close before the selected clip ends even though capture never produced a
-        // resumed image (for example Stop while the phone stayed offline). In that case keep the
-        // last unavailable card on screen through the unobserved tail. Returning to the held
-        // pre-reboot image would imply that we observed the device after it came back online.
-        val lastGapIndex = gaps.lastIndex
-        if (lastGapIndex >= 0 && latestOfflineEndUs != null &&
-            lastConnectedImageUs < latestOfflineEndUs && endUs > latestOfflineEndUs &&
-            unavailableGapIndex((endUs - 1L).coerceAtLeast(0L) / MICROS_PER_MILLI, gaps) < 0
-        ) {
-            var cursor = maxOf(startUs, latestOfflineEndUs)
-            while (cursor < endUs) {
-                writeCardFrame(lastGapIndex, cursor)
-                cursor = saturatingAddTimestamp(cursor, GAP_CARD_STEP_US)
-            }
-        }
-        // A true trailing offline interval has cards through the end. Otherwise make the final
-        // held picture last until the selected boundary so the output's physical duration agrees
-        // with its declared timeline even when the device screen remained static.
-        val sourceHasResumedAfterLatestGap = latestOfflineEndUs == null || lastConnectedImageUs >= latestOfflineEndUs
-        if (unavailableGapIndex((endUs - 1L).coerceAtLeast(0L) / MICROS_PER_MILLI, gaps) < 0 && sourceHasResumedAfterLatestGap) {
-            if (!timelineStartFrameWritten && unavailableGapIndex(startUs / MICROS_PER_MILLI, gaps) < 0) {
-                writeConnectedImageAt(startUs)
-            }
-            val finalImageUs = (endUs - GAP_CARD_STEP_US).coerceAtLeast(startUs)
-            if (finalImageUs > lastRenderedVideoUs) writeConnectedImageAt(finalImageUs)
-        }
+        writer.finishTimeline()
         audioWriter?.finish()
-        if (outputFrames == 0L) throw IOException("Availability export produced no video frames")
+        if (writer.outputFrames == 0L) throw IOException("Availability export produced no video frames")
         recorderInstance.stop()
         recorderStarted = false
         checkInterrupted()
@@ -594,6 +431,267 @@ private fun renderAvailabilityTimeline(
         runCatching { converter.close() }
         if (grabberStarted) runCatching { input?.stop() }
         runCatching { input?.release() }
+    }
+}
+
+private fun configureAvailabilityGrabber(grabber: FFmpegFrameGrabber, sourceDecoderPath: String?) {
+    sourceDecoderPath?.let { configureCaptureMkvOpusDecoder(grabber, it) }
+    grabber.sampleMode = FrameGrabber.SampleMode.SHORT
+    grabber.sampleFormat = AV_SAMPLE_FMT_S16
+}
+
+private fun startAvailabilityGrabber(input: FFmpegFrameGrabber, sourceDecoderPath: String?) {
+    configureAvailabilityGrabber(input, sourceDecoderPath)
+    input.start()
+}
+
+private fun seekAvailabilityGrabber(grabber: FFmpegFrameGrabber, timestampUs: Long, failureMessage: String) {
+    runCatching { grabber.setTimestamp(timestampUs) }
+        .onFailure { throw IOException(failureMessage, it) }
+}
+
+/** What the started source offers; a missing source or stream falls back to a card-only frame size and no audio. */
+private class AvailabilityMediaInfo(
+    val videoPresent: Boolean,
+    val width: Int,
+    val height: Int,
+    val audioPresent: Boolean,
+    val audioChannels: Int,
+    val sampleRate: Int,
+)
+
+private fun availabilityMediaInfo(input: FFmpegFrameGrabber?): AvailabilityMediaInfo {
+    val videoPresent = input != null && input.videoStream >= 0 && input.imageWidth > 0 && input.imageHeight > 0
+    val audioPresent = input != null && input.audioStream >= 0 && input.audioChannels > 0 && input.sampleRate > 0
+    return AvailabilityMediaInfo(
+        videoPresent = videoPresent,
+        width = (if (videoPresent) input!!.imageWidth else GAP_CARD_FALLBACK_WIDTH).coerceAtLeast(2),
+        height = (if (videoPresent) input!!.imageHeight else GAP_CARD_FALLBACK_HEIGHT).coerceAtLeast(2),
+        audioPresent = audioPresent,
+        audioChannels = if (audioPresent) input!!.audioChannels else 0,
+        sampleRate = if (audioPresent) input!!.sampleRate else 0,
+    )
+}
+
+private fun requireEncoder(candidates: List<String>, unavailableMessage: String): Pair<String, Int> =
+    findEncoder(candidates) ?: throw IOException(unavailableMessage)
+
+private fun createAvailabilityRecorder(
+    destination: File,
+    media: AvailabilityMediaInfo,
+    mp4: Boolean,
+    videoEncoder: Pair<String, Int>,
+    displayRotation: Double?,
+): FFmpegFrameRecorder = FFmpegFrameRecorder(destination, media.width, media.height, media.audioChannels).apply {
+    format = muxFormatFor(mp4)
+    videoCodec = videoEncoder.second
+    videoCodecName = videoEncoder.first
+    frameRate = GAP_CARD_FPS
+    gopSize = GAP_CARD_GOP_SIZE
+    videoBitrate = REENCODE_FALLBACK_BITRATE
+    pixelFormat = AV_PIX_FMT_YUV420P
+    setVideoOption("threads", EXPORT_FFMPEG_THREADS)
+    if (displayRotation != null) setDisplayRotation(displayRotation)
+    if (media.audioChannels > 0) {
+        sampleRate = media.sampleRate
+        audioBitrate = GAP_AUDIO_BITRATE
+        val audioEncoder = requireEncoder(
+            if (mp4) GAP_MP4_AUDIO_ENCODERS else GAP_MKV_AUDIO_ENCODERS,
+            "No compatible audio encoder is available to preserve capture audio",
+        )
+        audioCodec = audioEncoder.second
+        audioCodecName = audioEncoder.first
+        setAudioOption("threads", EXPORT_FFMPEG_THREADS)
+    }
+    if (mp4) setOption("movflags", "faststart")
+}
+
+/** Feeds every decoded source frame up to [endUs] through the timeline and audio writers. */
+private fun decodeAvailabilityFrames(
+    input: FFmpegFrameGrabber,
+    converter: Java2DFrameConverter,
+    writer: AvailabilityTimelineWriter,
+    audioWriter: AvailabilityAudioWriter?,
+    originUs: Long,
+    endUs: Long,
+) {
+    while (true) {
+        checkInterrupted()
+        val frame = grabAvailabilityFrame(input) ?: break
+        val sourcePtsUs = frame.timestamp.coerceAtLeast(0L)
+        val captureUs = saturatingAddTimestamp(sourcePtsUs, originUs)
+        if (captureUs >= endUs) break
+        writer.advanceVideoTimelineBefore(captureUs)
+        if (!frame.image.isNullOrEmpty()) {
+            val image = converter.convert(frame)
+                ?: throw IOException("FFmpeg could not convert a decoded capture frame")
+            writer.writeDecodedImage(image, captureUs)
+        }
+        if (!frame.samples.isNullOrEmpty()) {
+            // Capture audio is already a continuous mixed stream: microphone PCM continues
+            // during an offline device interval and missing device audio is silence. Rebase
+            // and fill any timestamp holes by sample count so audio never collapses gaps.
+            audioWriter?.write(frame, captureUs)
+        }
+    }
+}
+
+// Any decoder failure ends the export; only an interrupt is reported as a cancellation.
+@Suppress("TooGenericExceptionCaught")
+private fun grabAvailabilityFrame(input: FFmpegFrameGrabber): Frame? = try {
+    input.grab()
+} catch (failure: Exception) {
+    if (Thread.currentThread().isInterrupted) throw InterruptedIOException("Availability export cancelled")
+    throw IOException("Could not decode the capture while rendering unavailable intervals", failure)
+}
+
+/**
+ * Writes the availability export's video track: source frames while the device was connected,
+ * unavailable cards while it was not, and held pictures where a static screen emitted no packets.
+ * Only the export's own thread touches an instance.
+ */
+private class AvailabilityTimelineWriter(
+    private val recorder: FFmpegFrameRecorder,
+    private val converter: Java2DFrameConverter,
+    private val gaps: List<RenderedUnavailableInterval>,
+    private val width: Int,
+    private val height: Int,
+    private val startUs: Long,
+    private val endUs: Long,
+) {
+    var outputFrames = 0L
+        private set
+    private var nextGapIndex = 0
+    private var nextGapFrameUs: Long? = gaps.firstOrNull()?.let { elapsedMillisToMicros(it.startElapsedMs) }
+    private var activeCardGapIndex = -1
+    private var activeCard: BufferedImage? = null
+    private var lastRenderedVideoUs = Long.MIN_VALUE
+    private var lastEncodedVideoTick = Long.MIN_VALUE
+    private var lastConnectedImageUs = Long.MIN_VALUE
+    private var heldImage: BufferedImage? = null
+    private var timelineStartFrameWritten = false
+    private val latestOfflineEndUs = gaps.lastOrNull()?.let { elapsedMillisToMicros(it.endElapsedMs) }
+
+    private val sourceHasResumedAfterLatestGap: Boolean
+        get() = latestOfflineEndUs == null || lastConnectedImageUs >= latestOfflineEndUs
+
+    private fun unavailableAt(captureUs: Long): Boolean = unavailableGapIndex(captureUs / MICROS_PER_MILLI, gaps) >= 0
+
+    private fun writeImageFrame(image: BufferedImage, captureUs: Long): Boolean {
+        checkInterrupted()
+        if (captureUs < startUs || captureUs >= endUs) return false
+        val deltaUs = captureUs - startUs
+        val frameTick = kotlin.math.round(deltaUs.toDouble() * GAP_CARD_FPS / MICROS_PER_SECOND).toLong()
+        // FFmpegFrameRecorder's video timebase is 1/frameRate. A source frame can quantize to
+        // the same tick as a generated card (or another source frame, especially if the
+        // device briefly emits above 30fps). Keep one packet per output tick; coalescing keeps
+        // source timing intact, while forcing duplicate timestamps would make the muxer reject
+        // DTS or stretch a dense source past the selected capture duration.
+        if (frameTick <= lastEncodedVideoTick) return false
+        if (frameTick > Int.MAX_VALUE) throw IOException("Capture video duration exceeds the encoder's frame range")
+        val frame = converter.convert(image)
+            ?: throw IOException("FFmpeg could not convert a capture video frame")
+        recorder.frameNumber = frameTick.toInt()
+        recorder.record(frame)
+        outputFrames++
+        lastEncodedVideoTick = frameTick
+        lastRenderedVideoUs = captureUs
+        return true
+    }
+
+    private fun writeCardFrame(gapIndex: Int, captureUs: Long) {
+        val gap = gaps[gapIndex]
+        if (activeCardGapIndex != gapIndex) {
+            activeCard = unavailableCardImage(width, height, gap)
+            activeCardGapIndex = gapIndex
+        }
+        writeImageFrame(requireNotNull(activeCard), captureUs)
+    }
+
+    private fun writeConnectedImageAt(captureUs: Long) {
+        if (captureUs < startUs || captureUs >= endUs) return
+        if (unavailableAt(captureUs)) return
+        writeImageFrame(heldImage ?: BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR), captureUs)
+        timelineStartFrameWritten = true
+    }
+
+    private fun writeTimelineStartImageIfMissing() {
+        if (!timelineStartFrameWritten && !unavailableAt(startUs)) writeConnectedImageAt(startUs)
+    }
+
+    fun advanceVideoTimelineBefore(captureUs: Long) {
+        if (captureUs > startUs) writeTimelineStartImageIfMissing()
+        while (nextGapIndex < gaps.size) {
+            val gap = gaps[nextGapIndex]
+            val gapStartUs = elapsedMillisToMicros(gap.startElapsedMs)
+            val gapEndUs = elapsedMillisToMicros(gap.endElapsedMs)
+            if (nextGapFrameUs == null) nextGapFrameUs = gapStartUs
+            val frameLimitUs = minOf(captureUs, gapEndUs)
+            var cursor = requireNotNull(nextGapFrameUs)
+            while (cursor < frameLimitUs) {
+                writeCardFrame(nextGapIndex, cursor)
+                cursor = saturatingAddTimestamp(cursor, GAP_CARD_STEP_US)
+            }
+            nextGapFrameUs = cursor
+            if (captureUs < gapEndUs) return
+            // Keep the card on screen after the interval closes until an actual post-reconnect
+            // video frame arrives. A connected device may not emit a frame immediately, and
+            // restoring the pre-gap image here would falsely imply we observed the screen.
+            nextGapIndex++
+            nextGapFrameUs = gaps.getOrNull(nextGapIndex)?.let { elapsedMillisToMicros(it.startElapsedMs) }
+        }
+    }
+
+    /** Remembers a decoded connected frame and writes it once the selected window has started. */
+    fun writeDecodedImage(image: BufferedImage, captureUs: Long) {
+        val inOfflineInterval = unavailableAt(captureUs)
+        if (!inOfflineInterval) {
+            heldImage = copyImage(image)
+            lastConnectedImageUs = captureUs
+        }
+        if (captureUs >= startUs && !inOfflineInterval) {
+            if (writeImageFrame(image, captureUs)) timelineStartFrameWritten = true
+        }
+    }
+
+    /**
+     * If the final decoded image predates an online tail, hold it through that tail. This
+     * covers scrcpy's static-screen behavior, where no new packet is emitted until pixels
+     * change, without inventing unavailable intervals.
+     */
+    fun holdFinalImageThroughOnlineTail() {
+        val inFinalGap = unavailableAt(endUs - 1L)
+        if (!inFinalGap && heldImage != null && sourceHasResumedAfterLatestGap && lastConnectedImageUs < endUs - GAP_CARD_STEP_US) {
+            writeTimelineStartImageIfMissing()
+            writeConnectedImageAt((endUs - GAP_CARD_STEP_US).coerceAtLeast(startUs))
+        }
+    }
+
+    /** Closes the track: remaining cards, then a picture that lasts until the selected end. */
+    fun finishTimeline() {
+        advanceVideoTimelineBefore(endUs)
+        // A gap can close before the selected clip ends even though capture never produced a
+        // resumed image (for example Stop while the phone stayed offline). In that case keep the
+        // last unavailable card on screen through the unobserved tail. Returning to the held
+        // pre-reboot image would imply that we observed the device after it came back online.
+        val lastGapIndex = gaps.lastIndex
+        val onlineTailWithoutResume = latestOfflineEndUs != null && lastConnectedImageUs < latestOfflineEndUs &&
+            endUs > latestOfflineEndUs && !unavailableAt((endUs - 1L).coerceAtLeast(0L))
+        if (lastGapIndex >= 0 && onlineTailWithoutResume) {
+            var cursor = maxOf(startUs, requireNotNull(latestOfflineEndUs))
+            while (cursor < endUs) {
+                writeCardFrame(lastGapIndex, cursor)
+                cursor = saturatingAddTimestamp(cursor, GAP_CARD_STEP_US)
+            }
+        }
+        // A true trailing offline interval has cards through the end. Otherwise make the final
+        // held picture last until the selected boundary so the output's physical duration agrees
+        // with its declared timeline even when the device screen remained static.
+        if (!unavailableAt((endUs - 1L).coerceAtLeast(0L)) && sourceHasResumedAfterLatestGap) {
+            writeTimelineStartImageIfMissing()
+            val finalImageUs = (endUs - GAP_CARD_STEP_US).coerceAtLeast(startUs)
+            if (finalImageUs > lastRenderedVideoUs) writeConnectedImageAt(finalImageUs)
+        }
     }
 }
 
@@ -655,21 +753,15 @@ private fun positionForAvailabilityExport(
     sourceDecoderPath: String?,
 ): FFmpegFrameGrabber {
     if (grabber.videoStream < 0) {
-        runCatching { grabber.setTimestamp(sourceStartUs) }
-            .onFailure { throw IOException("Could not position capture audio near the selected interval", it) }
+        seekAvailabilityGrabber(grabber, sourceStartUs, "Could not position capture audio near the selected interval")
         return grabber
     }
     val firstKeyframeUs = findAvailabilitySeekKeyframe(source, sourceStartUs) ?: run {
-        runCatching { grabber.setTimestamp(sourceStartUs) }
-            .onFailure { throw IOException("Could not position capture decoder near the selected interval", it) }
+        seekAvailabilityGrabber(grabber, sourceStartUs, "Could not position capture decoder near the selected interval")
         return grabber
     }
     var keyframeUs = firstKeyframeUs
-    val configureFreshGrabber: (FFmpegFrameGrabber) -> Unit = { candidate ->
-        sourceDecoderPath?.let { configureCaptureMkvOpusDecoder(candidate, it) }
-        candidate.sampleMode = FrameGrabber.SampleMode.SHORT
-        candidate.sampleFormat = AV_SAMPLE_FMT_S16
-    }
+    val configureFreshGrabber: (FFmpegFrameGrabber) -> Unit = { candidate -> configureAvailabilityGrabber(candidate, sourceDecoderPath) }
     var positioned = positionAtOrBeforeKeyframe(grabber, source, keyframeUs, configureFreshGrabber)
     while (positioned.usedSeek && (positioned.landedFrame?.timestamp ?: Long.MIN_VALUE) > sourceStartUs) {
         // Heuristic seeking in a growing/truncated Matroska file can land on a later keyframe even
@@ -686,8 +778,11 @@ private fun positionForAvailabilityExport(
     // positionAtOrBeforeKeyframe consumes one image to verify a seek. Re-seek to that verified
     // image's timestamp so the renderer decodes it again as the first usable still frame.
     if (positioned.usedSeek) {
-        runCatching { positionedGrabber.setTimestamp(positioned.landedFrame?.timestamp ?: keyframeUs) }
-            .onFailure { throw IOException("Could not rewind to the selected capture keyframe", it) }
+        seekAvailabilityGrabber(
+            positionedGrabber,
+            positioned.landedFrame?.timestamp ?: keyframeUs,
+            "Could not rewind to the selected capture keyframe",
+        )
     }
     return positionedGrabber
 }
@@ -785,32 +880,57 @@ private fun unavailableGapIndex(elapsedMs: Long, gaps: List<RenderedUnavailableI
     return -1
 }
 
+// Unavailable-card look. The border box is a fraction of the frame; strokes, corners and font sizes
+// scale with the shorter side so the card reads the same on portrait and landscape recordings.
+private val CARD_BACKGROUND_COLOR = Color(12, 17, 24)
+private val CARD_ACCENT_COLOR = Color(246, 190, 78)
+private val CARD_DETAIL_COLOR = Color(231, 235, 242)
+private val CARD_REBOOT_COLOR = Color(174, 185, 198)
+private const val CARD_BORDER_LEFT = 0.08
+private const val CARD_BORDER_TOP = 0.12
+private const val CARD_BORDER_WIDTH = 0.84
+private const val CARD_BORDER_HEIGHT = 0.76
+private const val CARD_STROKE_SCALE = 0.004
+private const val CARD_MIN_STROKE = 2f
+private const val CARD_CORNER_RADIUS_SCALE = 0.025
+private const val CARD_TITLE_SCALE = 0.075
+private const val CARD_TITLE_MIN_SIZE = 22
+private const val CARD_TITLE_MAX_SIZE = 76
+private const val CARD_DETAIL_TITLE_SCALE = 0.42
+private const val CARD_DETAIL_MIN_SIZE = 13
+private const val CARD_REBOOT_DETAIL_SCALE = 0.84
+private const val CARD_REBOOT_MIN_SIZE = 11
+private const val CARD_REBOOT_LINE_OFFSET = 3.2
+private const val CARD_TEXT_MAX_WIDTH_SCALE = 0.84
+private const val CARD_TEXT_MIN_FONT_SIZE = 10
+
 private fun unavailableCardImage(width: Int, height: Int, gap: RenderedUnavailableInterval): BufferedImage {
     val image = BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR)
     val graphics = image.createGraphics()
     try {
-        graphics.color = Color(12, 17, 24)
+        graphics.color = CARD_BACKGROUND_COLOR
         graphics.fillRect(0, 0, width, height)
         graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON)
         graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
         val centerX = width / 2
         val centerY = height / 2
-        graphics.color = Color(246, 190, 78)
-        graphics.stroke = java.awt.BasicStroke((minOf(width, height) * 0.004).toFloat().coerceAtLeast(2f))
+        graphics.color = CARD_ACCENT_COLOR
+        graphics.stroke = java.awt.BasicStroke((minOf(width, height) * CARD_STROKE_SCALE).toFloat().coerceAtLeast(CARD_MIN_STROKE))
+        val cornerRadius = (minOf(width, height) * CARD_CORNER_RADIUS_SCALE).toInt()
         graphics.drawRoundRect(
-            (width * 0.08).toInt(),
-            (height * 0.12).toInt(),
-            (width * 0.84).toInt(),
-            (height * 0.76).toInt(),
-            (minOf(width, height) * 0.025).toInt(),
-            (minOf(width, height) * 0.025).toInt(),
+            (width * CARD_BORDER_LEFT).toInt(),
+            (height * CARD_BORDER_TOP).toInt(),
+            (width * CARD_BORDER_WIDTH).toInt(),
+            (height * CARD_BORDER_HEIGHT).toInt(),
+            cornerRadius,
+            cornerRadius,
         )
-        val titleSize = (minOf(width, height) * 0.075).toInt().coerceIn(22, 76)
-        val detailSize = (titleSize * 0.42).toInt().coerceAtLeast(13)
-        graphics.color = Color(246, 190, 78)
+        val titleSize = (minOf(width, height) * CARD_TITLE_SCALE).toInt().coerceIn(CARD_TITLE_MIN_SIZE, CARD_TITLE_MAX_SIZE)
+        val detailSize = (titleSize * CARD_DETAIL_TITLE_SCALE).toInt().coerceAtLeast(CARD_DETAIL_MIN_SIZE)
+        graphics.color = CARD_ACCENT_COLOR
         graphics.font = Font(Font.SANS_SERIF, Font.BOLD, titleSize)
         drawCenteredText(graphics, "DEVICE UNAVAILABLE", centerX, centerY - titleSize)
-        graphics.color = Color(231, 235, 242)
+        graphics.color = CARD_DETAIL_COLOR
         graphics.font = Font(Font.SANS_SERIF, Font.PLAIN, detailSize)
         val originalDuration = gap.evidence.endElapsedMs?.let { (it - gap.evidence.startElapsedMs).coerceAtLeast(0L) }
             ?: (gap.endElapsedMs - gap.evidence.startElapsedMs).coerceAtLeast(0L)
@@ -820,9 +940,9 @@ private fun unavailableCardImage(width: Int, height: Int, gap: RenderedUnavailab
             false -> "Device reconnected without a reboot"
             null -> "Reboot status unknown"
         }
-        graphics.color = Color(174, 185, 198)
-        graphics.font = Font(Font.SANS_SERIF, Font.PLAIN, (detailSize * 0.84).toInt().coerceAtLeast(11))
-        drawCenteredText(graphics, reboot, centerX, (centerY + detailSize * 3.2).toInt())
+        graphics.color = CARD_REBOOT_COLOR
+        graphics.font = Font(Font.SANS_SERIF, Font.PLAIN, (detailSize * CARD_REBOOT_DETAIL_SCALE).toInt().coerceAtLeast(CARD_REBOOT_MIN_SIZE))
+        drawCenteredText(graphics, reboot, centerX, (centerY + detailSize * CARD_REBOOT_LINE_OFFSET).toInt())
     } finally {
         graphics.dispose()
     }
@@ -831,9 +951,9 @@ private fun unavailableCardImage(width: Int, height: Int, gap: RenderedUnavailab
 
 private fun drawCenteredText(graphics: java.awt.Graphics2D, text: String, centerX: Int, baselineY: Int) {
     val originalFont = graphics.font
-    val maxWidth = ((graphics.clipBounds?.width ?: Int.MAX_VALUE) * 0.84).toInt()
+    val maxWidth = ((graphics.clipBounds?.width ?: Int.MAX_VALUE) * CARD_TEXT_MAX_WIDTH_SCALE).toInt()
     var font = originalFont
-    while (graphics.getFontMetrics(font).stringWidth(text) > maxWidth && font.size > 10) {
+    while (graphics.getFontMetrics(font).stringWidth(text) > maxWidth && font.size > CARD_TEXT_MIN_FONT_SIZE) {
         font = font.deriveFont(font.size2D - 1f)
     }
     graphics.font = font
@@ -842,11 +962,15 @@ private fun drawCenteredText(graphics: java.awt.Graphics2D, text: String, center
     graphics.font = originalFont
 }
 
+private const val HALF_SECOND_MS = 500L
+private const val SECONDS_PER_MINUTE = 60L
+private const val SECONDS_PER_HOUR = 3_600L
+
 private fun formatAvailabilityDuration(durationMs: Long): String {
-    val totalSeconds = (durationMs.coerceAtLeast(0L) + 500L) / 1_000L
-    val hours = totalSeconds / 3_600L
-    val minutes = (totalSeconds % 3_600L) / 60L
-    val seconds = totalSeconds % 60L
+    val totalSeconds = (durationMs.coerceAtLeast(0L) + HALF_SECOND_MS) / MILLIS_PER_SECOND
+    val hours = totalSeconds / SECONDS_PER_HOUR
+    val minutes = (totalSeconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE
+    val seconds = totalSeconds % SECONDS_PER_MINUTE
     return when {
         hours > 0L -> "${hours}h ${minutes}m ${seconds}s"
         minutes > 0L -> "${minutes}m ${seconds}s"

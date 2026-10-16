@@ -113,20 +113,22 @@ internal class ScriptedAdbRunner(
                 // actions. Keep the mutation list stable for input and permission assertions while
                 // preserving every command in [specs] for tests that inspect the adb protocol.
                 if (!arguments.isReadOnlyFixtureProbe()) shellCommands += arguments
-                shellResponder?.invoke(arguments) ?: when {
-                    arguments == listOf("getprop", "sys.boot_completed") -> CompletedFakeProcess("1")
-                    arguments == listOf("getprop", "ro.boot.boot_id") -> CompletedFakeProcess(bootId)
-                    arguments == listOf("getprop", "log.tag") -> CompletedFakeProcess("\n")
-                    arguments == listOf("getprop") -> CompletedFakeProcess("[log.tag.FOO]: [D]\n")
-                    arguments == listOf("cat", "/proc/sys/kernel/random/boot_id") -> CompletedFakeProcess(bootId)
-                    arguments == listOf("cat", "/proc/uptime") -> CompletedFakeProcess("${bootUptimeMs / 1000.0} 0.00\n")
-                    arguments == listOf("date", "-u", "+%m-%dT%H:%M:%S") -> CompletedFakeProcess("01-02T03:04:05\n")
-                    arguments == listOf("echo", "capture-ready") -> CompletedFakeProcess("capture-ready\n")
-                    arguments == listOf("id", "-u") -> CompletedFakeProcess("2000\n")
-                    else -> CompletedFakeProcess(shellStdout, code = shellExitCode)
-                }
+                shellResponder?.invoke(arguments) ?: defaultShellResponse(arguments)
             }
         }
+    }
+
+    private fun defaultShellResponse(arguments: List<String>): CompletedFakeProcess = when {
+        arguments == listOf("getprop", "sys.boot_completed") -> CompletedFakeProcess("1")
+        arguments == listOf("getprop", "ro.boot.boot_id") -> CompletedFakeProcess(bootId)
+        arguments == listOf("getprop", "log.tag") -> CompletedFakeProcess("\n")
+        arguments == listOf("getprop") -> CompletedFakeProcess("[log.tag.FOO]: [D]\n")
+        arguments == listOf("cat", "/proc/sys/kernel/random/boot_id") -> CompletedFakeProcess(bootId)
+        arguments == listOf("cat", "/proc/uptime") -> CompletedFakeProcess("${bootUptimeMs / MILLIS_PER_SECOND} 0.00\n")
+        arguments == listOf("date", "-u", "+%m-%dT%H:%M:%S") -> CompletedFakeProcess("01-02T03:04:05\n")
+        arguments == listOf("echo", "capture-ready") -> CompletedFakeProcess("capture-ready\n")
+        arguments == listOf("id", "-u") -> CompletedFakeProcess("2000\n")
+        else -> CompletedFakeProcess(shellStdout, code = shellExitCode)
     }
 
     private fun List<String>.isReadOnlyFixtureProbe(): Boolean = when {
@@ -143,6 +145,7 @@ internal class ScriptedAdbRunner(
     }
 
     private companion object {
+        const val MILLIS_PER_SECOND = 1000.0
         const val LOGCAT_BUFFER_SIZES = """
             main: ring buffer is 256Kb
             system: ring buffer is 256Kb

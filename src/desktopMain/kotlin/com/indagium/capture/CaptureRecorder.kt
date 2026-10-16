@@ -8,11 +8,13 @@ import com.indagium.debug.AppLogger
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -20,7 +22,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
@@ -101,6 +102,21 @@ fun interface CaptureDiskSpace {
     }
 }
 
+/** Test-only knobs of [CaptureRecorder]; production always runs with the defaults. */
+internal data class CaptureRecorderSeams(
+    // Exercises the bounded replay-index overflow path without multi-gigabyte logs.
+    val replayHistoryByteLimit: Int = MAX_REPLAY_HISTORY_BYTES,
+    val replayHistoryRowLimit: Int = MAX_REPLAY_HISTORY_ROWS,
+    // Lets a test hand the recorder a storage stream that fails on demand (disk full).
+    val openStorage: (File) -> FileOutputStream = { FileOutputStream(it, true) },
+    // The bounded post-boot settings restore window. Production waits for Android boot
+    // completion, then verifies that host-side emulator initialization has stopped changing
+    // logd settings before reporting the saved configuration as restored.
+    val loggingRestoreStabilityWindowMs: Long = LOGGING_RESTORE_STABILITY_WINDOW_MS,
+    val loggingRestoreSampleIntervalMs: Long = LOGGING_RESTORE_SAMPLE_INTERVAL_MS,
+    val loggingRestoreBootWaitMs: Long = LOGGING_RESTORE_BOOT_WAIT_MS,
+)
+
 class CaptureRecorder internal constructor(
     private val sessionsRoot: File,
     private val runner: CaptureProcessRunner = ProcessBuilderCaptureRunner(),
@@ -120,17 +136,7 @@ class CaptureRecorder internal constructor(
     private val embeddedTransportFactory: (CaptureTools) -> EmbeddedMirrorTransport = { tools ->
         AdbScrcpyTransport(tools = tools, runner = runner, localRoot = sessionsRoot)
     },
-    // Test seam for exercising the bounded replay-index overflow path without multi-gigabyte logs.
-    private val replayHistoryByteLimitForTests: Int = MAX_REPLAY_HISTORY_BYTES,
-    private val replayHistoryRowLimitForTests: Int = MAX_REPLAY_HISTORY_ROWS,
-    // Test seam: lets a test hand the recorder a storage stream that fails on demand (disk full).
-    private val openStorage: (File) -> FileOutputStream = { FileOutputStream(it, true) },
-    // Test seams for the bounded post-boot settings restore window. Production waits for Android
-    // boot completion, then verifies that host-side emulator initialization has stopped changing
-    // logd settings before reporting the saved configuration as restored.
-    private val loggingRestoreStabilityWindowMs: Long = LOGGING_RESTORE_STABILITY_WINDOW_MS,
-    private val loggingRestoreSampleIntervalMs: Long = LOGGING_RESTORE_SAMPLE_INTERVAL_MS,
-    private val loggingRestoreBootWaitMs: Long = LOGGING_RESTORE_BOOT_WAIT_MS,
+    private val seams: CaptureRecorderSeams = CaptureRecorderSeams(),
 ) : Closeable {
     private val lock = Any()
     private val active = AtomicBoolean(false)
@@ -180,12 +186,18 @@ class CaptureRecorder internal constructor(
     private var lastPublishMs: Long = Long.MIN_VALUE
     private var lastSpaceCheckMs: Long = Long.MIN_VALUE
     private var lastMetadataPersistMs: Long = Long.MIN_VALUE
+
     @Volatile private var lastKnownBootId: String? = null
+
     @Volatile private var lastKnownBootUptimeMs: Long? = null
+
     @Volatile private var bootUptimeObservedElapsedMs: Long = 0
+
     @Volatile private var lastKnownDeviceWallClockMsOfYear: Long? = null
+
     @Volatile private var deviceWallClockObservedElapsedMs: Long = 0
     private var stopLatch = CountDownLatch(0)
+
     /** Wakes the reconnect backoff promptly on Stop without interrupting the active logcat reader. */
     private val reconnectWaitMonitor = Object()
 
@@ -295,8 +307,8 @@ class CaptureRecorder internal constructor(
         var openedLogFile: FileOutputStream? = null
         var openedIndexFile: FileOutputStream? = null
         try {
-            openedLogFile = openStorage(session.logFile)
-            openedIndexFile = openStorage(session.indexFile)
+            openedLogFile = seams.openStorage(session.logFile)
+            openedIndexFile = seams.openStorage(session.indexFile)
         } catch (failure: IOException) {
             runCatching { openedLogFile?.close() }
             runCatching { openedIndexFile?.close() }
@@ -475,15 +487,7 @@ class CaptureRecorder internal constructor(
             val updated = old.copy(deviceLoggingConfiguration = known.mergeKnown(configuration))
             currentSession = updated
             mutableSelectedSession.value = updated
-            try {
-                persistSession(updated)
-            } catch (failure: IOException) {
-                failureMessage = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            } catch (failure: RuntimeException) {
-                failureMessage = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            }
+            failureMessage = persistSessionOrRecordFailureLocked(updated)
         }
         failureMessage?.let { interrupt("Capture storage failed while saving device logging settings: $it") }
     }
@@ -688,7 +692,20 @@ class CaptureRecorder internal constructor(
         }
     }
 
-    @Suppress("TooGenericExceptionCaught")
+    /** The adb logcat process currently being read, with the thread draining its stderr and the fatal line it saw. */
+    private class LogcatStream(
+        var process: RunningCaptureProcess,
+        var processError: AtomicReference<String?>,
+        var errorDrain: Thread,
+    )
+
+    /** What the buffered-log drain before a verified restart's reconnect established for the replacement stream. */
+    private class ReconnectDrainOutcome(
+        val complete: Boolean = false,
+        val cursorEstablishedByPartialDrain: Boolean = false,
+        val replayOccurrenceBudget: Map<ReplayRowFingerprint, Int>? = null,
+    )
+
     private fun consumeLogcat(
         initialProcess: RunningCaptureProcess,
         initialError: AtomicReference<String?>,
@@ -696,175 +713,258 @@ class CaptureRecorder internal constructor(
     ) {
         val session = synchronized(lock) { currentSession } ?: return
         val tools = synchronized(lock) { currentTools } ?: return
-        val readerState = LogcatReaderState(replayHistoryByteLimitForTests, replayHistoryRowLimitForTests)
-        var process = initialProcess
-        var processError = initialError
-        var errorDrain = initialErrorDrain
-        var attempt = 0
+        val readerState = LogcatReaderState(seams.replayHistoryByteLimit, seams.replayHistoryRowLimit)
+        val stream = LogcatStream(initialProcess, initialError, initialErrorDrain)
         while (true) {
-            val storageFailure = consumeLogcatStream(process, readerState)
-            val streamEndedElapsedMs = elapsedNow()
-            process.close()
-            if (errorDrain !== Thread.currentThread()) errorDrain.join(LOGCAT_DIAGNOSTIC_JOIN_MS)
-            synchronized(lock) { if (logProcess === process) logProcess = null }
-            if (storageFailure || !active.get()) return
-            val error = processError.get()
-            if (error != null) {
-                interrupt("Capture stopped because adb logcat rejected its configuration: $error")
-                return
+            val streamEndedElapsedMs = awaitLogcatStreamEnd(stream, readerState) ?: return
+            val readiness = assessLogcatStreamEnd(tools, session, streamEndedElapsedMs) ?: return
+            if (!reconnectLogcat(tools, session, readerState, stream, readiness)) return
+        }
+    }
+
+    /** Reads [stream] to its end. Returns when it ended, or null when the capture is over and the reader should return. */
+    private fun awaitLogcatStreamEnd(stream: LogcatStream, readerState: LogcatReaderState): Long? {
+        val storageFailure = consumeLogcatStream(stream.process, readerState)
+        val streamEndedElapsedMs = elapsedNow()
+        stream.process.close()
+        if (stream.errorDrain !== Thread.currentThread()) stream.errorDrain.join(LOGCAT_DIAGNOSTIC_JOIN_MS)
+        synchronized(lock) { if (logProcess === stream.process) logProcess = null }
+        if (storageFailure || !active.get()) return null
+        val error = stream.processError.get()
+        if (error != null) {
+            interrupt("Capture stopped because adb logcat rejected its configuration: $error")
+            return null
+        }
+        return streamEndedElapsedMs
+    }
+
+    /** Probes the device after its logcat stream ended and records the outage. Null means the capture was stopped. */
+    private fun assessLogcatStreamEnd(tools: CaptureTools, session: CaptureSession, streamEndedElapsedMs: Long): DeviceReadiness? {
+        val initialReadiness = probeDeviceReadiness(tools, session.device.serial)
+        val wasUnavailable = synchronized(lock) {
+            currentSession?.availabilityIntervals?.lastOrNull()?.endElapsedMs == null &&
+                currentSession?.availabilityIntervals?.isNotEmpty() == true
+        }
+        val bootChangedDuringDisconnect = lastKnownBootId != null && initialReadiness.bootId != null &&
+            lastKnownBootId != initialReadiness.bootId
+        val sameIdRestartDuringDisconnect = sameIdentityRestartEvidence(initialReadiness)
+        if (!initialReadiness.ready || bootChangedDuringDisconnect || sameIdRestartDuringDisconnect) {
+            cancelDeviceLoggingRestore()
+            if (!recordDeviceUnavailable(session.device, streamEndedElapsedMs)) return null
+        } else if (!wasUnavailable) {
+            // Otherwise the device became shell-responsive before this reader observed the
+            // transition; the interval is closed after a replacement stream is accepted.
+            addDiagnostic("Logcat stream ended while the device remained available; retrying logcat.")
+        }
+        return initialReadiness
+    }
+
+    /**
+     * Waits for the device and restarts logcat on it. Returns true once a replacement stream is
+     * being read (or the capture went inactive), false when the reader should return.
+     */
+    private fun reconnectLogcat(
+        tools: CaptureTools,
+        session: CaptureSession,
+        readerState: LogcatReaderState,
+        stream: LogcatStream,
+        initialReadiness: DeviceReadiness,
+    ): Boolean {
+        var attempt = 0
+        var readiness = initialReadiness
+        while (active.get()) {
+            try {
+                synchronized(reconnectWaitMonitor) {
+                    if (active.get()) reconnectWaitMonitor.wait(reconnectDelay(attempt++))
+                }
+            } catch (_: InterruptedException) {
+                // Only a Stop or a programmer error can interrupt this thread. Stop itself
+                // uses notifyAll so it never cuts off buffered bytes from the current stream.
             }
-            val initialReadiness = probeDeviceReadiness(tools, session.device.serial)
-            val wasUnavailable = synchronized(lock) {
-                currentSession?.availabilityIntervals?.lastOrNull()?.endElapsedMs == null &&
-                    currentSession?.availabilityIntervals?.isNotEmpty() == true
-            }
-            val bootChangedDuringDisconnect = lastKnownBootId != null && initialReadiness.bootId != null &&
-                lastKnownBootId != initialReadiness.bootId
-            val sameIdRestartDuringDisconnect = sameIdentityRestartEvidence(initialReadiness)
-            if (!initialReadiness.ready || bootChangedDuringDisconnect || sameIdRestartDuringDisconnect) {
-                cancelDeviceLoggingRestore()
-                if (!recordDeviceUnavailable(session.device, streamEndedElapsedMs)) return
-            } else if (wasUnavailable) {
-                // The device became shell-responsive before this reader observed the transition.
-                // Close the interval after a replacement stream is accepted below.
+            if (!active.get()) return false
+            if (!readiness.ready) readiness = probeDeviceReadiness(tools, session.device.serial)
+            if (readiness.ready) return resumeLogcat(tools, session, readerState, stream, readiness)
+        }
+        return true
+    }
+
+    /** Drains what the device buffered while away, starts the replacement logcat and swaps it into [stream]. */
+    private fun resumeLogcat(
+        tools: CaptureTools,
+        session: CaptureSession,
+        readerState: LogcatReaderState,
+        stream: LogcatStream,
+        readiness: DeviceReadiness,
+    ): Boolean {
+        val priorBootId = lastKnownBootId
+        val bootChanged = priorBootId != null && readiness.bootId != null && priorBootId != readiness.bootId
+        val sameIdRestart = !bootChanged && sameIdentityRestartEvidence(readiness)
+        val restartVerified = bootChanged || sameIdRestart
+        val drain = if (restartVerified) {
+            drainBufferedLogsBeforeResume(tools, session, readerState, bootChanged, sameIdRestart) ?: return false
+        } else {
+            ReconnectDrainOutcome()
+        }
+        // A same-identity clock rewind can invalidate the old timestamp cursor. Keep
+        // exact row occurrence quotas across buffer ordering instead of comparing old
+        // timestamps. A confirmed new boot has a fresh cursor established by its drain.
+        val resumeCursor = if (sameIdRestart && !drain.cursorEstablishedByPartialDrain) {
+            null
+        } else {
+            readerState.lastDeviceTimestamp
+        }
+        val replacement = startReplacementLogcat(tools, session, resumeCursor, restartVerified) ?: return false
+        if (!acceptReplacementLogcat(replacement)) return false
+        if (sameIdRestart) readerState.beginReplayOccurrenceDeduplication(drain.replayOccurrenceBudget)
+        val replacementError = AtomicReference<String?>(null)
+        stream.errorDrain = drainDiagnostics(replacement.errorStream, "adb") { line ->
+            if (isFatalLogcatDiagnostic(line)) replacementError.compareAndSet(null, line.take(MAX_DIAGNOSTIC_CHARS))
+        }
+        stream.processError = replacementError
+        if (!recordDeviceReconnected(readiness.bootId)) {
+            closeReplacementLogcat(replacement)
+            return false
+        }
+        if (restartVerified) {
+            val latestSession = synchronized(lock) { currentSession } ?: session
+            startDeviceLoggingRestore(tools, latestSession, restoreBufferSizes = drain.complete)
+            if (!sameIdRestart) readerState.beginBoundaryDeduplication()
+        } else {
+            readerState.beginBoundaryDeduplication()
+        }
+        stream.process = replacement
+        rememberDeviceReadiness(readiness)
+        return true
+    }
+
+    /** Publishes [replacement] as the live logcat process; false (after closing it) when the capture already stopped. */
+    private fun acceptReplacementLogcat(replacement: RunningCaptureProcess): Boolean {
+        val accepted = synchronized(lock) {
+            if (active.get()) {
+                logProcess = replacement
+                true
             } else {
-                addDiagnostic("Logcat stream ended while the device remained available; retrying logcat.")
-            }
-            attempt = 0
-            var reconnectReadiness = initialReadiness
-            while (active.get()) {
-                try {
-                    synchronized(reconnectWaitMonitor) {
-                        if (active.get()) reconnectWaitMonitor.wait(reconnectDelay(attempt++))
-                    }
-                } catch (_: InterruptedException) {
-                    // Only a Stop or a programmer error can interrupt this thread. Stop itself
-                    // uses notifyAll so it never cuts off buffered bytes from the current stream.
-                    if (!active.get()) return
-                }
-                if (!active.get()) return
-                if (!reconnectReadiness.ready) reconnectReadiness = probeDeviceReadiness(tools, session.device.serial)
-                if (!reconnectReadiness.ready) continue
-                val priorBootId = lastKnownBootId
-                val bootChanged = priorBootId != null && reconnectReadiness.bootId != null && priorBootId != reconnectReadiness.bootId
-                val sameIdRestart = !bootChanged && sameIdentityRestartEvidence(reconnectReadiness)
-                val restartVerified = bootChanged || sameIdRestart
-                var drainComplete = false
-                var sameIdCursorEstablishedByPartialDrain = false
-                var replayOccurrenceBudget: Map<ReplayRowFingerprint, Int>? = null
-                if (restartVerified) {
-                    if (bootChanged) readerState.resetForNewBoot() else readerState.beginBoundaryDeduplication()
-                    // This is the immutable old-session boundary used by the overflow fallback.
-                    // The reader has ended, so flushing here captures every row written before
-                    // the disconnect without holding the UI thread or retaining the log in RAM.
-                    val preGapLogLength = if (sameIdRestart) flushedLogLength(session) else 0L
-                    var drainAttempt = 0
-                    var waitingForSafeDrain = false
-                    while (active.get()) {
-                        val drain = drainReconnectBuffer(
-                            tools,
-                            session,
-                            readerState,
-                            searchForSameBootOverlap = !bootChanged,
-                            preGapLogLength = preGapLogLength,
-                        )
-                        if (drain.fatalConfigurationFailure) {
-                            interrupt(drain.diagnostic ?: "Capture stopped because adb logcat rejected its configuration.")
-                            return
-                        }
-                        val hasReplayRows = drain.bufferedTimestampedRows > 0
-                        if (sameIdRestart && !drain.complete && !hasReplayRows) {
-                            if (!waitingForSafeDrain) {
-                                addDiagnostic("Waiting for a complete buffered log sample after the device clock reset; capture remains active.")
-                                waitingForSafeDrain = true
-                            }
-                            if (!awaitReconnectRetry(drainAttempt++)) return
-                            continue
-                        }
-                        if (sameIdRestart && drain.complete && !hasReplayRows) {
-                            // An inspected empty ring is a safe boundary. The old timestamp may
-                            // be in the future after QuickBoot, so it must not survive this reset.
-                            readerState.resetForEmptyRestartBuffer()
-                        } else if (sameIdRestart && !drain.complete && drain.appendedTimestampedRows > 0) {
-                            // A capped sample still establishes a usable cursor when it contains
-                            // complete, newly indexed timestamped rows. Resume from that cursor;
-                            // the unterminated tail was already excluded by the drain parser.
-                            sameIdCursorEstablishedByPartialDrain = true
-                        } else if (sameIdRestart && drain.appendedTimestampedRows == 0) {
-                            // The current ring is fully known replay. Keep its row occurrence quotas
-                            // for the replacement stream and clear the stale clock cursor below.
-                            readerState.clearTimestampCursor()
-                        }
-                        drainComplete = drain.complete
-                        replayOccurrenceBudget = drain.replayOccurrenceBudget
-                        drain.diagnostic?.let(::addDiagnostic)
-                        if (!drainComplete && drain.diagnostic == null) {
-                            addDiagnostic("The buffered device log drain reached its size limit; continuing capture without resizing buffers.")
-                        }
-                        break
-                    }
-                    if (!active.get()) return
-                }
-                // A same-identity clock rewind can invalidate the old timestamp cursor. Keep
-                // exact row occurrence quotas across buffer ordering instead of comparing old
-                // timestamps. A confirmed new boot has a fresh cursor established by its drain.
-                val resumeCursor = if (sameIdRestart && !sameIdCursorEstablishedByPartialDrain) {
-                    null
-                } else {
-                    readerState.lastDeviceTimestamp
-                }
-                val replacement = try {
-                    runner.start(tools.adbSpec(
-                        session.device.serial,
-                        logcatArguments(session.settings, resumeCursor, retainNewBootBuffer = restartVerified),
-                    ))
-                } catch (failure: IOException) {
-                    interrupt("Capture stopped because adb logcat could not be restarted: ${failure.message ?: failure::class.simpleName}")
-                    return
-                } catch (failure: RuntimeException) {
-                    interrupt("Capture stopped because adb logcat could not be restarted: ${failure.message ?: failure::class.simpleName}")
-                    return
-                }
-                val accepted = synchronized(lock) {
-                    if (active.get()) {
-                        logProcess = replacement
-                        true
-                    } else false
-                }
-                if (!accepted) {
-                    replacement.terminate()
-                    replacement.close()
-                    return
-                }
-                if (sameIdRestart) readerState.beginReplayOccurrenceDeduplication(replayOccurrenceBudget)
-                val replacementError = AtomicReference<String?>(null)
-                errorDrain = drainDiagnostics(replacement.errorStream, "adb") { line ->
-                    if (isFatalLogcatDiagnostic(line)) replacementError.compareAndSet(null, line.take(MAX_DIAGNOSTIC_CHARS))
-                }
-                processError = replacementError
-                if (!recordDeviceReconnected(reconnectReadiness.bootId)) {
-                    replacement.terminate()
-                    replacement.close()
-                    return
-                }
-                if (restartVerified) {
-                    val latestSession = synchronized(lock) { currentSession } ?: session
-                    startDeviceLoggingRestore(tools, latestSession, restoreBufferSizes = drainComplete)
-                    if (!sameIdRestart) readerState.beginBoundaryDeduplication()
-                } else {
-                    readerState.beginBoundaryDeduplication()
-                }
-                process = replacement
-                lastKnownBootId = reconnectReadiness.bootId ?: lastKnownBootId
-                lastKnownBootUptimeMs = reconnectReadiness.uptimeMs ?: lastKnownBootUptimeMs
-                lastKnownDeviceWallClockMsOfYear = reconnectReadiness.deviceWallClockMsOfYear ?: lastKnownDeviceWallClockMsOfYear
-                val readinessObservedElapsedMs = elapsedNow()
-                bootUptimeObservedElapsedMs = readinessObservedElapsedMs
-                deviceWallClockObservedElapsedMs = readinessObservedElapsedMs
-                reconnectReadiness = DeviceReadiness(false)
-                break
+                false
             }
         }
+        if (!accepted) closeReplacementLogcat(replacement)
+        return accepted
+    }
+
+    private fun closeReplacementLogcat(replacement: RunningCaptureProcess) {
+        replacement.terminate()
+        replacement.close()
+    }
+
+    private fun rememberDeviceReadiness(readiness: DeviceReadiness) {
+        lastKnownBootId = readiness.bootId ?: lastKnownBootId
+        lastKnownBootUptimeMs = readiness.uptimeMs ?: lastKnownBootUptimeMs
+        lastKnownDeviceWallClockMsOfYear = readiness.deviceWallClockMsOfYear ?: lastKnownDeviceWallClockMsOfYear
+        val readinessObservedElapsedMs = elapsedNow()
+        bootUptimeObservedElapsedMs = readinessObservedElapsedMs
+        deviceWallClockObservedElapsedMs = readinessObservedElapsedMs
+    }
+
+    /**
+     * Drains the device's buffered log after a verified restart so early boot rows are durable and
+     * deduplicated before the replacement stream starts. Null means the capture was stopped.
+     */
+    private fun drainBufferedLogsBeforeResume(
+        tools: CaptureTools,
+        session: CaptureSession,
+        readerState: LogcatReaderState,
+        bootChanged: Boolean,
+        sameIdRestart: Boolean,
+    ): ReconnectDrainOutcome? {
+        if (bootChanged) readerState.resetForNewBoot() else readerState.beginBoundaryDeduplication()
+        // This is the immutable old-session boundary used by the overflow fallback.
+        // The reader has ended, so flushing here captures every row written before
+        // the disconnect without holding the UI thread or retaining the log in RAM.
+        val preGapLogLength = if (sameIdRestart) flushedLogLength(session) else 0L
+        var drainAttempt = 0
+        var waitingForSafeDrain = false
+        while (active.get()) {
+            val drain = drainReconnectBuffer(
+                tools,
+                session,
+                readerState,
+                searchForSameBootOverlap = !bootChanged,
+                preGapLogLength = preGapLogLength,
+            )
+            if (drain.fatalConfigurationFailure) {
+                interrupt(drain.diagnostic ?: "Capture stopped because adb logcat rejected its configuration.")
+                return null
+            }
+            val hasReplayRows = drain.bufferedTimestampedRows > 0
+            if (sameIdRestart && !drain.complete && !hasReplayRows) {
+                if (!waitingForSafeDrain) {
+                    addDiagnostic("Waiting for a complete buffered log sample after the device clock reset; capture remains active.")
+                    waitingForSafeDrain = true
+                }
+                if (!awaitReconnectRetry(drainAttempt++)) return null
+                continue
+            }
+            val cursorEstablishedByPartialDrain = applyRestartDrainToReader(readerState, drain, sameIdRestart, hasReplayRows)
+            drain.diagnostic?.let(::addDiagnostic)
+            if (!drain.complete && drain.diagnostic == null) {
+                addDiagnostic("The buffered device log drain reached its size limit; continuing capture without resizing buffers.")
+            }
+            return ReconnectDrainOutcome(drain.complete, cursorEstablishedByPartialDrain, drain.replayOccurrenceBudget)
+                .takeIf { active.get() }
+        }
+        return null
+    }
+
+    /** Applies a same-identity restart's drain to [readerState]; true when a capped sample established the cursor. */
+    private fun applyRestartDrainToReader(
+        readerState: LogcatReaderState,
+        drain: BufferedReconnectDrain,
+        sameIdRestart: Boolean,
+        hasReplayRows: Boolean,
+    ): Boolean {
+        var cursorEstablishedByPartialDrain = false
+        if (sameIdRestart && drain.complete && !hasReplayRows) {
+            // An inspected empty ring is a safe boundary. The old timestamp may
+            // be in the future after QuickBoot, so it must not survive this reset.
+            readerState.resetForEmptyRestartBuffer()
+        } else if (sameIdRestart && !drain.complete && drain.appendedTimestampedRows > 0) {
+            // A capped sample still establishes a usable cursor when it contains
+            // complete, newly indexed timestamped rows. Resume from that cursor;
+            // the unterminated tail was already excluded by the drain parser.
+            cursorEstablishedByPartialDrain = true
+        } else if (sameIdRestart && drain.appendedTimestampedRows == 0) {
+            // The current ring is fully known replay. Keep its row occurrence quotas
+            // for the replacement stream and clear the stale clock cursor below.
+            readerState.clearTimestampCursor()
+        }
+        return cursorEstablishedByPartialDrain
+    }
+
+    /** Starts the replacement logcat process; null (after interrupting the capture) when adb cannot be launched. */
+    @Suppress("TooGenericExceptionCaught") // A runtime failure while launching adb must stop the capture like an I/O error.
+    private fun startReplacementLogcat(
+        tools: CaptureTools,
+        session: CaptureSession,
+        resumeCursor: String?,
+        restartVerified: Boolean,
+    ): RunningCaptureProcess? {
+        return try {
+            runner.start(
+                tools.adbSpec(
+                    session.device.serial,
+                    logcatArguments(session.settings, resumeCursor, retainNewBootBuffer = restartVerified),
+                ),
+            )
+        } catch (failure: IOException) {
+            interruptForLogcatRestartFailure(failure)
+        } catch (failure: RuntimeException) {
+            interruptForLogcatRestartFailure(failure)
+        }
+    }
+
+    private fun interruptForLogcatRestartFailure(failure: Exception): RunningCaptureProcess? {
+        interrupt("Capture stopped because adb logcat could not be restarted: ${failure.message ?: failure::class.simpleName}")
+        return null
     }
 
     private fun consumeLogcatStream(process: RunningCaptureProcess, state: LogcatReaderState): Boolean {
@@ -886,7 +986,9 @@ class CaptureRecorder internal constructor(
                     if (!writeDeviceLogLines(state, emittedLines, allowAfterStop = true)) {
                         stoppedForStorage = true
                         false
-                    } else true
+                    } else {
+                        true
+                    }
                 }
             }
             if (!stoppedForStorage && !writeDeviceLogLines(state, state.flushPending(), allowAfterStop = true)) stoppedForStorage = true
@@ -913,7 +1015,7 @@ class CaptureRecorder internal constructor(
             synchronized(lock) {
                 val session = currentSession ?: return@synchronized
                 if (logOutput == null || indexOutput == null) return@synchronized
-                try {
+                storageFailure = runStorage("Capture storage failed", ::recordStopStorageFailureLocked) {
                     enforceStorageLimitsLocked(session, elapsed, emitted.raw.size)
                     val offset = logBytes
                     val separator = isSeparator(emitted.raw)
@@ -923,12 +1025,6 @@ class CaptureRecorder internal constructor(
                     val record = CaptureLogIndexRecord(offset, emitted.raw.size, elapsed, ordinal)
                     requireNotNull(indexOutput).write((indexRecordJson(record) + "\n").toByteArray(Charsets.UTF_8))
                     if (!separator) state.record(emitted.text)
-                } catch (failure: IOException) {
-                    storageFailure = failure.message ?: "Capture storage failed"
-                    recordStopStorageFailureLocked(failure)
-                } catch (failure: RuntimeException) {
-                    storageFailure = failure.message ?: "Capture storage failed"
-                    recordStopStorageFailureLocked(failure)
                 }
             }
             if (storageFailure != null) {
@@ -978,67 +1074,97 @@ class CaptureRecorder internal constructor(
             )
         }
         val outputWasTruncated = result.stdout.size >= outputLimitBytes
+        val lines = completeBufferedLines(result.stdout, outputWasTruncated)
+        val overlap = if (searchForSameBootOverlap) {
+            removeBufferedReplayOverlap(session, readerState, lines, preGapLogLength)
+        } else {
+            ReplayOverlapResult(lines, null, null)
+        }
+        val appendLines = overlap.appendLines
+        if (!writeDeviceLogLines(readerState, appendLines)) return BufferedReconnectDrain(false)
+        val sizeLimitDiagnostic = if (outputWasTruncated) {
+            "The buffered device log drain reached its ${outputLimitBytes / BYTES_PER_MIB} MiB size limit; " +
+                "continuing capture without resizing buffers."
+        } else {
+            null
+        }
+        return BufferedReconnectDrain(
+            complete = !outputWasTruncated,
+            diagnostic = listOfNotNull(overlap.fallbackDiagnostic, sizeLimitDiagnostic).joinToString(" ").takeIf { it.isNotEmpty() },
+            bufferedTimestampedRows = lines.count { LOGCAT_THREADTIME_PREFIX.containsMatchIn(it.text) },
+            appendedTimestampedRows = appendLines.count { LOGCAT_THREADTIME_PREFIX.containsMatchIn(it.text) },
+            replayOccurrenceBudget = overlap.replayOccurrenceBudget,
+        )
+    }
+
+    private fun completeBufferedLines(stdout: ByteArray, outputWasTruncated: Boolean): List<DeviceLogLine> {
         // adb's bounded-output reader may end in the middle of a UTF-8/logcat line. Index only
         // rows terminated by LF so the saved timestamp cursor can never move beyond unread bytes.
         val completeOutputLength = if (outputWasTruncated) {
-            val lastCompleteLine = result.stdout.indexOfLast { it == '\n'.code.toByte() }
+            val lastCompleteLine = stdout.indexOfLast { it == '\n'.code.toByte() }
             if (lastCompleteLine < 0) 0 else lastCompleteLine + 1
-        } else result.stdout.size
+        } else {
+            stdout.size
+        }
         val lines = ArrayList<DeviceLogLine>()
-        forEachRawLine(ByteArrayInputStream(result.stdout, 0, completeOutputLength)) { raw ->
+        forEachRawLine(ByteArrayInputStream(stdout, 0, completeOutputLength)) { raw ->
             lines += DeviceLogLine(raw.toString(Charsets.UTF_8).trimEnd('\r', '\n'), raw)
             true
         }
-        var replayOccurrenceBudget: Map<ReplayRowFingerprint, Int>? = null
+        return lines
+    }
+
+    /** Rows of a buffered drain that are not already in the log, with the quota the replacement stream must honour. */
+    private class ReplayOverlapResult(
+        val appendLines: List<DeviceLogLine>,
+        val replayOccurrenceBudget: Map<ReplayRowFingerprint, Int>?,
+        val fallbackDiagnostic: String?,
+    )
+
+    private fun removeBufferedReplayOverlap(
+        session: CaptureSession,
+        readerState: LogcatReaderState,
+        lines: List<DeviceLogLine>,
+        preGapLogLength: Long?,
+    ): ReplayOverlapResult {
         var fallbackDiagnostic: String? = null
-        val appendLines = if (searchForSameBootOverlap) {
-            val priorCounts = readerState.replayHistoryOccurrencesSnapshot()
-            var priorReplayCounts = priorCounts
-            if (readerState.replayHistoryWasTruncated && lines.isNotEmpty()) {
-                val candidates = readerState.countReplayOccurrences(lines, MAX_REPLAY_CANDIDATE_KEYS)
-                when {
-                    candidates == null -> {
-                        fallbackDiagnostic = "QuickBoot replay history exceeded its bounded index and the buffered sample had too many distinct rows to scan safely; uncovered rows are preserved."
-                    }
-                    candidates.any { (fingerprint, count) -> count > (priorCounts[fingerprint] ?: 0) } -> {
-                        val scanned = scanPreGapReplayOccurrences(
-                            session.logFile,
-                            preGapLogLength,
-                            candidates,
-                            readerState,
-                        )
-                        if (scanned == null) {
-                            fallbackDiagnostic = "QuickBoot replay history exceeded its bounded index; the pre-gap log scan was interrupted, so uncovered rows are preserved."
-                        } else {
-                            priorReplayCounts = readerState.mergeReplayOccurrenceCounts(priorCounts, scanned)
-                        }
+        val priorCounts = readerState.replayHistoryOccurrencesSnapshot()
+        var priorReplayCounts = priorCounts
+        if (readerState.replayHistoryWasTruncated && lines.isNotEmpty()) {
+            val candidates = readerState.countReplayOccurrences(lines, MAX_REPLAY_CANDIDATE_KEYS)
+            when {
+                candidates == null -> {
+                    fallbackDiagnostic = "QuickBoot replay history exceeded its bounded index and the buffered sample had too many " +
+                        "distinct rows to scan safely; uncovered rows are preserved."
+                }
+                candidates.any { (fingerprint, count) -> count > (priorCounts[fingerprint] ?: 0) } -> {
+                    val scanned = scanPreGapReplayOccurrences(
+                        session.logFile,
+                        preGapLogLength,
+                        candidates,
+                        readerState,
+                    )
+                    if (scanned == null) {
+                        fallbackDiagnostic = "QuickBoot replay history exceeded its bounded index; the pre-gap log scan was interrupted, " +
+                            "so uncovered rows are preserved."
+                    } else {
+                        priorReplayCounts = readerState.mergeReplayOccurrenceCounts(priorCounts, scanned)
                     }
                 }
             }
-            val filtered = readerState.removeBufferedReplayOverlap(lines, priorReplayCounts)
-            val newlyAppended = readerState.countReplayOccurrences(filtered, MAX_REPLAY_CANDIDATE_KEYS)
-            if (newlyAppended == null && fallbackDiagnostic == null) {
-                fallbackDiagnostic = "QuickBoot replay rows exceeded the bounded stream replay quota; rows outside the quota are preserved."
-            }
-            replayOccurrenceBudget = newlyAppended?.let {
-                readerState.addReplayOccurrenceCounts(priorReplayCounts, it)
-            }
-            if (newlyAppended != null && replayOccurrenceBudget == null && fallbackDiagnostic == null) {
-                fallbackDiagnostic = "QuickBoot replay quotas exceeded the bounded stream replay limit; rows outside the quota are preserved."
-            }
-            filtered
-        } else lines
-        if (!writeDeviceLogLines(readerState, appendLines)) return BufferedReconnectDrain(false)
-        val sizeLimitDiagnostic = if (outputWasTruncated) {
-            "The buffered device log drain reached its ${outputLimitBytes / (1024 * 1024)} MiB size limit; continuing capture without resizing buffers."
-        } else null
-        return BufferedReconnectDrain(
-            complete = !outputWasTruncated,
-            diagnostic = listOfNotNull(fallbackDiagnostic, sizeLimitDiagnostic).joinToString(" ").takeIf { it.isNotEmpty() },
-            bufferedTimestampedRows = lines.count { LOGCAT_THREADTIME_PREFIX.containsMatchIn(it.text) },
-            appendedTimestampedRows = appendLines.count { LOGCAT_THREADTIME_PREFIX.containsMatchIn(it.text) },
-            replayOccurrenceBudget = replayOccurrenceBudget,
-        )
+        }
+        val filtered = readerState.removeBufferedReplayOverlap(lines, priorReplayCounts)
+        val newlyAppended = readerState.countReplayOccurrences(filtered, MAX_REPLAY_CANDIDATE_KEYS)
+        if (newlyAppended == null && fallbackDiagnostic == null) {
+            fallbackDiagnostic = "QuickBoot replay rows exceeded the bounded stream replay quota; rows outside the quota are preserved."
+        }
+        val replayOccurrenceBudget = newlyAppended?.let {
+            readerState.addReplayOccurrenceCounts(priorReplayCounts, it)
+        }
+        if (newlyAppended != null && replayOccurrenceBudget == null && fallbackDiagnostic == null) {
+            fallbackDiagnostic = "QuickBoot replay quotas exceeded the bounded stream replay limit; rows outside the quota are preserved."
+        }
+        return ReplayOverlapResult(filtered, replayOccurrenceBudget, fallbackDiagnostic)
     }
 
     /** Flushes the ended stream and returns its fixed pre-gap byte boundary for replay scans. */
@@ -1085,7 +1211,7 @@ class CaptureRecorder internal constructor(
         val limit = preGapLogLength ?: return null
         if (limit <= 0L || candidates.isEmpty()) return emptyMap()
         val remaining = candidates.toMutableMap()
-        val found = HashMap<ReplayRowFingerprint, Int>(minOf(candidates.size, 16_384))
+        val found = HashMap<ReplayRowFingerprint, Int>(minOf(candidates.size, MAX_REPLAY_SCAN_PRESIZE))
         return runCatching {
             FileInputStream(logFile).use { fileInput ->
                 forEachRawLine(BoundedInputStream(fileInput, limit)) { raw ->
@@ -1109,23 +1235,58 @@ class CaptureRecorder internal constructor(
         restoreBufferSizes: Boolean,
         generation: Long,
     ) {
-        if (!isCurrentLoggingRestore(generation)) return
-        val initialConfiguration = latestLoggingConfiguration(session.id)
-        if (initialConfiguration == null) {
-            addDiagnostic("No device logging settings were captured; leaving device logging configuration unchanged after restart.")
-            return
+        LoggingRestoreRun(tools, session, restoreBufferSizes, generation).run()
+    }
+
+    /** What one verification pass of a [LoggingRestoreRun] asks its loop to do next. */
+    private enum class RestoreStep { SLEEP, NEXT, DONE, ABORT }
+
+    /**
+     * One post-restart restore of the saved device logging settings. Runs on its own worker thread
+     * and is the only user of its mutable fields; every step checks [isCurrentLoggingRestore] so a
+     * newer boot or a stop abandons it promptly.
+     */
+    private inner class LoggingRestoreRun(
+        private val tools: CaptureTools,
+        private val session: CaptureSession,
+        private val restoreBufferSizes: Boolean,
+        private val generation: Long,
+    ) {
+        private var permissionDenied = false
+        private var deadlineNanos = 0L
+        private var firstPass = true
+        private var attempted = false
+        private var unavailableReadDiagnosticAdded = false
+        private var priorExpected: DeviceLoggingConfiguration? = null
+        private var stableSinceNanos: Long? = null
+        private var settingsVerified = false
+
+        fun run() {
+            if (!isCurrentLoggingRestore(generation)) return
+            if (!hasRestorableSnapshot()) return
+            if (!awaitBootCompleted()) return
+            if (!verifyUntilStable()) return
+            reportOutcome()
         }
-        if (initialConfiguration.bufferSizesBytes == null && initialConfiguration.globalLogTag == null &&
-            initialConfiguration.perTagOverrides == null
-        ) {
-            addDiagnostic("No complete device logging settings were available to restore; device settings were left unchanged.")
-            return
+
+        private fun hasRestorableSnapshot(): Boolean {
+            val initialConfiguration = latestLoggingConfiguration(session.id)
+            if (initialConfiguration == null) {
+                addDiagnostic("No device logging settings were captured; leaving device logging configuration unchanged after restart.")
+                return false
+            }
+            if (initialConfiguration.bufferSizesBytes == null && initialConfiguration.globalLogTag == null &&
+                initialConfiguration.perTagOverrides == null
+            ) {
+                addDiagnostic("No complete device logging settings were available to restore; device settings were left unchanged.")
+                return false
+            }
+            return true
         }
-        val bootDeadlineNanos = System.nanoTime() + loggingRestoreBootWaitMs.coerceAtLeast(0) * NANOS_PER_MILLI
-        var permissionDenied = false
-        fun runAdb(arguments: List<String>, deadlineNanos: Long, outputLimit: Int = LOGGING_RESTORE_OUTPUT_LIMIT): CaptureCommandResult? {
-            if (!isCurrentLoggingRestore(generation) || System.nanoTime() >= deadlineNanos) return null
-            val remainingMs = ((deadlineNanos - System.nanoTime()) / NANOS_PER_MILLI).coerceAtLeast(1)
+
+        private fun runAdb(arguments: List<String>, untilNanos: Long, outputLimit: Int = LOGGING_RESTORE_OUTPUT_LIMIT): CaptureCommandResult? {
+            if (!isCurrentLoggingRestore(generation) || System.nanoTime() >= untilNanos) return null
+            val remainingMs = ((untilNanos - System.nanoTime()) / NANOS_PER_MILLI).coerceAtLeast(1)
             val result = runCatching {
                 tools.runAdb(
                     session.device.serial,
@@ -1141,13 +1302,13 @@ class CaptureRecorder internal constructor(
             return result
         }
 
-        fun apply(arguments: List<String>, deadlineNanos: Long): Boolean {
+        private fun applyWithRetry(arguments: List<String>, untilNanos: Long): Boolean {
             repeat(LOGGING_RESTORE_ATTEMPTS) { attempt ->
-                if (!isCurrentLoggingRestore(generation) || System.nanoTime() >= deadlineNanos) return false
-                val result = runAdb(arguments, deadlineNanos)
+                if (!isCurrentLoggingRestore(generation) || System.nanoTime() >= untilNanos) return false
+                val result = runAdb(arguments, untilNanos)
                 if (!isCurrentLoggingRestore(generation)) return false
                 if (result != null && !result.timedOut && result.exitCode == 0) return true
-                if (attempt + 1 < LOGGING_RESTORE_ATTEMPTS && isCurrentLoggingRestore(generation) && System.nanoTime() < deadlineNanos) {
+                if (attempt + 1 < LOGGING_RESTORE_ATTEMPTS && isCurrentLoggingRestore(generation) && System.nanoTime() < untilNanos) {
                     try {
                         Thread.sleep(LOGGING_RESTORE_RETRY_DELAY_MS)
                     } catch (_: InterruptedException) {
@@ -1158,7 +1319,7 @@ class CaptureRecorder internal constructor(
             return false
         }
 
-        fun sleepCancellable(ms: Long): Boolean {
+        private fun sleepCancellable(ms: Long): Boolean {
             if (ms <= 0L) return isCurrentLoggingRestore(generation)
             return try {
                 Thread.sleep(ms)
@@ -1168,73 +1329,126 @@ class CaptureRecorder internal constructor(
             }
         }
 
-        // adb can become shell-responsive before Android has completed boot. Emulator host-side
-        // initialization runs after that point and may resize logd buffers, so do not write the
-        // saved settings until the framework reports boot completion.
-        var bootCompleted = false
-        while (isCurrentLoggingRestore(generation) && System.nanoTime() < bootDeadlineNanos) {
-            val result = runAdb(listOf("shell", "getprop", "sys.boot_completed"), bootDeadlineNanos)
-            if (result != null && !result.timedOut && result.exitCode == 0 && result.stdoutText().trim() == "1") {
-                bootCompleted = true
-                break
+        /**
+         * adb can become shell-responsive before Android has completed boot. Emulator host-side
+         * initialization runs after that point and may resize logd buffers, so do not write the
+         * saved settings until the framework reports boot completion. False means the restore ended.
+         */
+        private fun awaitBootCompleted(): Boolean {
+            val bootDeadlineNanos = System.nanoTime() + seams.loggingRestoreBootWaitMs.coerceAtLeast(0) * NANOS_PER_MILLI
+            var bootCompleted = false
+            while (isCurrentLoggingRestore(generation) && System.nanoTime() < bootDeadlineNanos) {
+                val result = runAdb(listOf("shell", "getprop", "sys.boot_completed"), bootDeadlineNanos)
+                if (result != null && !result.timedOut && result.exitCode == 0 && result.stdoutText().trim() == "1") {
+                    bootCompleted = true
+                    break
+                }
+                if (!sleepCancellable(LOGGING_RESTORE_BOOT_POLL_MS)) return false
             }
-            if (!sleepCancellable(LOGGING_RESTORE_BOOT_POLL_MS)) return
+            if (!isCurrentLoggingRestore(generation)) return false
+            if (!bootCompleted) {
+                addDiagnostic("Device logging settings were not restored after restart because Android did not report boot completion; capture continued.")
+                return false
+            }
+            return true
         }
-        if (!isCurrentLoggingRestore(generation)) return
-        if (!bootCompleted) {
-            addDiagnostic("Device logging settings were not restored after restart because Android did not report boot completion; capture continued.")
-            return
+
+        /** Reads back and repairs the settings until they match for the stability window. False means the restore ended. */
+        private fun verifyUntilStable(): Boolean {
+            deadlineNanos = System.nanoTime() + MAX_LOGGING_RESTORE_TIME_MS * NANOS_PER_MILLI
+            while (isCurrentLoggingRestore(generation) && System.nanoTime() < deadlineNanos) {
+                when (verificationPass()) {
+                    RestoreStep.DONE -> break
+                    RestoreStep.ABORT -> return false
+                    RestoreStep.NEXT -> Unit
+                    RestoreStep.SLEEP -> if (!sleepCancellable(seams.loggingRestoreSampleIntervalMs.coerceAtLeast(1))) return false
+                }
+            }
+            return isCurrentLoggingRestore(generation)
         }
 
-        val deadlineNanos = System.nanoTime() + MAX_LOGGING_RESTORE_TIME_MS * NANOS_PER_MILLI
-        var firstPass = true
-        var attempted = false
-        var unavailableReadDiagnosticAdded = false
-        var priorExpected: DeviceLoggingConfiguration? = null
-        var stableSinceNanos: Long? = null
-        var settingsVerified = false
+        private fun verificationPass(): RestoreStep {
+            // A launcher can save a new setting while recovery is waiting. Read the recorder's
+            // current persisted target on every pass so an old restart snapshot never wins later.
+            val expected = latestLoggingConfiguration(session.id) ?: return RestoreStep.DONE
+            if (expected != priorExpected) {
+                stableSinceNanos = null
+                priorExpected = expected
+            }
+            val current = readback(expected)
+            if (!isCurrentLoggingRestore(generation)) return RestoreStep.ABORT
+            if (!expectedIsCurrent(expected)) {
+                stableSinceNanos = null
+                return RestoreStep.NEXT
+            }
+            if (expected.perTagOverrides != null && current.perTagOverrides == null) reportUnreadableOverridesOnce()
+            return if (matches(expected, current)) confirmStable(expected) else repair(expected, current)
+        }
 
-        data class Readback(
-            val bufferSizesBytes: Map<String, Long>?,
-            val globalLogTag: String?,
-            val perTagOverrides: Map<String, String>?,
-        )
+        private fun reportUnreadableOverridesOnce() {
+            if (unavailableReadDiagnosticAdded) return
+            addDiagnostic("Could not read current per-tag overrides during restart recovery; unknown properties were left unchanged.")
+            unavailableReadDiagnosticAdded = true
+        }
 
-        fun readback(expected: DeviceLoggingConfiguration): Readback {
+        private fun confirmStable(expected: DeviceLoggingConfiguration): RestoreStep {
+            val now = System.nanoTime()
+            val stableSince = stableSinceNanos ?: now.also { stableSinceNanos = it }
+            if (now - stableSince < seams.loggingRestoreStabilityWindowMs.coerceAtLeast(0) * NANOS_PER_MILLI) return RestoreStep.SLEEP
+            if (!expectedIsCurrent(expected)) {
+                stableSinceNanos = null
+                return RestoreStep.NEXT
+            }
+            settingsVerified = true
+            return RestoreStep.DONE
+        }
+
+        private fun repair(expected: DeviceLoggingConfiguration, current: LoggingReadback): RestoreStep {
+            stableSinceNanos = null
+            // A denied write cannot be repaired by retrying it every sample. The readback
+            // above still gets the chance to show that the target already matches.
+            if (permissionDenied) return RestoreStep.DONE
+            applyExpected(expected, current)
+            firstPass = false
+            return RestoreStep.SLEEP
+        }
+
+        private fun <T> readSetting(arguments: List<String>, parse: (text: String, outputWasTruncated: Boolean) -> T?): T? {
+            val result = runAdb(arguments, deadlineNanos, MAX_DEVICE_GETPROP_OUTPUT_BYTES)
+            return result?.takeIf { !it.timedOut && it.exitCode == 0 }?.let {
+                parse(
+                    it.stdoutText(),
+                    it.stdout.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES || it.stderr.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES,
+                )
+            }
+        }
+
+        private fun readback(expected: DeviceLoggingConfiguration): LoggingReadback {
             val sizes = if (expected.bufferSizesBytes != null) {
-                val result = runAdb(listOf("logcat", "-b", "all", "-g"), deadlineNanos, MAX_DEVICE_GETPROP_OUTPUT_BYTES)
-                result?.takeIf { !it.timedOut && it.exitCode == 0 }?.let {
-                    parseCompleteLogBufferConfiguration(
-                        it.stdoutText(),
-                        outputWasTruncated = it.stdout.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES ||
-                            it.stderr.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES,
-                    )
+                readSetting(listOf("logcat", "-b", "all", "-g")) { text, truncated ->
+                    parseCompleteLogBufferConfiguration(text, outputWasTruncated = truncated)
                 }
-            } else null
+            } else {
+                null
+            }
             val global = if (expected.globalLogTag != null) {
-                val result = runAdb(listOf("shell", "getprop", "log.tag"), deadlineNanos, MAX_DEVICE_GETPROP_OUTPUT_BYTES)
-                result?.takeIf { !it.timedOut && it.exitCode == 0 }?.let {
-                    knownGlobalLogTag(
-                        it.stdoutText(),
-                        outputWasTruncated = it.stdout.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES ||
-                            it.stderr.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES,
-                    )
+                readSetting(listOf("shell", "getprop", "log.tag")) { text, truncated ->
+                    knownGlobalLogTag(text, outputWasTruncated = truncated)
                 }
-            } else null
+            } else {
+                null
+            }
             val overrides = if (expected.perTagOverrides != null) {
-                val result = runAdb(listOf("shell", "getprop"), deadlineNanos, MAX_DEVICE_GETPROP_OUTPUT_BYTES)
-                result?.takeIf { !it.timedOut && it.exitCode == 0 }?.let {
-                    parseCompletePerTagLogOverrides(
-                        it.stdoutText(),
-                        outputWasTruncated = it.stdout.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES ||
-                            it.stderr.size >= MAX_DEVICE_GETPROP_OUTPUT_BYTES,
-                    )
+                readSetting(listOf("shell", "getprop")) { text, truncated ->
+                    parseCompletePerTagLogOverrides(text, outputWasTruncated = truncated)
                 }
-            } else null
-            return Readback(sizes, global, overrides)
+            } else {
+                null
+            }
+            return LoggingReadback(sizes, global, overrides)
         }
 
-        fun matches(expected: DeviceLoggingConfiguration, current: Readback): Boolean {
+        private fun matches(expected: DeviceLoggingConfiguration, current: LoggingReadback): Boolean {
             val buffersMatch = expected.bufferSizesBytes == null || !restoreBufferSizes ||
                 expected.bufferSizesBytes.all { (name, size) -> current.bufferSizesBytes?.get(name) == size }
             val globalMatches = expected.globalLogTag == null || current.globalLogTag == expected.globalLogTag
@@ -1242,121 +1456,101 @@ class CaptureRecorder internal constructor(
             return buffersMatch && globalMatches && overridesMatch
         }
 
-        fun expectedIsCurrent(expected: DeviceLoggingConfiguration): Boolean =
+        private fun expectedIsCurrent(expected: DeviceLoggingConfiguration): Boolean =
             isCurrentLoggingRestore(generation) && latestLoggingConfiguration(session.id) == expected
 
-        fun applyExpected(expected: DeviceLoggingConfiguration, current: Readback?) {
+        private fun applyExpected(expected: DeviceLoggingConfiguration, current: LoggingReadback?) {
             if (!expectedIsCurrent(expected) || System.nanoTime() >= deadlineNanos) return
+            if (!applyGlobalTag(expected, current)) return
+            if (!applyTagOverrides(expected, current)) return
+            applyBufferSizes(expected, current)
+        }
+
+        /** False when the target changed underneath the restore and nothing further should be applied. */
+        private fun applyGlobalTag(expected: DeviceLoggingConfiguration, current: LoggingReadback?): Boolean {
             val needGlobal = expected.globalLogTag != null &&
                 (firstPass || current?.globalLogTag != expected.globalLogTag)
-            if (needGlobal) {
-                if (!expectedIsCurrent(expected)) return
-                val value = expected.globalLogTag
-                if (value != null && value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
-                    attempted = true
-                    val script = "setprop ${shellQuoteCapture("log.tag")} ${shellQuoteCapture(value)}"
-                    apply(listOf("shell", script), deadlineNanos)
-                }
+            if (!needGlobal) return true
+            if (!expectedIsCurrent(expected)) return false
+            val value = expected.globalLogTag
+            if (value != null && value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
+                attempted = true
+                val script = "setprop ${shellQuoteCapture("log.tag")} ${shellQuoteCapture(value)}"
+                applyWithRetry(listOf("shell", script), deadlineNanos)
             }
+            return true
+        }
 
+        /** False when the target changed underneath the restore and nothing further should be applied. */
+        private fun applyTagOverrides(expected: DeviceLoggingConfiguration, current: LoggingReadback?): Boolean {
             val savedOverrides = expected.perTagOverrides
-            if (savedOverrides != null && (firstPass || current?.perTagOverrides != savedOverrides)) {
-                if (!expectedIsCurrent(expected)) return
-                val currentOverrides = current?.perTagOverrides
-                if (currentOverrides == null) {
-                    if (!unavailableReadDiagnosticAdded) {
-                        addDiagnostic("Could not read current per-tag overrides during restart recovery; unknown properties were left unchanged.")
-                        unavailableReadDiagnosticAdded = true
-                    }
-                } else {
-                    val propertyCommands = mutableListOf<String>()
-                    currentOverrides.keys.filter { it !in savedOverrides }.forEach { tag ->
-                        if (isSafeLogTag(tag)) propertyCommands += "setprop ${shellQuoteCapture("log.tag.$tag")} '' || status=1"
-                    }
-                    savedOverrides.forEach { (tag, value) ->
-                        if (isSafeLogTag(tag) && value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
-                            propertyCommands += "setprop ${shellQuoteCapture("log.tag.$tag")} ${shellQuoteCapture(value)} || status=1"
-                        }
-                    }
-                    if (propertyCommands.isNotEmpty()) {
-                        attempted = true
-                        val script = "status=0; ${propertyCommands.joinToString("; ")}; exit \$status"
-                        apply(listOf("shell", script), deadlineNanos)
-                    }
+            if (savedOverrides == null || !(firstPass || current?.perTagOverrides != savedOverrides)) return true
+            if (!expectedIsCurrent(expected)) return false
+            val currentOverrides = current?.perTagOverrides
+            if (currentOverrides == null) {
+                reportUnreadableOverridesOnce()
+                return true
+            }
+            val propertyCommands = mutableListOf<String>()
+            currentOverrides.keys.filter { it !in savedOverrides }.forEach { tag ->
+                if (isSafeLogTag(tag)) propertyCommands += "setprop ${shellQuoteCapture("log.tag.$tag")} '' || status=1"
+            }
+            savedOverrides.forEach { (tag, value) ->
+                if (isSafeLogTag(tag) && value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
+                    propertyCommands += "setprop ${shellQuoteCapture("log.tag.$tag")} ${shellQuoteCapture(value)} || status=1"
                 }
             }
+            if (propertyCommands.isNotEmpty()) {
+                attempted = true
+                val script = "status=0; ${propertyCommands.joinToString("; ")}; exit \$status"
+                applyWithRetry(listOf("shell", script), deadlineNanos)
+            }
+            return true
+        }
 
+        private fun applyBufferSizes(expected: DeviceLoggingConfiguration, current: LoggingReadback?) {
             val savedSizes = expected.bufferSizesBytes
-            if (restoreBufferSizes && savedSizes != null && (firstPass || savedSizes.any { (name, size) -> current?.bufferSizesBytes?.get(name) != size })) {
-                for ((buffer, sizeBytes) in savedSizes) {
-                    if (!expectedIsCurrent(expected) || System.nanoTime() >= deadlineNanos) {
-                        break
-                    }
-                    if (!isSafeLogBuffer(buffer) || sizeBytes !in 1..MAX_RESTORABLE_LOG_BUFFER_BYTES) {
-                        continue
-                    }
-                    if (!firstPass && current?.bufferSizesBytes?.get(buffer) == sizeBytes) continue
+            if (!restoreBufferSizes || savedSizes == null) return
+            if (!(firstPass || savedSizes.any { (name, size) -> current?.bufferSizesBytes?.get(name) != size })) return
+            for ((buffer, sizeBytes) in savedSizes) {
+                if (!expectedIsCurrent(expected) || System.nanoTime() >= deadlineNanos) break
+                if (needsResize(buffer, sizeBytes, current)) {
                     attempted = true
-                    apply(listOf("logcat", "-b", buffer, "-G", sizeBytes.toString()), deadlineNanos)
+                    applyWithRetry(listOf("logcat", "-b", buffer, "-G", sizeBytes.toString()), deadlineNanos)
                 }
             }
         }
 
-        while (isCurrentLoggingRestore(generation) && System.nanoTime() < deadlineNanos) {
-            // A launcher can save a new setting while recovery is waiting. Read the recorder's
-            // current persisted target on every pass so an old restart snapshot never wins later.
-            val expected = latestLoggingConfiguration(session.id) ?: break
-            if (expected != priorExpected) {
-                stableSinceNanos = null
-                priorExpected = expected
-            }
-            val current = readback(expected)
-            if (!isCurrentLoggingRestore(generation)) return
-            if (!expectedIsCurrent(expected)) {
-                stableSinceNanos = null
-                continue
-            }
-            if (expected.perTagOverrides != null && current.perTagOverrides == null && !unavailableReadDiagnosticAdded) {
-                addDiagnostic("Could not read current per-tag overrides during restart recovery; unknown properties were left unchanged.")
-                unavailableReadDiagnosticAdded = true
-            }
-            if (matches(expected, current)) {
-                val now = System.nanoTime()
-                if (stableSinceNanos == null) stableSinceNanos = now
-                if (now - requireNotNull(stableSinceNanos) >= loggingRestoreStabilityWindowMs.coerceAtLeast(0) * NANOS_PER_MILLI) {
-                    if (!expectedIsCurrent(expected)) {
-                        stableSinceNanos = null
-                        continue
-                    }
-                    settingsVerified = true
-                    break
-                }
-            } else {
-                stableSinceNanos = null
-                // A denied write cannot be repaired by retrying it every sample. The readback
-                // above still gets the chance to show that the target already matches.
-                if (permissionDenied) break
-                applyExpected(expected, current)
-                firstPass = false
-            }
-            if (!sleepCancellable(loggingRestoreSampleIntervalMs.coerceAtLeast(1))) return
-        }
-        if (!isCurrentLoggingRestore(generation)) return
+        private fun needsResize(buffer: String, sizeBytes: Long, current: LoggingReadback?): Boolean =
+            isSafeLogBuffer(buffer) && sizeBytes in 1..MAX_RESTORABLE_LOG_BUFFER_BYTES &&
+                (firstPass || current?.bufferSizesBytes?.get(buffer) != sizeBytes)
 
-        val configuration = latestLoggingConfiguration(session.id) ?: session.deviceLoggingConfiguration
-        if (settingsVerified && configuration != priorExpected) settingsVerified = false
-        val incompleteSnapshot = configuration == null || configuration.bufferSizesBytes == null ||
-            configuration.globalLogTag == null || configuration.perTagOverrides == null
-        val bufferSizesSkipped = !restoreBufferSizes && configuration?.bufferSizesBytes != null
-        when {
-            permissionDenied && !settingsVerified -> addDiagnostic(
-                "Some device logging settings could not be restored after restart because Android denied permission. Capture continued; reapply them from Device logging or review the device's permissions.",
-            )
-            bufferSizesSkipped -> addDiagnostic("Buffer sizes were left unchanged after restart because buffered logs could not be fully drained; capture continued.")
-            !settingsVerified -> addDiagnostic("Some device logging settings could not be restored and verified after restart. Capture continued; reapply them from Device logging if needed.")
-            incompleteSnapshot -> addDiagnostic("Only device logging settings that were readable at capture start could be restored and verified; unknown values were left unchanged.")
-            attempted || configuration != null -> addDiagnostic("Device logging settings were restored and verified after restart.")
-            else -> addDiagnostic("No complete device logging settings were available to restore; device settings were left unchanged.")
+        private fun reportOutcome() {
+            val priorConfiguration = priorExpected
+            val configuration = latestLoggingConfiguration(session.id) ?: session.deviceLoggingConfiguration
+            if (settingsVerified && configuration != priorConfiguration) settingsVerified = false
+            val incompleteSnapshot = configuration == null || configuration.bufferSizesBytes == null ||
+                configuration.globalLogTag == null || configuration.perTagOverrides == null
+            val bufferSizesSkipped = !restoreBufferSizes && configuration?.bufferSizesBytes != null
+            when {
+                permissionDenied && !settingsVerified -> addDiagnostic(
+                    "Some device logging settings could not be restored after restart because Android denied permission. " +
+                        "Capture continued; reapply them from Device logging or review the device's permissions.",
+                )
+                bufferSizesSkipped -> addDiagnostic(
+                    "Buffer sizes were left unchanged after restart because buffered logs could not be fully drained; capture continued.",
+                )
+                !settingsVerified -> addDiagnostic(
+                    "Some device logging settings could not be restored and verified after restart. " +
+                        "Capture continued; reapply them from Device logging if needed.",
+                )
+                incompleteSnapshot -> addDiagnostic(
+                    "Only device logging settings that were readable at capture start could be restored and verified; " +
+                        "unknown values were left unchanged.",
+                )
+                attempted || configuration != null -> addDiagnostic("Device logging settings were restored and verified after restart.")
+                else -> addDiagnostic("No complete device logging settings were available to restore; device settings were left unchanged.")
+            }
         }
     }
 
@@ -1575,31 +1769,19 @@ class CaptureRecorder internal constructor(
 
         private fun timestampBefore(value: String, cursor: String): Boolean = compareTimestamp(value, cursor) < 0
 
-        private fun timestampAfter(value: String, cursor: String): Boolean = compareTimestamp(value, cursor) > 0
-
         /** Logcat threadtime omits the year. Compare around the cursor using the shortest distance
          * on a leap-year calendar so December rows sort before a January cursor, and January rows
          * sort after a December cursor. */
         private fun compareTimestamp(value: String, cursor: String): Int {
             val valueMillis = timestampMillis(value) ?: return value.compareTo(cursor)
             val cursorMillis = timestampMillis(cursor) ?: return value.compareTo(cursor)
-            val yearMillis = 366L * MILLIS_PER_DAY
-            var delta = valueMillis - cursorMillis
-            if (delta > yearMillis / 2) delta -= yearMillis
-            if (delta < -yearMillis / 2) delta += yearMillis
-            return delta.compareTo(0L)
+            return circularYearDelta(valueMillis, cursorMillis).compareTo(0L)
         }
 
         private fun timestampMillis(value: String): Long? = runCatching {
-            val prefix = LOGCAT_THREADTIME_PREFIX.find(value)?.value ?: return null
-            val month = prefix.substring(0, 2).toInt()
-            val day = prefix.substring(3, 5).toInt()
-            val hour = prefix.substring(6, 8).toInt()
-            val minute = prefix.substring(9, 11).toInt()
-            val second = prefix.substring(12, 14).toInt()
-            val millis = prefix.substring(15, 18).toInt()
-            val dayOfYear = java.time.LocalDate.of(2000, month, day).dayOfYear - 1
-            dayOfYear * MILLIS_PER_DAY + hour * 3_600_000L + minute * 60_000L + second * 1_000L + millis
+            val fields = LOGCAT_THREADTIME_FIELDS.find(value)?.groupValues ?: return null
+            millisOfLeapYear(fields[1].toInt(), fields[2].toInt(), fields[3].toInt(), fields[4].toInt(), fields[5].toInt()) +
+                fields[6].toInt()
         }.getOrNull()
 
         private fun fingerprint(line: String): ReplayRowFingerprint {
@@ -1618,24 +1800,30 @@ class CaptureRecorder internal constructor(
 
         fun accept(line: DeviceLogLine): List<DeviceLogLine> {
             val replay = replayOccurrences
-            if (replay != null) {
-                val fingerprint = fingerprintIfDeviceRow(line.text)
-                if (fingerprint != null && decrementIfPresent(replay, fingerprint)) {
-                    if (replay.isEmpty()) replayOccurrences = null
-                    return emptyList()
-                }
-                return listOf(line)
-            }
-            if (!deduplicateBoundary) return listOf(line)
+            val duplicate = if (replay != null) consumeReplayOccurrence(replay, line) else isBoundaryDuplicate(line)
+            return if (duplicate) emptyList() else listOf(line)
+        }
+
+        /** True when [line] is one of the still-expected replayed rows, which is then used up. */
+        private fun consumeReplayOccurrence(replay: MutableMap<ReplayRowFingerprint, Int>, line: DeviceLogLine): Boolean {
+            val fingerprint = fingerprintIfDeviceRow(line.text)
+            if (fingerprint == null || !decrementIfPresent(replay, fingerprint)) return false
+            if (replay.isEmpty()) replayOccurrences = null
+            return true
+        }
+
+        /** True when [line] is a row the old stream already wrote before the boundary. */
+        private fun isBoundaryDuplicate(line: DeviceLogLine): Boolean {
+            if (!deduplicateBoundary) return false
             val cursor = boundaryTimestamp ?: run {
                 deduplicateBoundary = false
-                return listOf(line)
+                return false
             }
-            val timestamp = timestampOf(line.text) ?: return listOf(line)
-            if (timestampBefore(timestamp, cursor)) return emptyList()
-            if (timestamp == cursor && decrementIfPresent(boundaryOccurrences, line.text)) return emptyList()
+            val timestamp = timestampOf(line.text) ?: return false
+            if (timestampBefore(timestamp, cursor)) return true
+            if (timestamp == cursor && decrementIfPresent(boundaryOccurrences, line.text)) return true
             deduplicateBoundary = false
-            return listOf(line)
+            return false
         }
 
         fun flushPending(): List<DeviceLogLine> = emptyList()
@@ -1761,7 +1949,7 @@ class CaptureRecorder internal constructor(
         )
         if (result.timedOut || result.exitCode != 0) return@runCatching null
         val seconds = result.stdoutText().trim().substringBefore(' ').toDoubleOrNull() ?: return@runCatching null
-        (seconds * 1_000.0).toLong().takeIf { it >= 0 }
+        (seconds * MILLIS_PER_SECOND_DOUBLE).toLong().takeIf { it >= 0 }
     }.getOrNull()
 
     /** Reads the device's current clock separately from host/session elapsed time. Emulator
@@ -1780,8 +1968,7 @@ class CaptureRecorder internal constructor(
         val hour = match.groupValues[3].toInt()
         val minute = match.groupValues[4].toInt()
         val second = match.groupValues[5].toInt()
-        val dayOfYear = java.time.LocalDate.of(2000, month, day).dayOfYear - 1
-        dayOfYear * MILLIS_PER_DAY + hour * 3_600_000L + minute * 60_000L + second * 1_000L
+        millisOfLeapYear(month, day, hour, minute, second)
     }.getOrNull()
 
     /** Detects same-identity emulator QuickBoot from an uptime reset or a substantial device
@@ -1803,11 +1990,7 @@ class CaptureRecorder internal constructor(
     }
 
     private fun circularWallClockDelta(actual: Long, expected: Long): Long {
-        val yearMillis = 366L * MILLIS_PER_DAY
-        var delta = actual - expected
-        if (delta > yearMillis / 2) delta -= yearMillis
-        if (delta < -yearMillis / 2) delta += yearMillis
-        return delta
+        return circularYearDelta(actual, expected)
     }
 
     private fun recordDeviceUnavailable(device: CaptureDevice, elapsed: Long): Boolean {
@@ -1823,15 +2006,7 @@ class CaptureRecorder internal constructor(
             )
             currentSession = updated
             mutableSelectedSession.value = updated
-            try {
-                persistSession(updated)
-            } catch (failure: IOException) {
-                storageFailure = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            } catch (failure: RuntimeException) {
-                storageFailure = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            }
+            storageFailure = persistSessionOrRecordFailureLocked(updated)
             addDiagnosticLocked("Device unavailable; waiting for the original device ${device.serial}.")
             if (device.wireless) {
                 addDiagnosticLocked("Wireless reconnect stays on ${device.serial}; a changed endpoint needs verified pairing to follow safely.")
@@ -1868,15 +2043,7 @@ class CaptureRecorder internal constructor(
             val updated = old.copy(elapsedMs = maxOf(old.elapsedMs, elapsed), availabilityIntervals = intervals)
             currentSession = updated
             mutableSelectedSession.value = updated
-            try {
-                persistSession(updated)
-            } catch (failure: IOException) {
-                storageFailure = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            } catch (failure: RuntimeException) {
-                storageFailure = failure.message ?: "Capture session metadata could not be saved"
-                recordStopStorageFailureLocked(failure)
-            }
+            storageFailure = persistSessionOrRecordFailureLocked(updated)
             val duration = (elapsed - open.startElapsedMs).coerceAtLeast(0)
             val rebootText = when (reboot) {
                 true -> "; reboot confirmed"
@@ -1902,7 +2069,7 @@ class CaptureRecorder internal constructor(
     }
 
     /** Called under lock. The synthetic line follows logcat threadtime and receives a normal index row. */
-    private fun appendAvailabilityMarkerLocked(elapsed: Long, message: String): String? = try {
+    private fun appendAvailabilityMarkerLocked(elapsed: Long, message: String): String? = runStorage("Capture storage failed", {}) {
         val session = requireNotNull(currentSession)
         val timestamp = AVAILABILITY_LOG_TIMESTAMP.format(Instant.ofEpochMilli(session.startedEpochMs + elapsed))
         val raw = "$timestamp  0  0 W IndagiumCapture: $message\n".toByteArray(Charsets.UTF_8)
@@ -1914,16 +2081,11 @@ class CaptureRecorder internal constructor(
         requireNotNull(indexOutput).write(
             (indexRecordJson(CaptureLogIndexRecord(offset, raw.size, elapsed, ordinal)) + "\n").toByteArray(Charsets.UTF_8),
         )
-        null
-    } catch (failure: IOException) {
-        failure.message ?: "Capture storage failed"
-    } catch (failure: RuntimeException) {
-        failure.message ?: "Capture storage failed"
     }
 
     private fun formatAvailabilityDuration(milliseconds: Long): String =
-        if (milliseconds < 1_000) "${milliseconds}ms"
-        else String.format(java.util.Locale.ROOT, "%.1fs", milliseconds / 1_000.0)
+        if (milliseconds < MILLIS_PER_SECOND) "${milliseconds}ms"
+        else String.format(java.util.Locale.ROOT, "%.1fs", milliseconds / MILLIS_PER_SECOND_DOUBLE)
 
     /** [EmbeddedDeviceSession.onVideoStartElapsedMs]: fires once, from the recording pump thread,
      * the first time a video packet actually reaches the muxer. */
@@ -2177,6 +2339,27 @@ class CaptureRecorder internal constructor(
             videoRecording = embeddedSession?.hasStartedVideo() == true,
         )
     }
+
+    /**
+     * Runs a storage [action]. An I/O failure, or a runtime failure from the streams or serializers
+     * it drives, is passed to [onFailure] and returned as its message instead of being thrown, so the
+     * caller can stop the capture cleanly. Null means the action succeeded.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private inline fun runStorage(fallbackMessage: String, onFailure: (Exception) -> Unit, action: () -> Unit): String? = try {
+        action()
+        null
+    } catch (failure: IOException) {
+        onFailure(failure)
+        failure.message ?: fallbackMessage
+    } catch (failure: RuntimeException) {
+        onFailure(failure)
+        failure.message ?: fallbackMessage
+    }
+
+    /** Called under lock: persists [session], recording a failure as a stop failure and returning its message. */
+    private fun persistSessionOrRecordFailureLocked(session: CaptureSession): String? =
+        runStorage("Capture session metadata could not be saved", ::recordStopStorageFailureLocked) { persistSession(session) }
 
     private fun recordStopStorageFailureLocked(failure: Exception) {
         val message = failure.message ?: failure::class.simpleName ?: "Capture storage failed"
@@ -2467,45 +2650,48 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
         exportCounter = root["exportCounter"]?.jsonPrimitive?.intOrNull ?: 0,
         interruptions = root["interruptions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }.orEmpty(),
         manualOffsetMs = root["manualOffsetMs"]?.jsonPrimitive?.longOrNull ?: 0,
-        availabilityIntervals = root["availabilityIntervals"]?.jsonArray.orEmpty().mapNotNull { element ->
-            runCatching {
-                val interval = element.jsonObject
-                CaptureAvailabilityInterval(
-                    startElapsedMs = interval.getValue("startElapsedMs").jsonPrimitive.long,
-                    endElapsedMs = interval["endElapsedMs"]?.jsonPrimitive?.longOrNull,
-                    bootIdBefore = interval["bootIdBefore"]?.jsonPrimitive?.contentOrNull,
-                    bootIdAfter = interval["bootIdAfter"]?.jsonPrimitive?.contentOrNull,
-                    rebootConfirmed = interval["rebootConfirmed"]?.jsonPrimitive?.booleanOrNull,
-                )
-            }.getOrNull()
+        availabilityIntervals = root["availabilityIntervals"]?.jsonArray.orEmpty().mapNotNull(::availabilityIntervalFromJson),
+        deviceLoggingConfiguration = root["deviceLoggingConfiguration"]?.let(::deviceLoggingConfigurationFromJson),
+    )
+}.getOrNull()
+
+private fun availabilityIntervalFromJson(element: JsonElement): CaptureAvailabilityInterval? = runCatching {
+    val interval = element.jsonObject
+    CaptureAvailabilityInterval(
+        startElapsedMs = interval.getValue("startElapsedMs").jsonPrimitive.long,
+        endElapsedMs = interval["endElapsedMs"]?.jsonPrimitive?.longOrNull,
+        bootIdBefore = interval["bootIdBefore"]?.jsonPrimitive?.contentOrNull,
+        bootIdAfter = interval["bootIdAfter"]?.jsonPrimitive?.contentOrNull,
+        rebootConfirmed = interval["rebootConfirmed"]?.jsonPrimitive?.booleanOrNull,
+    )
+}.getOrNull()
+
+private fun deviceLoggingConfigurationFromJson(element: JsonElement): DeviceLoggingConfiguration? = runCatching {
+    val config = element.jsonObject
+    DeviceLoggingConfiguration(
+        bufferSizesBytes = config["bufferSizesBytes"]?.let { value -> runCatching {
+            val values = value.jsonObject
+            require(values.size <= MAX_PERSISTED_LOG_CONFIG_ITEMS)
+            values.map { (buffer, bytes) ->
+                val parsed = bytes.jsonPrimitive.longOrNull ?: error("Invalid buffer size")
+                require(buffer.matches(Regex("^[A-Za-z0-9_.-]{1,64}$")) && parsed in 1..MAX_RESTORABLE_LOG_BUFFER_BYTES)
+                buffer to parsed
+            }.toMap()
+        }.getOrNull()
         },
-        deviceLoggingConfiguration = root["deviceLoggingConfiguration"]?.let { element ->
-            runCatching {
-                val config = element.jsonObject
-                DeviceLoggingConfiguration(
-                    bufferSizesBytes = config["bufferSizesBytes"]?.let { value -> runCatching {
-                        val values = value.jsonObject
-                        require(values.size <= MAX_PERSISTED_LOG_CONFIG_ITEMS)
-                        values.map { (buffer, bytes) ->
-                            val parsed = bytes.jsonPrimitive.longOrNull ?: error("Invalid buffer size")
-                            require(buffer.matches(Regex("^[A-Za-z0-9_.-]{1,64}$")) && parsed in 1..MAX_RESTORABLE_LOG_BUFFER_BYTES)
-                            buffer to parsed
-                        }.toMap()
-                    }.getOrNull()
-                    },
-                    globalLogTag = config["globalLogTag"]?.jsonPrimitive?.contentOrNull?.takeIf { it.length <= 512 },
-                    perTagOverrides = config["perTagOverrides"]?.let { value -> runCatching {
-                        val values = value.jsonObject
-                        require(values.size <= MAX_PERSISTED_LOG_CONFIG_ITEMS)
-                        values.map { (tag, entry) ->
-                            val text = entry.jsonPrimitive.contentOrNull ?: error("Invalid property value")
-                            require(tag.matches(Regex("^[A-Za-z0-9_.$-]{1,128}$")) && text.length <= 512 && text.isNotBlank())
-                            tag to text
-                        }.toMap()
-                    }.getOrNull()
-                    },
+        globalLogTag = config["globalLogTag"]?.jsonPrimitive?.contentOrNull?.takeIf { it.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS },
+        perTagOverrides = config["perTagOverrides"]?.let { value -> runCatching {
+            val values = value.jsonObject
+            require(values.size <= MAX_PERSISTED_LOG_CONFIG_ITEMS)
+            values.map { (tag, entry) ->
+                val text = entry.jsonPrimitive.contentOrNull ?: error("Invalid property value")
+                require(
+                    tag.matches(Regex("^[A-Za-z0-9_.$-]{1,128}$")) && text.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS &&
+                        text.isNotBlank(),
                 )
-            }.getOrNull()
+                tag to text
+            }.toMap()
+        }.getOrNull()
         },
     )
 }.getOrNull()
@@ -2572,12 +2758,20 @@ private fun stripLeadingNonPngBytes(bytes: ByteArray): ByteArray? {
     return null
 }
 
+/** The device's current logging settings, as far as each could be read back. */
+private data class LoggingReadback(
+    val bufferSizesBytes: Map<String, Long>?,
+    val globalLogTag: String?,
+    val perTagOverrides: Map<String, String>?,
+)
+
 const val CAPTURE_SESSION_FILE_NAME = "session.json"
 private const val SESSION_FILE = CAPTURE_SESSION_FILE_NAME
 private const val PREVIEW_PUBLISH_INTERVAL_MS = 250L
 private const val SPACE_CHECK_INTERVAL_MS = 1_000L
 private const val SESSION_METADATA_PERSIST_INTERVAL_MS = 5_000L
 private const val MAX_DIAGNOSTICS = 50
+
 // Exact replay fingerprints are retained for the most recent 32 MiB of device rows. That covers
 // reconnect snapshots without retaining the session's potentially multi-gigabyte log in memory.
 private const val MAX_REPLAY_HISTORY_BYTES = 32 * 1024 * 1024
@@ -2611,6 +2805,7 @@ private const val MAX_DEVICE_RECONNECT_DELAY_MS = 5_000L
 private val AVAILABILITY_LOG_TIMESTAMP =
     DateTimeFormatter.ofPattern("MM-dd HH:mm:ss.SSS").withZone(ZoneId.systemDefault())
 private val LOGCAT_THREADTIME_PREFIX = Regex("^\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}\\.\\d{3}")
+private val LOGCAT_THREADTIME_FIELDS = Regex("^(\\d{2})-(\\d{2}) (\\d{2}):(\\d{2}):(\\d{2})\\.(\\d{3})")
 private val DEVICE_WALL_CLOCK_PATTERN = Regex("^(\\d{2})-(\\d{2})T(\\d{2}):(\\d{2}):(\\d{2})$")
 private const val CAPTURE_WRITE_BUFFER_BYTES = 256 * 1024
 private const val STOP_WAIT_SECONDS = 8L
@@ -2622,7 +2817,30 @@ private const val WATCHDOG_JOIN_TIMEOUT_MS = 1_000L
 private const val MIRROR_STDERR_TAIL_LINES = 50
 private const val MIRROR_STDERR_JOIN_MS = 2_000L
 private const val NANOS_PER_MILLI = 1_000_000L
+private const val MILLIS_PER_SECOND = 1_000L
+private const val MILLIS_PER_SECOND_DOUBLE = 1_000.0
+private const val MILLIS_PER_MINUTE = 60_000L
+private const val MILLIS_PER_HOUR = 3_600_000L
 private const val MILLIS_PER_DAY = 86_400_000L
+private const val BYTES_PER_MIB = 1024 * 1024
+private const val MAX_REPLAY_SCAN_PRESIZE = 16_384
+
+// Device clocks report month/day/time without a year. 2000 is a leap year, so every real date maps.
+private const val LEAP_REFERENCE_YEAR = 2000
+private const val LEAP_YEAR_MILLIS = 366L * MILLIS_PER_DAY
+
+private fun millisOfLeapYear(month: Int, day: Int, hour: Int, minute: Int, second: Int): Long {
+    val dayOfYear = java.time.LocalDate.of(LEAP_REFERENCE_YEAR, month, day).dayOfYear - 1
+    return dayOfYear * MILLIS_PER_DAY + hour * MILLIS_PER_HOUR + minute * MILLIS_PER_MINUTE + second * MILLIS_PER_SECOND
+}
+
+/** The signed shortest distance from [expected] to [actual] on a leap-year calendar that wraps at New Year. */
+private fun circularYearDelta(actual: Long, expected: Long): Long {
+    var delta = actual - expected
+    if (delta > LEAP_YEAR_MILLIS / 2) delta -= LEAP_YEAR_MILLIS
+    if (delta < -LEAP_YEAR_MILLIS / 2) delta += LEAP_YEAR_MILLIS
+    return delta
+}
 
 /** A scrcpy window that dies this soon after launch never got going, which is how a broken host audio
  *  device shows up when its error line is not recognisable. */

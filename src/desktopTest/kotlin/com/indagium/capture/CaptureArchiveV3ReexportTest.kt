@@ -8,6 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
+@Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
 class CaptureArchiveV3ReexportTest {
     @Test
     fun legacyAnchorTimingSurvivesAChildExportWithoutRewritingTheSource() {

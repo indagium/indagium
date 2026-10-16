@@ -80,7 +80,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
-import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.model.LogTab
 import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoSource
@@ -356,9 +355,7 @@ internal fun BoundVideoPanel(
         val showUnavailableFrames = captureTimeline?.showUnavailableFrames
             ?: state.settings.captureSettings.showUnavailableFrames
         val videoWasConfigured = state.captureSnapshotSessionFor(tab.id)?.settings?.recordVideo != false
-        if (captureTimeline != null && videoWasConfigured && showUnavailableFrames &&
-            captureTimeline.availabilityFramesRendered != true && captureTimeline.availabilityIntervals.isNotEmpty()
-        ) {
+        if (captureTimeline != null && videoWasConfigured && showUnavailableFrames && captureTimeline.hasUnrenderedAvailability()) {
             CaptureTimelineOnlyPanel(captureTimeline, modifier)
         }
         return
@@ -407,6 +404,9 @@ internal fun BoundVideoPanel(
         )
     }
 }
+
+private fun com.indagium.capture.CaptureTimeline.hasUnrenderedAvailability(): Boolean =
+    availabilityFramesRendered != true && availabilityIntervals.isNotEmpty()
 
 /** Shows outage timing for a finalized capture that has no video packets to attach or play. */
 @Composable
@@ -710,7 +710,9 @@ private fun VideoFrameArea(
             ?: state.settings.captureSettings.showUnavailableFrames
         val unavailableInterval = if (showUnavailableFrames && captureTimeline?.availabilityFramesRendered != true) {
             captureTimeline?.unavailableIntervalAtVideoMs(controller.positionMs)
-        } else null
+        } else {
+            null
+        }
         when {
             err != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = DANGER_RED, modifier = Modifier.size(22.dp))

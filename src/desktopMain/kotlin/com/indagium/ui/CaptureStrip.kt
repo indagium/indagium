@@ -85,15 +85,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CAPTURE_NO_VIDEO_AFTER_MS
+import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
-import com.indagium.capture.CaptureAvailabilityInterval
-import com.indagium.capture.CaptureStatus
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureStatus
 import com.indagium.capture.MIRROR_AUDIO_FALLBACK_DIAGNOSTIC
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
@@ -121,9 +121,11 @@ private const val CAPTURE_PREVIEW_REFRESH_INTERVAL_MS = 1_000L
 private const val CAPTURE_BYTES_PER_KIB = 1024L
 private const val CAPTURE_BYTES_PER_MIB = CAPTURE_BYTES_PER_KIB * 1024L
 private const val CAPTURE_BYTES_PER_GIB = CAPTURE_BYTES_PER_MIB * 1024L
-private const val CAPTURE_MILLIS_PER_SECOND = 1_000L
-private const val CAPTURE_SECONDS_PER_MINUTE = 60L
-private const val CAPTURE_SECONDS_PER_HOUR = 3_600L
+internal const val CAPTURE_MILLIS_PER_SECOND = 1_000L
+internal const val CAPTURE_SECONDS_PER_MINUTE = 60L
+internal const val CAPTURE_SECONDS_PER_HOUR = 3_600L
+private const val CAPTURE_MAX_CLOCK_FIELD = 59
+private const val CAPTURE_DEFAULT_PLAYHEAD_WINDOW_MS = 5L * 60_000L
 
 /** Right-aligns the panel to its trigger, keeps a gap, and flips above only when needed. */
 internal class CaptureSnapshotPopupPositionProvider(
@@ -184,10 +186,11 @@ internal fun parseCaptureElapsed(value: String): Long? {
     val parts = value.trim().split(':')
     if (parts.size !in 2..3 || parts.any { it.isBlank() || it.any { char -> !char.isDigit() } }) return null
     val numbers = parts.map { it.toLongOrNull() ?: return null }
-    if (numbers.last() !in 0..59 || (parts.size == 3 && numbers[1] !in 0..59)) return null
-    val seconds = if (parts.size == 2) numbers[0] * 60L + numbers[1]
-    else numbers[0] * 3_600L + numbers[1] * 60L + numbers[2]
-    return seconds.takeIf { it <= Long.MAX_VALUE / 1_000L }?.times(1_000L)
+    val clockFields = 0..CAPTURE_MAX_CLOCK_FIELD
+    if (numbers.last() !in clockFields || (parts.size == 3 && numbers[1] !in clockFields)) return null
+    val seconds = if (parts.size == 2) numbers[0] * CAPTURE_SECONDS_PER_MINUTE + numbers[1]
+    else numbers[0] * CAPTURE_SECONDS_PER_HOUR + numbers[1] * CAPTURE_SECONDS_PER_MINUTE + numbers[2]
+    return seconds.takeIf { it <= Long.MAX_VALUE / CAPTURE_MILLIS_PER_SECOND }?.times(CAPTURE_MILLIS_PER_SECOND)
 }
 
 /** Compact byte formatting used by both the strip and status card. */
@@ -499,16 +502,19 @@ internal fun captureSinceSaveHint(
     val hasVideoTail = session.settings.recordVideo && videoCursor >= 0L && videoCursor < end
     if (hasNewLogRange) {
         return if (includeVideo && hasVideoTail) {
-            "Logs saved through ${formatCaptureElapsed(logCursor)}; this cut ends at ${formatCaptureElapsed(end)} and video remains unsaved from ${formatCaptureElapsed(videoCursor)}."
+            "Logs saved through ${formatCaptureElapsed(logCursor)}; this cut ends at ${formatCaptureElapsed(end)} " +
+                "and video remains unsaved from ${formatCaptureElapsed(videoCursor)}."
         } else {
             "Logs saved through ${formatCaptureElapsed(logCursor)}; this cut ends at ${formatCaptureElapsed(end)}."
         }
     }
     if (logCursor == end && hasVideoTail) {
         return if (includeVideo) {
-            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. Include video and confirm coverage in the preview."
+            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. " +
+                "Include video and confirm coverage in the preview."
         } else {
-            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. Include video to export it."
+            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. " +
+                "Include video to export it."
         }
     }
     return "Logs are saved through ${formatCaptureElapsed(logCursor)}; there is no later range at ${formatCaptureElapsed(end)}."
@@ -1415,8 +1421,8 @@ internal fun captureSnapshotExplicitBounds(
     choice: SnapshotRangeChoice,
     durationMs: Long,
     playheadElapsedMs: Long,
-    beforeMs: Long = 5L * 60_000L,
-    afterMs: Long = 5L * 60_000L,
+    beforeMs: Long = CAPTURE_DEFAULT_PLAYHEAD_WINDOW_MS,
+    afterMs: Long = CAPTURE_DEFAULT_PLAYHEAD_WINDOW_MS,
     offsetMs: Long = 0L,
     explicitStartMs: Long? = null,
     explicitEndMs: Long? = null,
@@ -1493,7 +1499,11 @@ internal fun CaptureSnapshotPopover(
     val centered = triggerBounds == null
     val availableHeightPx = if (centered) {
         (hostWindowSize.height - 2 * marginPx).coerceAtLeast(1)
-    } else if (placeAbove) aboveSpacePx else belowSpacePx
+    } else if (placeAbove) {
+        aboveSpacePx
+    } else {
+        belowSpacePx
+    }
     val popupHeight = with(density) { availableHeightPx.toDp() }
         .coerceAtMost(CAPTURE_SNAPSHOT_POPOVER_MAX_HEIGHT)
     val popupPositionProvider = remember(density, placeAbove, centered) {
@@ -1607,7 +1617,9 @@ internal fun CaptureSnapshotPopover(
     val latestRangeControls by rememberUpdatedState(previewRangeControls)
     val previewKey = if (session != null && request != null) {
         captureExportPreviewIdentity(session, request, rangeChoice, previewRangeControls)
-    } else null
+    } else {
+        null
+    }
     val previewMatchesCurrentRange = previewKey != null && previewKey == state.captureExportPreviewKey
     val preview = if (previewMatchesCurrentRange) state.captureExportPreview else null
     val previewError = if (previewMatchesCurrentRange) state.captureExportPreviewError else null
@@ -1704,7 +1716,8 @@ internal fun CaptureSnapshotPopover(
                         preview == null && previewError != null -> "Preview failed: $previewError"
                         preview == null -> "Checking this range for new rows, video, or device-availability records…"
                         sinceSaveHasContent -> sinceSaveHint
-                        else -> "No complete log rows, usable video coverage, or device-availability records are available after ${formatCaptureElapsed(session?.effectiveSnapshotCheckpointMs ?: 0L)}."
+                        else -> "No complete log rows, usable video coverage, or device-availability records are available " +
+                            "after ${formatCaptureElapsed(session?.effectiveSnapshotCheckpointMs ?: 0L)}."
                     }
                     AppText(
                         displayedSinceSaveHint,
@@ -1735,9 +1748,21 @@ internal fun CaptureSnapshotPopover(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
                             AppText("Before/after min", color = colors.td, fontSize = 10.sp)
-                            InlineField(value = playheadBeforeMinutesText, onValue = { playheadBeforeMinutesText = it.filter(Char::isDigit).take(4) }, modifier = Modifier.width(44.dp))
-                            InlineField(value = playheadAfterMinutesText, onValue = { playheadAfterMinutesText = it.filter(Char::isDigit).take(4) }, modifier = Modifier.width(44.dp))
-                            AppText("${formatCaptureElapsed(explicitBounds?.first ?: 0L)}–${formatCaptureElapsed(explicitBounds?.second ?: 0L)}", color = colors.td, fontSize = 10.sp)
+                            InlineField(
+                                value = playheadBeforeMinutesText,
+                                onValue = { playheadBeforeMinutesText = it.filter(Char::isDigit).take(4) },
+                                modifier = Modifier.width(44.dp),
+                            )
+                            InlineField(
+                                value = playheadAfterMinutesText,
+                                onValue = { playheadAfterMinutesText = it.filter(Char::isDigit).take(4) },
+                                modifier = Modifier.width(44.dp),
+                            )
+                            AppText(
+                                "${formatCaptureElapsed(explicitBounds?.first ?: 0L)}–${formatCaptureElapsed(explicitBounds?.second ?: 0L)}",
+                                color = colors.td,
+                                fontSize = 10.sp,
+                            )
                         }
                         SnapshotRangeChoice.START_TO_PLAYHEAD -> Row(verticalAlignment = Alignment.CenterVertically) {
                             AppText("Offset minutes", color = colors.td, fontSize = 10.sp)
@@ -1753,11 +1778,19 @@ internal fun CaptureSnapshotPopover(
                         SnapshotRangeChoice.EXPLICIT -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             Column(Modifier.weight(1f)) {
                                 AppText("Start (mm:ss or hh:mm:ss)", color = colors.td, fontSize = 10.sp)
-                                InlineField(value = explicitStartText, onValue = { explicitStartText = it.filter { c -> c.isDigit() || c == ':' }.take(8) }, modifier = Modifier.fillMaxWidth())
+                                InlineField(
+                                    value = explicitStartText,
+                                    onValue = { explicitStartText = it.filter { c -> c.isDigit() || c == ':' }.take(8) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
                             }
                             Column(Modifier.weight(1f)) {
                                 AppText("End (mm:ss or hh:mm:ss)", color = colors.td, fontSize = 10.sp)
-                                InlineField(value = explicitEndText, onValue = { explicitEndText = it.filter { c -> c.isDigit() || c == ':' }.take(8) }, modifier = Modifier.fillMaxWidth())
+                                InlineField(
+                                    value = explicitEndText,
+                                    onValue = { explicitEndText = it.filter { c -> c.isDigit() || c == ':' }.take(8) },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
                             }
                         }
                         else -> Unit

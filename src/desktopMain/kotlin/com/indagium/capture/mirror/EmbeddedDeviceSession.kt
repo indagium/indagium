@@ -51,6 +51,7 @@ internal class EmbeddedDeviceSession(
     private val microphoneDeviceId: String = MICROPHONE_OFF_ID,
 ) : Closeable {
     private val lock = Any()
+
     /** Serializes audio packet writes with the connection-epoch change at reconnect. */
     private val audioEpochLock = Any()
 
@@ -115,6 +116,7 @@ internal class EmbeddedDeviceSession(
     // synchronized writers' mutual exclusion.
     @Volatile private var muxerStarted = false
     private var firstAnchorPtsUs: Long? = null
+
     /** False between a reconnect and its first video packet's host-clock re-anchor. */
     private var videoConnectionAnchorReady = false
     private var activeStreamEpoch: Long? = null

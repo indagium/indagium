@@ -254,8 +254,7 @@ private fun parseCompleteGetpropListing(output: String): Map<String, String>? {
             val contentEnd = content.trimEnd()
             if (contentEnd.endsWith(']')) {
                 value.append('\n').append(contentEnd.dropLast(1))
-                val property = openProperty ?: return null
-                properties[property] = value.toString()
+                properties[openProperty] = value.toString()
                 openProperty = null
             } else {
                 value.append('\n').append(content)

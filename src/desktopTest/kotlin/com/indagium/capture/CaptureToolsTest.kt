@@ -296,7 +296,9 @@ class CaptureToolsTest {
         runner.runHandler = { spec ->
             if (spec.command.takeLast(4) == listOf("shell", "setprop", "log.tag", "D")) {
                 CaptureCommandResult(1, byteArrayOf(), "Permission denied\n".toByteArray())
-            } else null
+            } else {
+                null
+            }
         }
         val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
 

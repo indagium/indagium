@@ -14,6 +14,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** Opt-in integration check. Never reboots a physical device or runs as part of ordinary tests. */
+@Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
 class CaptureRebootSmokeTest {
     @Test
     fun emulatorRebootKeepsOneCaptureAndExportsItsGap() {
@@ -25,6 +26,7 @@ class CaptureRebootSmokeTest {
         evidence.mkdirs()
         val runner = ProcessBuilderCaptureRunner()
         val tools = CaptureTools(CaptureExecutable(adbPath), null, runner)
+
         fun adb(vararg arguments: String): CaptureCommandResult =
             tools.runAdb(serial, arguments.toList(), Duration.ofSeconds(5))
         assertEquals("1", adb("shell", "getprop", "sys.boot_completed").stdoutText().trim(), "Emulator must be booted before this test")

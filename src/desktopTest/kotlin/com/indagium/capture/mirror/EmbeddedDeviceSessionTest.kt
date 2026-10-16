@@ -349,7 +349,9 @@ class EmbeddedDeviceSessionTest {
                         oldAudioWaiting,
                         releaseOldAudio,
                     )
+
                     override fun sendControl(bytes: ByteArray) = Unit
+
                     override fun close() = Unit
                 }
                 1 -> object : EmbeddedMirrorConnection {
@@ -375,10 +377,12 @@ class EmbeddedDeviceSessionTest {
                         }
                     }
                     override val audioInput: InputStream = PacedChunkInputStream(newAudioChunks, delayMs = 50)
+
                     override fun sendControl(bytes: ByteArray) = Unit
+
                     override fun close() { releaseVideo.countDown() }
                 }
-                else -> throw IllegalStateException("unexpected reconnect")
+                else -> error("unexpected reconnect")
             }
         }
         val elapsed = AtomicLong(1_000)

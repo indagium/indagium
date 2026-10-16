@@ -830,11 +830,13 @@ private fun waitForDeviceReadyTool(context: LaneToolContext): LaneTool =
         IndagiumToolDescriptor(
             "wait_for_device_ready",
             "Wait for this lane's original Android device to be adb-authorized, shell-responsive and fully booted. Use after an expected " +
-                "reboot or temporary disconnect; it never switches to another device. The timeout defaults to $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS ms and is capped at $LANE_MAX_WAIT_FOR_DEVICE_READY_MS ms.",
+                "reboot or temporary disconnect; it never switches to another device. " +
+                "The timeout defaults to $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS ms and is capped at $LANE_MAX_WAIT_FOR_DEVICE_READY_MS ms.",
             schema(
                 "timeoutMs" to "integer",
                 descriptions = mapOf(
-                    "timeoutMs" to "Wait time in milliseconds, 1..$LANE_MAX_WAIT_FOR_DEVICE_READY_MS (default $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS). The active step deadline can shorten this wait.",
+                    "timeoutMs" to "Wait time in milliseconds, 1..$LANE_MAX_WAIT_FOR_DEVICE_READY_MS " +
+                        "(default $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS). The active step deadline can shorten this wait.",
                 ),
             ),
         ),
@@ -852,6 +854,7 @@ private fun waitForDeviceReadyTool(context: LaneToolContext): LaneTool =
                 context.session.waitForDeviceReady(effectiveTimeoutMs, latestProgress::set)
             }
             val stepDeadlineExpired = stepRemainingMs != null && stepRemainingMs <= timeoutMs
+
             fun timeoutDiagnostic(observed: String?): String = when {
                 !stepDeadlineExpired -> observed ?: "The device did not become ready before timeout."
                 observed == null -> "The step execution allowance expired before an adb readiness probe completed."

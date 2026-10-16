@@ -1,8 +1,8 @@
 package com.indagium.testing.device
 
+import com.indagium.capture.CaptureCommandResult
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureMirrorMode
-import com.indagium.capture.CaptureCommandResult
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureRecorder
 import com.indagium.capture.CaptureSettings
@@ -24,8 +24,8 @@ import com.indagium.model.LogEntry
 import com.indagium.testing.script.AdbScriptTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -57,6 +57,61 @@ private const val MAX_SEQUENCE_DELAY_MS = 2_000L
 private const val MAX_SEQUENCE_ACTION_DELAY_MS = 1_000L
 private const val MAX_UI_TREE_READ_TIMEOUT_MS = 2_000L
 private const val NANOS_PER_MILLISECOND = 1_000_000L
+
+private const val DEVICE_READY_POLL_INTERVAL_MS = 500L
+private const val ADB_ERROR_STATE_MAX_CHARS = 160
+
+private enum class DeviceReadyProbe { READY, WAITING, OUT_OF_TIME }
+
+/** Mutable facts of one wait_for_device_ready call; only that call's coroutine touches it. */
+private class DeviceReadyWait(private val serial: String, private val timeoutMs: Long, private val bootIdBefore: String?) {
+    private val started = System.nanoTime()
+    val deadline = started + timeoutMs.coerceAtLeast(1L) * NANOS_PER_MILLISECOND
+    var state = "unavailable"
+    var authorized = false
+    var shellResponsive = false
+    var bootCompleted = false
+    var diagnostic = "Waiting for the original device serial to become ready."
+    var observedBootId: String? = null
+    var ready: Map<String, Any?>? = null
+
+    fun rebootConfirmed(): Boolean? = bootIdBefore?.let { before -> observedBootId?.let { after -> before != after } }
+
+    fun snapshot(timedOut: Boolean = false): Map<String, Any?> = mapOf(
+        "ready" to false,
+        "timedOut" to timedOut,
+        "timeoutMs" to timeoutMs,
+        "waitedMs" to ((System.nanoTime() - started) / NANOS_PER_MILLISECOND).coerceAtLeast(0L),
+        "serial" to serial,
+        "adbState" to state,
+        "authorized" to authorized,
+        "shellResponsive" to shellResponsive,
+        "bootCompleted" to bootCompleted,
+        "bootIdBefore" to bootIdBefore,
+        "bootIdAfter" to observedBootId,
+        "rebootConfirmed" to rebootConfirmed(),
+        "diagnostic" to diagnostic,
+    )
+
+    fun markNotAuthorized() {
+        shellResponsive = false
+        bootCompleted = false
+        observedBootId = null
+        diagnostic = when {
+            "unauthorized" in state -> "The original device serial is attached but adb authorization is required."
+            "offline" in state -> "The original device serial is attached but adb reports it offline."
+            else -> "Waiting for the original device serial; current adb state: $state."
+        }
+    }
+
+    fun markUnreachable(failure: Exception) {
+        state = failure.message?.take(ADB_ERROR_STATE_MAX_CHARS) ?: failure::class.simpleName.orEmpty()
+        authorized = false
+        shellResponsive = false
+        bootCompleted = false
+        diagnostic = "The original device is not currently reachable through adb: $state"
+    }
+}
 
 internal sealed interface DeviceInputAction {
     val delayMs: Long
@@ -224,96 +279,79 @@ internal class TestDeviceSession private constructor(
 
     suspend fun readDeviceState(key: String): DeviceStateReading = deviceStateReader.read(key)
 
-    /** Wait for this lane's original adb serial to be authorized, shell-responsive and fully booted. */
+    /**
+     * Wait for this lane's original adb serial to be authorized, shell-responsive and fully booted.
+     * Any adb or process failure means "not reachable yet": keep polling until the deadline.
+     */
+    @Suppress("TooGenericExceptionCaught")
     suspend fun waitForDeviceReady(
         timeoutMs: Long,
         onProgress: (Map<String, Any?>) -> Unit = {},
     ): Map<String, Any?> {
-        val started = System.nanoTime()
-        val deadline = started + timeoutMs.coerceAtLeast(1L) * NANOS_PER_MILLISECOND
-        var state = "unavailable"
-        var authorized = false
-        var shellResponsive = false
-        var bootCompleted = false
-        var diagnostic = "Waiting for the original device serial to become ready."
-        val bootIdBefore = lastKnownBootId
-        var observedBootId: String? = null
-
-        fun snapshot(timedOut: Boolean = false): Map<String, Any?> = mapOf(
-            "ready" to false,
-            "timedOut" to timedOut,
-            "timeoutMs" to timeoutMs,
-            "waitedMs" to elapsedSince(started),
-            "serial" to serial,
-            "adbState" to state,
-            "authorized" to authorized,
-            "shellResponsive" to shellResponsive,
-            "bootCompleted" to bootCompleted,
-            "bootIdBefore" to bootIdBefore,
-            "bootIdAfter" to observedBootId,
-            "rebootConfirmed" to bootIdBefore?.let { before -> observedBootId?.let { after -> before != after } },
-            "diagnostic" to diagnostic,
-        )
-
-        while (System.nanoTime() < deadline) {
+        val wait = DeviceReadyWait(serial, timeoutMs, lastKnownBootId)
+        while (System.nanoTime() < wait.deadline) {
             try {
-                val stateResult = adbUntilDeadline(deadline, listOf("get-state")) ?: break
-                val stateText = stateResult.stdoutText().trim().lowercase()
-                state = stateText.ifBlank { stateResult.stderrText().trim().lowercase().ifBlank { "unavailable" } }
-                authorized = !stateResult.timedOut && stateResult.exitCode == 0 && stateText == "device"
-                if (authorized) {
-                    diagnostic = "The original device serial is authorized; checking shell responsiveness and Android boot state."
-                    onProgress(snapshot())
-                    val bootResult = adbUntilDeadline(deadline, listOf("shell", "getprop", "sys.boot_completed")) ?: break
-                    shellResponsive = !bootResult.timedOut && bootResult.exitCode == 0
-                    bootCompleted = shellResponsive && bootResult.stdoutText().trim() == "1"
-                    diagnostic = when {
-                        !shellResponsive -> "The device is authorized, but its shell is not responsive yet."
-                        bootCompleted -> "The device is authorized and shell-responsive; confirming its boot identity."
-                        else -> "The device is authorized and shell-responsive; Android boot is still in progress."
-                    }
-                    // Publish shell and boot facts before reading the optional identity. That read
-                    // can consume the rest of the deadline, but callers still retain these facts.
-                    onProgress(snapshot())
-                    if (shellResponsive) {
-                        observedBootId = readBootIdUntilDeadline(deadline)
-                        if (observedBootId != null) onProgress(snapshot())
-                        if (bootCompleted) {
-                            val confirmedReboot = bootIdBefore?.let { before -> observedBootId?.let { after -> before != after } }
-                            if (observedBootId != null) lastKnownBootId = observedBootId
-                            val ready = snapshot().toMutableMap().apply {
-                                put("ready", true)
-                                put("diagnostic", if (confirmedReboot == true) "The device returned after a confirmed reboot." else "The device shell is responsive and boot is complete.")
-                            }
-                            onProgress(ready)
-                            return ready
-                        }
-                    }
-                } else {
-                    shellResponsive = false
-                    bootCompleted = false
-                    observedBootId = null
-                    diagnostic = when {
-                        "unauthorized" in state -> "The original device serial is attached but adb authorization is required."
-                        "offline" in state -> "The original device serial is attached but adb reports it offline."
-                        else -> "Waiting for the original device serial; current adb state: $state."
-                    }
-                    onProgress(snapshot())
+                when (probeDeviceReady(wait, onProgress)) {
+                    DeviceReadyProbe.READY -> return checkNotNull(wait.ready)
+                    DeviceReadyProbe.OUT_OF_TIME -> break
+                    DeviceReadyProbe.WAITING -> Unit
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
-                state = failure.message?.take(160) ?: failure::class.simpleName.orEmpty()
-                authorized = false
-                shellResponsive = false
-                bootCompleted = false
-                diagnostic = "The original device is not currently reachable through adb: $state"
-                onProgress(snapshot())
+                wait.markUnreachable(failure)
+                onProgress(wait.snapshot())
             }
-            delay(minOf(500L, ((deadline - System.nanoTime()).coerceAtLeast(0L) / NANOS_PER_MILLISECOND)))
+            delay(minOf(DEVICE_READY_POLL_INTERVAL_MS, ((wait.deadline - System.nanoTime()).coerceAtLeast(0L) / NANOS_PER_MILLISECOND)))
         }
-        if (observedBootId != null) lastKnownBootId = observedBootId
-        return snapshot(timedOut = true).also(onProgress)
+        wait.observedBootId?.let { lastKnownBootId = it }
+        return wait.snapshot(timedOut = true).also(onProgress)
+    }
+
+    /** One adb pass of [waitForDeviceReady]: authorization, then shell responsiveness, boot completion and boot identity. */
+    private suspend fun probeDeviceReady(wait: DeviceReadyWait, onProgress: (Map<String, Any?>) -> Unit): DeviceReadyProbe {
+        val stateResult = adbUntilDeadline(wait.deadline, listOf("get-state")) ?: return DeviceReadyProbe.OUT_OF_TIME
+        val stateText = stateResult.stdoutText().trim().lowercase()
+        wait.state = stateText.ifBlank { stateResult.stderrText().trim().lowercase().ifBlank { "unavailable" } }
+        wait.authorized = !stateResult.timedOut && stateResult.exitCode == 0 && stateText == "device"
+        if (!wait.authorized) {
+            wait.markNotAuthorized()
+            onProgress(wait.snapshot())
+            return DeviceReadyProbe.WAITING
+        }
+        wait.diagnostic = "The original device serial is authorized; checking shell responsiveness and Android boot state."
+        onProgress(wait.snapshot())
+        val bootResult = adbUntilDeadline(wait.deadline, listOf("shell", "getprop", "sys.boot_completed"))
+            ?: return DeviceReadyProbe.OUT_OF_TIME
+        wait.shellResponsive = !bootResult.timedOut && bootResult.exitCode == 0
+        wait.bootCompleted = wait.shellResponsive && bootResult.stdoutText().trim() == "1"
+        wait.diagnostic = when {
+            !wait.shellResponsive -> "The device is authorized, but its shell is not responsive yet."
+            wait.bootCompleted -> "The device is authorized and shell-responsive; confirming its boot identity."
+            else -> "The device is authorized and shell-responsive; Android boot is still in progress."
+        }
+        // Publish shell and boot facts before reading the optional identity. That read
+        // can consume the rest of the deadline, but callers still retain these facts.
+        onProgress(wait.snapshot())
+        if (!wait.shellResponsive) return DeviceReadyProbe.WAITING
+        wait.observedBootId = readBootIdUntilDeadline(wait.deadline)
+        if (wait.observedBootId != null) onProgress(wait.snapshot())
+        if (!wait.bootCompleted) return DeviceReadyProbe.WAITING
+        wait.observedBootId?.let { lastKnownBootId = it }
+        val ready = wait.snapshot().toMutableMap().apply {
+            put("ready", true)
+            put(
+                "diagnostic",
+                if (wait.rebootConfirmed() == true) {
+                    "The device returned after a confirmed reboot."
+                } else {
+                    "The device shell is responsive and boot is complete."
+                },
+            )
+        }
+        onProgress(ready)
+        wait.ready = ready
+        return DeviceReadyProbe.READY
     }
 
     private fun readBootId(): String? = runCatching {
@@ -354,8 +392,6 @@ internal class TestDeviceSession private constructor(
             null
         }
     }
-
-    private fun elapsedSince(started: Long): Long = ((System.nanoTime() - started) / NANOS_PER_MILLISECOND).coerceAtLeast(0L)
 
     private suspend fun deviceShell(command: List<String>): DeviceShellOutput {
         val result = adb(listOf("shell") + command, DEVICE_STATE_TIMEOUT_SECONDS)

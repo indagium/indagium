@@ -13,20 +13,35 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
+private const val MILLIS_PER_SECOND = 1000.0
+private const val BYTES_PER_KIB = 1024L
+private const val BYTES_PER_MIB = BYTES_PER_KIB * 1024L
+
 internal class FakeCaptureRunner : CaptureProcessRunner {
     private val handles = ArrayDeque<RunningCaptureProcess>()
     val specs = mutableListOf<CaptureProcessSpec>()
     val runSpecs = mutableListOf<CaptureProcessSpec>()
+
     @Volatile var adbState: String = "device"
+
     @Volatile var shellResponsive: Boolean = true
+
     @Volatile var bootId: String = "test-boot-id"
+
     @Volatile var bootUptimeMs: Long = 10_000_000L
+
     @Volatile var bootCompletedValue: String = "1"
+
     @Volatile var bufferListing: String = "main: ring buffer is 256Kb\nsystem: ring buffer is 256Kb\ncrash: ring buffer is 256Kb\n"
+
     @Volatile var globalLogTagValue: String = "\n"
+
     @Volatile var getpropListing: String = "[log.tag.FOO]: [D]\n[ro.build.type]: [userdebug]\n"
+
     @Volatile var bufferedLogcatOutput: String = ""
+
     @Volatile var failRestoreCommands: Boolean = false
+
     @Volatile var runHandler: ((CaptureProcessSpec) -> CaptureCommandResult?)? = null
 
     fun enqueue(handle: RunningCaptureProcess) {
@@ -44,11 +59,17 @@ internal class FakeCaptureRunner : CaptureProcessRunner {
         runSpecs += spec
         runHandler?.invoke(spec)?.let { return it }
         val args = spec.command
-        val (stdout, exitCode) = when {
+        val (stdout, exitCode) = queryResponse(args) ?: changeResponse(args) ?: return super.run(spec, timeout, outputLimitBytes)
+        return CaptureCommandResult(exitCode, stdout.toByteArray(), if (exitCode == 0) byteArrayOf() else "permission denied".toByteArray())
+    }
+
+    /** The fake device's answer to a read-only adb probe, or null when [args] is not one. */
+    private fun queryResponse(args: List<String>): Pair<String, Int>? {
+        return when {
             args.takeLast(4) == listOf("shell", "date", "-u", "+%m-%dT%H:%M:%S") ->
                 Instant.now().atZone(ZoneOffset.UTC).format(DateTimeFormatter.ofPattern("MM-dd'T'HH:mm:ss")) to 0
             args.takeLast(3) == listOf("shell", "cat", "/proc/sys/kernel/random/boot_id") -> bootId to 0
-            args.takeLast(3) == listOf("shell", "cat", "/proc/uptime") -> "${bootUptimeMs / 1000.0} 0.00\n" to 0
+            args.takeLast(3) == listOf("shell", "cat", "/proc/uptime") -> "${bootUptimeMs / MILLIS_PER_SECOND} 0.00\n" to 0
             args.takeLast(3) == listOf("shell", "getprop", "sys.boot_completed") -> bootCompletedValue to 0
             args.lastOrNull() == "get-state" -> adbState to if (adbState == "device") 0 else 1
             args.takeLast(3) == listOf("shell", "echo", "capture-ready") ->
@@ -57,17 +78,24 @@ internal class FakeCaptureRunner : CaptureProcessRunner {
             args.takeLast(3) == listOf("shell", "getprop", "log.tag") -> globalLogTagValue to 0
             args.takeLast(2) == listOf("shell", "getprop") -> getpropListing to 0
             args.contains("logcat") && args.contains("-d") -> bufferedLogcatOutput to 0
+            else -> null
+        }
+    }
+
+    /** The fake device's answer to a logd buffer-resize or setprop command, or null when [args] is neither. */
+    private fun changeResponse(args: List<String>): Pair<String, Int>? {
+        val exitCode = if (failRestoreCommands) 1 else 0
+        return when {
             args.contains("-G") -> {
                 if (!failRestoreCommands) applyFakeBufferResize(args)
-                "" to if (failRestoreCommands) 1 else 0
+                "" to exitCode
             }
             args.any { it.contains("setprop") } -> {
                 if (!failRestoreCommands) applyFakeSetprop(args.joinToString(" "))
-                "" to if (failRestoreCommands) 1 else 0
+                "" to exitCode
             }
-            else -> return super.run(spec, timeout, outputLimitBytes)
+            else -> null
         }
-        return CaptureCommandResult(exitCode, stdout.toByteArray(), if (exitCode == 0) byteArrayOf() else "permission denied".toByteArray())
     }
 
     /** Updates fake logd ring sizes exactly as a successful `logcat -G` would. */
@@ -111,8 +139,8 @@ internal class FakeCaptureRunner : CaptureProcessRunner {
     }
 
     private fun formatFakeBufferSize(bytes: Long): String = when {
-        bytes % (1024L * 1024L) == 0L -> "${bytes / (1024L * 1024L)}Mb"
-        bytes % 1024L == 0L -> "${bytes / 1024L}Kb"
+        bytes % BYTES_PER_MIB == 0L -> "${bytes / BYTES_PER_MIB}Mb"
+        bytes % BYTES_PER_KIB == 0L -> "${bytes / BYTES_PER_KIB}Kb"
         else -> bytes.toString()
     }
 }

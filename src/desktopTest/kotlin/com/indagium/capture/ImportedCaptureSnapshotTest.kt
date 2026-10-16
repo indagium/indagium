@@ -10,6 +10,7 @@ import kotlin.test.assertTrue
 
 class ImportedCaptureSnapshotTest {
     @Test
+    @Suppress("TooGenericExceptionCaught") // Worker threads collect any failure, assertion errors included, for the test thread.
     fun concurrentStaleCursorWritesMergeMonotonicallyForOneSource() {
         val root = createTempDirectory("imported-capture-cursors").toFile()
         val session = CaptureSession(

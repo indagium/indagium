@@ -109,9 +109,9 @@ private fun StringBuilder.appendNoteHtml(
         } else {
             val png = renderDiagramPng(diagram.document)
             if (png != null) {
-            append("<img src=\"data:image/png;base64,")
-            append(Base64.getEncoder().encodeToString(png))
-            append("\" alt=\"Sequence diagram\">")
+                append("<img src=\"data:image/png;base64,")
+                append(Base64.getEncoder().encodeToString(png))
+                append("\" alt=\"Sequence diagram\">")
             } else {
                 // No model to draw (an older or hand-authored note) — the source still communicates.
                 append("<pre>").append(escapeHtmlMultiline(maskText(diagram.source))).append("</pre>")

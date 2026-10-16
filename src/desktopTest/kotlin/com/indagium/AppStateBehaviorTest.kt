@@ -2531,7 +2531,9 @@ class AppStateBehaviorTest {
             if (i > tabsIdx && line.startsWith("tab\t")) {
                 line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
                     .substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
-            } else line
+            } else {
+                line
+            }
         }
         cacheFile.writeText(rewritten.joinToString("\n"))
 
