@@ -617,12 +617,11 @@ internal fun CompareTabPicker(
                         onDismissRequest = { overflowOpen = false },
                         properties = PopupProperties(focusable = true),
                     ) {
-                        Box(
+                        ScrollColumnWithBar(
                             Modifier.width(280.dp)
                                 .heightIn(max = 320.dp)
                                 .background(tc.p, RoundedCornerShape(7.dp))
-                                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                                .verticalScroll(rememberScrollState()),
+                                .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
                         ) {
                             Column(Modifier.padding(vertical = 4.dp)) {
                                 overflowTabs.forEach { tab ->

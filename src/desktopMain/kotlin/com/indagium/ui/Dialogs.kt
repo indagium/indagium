@@ -1307,8 +1307,8 @@ internal fun SplitPromptDialog(
             pending.memoryShortfall?.let { shortfall ->
                 AppText(memoryShortfallLine(shortfall), color = tc.td, fontSize = 11.sp, maxLines = 3)
             }
-            Column(
-                Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState()),
+            ScrollColumnWithBar(
+                Modifier.fillMaxWidth().heightIn(max = 260.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 pending.sources.forEach { source ->
@@ -1567,8 +1567,10 @@ internal fun KeyboardShortcutsDialog(onDismiss: () -> Unit) {
             .background(tc.p)
             .border(1.dp, tc.br, shape),
     ) {
-        Column(
-            Modifier.verticalScroll(scroll).padding(20.dp),
+        ScrollColumnWithBar(
+            state = scroll,
+            contentPadding = PaddingValues(20.dp),
+            endGutter = 0.dp,
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Row(

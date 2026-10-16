@@ -279,8 +279,8 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     )
                     // Scrolls only if the section list ever outgrows the space between the search
                     // field and the shortcuts block below.
-                    Column(
-                        Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                    ScrollColumnWithBar(
+                        Modifier.weight(1f).fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
                         if (searching) {
