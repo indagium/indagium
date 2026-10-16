@@ -48,7 +48,6 @@ import com.indagium.testing.run.StartRunResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.awt.Desktop
 import java.io.File
 
 // The detail of one step of one lane in the report: what was asked, what the agent said, the automatic checks, the judge's
@@ -209,11 +208,13 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
                     }
                     val evidencePaths = listOfNotNull(failed.startScreenshotPath, failed.screenshotPath) + failed.sampleScreenshotPaths
                     if (evidencePaths.isNotEmpty()) {
-                        val scope = LocalTestsUi.current.scope
+                        val testsUi = LocalTestsUi.current
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             evidencePaths.distinct().forEachIndexed { index, path ->
                                 val file = File(runDir, path)
-                                if (file.isFile) AppButton("Open evidence ${index + 1}", onClick = { scope.launch(Dispatchers.IO) { openFile(file) } })
+                                if (file.isFile) {
+                                    AppButton("Open evidence ${index + 1}", onClick = { testsUi.openFileReportingFailure(file, "the evidence screenshot") })
+                                }
                             }
                         }
                     }
@@ -223,8 +224,8 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
         lane.transcriptPath?.let { path ->
             val transcript = File(runDir, path)
             if (transcript.isFile) {
-                val scope = LocalTestsUi.current.scope
-                AppButton("Open lane transcript", onClick = { scope.launch(Dispatchers.IO) { openFile(transcript) } })
+                val testsUi = LocalTestsUi.current
+                AppButton("Open lane transcript", onClick = { testsUi.openFileReportingFailure(transcript, "the lane transcript") })
             }
         }
     }
@@ -428,16 +429,12 @@ private fun StepEvidence(step: StepResult, lane: LaneResult, runDir: File) {
     }
     val transcript = lane.transcriptPath?.let { File(runDir, it) }?.takeIf { it.isFile }
     if (transcript != null) {
-        val scope = LocalTestsUi.current.scope
+        val testsUi = LocalTestsUi.current
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             AppText("Transcript bytes ${step.transcriptStartOffset ?: 0}–${step.transcriptEndOffset ?: 0}", color = tc.td, fontSize = 10.sp)
-            AppButton("Open transcript", onClick = { scope.launch(Dispatchers.IO) { openFile(transcript) } })
+            AppButton("Open transcript", onClick = { testsUi.openFileReportingFailure(transcript, "the transcript") })
         }
     }
-}
-
-private fun openFile(file: File) {
-    runCatching { if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) Desktop.getDesktop().open(file) }
 }
 
 // ── Actions ──────────────────────────────────────────────────────────

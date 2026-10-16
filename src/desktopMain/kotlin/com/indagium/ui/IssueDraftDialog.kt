@@ -16,10 +16,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.testing.model.IssueAttachment
 import com.indagium.testing.model.IssueDestination
 import com.indagium.testing.model.IssueDraft
 import com.indagium.testing.model.IssueRecord
@@ -30,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 // "Create issue…" on a step of the report, the live view's "issue draft created" card and the Issues screen's Edit all open
 // this dialog: title, severity, labels, the description sections, the evidence checklist (with sizes), where the issue goes
@@ -122,6 +125,16 @@ private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     var defaultClipWindow by remember(ready) { mutableStateOf<com.indagium.testing.run.IssueStepClipRequest?>(null) }
     var clipAvailability by remember(ready) { mutableStateOf<String?>(null) }
     var archiveProgress by remember(ready) { mutableStateOf<String?>(null) }
+    var openNote by remember(ready) { mutableStateOf<String?>(null) }
+    // The file each attachment would open: the stored copy once the issue has been stored, else the draft's source file. Checked on IO.
+    val evidenceFiles by produceState(emptyList<File?>(), form.attachments, storedId) {
+        value = withContext(Dispatchers.IO) {
+            form.attachments.map { attachment ->
+                storedId?.let { ui.state.issueStore.attachmentFile(it, attachment) }
+                    ?: attachment.sourcePath?.let(::File)?.takeIf { it.isFile }
+            }
+        }
+    }
     LaunchedEffect(ready.source) {
         if (ready.source.stepNumber > 0) {
             ui.state.defaultIssueStepClipWindow(ready.source).fold(
@@ -198,6 +211,17 @@ private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
                 FormFields(form, ready.draft) { form = it }
                 EvidenceChecklist(
                     form = form,
+                    files = evidenceFiles,
+                    openNote = openNote,
+                    onOpen = { attachment, file ->
+                        ui.openIssueAttachment(attachment, file)
+                        // This dialog is modal: a tab opened behind it is only seen once it is closed.
+                        openNote = if (issueAttachmentOpenMode(attachment.kind, file) == ArtifactOpenMode.IN_APP) {
+                            "${attachment.label} opens in a new tab. Close this dialog to see it."
+                        } else {
+                            null
+                        }
+                    },
                     onToggle = { if (!busy) form = form.toggleAttachment(it) },
                     onCollectBugreport = {
                         if (bugreportJob != null || busy) return@EvidenceChecklist
@@ -409,6 +433,9 @@ private fun Area(label: String, value: String, onValue: (String) -> Unit) {
 @Composable
 private fun EvidenceChecklist(
     form: IssueFormModel,
+    files: List<File?>,
+    openNote: String?,
+    onOpen: (IssueAttachment, File) -> Unit,
     onToggle: (Int) -> Unit,
     onCollectBugreport: () -> Unit,
     onCancelBugreport: () -> Unit,
@@ -421,12 +448,17 @@ private fun EvidenceChecklist(
     if (form.attachments.isEmpty()) TestsHint("No evidence files were kept for this step.")
     form.attachments.forEachIndexed { index, attachment ->
         CheckRow(checked = attachment.include, onToggle = { onToggle(index) }, enabled = checklistEnabled) {
-            Column {
+            Column(Modifier.weight(1f)) {
                 AppText(attachment.checklistLabel(), color = tc().tx, fontSize = 12.sp)
                 if (attachment.note.isNotBlank()) AppText(attachment.note, color = tc().td, fontSize = 10.sp, maxLines = 2)
             }
+            // A click on this button is its own: it does not reach the row, so it never toggles the checkbox.
+            files.getOrNull(index)?.let { file ->
+                AppButton("Open", onClick = { onOpen(attachment, file) }, variant = ButtonVariant.Ghost, modifier = Modifier.testTag("evidence-draft-open-$index"))
+            }
         }
     }
+    openNote?.let { TestsHint(it) }
     if (enabled) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             AppButton(if (collecting) "Collecting bugreport…" else "Collect Android bugreport", onClick = onCollectBugreport, enabled = !collecting && checklistEnabled)

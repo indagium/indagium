@@ -39,7 +39,6 @@ import com.indagium.testing.model.RecheckOutcome
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.awt.Desktop
 
 // The Issues screen of the Tests workspace: the stored issues (newest first, searchable) as rows, and the selected issue in the
 // inspector beside them (the first one is preselected): its Markdown as plain styled text, where it was sent and what a later run
@@ -258,7 +257,7 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
         overflowItems = listOf(
             TestsMenuItem("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") }),
             TestsMenuItem("Add to notes", onClick = { addToNotes(openLaneLog = false) }),
-            TestsMenuItem("Open folder", onClick = { ui.scope.launch(Dispatchers.IO) { openFolder(ui.state.issueStore.issueDir(issue.id)) } }),
+            TestsMenuItem("Open folder", onClick = { ui.openFolderReportingFailure(ui.state.issueStore.issueDir(issue.id), "the issue folder") }),
             TestsMenuItem(
                 "Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true,
                 enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
@@ -285,6 +284,11 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(10.dp)) {
         AppText(markdown, color = tc.tx.copy(alpha = DETAIL_ALPHA), fontSize = 11.sp, fontFamily = MONO, maxLines = MARKDOWN_MAX_LINES)
     }
+    // Resolved on IO: each stored file is checked on disk, so a deleted one shows as missing instead of a button that fails.
+    val evidence by produceState(emptyList<EvidenceRow>(), issue) {
+        value = withContext(Dispatchers.IO) { issueEvidenceRows(issue.draft.attachments) { ui.state.issueStore.attachmentFile(issue, it) } }
+    }
+    IssueEvidenceSection(evidence, onOpen = ui::openIssueAttachment, onReveal = ui::revealIssueFile)
     if (issue.destinationResults.isNotEmpty()) {
         TestsSectionTitle("Where it went")
         issue.destinationResults.asReversed().forEach { result ->
@@ -324,8 +328,4 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             danger = false,
         )
     }
-}
-
-private fun openFolder(folder: java.io.File) {
-    runCatching { if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) Desktop.getDesktop().open(folder) }
 }
