@@ -550,6 +550,13 @@ The raw-media player preserves a requested seek position inside sparse video PTS
 the preceding image while the playback clock traverses the gap. Paused preview scans do not feed
 audio; decoding resumes from the requested position. The same resolver serves headless frame grabs,
 so raw capture playback does not depend on exporting placeholder frames first.
+After a seek the playback clock stays frozen at the seek position until the decode thread has
+actually reached it (the first frame at or after the target; JavaCV's cached first frame after
+`setTimestamp` does not count, since the demuxer can still sit back at the previous keyframe), so
+catch-up through a long GOP cannot make the first frames arrive late. A frame the drop logic picks
+for display is shown even if the published position already ran ahead of it; the position never
+moves backwards. Availability exports re-encode with a keyframe about every two seconds so that
+catch-up stays short.
 The Device events control presents those structured intervals independently of marker-row
 presentation. Confirmed reboot labels come from interval evidence; optional log jumps require
 matching transition rows and preserve the difference between row ordinals and parsed entry IDs.

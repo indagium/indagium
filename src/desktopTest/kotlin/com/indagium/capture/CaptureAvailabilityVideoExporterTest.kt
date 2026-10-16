@@ -156,6 +156,37 @@ class CaptureAvailabilityVideoExporterTest {
         assertVideoDurationWithinOneFrame(destination, expectedDurationMs = 4_000)
     }
 
+    @Test
+    fun renderedAvailabilityVideoCarriesPeriodicKeyframes() {
+        val destination = tempFile("keyframes", ".mkv")
+
+        FfmpegCaptureVideoExporter().exportWithAvailability(
+            source = null,
+            destination = destination,
+            timelineStartElapsedMs = 0,
+            timelineEndElapsedMs = 9_000,
+            sourceElapsedOriginMs = 0,
+            availabilityIntervals = listOf(CaptureAvailabilityInterval(0, null, rebootConfirmed = null)),
+        )
+
+        // A keyframe roughly every 2 s keeps seeking in the player cheap (it decodes forward from the
+        // previous keyframe). A single keyframe for the whole file is the regression.
+        val keyframeTimesMs = FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            val times = mutableListOf<Long>()
+            while (true) {
+                val frame = grabber.grabImage() ?: break
+                if (frame.keyFrame) times += frame.timestamp / 1_000L
+            }
+            times
+        }
+        assertTrue(keyframeTimesMs.size >= 4, "expected a keyframe about every 2 s over 9 s, got $keyframeTimesMs")
+        assertTrue(
+            keyframeTimesMs.zipWithNext().all { (a, b) -> b - a <= 2_500L },
+            "keyframes should be at most ~2 s apart, got $keyframeTimesMs",
+        )
+    }
+
     private fun assertCardAt(file: File, targetMs: Long) {
         val converter = Java2DFrameConverter()
         try {
