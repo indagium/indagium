@@ -48,10 +48,10 @@ import com.indagium.capture.DeviceLogActivity
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
 import com.indagium.capture.bufferSizeButtonLabel
+import com.indagium.capture.deviceLogGlobalLevelButtonLabel
 import com.indagium.capture.deviceLogStatusText
 import com.indagium.capture.deviceLoggingSummaryLine
 import com.indagium.capture.deviceStateGuidance
-import com.indagium.capture.deviceLogGlobalLevelButtonLabel
 import com.indagium.capture.mainBufferIsSmall
 import com.indagium.capture.matchingBufferSizeChoice
 import kotlinx.coroutines.delay

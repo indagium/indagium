@@ -1867,6 +1867,16 @@ internal sealed class RestoredTabSource {
 
     data class CaptureSource(val archiveFile: File, val logEntryPath: String?) : RestoredTabSource() {
         override val largeFileMode: Boolean = false // recomputed from the extracted log on the IO load path
+
+        companion object {
+            /** [logSourcePath] is the tab's persisted `archive!entry` source, whose entry part names the capture's log. */
+            fun restore(archivePath: String, logSourcePath: String?): CaptureSource? {
+                val bangIndex = logSourcePath?.indexOf('!') ?: -1
+                val logEntryPath = logSourcePath?.substring(bangIndex + 1)?.takeIf { bangIndex > 0 && it.isNotBlank() }
+                return File(archivePath).takeIf { it.exists() }
+                    ?.let { CaptureSource(it, logEntryPath) }
+            }
+        }
     }
 }
 
@@ -1877,7 +1887,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
     val persistedCandidate = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.archiveCandidateFromToken()
     val attachedVideo = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.attachedVideoFromToken()
     val captureArchivePath = p.getOrNull(15)?.takeIf { it.isNotBlank() } ?: attachedVideo?.captureSourcePath
-    val source = captureArchivePath?.restoredCaptureSource(sourcePath?.captureArchiveEntryPath())
+    val source = captureArchivePath?.let { RestoredTabSource.CaptureSource.restore(it, sourcePath) }
         ?: sourcePath?.restoredTabSource(persistedCandidate)
         ?: return@runCatching null
     RestoredTabShell(
@@ -1925,15 +1935,6 @@ private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null
         return RestoredTabSource.ArchiveSource(archiveFile, entryPath, matchingPersistedCandidate)
     }
     return File(this).takeIf { it.exists() }?.let(RestoredTabSource::FileSource)
-}
-
-private fun String.restoredCaptureSource(logEntryPath: String?): RestoredTabSource.CaptureSource? =
-    File(this).takeIf { it.exists() }
-        ?.let { RestoredTabSource.CaptureSource(it, logEntryPath) }
-
-private fun String.captureArchiveEntryPath(): String? {
-    val bangIndex = indexOf('!')
-    return substring(bangIndex + 1).takeIf { bangIndex > 0 && it.isNotBlank() }
 }
 
 internal fun File.totalFileSize(): Long =

@@ -261,23 +261,14 @@ class CaptureArchiveExporter(
         val requestedEndMs: Long,
     )
 
-    /**
-     * Publishes the durable representation of a stopped capture beside its recorder output.
-     *
-     * This deliberately does not create a ZIP, remux the MKV, or copy any raw asset. The
-     * recorder's files are already the canonical extracted capture; finalization only derives
-     * the portable log-to-video mapping and descriptor, then re-opens that directory through the
-     * normal reader so callers receive exactly the same validation as imported archives.
-     */
-    @Synchronized
-    @Suppress("ThrowsCount", "TooGenericExceptionCaught")
-    fun finalizeSessionInPlace(session: CaptureSession): ImportedCapture {
-        if (session.status == CaptureStatus.RECORDING) {
-            throw CaptureArchiveException("Cannot finalize an active capture session")
+    /** Checks that [session] is stopped with regular, size-bounded files, and returns its non-empty video file. */
+    private fun requireFinalizableSession(session: CaptureSession): File? {
+        val unfinalizable = when {
+            session.status == CaptureStatus.RECORDING -> "Cannot finalize an active capture session"
+            !session.directory.isDirectory -> "Capture session directory is missing: ${session.directory}"
+            else -> null
         }
-        if (!session.directory.isDirectory) {
-            throw CaptureArchiveException("Capture session directory is missing: ${session.directory}")
-        }
+        if (unfinalizable != null) throw CaptureArchiveException(unfinalizable)
         requireRegularCaptureFile(session.logFile, "Capture log")
         requireRegularCaptureFile(session.indexFile, "Capture index")
         require(session.logFile.length() <= MAX_ARCHIVE_ENTRY_BYTES) {
@@ -299,6 +290,21 @@ class CaptureArchiveExporter(
                 "Capture video has no start-time reference"
             }
         }
+        return videoFile
+    }
+
+    /**
+     * Publishes the durable representation of a stopped capture beside its recorder output.
+     *
+     * This deliberately does not create a ZIP, remux the MKV, or copy any raw asset. The
+     * recorder's files are already the canonical extracted capture; finalization only derives
+     * the portable log-to-video mapping and descriptor, then re-opens that directory through the
+     * normal reader so callers receive exactly the same validation as imported archives.
+     */
+    @Synchronized
+    @Suppress("ThrowsCount", "TooGenericExceptionCaught")
+    fun finalizeSessionInPlace(session: CaptureSession): ImportedCapture {
+        val videoFile = requireFinalizableSession(session)
 
         val input = validateFinalizationInput(session)
         val staging = Files.createTempDirectory(session.directory.toPath(), ".finalize-").toFile()
@@ -906,9 +912,9 @@ class CaptureArchiveExporter(
                 mapping = null,
                 video = videoAsset,
                 videoStartMs = if (availabilityFramesRendered) timelineBaseMs
-                    else effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                else effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
                 videoEndMs = if (availabilityFramesRendered) selectedEndMs
-                    else effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                else effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
                 screenshots = screenshotAssets,
                 notes = notesAsset,
                 markers = markerAssets,
@@ -1095,6 +1101,83 @@ object CaptureArchiveReader {
         return validateImported(root, descriptor, source)
     }
 
+    private fun timelineFromRows(
+        root: File,
+        descriptor: CaptureArchiveDescriptor,
+        timelineAsset: CaptureArchiveAsset,
+        parsedLogCount: Int,
+    ): CaptureTimeline {
+        val elapsedRows = readTimelineRows(
+            resolveSafe(root, timelineAsset.path),
+            parsedLogCount,
+            descriptor.timelineBaseElapsedMs,
+            descriptor.timelineDurationMs,
+            descriptor.availabilityIntervals,
+        )
+        val anchor = descriptor.syncAnchor
+        val anchorElapsed = anchor?.let { elapsedRows.getOrNull(it.row - 1)?.second }
+        val videoDurationMs = if (descriptor.videoStartMs != null && descriptor.videoEndMs != null) {
+            (descriptor.videoEndMs - descriptor.videoStartMs).coerceAtLeast(0L)
+        } else {
+            null
+        }
+        val rows = elapsedRows.mapIndexed { index, (ordinal, elapsedMs) ->
+            val videoMs = if (anchor != null && anchorElapsed != null && descriptor.video != null) {
+                runCatching {
+                    Math.addExact(anchor.videoMs, Math.subtractExact(elapsedMs, anchorElapsed))
+                }.getOrNull()?.takeIf { position ->
+                    position >= 0L && (videoDurationMs == null || position <= videoDurationMs)
+                }
+            } else {
+                null
+            }
+            require(elapsedMs <= descriptor.timelineDurationMs) { "Capture timeline row exceeds its declared duration" }
+            CaptureMappingRow(index + 1, elapsedMs, videoMs)
+        }
+        return CaptureTimeline(
+            rows = rows,
+            quality = if (anchor != null) "estimated" else "unmapped",
+            availabilityIntervals = descriptor.availabilityIntervals,
+            timelineBaseElapsedMs = descriptor.timelineBaseElapsedMs,
+            timelineDurationMs = descriptor.timelineDurationMs,
+            // The row anchor is authoritative for the PTS-to-capture mapping. In particular,
+            // it preserves the manual calibration already reflected in the rows instead of
+            // deriving a subtly different origin from the descriptor's coverage edge.
+            videoOriginElapsedMs = if (anchor != null && anchorElapsed != null) {
+                runCatching {
+                    Math.addExact(
+                        descriptor.timelineBaseElapsedMs,
+                        Math.subtractExact(anchorElapsed, anchor.videoMs),
+                    )
+                }.getOrNull()
+            } else {
+                descriptor.videoStartMs
+            },
+            availabilityFramesRendered = descriptor.availabilityFramesRendered,
+            showUnavailableFrames = descriptor.showUnavailableFrames,
+        )
+    }
+
+    private fun timelineFromLegacyMapping(
+        root: File,
+        descriptor: CaptureArchiveDescriptor,
+        mappingAsset: CaptureArchiveAsset,
+        parsedLogCount: Int,
+    ): CaptureTimeline {
+        val rows = readMapping(resolveSafe(root, mappingAsset.path))
+        require(rows.size == parsedLogCount) {
+            "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
+        }
+        return CaptureTimeline(
+            rows = rows,
+            manualOffsetMs = descriptor.manualOffsetMs,
+            timelineDurationMs = rows.lastOrNull()?.elapsedMs ?: 0L,
+            videoOriginElapsedMs = rows.firstNotNullOfOrNull { row ->
+                row.videoMs?.let { row.elapsedMs - it }
+            },
+        )
+    }
+
     private fun validateImported(root: File, descriptor: CaptureArchiveDescriptor, source: File): ImportedCapture {
         val logFile = resolveSafe(root, descriptor.log.path)
         val videoFile = descriptor.video?.let { resolveSafe(root, it.path) }
@@ -1108,68 +1191,8 @@ object CaptureArchiveReader {
         // v3: no mapping file at all — descriptor.mapping is null (see its own doc) and there is
         // nothing here to read; AppState instead turns descriptor.syncAnchor into a plain
         // VideoAnchor once it has parsed the log itself.
-        val timeline = descriptor.timeline?.let { timelineAsset ->
-            val elapsedRows = readTimelineRows(
-                resolveSafe(root, timelineAsset.path),
-                parsedLogCount,
-                descriptor.timelineBaseElapsedMs,
-                descriptor.timelineDurationMs,
-                descriptor.availabilityIntervals,
-            )
-            val anchor = descriptor.syncAnchor
-            val anchorElapsed = anchor?.let { elapsedRows.getOrNull(it.row - 1)?.second }
-            val videoDurationMs = if (descriptor.videoStartMs != null && descriptor.videoEndMs != null) {
-                (descriptor.videoEndMs - descriptor.videoStartMs).coerceAtLeast(0L)
-            } else {
-                null
-            }
-            val rows = elapsedRows.mapIndexed { index, (ordinal, elapsedMs) ->
-                val videoMs = if (anchor != null && anchorElapsed != null && descriptor.video != null) {
-                    runCatching {
-                        Math.addExact(anchor.videoMs, Math.subtractExact(elapsedMs, anchorElapsed))
-                    }.getOrNull()?.takeIf { position ->
-                        position >= 0L && (videoDurationMs == null || position <= videoDurationMs)
-                    }
-                } else {
-                    null
-                }
-                require(elapsedMs <= descriptor.timelineDurationMs) { "Capture timeline row exceeds its declared duration" }
-                CaptureMappingRow(index + 1, elapsedMs, videoMs)
-            }
-            CaptureTimeline(
-                rows = rows,
-                quality = if (anchor != null) "estimated" else "unmapped",
-                availabilityIntervals = descriptor.availabilityIntervals,
-                timelineBaseElapsedMs = descriptor.timelineBaseElapsedMs,
-                timelineDurationMs = descriptor.timelineDurationMs,
-                // The row anchor is authoritative for the PTS-to-capture mapping. In particular,
-                // it preserves the manual calibration already reflected in the rows instead of
-                // deriving a subtly different origin from the descriptor's coverage edge.
-                videoOriginElapsedMs = if (anchor != null && anchorElapsed != null) {
-                    runCatching {
-                        Math.addExact(
-                            descriptor.timelineBaseElapsedMs,
-                            Math.subtractExact(anchorElapsed, anchor.videoMs),
-                        )
-                    }.getOrNull()
-                } else descriptor.videoStartMs,
-                availabilityFramesRendered = descriptor.availabilityFramesRendered,
-                showUnavailableFrames = descriptor.showUnavailableFrames,
-            )
-        } ?: descriptor.mapping?.let { mappingAsset ->
-            val rows = readMapping(resolveSafe(root, mappingAsset.path))
-            require(rows.size == parsedLogCount) {
-                "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
-            }
-            CaptureTimeline(
-                rows = rows,
-                manualOffsetMs = descriptor.manualOffsetMs,
-                timelineDurationMs = rows.lastOrNull()?.elapsedMs ?: 0L,
-                videoOriginElapsedMs = rows.firstNotNullOfOrNull { row ->
-                    row.videoMs?.let { row.elapsedMs - it }
-                },
-            )
-        }
+        val timeline = descriptor.timeline?.let { timelineAsset -> timelineFromRows(root, descriptor, timelineAsset, parsedLogCount) }
+            ?: descriptor.mapping?.let { mappingAsset -> timelineFromLegacyMapping(root, descriptor, mappingAsset, parsedLogCount) }
         descriptor.syncAnchor?.let { anchor ->
             require(anchor.row in 1..parsedLogCount) {
                 "Capture sync anchor row ${anchor.row} is outside the parsed log ($parsedLogCount rows)"
@@ -2276,11 +2299,7 @@ private fun parseDescriptorV3(root: JsonObject, version: Int): CaptureArchiveDes
     // anchor from it rather than trying to resurrect a mapping file that no longer ships (see this
     // class's own doc — nothing outside this machine has ever seen that shape).
     val sync = root["sync"] as? JsonObject
-    val syncAnchor = sync?.let { obj ->
-        val row = obj.int("row")
-        val videoMs = obj.long("videoMs")
-        if (row != null && videoMs != null) CaptureSyncAnchor(row = row, videoMs = videoMs) else null
-    }
+    val syncAnchor = sync?.toSyncAnchorOrNull()
     val sha256 = root["sha256"] as? JsonObject ?: JsonObject(emptyMap())
 
     fun assetFor(path: String) = CaptureArchiveAsset(
@@ -2292,12 +2311,7 @@ private fun parseDescriptorV3(root: JsonObject, version: Int): CaptureArchiveDes
         formatVersion = version,
         app = root.string("app") ?: "",
         sessionId = root.requiredString("sessionId"),
-        device = CaptureArchiveDevice(
-            serial = device.requiredString("serial"),
-            state = device.string("state") ?: "device",
-            model = device.requiredString("model"),
-            emulator = device.boolean("emulator") ?: false,
-        ),
+        device = device.toArchiveDevice(),
         sessionStartedEpochMs = root.string("startedAt")?.let(::parseIsoInstant) ?: root.requiredLong("sessionStartedEpochMs"),
         exportedEpochMs = root.string("exportedAt")?.let(::parseIsoInstant) ?: root.requiredLong("exportedEpochMs"),
         range = root.requiredString("range").let { CaptureRange.valueOf(it) },
@@ -2317,15 +2331,29 @@ private fun parseDescriptorV3(root: JsonObject, version: Int): CaptureArchiveDes
         markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toMarkerV3() } ?: emptyList(),
         syncAnchor = syncAnchor,
         timeline = if (version >= 4) root.string("timeline")?.let(::assetFor) else null,
-        availabilityIntervals = if (version >= 4) {
-            (root["availability"] as? JsonArray)?.map { it.jsonObject.toAvailabilityInterval() } ?: emptyList()
-        } else emptyList(),
+        availabilityIntervals = if (version >= 4) root.availabilityIntervals() else emptyList(),
         timelineBaseElapsedMs = root.long("timelineBaseMs") ?: 0L,
         timelineDurationMs = root.long("timelineDurationMs") ?: 0L,
         availabilityFramesRendered = root.boolean("availabilityFramesRendered") ?: false,
         showUnavailableFrames = root.boolean("showUnavailableFrames"),
     )
 }
+
+private fun JsonObject.toArchiveDevice(): CaptureArchiveDevice = CaptureArchiveDevice(
+    serial = requiredString("serial"),
+    state = string("state") ?: "device",
+    model = requiredString("model"),
+    emulator = boolean("emulator") ?: false,
+)
+
+private fun JsonObject.toSyncAnchorOrNull(): CaptureSyncAnchor? {
+    val row = int("row")
+    val videoMs = long("videoMs")
+    return if (row != null && videoMs != null) CaptureSyncAnchor(row = row, videoMs = videoMs) else null
+}
+
+private fun JsonObject.availabilityIntervals(): List<CaptureAvailabilityInterval> =
+    (this["availability"] as? JsonArray)?.map { it.jsonObject.toAvailabilityInterval() } ?: emptyList()
 
 private fun JsonObject.toAvailabilityInterval(): CaptureAvailabilityInterval = CaptureAvailabilityInterval(
     startElapsedMs = requiredLong("startMs"),
@@ -2356,12 +2384,7 @@ private fun parseDescriptorLegacy(root: JsonObject, version: Int): CaptureArchiv
         formatVersion = version,
         app = "",
         sessionId = root.requiredString("sessionId"),
-        device = CaptureArchiveDevice(
-            serial = device.requiredString("serial"),
-            state = device.string("state") ?: "device",
-            model = device.requiredString("model"),
-            emulator = device.boolean("emulator") ?: false,
-        ),
+        device = device.toArchiveDevice(),
         sessionStartedEpochMs = root.requiredLong("sessionStartedEpochMs"),
         exportedEpochMs = root.requiredLong("exportedEpochMs"),
         range = root.requiredString("range").let { CaptureRange.valueOf(it) },

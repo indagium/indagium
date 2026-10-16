@@ -1,8 +1,8 @@
 package com.indagium.capture
 
+import com.indagium.model.VideoSource
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import com.indagium.model.VideoSource
 
 private const val BYTES_PER_GIBIBYTE = 1024L * 1024L * 1024L
 private const val DEFAULT_SESSION_LIMIT_BYTES = 10L * BYTES_PER_GIBIBYTE

@@ -5,17 +5,17 @@
 
 package com.indagium.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -30,18 +30,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.platform.LocalDensity
@@ -315,6 +315,7 @@ private class CaptureLogRowsSignal(
 
 private class CaptureRowsIdentity(val rows: List<CaptureMappingRow>) {
     override fun equals(other: Any?): Boolean = other is CaptureRowsIdentity && rows === other.rows
+
     override fun hashCode(): Int = System.identityHashCode(rows)
 }
 
@@ -394,7 +395,15 @@ internal fun rememberCaptureDeviceEvents(state: AppState, tab: LogTab): CaptureD
     val summary = remember(intervals) { captureDeviceEventSummary(intervals) }
     val isImported = state.isImportedCaptureSnapshot(tab.id)
     val markerEnabled = if (isImported) null else session?.settings?.writeDeviceAvailabilityMarkers
-    return remember(intervals, activeTimeline.timelineBaseElapsedMs, activeTimeline.timelineDurationMs, CaptureRowsIdentity(activeTimeline.rows), targets, summary, markerEnabled) {
+    return remember(
+        intervals,
+        activeTimeline.timelineBaseElapsedMs,
+        activeTimeline.timelineDurationMs,
+        CaptureRowsIdentity(activeTimeline.rows),
+        targets,
+        summary,
+        markerEnabled,
+    ) {
         CaptureDeviceEventsModel(
             intervals = intervals,
             timelineBaseElapsedMs = activeTimeline.timelineBaseElapsedMs,
@@ -470,7 +479,11 @@ internal fun CaptureDeviceEventsDropdown(
                 DisableSelection {
                     AppText(
                         "Events ${events.summary.disconnectCount}  ▾",
-                        color = if (events.summary.waitingCount > 0 || events.summary.confirmedRebootCount > 0) colors.warn else if (hovered || open) colors.tx else colors.td,
+                        color = when {
+                            events.summary.waitingCount > 0 || events.summary.confirmedRebootCount > 0 -> colors.warn
+                            hovered || open -> colors.tx
+                            else -> colors.td
+                        },
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
@@ -635,7 +648,12 @@ private fun CaptureDeviceEventsDetails(
                 Column(Modifier.fillMaxWidth().padding(horizontal = 7.dp, vertical = 5.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         AppText(status.label, color = if (status == CaptureDeviceEventStatus.REBOOT_CONFIRMED) colors.warn else colors.ac, fontSize = 10.sp)
-                        AppText(formatCaptureDeviceEventElapsed(interval.startElapsedMs), color = colors.tx, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                        AppText(
+                            formatCaptureDeviceEventElapsed(interval.startElapsedMs),
+                            color = colors.tx,
+                            fontSize = 10.sp,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        )
                     }
                     val period = if (interval.endElapsedMs != null) {
                         "${formatCaptureDeviceEventElapsed(interval.startElapsedMs)}–${formatCaptureDeviceEventElapsed(interval.endElapsedMs)}"
@@ -681,19 +699,19 @@ private fun CaptureDeviceEventsDetails(
 }
 
 private fun formatCaptureDeviceEventElapsed(elapsedMs: Long): String {
-    val totalSeconds = elapsedMs.coerceAtLeast(0L) / 1_000L
-    val hours = totalSeconds / 3_600L
-    val minutes = totalSeconds % 3_600L / 60L
-    val seconds = totalSeconds % 60L
+    val totalSeconds = elapsedMs.coerceAtLeast(0L) / CAPTURE_MILLIS_PER_SECOND
+    val hours = totalSeconds / CAPTURE_SECONDS_PER_HOUR
+    val minutes = totalSeconds % CAPTURE_SECONDS_PER_HOUR / CAPTURE_SECONDS_PER_MINUTE
+    val seconds = totalSeconds % CAPTURE_SECONDS_PER_MINUTE
     return if (hours > 0L) String.format(Locale.ROOT, "%d:%02d:%02d", hours, minutes, seconds)
     else String.format(Locale.ROOT, "%02d:%02d", minutes, seconds)
 }
 
 private fun formatCaptureDeviceEventDuration(durationMs: Long): String {
-    val seconds = durationMs.coerceAtLeast(0L) / 1_000L
+    val seconds = durationMs.coerceAtLeast(0L) / CAPTURE_MILLIS_PER_SECOND
     return when {
-        seconds < 60L -> "${seconds}s"
-        seconds < 3_600L -> "${seconds / 60L}m ${seconds % 60L}s"
-        else -> "${seconds / 3_600L}h ${seconds % 3_600L / 60L}m"
+        seconds < CAPTURE_SECONDS_PER_MINUTE -> "${seconds}s"
+        seconds < CAPTURE_SECONDS_PER_HOUR -> "${seconds / CAPTURE_SECONDS_PER_MINUTE}m ${seconds % CAPTURE_SECONDS_PER_MINUTE}s"
+        else -> "${seconds / CAPTURE_SECONDS_PER_HOUR}h ${seconds % CAPTURE_SECONDS_PER_HOUR / CAPTURE_SECONDS_PER_MINUTE}m"
     }
 }

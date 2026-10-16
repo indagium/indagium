@@ -3558,7 +3558,13 @@ private fun IssueCategoryDropdown(
                         val active = option.selection == category
                         HoverBox(
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
-                                .then(if (option.selection == IssueCategorySelection.DeviceEvents) Modifier.testTag("issue-category-device-events") else Modifier),
+                                .then(
+                                    if (option.selection == IssueCategorySelection.DeviceEvents) {
+                                        Modifier.testTag("issue-category-device-events")
+                                    } else {
+                                        Modifier
+                                    },
+                                ),
                             baseBg = if (active) tc.abg else Color.Transparent,
                             onClick = { open = false; onSelect(option.selection) },
                         ) {

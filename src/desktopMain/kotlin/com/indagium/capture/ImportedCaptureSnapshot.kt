@@ -1,18 +1,20 @@
 package com.indagium.capture
 
+import com.indagium.model.LogEntry
 import com.indagium.model.VideoSource
 import com.indagium.utils.unrollLogTimeline
-import com.indagium.model.LogEntry
-import java.io.ByteArrayOutputStream
 import java.io.BufferedInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.security.MessageDigest
-import java.util.Properties
-import java.util.UUID
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.Properties
+import java.util.UUID
+
+private const val BYTE_MASK = 0xFF
 
 /** A range-exportable view over immutable archive assets plus its app-local, source-keyed cursor. */
 internal data class ImportedCaptureSnapshot(
@@ -61,7 +63,7 @@ internal fun importedCaptureSnapshot(
     val settings = CaptureSettings(
         recordVideo = video?.isFile == true,
         videoContainer = if (video?.extension.equals("mkv", ignoreCase = true)) CaptureVideoContainer.MKV
-            else CaptureVideoContainer.MP4,
+        else CaptureVideoContainer.MP4,
         showUnavailableFrames = imported.descriptor.showUnavailableFrames ?: true,
         writeDeviceAvailabilityMarkers = true,
     )
@@ -162,11 +164,11 @@ private fun importedCaptureSnapshotIdentity(source: File, descriptor: CaptureArc
             .plus(descriptor.screenshots)
             .sortedBy { it.path }
             .forEach { asset ->
-            append(asset.path).append(':').append(asset.sha256).append('\u0000')
-        }
+                append(asset.path).append(':').append(asset.sha256).append('\u0000')
+            }
     }
     return MessageDigest.getInstance("SHA-256").digest(stable.toByteArray(Charsets.UTF_8))
-        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        .joinToString("") { "%02x".format(it.toInt() and BYTE_MASK) }
 }
 
 private fun readImportedSnapshotCursors(file: File): Triple<Long, Long, Int> {
@@ -227,6 +229,7 @@ private fun writeImportedIndex(logFile: File, indexFile: File, elapsedByOrdinal:
         BufferedInputStream(logFile.inputStream()).use { input ->
             temp.bufferedWriter(Charsets.UTF_8).use { output ->
                 val line = ByteArrayOutputStream()
+
                 fun emit() {
                     val raw = line.toByteArray()
                     val trimmed = raw.toString(Charsets.UTF_8).trim()

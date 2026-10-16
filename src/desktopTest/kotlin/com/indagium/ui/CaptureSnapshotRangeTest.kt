@@ -1,20 +1,20 @@
 package com.indagium.ui
 
-import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureAvailabilityInterval
+import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import java.io.File
 
 class CaptureSnapshotRangeTest {
     private val stopped = CaptureSession(

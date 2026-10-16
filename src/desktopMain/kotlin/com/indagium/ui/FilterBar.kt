@@ -61,8 +61,8 @@ import com.indagium.model.FilterMode
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.RuleTarget
-import com.indagium.utils.isValidRegexPattern
 import com.indagium.utils.hasTagPrefixPids
+import com.indagium.utils.isValidRegexPattern
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive

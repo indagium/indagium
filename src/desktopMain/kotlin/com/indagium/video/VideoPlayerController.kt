@@ -143,8 +143,53 @@ private fun seekPreviewFrameAt(
     grabber: FFmpegFrameGrabber,
     targetUs: Long,
     isCurrent: () -> Boolean = { true },
-): SeekPreviewFrame? {
-    fun gapThresholdUs(previousIntervalUs: Long?): Long {
+): SeekPreviewFrame? = SeekPreviewScan(grabber, targetUs, isCurrent).resolve()
+
+/** What one forward scan of a [SeekPreviewScan] concluded: a final answer (possibly none) or a retry from earlier. */
+private sealed interface SeekScanPass {
+    class Resolved(val preview: SeekPreviewFrame?) : SeekScanPass
+
+    data object RetryEarlier : SeekScanPass
+}
+
+/** The state of one [seekPreviewFrameAt] call: scans forward from the target, backing up in bounded steps when needed. */
+private class SeekPreviewScan(
+    private val grabber: FFmpegFrameGrabber,
+    private val targetUs: Long,
+    private val isCurrent: () -> Boolean,
+) {
+    private var backtrackUs = SEEK_PREVIEW_INITIAL_BACKTRACK_US
+    private var scanStartUs = targetUs
+    private var attempt = 0
+    private var olderVideoTimestampUs: Long? = null
+    private var previousVideoTimestampUs: Long? = null
+
+    fun resolve(): SeekPreviewFrame? {
+        while (isCurrent()) {
+            if (attempt > 0 && runCatching { grabber.setTimestamp(scanStartUs) }.isFailure) return null
+            olderVideoTimestampUs = null
+            previousVideoTimestampUs = null
+            when (val pass = scanPass()) {
+                is SeekScanPass.Resolved -> return pass.preview
+                SeekScanPass.RetryEarlier -> if (!prepareRetry()) return null
+            }
+        }
+        return null
+    }
+
+    private fun prepareRetry(): Boolean {
+        if (attempt >= MAX_SEEK_PREVIEW_BACKTRACKS) return false
+        attempt++
+        scanStartUs = (targetUs - backtrackUs).coerceAtLeast(0L)
+        if (scanStartUs == 0L && targetUs == 0L) return false
+        backtrackUs = (backtrackUs * 2L).coerceAtMost(Long.MAX_VALUE / 2L)
+        return true
+    }
+
+    private fun retryEarlierOrGiveUp(): SeekScanPass =
+        if (scanStartUs == 0L || attempt >= MAX_SEEK_PREVIEW_BACKTRACKS) SeekScanPass.Resolved(null) else SeekScanPass.RetryEarlier
+
+    private fun gapThresholdUs(previousIntervalUs: Long?): Long {
         val nominalIntervalUs = previousIntervalUs?.takeIf { it > 0L }
             ?: grabber.frameRate.takeIf { it.isFinite() && it > 0.0 }
                 ?.let { (MICROS_PER_SECOND / it).toLong().coerceAtLeast(1L) }
@@ -156,7 +201,7 @@ private fun seekPreviewFrameAt(
         )
     }
 
-    fun imageAtOrBefore(timestampUs: Long): Frame? {
+    private fun imageAtOrBefore(timestampUs: Long): Frame? {
         if (runCatching { grabber.setTimestamp(timestampUs) }.isFailure) return null
         while (isCurrent()) {
             val image = grabber.grabImage() ?: return null
@@ -165,63 +210,43 @@ private fun seekPreviewFrameAt(
         return null
     }
 
-    var backtrackUs = SEEK_PREVIEW_INITIAL_BACKTRACK_US
-    var scanStartUs = targetUs
-    var attempt = 0
-    while (isCurrent()) {
-        if (attempt > 0 && runCatching { grabber.setTimestamp(scanStartUs) }.isFailure) return null
-        var olderVideoTimestampUs: Long? = null
-        var previousVideoTimestampUs: Long? = null
-        var retryEarlier = false
-
+    private fun scanPass(): SeekScanPass {
         while (isCurrent()) {
-            val frame = grabber.grab()
-            if (frame == null) {
-                val previous = previousVideoTimestampUs
-                if (previous == null) {
-                    if (scanStartUs == 0L || attempt >= MAX_SEEK_PREVIEW_BACKTRACKS) return null
-                    retryEarlier = true
-                    break
-                }
-                val held = imageAtOrBefore(previous) ?: return null
-                // This is an audio/video tail seek, not a gap with a known future frame. Keep the
-                // prior behavior of positioning at the last available image instead of leaving
-                // the transport at a timestamp beyond the file's final video packet.
-                return SeekPreviewFrame(held, retainRequestedPosition = false)
-            }
+            val frame = grabber.grab() ?: return resolveAtEndOfStream()
             if (frame.image.isNullOrEmpty()) continue
-
-            if (frame.timestamp >= targetUs) {
-                val previous = previousVideoTimestampUs
-                if (previous != null && targetUs > previous && frame.timestamp > targetUs) {
-                    val previousIntervalUs = olderVideoTimestampUs?.let { previous - it }
-                    if (frame.timestamp - previous > gapThresholdUs(previousIntervalUs)) {
-                        val held = imageAtOrBefore(previous) ?: return null
-                        return SeekPreviewFrame(held, retainRequestedPosition = true)
-                    }
-                } else if (previous == null && frame.timestamp - targetUs > gapThresholdUs(null)) {
-                    // Some demuxers seek directly to the first image at/after the target rather
-                    // than exposing the earlier keyframe. Walk back in bounded exponential steps
-                    // until the preceding image becomes visible; otherwise the preview itself
-                    // would still jump across the sparse interval.
-                    if (scanStartUs == 0L || attempt >= MAX_SEEK_PREVIEW_BACKTRACKS) return null
-                    retryEarlier = true
-                    break
-                }
-                return SeekPreviewFrame(frame, retainRequestedPosition = false)
-            }
-
+            if (frame.timestamp >= targetUs) return resolveAtOrAfterTarget(frame)
             olderVideoTimestampUs = previousVideoTimestampUs
             previousVideoTimestampUs = frame.timestamp
         }
-
-        if (!retryEarlier || attempt >= MAX_SEEK_PREVIEW_BACKTRACKS) return null
-        attempt++
-        scanStartUs = (targetUs - backtrackUs).coerceAtLeast(0L)
-        if (scanStartUs == 0L && targetUs == 0L) return null
-        backtrackUs = (backtrackUs * 2L).coerceAtMost(Long.MAX_VALUE / 2L)
+        return SeekScanPass.Resolved(null)
     }
-    return null
+
+    private fun resolveAtEndOfStream(): SeekScanPass {
+        val previous = previousVideoTimestampUs ?: return retryEarlierOrGiveUp()
+        val held = imageAtOrBefore(previous) ?: return SeekScanPass.Resolved(null)
+        // This is an audio/video tail seek, not a gap with a known future frame. Keep the
+        // prior behavior of positioning at the last available image instead of leaving
+        // the transport at a timestamp beyond the file's final video packet.
+        return SeekScanPass.Resolved(SeekPreviewFrame(held, retainRequestedPosition = false))
+    }
+
+    private fun resolveAtOrAfterTarget(frame: Frame): SeekScanPass {
+        val previous = previousVideoTimestampUs
+        if (previous != null && targetUs > previous && frame.timestamp > targetUs) {
+            val previousIntervalUs = olderVideoTimestampUs?.let { previous - it }
+            if (frame.timestamp - previous > gapThresholdUs(previousIntervalUs)) {
+                val held = imageAtOrBefore(previous) ?: return SeekScanPass.Resolved(null)
+                return SeekScanPass.Resolved(SeekPreviewFrame(held, retainRequestedPosition = true))
+            }
+        } else if (previous == null && frame.timestamp - targetUs > gapThresholdUs(null)) {
+            // Some demuxers seek directly to the first image at/after the target rather
+            // than exposing the earlier keyframe. Walk back in bounded exponential steps
+            // until the preceding image becomes visible; otherwise the preview itself
+            // would still jump across the sparse interval.
+            return retryEarlierOrGiveUp()
+        }
+        return SeekScanPass.Resolved(SeekPreviewFrame(frame, retainRequestedPosition = false))
+    }
 }
 
 // A decoded video frame whose presentation timestamp already trails the playback clock by more
@@ -1447,11 +1472,7 @@ private class FfmpegVideoPlayerController(
      */
     private fun refillReadAheadQueue() {
         val epoch = seekEpoch.get()
-        deferredAudioFrame?.let { frame ->
-            if (rate == 1f && audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) return
-            deferredAudioFrame = null
-            if (frame.timestamp >= minimumPlaybackTimestampUs) presentAudioFrame(frame)
-        }
+        if (!releaseDeferredAudioFrame()) return
         while (!closed && playRequested && !grabberExhausted && isCurrentEpoch(epoch)) {
             if (!mayReadAhead()) return
             val frame = grabNextFrame()
@@ -1468,31 +1489,45 @@ private class FfmpegVideoPlayerController(
             // Start the clock before this frame is handled, so the audioFrameTooFarAhead check below
             // already sees a running clock.
             anchorClockIfDecoderArrived(frame)
-            when {
-                // JavaCV reuses this Frame's own buffers on the very next grab() call — a reference
-                // held past that point would see corrupted/overwritten pixel data. clone() deep-copies
-                // into freshly allocated native buffers before this frame goes anywhere near a queue
-                // that outlives the current loop iteration; presentQueuedVideoFrame closes the clone
-                // (releasing that native memory) once it has been shown or dropped.
-                !frame.image.isNullOrEmpty() && frame.timestamp >= minimumPlaybackTimestampUs ->
-                    enqueueVideoFrame(frame.clone(), epoch)
-                !frame.image.isNullOrEmpty() -> Unit // discard keyframe preroll before a seek target
-                // Audio is written immediately, not queued: writeAudio fully copies the sample data
-                // into either the line or pendingAudioTail before returning, so it never needs to
-                // outlive this grab() the way a queued video Frame would.
-                !frame.samples.isNullOrEmpty() && frame.timestamp < minimumPlaybackTimestampUs -> Unit
-                !frame.samples.isNullOrEmpty() && rate == 1f && audioLine != null &&
-                    audioFrameTooFarAhead(frame.timestamp, currentClockUs()) -> {
-                    // Keep the grabber-owned buffer in place until its PTS is close enough to the
-                    // playback clock. Returning lets the queued video (or the clock-only gap path)
-                    // make progress without starting this future audio early.
-                    deferredAudioFrame = frame
-                    return
-                }
-                !frame.samples.isNullOrEmpty() -> presentAudioFrame(frame)
-                else -> Unit // data/subtitle frames — nothing to do with them here
-            }
+            if (!queueOrPresentGrabbedFrame(frame, epoch)) return
         }
+    }
+
+    /** Plays a held-back future audio frame once the clock is close enough; false while it must keep waiting. */
+    private fun releaseDeferredAudioFrame(): Boolean {
+        val frame = deferredAudioFrame ?: return true
+        if (rate == 1f && audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) return false
+        deferredAudioFrame = null
+        if (frame.timestamp >= minimumPlaybackTimestampUs) presentAudioFrame(frame)
+        return true
+    }
+
+    /** Queues a video frame or writes an audio frame; false when refill must stop for now. */
+    private fun queueOrPresentGrabbedFrame(frame: Frame, epoch: Long): Boolean {
+        if (!frame.image.isNullOrEmpty()) {
+            // JavaCV reuses this Frame's own buffers on the very next grab() call — a reference
+            // held past that point would see corrupted/overwritten pixel data. clone() deep-copies
+            // into freshly allocated native buffers before this frame goes anywhere near a queue
+            // that outlives the current loop iteration; presentQueuedVideoFrame closes the clone
+            // (releasing that native memory) once it has been shown or dropped. A frame before the
+            // seek target is keyframe preroll and is discarded.
+            if (frame.timestamp >= minimumPlaybackTimestampUs) enqueueVideoFrame(frame.clone(), epoch)
+            return true
+        }
+        // Audio is written immediately, not queued: writeAudio fully copies the sample data
+        // into either the line or pendingAudioTail before returning, so it never needs to
+        // outlive this grab() the way a queued video Frame would. Data/subtitle frames have
+        // nothing to do here.
+        if (frame.samples.isNullOrEmpty() || frame.timestamp < minimumPlaybackTimestampUs) return true
+        if (rate == 1f && audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) {
+            // Keep the grabber-owned buffer in place until its PTS is close enough to the
+            // playback clock. Returning lets the queued video (or the clock-only gap path)
+            // make progress without starting this future audio early.
+            deferredAudioFrame = frame
+            return false
+        }
+        presentAudioFrame(frame)
+        return true
     }
 
     /** [shouldReadAhead]'s bound, except while the clock waits for the decoder: the clock is frozen
@@ -1865,19 +1900,7 @@ private class FfmpegVideoPlayerController(
         epoch: Long = seekEpoch.get(),
         minimumTimestampUs: Long? = null,
     ) {
-        val preview = runCatching {
-            if (minimumTimestampUs == null) {
-                grabber.grabImage()?.let { SeekPreviewFrame(it, retainRequestedPosition = false) }
-            } else {
-                seekPreviewFrameAt(grabber, minimumTimestampUs) { !closed && isCurrentEpoch(epoch) }
-            }
-        }
-            .onFailure {
-                AppLogger.error("video", "image grab failed", it)
-                publishUiState { errorState = it.message ?: "Playback error" }
-            }
-            .getOrNull()
-
+        val preview = grabPreviewFrame(epoch, minimumTimestampUs)
         if (preview == null) {
             if (minimumTimestampUs != null && !closed && isCurrentEpoch(epoch)) {
                 restoreGrabberToSeekTarget(minimumTimestampUs)
@@ -1887,6 +1910,23 @@ private class FfmpegVideoPlayerController(
             }
             return
         }
+        publishPreview(preview, epoch, minimumTimestampUs)
+    }
+
+    private fun grabPreviewFrame(epoch: Long, minimumTimestampUs: Long?): SeekPreviewFrame? = runCatching {
+        if (minimumTimestampUs == null) {
+            grabber.grabImage()?.let { SeekPreviewFrame(it, retainRequestedPosition = false) }
+        } else {
+            seekPreviewFrameAt(grabber, minimumTimestampUs) { !closed && isCurrentEpoch(epoch) }
+        }
+    }
+        .onFailure {
+            AppLogger.error("video", "image grab failed", it)
+            publishUiState { errorState = it.message ?: "Playback error" }
+        }
+        .getOrNull()
+
+    private fun publishPreview(preview: SeekPreviewFrame, epoch: Long, minimumTimestampUs: Long?) {
         if (closed || !isCurrentEpoch(epoch)) return
         // The selected image is the grabber's reusable buffer. Convert it before restoring the
         // cursor to the requested timestamp, since another grab may overwrite that buffer.

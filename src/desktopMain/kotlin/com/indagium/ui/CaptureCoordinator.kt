@@ -37,10 +37,10 @@ import com.indagium.capture.WirelessPairingStage
 import com.indagium.capture.classifyAdbRootOutput
 import com.indagium.capture.codePairingCandidates
 import com.indagium.capture.isPermissionFailure
-import com.indagium.capture.parseLogcatBufferSizes
+import com.indagium.capture.knownGlobalLogTag
 import com.indagium.capture.parseCompleteLogBufferConfiguration
 import com.indagium.capture.parseCompletePerTagLogOverrides
-import com.indagium.capture.knownGlobalLogTag
+import com.indagium.capture.parseLogcatBufferSizes
 import com.indagium.capture.perTagLogLevelOverrides
 import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
@@ -518,15 +518,23 @@ internal class CaptureService(
         field: DeviceLogReadField,
         failurePrefix: String,
     ): CaptureCommandResult {
-        val result = try {
-            tools.runAdb(serial, args)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (failure: Exception) {
-            throw DeviceLogReadFailure(field, failure.message ?: failurePrefix, failure)
-        }
+        val result = adbForDeviceLogRead(tools, serial, args, field, failurePrefix)
         if (result.exitCode != 0) throw DeviceLogReadFailure(field, adbFailureMessage(failurePrefix, result))
         return result
+    }
+
+    private fun adbForDeviceLogRead(
+        tools: CaptureTools,
+        serial: String,
+        args: List<String>,
+        field: DeviceLogReadField,
+        failurePrefix: String,
+    ): CaptureCommandResult = try {
+        tools.runAdb(serial, args)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        throw DeviceLogReadFailure(field, failure.message ?: failurePrefix, failure)
     }
 
     init {

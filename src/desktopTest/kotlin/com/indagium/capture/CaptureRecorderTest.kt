@@ -22,6 +22,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+@Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
 class CaptureRecorderTest {
     @Test
     fun publishesStorageBeforeLaunchingAdb() {
@@ -283,15 +284,19 @@ class CaptureRecorderTest {
                     resetApplied = true
                 }
                 CaptureCommandResult(0, runner.bufferListing.toByteArray(), byteArrayOf())
-            } else null
+            } else {
+                null
+            }
         }
         val recorder = CaptureRecorder(
             root,
             runner,
             reconnectBaseDelayMs = 1,
-            loggingRestoreStabilityWindowMs = 300,
-            loggingRestoreSampleIntervalMs = 25,
-            loggingRestoreBootWaitMs = 2_000,
+            seams = CaptureRecorderSeams(
+                loggingRestoreStabilityWindowMs = 300,
+                loggingRestoreSampleIntervalMs = 25,
+                loggingRestoreBootWaitMs = 2_000,
+            ),
         )
         val liveRow = "01-02 03:04:06.007  100  101 I Tag: log while boot waits\n"
         try {
@@ -320,7 +325,10 @@ class CaptureRecorderTest {
             }
 
             val finalSizes = parseLogcatBufferSizes(runner.bufferListing).associate { it.buffer to it.sizeBytes }
-            assertTrue(savedSizes.all { (buffer, size) -> finalSizes[buffer] == size }, "saved buffer sizes should survive the emulator's later 2 MiB initialization")
+            assertTrue(
+                savedSizes.all { (buffer, size) -> finalSizes[buffer] == size },
+                "saved buffer sizes should survive the emulator's later 2 MiB initialization",
+            )
             assertTrue(resetApplied, "the fake emulator should perform its delayed post-boot reset")
             assertTrue(runner.runSpecs.count { "-G" in it.command } >= savedSizes.size + defaultSizedBuffers.size)
             assertTrue(session.logFile.readText().contains("log while boot waits"), "recovery must keep streaming while boot initialization settles")
@@ -343,9 +351,11 @@ class CaptureRecorderTest {
             root,
             runner,
             reconnectBaseDelayMs = 1,
-            loggingRestoreStabilityWindowMs = 100,
-            loggingRestoreSampleIntervalMs = 20,
-            loggingRestoreBootWaitMs = 2_000,
+            seams = CaptureRecorderSeams(
+                loggingRestoreStabilityWindowMs = 100,
+                loggingRestoreSampleIntervalMs = 20,
+                loggingRestoreBootWaitMs = 2_000,
+            ),
         )
         val latestSizes = mapOf("main" to TWO_MIB)
         try {
@@ -371,7 +381,10 @@ class CaptureRecorderTest {
             awaitCapture { recorder.snapshot.value.diagnostics.any { it == "Device logging settings were restored and verified after restart." } }
 
             assertTrue(runner.runSpecs.any { it.command.takeLast(2) == listOf("-G", TWO_MIB.toString()) })
-            assertFalse(runner.runSpecs.any { it.command.takeLast(2) == listOf("-G", ONE_MIB.toString()) }, "the pre-wait session snapshot must not overwrite a newer saved size")
+            assertFalse(
+                runner.runSpecs.any { it.command.takeLast(2) == listOf("-G", ONE_MIB.toString()) },
+                "the pre-wait session snapshot must not overwrite a newer saved size",
+            )
             assertEquals("D\n", runner.globalLogTagValue)
             assertTrue(runner.getpropListing.contains("[log.tag.FOO]: [I]"))
         } finally {
@@ -393,9 +406,11 @@ class CaptureRecorderTest {
             root,
             runner,
             reconnectBaseDelayMs = 1,
-            loggingRestoreStabilityWindowMs = 100,
-            loggingRestoreSampleIntervalMs = 20,
-            loggingRestoreBootWaitMs = 2_000,
+            seams = CaptureRecorderSeams(
+                loggingRestoreStabilityWindowMs = 100,
+                loggingRestoreSampleIntervalMs = 20,
+                loggingRestoreBootWaitMs = 2_000,
+            ),
         )
         try {
             recorder.startWithDeviceLoggingConfiguration(
@@ -538,6 +553,7 @@ class CaptureRecorderTest {
         runner.enqueue(returned)
         val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
         val repeat = "01-02 03:04:11.000  100  101 I Main: same timestamp repeated\n"
+
         fun row(millisAfterStart: Int, pid: Int, tag: String): String {
             val second = 10 + millisAfterStart / 1_000
             val millis = (millisAfterStart % 1_000).toString().padStart(3, '0')
@@ -626,7 +642,7 @@ class CaptureRecorderTest {
             root,
             runner,
             reconnectBaseDelayMs = 1,
-            replayHistoryByteLimitForTests = 128,
+            seams = CaptureRecorderSeams(replayHistoryByteLimit = 128),
         )
         val quietRows = (0 until 5).map { index ->
             "01-02 03:04:00.${index.toString().padStart(3, '0')}  297  297 I vold: quiet startup row $index\n"
@@ -748,7 +764,9 @@ class CaptureRecorderTest {
             runner.runHandler = { spec ->
                 if (spec.command.takeLast(2) == listOf("shell", "getprop")) {
                     CaptureCommandResult(1, byteArrayOf(), "getprop failed".toByteArray())
-                } else null
+                } else {
+                    null
+                }
             }
             runner.adbState = "offline"
             initial.finish()
@@ -852,7 +870,10 @@ class CaptureRecorderTest {
             assertEquals(1, text.windowed("before rewind".length).count { it == "before rewind" })
             assertEquals(1, text.windowed("complete buffered row".length).count { it == "complete buffered row" })
             assertFalse(text.contains("incomplete partial row"), "an unterminated bounded-output tail must not be indexed")
-            assertTrue(runner.specs[1].command.containsAll(listOf("-T", "01-02 03:04:06.007")), "the partial drain establishes a safe cursor from its complete new row")
+            assertTrue(
+                runner.specs[1].command.containsAll(listOf("-T", "01-02 03:04:06.007")),
+                "the partial drain establishes a safe cursor from its complete new row",
+            )
             assertTrue(runner.runSpecs.none { "-G" in it.command }, "a capped drain must never resize log buffers")
             assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
         } finally {
@@ -882,7 +903,9 @@ class CaptureRecorderTest {
             runner.runHandler = { spec ->
                 if (spec.command.contains("logcat") && spec.command.contains("-d") && drainAttempts.incrementAndGet() == 1) {
                     CaptureCommandResult(1, byteArrayOf(), "temporary adb transport failure".toByteArray())
-                } else null
+                } else {
+                    null
+                }
             }
             initial.finish()
 
@@ -1640,7 +1663,7 @@ class CaptureRecorderTest {
             root,
             runner,
             watchdogIntervalMs = 60_000,
-            openStorage = { FailingFileOutputStream(it, failing) },
+            seams = CaptureRecorderSeams(openStorage = { FailingFileOutputStream(it, failing) }),
         )
         try {
             recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))

@@ -1,5 +1,6 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.ImageBitmap
 import com.indagium.capture.*
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
@@ -9,7 +10,6 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import com.indagium.video.VideoPlayerController
-import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -96,14 +96,23 @@ class CaptureAppRoundTripTest {
                 override val volume: Float = 1f
                 override val isMuted: Boolean = false
                 override val error: String? = null
+
                 override fun play() = Unit
+
                 override fun pause() = Unit
+
                 override fun seek(ms: Long) = Unit
+
                 override fun setRate(rate: Float) = Unit
+
                 override fun setVolume(volume: Float) = Unit
+
                 override fun setMuted(muted: Boolean) = Unit
+
                 override fun grabCurrentFrame(): ByteArray? = null
+
                 override fun grabFrameAt(ms: Long): ByteArray? = null
+
                 override fun close() = Unit
             }
             val state = AppState(

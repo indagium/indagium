@@ -23,6 +23,7 @@ import kotlin.test.assertTrue
  * tied to emulator-5556 and the clone's exact name so it cannot stop the primary emulator, original
  * AVD, or a physical device.
  */
+@Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
 class CaptureQuickBootSmokeTest {
     @Test
     fun sameBootRestartRestoresFourMegabyteBuffersAndDoesNotReplayStartupRows() =
@@ -32,6 +33,8 @@ class CaptureQuickBootSmokeTest {
     fun coldBootRestoresFourMegabyteBuffersAndDoesNotReplayStartupRows() =
         runRestartSmoke(forceColdBoot = true)
 
+    // One linear opt-in emulator scenario that shares evidence and cleanup state; the catch only records the failure and rethrows.
+    @Suppress("LongMethod", "CyclomaticComplexMethod", "TooGenericExceptionCaught")
     private fun runRestartSmoke(forceColdBoot: Boolean) {
         val serial = System.getenv("INDAGIUM_CAPTURE_SMOKE_SERIAL").orEmpty()
         assumeTrue(
@@ -77,7 +80,11 @@ class CaptureQuickBootSmokeTest {
         fun adb(vararg arguments: String, timeout: Duration = Duration.ofSeconds(5), outputLimitBytes: Int = DEFAULT_ADB_OUTPUT_LIMIT): CaptureCommandResult =
             tools.runAdb(serial, arguments.toList(), timeout, outputLimitBytes)
 
-        fun adbRequired(vararg arguments: String, timeout: Duration = Duration.ofSeconds(5), outputLimitBytes: Int = DEFAULT_ADB_OUTPUT_LIMIT): CaptureCommandResult {
+        fun adbRequired(
+            vararg arguments: String,
+            timeout: Duration = Duration.ofSeconds(5),
+            outputLimitBytes: Int = DEFAULT_ADB_OUTPUT_LIMIT,
+        ): CaptureCommandResult {
             val result = adb(*arguments, timeout = timeout, outputLimitBytes = outputLimitBytes)
             assertTrue(!result.timedOut, "adb ${arguments.joinToString(" ")} timed out")
             assertEquals(0, result.exitCode, "adb ${arguments.joinToString(" ")} failed: ${result.stderrText()}")
@@ -91,7 +98,10 @@ class CaptureQuickBootSmokeTest {
             val bootBefore = readBootId(::adbRequired)
             val uptimeBefore = readOptionalDeviceValue(::adb, "shell", "cat", "/proc/uptime")
             val wallClockBefore = readOptionalDeviceValue(::adb, "shell", "date", "+%s")
-            note("mode=${if (forceColdBoot) "coldboot" else "same-boot"} serial=$serial avd=$avdName bootIdBefore=$bootBefore uptimeBefore=${uptimeBefore ?: "unavailable"} wallClockEpochBefore=${wallClockBefore ?: "unavailable"}")
+            note(
+                "mode=${if (forceColdBoot) "coldboot" else "same-boot"} serial=$serial avd=$avdName bootIdBefore=$bootBefore " +
+                    "uptimeBefore=${uptimeBefore ?: "unavailable"} wallClockEpochBefore=${wallClockBefore ?: "unavailable"}",
+            )
 
             // Each method may run first. Refresh only the isolated clone's default QuickBoot
             // snapshot so the same-boot case always resumes the boot ID observed above.
@@ -279,7 +289,11 @@ class CaptureQuickBootSmokeTest {
                 restoredLoggingSnapshot.warnings.isEmpty(),
                 "Restored device logging settings could not be fully read back: ${restoredLoggingSnapshot.warnings}",
             )
-            assertEquals(captureLoggingConfiguration, restoredLoggingSnapshot.configuration, "QuickBoot restore must match the settings captured after resizing")
+            assertEquals(
+                captureLoggingConfiguration,
+                restoredLoggingSnapshot.configuration,
+                "QuickBoot restore must match the settings captured after resizing",
+            )
             assertEquals(expectedFourMegabyteBuffers, restoredLoggingSnapshot.configuration.bufferSizesBytes)
             File(logs, "device-logging-after.txt").writeText("${restoredLoggingSnapshot.configuration}\n")
             assertEquals(RecorderState.RECORDING, capture.snapshot.value.state, "Capture must remain active after the delayed settings readback")
@@ -308,7 +322,10 @@ class CaptureQuickBootSmokeTest {
             File(logs, "marker-timestamps.txt").writeText(
                 "before=${beforeMarkerRow.timestamp}\nafter=${afterMarkerRow.timestamp}\nrewound=$logTimestampRewound\n",
             )
-            note("deviceClockComparison uptime=${compareOptionalUptimes(uptimeBefore, uptimeAfter)} wallClock=${compareOptionalEpochs(wallClockBefore, wallClockAfter)} logcatTimestampRewound=$logTimestampRewound")
+            note(
+                "deviceClockComparison uptime=${compareOptionalUptimes(uptimeBefore, uptimeAfter)} " +
+                    "wallClock=${compareOptionalEpochs(wallClockBefore, wallClockAfter)} logcatTimestampRewound=$logTimestampRewound",
+            )
             assertEquals(1, resumedRows.count { it.isSmokeMarker(beforeMarker) })
             assertEquals(1, resumedRows.count { it.isSmokeMarker(afterMarker) }, "The new marker should be captured once")
             assertTrue(resumedText.contains("IndagiumCapture: Device unavailable; elapsedMs="))
@@ -484,7 +501,9 @@ class CaptureQuickBootSmokeTest {
 
     private class SmokeDeadline(duration: Duration) {
         private val endNanos = System.nanoTime() + duration.toNanos()
+
         fun expired(): Boolean = System.nanoTime() >= endNanos
+
         fun remaining(): Duration = Duration.ofNanos((endNanos - System.nanoTime()).coerceAtLeast(1L))
     }
 

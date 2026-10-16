@@ -16,8 +16,8 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertSame
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class CaptureDeviceEventsTest {
@@ -117,7 +117,14 @@ class CaptureDeviceEventsTest {
         )
         val markers = listOf(
             CaptureDeviceEventMarker(20, 1, CaptureDeviceEventMarkerKind.UNAVAILABLE, captureElapsedMs = 1_000),
-            CaptureDeviceEventMarker(30, 2, CaptureDeviceEventMarkerKind.RECONNECTED, unavailableMs = 2_000, rebootEvidence = false, rebootEvidenceKnown = true),
+            CaptureDeviceEventMarker(
+                30,
+                2,
+                CaptureDeviceEventMarkerKind.RECONNECTED,
+                unavailableMs = 2_000,
+                rebootEvidence = false,
+                rebootEvidenceKnown = true,
+            ),
             CaptureDeviceEventMarker(50, 3, CaptureDeviceEventMarkerKind.UNAVAILABLE, captureElapsedMs = 5_000),
             CaptureDeviceEventMarker(60, 4, CaptureDeviceEventMarkerKind.RECONNECTED, unavailableMs = 4_000, rebootEvidence = true, rebootEvidenceKnown = true),
         )

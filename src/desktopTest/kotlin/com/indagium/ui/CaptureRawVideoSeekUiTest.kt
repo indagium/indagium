@@ -25,7 +25,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.unit.dp
 import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.capture.CaptureMappingRow
 import com.indagium.capture.CaptureTimeline
@@ -179,8 +178,8 @@ class CaptureRawVideoSeekUiTest {
         var accepted = false
         rule.onNode(SemanticsMatcher.keyIsDefined(SemanticsProperties.ProgressBarRangeInfo))
             .performSemanticsAction(SemanticsActions.SetProgress) { setProgress ->
-            accepted = setProgress(positionMs.toFloat())
-        }
+                accepted = setProgress(positionMs.toFloat())
+            }
         assertTrue(accepted, "video seek slider rejected $positionMs ms")
     }
 

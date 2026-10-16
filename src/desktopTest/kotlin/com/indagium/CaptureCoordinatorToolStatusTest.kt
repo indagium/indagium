@@ -2,15 +2,15 @@ package com.indagium
 
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.DeviceLogActivity
-import com.indagium.capture.LogBufferSize
 import com.indagium.capture.DeviceLogRetryableChange
 import com.indagium.capture.DeviceLogState
+import com.indagium.capture.LogBufferSize
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.deviceLogGlobalLevelButtonLabel
 import com.indagium.ui.DeviceLogReadFailure
 import com.indagium.ui.DeviceLogReadField
-import com.indagium.ui.deviceLogReadFailureState
 import com.indagium.ui.deviceLogFailedChangeState
+import com.indagium.ui.deviceLogReadFailureState
 import com.indagium.ui.deviceLogRootAttemptFailedState
 import com.indagium.ui.toolStatusLine
 import kotlin.test.Test

@@ -32,13 +32,13 @@ import com.indagium.capture.ImportedCaptureSnapshot
 import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.adaptedToNativeMedia
 import com.indagium.capture.importedCaptureSnapshot
-import com.indagium.capture.persistImportedCaptureSnapshotCursors
-import com.indagium.capture.refreshImportedCaptureSnapshotCursors
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.nativeMediaAdaptationNotice
 import com.indagium.capture.parseMarkerHeader
+import com.indagium.capture.persistImportedCaptureSnapshotCursors
 import com.indagium.capture.readScreencapPng
+import com.indagium.capture.refreshImportedCaptureSnapshotCursors
 import com.indagium.capture.withMirrorMode
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
@@ -3286,6 +3286,7 @@ class AppState(
     }
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+
     /** Imported archives keep their immutable extracted assets and source-local cursor per tab. */
     private val importedCaptureSnapshots = ConcurrentHashMap<String, ImportedCaptureSnapshot>()
 
@@ -3423,6 +3424,7 @@ class AppState(
         private set
     internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
         private set
+
     /** Request identity keeps a completed preview from enabling Save after a range/playhead edit. */
     internal var captureExportPreviewKey by mutableStateOf<CaptureExportPreviewIdentity?>(null)
         private set
@@ -3430,6 +3432,7 @@ class AppState(
         private set
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
+
     /** True only after the user explicitly cancels the active export. */
     internal var captureExportCancelled by mutableStateOf(false)
         private set
@@ -3445,6 +3448,7 @@ class AppState(
      * showing another capture's "Saved" line. */
     internal var captureExportOwner by mutableStateOf<String?>(null)
         private set
+
     /** Source session behind the result, retained when a live-popover export's owner is null. */
     internal var captureExportSessionId by mutableStateOf<String?>(null)
         private set
@@ -5380,7 +5384,8 @@ class AppState(
             checkCaptureStartOwnership(plan)
             val loggingSnapshot = captureService.readDeviceLoggingConfiguration(tools, plan.device.serial)
             if (loggingSnapshot.warnings.isNotEmpty()) {
-                startupNotices += "Some device logging settings could not be read. Capture will continue; only read settings can be restored after a verified restart."
+                startupNotices += "Some device logging settings could not be read. " +
+                    "Capture will continue; only read settings can be restored after a verified restart."
             }
             // These synchronous adb reads do not stop promptly when ioJob is cancelled. Re-check
             // ownership after them so shutdown or controller removal cannot be followed by a new
@@ -11550,15 +11555,22 @@ class AppState(
             com.indagium.capture.CaptureArchiveReader.isCaptureArchive(File(path))
         }.getOrDefault(false) }?.let { return it }
         val sourcePath = tab.sourcePath ?: return null
+        return captureArchivePathFromEntrySource(sourcePath) ?: legacyRetainedCaptureDescriptorPath(sourcePath)
+    }
+
+    /** The archive of an `archive!entry` source when that entry is the archive's own log. */
+    private fun captureArchivePathFromEntrySource(sourcePath: String): String? {
         val bang = sourcePath.indexOf('!')
-        if (bang > 0) {
-            val archive = File(sourcePath.substring(0, bang))
-            val entryPath = sourcePath.substring(bang + 1)
-            val imported = runCatching {
-                com.indagium.capture.CaptureArchiveReader.open(archive, File(archiveCacheDir, "captures"))
-            }.getOrNull()
-            if (imported?.descriptor?.log?.path == entryPath) return archive.absolutePath
-        }
+        if (bang <= 0) return null
+        val archive = File(sourcePath.substring(0, bang))
+        val entryPath = sourcePath.substring(bang + 1)
+        val imported = runCatching {
+            com.indagium.capture.CaptureArchiveReader.open(archive, File(archiveCacheDir, "captures"))
+        }.getOrNull()
+        return archive.absolutePath.takeIf { imported?.descriptor?.log?.path == entryPath }
+    }
+
+    private fun legacyRetainedCaptureDescriptorPath(sourcePath: String): String? {
         // Legacy retained captures did not persist captureArchivePath. Recognize only their known
         // logcat location and then verify that the descriptor resolves to this exact file. Walking
         // arbitrary ancestors can accidentally associate an unrelated log in a parent directory.
@@ -15329,97 +15341,91 @@ class AppState(
 
     private val captureAdoptionLock = Any()
 
-    private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult {
-        return when (source) {
-            is RestoredTabSource.CaptureSource -> {
-                val imported = runCatching {
-                    com.indagium.capture.CaptureArchiveReader.open(
-                        source.archiveFile,
-                        File(archiveCacheDir, "captures"),
-                    )
-                }.getOrNull()
-                if (imported == null) {
-                    val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
-                        source.archiveFile,
-                        source.logEntryPath,
-                        File(archiveCacheDir, "capture-log-restore"),
-                    ) ?: return RestoredTabLoadResult.MissingArchiveEntry(
-                        source.archiveFile,
-                        source.logEntryPath ?: com.indagium.capture.CAPTURE_DESCRIPTOR_NAME,
-                    )
-                    val parsed = runCatching { parser(verifiedLog) }
-                        .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
-                    return RestoredTabLoadResult.Loaded(
-                        logData = parsed.entries,
-                        archiveCandidate = null,
-                        largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
-                        logFormat = parsed.format,
-                    )
-                }
-                RestoredTabLoadResult.Loaded(
-                    logData = parseLogcat(imported.logFile),
-                    archiveCandidate = null,
-                    largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
-                    captureArchive = imported,
-                )
-            }
-            is RestoredTabSource.FileSource -> {
-                val parsed = runCatching { parser(source.file) }
-                    .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
-                RestoredTabLoadResult.Loaded(
-                    logData = parsed.entries,
-                    archiveCandidate = null,
-                    largeFileMode = source.file.length() >= LARGE_FILE_MODE_BYTES,
-                    logFormat = parsed.format,
-                )
-            }
-            is RestoredTabSource.ArchiveSource -> {
-                if (runCatching {
-                        com.indagium.capture.CaptureArchiveReader.isCaptureArchive(source.archiveFile)
-                    }.getOrDefault(false)
-                ) {
-                    val imported = runCatching {
-                        com.indagium.capture.CaptureArchiveReader.open(
-                            source.archiveFile,
-                            File(archiveCacheDir, "captures"),
-                        )
-                    }.getOrNull()
-                    if (imported == null || imported.descriptor.log.path != source.entryPath) {
-                        val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
-                            source.archiveFile,
-                            source.entryPath,
-                            File(archiveCacheDir, "capture-log-restore"),
-                        ) ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
-                        val parsed = runCatching { parser(verifiedLog) }
-                            .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
-                        return RestoredTabLoadResult.Loaded(
-                            logData = parsed.entries,
-                            archiveCandidate = null,
-                            largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
-                            logFormat = parsed.format,
-                        )
-                    }
-                    return RestoredTabLoadResult.Loaded(
-                        logData = parseLogcat(imported.logFile),
-                        archiveCandidate = null,
-                        largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
-                        captureArchive = imported,
-                    )
-                }
-                val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
-                    ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
-                val parsed = runCatching {
-                    extractCandidateResult(source.archiveFile, currentCandidate, archiveEntryByteBudget)
-                }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
-                RestoredTabLoadResult.Loaded(
-                    logData = parsed.entries,
-                    archiveCandidate = currentCandidate,
-                    largeFileMode = currentCandidate.sizeBytes >= restoredArchiveLargeFileModeBytes,
-                    logFormat = parsed.format,
-                )
-            }
+    private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult = when (source) {
+        is RestoredTabSource.CaptureSource -> loadRestoredCaptureSource(source)
+        is RestoredTabSource.FileSource -> {
+            val parsed = runCatching { parser(source.file) }
+                .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+            RestoredTabLoadResult.Loaded(
+                logData = parsed.entries,
+                archiveCandidate = null,
+                largeFileMode = source.file.length() >= LARGE_FILE_MODE_BYTES,
+                logFormat = parsed.format,
+            )
         }
+        is RestoredTabSource.ArchiveSource -> loadRestoredArchiveSource(source)
     }
+
+    private fun loadRestoredCaptureSource(source: RestoredTabSource.CaptureSource): RestoredTabLoadResult {
+        val imported = runCatching {
+            com.indagium.capture.CaptureArchiveReader.open(
+                source.archiveFile,
+                File(archiveCacheDir, "captures"),
+            )
+        }.getOrNull()
+        if (imported == null) {
+            return loadVerifiedRestoreLog(
+                source.archiveFile,
+                source.logEntryPath,
+                source.logEntryPath ?: com.indagium.capture.CAPTURE_DESCRIPTOR_NAME,
+            )
+        }
+        return loadedImportedCapture(imported)
+    }
+
+    private fun loadRestoredArchiveSource(source: RestoredTabSource.ArchiveSource): RestoredTabLoadResult {
+        if (runCatching {
+                com.indagium.capture.CaptureArchiveReader.isCaptureArchive(source.archiveFile)
+            }.getOrDefault(false)
+        ) {
+            val imported = runCatching {
+                com.indagium.capture.CaptureArchiveReader.open(
+                    source.archiveFile,
+                    File(archiveCacheDir, "captures"),
+                )
+            }.getOrNull()
+            if (imported == null || imported.descriptor.log.path != source.entryPath) {
+                return loadVerifiedRestoreLog(source.archiveFile, source.entryPath, source.entryPath)
+            }
+            return loadedImportedCapture(imported)
+        }
+        val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
+            ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
+        val parsed = runCatching {
+            extractCandidateResult(source.archiveFile, currentCandidate, archiveEntryByteBudget)
+        }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+        return RestoredTabLoadResult.Loaded(
+            logData = parsed.entries,
+            archiveCandidate = currentCandidate,
+            largeFileMode = currentCandidate.sizeBytes >= restoredArchiveLargeFileModeBytes,
+            logFormat = parsed.format,
+        )
+    }
+
+    /** Restores a capture whose descriptor no longer opens from the archive's checksum-verified log alone. */
+    private fun loadVerifiedRestoreLog(archiveFile: File, entryPath: String?, missingEntryPath: String): RestoredTabLoadResult {
+        val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
+            archiveFile,
+            entryPath,
+            File(archiveCacheDir, "capture-log-restore"),
+        ) ?: return RestoredTabLoadResult.MissingArchiveEntry(archiveFile, missingEntryPath)
+        val parsed = runCatching { parser(verifiedLog) }
+            .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+        return RestoredTabLoadResult.Loaded(
+            logData = parsed.entries,
+            archiveCandidate = null,
+            largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
+            logFormat = parsed.format,
+        )
+    }
+
+    private fun loadedImportedCapture(imported: com.indagium.capture.ImportedCapture): RestoredTabLoadResult.Loaded =
+        RestoredTabLoadResult.Loaded(
+            logData = parseLogcat(imported.logFile),
+            archiveCandidate = null,
+            largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
+            captureArchive = imported,
+        )
 
     private fun serializeAutosave(): String = buildString {
         appendLine(AUTOSAVE_MAGIC_CURRENT)

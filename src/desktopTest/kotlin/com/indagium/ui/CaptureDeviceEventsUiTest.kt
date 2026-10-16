@@ -1,5 +1,6 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.clickable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -29,18 +29,18 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
-import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.capture.CaptureMappingRow
 import com.indagium.capture.CaptureTimeline
-import com.indagium.model.Filter
-import com.indagium.model.FilterMode
+import com.indagium.model.CrashCategory
 import com.indagium.model.CrashKind
 import com.indagium.model.CrashSite
-import com.indagium.model.CrashCategory
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.IssueCategorySelection
 import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
@@ -48,15 +48,15 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import org.junit.Rule
 import org.junit.Test
-import java.io.File
 import java.awt.image.BufferedImage
+import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import javax.imageio.ImageIO
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
-import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalTestApi::class)
 class CaptureDeviceEventsUiTest {
