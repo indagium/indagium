@@ -1259,6 +1259,10 @@ without adding a row for every retry. Playback and exported video retain the ful
 with a **Device unavailable** card. Disabling either presentation option does not discard the timing
 metadata. A reboot is confirmed only when boot identity is available before and after the outage.
 
+You can seek into an unavailable period before saving a snapshot. The playhead stays at the
+selected time and the card remains visible until playback reaches reconnection. Static periods
+between recorded video frames retain the preceding image instead of jumping ahead.
+
 After a disconnect, **Device events** in the capture bar shows the recorded events. Open it to see
 each interval's elapsed time, downtime, and reboot evidence, or select its matching log transition.
 **Issues → Device events** in the existing category dropdown provides the same evidence when
