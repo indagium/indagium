@@ -546,6 +546,10 @@ verified stable hardware identity. Optional indexed log transitions and video ca
 are controlled by keyed JSON settings; disabling their presentation does not remove interval data.
 Stop while offline retains the trailing gap. Playback uses the session timeline, and gap-aware
 video export renders unavailable cards without compressing that elapsed interval.
+The raw-media player preserves a requested seek position inside sparse video PTS intervals, holding
+the preceding image while the playback clock traverses the gap. Paused preview scans do not feed
+audio; decoding resumes from the requested position. The same resolver serves headless frame grabs,
+so raw capture playback does not depend on exporting placeholder frames first.
 The Device events control presents those structured intervals independently of marker-row
 presentation. Confirmed reboot labels come from interval evidence; optional log jumps require
 matching transition rows and preserve the difference between row ordinals and parsed entry IDs.
