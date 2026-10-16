@@ -2550,6 +2550,8 @@ private fun Seq3NoteTextOverlay(
             .size(movedBox.width.dp, movedBox.height.dp)
             .background(docTheme.seq2.copy(alpha = NOTE_FILL_ALPHA), CORNER_SM)
             .border(1.dp, docTheme.seq2, CORNER_SM)
+            // The whole box drags the note, except while its text is being edited (the field owns the pointer then).
+            .then(if (editing) Modifier else Modifier.moveCursor())
             .pointerInput(session.id, note.noteId, note.box) {
                 detectDragGestures(
                     onDrag = { change, dragAmount ->
@@ -2597,14 +2599,17 @@ private fun Seq3NoteTextOverlay(
                 Modifier.align(Alignment.TopEnd).padding(2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp)
-                SquareIconButton("×", fontSize = 11.sp, onClick = ::deleteNote, size = 16.dp)
+                // Buttons sit on the draggable box: give them their own hand so they do not read as drag handles.
+                val buttonCursor = Modifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
+                SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp, modifier = buttonCursor)
+                SquareIconButton("×", fontSize = 11.sp, onClick = ::deleteNote, size = 16.dp, modifier = buttonCursor)
             }
         }
         Box(
             Modifier.align(Alignment.BottomEnd)
                 .size(12.dp)
                 .background(docTheme.seq2, RoundedCornerShape(topStart = 4.dp))
+                .resizeCursor(AwtCursor.SE_RESIZE_CURSOR)
                 .pointerInput(session.id, note.noteId, note.box) {
                     detectDragGestures(
                         onDrag = { change, dragAmount ->
@@ -2795,6 +2800,7 @@ private fun Seq3LifelineChip(
                 Modifier
                     .offset { IntOffset((column.header.x * density + dragPx).roundToInt(), (column.header.y * density).roundToInt()) }
                     .size(column.header.width.dp, column.header.height.dp)
+                    .moveCursor()
                     .let {
                         // Item 2 (actor glyph): "a stick figure ABOVE THE NAME INSTEAD OF the rounded
                         // chip" — an actor column skips the fill/border entirely rather than drawing

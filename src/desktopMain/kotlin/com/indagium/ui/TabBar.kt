@@ -535,7 +535,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                     var downPos = Offset.Zero
                     var downId: String? = null
                     var dragging = false
-                    awaitPointerEventScope {
+                    awaitReorderPointerScope {
                         while (true) {
                             val ev = awaitPointerEvent(PointerEventPass.Initial)
                             val ch = ev.changes.firstOrNull() ?: continue
@@ -550,6 +550,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 PointerEventType.Move -> {
                                     if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
                                         dragging = true
+                                        holdMoveDragCursor()
                                         dragTabId = downId
                                         justReleasedTabId = null
                                         dragStartIndex = visibleTabIds.indexOf(downId)
@@ -569,6 +570,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 }
 
                                 PointerEventType.Release -> {
+                                    releaseMoveDragCursor()
                                     if (dragging && dragTabId != null) {
                                         justReleasedTabId = dragTabId
                                         commitReorder(currentVisualOrderIds, currentOverflowTabIds)

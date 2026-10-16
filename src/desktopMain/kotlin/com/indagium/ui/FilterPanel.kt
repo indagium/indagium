@@ -2056,7 +2056,7 @@ internal fun FilterPanel(
                             var downPos = Offset.Zero
                             var downId: String? = null
                             var dragging = false
-                            awaitPointerEventScope {
+                            awaitReorderPointerScope {
                                 while (true) {
                                     val ev = awaitPointerEvent(PointerEventPass.Initial)
                                     val ch = ev.changes.firstOrNull() ?: continue
@@ -2073,6 +2073,7 @@ internal fun FilterPanel(
                                             if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
                                                 val id = downId ?: continue
                                                 dragging = true
+                                                holdMoveDragCursor()
                                                 dragId = id
                                                 dragStartIndex = sequenceIds.indexOf(id)
                                                 dragStartTopY = dragStartIndex * rowHeightPx
@@ -2094,6 +2095,7 @@ internal fun FilterPanel(
                                         }
 
                                         PointerEventType.Release -> {
+                                            releaseMoveDragCursor()
                                             if (dragging && dragId != null) {
                                                 val releasedId = currentDragId.value ?: dragId
                                                 val releasedOrder = currentVisualSequenceIds.value
@@ -2156,7 +2158,7 @@ internal fun FilterPanel(
                                         .padding(horizontal = 12.dp, vertical = 3.dp),
                                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
                                 ) {
-                                    AppText("⠿", color = tc.td, fontSize = 12.sp)
+                                    AppText("⠿", color = tc.td, fontSize = 12.sp, modifier = Modifier.moveCursor())
                                     AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
                                     HighlighterColorPicker(
                                         color = def.color,
@@ -2185,19 +2187,21 @@ internal fun FilterPanel(
                                     // Also doubles as the "turn scoping off" control (Task 3) —
                                     // clicking it always succeeds, so no failure state to show here.
                                     if (def.scopeTid != null) {
-                                        AppText(
-                                            "tid ${def.scopeTid}",
-                                            color = tc.ac,
-                                            fontSize = 9.sp,
-                                            fontFamily = MONO,
-                                            modifier = Modifier
-                                                .background(tc.ac.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
-                                                .clickable {
-                                                    seqScopeToggleFailedId = null
-                                                    onSetSeqScoped(def.id, false)
-                                                }
-                                                .padding(horizontal = 4.dp, vertical = 1.dp),
-                                        )
+                                        TooltipArea(tooltip = { ToolbarTooltip("Pinned to tid ${def.scopeTid} — click to unpin") }) {
+                                            AppText(
+                                                "tid ${def.scopeTid}",
+                                                color = tc.ac,
+                                                fontSize = 9.sp,
+                                                fontFamily = MONO,
+                                                modifier = Modifier
+                                                    .background(tc.ac.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                                    .clickable {
+                                                        seqScopeToggleFailedId = null
+                                                        onSetSeqScoped(def.id, false)
+                                                    }
+                                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                            )
+                                        }
                                     } else if (seqScopeToggleFailedId == def.id) {
                                         // Task 3: "switch to thread-scoped" resolves the tid from a
                                         // fresh scan of THIS tab's own log data (AppState.
@@ -2232,15 +2236,23 @@ internal fun FilterPanel(
                                     // in the log-row context menu (App.kt) for the creation-time
                                     // path this control mirrors for an existing sequence.
                                     if (def.scopeTid == null) {
-                                        SquareIconButton("⏱", fontSize = 11.sp, onClick = {
-                                            seqScopeToggleFailedId = if (onSetSeqScoped(def.id, true)) null else def.id
-                                        })
+                                        SquareIconButton(
+                                            "⏱",
+                                            fontSize = 11.sp,
+                                            onClick = { seqScopeToggleFailedId = if (onSetSeqScoped(def.id, true)) null else def.id },
+                                            tooltip = "Async: pin to the thread (tid) of the first matching line so interleaved runs don't merge",
+                                        )
                                     }
-                                    SquareIconButton("✎", fontSize = 11.sp, onClick = {
-                                        editingSeqId = if (editingSeqId == def.id) null else def.id
-                                    })
-                                    RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
-                                    SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) })
+                                    SquareIconButton(
+                                        "✎",
+                                        fontSize = 11.sp,
+                                        onClick = { editingSeqId = if (editingSeqId == def.id) null else def.id },
+                                        tooltip = "Edit sequence",
+                                    )
+                                    TooltipArea(tooltip = { ToolbarTooltip("Enable / disable sequence") }) {
+                                        RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
+                                    }
+                                    SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) }, tooltip = "Remove sequence")
                                 }
                             }
                         }
@@ -2952,7 +2964,7 @@ private fun SavedFilterCanonicalList(
                     var down = Offset.Zero
                     var downId: String? = null
                     var dragging = false
-                    awaitPointerEventScope {
+                    awaitReorderPointerScope {
                         while (true) {
                             val event = awaitPointerEvent(PointerEventPass.Initial)
                             val change = event.changes.firstOrNull() ?: continue
@@ -2966,6 +2978,7 @@ private fun SavedFilterCanonicalList(
                                 PointerEventType.Move -> {
                                     if (!dragging && downId != null && (change.position - down).getDistance() > 8f) {
                                         dragging = true
+                                        holdMoveDragCursor()
                                         dragId = downId
                                         dragStartIndex = canonicalIds.indexOf(downId)
                                         dragOffsetY = 0f
@@ -2985,6 +2998,7 @@ private fun SavedFilterCanonicalList(
                                     }
                                 }
                                 PointerEventType.Release -> {
+                                    releaseMoveDragCursor()
                                     if (dragging && dragId != null) {
                                         val id = currentDragId.value ?: dragId
                                         val releasedOrder = currentVisualIds.value
@@ -3096,7 +3110,7 @@ private fun SavedFilterLibraryRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (!isProjection && !isDraft) AppText("⠿", color = tc.td, fontSize = 12.sp)
+            if (!isProjection && !isDraft) AppText("⠿", color = tc.td, fontSize = 12.sp, modifier = Modifier.moveCursor())
             RoundIndicator(
                 active = active,
                 color = tc.ac,

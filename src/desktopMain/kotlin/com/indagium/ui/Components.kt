@@ -1167,20 +1167,35 @@ fun ColorSwatch(color: Color, selected: Boolean, modifier: Modifier = Modifier, 
 // 18dp matches the height of the adjacent type badge (BlockControls' Note/LogRef pill) they sit
 // next to in the same row.
 @Composable
-fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 18.dp, enabled: Boolean = true) {
+fun SquareIconButton(
+    text: String,
+    fontSize: TextUnit,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    size: Dp = 18.dp,
+    enabled: Boolean = true,
+    tooltip: String? = null,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
-    Box(
-        modifier
-            .size(size)
-            .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
-            .clip(CORNER_MD)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false },
-        contentAlignment = Alignment.Center,
-    ) {
-        DisableSelection { AppText(text, color = tc.td, fontSize = fontSize) }
+    val button: @Composable () -> Unit = {
+        Box(
+            modifier
+                .size(size)
+                .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false },
+            contentAlignment = Alignment.Center,
+        ) {
+            DisableSelection { AppText(text, color = tc.td, fontSize = fontSize) }
+        }
+    }
+    if (tooltip != null) {
+        TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) { button() }
+    } else {
+        button()
     }
 }
 
@@ -1405,6 +1420,8 @@ fun AppButton(
     // pre-existing call site (none of which passes this) renders identically to before.
     shape: Shape = CORNER_MD,
     textColor: Color? = null,
+    // Hover explanation, shown like ToolbarBtn's; null (every pre-existing call site) adds no wrapper.
+    tooltip: String? = null,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -1416,54 +1433,61 @@ fun AppButton(
         variant == ButtonVariant.Ghost -> tc.td
         else -> tc.tx
     }
-    Box(
-        modifier = modifier
-            .then(if (enabled) Modifier else Modifier.semantics { disabled() })
-            .then(if (variant == ButtonVariant.Secondary)
-                Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, shape)
-            else Modifier)
-            .background(
-                when {
-                    variant == ButtonVariant.Primary && enabled -> accentColor
-                    hovered && enabled -> tc.hv
-                    else -> Color.Transparent
-                },
-                shape,
-            )
-            .clip(shape)
-            // Keep the entire padded visual surface clickable; placing this after padding would
-            // make only the label hit-testable and lets parent row handlers win in the padding.
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = horizontalPadding, vertical = 5.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        // A button label must never behave like selectable text - without this, a button placed
-        // inside an ambient SelectionContainer (e.g. the AI sidebar's response area) shows an
-        // I-beam cursor on hover instead of looking clickable.
-        DisableSelection {
-            Row(
-                horizontalArrangement = if (leadingIcon != null && label.isEmpty()) {
-                    Arrangement.Center
-                } else {
-                    Arrangement.spacedBy(4.dp)
-                },
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                leadingIcon?.let {
-                    Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = resolvedTextColor)
-                }
-                if (label.isNotEmpty()) {
-                    AppText(
-                        label,
-                        color = resolvedTextColor,
-                        fontSize = 12.sp,
-                        fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
-                    )
+    val button: @Composable () -> Unit = {
+        Box(
+            modifier = modifier
+                .then(if (enabled) Modifier else Modifier.semantics { disabled() })
+                .then(if (variant == ButtonVariant.Secondary)
+                    Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, shape)
+                else Modifier)
+                .background(
+                    when {
+                        variant == ButtonVariant.Primary && enabled -> accentColor
+                        hovered && enabled -> tc.hv
+                        else -> Color.Transparent
+                    },
+                    shape,
+                )
+                .clip(shape)
+                // Keep the entire padded visual surface clickable; placing this after padding would
+                // make only the label hit-testable and lets parent row handlers win in the padding.
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(horizontal = horizontalPadding, vertical = 5.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            // A button label must never behave like selectable text - without this, a button placed
+            // inside an ambient SelectionContainer (e.g. the AI sidebar's response area) shows an
+            // I-beam cursor on hover instead of looking clickable.
+            DisableSelection {
+                Row(
+                    horizontalArrangement = if (leadingIcon != null && label.isEmpty()) {
+                        Arrangement.Center
+                    } else {
+                        Arrangement.spacedBy(4.dp)
+                    },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    leadingIcon?.let {
+                        Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = resolvedTextColor)
+                    }
+                    if (label.isNotEmpty()) {
+                        AppText(
+                            label,
+                            color = resolvedTextColor,
+                            fontSize = 12.sp,
+                            fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+                        )
+                    }
                 }
             }
         }
+    }
+    if (tooltip != null) {
+        TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) { button() }
+    } else {
+        button()
     }
 }
 
@@ -1729,6 +1753,7 @@ internal fun CtxSequenceActions(
                         "Start", onClick = onStart, variant = ButtonVariant.Ghost,
                         modifier = Modifier.fillMaxWidth().height(26.dp),
                         leadingIcon = Icons.Outlined.PlayArrow, horizontalPadding = 4.dp,
+                        tooltip = "Mark this entry as the start of a sequence, then right-click the end entry and choose End",
                     )
                 }
                 CtxActionDivider(tc)
@@ -1737,6 +1762,7 @@ internal fun CtxSequenceActions(
                         "Async start", onClick = onAsyncStart, variant = ButtonVariant.Ghost,
                         modifier = Modifier.fillMaxWidth().height(26.dp),
                         leadingIcon = Icons.Outlined.PlayArrow, horizontalPadding = 4.dp,
+                        tooltip = "Start a sequence pinned to this entry's thread (tid), so interleaved runs of the same pattern stay separate",
                     )
                 }
                 CtxActionDivider(tc)
@@ -1745,6 +1771,7 @@ internal fun CtxSequenceActions(
                         "End", onClick = onEnd ?: {}, variant = ButtonVariant.Ghost, enabled = onEnd != null,
                         modifier = Modifier.fillMaxWidth().height(26.dp),
                         leadingIcon = Icons.Outlined.Flag, horizontalPadding = 4.dp,
+                        tooltip = if (onEnd != null) "Close the pending sequence at this entry" else "Choose Start or Async start on an entry first",
                     )
                 }
             }
