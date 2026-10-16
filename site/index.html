@@ -98,11 +98,11 @@
 
       <section class="capture-highlight section evidence-section" aria-labelledby="capture-highlight-title">
         <p class="eyebrow">Exhibit 01 <span>/</span> Live device capture</p>
-        <h2 id="capture-highlight-title">Record logcat and screen video together. <em>Keep the timing.</em></h2>
-        <p class="section-lede">Connect an Android device by USB or wireless debugging, investigate the live log as you reproduce an issue, and save a ZIP snapshot with its video and synchronization data.</p>
+        <h2 id="capture-highlight-title">Record logcat and screen video together. <em>Continue after a reboot.</em></h2>
+        <p class="section-lede">Connect an Android device by USB or wireless debugging, investigate the live log as you reproduce an issue, and save a ZIP snapshot with its video and synchronization data. If the device restarts or temporarily disconnects, the same capture waits for it and preserves the outage interval.</p>
         <article class="exhibit">
           <video controls muted playsinline preload="metadata" poster="/assets/media/posters/demo-device-capture.webp" aria-label="Indagium capturing Android logcat and screen video, marking an issue, and saving a snapshot"><source src="/assets/media/web/demo-device-capture.mp4" type="video/mp4" /></video>
-          <div><p class="exhibit-label">USB <span>/</span> WIRELESS <span>/</span> SYNCHRONIZED ZIP</p><h3>Start with the event, finish with evidence.</h3><p>Filter and annotate while capture runs. Save a snapshot without stopping, then reopen the ZIP to move between log rows and the recorded screen together.</p><a class="text-link" href="/android-logcat-capture/">See Android logcat capture setup and workflow <span aria-hidden="true">→</span></a></div>
+          <div><p class="exhibit-label">USB <span>/</span> WIRELESS <span>/</span> REBOOTS <span>/</span> SYNCHRONIZED ZIP</p><h3>Start with the event, finish with evidence.</h3><p>Filter and annotate while capture runs. Save a snapshot without stopping, then reopen the ZIP to move between log rows and the recorded screen together. During a reboot, Indagium waits for the original authorized device and marks the time it was unavailable.</p><a class="text-link" href="/android-logcat-capture/#capture-recovery">See how capture recovers through a reboot <span aria-hidden="true">→</span></a></div>
         </article>
       </section>
 
