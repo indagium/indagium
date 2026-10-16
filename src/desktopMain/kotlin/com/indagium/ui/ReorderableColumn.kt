@@ -4,7 +4,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -38,9 +37,7 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.onPointerEvent
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -53,7 +50,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.indagium.testing.model.altArrowTarget
 import kotlin.math.roundToInt
-import java.awt.Cursor as AwtCursor
 
 // A reusable reorderable list for the Tests workspace (suites, cases, steps, checks, examples, hooks, params,
 // scripts, shared steps, variables). It adds NO new drag math: the order while dragging comes from the existing
@@ -168,7 +164,7 @@ internal fun ReorderGrip(row: ReorderRowScope, modifier: Modifier = Modifier) {
             .semantics { contentDescription = if (row.enabled) "Drag to reorder" else "Reordering is off" }
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .then(if (row.enabled) row.dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))) else Modifier),
+            .then(if (row.enabled) row.dragHandleModifier.moveCursor() else Modifier),
         contentAlignment = Alignment.Center,
     ) {
         AppText("⠿", color = color, fontSize = 12.sp)
@@ -247,7 +243,7 @@ internal fun <T> ReorderableColumn(
 
     fun handleFor(id: String): Modifier = Modifier.pointerInput(id, reorderEnabled) {
         if (!reorderEnabled) return@pointerInput
-        detectDragGestures(
+        detectMoveDragGestures(
             onDragStart = {
                 val stable = currentIds
                 val stableHeights = heights(stable)

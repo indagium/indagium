@@ -6,7 +6,6 @@ import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -586,7 +585,7 @@ private fun Seq3LifelinesSection(
                                     animatedY = targetY,
                                 )
                                 val dragHandleModifier = Modifier.pointerInput(lifeline.id) {
-                                    detectDragGestures(
+                                    detectMoveDragGestures(
                                         onDragStart = {
                                             dragId = lifeline.id
                                             dragOffsetY = 0f
@@ -825,8 +824,7 @@ private fun Seq3LifelineRow(
                 "⠿",
                 color = tc.td,
                 fontSize = 12.sp,
-                modifier = dragHandleModifier.padding(top = 2.dp)
-                    .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+                modifier = dragHandleModifier.padding(top = 2.dp).moveCursor(),
             )
             Box(Modifier.width(16.dp).padding(top = 2.dp)) {
                 Seq3RowCheckbox(checked = selected) { toggleChecked() }

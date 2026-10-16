@@ -10,7 +10,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -1522,7 +1521,7 @@ fun AnnotationPanel(
                                 animatedY = animatedY,
                             )
                             val dragHandleModifier = Modifier.pointerInput(block.id) {
-                                detectDragGestures(
+                                detectMoveDragGestures(
                                     onDragStart = {
                                         dragBlockId = block.id
                                         dragOffsetY = 0f
@@ -3526,8 +3525,9 @@ private fun BlockControls(
                     "⠿",
                     color = tc().td,
                     fontSize = 12.sp,
-                    modifier = (if (mutationEnabled) dragHandleModifier else Modifier)
-                        .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+                    // Both the drag gesture and the move cursor only when mutation is on — a read-only
+                    // note's grip must not advertise a drag that does nothing.
+                    modifier = if (mutationEnabled) dragHandleModifier.moveCursor() else Modifier,
                 )
                 val badge: @Composable () -> Unit = {
                     Box(
