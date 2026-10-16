@@ -294,24 +294,114 @@ class EmbeddedDeviceSessionTest {
         // A fake clock that advances on every read (rather than a fixed value flipped mid-test)
         // deterministically simulates a real-world reconnect gap regardless of how fast this
         // in-memory fake transport actually reconnects — nothing here depends on wall-clock timing.
-        val elapsedValue = AtomicLong(0)
+        val elapsedValue = AtomicLong(1_000)
         val session = EmbeddedDeviceSession(
             transport,
             StreamingMkvWriter(tempFile()),
-            elapsedMillis = { elapsedValue.addAndGet(50) },
+            elapsedMillis = { elapsedValue.get() },
             reconnectDelay = Duration.ZERO,
             onDiagnostic = { diagnostics += it },
-            onVideoPacketWrittenHook = { pts, _ -> writtenPts += pts },
+            onVideoPacketWrittenHook = { pts, _ ->
+                writtenPts += pts
+                if (writtenPts.size == 1) elapsedValue.set(6_000)
+            },
         )
         try {
             session.start("serial", MirrorStreamOptions())
             awaitTrue { writtenPts.size >= 2 }
-            assertTrue(writtenPts[1] > writtenPts[0], "reconnected video must continue forward, never rewind: $writtenPts")
+            assertEquals(
+                5_000_000L,
+                writtenPts[1] - writtenPts[0],
+                "the restarted source PTS must be re-anchored to all five seconds of host elapsed time: $writtenPts",
+            )
             assertTrue(
                 diagnostics.any { it.contains("video gap", ignoreCase = true) },
                 "a reconnect must record an interruption diagnostic: $diagnostics",
             )
         } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun bufferedAudioFromThePreviousConnectionCannotCrossIntoTheNewTimelineEpoch() {
+        val oldAudioWaiting = CountDownLatch(1)
+        val releaseOldAudio = CountDownLatch(1)
+        val releaseVideo = CountDownLatch(1)
+        val opusHead = opusHeadExtradata()
+        val oldAudioPrefix = intBytes(ScrcpyCodecIds.OPUS) + longBytes(1L shl 62) + intBytes(opusHead.size) + opusHead
+        val staleAudioPacket = longBytes(120_000L) + intBytes(3) + byteArrayOf(7, 8, 9)
+        val newAudioChunks = listOf(
+            intBytes(ScrcpyCodecIds.OPUS),
+            longBytes(1L shl 62) + intBytes(opusHead.size) + opusHead,
+            longBytes(10_000L) + intBytes(3) + byteArrayOf(1, 2, 3),
+        )
+        val firstVideo = videoStream(64, 64, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key)))
+        val secondVideo = videoStream(64, 64, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key)))
+        val opens = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            when (opens.getAndIncrement()) {
+                0 -> object : EmbeddedMirrorConnection {
+                    override val videoInput: InputStream = ByteArrayInputStream(firstVideo)
+                    override val audioInput: InputStream = BoundaryBlockingInputStream(
+                        oldAudioPrefix,
+                        staleAudioPacket,
+                        oldAudioWaiting,
+                        releaseOldAudio,
+                    )
+                    override fun sendControl(bytes: ByteArray) = Unit
+                    override fun close() = Unit
+                }
+                1 -> object : EmbeddedMirrorConnection {
+                    override val videoInput: InputStream = object : InputStream() {
+                        private var initialized = false
+                        private val blocking = BlockingAfterPayloadInputStream(secondVideo, releaseVideo)
+
+                        private fun activateNextEpoch() {
+                            if (initialized) return
+                            initialized = true
+                            assertTrue(oldAudioWaiting.await(2, TimeUnit.SECONDS), "old audio did not reach its blocked packet")
+                            releaseOldAudio.countDown()
+                        }
+
+                        override fun read(): Int {
+                            activateNextEpoch()
+                            return blocking.read()
+                        }
+
+                        override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+                            activateNextEpoch()
+                            return blocking.read(buffer, off, len)
+                        }
+                    }
+                    override val audioInput: InputStream = PacedChunkInputStream(newAudioChunks, delayMs = 50)
+                    override fun sendControl(bytes: ByteArray) = Unit
+                    override fun close() { releaseVideo.countDown() }
+                }
+                else -> throw IllegalStateException("unexpected reconnect")
+            }
+        }
+        val elapsed = AtomicLong(1_000)
+        val writtenAudio = CopyOnWriteArrayList<Long>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { elapsed.get() },
+            reconnectDelay = Duration.ZERO,
+            onVideoPacketWrittenHook = { _, keyFrame -> if (keyFrame) elapsed.set(6_000) },
+            onAudioPacketWrittenHook = { writtenAudio += it },
+        )
+        try {
+            session.start("serial", MirrorStreamOptions(audio = true))
+            awaitTrue(timeoutMs = 5_000) { writtenAudio.isNotEmpty() }
+            assertEquals(
+                listOf(5_010_000L),
+                writtenAudio.toList(),
+                "only the new connection's audio packet should use the re-anchored host clock",
+            )
+        } finally {
+            releaseOldAudio.countDown()
+            releaseVideo.countDown()
             session.close()
         }
     }
@@ -616,6 +706,38 @@ class EmbeddedDeviceSessionTest {
             payload.copyInto(buffer, off, offset, offset + count)
             offset += count
             return count
+        }
+    }
+
+    private class BoundaryBlockingInputStream(
+        prefix: ByteArray,
+        suffix: ByteArray,
+        private val waiting: CountDownLatch,
+        private val release: CountDownLatch,
+    ) : InputStream() {
+        private val first = ByteArrayInputStream(prefix)
+        private val rest = ByteArrayInputStream(suffix)
+        private var crossedBoundary = false
+
+        private fun activateSuffix() {
+            if (crossedBoundary) return
+            crossedBoundary = true
+            waiting.countDown()
+            release.await()
+        }
+
+        override fun read(): Int {
+            val next = first.read()
+            if (next >= 0) return next
+            activateSuffix()
+            return rest.read()
+        }
+
+        override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+            val firstCount = first.read(buffer, off, len)
+            if (firstCount >= 0) return firstCount
+            activateSuffix()
+            return rest.read(buffer, off, len)
         }
     }
 

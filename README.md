@@ -17,7 +17,7 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 - **Log level filtering** — toggle V / D / I / W / E / A individually
 - **Tag filters** — include or exclude tags with exact match or regex; package-level grouping
 - **Message rules** — filter lines by message content or PID/TID (substring or regex), optionally scoped to a tag or package
-- **Sequences** — collapse recurring regions into colored, nestable groups using start/end patterns
+- **Sequences** — collapse recurring regions into colored, nestable groups using start/end patterns; choose from the same palette and custom colors as highlighters
 - **Manual collapse** — fold to start, to end, or an explicit range when there's no pattern to match
 - **Highlighters** — style matched text or whole lines by text, tag, message or regex; choose independent text/background colors from 100 presets or saved custom colors, override fonts, bold and italic, and import klogg highlighter sets
 - **Find bar** — in-view search across the fully expanded log
@@ -37,8 +37,8 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 
 **Producing output**
 
-- **Annotations** — annotate log selections with notes, images, and video frames; export as Markdown or Jira markup
-- **Sequence-diagram workspaces** — turn a selected log range into an interactive, themed component-flow diagram; merge raw tags into named components, add mirrored actors, inspect evidence, save drafts, and attach an image or editable source to a note
+- **Annotations** — annotate log selections with notes, images, and video frames; copy for Microsoft Teams, Jira, Markdown, or HTML
+- **[Sequence-diagram workspaces](https://indagium.com/sequence-diagrams/)** — turn a selected log range into an interactive, themed component-flow diagram; merge raw tags into named components, add mirrored actors, inspect evidence, save drafts, and attach an image or editable source to a note. The walkthrough reuses the user guide's 20-second animation as a video.
 - **Export filtered log** — write the current filtered set to TXT or CSV
 - **Merge and split** — interleave several logs by timestamp, or split one huge file into parts
 - **Show in code** — register your project's source folder(s) in Settings, then right-click a log line to view the exact method that emitted it (Kotlin/Java, `Log.*` + Timber, plus custom wrappers); also exposed to AI assistants via the `resolve_log_source` MCP tool
@@ -97,18 +97,38 @@ templates, and separate session, snapshot, and saved-ZIP folders. Updated record
 options are used when a capture starts; live mirror/display controls can be adjusted during capture.
 The default storage guard stops at 10 GiB and preserves a 1 GiB reserve.
 
-The strip's **Save snapshot** action exports a point-in-time ZIP without stopping the recorder. It can
-include all history, the last N minutes, rows since the previous successful save, or the current
-selection (the contiguous interval between the first and last selected capture rows), with optional
-video. The destination and generated filename are shown before export. Cancellation or failure
-leaves the live capture running; when video ends before the selected log range, the result reports
-the actual video coverage. The exported v3 ZIP has a flat layout: `capture.indagium.json`,
-`logcat.log`, optional `screen.mp4` (or `screen.mkv` when needed to retain audio), and optional notes,
-markers, and screenshots, plus `captured_with_indagium.txt`. Its descriptor stores checksums and a
-single log/video synchronization anchor; v3 does not export a row-by-row mapping file. Opening the
-ZIP verifies the assets, loads the log, and automatically links the available video for synchronized
-review. The retained working session folder uses its own paths and index files; it is not the same
-layout as the portable ZIP.
+The strip's **Save snapshot** action exports a ZIP with matching logs, optional video, and notes.
+The same range editor is available while recording, after Stop, and through **Export → Export
+capture range…** after reopening a capture. Opened archives show analysis controls rather than a
+recording's Save snapshot button. Closing the editor leaves an export running; **Cancel export**
+stops it, and **Save + open** still opens the completed ZIP if the editor was dismissed.
+Choose all history, the last N minutes, rows since the previous successful save, the current
+selection, a window around the video playhead, or explicit start/end times. The destination and
+generated filename are shown before export. Cancellation or failure leaves a live capture running
+and does not advance its save boundary. Exporting an earlier interval does not move that boundary
+backward.
+
+Archive v4 retains the existing log/video/notes assets and adds a checksummed timeline so reboot
+gaps and selected ranges survive reopening and further cuts. Older v1–v3 archives remain readable.
+Opening a ZIP verifies its assets and automatically links the available video. The retained working
+session folder has separate raw recording and index files.
+
+A reboot, power-off, or temporary connection loss leaves capture waiting for the original device.
+Logs and video reconnect automatically when it returns. Availability transitions are recorded in
+logs, and unavailable intervals appear as cards in playback and exported video; both presentation
+options can be disabled in Capture Settings. Android cannot always distinguish a power-off from a
+disconnected cable: a reboot is confirmed only when the device's boot identity changes.
+**Device events** in the capture bar and **Issues → Device events** list recorded disconnects and
+confirmed reboots with times and downtime, including in reopened archives, and link to matching
+transition rows when available. Event selection preserves filters and Unfiltered-panel visibility. The marker
+tag is `IndagiumCapture`; confirmed reconnect markers include `reboot=true`.
+Capture remembers the device's actual logging buffer sizes and global/per-tag levels and restores
+them after a verified reboot or emulator restart when permitted. Restore failures appear in
+diagnostics while capture continues. Buffered-log recovery avoids replaying already saved rows;
+a new boot retains its own early messages.
+Recovery follows the selected ADB serial. If a wireless device returns under a different serial or
+address, capture keeps waiting; restore the original connection or start a new capture for that
+address.
 
 **Screenshot** runs `adb screencap`, stores the image in the session, and adds it to the active tab's
 Notes with capture/video provenance when a video timestamp is available. **Stop** ends capture,

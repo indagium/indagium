@@ -2,6 +2,9 @@ package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureRange
+import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureStatus
 import com.indagium.model.LogTab
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
@@ -98,7 +101,44 @@ class DeviceAiCaptureSupportTest {
         assertEquals(CaptureRange.CUSTOM, resolveCaptureSnapshotRangeForAi("last_minutes", 7))
         assertEquals(CaptureRange.SINCE_SAVE, resolveCaptureSnapshotRangeForAi("since_last_save", null))
         assertEquals(CaptureRange.SELECTION, resolveCaptureSnapshotRangeForAi("SELECTION", null))
+        assertEquals(CaptureRange.EXPLICIT, resolveCaptureSnapshotRangeForAi("explicit", null))
         assertFailsWith<IllegalStateException> { resolveCaptureSnapshotRangeForAi("bogus", null) }
+    }
+
+    @Test
+    fun stoppedAiSnapshotUsesTheSamePlayheadCutoffAndExplicitBoundsAsTheEditor() {
+        val duration = 20L * 60_000L
+        val playhead = 10L * 60_000L
+        val session = CaptureSession(
+            id = "stopped-ai-snapshot",
+            directory = File("/tmp/stopped-ai-snapshot"),
+            device = CaptureDevice("serial", "device"),
+            settings = CaptureSettings(recordVideo = true),
+            startedEpochMs = 0L,
+            elapsedMs = duration,
+            status = CaptureStatus.STOPPED,
+            snapshotCheckpointMs = 5L * 60_000L,
+        )
+
+        assertEquals(duration, captureSnapshotCutoffForAi(session, CaptureRange.ALL, playhead))
+        assertEquals(playhead, captureSnapshotCutoffForAi(session, CaptureRange.LAST_FIVE, playhead))
+        assertEquals(playhead, captureSnapshotCutoffForAi(session, CaptureRange.SINCE_SAVE, playhead))
+        assertEquals(duration, captureSnapshotCutoffForAi(session, CaptureRange.EXPLICIT, playhead))
+
+        val request = buildCaptureSnapshotExportRequest(
+            tab = LogTab("capture", "capture", emptyList(), emptyMap()),
+            destination = File("capture.zip"),
+            range = CaptureRange.EXPLICIT,
+            customMinutes = 5,
+            includeVideo = true,
+            cutoffElapsedMs = captureSnapshotCutoffForAi(session, CaptureRange.EXPLICIT, playhead),
+            overwriteExisting = false,
+            explicitStartElapsedMs = 15L * 60_000L,
+            explicitEndElapsedMs = 18L * 60_000L,
+        )
+        assertEquals(duration, request.cutoffElapsedMs)
+        assertEquals(15L * 60_000L, request.explicitStartElapsedMs)
+        assertEquals(18L * 60_000L, request.explicitEndElapsedMs)
     }
 
     @Test

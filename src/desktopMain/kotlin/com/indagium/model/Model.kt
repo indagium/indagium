@@ -172,6 +172,9 @@ sealed interface IssueCategorySelection {
     data class BuiltIn(val category: CrashCategory) : IssueCategorySelection
 
     data class Custom(val ruleId: String) : IssueCategorySelection
+
+    /** Structured device availability events recorded by Indagium during a capture. */
+    data object DeviceEvents : IssueCategorySelection
 }
 
 // Truncation granularity for the message-template histogram (utils/MessageTemplates.kt). Masking
@@ -956,6 +959,11 @@ data class LogTab(
     // the lane ended and the capture stopped. Deliberately ABSENT from AutosaveCodec like captureSessionId: a restored tab is just
     // an ordinary (stopped) capture tab. Do not add it there. Appended last to preserve positional LogTab construction.
     val testLane: TestLaneTabRef? = null,
+    // Durable pointer to the capture archive/descriptor that supplied this tab. Unlike the
+    // recorder session id, this survives restart so imported captures retain their stopped
+    // snapshot controls even when they have no video attachment. The archive remains the source
+    // of truth; this path reopens its descriptor and app-local snapshot cursor.
+    val captureArchivePath: String? = null,
 )
 
 fun LogTab.searchFor(scope: SearchScope): LogSearchState = searches[scope]
@@ -1038,6 +1046,7 @@ enum class AnnotationCopyFormat(val label: String) {
     JIRA_WIKI("Jira wiki"),
     MARKDOWN("Markdown"),
     HTML("HTML"),
+    TEAMS("Microsoft Teams"),
 }
 
 // What Ctrl/Cmd+F does. FIND_BAR (the default) opens the non-destructive in-view Find bar

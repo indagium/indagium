@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.capture.DeviceLogRetryableChange
+import com.indagium.capture.DeviceLogState
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
 import kotlin.test.Test
@@ -46,5 +47,19 @@ class DeviceToolTargetingTest {
         assertTrue(failure.message.orEmpty().startsWith("logLevel must be one of"))
         assertFailsWith<IllegalStateException> { parseDeviceLogChanges("3M", "W") }
         assertFailsWith<IllegalArgumentException> { parseDeviceLogChanges(null, null) }
+    }
+
+    @Test
+    fun deviceLogToolDistinguishesUnknownFromConfirmedDefault() {
+        assertEquals("unknown", deviceLogGlobalLevelForTool(DeviceLogState(serial = "s1")))
+        assertEquals(
+            "unknown",
+            deviceLogGlobalLevelForTool(DeviceLogState(serial = "s1", loaded = true, globalLevelKnown = false)),
+        )
+        assertEquals("default", deviceLogGlobalLevelForTool(DeviceLogState(serial = "s1", loaded = true)))
+        assertEquals(
+            "D",
+            deviceLogGlobalLevelForTool(DeviceLogState(serial = "s1", loaded = true, globalLevel = LogTagLevel.DEBUG)),
+        )
     }
 }

@@ -62,6 +62,7 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.RuleTarget
 import com.indagium.utils.isValidRegexPattern
+import com.indagium.utils.hasTagPrefixPids
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -1018,12 +1019,18 @@ private fun TagAndPkgField(
     val candidates = remember(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit) {
         combinedTagCandidates(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit)
     }
+    val packagePrefixHasPids = remember(tab.analysis.tagPids, candidates) {
+        candidates.asSequence().filter { it.second }
+            .associate { (prefix, _) -> prefix to hasTagPrefixPids(tab.analysis.tagPids, prefix) }
+    }
     // Typing can drop the anchor row while the popover is open; close it then.
-    LaunchedEffect(candidates, pidPopover.tag) { pidPopover.closeIfMissing(candidates) }
+    LaunchedEffect(candidates, pidPopover.tag, pidPopover.packagePrefixScope) { pidPopover.closeIfMissing(candidates) }
     TagPidPopoverScanEffect(pidPopover, tab)
 
-    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean =
-        candidate != null && !candidate.second && !tab.analysis.tagPids[candidate.first].isNullOrEmpty()
+    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean = candidate?.let { (value, isPackage) ->
+        if (isPackage) packagePrefixHasPids[value] == true
+        else !tab.analysis.tagPids[value].isNullOrEmpty()
+    } ?: false
 
     // Escape is the panel's explicit cancel path: clear the query, clear the debounced search
     // immediately, and hide candidates even though the field itself keeps focus. The field's
@@ -1111,7 +1118,7 @@ private fun TagAndPkgField(
                             val c = candidates.getOrNull(selectedIdx)
                             if (c != null) {
                                 if (selectedAction == TAG_ACTION_PID && pidAvailableFor(c)) {
-                                    pidPopover.open(c.first)
+                                    pidPopover.open(c.first, packagePrefixScope = c.second)
                                 } else if (c.second) {
                                     if (selectedAction == 0) actions.onAddPkgPrefix(c.first) else actions.onAddExcludePkgPrefix(c.first)
                                 } else if (selectedAction == 0) {
@@ -1189,6 +1196,10 @@ private fun TagAndPkgField(
                                         .then(
                                             if (isPkg) {
                                                 Modifier
+                                                    .onPointerEvent(PointerEventType.Enter) { pidPopover.hoveredPackagePrefix = value }
+                                                    .onPointerEvent(PointerEventType.Exit) {
+                                                        if (pidPopover.hoveredPackagePrefix == value) pidPopover.hoveredPackagePrefix = null
+                                                    }
                                             } else {
                                                 Modifier
                                                     .onPointerEvent(PointerEventType.Enter) { pidPopover.hoveredTag = value }
@@ -1224,7 +1235,8 @@ private fun TagAndPkgField(
                                                     else -> pkgTagColor.copy(.7f)
                                                 },
                                                 fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
-                                                modifier = Modifier.width(26.dp),
+                                                modifier = Modifier.width(26.dp)
+                                                    .testTag("filter-bar-tags-package-candidate-$idx"),
                                             )
                                             FullTextHint(value, modifier = Modifier.weight(1f), forceShow = isRowSelected) { onTextLayout ->
                                                 AppText(
@@ -1239,7 +1251,20 @@ private fun TagAndPkgField(
                                                     onTextLayout = onTextLayout,
                                                 )
                                             }
-                                            Spacer(Modifier.width(26.dp))
+                                            Box(Modifier.width(26.dp), contentAlignment = Alignment.Center) {
+                                                TagPidSlot(
+                                                    tag = value,
+                                                    state = pidPopover,
+                                                    hasPids = packagePrefixHasPids[value] == true,
+                                                    rowSelected = isRowSelected,
+                                                    kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
+                                                    positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
+                                                        RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
+                                                    },
+                                                    buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
+                                                    packagePrefixScope = true,
+                                                )
+                                            }
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
                                                 Modifier.size(20.dp)

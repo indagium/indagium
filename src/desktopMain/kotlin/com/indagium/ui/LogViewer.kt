@@ -1310,6 +1310,9 @@ fun LogViewer(
     filterBarActions: FilterBarActions? = null,
     filterBarVisible: Boolean? = null,
     onToggleFilterBar: (() -> Unit)? = null,
+    // Capture archives expose their range exporter through the ordinary Export menu. Nullable and
+    // last to preserve every existing preview/test/CompareView caller.
+    onExportCaptureRange: (() -> Unit)? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -1436,6 +1439,9 @@ fun LogViewer(
                     ExportMenuPopup(
                         onExportTxt = { exportMenuOpen = false; onExportTxt() },
                         onExportCsv = { exportMenuOpen = false; onExportCsv() },
+                        onExportCaptureRange = onExportCaptureRange?.let { callback ->
+                            { exportMenuOpen = false; callback() }
+                        },
                         onDismiss = { exportMenuOpen = false },
                         tc = tc,
                     )
@@ -4541,6 +4547,7 @@ private fun ColumnScope.EmptyState(tc: ThemeColors, totalCount: Int, onClear: ()
 private fun ExportMenuPopup(
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
+    onExportCaptureRange: (() -> Unit)?,
     onDismiss: () -> Unit,
     tc: ThemeColors,
 ) {
@@ -4552,7 +4559,7 @@ private fun ExportMenuPopup(
         properties = PopupProperties(focusable = true),
     ) {
         Column(
-            Modifier.width(160.dp)
+            Modifier.width(if (onExportCaptureRange == null) 160.dp else 205.dp)
                 .background(tc.p, RoundedCornerShape(7.dp))
                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                 .padding(vertical = 4.dp),
@@ -4568,6 +4575,14 @@ private fun ExportMenuPopup(
                     "Filtered log as .csv", color = tc.tx, fontSize = 11.sp,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                 )
+            }
+            if (onExportCaptureRange != null) {
+                HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onExportCaptureRange) {
+                    AppText(
+                        "Export capture range…", color = tc.tx, fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    )
+                }
             }
         }
     }

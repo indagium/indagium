@@ -370,6 +370,35 @@ class AnnotationClipboardTest {
     }
 
     @Test
+    fun teamsChoiceUsesSemanticHtmlAndReadableAttachmentFallbackWithoutInlineImages() {
+        val tab = mkTab("log", "source.log", emptyList()).copy(
+            annotations = Annotations(
+                prefix = "From source.log",
+                blocks = listOf(
+                    AnnBlock.Note("n1", "First paragraph with **bold**, *emphasis*, and [a link](https://example.test).\n\n- one\n- two"),
+                    AnnBlock.Image("i1", "A screenshot", "pasted", "jpeg", byteArrayOf(1, 2, 3)),
+                ),
+            ),
+        )
+        val html = buildAnnotationsHtml(tab, AppSettings(), embedImages = false)
+        val teams = annotationClipboardTransferable(tab, AppSettings(), AnnotationCopyFormat.TEAMS, html)
+
+        assertTrue(teams.isDataFlavorSupported(HtmlTransferable.HTML_FLAVOR))
+        assertTrue(teams.isDataFlavorSupported(DataFlavor.stringFlavor))
+        val rich = teams.getTransferData(HtmlTransferable.HTML_FLAVOR) as String
+        val fallback = teams.getTransferData(DataFlavor.stringFlavor) as String
+        assertTrue(rich.contains("<p>From source.log</p>"))
+        assertTrue(rich.contains("<strong>bold</strong>"))
+        assertTrue(rich.contains("<em>emphasis</em>"))
+        assertTrue(rich.contains("<a href=\"https://example.test\">a link</a>"))
+        assertTrue(rich.contains("<ul>"))
+        assertTrue(rich.contains("frame-01.jpg"))
+        assertFalse(rich.contains("data:image/jpeg;base64"))
+        assertTrue(fallback.contains("frame-01.jpg"))
+        assertTrue(fallback.contains("A screenshot"))
+    }
+
+    @Test
     fun richClipboardHtmlMatchesPreviewProseAndKeepsMarkdownAndLogsAsCodeBlocks() {
         val tab = mkTab("log", "LOGCAT_example.log", listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "Car_SDK", "ready <now>"),

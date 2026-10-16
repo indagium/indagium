@@ -110,7 +110,34 @@ internal fun CaptureSettingsSection(state: AppState) {
         // just not inside a CapturePairedGroupRow.
         Divider()
         CaptureMarkerGroup(settings, update)
+        Divider()
+        CaptureAvailabilityGroup(settings, update)
     }
+}
+
+@Composable
+private fun CaptureAvailabilityGroup(settings: CaptureSettings, update: (CaptureSettings) -> Unit) {
+    CaptureGroupLabel("Device availability")
+    CheckRow(
+        settings.writeDeviceAvailabilityMarkers,
+        { update(settings.copy(writeDeviceAvailabilityMarkers = !settings.writeDeviceAvailabilityMarkers)) },
+        modifier = Modifier.settingsAnchor("Write device availability markers"),
+    ) {
+        AppText("Write device availability markers to the log", fontSize = 11.sp)
+    }
+    CheckRow(
+        settings.showUnavailableFrames,
+        { update(settings.copy(showUnavailableFrames = !settings.showUnavailableFrames)) },
+        modifier = Modifier.settingsAnchor("Show unavailable frames"),
+    ) {
+        AppText("Show unavailable device periods in playback and exported video", fontSize = 11.sp)
+    }
+    AppText(
+        "Offline duration is always kept in the capture timeline. Markers and playback cards can be hidden independently.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = 2,
+    )
 }
 
 /** Two equal-width tracks, top-aligned so a taller left group (e.g. Custom buffer checkboxes)

@@ -73,6 +73,29 @@ fun tagProcessInfo(
     tag: String,
     processNames: Map<Int, String>,
     cancellationCheck: CancellationCheck,
+): List<TagProcessInfo> = tagProcessInfoMatchingTags(logData, processNames, cancellationCheck) { it == tag }
+
+/**
+ * The processes that logged a tag equal to [prefix] or below it at a dot boundary. This is the
+ * package-row counterpart of [tagProcessInfo]; it keeps one cancellable pass over the log instead
+ * of rescanning once for each child tag.
+ */
+fun tagPrefixProcessInfo(
+    logData: List<LogEntry>,
+    prefix: String,
+    processNames: Map<Int, String>,
+    cancellationCheck: CancellationCheck,
+): List<TagProcessInfo> = tagProcessInfoMatchingTags(logData, processNames, cancellationCheck) { tagMatchesPrefix(it, prefix) }
+
+/** Whether the analysis aggregate contains any real PID under a package prefix. */
+fun hasTagPrefixPids(tagPids: Map<String, Set<Int>>, prefix: String): Boolean =
+    tagPids.any { (tag, pids) -> tagMatchesPrefix(tag, prefix) && pids.any { it > 0 } }
+
+private fun tagProcessInfoMatchingTags(
+    logData: List<LogEntry>,
+    processNames: Map<Int, String>,
+    cancellationCheck: CancellationCheck,
+    matchesTag: (String) -> Boolean,
 ): List<TagProcessInfo> {
     val stats = HashMap<Int, PidStats>()
     var sinceCheck = 0
@@ -86,7 +109,7 @@ fun tagProcessInfo(
         s.lastTs = entry.ts
         s.totalLines++
         s.tags += entry.tag
-        if (entry.tag == tag) s.tagLines++
+        if (matchesTag(entry.tag)) s.tagLines++
     }
     return stats.asSequence()
         .filter { it.value.tagLines > 0 }

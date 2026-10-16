@@ -443,7 +443,7 @@ card (`ui/EmbeddedMirrorPanel.kt`, `capture/mirror/EmbeddedMirrorRuntime.kt`).
 `CaptureRecorder` owns `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the checksum-pinned
 scrcpy server over `adb forward` and parses its frame-meta stream. `ScrcpyPacketReader` preserves
 presentation timestamps, configuration packets, and key-frame boundaries; `StreamingMkvWriter`
-remuxes H.264 and optional Opus packets into the growing session MKV using FFmpeg. A bounded reconnect
+remuxes H.264 and optional Opus packets into the growing session MKV using FFmpeg. A cancellable reconnect
 path maintains the video timeline across device interruptions, while resize/rotation parameter sets
 are inserted before the next key frame.
 
@@ -480,13 +480,16 @@ one adb process (there is no runner-level or capture-diagnostics logging of argv
 `QrPairingCredentials.toString` redacts the password. A wireless device is recognised purely from its
 serial (`CaptureDevice.wireless`), so no persisted format changed.
 
-The descriptor is the hand-off between capture and review. Portable archive v3 uses a flat ZIP
+The descriptor is the hand-off between capture and review. Portable archive v4 extends v3's ZIP
 layout: `capture.indagium.json`, `logcat.log`, optional `screen.mp4` (or MKV when needed to retain
 audio), optional notes/markers and screenshots, and `captured_with_indagium.txt`. The descriptor
-stores checksums, actual video coverage, and a single log-row/video-time synchronization anchor; v3
-does not export the older row-by-row mapping file. Opening a ZIP verifies its assets and creates an
-ordinary log tab with the available video automatically linked using that anchor. The reader still
-accepts legacy v1/v2 archives, whose nested asset layout and row-mapping metadata are distinct.
+stores checksums, actual video coverage, a log-row/video-time synchronization anchor, and structured
+device-availability intervals. A bounded, checksummed JSONL timeline asset carries its time bounds,
+availability records, and export-local row ordinals with monotonic elapsed times. Import validates
+that the timeline's availability metadata agrees with the descriptor. Child exports rebase their timing and clip availability and
+note ranges to the selected window. Opening a ZIP verifies its assets and creates an ordinary log
+tab with linked video and the imported timeline. The reader still accepts v1/v2 archives with their
+legacy nested assets/mappings and v3 archives with their single estimated anchor.
 
 A retained working session directory has a different layout: `logs/logcat.log`,
 `mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, session metadata, and the finalized
@@ -519,7 +522,7 @@ session's video to catch up to the requested end before snapshotting it, and its
 cheap copy+scan probe (`CaptureVideoCoverageProbe`, cached by source file length) instead of a full
 copy+remux so the snapshot popover's debounced polling stays lightweight.
 
-Stop drains tailing and finalizes the v3 descriptor in the retained session directory; the session
+Stop drains tailing and finalizes the v4 descriptor in the retained session directory; the session
 index remains beside the raw log and video. The ordinary player then lets log rows and video seek one
 another, while a later Save ZIP writes the separate flat portable layout. If the application exits before Stop, the recorder marks its directory interrupted; the
 next launcher lists it for recovery. Live recorder/launcher markers are not restored as active
@@ -531,6 +534,69 @@ archive code (§26.5.5); `LogTab.testLane` marks such a tab, `AppState.liveCaptu
 the one-live-capture rule above stays exactly as it was for every manual flow (toolbar, launcher, the
 device AI tools), and a per-device claim under `stateLock` keeps lanes and manual captures off the same
 phone.
+
+**Availability and offline review.** Device availability is independent of the recorder lifecycle:
+a transport outage leaves the recorder `RECORDING`, retaining its device claim and lane ownership.
+Logcat and embedded-video reconnect work runs in the background with cancellable backoff capped at
+five seconds. Logcat resumes as soon as ADB is usable; completed Android boot is a separate AI-tool
+condition. `CaptureAvailabilityInterval` stores monotonic start/end times and best-effort boot
+identity evidence in session JSON and archive v4. Recovery stays on the original ADB serial;
+changed wireless endpoints are not automatically rebound because existing session metadata lacks a
+verified stable hardware identity. Optional indexed log transitions and video cards
+are controlled by keyed JSON settings; disabling their presentation does not remove interval data.
+Stop while offline retains the trailing gap. Playback uses the session timeline, and gap-aware
+video export renders unavailable cards without compressing that elapsed interval.
+The Device events control presents those structured intervals independently of marker-row
+presentation. Confirmed reboot labels come from interval evidence; optional log jumps require
+matching transition rows and preserve the difference between row ordinals and parsed entry IDs.
+FileView collects one per-tab event model for the capture-bar pill and the existing FilterPanel
+Issues category dropdown. Device events appear only in their dedicated category; All and Android
+issue categories exclude event rows and counts, without a separate section or badge. Those surfaces share incremental background marker scanning. Event navigation preserves
+filters and Original-panel visibility and reports when a matching row is hidden by the filter.
+
+`DeviceLoggingConfiguration` retains only logging buffer sizes and global/per-tag `log.tag` values
+in keyed, local session metadata. Unknown reads remain distinct from known empty/default values. Buffer parsing accepts Android
+consumed/readable metrics; bounded getprop parsing accepts unrelated multiline property values.
+A typed, replay-one restoration event triggers one ownership-checked actual device readback.
+Capture start reads the actual device state off the UI thread; successful in-session changes update
+the intended values. Start rechecks application/controller ownership after those blocking reads
+and before publication so shutdown cannot launch a recorder from a stale start request.
+Recovery restores known values only on verified reboot/restart evidence,
+preserving early buffered log rows before a potentially destructive buffer resize. Ordinary
+same-boot reconnects do not overwrite device settings, and restoration never escalates to adb root
+automatically. Probe/write failures are bounded and diagnostic; they do not finalize the capture.
+Restoration has its own cancellable worker so setting writes cannot block the log stream's stdout
+reader; Stop interrupts and joins that worker. Recovery waits up to 120 seconds for Android boot
+completion, then uses a 30-second apply/readback budget requiring 10 seconds of matching samples
+(at 500 ms intervals). Each write rechecks the latest saved target. Verification repairs boot-time
+overwrites such as the emulator’s asynchronous `logcat -G 2M` initialization. Success requires
+verified values; readback and stabilization failures remain diagnostic. Complete buffered rows are made durable before any
+resize, and a truncated drain leaves buffer sizes unchanged.
+Ordinary reconnects use the device-log cursor and timestamp occurrence counts. Same-identity
+emulator restarts are identified by uptime or sampled UTC device-clock rollback relative to the
+monotonic session clock. Exact SHA-256 row occurrence quotas suppress Quick Boot replay independently
+of log-buffer ordering, preserving additional occurrences and unmatched rows. A bounded FIFO retains
+recent fingerprints; on overflow, a cancellable streamed scan of the fixed pre-gap log boundary
+counts only bounded drain candidates. Drain sampling uses a 32 MiB minimum and a formatting margin
+for known buffer sizes, capped at 128 MiB. Limit failures are diagnostic and preserve uncovered rows.
+A failed same-identity restart drain retries before resuming; an inspected empty ring clears the old
+cursor. Confirmed new boots retain early-boot messages even when text matches a previous boot.
+
+The snapshot range resolver accepts explicit elapsed start/end bounds in addition to the original
+presets. Live, stopped, and imported capture tabs share preview/export behavior; imported archives
+use local export metadata so their source ZIP remains immutable. Save checkpoints advance only on
+successful export and never move backward for an earlier cut. The independent log/video checkpoint
+rule above remains necessary for a growing recording whose media lags its log stream.
+The snapshot editor checks Since-last-save eligibility against that preset's own cutoff, even
+while another preset is selected. Stopped playhead changes invalidate coverage previews; live
+cutoffs share a stable preview identity and refresh on a bounded timer so recorder updates cannot
+starve a slow probe. Save requires actual rows, readable video, or availability evidence, with a
+final exporter check before publication. While the editor is open, it owns the visible progress
+and result; the stopped strip suppresses its duplicate status.
+Popup visibility does not own the export job. Dismissal cancels only preview work, leaving export
+ownership, completion status, and Save-and-open intent with AppState. Explicit export cancellation
+has its own status and does not advance checkpoints. Imported archives expose the range editor
+through the log Export menu instead of rendering a stopped-recording strip.
 
 On macOS, Windows, and Linux (x86 or ARM), host `adb` and optional `scrcpy` are resolved from the
 normal platform installation. A Linux Flatpak launch uses `flatpak-spawn --host --watch-bus` for
@@ -1120,6 +1186,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `LogParser.kt` | Parses four logcat formats (`threadtime`, `time`, `brief`, `bare`), per line. Fast path at `:127`, regex fallback chain, tag interning, `RAW` for unrecognised lines |
 | `Filter.kt` | `passesFilter` (`:13`), `visibleEntries` (`:132`), `computeItems` (`:301`), `buildMd` (`:700`). The largest single algorithm in the app |
 | `SeqComputer.kt` | `computeSeqGroups` (`:79`) — O(n·d) sequence detection with one level of nesting |
+| `TagProcesses.kt` | Cancellable process-info scans for exact tags and dot-boundary package prefixes; package results emit existing numeric PID/TID rules, while exact tags retain dynamic `tag:<Tag>` restart following |
 | `StackTraceComputer.kt` | Always-on stack folding (`:115`), crash sites (`:189`), custom issue sites (`:212`) |
 | `TextMatch.kt` | Shared regex infrastructure: bounded LRU cache, backtracking deadline, `visibleLogLineText` as the single definition of "what the row shows" |
 | `HighlightMatch.kt` | The one highlighter matcher: `highlighterMatches` (boolean), `resolveLineHighlight` (whole-line owner plus paint-ordered spans) and `countHighlighterRows` (per-highlighter row counts for the filter panel). Row rendering, the minimap and the panel counts all go through it, so "which highlighter owns this row" cannot drift between them. See [§10.1](#103-highlighters) |
@@ -1144,6 +1211,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `FileView.kt` / `CompareView.kt` | Single-tab and two-tab layouts; the `Bound*` adapters |
 | `LogViewer.kt` | The log list: `LazyColumn`, horizontal scroll, selection, drag-select, the Original/Filtered split |
 | `FilterPanel.kt` | Left sidebar: levels, tags, message rules, sequences, collapsed ranges, saved filters |
+| `TagProcessPopover.kt` | Shared process picker and PID slot for sidebar and filter-bar tag/package search; package mode identifies current-PID scope rather than advertising dynamic restart following |
 | `HighlighterSection.kt` / `HighlighterCandidates.kt` | The panel's Highlighters section: rows with a Match/Line chip, badges and match counts, the inline editor, and the search-to-add field with its TEXT / TAGS / MESSAGES dropdown. `HighlighterCandidates.kt` is the pure half (query parsing incl. `tag:Name rest`, candidate ranking, row labels/badges) so tests can pin it without composing |
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
@@ -1894,6 +1962,12 @@ parsing is *queued*, not performed, and is started by `App()` only after first c
 The consequence: restoring a session with eight multi-gigabyte tabs shows the window immediately with
 all filters and notes intact, and the log bodies stream in behind it. Tabs whose backing file no
 longer exists are dropped during restore (`ui/AutosaveCodec.kt:1432`).
+
+The tab token appends `captureArchivePath` so imported capture snapshots can be restored even
+without a video attachment. `RestoredTabSource.CaptureSource` loads and verifies the descriptor,
+log, and optional media on the IO load path; token parsing does not scan ZIP contents. Imported
+sources use immutable asset overrides plus a source-keyed index/cursor cache instead of copying
+multi-gigabyte videos or rewriting their source archives.
 
 ### 13.6 Notes sidecars
 
@@ -2847,11 +2921,33 @@ honest exclusion rather than a coverage-number optimisation: those files are pro
 `AppState` and cannot be meaningfully unit-tested without a Compose test harness the project has
 chosen not to adopt.
 
-Capture's unit tests intentionally stop at state, archive, and process seams. They cannot prove
-Compose layout fidelity, native `scrcpy` window behavior, or device authorization across the three
-desktop platforms. The idle launcher, recording strip/card, snapshot popover, and Settings → Capture
-states therefore require manual `./gradlew desktopRun` inspection with a real device; that manual
-verification is the weaker, environment-dependent acceptance point.
+Capture tests cover state, archive, and process seams. `CaptureDeviceEventsUiTest` additionally
+checks the Issues category, popup geometry, pointer movement, first-click propagation to Filtered,
+Escape dismissal, and filtered navigation without opening the Unfiltered panel; it writes UI
+screenshots under `build/verification/user-followup-20261016/`. These checks cannot establish every
+Compose layout, native `scrcpy` window behavior, or device authorization across the three desktop
+platforms. Remaining launcher, snapshot, settings, and native-device flows still need manual inspection.
+
+`CaptureRebootSmokeTest` is an opt-in real-recorder integration check. With an already booted SDK
+emulator, run `INDAGIUM_CAPTURE_SMOKE_SERIAL=emulator-5554 ./gradlew desktopTest --tests
+"com.indagium.capture.CaptureRebootSmokeTest"` (on one command line). Set
+`INDAGIUM_CAPTURE_SMOKE_ADB` if adb is elsewhere. It refuses physical serials, reboots the selected
+emulator, verifies that one capture resumes, and exports both the full capture and an entirely
+offline interval. Evidence stays under `build/verification/capture-reboot/`. Ordinary test runs skip
+this check and never reboot a device.
+
+`CaptureQuickBootSmokeTest` is separately opt-in and pinned to `emulator-5556` with AVD name
+`Indagium_QuickBoot_Test`. Set `INDAGIUM_CAPTURE_SMOKE_SERIAL`, `INDAGIUM_CAPTURE_SMOKE_AVD`,
+`INDAGIUM_CAPTURE_SMOKE_EMULATOR`, and optionally `INDAGIUM_CAPTURE_SMOKE_ADB`; point
+`ANDROID_AVD_HOME` at a disposable cloned AVD directory. Start that clone from a stable, completed-boot
+snapshot with the same runtime mode as the test's relaunch (writable clone, `-no-snapshot-save`).
+The two opt-in methods stop and restart only that verified secondary emulator, checking unchanged
+boot identity for Quick Boot and changed identity for a forced cold boot. Run the methods separately,
+relaunching the clone between them because each method cleans up its emulator process. Each run
+compares every pre-gap raw-row occurrence count, verifies resumed logging and actual restored-setting
+readback with all eight buffers explicitly set to 4 MiB and a second read five seconds after
+restoration completes, then stops the capture. Evidence stays under `build/verification/quickboot-real/`.
+The caller owns removal of the disposable clone; ordinary test runs skip this check.
 
 ---
 
@@ -3743,6 +3839,16 @@ flowchart LR
   force `markerNotesInSnapshot` so the markers always travel with it. Reopening it ("Bug report / archive")
   shows the log, the video and the AI markers at the failure (`LaneRunCaptureTest` round-trips it through
   `CaptureArchiveReader` and `reanchorImportedCaptureNotes`).
+
+Expected device reboots do not complete a lane capture's `lost` signal: that signal still represents
+terminal capture loss, including user Stop/close or fatal recording failure. The lane-scoped
+`wait_for_device_ready(timeoutMs)` tool waits for authorized ADB, a responsive shell, and Android's
+boot-completed property. It defaults to 120 seconds, allows at most 600 seconds, and remains bounded
+by the active step's remaining execution allowance and cancellation. Reboot steps must configure
+enough step time; waiting never silently pauses deadlines. The result includes readiness and
+best-effort reboot evidence for the normal tool transcript. Timeout results retain the latest
+completed probe observations, including authorization and partial boot evidence, even when the
+outer step deadline interrupts the next probe.
 
 ### 26.6 Locks
 

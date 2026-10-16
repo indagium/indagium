@@ -80,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
+import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.model.LogTab
 import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoSource
@@ -229,10 +230,11 @@ private fun VideoHeaderFollowActions(
     followLogs: Boolean,
 ) {
     val anchor = attachment.anchor
-    val captureLinked = attachment.captureSourcePath != null && tab.captureTimeline != null
+    val captureTimeline = state.captureTimelineFor(tab.id) ?: tab.captureTimeline
+    val captureLinked = attachment.captureSourcePath != null && captureTimeline != null
     val hasMapping = anchor != null || captureLinked
     val clearTooltip = if (captureLinked) {
-        val timeline = tab.captureTimeline
+        val timeline = requireNotNull(captureTimeline)
         val uncertainty = timeline.uncertaintyMs?.let { " ±${it}ms" }.orEmpty()
         "Portable capture mapping (${timeline.quality}$uncertainty). Click to unlink the mapping; the video stays attached."
     } else if (anchor != null) {
@@ -347,8 +349,20 @@ internal fun BoundVideoPanel(
     tab: LogTab,
     modifier: Modifier = Modifier,
 ) {
-    val attachment = tab.attachedVideo ?: return
     if (!state.videoPanelVisible) return
+    val captureTimeline = state.captureTimelineFor(tab.id) ?: tab.captureTimeline
+    val attachment = tab.attachedVideo
+    if (attachment == null) {
+        val showUnavailableFrames = captureTimeline?.showUnavailableFrames
+            ?: state.settings.captureSettings.showUnavailableFrames
+        val videoWasConfigured = state.captureSnapshotSessionFor(tab.id)?.settings?.recordVideo != false
+        if (captureTimeline != null && videoWasConfigured && showUnavailableFrames &&
+            captureTimeline.availabilityFramesRendered != true && captureTimeline.availabilityIntervals.isNotEmpty()
+        ) {
+            CaptureTimelineOnlyPanel(captureTimeline, modifier)
+        }
+        return
+    }
     val controller = state.videoController(tab.id) ?: return
     var detached by remember(tab.id) { mutableStateOf(false) }
     val onSidebarVisibleChange = LocalVideoSidebarExpandedChange.current
@@ -357,7 +371,17 @@ internal fun BoundVideoPanel(
     // function is still composing can publish its first frame before VideoFrameArea has subscribed
     // to controller.currentFrame. With no later updates while paused, that leaves the first open
     // black until Play; SideEffect makes the subscription exist before decoding begins.
-    SideEffect { controller.start() }
+    SideEffect {
+        val timeline = captureTimeline
+        if (timeline != null && timeline.timelineDurationMs > 0L) {
+            val originElapsedMs = timeline.videoOriginElapsedMs ?: timeline.timelineBaseElapsedMs
+            val timelineEndElapsedMs = timeline.timelineBaseElapsedMs + timeline.timelineDurationMs
+            controller.setVirtualDurationMs((timelineEndElapsedMs - originElapsedMs).coerceAtLeast(0L))
+        }
+        // Publish the capture's full virtual duration before decoding can hit raw-media EOF. That
+        // lets a trailing offline interval remain seekable/playable from the first decode pass.
+        controller.start()
+    }
 
     // A detached player deliberately does not retain a blank sidebar slot. Returning from it
     // restores the embedded player without recreating its controller.
@@ -381,6 +405,65 @@ internal fun BoundVideoPanel(
             controller = controller,
             onReturnToSidebar = { detached = false },
         )
+    }
+}
+
+/** Shows outage timing for a finalized capture that has no video packets to attach or play. */
+@Composable
+private fun CaptureTimelineOnlyPanel(
+    timeline: com.indagium.capture.CaptureTimeline,
+    modifier: Modifier = Modifier,
+) {
+    val colors = tc()
+    val durationMs = timeline.timelineDurationMs.coerceAtLeast(0L)
+    val windows = timeline.availabilityIntervals.mapNotNull { interval ->
+        val startMs = interval.startElapsedMs.coerceIn(0L, durationMs)
+        val endMs = (interval.endElapsedMs ?: durationMs).coerceIn(startMs, durationMs)
+        if (endMs <= startMs) null else Triple(interval, startMs, endMs)
+    }
+
+    Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = colors.warn, modifier = Modifier.size(28.dp))
+            AppText("Device unavailable", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "No video frames were recorded · capture duration ${formatCaptureElapsed(durationMs)}",
+                color = Color.White.copy(alpha = 0.72f),
+                fontSize = 11.sp,
+            )
+            if (windows.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    windows.take(4).forEach { (interval, startMs, endMs) ->
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            AppText(
+                                "${formatCaptureElapsed(startMs)}–${formatCaptureElapsed(endMs)} · ${formatCaptureElapsed(endMs - startMs)}",
+                                color = Color.White,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            AppText(
+                                when (interval.rebootConfirmed) {
+                                    true -> "Device reboot confirmed after reconnection"
+                                    false -> "Device reconnected without a reboot"
+                                    null -> if (interval.endElapsedMs == null) "Device remains unavailable" else "Reboot status unknown"
+                                },
+                                color = Color.White.copy(alpha = 0.68f),
+                                fontSize = 10.sp,
+                            )
+                        }
+                    }
+                    if (windows.size > 4) {
+                        AppText("and ${windows.size - 4} more unavailable periods", color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp)
+                    }
+                }
+            } else {
+                AppText("No video frames are available for this capture timeline", color = Color.White.copy(alpha = 0.68f), fontSize = 10.sp)
+            }
+        }
     }
 }
 
@@ -584,6 +667,8 @@ private fun ColumnScope.VideoPlayerContents(
 
     val rotationDegrees = state.videoRotationDegrees(tab.id)
     VideoFrameArea(
+        state = state,
+        tab = tab,
         controller = controller,
         rotationDegrees = rotationDegrees,
         modifier = Modifier.fillMaxWidth().weight(1f),
@@ -605,10 +690,14 @@ private fun ColumnScope.VideoPlayerContents(
 
 @Composable
 private fun VideoFrameArea(
+    state: AppState,
+    tab: LogTab,
     controller: VideoPlayerController,
     rotationDegrees: Int,
     modifier: Modifier = Modifier,
 ) {
+    val colors = tc()
+    val captureTimeline = state.captureTimelineFor(tab.id) ?: tab.captureTimeline
     Box(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
         val err = controller.error
         val frame = controller.currentFrame
@@ -617,6 +706,11 @@ private fun VideoFrameArea(
         // Play. Calling that state "Opening" makes a fully ready video look stuck. The transport
         // remains usable, so tell the user what action is available instead.
         val readyToPlay = controller.seekReadiness == VideoSeekReadiness.READY
+        val showUnavailableFrames = captureTimeline?.showUnavailableFrames
+            ?: state.settings.captureSettings.showUnavailableFrames
+        val unavailableInterval = if (showUnavailableFrames && captureTimeline?.availabilityFramesRendered != true) {
+            captureTimeline?.unavailableIntervalAtVideoMs(controller.positionMs)
+        } else null
         when {
             err != null -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = DANGER_RED, modifier = Modifier.size(22.dp))
@@ -648,6 +742,26 @@ private fun VideoFrameArea(
                 color = Color.White.copy(alpha = 0.7f),
                 fontSize = 12.sp,
             )
+        }
+        if (unavailableInterval != null) {
+            val duration = (unavailableInterval.endElapsedMs?.minus(unavailableInterval.startElapsedMs) ?: 0L).coerceAtLeast(0L)
+            Column(
+                Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.86f)).padding(24.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Icon(Icons.Outlined.ErrorOutline, contentDescription = null, tint = colors.warn, modifier = Modifier.size(26.dp))
+                AppText("Device unavailable", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                AppText("No device frames for ${formatCaptureElapsed(duration)}", color = Color.White.copy(alpha = 0.75f), fontSize = 11.sp)
+                AppText(
+                    when (unavailableInterval.rebootConfirmed) {
+                        true -> "Device reboot confirmed after reconnection"
+                        false -> "Device reconnected without a reboot"
+                        null -> "Reboot status unknown"
+                    },
+                    color = Color.White.copy(alpha = 0.65f), fontSize = 10.sp,
+                )
+            }
         }
     }
 }

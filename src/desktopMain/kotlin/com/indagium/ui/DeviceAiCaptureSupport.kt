@@ -3,6 +3,7 @@ package com.indagium.ui
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
+import com.indagium.capture.CaptureSession
 import com.indagium.model.LogTab
 import kotlinx.coroutines.CompletableDeferred
 import java.io.File
@@ -82,8 +83,26 @@ internal fun resolveCaptureSnapshotRangeForAi(rangeParam: String?, minutes: Int?
         }
         "since_last_save" -> CaptureRange.SINCE_SAVE
         "selection" -> CaptureRange.SELECTION
-        else -> error("range must be one of all, last_minutes, since_last_save, selection")
+        "explicit" -> CaptureRange.EXPLICIT
+        else -> error("range must be one of all, last_minutes, since_last_save, selection, explicit")
     }
+
+/** AI and the snapshot popover use the same stopped-playhead boundary semantics. */
+internal fun captureSnapshotCutoffForAi(
+    session: CaptureSession,
+    range: CaptureRange,
+    playheadElapsedMs: Long,
+): Long = captureSnapshotCutoffForChoice(
+    session,
+    when (range) {
+        CaptureRange.ALL -> SnapshotRangeChoice.ALL
+        CaptureRange.LAST_FIVE, CaptureRange.LAST_TEN, CaptureRange.CUSTOM -> SnapshotRangeChoice.LAST_MINUTES
+        CaptureRange.SINCE_SAVE -> SnapshotRangeChoice.SINCE_SAVE
+        CaptureRange.SELECTION -> SnapshotRangeChoice.SELECTION
+        CaptureRange.EXPLICIT -> SnapshotRangeChoice.EXPLICIT
+    },
+    playheadElapsedMs,
+)
 
 // Generous upper bound on how many "-N" suffixes uniqueSnapshotDestination will try before giving
 // up; a real directory hitting this would already have a much more pressing problem.
@@ -119,6 +138,8 @@ internal fun buildCaptureSnapshotExportRequest(
     includeVideo: Boolean,
     cutoffElapsedMs: Long,
     overwriteExisting: Boolean,
+    explicitStartElapsedMs: Long? = null,
+    explicitEndElapsedMs: Long? = null,
 ): CaptureExportRequest {
     val selection = selectedCaptureOrdinals(tab)
     return CaptureExportRequest(
@@ -130,5 +151,7 @@ internal fun buildCaptureSnapshotExportRequest(
         selectedFirstRowOrdinal = selection?.first,
         selectedLastRowOrdinal = selection?.last,
         overwriteExisting = overwriteExisting,
+        explicitStartElapsedMs = explicitStartElapsedMs,
+        explicitEndElapsedMs = explicitEndElapsedMs,
     )
 }

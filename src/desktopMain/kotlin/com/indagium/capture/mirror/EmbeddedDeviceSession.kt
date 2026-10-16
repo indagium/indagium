@@ -51,6 +51,8 @@ internal class EmbeddedDeviceSession(
     private val microphoneDeviceId: String = MICROPHONE_OFF_ID,
 ) : Closeable {
     private val lock = Any()
+    /** Serializes audio packet writes with the connection-epoch change at reconnect. */
+    private val audioEpochLock = Any()
 
     /** Lock-free progress counters for the host video/audio path; see [MirrorPathStats]. */
     val pathStats = MirrorPathStats(elapsedMillis)
@@ -113,6 +115,9 @@ internal class EmbeddedDeviceSession(
     // synchronized writers' mutual exclusion.
     @Volatile private var muxerStarted = false
     private var firstAnchorPtsUs: Long? = null
+    /** False between a reconnect and its first video packet's host-clock re-anchor. */
+    private var videoConnectionAnchorReady = false
+    private var activeStreamEpoch: Long? = null
     private var ptsOffsetUs = 0L
     private var lastOutputPtsUs = -1L
     private var pendingWidth = 0
@@ -512,6 +517,23 @@ internal class EmbeddedDeviceSession(
         serial: String,
         attempt: Int,
     ): Long? {
+        // The scrcpy server resets its source PTS on every new socket. Keep the output clock
+        // (ptsOffsetUs/lastOutputPtsUs/videoAnchorElapsedMs) continuous, but establish a fresh
+        // per-connection source anchor so the first packet after reconnect can rebase against the
+        // full host elapsed time. Audio from the new socket waits for that re-anchor as well.
+        synchronized(audioEpochLock) {
+            synchronized(lock) {
+                if (stopping || generation.get() != runId) return null
+                activeStreamEpoch = null
+                firstAnchorPtsUs = null
+                videoConnectionAnchorReady = false
+                pendingWidth = 0
+                pendingHeight = 0
+                lastConfigBytes = null
+                lastAudioConfigBytes = null
+                deviceAudioContinuity.reset()
+            }
+        }
         val streamEpoch = beginVideoConnection(runId)
         if (streamEpoch == null || !publishConnectionSnapshotIfCurrent(
                 runId,
@@ -520,6 +542,12 @@ internal class EmbeddedDeviceSession(
         ) {
             closeAcceptedConnectionIfStillOwned(connection)
             return null
+        }
+        synchronized(audioEpochLock) {
+            synchronized(lock) {
+                if (stopping || generation.get() != runId) return null
+                activeStreamEpoch = streamEpoch
+            }
         }
         return streamEpoch
     }
@@ -536,10 +564,9 @@ internal class EmbeddedDeviceSession(
         var nativeFailure = false
         while (isCurrent(runId) && !nativeFailure) {
             if (attempt > 0) {
-                onDiagnostic("Embedded recording: reconnecting (attempt $attempt of $maxReconnectAttempts)…")
-                if (!sleepBeforeReconnect(runId)) return
+                onDiagnostic("Embedded recording: reconnecting (attempt $attempt)…")
+                if (!sleepBeforeReconnect(runId, attempt)) return
             }
-            val gapStartElapsedMs = elapsedMillis()
             var connection: EmbeddedMirrorConnection? = null
             try {
                 val openedConnection = openAndAcceptConnection(runId, serial, options) ?: return
@@ -553,17 +580,6 @@ internal class EmbeddedDeviceSession(
                 // the finalized file, dropping what looks like leading video that was never
                 // actually captured). See EmbeddedDeviceSessionTest's reconnect-before-first-video
                 // regression test.
-                if (attempt > 0 && muxerStarted) {
-                    val gapMs = elapsedMillis() - gapStartElapsedMs
-                    synchronized(lock) {
-                        // Continue the output timeline from where the previous connection's video
-                        // left off, offset by the real wall-clock gap the reconnect took — not by
-                        // the new connection's own device-clock pts, which restarts from ~0.
-                        ptsOffsetUs = maxOf(lastOutputPtsUs, 0L) + gapMs * MICROS_PER_MILLI
-                        firstAnchorPtsUs = null
-                    }
-                    onDiagnostic("Embedded recording: video gap ${gapMs}ms (reconnect attempt $attempt)")
-                }
                 // Audio (when requested) streams concurrently with video on its own socket and
                 // must be pumped on its own thread — video and audio packets arrive from the
                 // device at the same time, and pumpVideo() below blocks on the video socket for
@@ -575,7 +591,7 @@ internal class EmbeddedDeviceSession(
                 // joining it here would just wait out that same close on every reconnect.
                 if (options.audio) {
                     thread(name = "embedded-recording-audio-$serial", isDaemon = true) {
-                        runCatching { pumpAudioIfRequested(runId, openedConnection, options) }
+                        runCatching { pumpAudioIfRequested(runId, streamEpoch, openedConnection, options) }
                             .onFailure { failure ->
                                 if (isCurrent(runId)) {
                                     onDiagnostic("Embedded recording: audio pump failed (${failure.message}); continuing video-only.")
@@ -621,7 +637,7 @@ internal class EmbeddedDeviceSession(
                 runCatching { connectionToClose?.close() }
             }
             if (attempt > maxReconnectAttempts) {
-                val diagnostic = "Embedded recording: giving up after $maxReconnectAttempts reconnect attempt(s); log capture continues."
+                val diagnostic = "Embedded recording: reconnect limit reached after $maxReconnectAttempts attempt(s); log capture continues."
                 onDiagnostic(diagnostic)
                 publishConnectionSnapshotIfCurrent(
                     runId,
@@ -848,7 +864,7 @@ internal class EmbeddedDeviceSession(
         // into the other from inside their own lock deadlocks instead of just contending. Only set
         // the flag under the lock; fire the callback after releasing it.
         var shouldReportVideoStart = false
-        val outputPts = synchronized(lock) {
+        var outputPts = synchronized(lock) {
             val anchor = firstAnchorPtsUs ?: event.ptsUs.also {
                 firstAnchorPtsUs = it
                 shouldReportVideoStart = true
@@ -857,8 +873,30 @@ internal class EmbeddedDeviceSession(
         }
         if (shouldReportVideoStart) {
             val elapsed = elapsedMillis()
-            videoAnchorElapsedMs.compareAndSet(NO_VIDEO_ANCHOR, elapsed)
-            onVideoStartElapsedMs(elapsed)
+            val initialAnchor = videoAnchorElapsedMs.compareAndSet(NO_VIDEO_ANCHOR, elapsed)
+            if (initialAnchor) {
+                synchronized(lock) {
+                    videoConnectionAnchorReady = true
+                    outputPts = (event.ptsUs - requireNotNull(firstAnchorPtsUs) + ptsOffsetUs).coerceAtLeast(0L)
+                }
+                onVideoStartElapsedMs(elapsed)
+            } else {
+                val gapMs = (elapsed - videoAnchorElapsedMs.get() -
+                    synchronized(lock) { lastOutputPtsUs.coerceAtLeast(0L) / MICROS_PER_MILLI }).coerceAtLeast(0L)
+                synchronized(lock) {
+                    // Re-anchor a reconnect to the monotonic capture clock. The previous offset
+                    // ended at the last emitted packet; using this elapsed-time target preserves
+                    // the entire unplug/backoff/reconnect interval, even when the new device clock
+                    // starts again near zero or the transport takes time to produce its first frame.
+                    val elapsedFromVideoStartMs = (elapsed - videoAnchorElapsedMs.get()).coerceAtLeast(0L)
+                    val targetPtsUs = elapsedFromVideoStartMs * MICROS_PER_MILLI
+                    ptsOffsetUs = maxOf(ptsOffsetUs, targetPtsUs, lastOutputPtsUs + 1L)
+                    val anchor = requireNotNull(firstAnchorPtsUs)
+                    outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
+                    videoConnectionAnchorReady = true
+                }
+                onDiagnostic("Embedded recording: video gap ${gapMs}ms; elapsed time is preserved across reconnect.")
+            }
         }
         val payload = if (event.keyFrame && pendingConfig != null) pendingConfig + event.data else event.data
         if (!muxerStarted) {
@@ -896,19 +934,36 @@ internal class EmbeddedDeviceSession(
         return if (event.keyFrame) null else pendingConfig
     }
 
-    private fun pumpAudioIfRequested(runId: Long, connection: EmbeddedMirrorConnection, options: MirrorStreamOptions) {
+    private fun pumpAudioIfRequested(
+        runId: Long,
+        streamEpoch: Long,
+        connection: EmbeddedMirrorConnection,
+        options: MirrorStreamOptions,
+    ) {
         if (!options.audio) return
+        if (!isCurrent(runId) || !isCurrentVideoConnection(runId, streamEpoch)) return
         val audioInput = connection.audioInput
         if (audioInput == null) {
-            resolveAudio(null) // no audio socket at all — never keep video waiting for it
+            synchronized(audioEpochLock) {
+                if (isCurrent(runId) && isCurrentVideoConnection(runId, streamEpoch)) {
+                    resolveAudio(null) // no audio socket at all — never keep video waiting for it
+                }
+            }
             return
         }
         val reader = ScrcpyPacketReader(CountingInputStream(audioInput, pathStats.audio))
-        if (!readAudioHeader(reader)) {
-            resolveAudio(null)
+        val validHeader = readAudioHeader(reader)
+        synchronized(audioEpochLock) {
+            if (!isCurrent(runId) || !isCurrentVideoConnection(runId, streamEpoch)) return
+            if (!validHeader) {
+                resolveAudio(null)
+                return
+            }
+        }
+        if (!isCurrent(runId) || !isCurrentVideoConnection(runId, streamEpoch)) {
             return
         }
-        pumpAudioPackets(runId, reader)
+        pumpAudioPackets(runId, streamEpoch, reader)
     }
 
     /** Records audio's outcome for [startMuxerCoordinatingWithAudio]'s wait — `extradata == null`
@@ -952,34 +1007,40 @@ internal class EmbeddedDeviceSession(
         }
     }
 
-    private fun pumpAudioPackets(runId: Long, reader: ScrcpyPacketReader) {
+    private fun pumpAudioPackets(runId: Long, streamEpoch: Long, reader: ScrcpyPacketReader) {
         var audioStreamAdded = false
         var configPending: ByteArray? = null
-        while (isCurrent(runId)) {
+        while (isCurrent(runId) && isCurrentVideoConnection(runId, streamEpoch)) {
             val event = reader.readNext() ?: return
-            pathStats.audio.event(event)
-            when {
-                event !is ScrcpyStreamEvent.Packet -> Unit
-                event.config -> {
-                    configPending = event.data
-                    resolveAudio(event.data) // unblocks startMuxerCoordinatingWithAudio's wait, if still waiting
-                    synchronized(lock) { lastAudioConfigBytes = event.data }
-                    if (mixedAudio != null) {
-                        runCatching {
-                            (deviceAudioDecoder ?: OpusPcmDecoder(onDiagnostic).also { deviceAudioDecoder = it })
-                                .configure(event.data)
-                        }.onFailure { failure ->
-                            onDiagnostic("Android audio could not be decoded for mixing (${failure.message}); microphone capture continues.")
+            synchronized(audioEpochLock) {
+                // The read may finish just as reconnect starts. Serialize this final epoch check
+                // and processing with prepareLiveConnection so an old socket cannot be retimed
+                // onto the new video anchor.
+                if (!isCurrent(runId) || !isCurrentVideoConnection(runId, streamEpoch)) return
+                pathStats.audio.event(event)
+                when {
+                    event !is ScrcpyStreamEvent.Packet -> Unit
+                    event.config -> {
+                        configPending = event.data
+                        resolveAudio(event.data) // unblocks initial muxer coordination, if still waiting
+                        synchronized(lock) { lastAudioConfigBytes = event.data }
+                        if (mixedAudio != null) {
+                            runCatching {
+                                (deviceAudioDecoder ?: OpusPcmDecoder(onDiagnostic).also { deviceAudioDecoder = it })
+                                    .configure(event.data)
+                            }.onFailure { failure ->
+                                onDiagnostic("Android audio could not be decoded for mixing (${failure.message}); microphone capture continues.")
+                            }
+                            // A fresh config means a fresh decoder/stream — see the field's own comment
+                            // for why the continuity clock's running expectation must not survive it.
+                            deviceAudioContinuity.reset()
                         }
-                        // A fresh config means a fresh decoder/stream — see the field's own comment
-                        // for why the continuity clock's running expectation must not survive it.
-                        deviceAudioContinuity.reset()
+                        feedLiveAudio { it.onAudioConfig(event.data) }
                     }
-                    feedLiveAudio { it.onAudioConfig(event.data) }
-                }
-                else -> {
-                    feedLiveAudio { it.onAudioPacket(event.ptsUs, event.data) }
-                    audioStreamAdded = writeAudioFrame(event, configPending, audioStreamAdded)
+                    else -> {
+                        feedLiveAudio { it.onAudioPacket(event.ptsUs, event.data) }
+                        audioStreamAdded = writeAudioFrame(event, configPending, audioStreamAdded, streamEpoch)
+                    }
                 }
             }
         }
@@ -1001,11 +1062,19 @@ internal class EmbeddedDeviceSession(
 
     /** Writes one non-config audio packet if the timeline is already anchored (by video) and the
      * stream has a config/extradata to start with; returns whether the audio stream is now started. */
-    private fun writeAudioFrame(event: ScrcpyStreamEvent.Packet, configPending: ByteArray?, alreadyAdded: Boolean): Boolean {
-        val anchor = synchronized(lock) { firstAnchorPtsUs } ?: return alreadyAdded // drop until video anchors the timeline
-        val mixed = mixedAudio
+    private fun writeAudioFrame(
+        event: ScrcpyStreamEvent.Packet,
+        configPending: ByteArray?,
+        alreadyAdded: Boolean,
+        streamEpoch: Long,
+    ): Boolean {
+        val (anchor, offset, mixed) = synchronized(lock) {
+            if (activeStreamEpoch != streamEpoch || !videoConnectionAnchorReady) return alreadyAdded
+            val currentAnchor = firstAnchorPtsUs ?: return alreadyAdded
+            Triple(currentAnchor, ptsOffsetUs, mixedAudio)
+        }
         if (mixed != null) {
-            val outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
+            val outputPts = (event.ptsUs - anchor + offset).coerceAtLeast(0L)
             deviceAudioDecoder?.decode(event.data)?.let { pcm ->
                 if (pcm.isEmpty()) return@let
                 // Device pts jitter (AudioRecord timestamps) a few ms per 20ms packet; offering that
@@ -1020,7 +1089,7 @@ internal class EmbeddedDeviceSession(
         }
         val started = alreadyAdded || (configPending?.let { startAudioStream(it); true } ?: false)
         if (!started) return false
-        val outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
+        val outputPts = (event.ptsUs - anchor + offset).coerceAtLeast(0L)
         runCatching { muxer.writeAudioPacket(outputPts, event.data) }
         pathStats.muxedAudioPackets.incrementAndGet()
         onAudioPacketWrittenHook?.invoke(outputPts)
@@ -1104,8 +1173,10 @@ internal class EmbeddedDeviceSession(
         onDiagnostic("Microphone capture unavailable: ${failure.message ?: failure::class.simpleName}.$guidance Video and log capture continue.")
     }
 
-    private fun sleepBeforeReconnect(runId: Long): Boolean = try {
-        Thread.sleep(reconnectDelay.toMillis().coerceAtLeast(0))
+    private fun sleepBeforeReconnect(runId: Long, attempt: Int): Boolean = try {
+        val multiplier = 1L shl (attempt - 1).coerceIn(0, 5)
+        val delayMs = (reconnectDelay.toMillis().coerceAtLeast(0) * multiplier).coerceAtMost(MAX_RECONNECT_DELAY_MS)
+        Thread.sleep(delayMs)
         isCurrent(runId)
     } catch (_: InterruptedException) {
         false
@@ -1114,8 +1185,9 @@ internal class EmbeddedDeviceSession(
     private fun isCurrent(runId: Long): Boolean = synchronized(lock) { !stopping && generation.get() == runId }
 
     private companion object {
-        const val DEFAULT_MAX_RECONNECT_ATTEMPTS = 5
+        const val DEFAULT_MAX_RECONNECT_ATTEMPTS = Int.MAX_VALUE
         const val DEFAULT_RECONNECT_DELAY_MS = 500L
+        const val MAX_RECONNECT_DELAY_MS = 5_000L
         const val STOP_JOIN_MS = 2_000L
         const val MICROS_PER_MILLI = 1_000L
         const val OPUS_SAMPLE_RATE_HZ = 48_000

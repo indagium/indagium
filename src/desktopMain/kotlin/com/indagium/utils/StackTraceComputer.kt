@@ -488,4 +488,5 @@ fun issueSitesForCategory(
         else -> crashSitesForCategory(crashSites, category.category)
     }
     is IssueCategorySelection.Custom -> customSites.filter { it.ruleId == category.ruleId }
+    IssueCategorySelection.DeviceEvents -> emptyList()
 }

@@ -1316,10 +1316,12 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
 private fun IssueCategorySelection.token(): String = when (this) {
     is IssueCategorySelection.BuiltIn -> category.name // preserves the legacy built-in representation
     is IssueCategorySelection.Custom -> "custom:$ruleId"
+    IssueCategorySelection.DeviceEvents -> "device-events"
 }
 
 private fun String.issueCategorySelectionFromToken(): IssueCategorySelection? = when {
     startsWith("custom:") -> removePrefix("custom:").takeIf { it.isNotBlank() }?.let(IssueCategorySelection::Custom)
+    this == "device-events" -> IssueCategorySelection.DeviceEvents
     else -> runCatching { CrashCategory.valueOf(this) }.getOrNull()?.let(IssueCategorySelection::BuiltIn)
 }
 
@@ -1688,7 +1690,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // restored tab reopens its sourcePath and so shows the whole log.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat,
+    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, captureArchivePath,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1824,6 +1826,10 @@ internal fun LogTab.tabToken(): String {
         // Trailing field (position 14): authoritative parsed source format. Old autosaves omit
         // this field and restore with LOGCAT until the content parser provides the real format.
         logFormat.name,
+        // Trailing field (position 15): durable imported capture archive/descriptor. A video-off
+        // capture has no VideoAttachment to carry captureSourcePath, but its stopped snapshot
+        // strip still needs a source after restart.
+        captureArchivePath.orEmpty(),
     )
 }
 
@@ -1838,6 +1844,7 @@ internal sealed interface RestoredTabLoadResult {
         val archiveCandidate: ZipLogCandidate?,
         val largeFileMode: Boolean,
         val logFormat: LogFormat = LogFormat.LOGCAT,
+        val captureArchive: com.indagium.capture.ImportedCapture? = null,
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
@@ -1857,6 +1864,10 @@ internal sealed class RestoredTabSource {
     ) : RestoredTabSource() {
         override val largeFileMode: Boolean = persistedCandidate?.sizeBytes?.let { it >= LARGE_FILE_MODE_BYTES } ?: false
     }
+
+    data class CaptureSource(val archiveFile: File, val logEntryPath: String?) : RestoredTabSource() {
+        override val largeFileMode: Boolean = false // recomputed from the extracted log on the IO load path
+    }
 }
 
 internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
@@ -1864,7 +1875,11 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
     if (p.size < 9) return@runCatching null
     val sourcePath = p[2].takeIf { it.isNotBlank() }
     val persistedCandidate = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.archiveCandidateFromToken()
-    val source = sourcePath?.restoredTabSource(persistedCandidate) ?: return@runCatching null
+    val attachedVideo = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.attachedVideoFromToken()
+    val captureArchivePath = p.getOrNull(15)?.takeIf { it.isNotBlank() } ?: attachedVideo?.captureSourcePath
+    val source = captureArchivePath?.restoredCaptureSource(sourcePath?.captureArchiveEntryPath())
+        ?: sourcePath?.restoredTabSource(persistedCandidate)
+        ?: return@runCatching null
     RestoredTabShell(
         LogTab(
             id = p[0],
@@ -1881,7 +1896,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             largeFileMode = source.largeFileMode,
             archiveCandidate = (source as? RestoredTabSource.ArchiveSource)?.persistedCandidate,
             showTimeDelta = p.getOrNull(10)?.toBoolean() ?: false,
-            attachedVideo = p.getOrNull(11)?.takeIf { it.isNotBlank() }?.attachedVideoFromToken(),
+            attachedVideo = attachedVideo,
             // Field index 12 (see tabToken above); absent on legacy tokens means "not yet decided",
             // same as a brand-new tab — resolveNoteTarget falls through to its fingerprint search.
             noteTargetName = p.getOrNull(12)?.takeIf { it.isNotBlank() },
@@ -1890,6 +1905,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             // Field index 14 (append-only); old autosaves are reclassified after parsing.
             logFormat = p.getOrNull(14)?.let { runCatching { LogFormat.valueOf(it) }.getOrNull() }
                 ?: LogFormat.LOGCAT,
+            captureArchivePath = captureArchivePath,
         ),
         source,
     )
@@ -1908,7 +1924,16 @@ private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null
         val matchingPersistedCandidate = persistedCandidate?.takeIf { it.entryPath == entryPath }
         return RestoredTabSource.ArchiveSource(archiveFile, entryPath, matchingPersistedCandidate)
     }
-    return File(this).takeIf { it.exists() }?.let { RestoredTabSource.FileSource(it) }
+    return File(this).takeIf { it.exists() }?.let(RestoredTabSource::FileSource)
+}
+
+private fun String.restoredCaptureSource(logEntryPath: String?): RestoredTabSource.CaptureSource? =
+    File(this).takeIf { it.exists() }
+        ?.let { RestoredTabSource.CaptureSource(it, logEntryPath) }
+
+private fun String.captureArchiveEntryPath(): String? {
+    val bangIndex = indexOf('!')
+    return substring(bangIndex + 1).takeIf { bangIndex > 0 && it.isNotBlank() }
 }
 
 internal fun File.totalFileSize(): Long =

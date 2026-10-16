@@ -96,6 +96,16 @@ The GIFs are 1280×731, 10 fps, opaque, looped, and use the 80-color full-statis
 | GIF-14 run | Second recording, 16–34 s | 1.5× plus 1 s final-frame hold | 13.1 s; 1.02 MiB (1,073,595 bytes) |
 | GIF-15 results | Second recording, 90–101.697 s | Real time plus 2 s final-frame hold | 13.6 s; 848 KiB (868,675 bytes) |
 
+### Sequence-diagram website media
+
+The `/sequence-diagrams/` product page reuses GIF-11 above as its source video;
+it does not introduce a second recording. The existing 1280x726, 10 fps, 20 s
+guide GIF is converted to a silent, faststart H.264 MP4 and a WebP poster from
+the 8-second frame under `site/assets/media/`. The page hero uses another WebP
+still from 14 seconds, showing the completed diagram with no unresolved
+targets or export popover. The GIF remains available for Markdown rendering in
+this guide.
+
 ---
 
 ## Shot list

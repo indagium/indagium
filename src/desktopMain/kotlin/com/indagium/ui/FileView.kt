@@ -14,6 +14,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import com.indagium.capture.RecorderSnapshot
+import com.indagium.capture.RecorderState
 import com.indagium.model.*
 
 internal data class FilterSearchRequest(
@@ -46,6 +48,8 @@ internal fun BoundFilterPanel(
     filterSearchRequest: FilterSearchRequest? = null,
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
+    captureDeviceEvents: CaptureDeviceEventsModel? = null,
+    onCaptureDeviceEventReturnFocus: () -> Unit = {},
 ) {
     if (!state.filterVisible) return
     // Grouped into one data class rather than five more lambdas on this already-~90-parameter
@@ -221,6 +225,9 @@ internal fun BoundFilterPanel(
         onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
         onPanelFocusChanged = onPanelFocusChanged,
         keyboardFocusVisible = state.keyboardFocusVisible,
+        captureDeviceEvents = captureDeviceEvents,
+        captureDeviceEventsState = state,
+        onCaptureDeviceEventReturnFocus = onCaptureDeviceEventReturnFocus,
     )
     HDivider { delta ->
         // Recompute live instead of closing over `width`/`liveMaxWidth()` as of the last
@@ -249,6 +256,13 @@ internal fun FileView(
     val annotationFr = remember { FocusRequester() }
     val aiFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
+    // A ZIP opened as a log view is an immutable archive surface even if its source happens to
+    // still exist in the retained-session store. Keep the prominent stopped-capture strip for a
+    // finalized local recording, but route archive cuts through the ordinary Export menu.
+    val archiveBackedCapture = state.isImportedCaptureSnapshot(tab.id) ||
+        tab.captureArchivePath?.endsWith(".zip", ignoreCase = true) == true
+    val captureDeviceEvents = rememberCaptureDeviceEvents(state, tab)
+    var importedRangeEditorOpen by remember(tab.id) { mutableStateOf(false) }
 
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
         if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
@@ -284,12 +298,14 @@ internal fun FileView(
         // captureFinalizationStatus clears — otherwise Save ZIP/Open folder vanished the instant
         // finalization succeeded, the exact moment a user is most likely to want to export.
         if (tab.captureSessionId != null ||
-            state.captureFinalizationStatus(tab.id) != null || tab.captureSourceSessionId != null
+            state.captureFinalizationStatus(tab.id) != null ||
+            (tab.captureSourceSessionId != null && !archiveBackedCapture)
         ) {
             CaptureStrip(
                 state = state,
                 tab = tab,
                 onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+                deviceEvents = captureDeviceEvents,
             )
         }
         // Tracked so the right sidebar's rendered width can be clamped to what this row actually
@@ -298,10 +314,16 @@ internal fun FileView(
         // otherwise happily squeeze LogViewer's weight(1f) share to nothing on a narrow window.
         var rowWidthPx by remember { mutableStateOf(0) }
         val rowDensity = LocalDensity.current
+        val retainedCaptureTimeline = state.captureTimelineFor(tab.id) ?: tab.captureTimeline
+        val hasTimelineOnlyVideoPanel = retainedCaptureTimeline != null &&
+            retainedCaptureTimeline.availabilityIntervals.isNotEmpty() &&
+            retainedCaptureTimeline.availabilityFramesRendered != true &&
+            (retainedCaptureTimeline.showUnavailableFrames ?: state.settings.captureSettings.showUnavailableFrames) &&
+            state.captureSnapshotSessionFor(tab.id)?.settings?.recordVideo != false
         // Hoisted above the Row so the Filters panel can reserve the sidebar's minimum width the
         // same way the sidebar reserves the filter panel's rendered width below.
         val liveStatusSidebarVisible = state.videoPanelVisible &&
-            (tab.attachedVideo != null || tab.captureSessionId != null)
+            (tab.attachedVideo != null || tab.captureSessionId != null || hasTimelineOnlyVideoPanel)
         val notesVisibleForTab = state.annotationVisible
         val rightSidebarVisible = notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible
 
@@ -332,6 +354,8 @@ internal fun FileView(
                 onPanelFocusChanged = { focused ->
                     if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
                 },
+                captureDeviceEvents = captureDeviceEvents,
+                onCaptureDeviceEventReturnFocus = { runCatching { logViewerFr.requestFocus() } },
             )
             // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
             // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
@@ -439,6 +463,11 @@ internal fun FileView(
                 filterBarActions = filterBarActions,
                 filterBarVisible = state.filterBarVisible,
                 onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
+                onExportCaptureRange = if (archiveBackedCapture) {
+                    { importedRangeEditorOpen = true }
+                } else {
+                    null
+                },
             )
             if (rightSidebarVisible) {
                 val rowWidthDp = with(rowDensity) { rowWidthPx.toDp().value }
@@ -557,13 +586,40 @@ internal fun FileView(
                     },
                     videoContent = if (state.videoPanelVisible && tab.captureSessionId != null) {
                         { CaptureCard(state = state, tab = tab) }
-                    } else if (state.videoPanelVisible && tab.attachedVideo != null) {
+                    } else if (state.videoPanelVisible && (tab.attachedVideo != null || hasTimelineOnlyVideoPanel)) {
                         { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
                     } else {
                         null
                     },
                 )
             }
+        }
+        val archiveSession = if (archiveBackedCapture) state.captureSnapshotSessionFor(tab.id) else null
+        if (importedRangeEditorOpen && archiveSession != null) {
+            CaptureSnapshotPopover(
+                state = state,
+                tab = tab,
+                snapshot = RecorderSnapshot(
+                    state = RecorderState.STOPPED,
+                    session = archiveSession,
+                    logBytes = archiveSession.logFile.length(),
+                    indexedRows = tab.logData.size,
+                ),
+                triggerBounds = null,
+                editorTitle = "Export capture range",
+                onDismiss = {
+                    importedRangeEditorOpen = false
+                    runCatching { logViewerFr.requestFocus() }
+                },
+                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+            )
+        }
+        if (archiveBackedCapture && !importedRangeEditorOpen) {
+            CaptureExportStatusLine(
+                state = state,
+                sessionId = archiveSession?.id ?: tab.captureSourceSessionId,
+                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+            )
         }
     }
 }

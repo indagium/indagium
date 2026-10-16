@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Turn selected Android logcat rows or a filtered view into an editable sequence diagram in Indagium. Keep messages linked to log evidence and export a PNG snapshot, Mermaid, or PlantUML source." />
+    <link rel="canonical" href="https://indagium.com/sequence-diagrams/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Generate Editable Sequence Diagrams from Android Logs | Indagium" />
+    <meta property="og:description" content="Create an editable sequence diagram from selected Android log rows or the current filtered view. Keep the canvas, message queue, and source evidence connected." />
+    <meta property="og:url" content="https://indagium.com/sequence-diagrams/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/sequence-diagram-complete.webp" />
+    <meta property="og:image:alt" content="Completed Indagium sequence diagram with two lifelines, four message groups, and no unresolved targets." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Generate Editable Sequence Diagrams from Android Logs | Indagium" />
+    <meta name="twitter:description" content="Create an editable sequence diagram from selected Android log rows or the current filtered view. Keep the canvas, message queue, and source evidence connected." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/sequence-diagram-complete.webp" />
+    <meta name="twitter:image:alt" content="Completed Indagium sequence diagram with two lifelines, four message groups, and no unresolved targets." />
+    <title>Generate Editable Sequence Diagrams from Android Logs | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/zoom.js" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Android Logcat Analyzer", "item": "https://indagium.com/logcat-analyzer/" },
+          { "@type": "ListItem", "position": 3, "name": "Sequence Diagrams", "item": "https://indagium.com/sequence-diagrams/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "VideoObject",
+        "name": "Explore a Sequence Diagram Workspace in Indagium",
+        "description": "A 20-second walkthrough of opening a sequence diagram from selected log rows, inspecting its message queue and canvas, selecting linked content, and opening export choices.",
+        "thumbnailUrl": ["https://indagium.com/assets/media/posters/sequence-diagram-workspace.webp"],
+        "uploadDate": "2026-10-15",
+        "duration": "PT20S",
+        "contentUrl": "https://indagium.com/assets/media/web/sequence-diagram-workspace.mp4",
+        "encodingFormat": "video/mp4",
+        "inLanguage": "en",
+        "publisher": { "@type": "Organization", "name": "Indagium", "url": "https://indagium.com/" }
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Can I make a sequence diagram from only part of a log?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Select a non-empty range of rows to use that inclusive range, or create a diagram from the current filtered view." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I edit a generated sequence diagram?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Edit lifelines, actors, message endpoints and labels, grouping, visibility, and presentation in the diagram workspace. The initial diagram is a starting point for review." }
+          },
+          {
+            "@type": "Question",
+            "name": "How does Indagium choose message targets?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Indagium uses supported evidence such as adjacent thread handoffs and shared high-confidence request or trace identifiers. When a target is not supported by the evidence, it marks the message as needing a target instead of inventing one." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I export the diagram?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Attach an image snapshot to a note, or use Mermaid or PlantUML source when a text-based review artifact is more useful. A diagram workspace can also be saved and reopened as a draft." }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body class="sequence-diagrams-page">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Android log analysis <span>/</span> Sequence diagrams</p>
+          <h1 id="page-title">Turn log rows into an editable sequence diagram.</h1>
+          <p class="page-lede">Create an interaction diagram from selected Android log rows or the current filtered view. Indagium builds a starting point from the evidence, then lets you edit the lifelines, actors, messages, and presentation while keeping the diagram connected to its source log.</p>
+          <div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="#diagram-demo">Watch the workspace walkthrough <span aria-hidden="true">↓</span></a></div>
+        </div>
+        <figure class="page-hero-figure"><img src="/assets/media/posters/sequence-diagram-complete.webp" width="1280" height="726" alt="Completed Indagium sequence diagram with two lifelines, four message groups, and no unresolved targets." /><figcaption>The completed diagram keeps four message groups beside their source evidence.</figcaption></figure>
+      </section>
+
+      <section class="section sequence-diagram-demo" id="diagram-demo" aria-labelledby="diagram-demo-title">
+        <p class="eyebrow">Sequence diagram workspace <span>/</span> 20-second walkthrough</p>
+        <h2 id="diagram-demo-title">Inspect the queue, canvas, and <em>source together.</em></h2>
+        <p class="section-lede">Open a diagram from selected rows, review the messages beside their lifelines, select the linked queue and canvas content, and open the image or source export choices.</p>
+        <figure>
+          <video controls muted playsinline preload="metadata" poster="/assets/media/posters/sequence-diagram-workspace.webp" width="1280" height="726" aria-label="Walkthrough of an evidence-linked sequence diagram in Indagium, from selected log rows through queue and canvas inspection to export choices">
+            <source src="/assets/media/web/sequence-diagram-workspace.mp4" type="video/mp4" />
+            <a href="/assets/media/web/sequence-diagram-workspace.mp4">Download the sequence diagram workspace walkthrough</a>
+          </video>
+          <figcaption>Created from the sequence-diagram workspace animation in the <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#sequence-diagram-workspaces">Indagium user guide</a>.</figcaption>
+        </figure>
+        <div class="capture-walkthrough-copy">
+          <p class="exhibit-label">THE WORKFLOW</p>
+          <ol class="capture-walkthrough">
+            <li><b>Choose the scope.</b> Start with an inclusive selection of log rows or the current filtered view.</li>
+            <li><b>Review the participants.</b> Enable tags as lifelines, rename or merge them, and add actors when a person or external service belongs in the interaction.</li>
+            <li><b>Edit the messages.</b> Use the queue and canvas together to adjust endpoints, labels, grouping, visibility, and presentation.</li>
+            <li><b>Keep the evidence attached.</b> Inspect the source rows behind an interaction, save the workspace as a draft, and attach a diagram snapshot or export its Mermaid or PlantUML source.</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="sequence-source-title">
+        <p class="eyebrow">From log events to interactions</p>
+        <h2 id="sequence-source-title">A diagram you can <em>review and shape.</em></h2>
+        <p class="section-lede">The generated messages give you a useful first pass across the chosen log range. They remain editable so the diagram can match the question you are investigating.</p>
+        <div class="feature-matrix">
+          <article class="evidence-card"><span>01</span><h3>Start with the rows in scope</h3><p>Use selected log rows for a focused interval, or start from the current filtered view to diagram the events you have already narrowed down.</p></article>
+          <article class="evidence-card"><span>02</span><h3>Choose and name lifelines</h3><p>Tags in the selected rows are enabled initially. Add tags from elsewhere in the filtered view, search other analyzed tags, rename or merge participants, and add actors.</p></article>
+          <article class="evidence-card"><span>03</span><h3>Edit messages in one queue</h3><p>Set message source, target, label, visibility, repeat handling, and structure. Compatible occurrences can be grouped for editing while their individual log evidence stays available.</p></article>
+          <article class="evidence-card"><span>04</span><h3>Move between queue and canvas</h3><p>Hovering a queue row highlights its arrow, and selecting an arrow reveals the corresponding row. Use the canvas to adjust declared lifeline endpoints or pan and zoom.</p></article>
+          <article class="evidence-card"><span>05</span><h3>Keep uncertain links visible</h3><p>Unsupported targets stay marked as needing a target, with their evidence preserved. Warnings and coverage counts identify hidden, grouped, truncated, or ambiguous events.</p></article>
+          <article class="evidence-card"><span>06</span><h3>Save and share the work</h3><p>Save a diagram as a draft, attach a snapshot to Notes, or choose Mermaid or PlantUML source when a text representation is the useful handoff.</p></article>
+        </div>
+      </section>
+
+      <section class="section split-callout" aria-labelledby="sequence-confidence-title">
+        <div>
+          <p class="eyebrow">Read the diagram with care</p>
+          <h2 id="sequence-confidence-title">Let the log set <em>the limits.</em></h2>
+          <p class="section-lede">A sequence diagram is a way to inspect event order and supported relationships. It does not turn every nearby log line into proof of a call.</p>
+          <p>Indagium starts from the selected evidence and uses conservative signals for inferred targets, such as validated adjacent thread handoffs and shared high-confidence request or trace identifiers. A message without a supported destination remains unresolved for you to inspect. Direct source calls are enriched only when the source index can verify them; ambiguous matches are surfaced instead of guessed.</p>
+          <p>The diagram generator runs locally in the desktop app and does not require an external AI service. You can edit the starting diagram, retain its row evidence, and review the resulting PNG snapshot or text source with your analysis note.</p>
+        </div>
+        <figure class="evidence-card image-card"><img src="/assets/media/posters/sequence-diagram-workspace.webp" width="1280" height="726" alt="Sequence diagram canvas with two declared lifelines and visible unresolved message stubs for events without supported targets." /><figcaption>Unresolved messages remain visible with their source evidence until you choose a target.</figcaption></figure>
+      </section>
+
+      <section class="section" id="faq" aria-labelledby="sequence-faq-title">
+        <p class="eyebrow">Common questions</p>
+        <h2 id="sequence-faq-title">Sequence diagram generation, <em>answered.</em></h2>
+        <div class="faq-list">
+          <div><h3>Can I make a sequence diagram from only part of a log?</h3><p>Yes. Select a non-empty range of rows to use that inclusive range, or create a diagram from the current filtered view.</p></div>
+          <div><h3>Can I edit a generated sequence diagram?</h3><p>Yes. The workspace lets you edit lifelines, actors, message endpoints and labels, grouping, visibility, and presentation. The initial diagram is a starting point for review.</p></div>
+          <div><h3>How does Indagium choose message targets?</h3><p>It uses supported evidence such as adjacent thread handoffs and shared high-confidence request or trace identifiers. When a target is not supported, the message is marked as needing a target instead of being assigned a guessed lifeline.</p></div>
+          <div><h3>Can I export the diagram?</h3><p>Attach an image snapshot to Notes, or use Mermaid or PlantUML source when a text-based review artifact is more useful. You can also save a workspace and reopen it as a draft.</p></div>
+          <div><h3>Does sequence diagram generation need an AI service?</h3><p>No. The diagram generator runs locally in Indagium and does not require an external AI service.</p></div>
+        </div>
+      </section>
+
+      <section class="section guide-band" aria-labelledby="sequence-next-title">
+        <p class="eyebrow">Continue the investigation</p>
+        <h2 id="sequence-next-title">Keep the diagram beside <em>the full trace.</em></h2>
+        <div class="guide-links"><a href="/logcat-analyzer/"><span>Analyzer</span><b>Filter and investigate Android logcat →</b></a><a href="https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md#sequence-diagram-workspaces"><span>User guide</span><b>Read the sequence diagram workspace details →</b></a><a href="/guides/analyze-android-logcat/"><span>Workflow</span><b>Follow a repeatable log analysis process →</b></a></div>
+      </section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/sequence-diagrams/" aria-current="page">Sequence diagrams</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>

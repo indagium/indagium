@@ -43,6 +43,7 @@ import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -85,7 +86,10 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CAPTURE_NO_VIDEO_AFTER_MS
 import com.indagium.capture.CaptureExportPreview
+import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureAvailabilityInterval
+import com.indagium.capture.CaptureStatus
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
@@ -96,6 +100,7 @@ import com.indagium.capture.RecorderState
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.renderCaptureFilename
+import com.indagium.capture.sinceSaveTimelineBaseElapsedMs
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.update.revealInFileManager
@@ -125,6 +130,7 @@ internal class CaptureSnapshotPopupPositionProvider(
     private val marginPx: Int,
     private val gapPx: Int,
     private val placeAbove: Boolean,
+    private val centered: Boolean = false,
 ) : PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: IntRect,
@@ -133,6 +139,14 @@ internal class CaptureSnapshotPopupPositionProvider(
         popupContentSize: IntSize,
     ): IntOffset {
         val min = marginPx.coerceAtLeast(0)
+        if (centered) {
+            val maxX = (windowSize.width - popupContentSize.width - min).coerceAtLeast(min)
+            val maxY = (windowSize.height - popupContentSize.height - min).coerceAtLeast(min)
+            return IntOffset(
+                ((windowSize.width - popupContentSize.width) / 2).coerceIn(min, maxX),
+                ((windowSize.height - popupContentSize.height) / 2).coerceIn(min, maxY),
+            )
+        }
         val maxX = (windowSize.width - popupContentSize.width - min).coerceAtLeast(min)
         val requestedX = if (layoutDirection == LayoutDirection.Ltr) {
             anchorBounds.right - popupContentSize.width
@@ -164,6 +178,16 @@ internal fun formatCaptureElapsed(elapsedMs: Long): String {
     } else {
         String.format(Locale.US, "%02d:%02d", minutes, seconds)
     }
+}
+
+internal fun parseCaptureElapsed(value: String): Long? {
+    val parts = value.trim().split(':')
+    if (parts.size !in 2..3 || parts.any { it.isBlank() || it.any { char -> !char.isDigit() } }) return null
+    val numbers = parts.map { it.toLongOrNull() ?: return null }
+    if (numbers.last() !in 0..59 || (parts.size == 3 && numbers[1] !in 0..59)) return null
+    val seconds = if (parts.size == 2) numbers[0] * 60L + numbers[1]
+    else numbers[0] * 3_600L + numbers[1] * 60L + numbers[2]
+    return seconds.takeIf { it <= Long.MAX_VALUE / 1_000L }?.times(1_000L)
 }
 
 /** Compact byte formatting used by both the strip and status card. */
@@ -261,9 +285,15 @@ internal fun captureNoVideoWarning(
 
 internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
     snapshot.videoRecording -> "Video REC"
+    snapshot.state == RecorderState.RECORDING && snapshot.session?.settings?.recordVideo == true &&
+        snapshot.session?.availabilityIntervals?.lastOrNull()?.let { it.endElapsedMs == null } == true -> "Video retrying"
     snapshot.session?.settings?.recordVideo == true -> "Video idle"
     else -> "Video off"
 }
+
+internal fun captureDeviceUnavailable(snapshot: RecorderSnapshot): Boolean =
+    snapshot.state == RecorderState.RECORDING &&
+        snapshot.session?.availabilityIntervals?.lastOrNull()?.let { it.endElapsedMs == null } == true
 
 /** Status only, not a toggle: video recording is decided when the session starts
  * (CaptureRecorder.kt:328 reads settings.recordVideo; there is no mid-session start/stop). Tapping
@@ -433,20 +463,137 @@ private fun CaptureStorageMeter(usedBytes: Long, limitBytes: Long?) {
     }
 }
 
-internal fun captureSinceSaveEnabled(session: CaptureSession?): Boolean =
-    session?.hasSnapshotCheckpoint == true
+internal fun captureSinceSaveEnabled(
+    session: CaptureSession?,
+    atElapsedMs: Long = session?.elapsedMs ?: 0L,
+    includeVideo: Boolean = session?.settings?.recordVideo == true,
+): Boolean {
+    if (session == null || !session.hasSnapshotCheckpoint) return false
+    val end = atElapsedMs.coerceIn(0L, session.elapsedMs.coerceAtLeast(0L))
+    val logCursor = session.effectiveSnapshotCheckpointMs
+    // A cut before the log checkpoint is invalid even if a stale video cursor happens to lag it:
+    // the archive contract requires the saved endpoint to be within the requested range.
+    if (logCursor > end) return false
+    val hasNewLogRange = logCursor >= 0L && logCursor < end
+    val videoCursor = session.effectiveVideoCheckpointMs
+    val hasVideoTail = logCursor == end && includeVideo && session.settings.recordVideo &&
+        videoCursor >= 0L && videoCursor < end
+    return hasNewLogRange || hasVideoTail
+}
 
-internal fun captureSinceSaveHint(session: CaptureSession?, atElapsedMs: Long = session?.elapsedMs ?: 0L): String =
+internal fun captureSinceSaveHint(
+    session: CaptureSession?,
+    atElapsedMs: Long = session?.elapsedMs ?: 0L,
+    includeVideo: Boolean = session?.settings?.recordVideo == true,
+): String {
     if (session == null || !session.hasSnapshotCheckpoint) {
-        "Since last save is unavailable until the first successful snapshot."
-    } else {
-        val age = session.snapshotCheckpointAgeMs(atElapsedMs) ?: 0L
-        "Last save ${formatCaptureElapsed(age)} ago."
+        return "Since last save is unavailable until the first successful snapshot."
     }
+    val end = atElapsedMs.coerceIn(0L, session.elapsedMs.coerceAtLeast(0L))
+    val logCursor = session.effectiveSnapshotCheckpointMs
+    val videoCursor = session.effectiveVideoCheckpointMs
+    if (end < logCursor) {
+        return "Since last save is unavailable: this range ends at ${formatCaptureElapsed(end)}, before the saved endpoint ${formatCaptureElapsed(logCursor)}."
+    }
+    val hasNewLogRange = logCursor >= 0L && logCursor < end
+    val hasVideoTail = session.settings.recordVideo && videoCursor >= 0L && videoCursor < end
+    if (hasNewLogRange) {
+        return if (includeVideo && hasVideoTail) {
+            "Logs saved through ${formatCaptureElapsed(logCursor)}; this cut ends at ${formatCaptureElapsed(end)} and video remains unsaved from ${formatCaptureElapsed(videoCursor)}."
+        } else {
+            "Logs saved through ${formatCaptureElapsed(logCursor)}; this cut ends at ${formatCaptureElapsed(end)}."
+        }
+    }
+    if (logCursor == end && hasVideoTail) {
+        return if (includeVideo) {
+            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. Include video and confirm coverage in the preview."
+        } else {
+            "Logs are saved through ${formatCaptureElapsed(logCursor)}; video remains unsaved from ${formatCaptureElapsed(videoCursor)}. Include video to export it."
+        }
+    }
+    return "Logs are saved through ${formatCaptureElapsed(logCursor)}; there is no later range at ${formatCaptureElapsed(end)}."
+}
+
+/** True when the exact Since-last-save preview contains something publishable. A time span alone
+ * cannot enable Save: index rows, readable video coverage, or structured availability evidence
+ * must actually be present. */
+internal fun captureSinceSavePreviewHasContent(
+    session: CaptureSession,
+    request: CaptureExportRequest,
+    preview: CaptureExportPreview,
+): Boolean {
+    if (request.range != CaptureRange.SINCE_SAVE) return true
+    if (preview.logStartMs != null) return true
+    val end = request.cutoffElapsedMs.coerceIn(0L, session.elapsedMs.coerceAtLeast(0L))
+    val logCursor = session.effectiveSnapshotCheckpointMs
+    val videoCursor = session.effectiveVideoCheckpointMs
+    val timelineStart = sinceSaveTimelineBaseElapsedMs(
+        logCheckpointMs = logCursor,
+        videoCheckpointMs = videoCursor,
+        includeVideo = request.includeVideo,
+        videoConfigured = session.settings.recordVideo,
+    )
+    val hasAvailability = end > timelineStart && session.availabilityIntervals.any { interval ->
+        val intervalEnd = interval.endElapsedMs ?: session.elapsedMs.coerceAtLeast(0L)
+        timelineStart < intervalEnd && interval.startElapsedMs < end
+    }
+    val hasVideoCoverage = request.includeVideo && session.settings.recordVideo &&
+        preview.videoCoveredEndMs?.let { it > videoCursor && it > 0L } == true
+    return hasAvailability || hasVideoCoverage
+}
+
+/** Stable preview identity. A live range is polled on a bounded cadence, so its last completed
+ * preview remains useful while the end advances; otherwise the 250ms recorder clock would make
+ * every preview stale before the probe completes. Stopped captures include the exact cutoff so
+ * seeking cannot reuse coverage from another range. */
+internal data class CaptureExportPreviewIdentity(
+    val sessionId: String,
+    val status: CaptureStatus,
+    val rangeChoice: SnapshotRangeChoice?,
+    val rangeControls: String,
+    val request: CaptureExportRequest,
+    val logCheckpointMs: Long,
+    val videoCheckpointMs: Long,
+    val availabilityIntervals: List<CaptureAvailabilityInterval>,
+)
+
+internal fun captureExportPreviewIdentity(
+    session: CaptureSession,
+    request: CaptureExportRequest,
+    rangeChoice: SnapshotRangeChoice? = null,
+    rangeControls: String = "",
+): CaptureExportPreviewIdentity = CaptureExportPreviewIdentity(
+    sessionId = session.id,
+    status = session.status,
+    rangeChoice = rangeChoice,
+    rangeControls = rangeControls,
+    request = if (session.status == CaptureStatus.RECORDING) {
+        request.copy(
+            cutoffElapsedMs = 0L,
+            explicitStartElapsedMs = if (
+                rangeChoice == SnapshotRangeChoice.AROUND_PLAYHEAD || rangeChoice == SnapshotRangeChoice.START_TO_PLAYHEAD
+            ) 0L else request.explicitStartElapsedMs,
+            explicitEndElapsedMs = if (
+                rangeChoice == SnapshotRangeChoice.AROUND_PLAYHEAD || rangeChoice == SnapshotRangeChoice.START_TO_PLAYHEAD
+            ) 0L else request.explicitEndElapsedMs,
+        )
+    } else {
+        request
+    },
+    logCheckpointMs = session.effectiveSnapshotCheckpointMs,
+    videoCheckpointMs = session.effectiveVideoCheckpointMs,
+    availabilityIntervals = session.availabilityIntervals,
+)
 
 /** No recorded video, or the file is missing/empty, for the range this snapshot would export. */
 private fun captureVideoUnavailableForRange(session: CaptureSession): Boolean =
     session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() <= 0L
+
+internal fun capturePlayheadElapsedMs(state: AppState, tab: LogTab, session: CaptureSession): Long {
+    val videoPositionMs = state.existingVideoPositionMs(tab.id) ?: return session.elapsedMs.coerceAtLeast(0L)
+    val videoStart = session.videoStartElapsedMs ?: return session.elapsedMs.coerceAtLeast(0L)
+    return (videoStart + videoPositionMs - session.manualOffsetMs).coerceIn(0L, session.elapsedMs.coerceAtLeast(0L))
+}
 
 /** Maps the current tab selection to source capture ordinals without assuming row ids start at 1. */
 internal fun selectedCaptureOrdinals(tab: LogTab): IntRange? {
@@ -465,6 +612,9 @@ internal fun captureArchiveName(input: String): String? {
     if (stem.contains('/') || stem.contains('\\')) return null
     return "$stem.zip"
 }
+
+internal fun parseCaptureSnapshotMinutes(input: String): Int =
+    input.toIntOrNull()?.takeIf { it > 0 } ?: 0
 
 private fun recorderIsActive(snapshot: RecorderSnapshot): Boolean = when (snapshot.state) {
     RecorderState.RECORDING, RecorderState.STOPPING -> true
@@ -523,6 +673,7 @@ internal fun CaptureStrip(
     state: AppState,
     tab: LogTab,
     onReturnFocus: () -> Unit,
+    deviceEvents: CaptureDeviceEventsModel? = null,
 ) {
     if (tab.captureSessionId == null) {
         state.captureFinalizationStatus(tab.id)?.let { status ->
@@ -535,7 +686,7 @@ internal fun CaptureStrip(
         // lets this strip keep offering Save ZIP / Open folder instead of disappearing along with
         // the live controller — see the field's doc in Model.kt.
         if (tab.captureSourceSessionId != null) {
-            CaptureStoppedStrip(state = state, tab = tab, onReturnFocus = onReturnFocus)
+            CaptureStoppedStrip(state = state, tab = tab, onReturnFocus = onReturnFocus, deviceEvents = deviceEvents)
         }
         return
     }
@@ -552,11 +703,7 @@ internal fun CaptureStrip(
     var snapshotTriggerBounds by remember(tab.id) { mutableStateOf<Rect?>(null) }
 
     fun dismissSnapshotPopover() {
-        // Only this popover's own export: a retained-session save running for a stopped tab (owner
-        // != null) is not the popover's to cancel.
-        if (state.captureExportBusy && state.captureExportOwner == null) state.cancelCaptureSnapshot()
         snapshotOpen = false
-        state.clearCaptureExportStatus()
         onReturnFocus()
     }
     val finalizing = state.captureFinalizationStatus(tab.id) == CAPTURE_FINALIZING_STATUS
@@ -586,7 +733,10 @@ internal fun CaptureStrip(
                     CAPTURE_FINALIZING_STATUS, color = colors.ts, fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
-                active -> CaptureRecordingIndicator(elapsedMs = sessionElapsed(snapshot))
+                active -> CaptureRecordingIndicator(
+                    elapsedMs = sessionElapsed(snapshot),
+                    waitingForDevice = captureDeviceUnavailable(snapshot),
+                )
                 else -> AppText(
                     snapshot.state.name, color = colors.td, fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -594,6 +744,9 @@ internal fun CaptureStrip(
             }
             CaptureStorageMeter(usedBytes = snapshot.logBytes, limitBytes = session?.settings?.sessionLimitBytes)
             CaptureVideoPill(snapshot = snapshot, onClick = ::openCaptureSettings)
+            if (deviceEvents != null) {
+                CaptureDeviceEventsDropdown(state, tab, deviceEvents, onReturnFocus)
+            }
             if (active) CaptureFollowBadges(state = state, tab = tab)
             Spacer(Modifier.weight(1f))
             // Right action cluster: its own row with tighter 8dp spacing, every button a uniform
@@ -641,7 +794,7 @@ internal fun CaptureStrip(
                         icon = Icons.Outlined.Save,
                         active = true,
                         tooltip = "Export a capture snapshot",
-                        enabled = active && (snapshotOpen || !state.captureExportBusy),
+                        enabled = active,
                         modifier = Modifier.height(30.dp),
                         contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                         onClick = {
@@ -649,7 +802,6 @@ internal fun CaptureStrip(
                                 dismissSnapshotPopover()
                             } else {
                                 snapshotOpen = true
-                                state.clearCaptureExportStatus()
                             }
                         },
                     )
@@ -753,6 +905,13 @@ internal fun CaptureStrip(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
+        if (!snapshotOpen) {
+            CaptureExportStatusLine(
+                state = state,
+                sessionId = session?.id,
+                onReturnFocus = onReturnFocus,
+            )
+        }
         // Its own row rather than a status-line candidate: the paused state is persistent and carries a
         // button, so it must not be hidden by (or hide) the transient screenshot status, and a real
         // failure (mirror error / microphone warning) above it stays visible alongside it.
@@ -836,12 +995,12 @@ private fun CaptureDeviceChip(model: String, serial: String, live: Boolean, modi
 
 /** Recording indicator shown next to (not inside) the device chip while a capture is active. */
 @Composable
-private fun CaptureRecordingIndicator(elapsedMs: Long) {
+private fun CaptureRecordingIndicator(elapsedMs: Long, waitingForDevice: Boolean) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(Modifier.size(8.dp).background(DANGER_RED, RoundedCornerShape(50)))
+        Box(Modifier.size(8.dp).background(if (waitingForDevice) tc().warn else DANGER_RED, RoundedCornerShape(50)))
         AppText(
-            formatCaptureElapsed(elapsedMs),
-            color = DANGER_RED,
+            if (waitingForDevice) "Waiting for device · ${formatCaptureElapsed(elapsedMs)}" else formatCaptureElapsed(elapsedMs),
+            color = if (waitingForDevice) tc().warn else DANGER_RED,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold,
             fontSize = 13.sp,
@@ -928,13 +1087,22 @@ private fun CaptureStoppedStrip(
     state: AppState,
     tab: LogTab,
     onReturnFocus: () -> Unit,
+    deviceEvents: CaptureDeviceEventsModel? = null,
 ) {
     val sessionId = tab.captureSourceSessionId ?: return
-    val session = state.captureService.sessionById(sessionId)
+    val session = state.captureSnapshotSessionFor(tab.id)
+    val imported = state.isImportedCaptureSnapshot(tab.id)
     val colors = tc()
+    var snapshotOpen by remember(tab.id) { mutableStateOf(false) }
+    var snapshotTriggerBounds by remember(tab.id) { mutableStateOf<Rect?>(null) }
+    val exportStatusOwner = captureExportStatusOwnerForSurface(
+        session?.id,
+        state.captureExportOwner,
+        state.captureExportSessionId,
+    )
     val exportStatus = captureExportStatusFor(
-        sessionId, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
-        state.captureExportWarning,
+        session?.id, exportStatusOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+        state.captureExportWarning, state.captureExportCancelled,
     )
     val (deviceModel, deviceSerial) = captureSessionDeviceParts(session, tab.filename.removePrefix("Capture — "))
     Column(Modifier.fillMaxWidth().background(colors.p2)) {
@@ -959,21 +1127,48 @@ private fun CaptureStoppedStrip(
                 color = colors.td, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
+            if (deviceEvents != null) {
+                CaptureDeviceEventsDropdown(state, tab, deviceEvents, onReturnFocus)
+            }
             Spacer(Modifier.weight(1f))
-            ToolbarBtn(
-                label = if (exportStatus.busy) "Saving…" else "Save ZIP",
-                icon = Icons.Outlined.Save,
-                active = true,
-                tooltip = "Export this capture as a ZIP",
-                enabled = session != null && !state.captureExportBusy,
-                modifier = Modifier.height(30.dp),
-                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
-                onClick = {
-                    state.saveRetainedCapture(sessionId, tab.id)
-                    onReturnFocus()
-                },
-            )
-            ToolbarBtn(
+            Box(Modifier.onGloballyPositioned { snapshotTriggerBounds = it.boundsInWindow() }) {
+                ToolbarBtn(
+                    label = "Save snapshot ▾",
+                    icon = Icons.Outlined.Save,
+                    active = true,
+                    tooltip = "Choose a time range and export a capture ZIP",
+                    enabled = session != null,
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                    onClick = {
+                        if (snapshotOpen) {
+                            snapshotOpen = false
+                        } else {
+                            snapshotOpen = true
+                        }
+                        onReturnFocus()
+                    },
+                )
+                if (snapshotOpen && session != null) {
+                    CaptureSnapshotPopover(
+                        state = state,
+                        tab = tab,
+                        snapshot = RecorderSnapshot(
+                            state = RecorderState.STOPPED,
+                            session = session,
+                            logBytes = session.logFile.length(),
+                            indexedRows = tab.logData.size,
+                        ),
+                        triggerBounds = snapshotTriggerBounds,
+                        onDismiss = {
+                            snapshotOpen = false
+                            onReturnFocus()
+                        },
+                        onReturnFocus = onReturnFocus,
+                    )
+                }
+            }
+            if (!imported) ToolbarBtn(
                 label = "Open folder",
                 icon = Icons.Outlined.FolderOpen,
                 tooltip = "Open the capture's session folder",
@@ -998,7 +1193,7 @@ private fun CaptureStoppedStrip(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
-        if (exportStatus.busy) {
+        if (!snapshotOpen && exportStatus.busy) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1015,13 +1210,16 @@ private fun CaptureStoppedStrip(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
             )
         }
-        CaptureExportNotice(
-            result = exportStatus.result,
-            error = exportStatus.error,
-            onClose = { state.clearCaptureExportStatus() },
-            onReclaimFocus = onReturnFocus,
-            warning = exportStatus.warning,
-        )
+        if (!snapshotOpen) {
+            CaptureExportNotice(
+                result = exportStatus.result,
+                error = exportStatus.error,
+                onClose = { state.clearCaptureExportStatus() },
+                onReclaimFocus = onReturnFocus,
+                warning = exportStatus.warning,
+                cancelled = exportStatus.cancelled,
+            )
+        }
     }
 }
 
@@ -1039,6 +1237,7 @@ internal data class CaptureExportStatusView(
     val result: CaptureExportResult?,
     val error: String?,
     val warning: CaptureExportWarning? = null,
+    val cancelled: Boolean = false,
 )
 
 /**
@@ -1053,8 +1252,17 @@ internal fun captureExportStatusFor(
     result: CaptureExportResult?,
     error: String?,
     warning: CaptureExportWarning? = null,
+    cancelled: Boolean = false,
 ): CaptureExportStatusView =
-    if (sessionId == owner) CaptureExportStatusView(busy, result, error, warning) else CaptureExportStatusView(false, null, null)
+    if (sessionId == owner) CaptureExportStatusView(busy, result, error, warning, cancelled) else CaptureExportStatusView(false, null, null)
+
+/** A stopped strip can recover an export that started in the live popover, whose owner is null,
+ * once that popover is unmounted by Stop. Only the same source session may claim that status. */
+internal fun captureExportStatusOwnerForSurface(
+    sessionId: String?,
+    owner: String?,
+    sourceSessionId: String?,
+): String? = owner ?: sourceSessionId?.takeIf { it == sessionId }
 
 /**
  * The saved/failed line under a ZIP save: success shows the file name, "Open folder" and ×, and hides
@@ -1071,12 +1279,13 @@ internal fun CaptureExportNotice(
     onClose: () -> Unit,
     onReclaimFocus: () -> Unit,
     warning: CaptureExportWarning? = null,
+    cancelled: Boolean = false,
 ) {
-    if (result == null && error == null && warning == null) return
+    if (result == null && error == null && warning == null && !cancelled) return
     val colors = tc()
     val latestOnClose by rememberUpdatedState(onClose)
-    LaunchedEffect(result, warning) {
-        if (result != null || (error == null && warning != null)) {
+    LaunchedEffect(result, warning, cancelled) {
+        if (result != null || cancelled || (error == null && warning != null)) {
             delay(CAPTURE_EXPORT_NOTICE_MS)
             latestOnClose()
         }
@@ -1086,9 +1295,14 @@ internal fun CaptureExportNotice(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        if (error != null) {
+        if (cancelled) {
             AppText(
-                "Save failed: $error", color = DANGER_RED, fontSize = 10.sp,
+                "Export cancelled", color = colors.ts, fontSize = 10.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
+        } else if (error != null) {
+            AppText(
+                "Export failed: $error", color = DANGER_RED, fontSize = 10.sp,
                 maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
             )
         } else if (result != null) {
@@ -1106,6 +1320,51 @@ internal fun CaptureExportNotice(
         }
         // Right after the text (not pushed to the row's far end), so it reads as this notice's close.
         CloseButton(onClick = { onClose(); onReclaimFocus() })
+    }
+}
+
+/** Single source-matched status surface for live and imported range exports when their editor is closed. */
+@Composable
+internal fun CaptureExportStatusLine(
+    state: AppState,
+    sessionId: String?,
+    onReturnFocus: () -> Unit,
+) {
+    if (sessionId == null) return
+    val owner = captureExportStatusOwnerForSurface(
+        sessionId,
+        state.captureExportOwner,
+        state.captureExportSessionId,
+    )
+    val status = captureExportStatusFor(
+        sessionId,
+        owner,
+        state.captureExportBusy,
+        state.captureExportResult,
+        state.captureExportError,
+        state.captureExportWarning,
+        state.captureExportCancelled,
+    )
+    if (status.busy) {
+        val colors = tc()
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AppText(state.captureExportBusyMessage ?: "Exporting capture…", color = colors.td, fontSize = 10.sp)
+            IndeterminateLoadingLine(Modifier.weight(1f))
+            AccentLink("Cancel", { state.cancelCaptureSnapshot(); onReturnFocus() })
+        }
+    } else {
+        CaptureExportNotice(
+            result = status.result,
+            error = status.error,
+            warning = status.warning,
+            cancelled = status.cancelled,
+            onClose = { state.clearCaptureExportStatus() },
+            onReclaimFocus = onReturnFocus,
+        )
     }
 }
 
@@ -1127,28 +1386,97 @@ private fun CaptureFinalizationBanner(status: String) {
     }
 }
 
-private enum class SnapshotRangeChoice(val label: String) {
+internal enum class SnapshotRangeChoice(val label: String) {
     ALL("All"),
     LAST_MINUTES("Last N minutes"),
     SINCE_SAVE("Since last save"),
     SELECTION("Current selection"),
+    AROUND_PLAYHEAD("Around playhead"),
+    START_TO_PLAYHEAD("Start to playhead + offset"),
+    EXPLICIT("Start and end"),
 }
 
+internal fun captureSnapshotCutoffForChoice(
+    session: CaptureSession,
+    choice: SnapshotRangeChoice,
+    playheadElapsedMs: Long,
+): Long = if (session.status != com.indagium.capture.CaptureStatus.RECORDING &&
+    choice in setOf(SnapshotRangeChoice.LAST_MINUTES, SnapshotRangeChoice.SINCE_SAVE)
+) {
+    playheadElapsedMs.coerceIn(0L, session.elapsedMs.coerceAtLeast(0L))
+} else {
+    session.elapsedMs.coerceAtLeast(0L)
+}
+
+/** Resolves the editor's explicit-window choices against full capture bounds. Last N/Since Save
+ * callers use [captureSnapshotCutoffForChoice] as their separate playhead cutoff; All and explicit
+ * windows must still be able to include content after a stopped video's current playhead. */
+internal fun captureSnapshotExplicitBounds(
+    choice: SnapshotRangeChoice,
+    durationMs: Long,
+    playheadElapsedMs: Long,
+    beforeMs: Long = 5L * 60_000L,
+    afterMs: Long = 5L * 60_000L,
+    offsetMs: Long = 0L,
+    explicitStartMs: Long? = null,
+    explicitEndMs: Long? = null,
+): Pair<Long, Long>? {
+    val endBound = durationMs.coerceAtLeast(0L)
+    val playhead = playheadElapsedMs.coerceIn(0L, endBound)
+    return when (choice) {
+        SnapshotRangeChoice.AROUND_PLAYHEAD -> {
+            val before = beforeMs.coerceAtLeast(0L)
+            val after = afterMs.coerceAtLeast(0L)
+            (playhead - before).coerceAtLeast(0L) to saturatedAdd(playhead, after).coerceAtMost(endBound)
+        }
+        SnapshotRangeChoice.START_TO_PLAYHEAD -> 0L to
+            saturatedAdd(playhead, offsetMs.coerceAtLeast(0L)).coerceAtMost(endBound)
+        SnapshotRangeChoice.EXPLICIT -> {
+            val start = explicitStartMs ?: return -1L to -1L
+            val end = explicitEndMs ?: return -1L to -1L
+            start.coerceIn(0L, endBound) to end.coerceIn(0L, endBound)
+        }
+        else -> null
+    }
+}
+
+private fun saturatedAdd(left: Long, right: Long): Long =
+    if (right > 0L && left > Long.MAX_VALUE - right) Long.MAX_VALUE else left + right
+
 @Composable
-private fun CaptureSnapshotPopover(
+internal fun CaptureSnapshotPopover(
     state: AppState,
     tab: LogTab,
     snapshot: RecorderSnapshot,
     triggerBounds: Rect?,
     onDismiss: () -> Unit,
     onReturnFocus: () -> Unit,
+    editorTitle: String = "Capture snapshot",
 ) {
+    DisposableEffect(state, tab.id) {
+        onDispose { state.invalidateCaptureSnapshotPreview(tab.id) }
+    }
     val colors = tc()
-    // The popover owns only live-snapshot exports (null owner); a retained-session save running for
-    // another tab must not paint its busy/saved/failed state here.
-    val exportStatus = captureExportStatusFor(
-        null, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
-    )
+    val snapshotSessionId = snapshot.session?.id
+    val matchingExportSource = snapshotSessionId != null && state.captureExportSessionId == snapshotSessionId
+    val livePopover = state.captureControllerFor(tab.id) != null
+    val popoverOwner = when {
+        matchingExportSource -> state.captureExportOwner
+        livePopover -> null
+        else -> snapshotSessionId
+    }
+    // A running live-popover export keeps its null owner, with its source session tracked separately
+    // so the stopped strip can recover the same status if Stop unmounts this popover.
+    val exportStatus = if (livePopover && !matchingExportSource) {
+        // Null is the live popover's owner only while its own source is recorded; otherwise it
+        // would accidentally display an unrelated active snapshot's global null-owner status.
+        CaptureExportStatusView(busy = false, result = null, error = null)
+    } else {
+        captureExportStatusFor(
+            popoverOwner, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+            cancelled = state.captureExportCancelled,
+        )
+    }
     val density = LocalDensity.current
     val hostWindowSize = LocalWindowInfo.current.containerSize
     val hostWidth = with(density) { hostWindowSize.width.toDp() }
@@ -1162,12 +1490,20 @@ private fun CaptureSnapshotPopover(
         (it.top.toInt() - marginPx - gapPx - 2).coerceAtLeast(1)
     } ?: 0
     val placeAbove = aboveSpacePx > belowSpacePx
-    val availableHeightPx = if (placeAbove) aboveSpacePx else belowSpacePx
+    val centered = triggerBounds == null
+    val availableHeightPx = if (centered) {
+        (hostWindowSize.height - 2 * marginPx).coerceAtLeast(1)
+    } else if (placeAbove) aboveSpacePx else belowSpacePx
     val popupHeight = with(density) { availableHeightPx.toDp() }
         .coerceAtMost(CAPTURE_SNAPSHOT_POPOVER_MAX_HEIGHT)
-    val popupPositionProvider = remember(density, placeAbove) {
+    val popupPositionProvider = remember(density, placeAbove, centered) {
         with(density) {
-            CaptureSnapshotPopupPositionProvider(marginPx = marginPx, gapPx = gapPx, placeAbove = placeAbove)
+            CaptureSnapshotPopupPositionProvider(
+                marginPx = marginPx,
+                gapPx = gapPx,
+                placeAbove = placeAbove,
+                centered = centered,
+            )
         }
     }
     val bodyScroll = rememberScrollState()
@@ -1181,10 +1517,16 @@ private fun CaptureSnapshotPopover(
     val selection = remember(tab.id, tab.selected, tab.logData) { selectedCaptureOrdinals(tab) }
     var rangeChoice by remember(tab.id) { mutableStateOf(SnapshotRangeChoice.ALL) }
     var customMinutesText by remember(tab.id) { mutableStateOf("5") }
+    var explicitStartText by remember(tab.id, session?.id) { mutableStateOf("00:00") }
+    var explicitEndText by remember(tab.id, session?.id, snapshot.state) {
+        mutableStateOf(formatCaptureElapsed(session?.elapsedMs ?: 0L))
+    }
+    var playheadOffsetMinutesText by remember(tab.id) { mutableStateOf("0") }
+    var playheadBeforeMinutesText by remember(tab.id) { mutableStateOf("5") }
+    var playheadAfterMinutesText by remember(tab.id) { mutableStateOf("5") }
     var includeVideo by remember(tab.id, recordVideoConfigured) { mutableStateOf(canIncludeVideo) }
     var overwriteConfirmed by remember(tab.id) { mutableStateOf(false) }
-    var saveAndOpen by remember(tab.id) { mutableStateOf(false) }
-    val customMinutes = customMinutesText.toIntOrNull()?.coerceAtLeast(1) ?: 0
+    val customMinutes = parseCaptureSnapshotMinutes(customMinutesText)
     val range = when (rangeChoice) {
         SnapshotRangeChoice.ALL -> CaptureRange.ALL
         SnapshotRangeChoice.LAST_MINUTES -> when (customMinutes) {
@@ -1194,6 +1536,23 @@ private fun CaptureSnapshotPopover(
         }
         SnapshotRangeChoice.SINCE_SAVE -> CaptureRange.SINCE_SAVE
         SnapshotRangeChoice.SELECTION -> CaptureRange.SELECTION
+        SnapshotRangeChoice.AROUND_PLAYHEAD, SnapshotRangeChoice.START_TO_PLAYHEAD, SnapshotRangeChoice.EXPLICIT -> CaptureRange.EXPLICIT
+    }
+    val playheadElapsedMs = session?.let { capturePlayheadElapsedMs(state, tab, it) } ?: 0L
+    val snapshotCutoffMs = session?.let { current ->
+        captureSnapshotCutoffForChoice(current, rangeChoice, capturePlayheadElapsedMs(state, tab, current))
+    } ?: 0L
+    val explicitBounds = session?.let { current ->
+        captureSnapshotExplicitBounds(
+            choice = rangeChoice,
+            durationMs = current.elapsedMs,
+            playheadElapsedMs = playheadElapsedMs,
+            beforeMs = (playheadBeforeMinutesText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L) * 60_000L,
+            afterMs = (playheadAfterMinutesText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L) * 60_000L,
+            offsetMs = (playheadOffsetMinutesText.toLongOrNull()?.coerceAtLeast(0L) ?: 0L) * 60_000L,
+            explicitStartMs = parseCaptureElapsed(explicitStartText),
+            explicitEndMs = parseCaptureElapsed(explicitEndText),
+        )
     }
     val defaultFilename = session?.let {
         renderCaptureFilename(
@@ -1211,11 +1570,19 @@ private fun CaptureSnapshotPopover(
     val destinationDirectory = state.effectiveCaptureSnapshotsDir()
     val filename = captureArchiveName(basename)
     val destination = filename?.let { File(destinationDirectory, it) } ?: File(destinationDirectory, "capture.zip")
-    val sinceSaveEnabled = captureSinceSaveEnabled(session)
-    val enabled = session != null && !state.captureExportBusy &&
+    val sinceSaveCutoffMs = session?.let { current ->
+        captureSnapshotCutoffForChoice(current, SnapshotRangeChoice.SINCE_SAVE, playheadElapsedMs)
+    } ?: 0L
+    val sinceSaveEnabled = captureSinceSaveEnabled(session, sinceSaveCutoffMs, includeVideo)
+    val sinceSaveHint = captureSinceSaveHint(session, sinceSaveCutoffMs, includeVideo)
+    val explicitRangeEnabled = explicitBounds?.let { (start, end) ->
+        start >= 0L && end > start && start < (session?.elapsedMs ?: 0L)
+    } ?: true
+    val rangeValid = session != null &&
         (rangeChoice != SnapshotRangeChoice.LAST_MINUTES || customMinutes > 0) &&
         (rangeChoice != SnapshotRangeChoice.SINCE_SAVE || sinceSaveEnabled) &&
-        (rangeChoice != SnapshotRangeChoice.SELECTION || selection != null) && filename != null
+        explicitRangeEnabled &&
+        (rangeChoice != SnapshotRangeChoice.SELECTION || selection != null)
     val request = session?.let {
         buildCaptureSnapshotExportRequest(
             tab = tab,
@@ -1223,18 +1590,49 @@ private fun CaptureSnapshotPopover(
             range = range,
             customMinutes = customMinutes,
             includeVideo = includeVideo,
-            cutoffElapsedMs = it.elapsedMs,
+            cutoffElapsedMs = snapshotCutoffMs,
             overwriteExisting = overwriteConfirmed,
+            explicitStartElapsedMs = explicitBounds?.first,
+            explicitEndElapsedMs = explicitBounds?.second,
         )
     }
-    LaunchedEffect(rangeChoice, customMinutes, includeVideo, selection, basename, enabled) {
-        if (!enabled || request == null) return@LaunchedEffect
+    val latestRequest by rememberUpdatedState(request)
+    val previewRangeControls = when (rangeChoice) {
+        SnapshotRangeChoice.AROUND_PLAYHEAD -> "$playheadBeforeMinutesText/$playheadAfterMinutesText"
+        SnapshotRangeChoice.START_TO_PLAYHEAD -> playheadOffsetMinutesText
+        SnapshotRangeChoice.EXPLICIT -> "$explicitStartText/$explicitEndText"
+        else -> ""
+    }
+    val latestRangeChoice by rememberUpdatedState(rangeChoice)
+    val latestRangeControls by rememberUpdatedState(previewRangeControls)
+    val previewKey = if (session != null && request != null) {
+        captureExportPreviewIdentity(session, request, rangeChoice, previewRangeControls)
+    } else null
+    val previewMatchesCurrentRange = previewKey != null && previewKey == state.captureExportPreviewKey
+    val preview = if (previewMatchesCurrentRange) state.captureExportPreview else null
+    val previewError = if (previewMatchesCurrentRange) state.captureExportPreviewError else null
+    val sinceSaveHasContent = if (rangeChoice == SnapshotRangeChoice.SINCE_SAVE && session != null && sinceSaveEnabled) {
+        request != null && preview?.let { captureSinceSavePreviewHasContent(session, request, it) } == true
+    } else {
+        true
+    }
+    val baseEnabled = rangeValid && !state.captureExportBusy && filename != null
+    val enabled = baseEnabled && sinceSaveHasContent
+    LaunchedEffect(
+        rangeChoice, customMinutes, previewRangeControls, includeVideo, selection, basename,
+        rangeValid, state.captureExportBusy,
+    ) {
+        if (!rangeValid || filename == null || latestRequest == null) {
+            state.invalidateCaptureSnapshotPreview(tab.id)
+            return@LaunchedEffect
+        }
+        if (state.captureExportBusy) return@LaunchedEffect
         // Recorder state is published every ~250ms. Previewing on that raw elapsed value starts
         // an unbounded stream of index scans/remuxes while the popover is open. Controls still
         // refresh immediately (effect keys above), while this bounded tick keeps growing-video
         // coverage reasonably current without coupling preview work to recorder publication.
         while (true) {
-            state.previewCaptureSnapshot(tab.id, request)
+            latestRequest?.let { state.previewCaptureSnapshot(tab.id, it, latestRangeChoice, latestRangeControls) }
             delay(CAPTURE_PREVIEW_REFRESH_INTERVAL_MS)
         }
     }
@@ -1259,9 +1657,9 @@ private fun CaptureSnapshotPopover(
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                AppText("Capture snapshot", color = colors.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                AppText(editorTitle, color = colors.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                SquareIconButton("×", fontSize = 14.sp, enabled = !state.captureExportBusy, onClick = {
+                SquareIconButton("×", fontSize = 14.sp, onClick = {
                     onDismiss()
                     onReturnFocus()
                 })
@@ -1290,6 +1688,10 @@ private fun CaptureSnapshotPopover(
                             selected = rangeChoice == choice,
                             onSelect = {
                                 rangeChoice = choice
+                                if (choice == SnapshotRangeChoice.EXPLICIT) {
+                                    explicitStartText = "00:00"
+                                    explicitEndText = formatCaptureElapsed(session?.elapsedMs ?: 0L)
+                                }
                                 onReturnFocus()
                             },
                             enabled = choiceEnabled,
@@ -1297,8 +1699,15 @@ private fun CaptureSnapshotPopover(
                             AppText(choice.label, color = if (choiceEnabled) colors.ts else colors.td, fontSize = 11.sp)
                         }
                     }
+                    val displayedSinceSaveHint = when {
+                        rangeChoice != SnapshotRangeChoice.SINCE_SAVE || !sinceSaveEnabled -> sinceSaveHint
+                        preview == null && previewError != null -> "Preview failed: $previewError"
+                        preview == null -> "Checking this range for new rows, video, or device-availability records…"
+                        sinceSaveHasContent -> sinceSaveHint
+                        else -> "No complete log rows, usable video coverage, or device-availability records are available after ${formatCaptureElapsed(session?.effectiveSnapshotCheckpointMs ?: 0L)}."
+                    }
                     AppText(
-                        captureSinceSaveHint(session),
+                        displayedSinceSaveHint,
                         color = if (sinceSaveEnabled) colors.td else colors.ts,
                         fontSize = 10.sp,
                     )
@@ -1313,6 +1722,47 @@ private fun CaptureSnapshotPopover(
                         )
                         if (customMinutes == 0) AppText("Enter a positive number", color = DANGER_RED, fontSize = 10.sp)
                     }
+                }
+                if (rangeChoice in setOf(
+                        SnapshotRangeChoice.AROUND_PLAYHEAD,
+                        SnapshotRangeChoice.START_TO_PLAYHEAD,
+                        SnapshotRangeChoice.EXPLICIT,
+                    )
+                ) {
+                    when (rangeChoice) {
+                        SnapshotRangeChoice.AROUND_PLAYHEAD -> Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            AppText("Before/after min", color = colors.td, fontSize = 10.sp)
+                            InlineField(value = playheadBeforeMinutesText, onValue = { playheadBeforeMinutesText = it.filter(Char::isDigit).take(4) }, modifier = Modifier.width(44.dp))
+                            InlineField(value = playheadAfterMinutesText, onValue = { playheadAfterMinutesText = it.filter(Char::isDigit).take(4) }, modifier = Modifier.width(44.dp))
+                            AppText("${formatCaptureElapsed(explicitBounds?.first ?: 0L)}–${formatCaptureElapsed(explicitBounds?.second ?: 0L)}", color = colors.td, fontSize = 10.sp)
+                        }
+                        SnapshotRangeChoice.START_TO_PLAYHEAD -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            AppText("Offset minutes", color = colors.td, fontSize = 10.sp)
+                            Spacer(Modifier.width(8.dp))
+                            InlineField(
+                                value = playheadOffsetMinutesText,
+                                onValue = { playheadOffsetMinutesText = it.filter(Char::isDigit).take(4) },
+                                modifier = Modifier.width(64.dp),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            AppText("end ${formatCaptureElapsed(explicitBounds?.second ?: 0L)}", color = colors.td, fontSize = 10.sp)
+                        }
+                        SnapshotRangeChoice.EXPLICIT -> Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Column(Modifier.weight(1f)) {
+                                AppText("Start (mm:ss or hh:mm:ss)", color = colors.td, fontSize = 10.sp)
+                                InlineField(value = explicitStartText, onValue = { explicitStartText = it.filter { c -> c.isDigit() || c == ':' }.take(8) }, modifier = Modifier.fillMaxWidth())
+                            }
+                            Column(Modifier.weight(1f)) {
+                                AppText("End (mm:ss or hh:mm:ss)", color = colors.td, fontSize = 10.sp)
+                                InlineField(value = explicitEndText, onValue = { explicitEndText = it.filter { c -> c.isDigit() || c == ':' }.take(8) }, modifier = Modifier.fillMaxWidth())
+                            }
+                        }
+                        else -> Unit
+                    }
+                    if (!explicitRangeEnabled) AppText("Enter a non-empty range inside the capture duration.", color = DANGER_RED, fontSize = 10.sp)
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AppText("Archive name", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
@@ -1342,7 +1792,7 @@ private fun CaptureSnapshotPopover(
                 }
                 if (includeVideo && canIncludeVideo && captureVideoUnavailableForRange(session)) {
                     AppText(
-                        "Video is unavailable for the current range; the archive will still save logs and advance Since last save.",
+                        "Video is unavailable for the current range; only new log rows or device-availability records can be saved.",
                         color = colors.ts,
                         fontSize = 10.sp,
                     )
@@ -1370,20 +1820,22 @@ private fun CaptureSnapshotPopover(
                 // Coverage lines are always laid out (placeholder until the async preview lands), so the
                 // content-sized popover doesn't grow right after opening; the video line exists exactly
                 // when video is included, whatever its outcome.
-                val preview = state.captureExportPreview
                 AppText(
-                    captureLogCoverageLine(preview),
+                    "Preview · ${captureLogCoverageLine(preview)}",
                     color = if (preview == null) colors.td else colors.ts,
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                 )
                 if (includeVideo) {
                     AppText(
-                        captureVideoCoverageLine(preview),
+                        "Preview · ${captureVideoCoverageLine(preview)}",
                         color = if (preview == null) colors.td else colors.ts,
                         fontSize = 10.sp,
                         maxLines = 2,
                     )
+                }
+                if (preview == null && previewError != null) {
+                    AppText("Preview unavailable: $previewError", color = DANGER_RED, fontSize = 10.sp, maxLines = 2)
                 }
                 if (destination.exists() && !overwriteConfirmed) {
                     AppText(
@@ -1400,13 +1852,16 @@ private fun CaptureSnapshotPopover(
                     }
                 }
                 exportStatus.error?.let { error ->
-                    AppText("Snapshot failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
+                    AppText("Export failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
+                }
+                if (exportStatus.cancelled) {
+                    AppText("Export cancelled", color = colors.ts, fontSize = 10.sp)
                 }
                 exportStatus.result?.let { result ->
-                    AppText("Saved ${result.file.name}: ${result.message}", color = colors.ac, fontSize = 10.sp, maxLines = 2)
+                    AppText("Last export: ${result.file.name}: ${result.message}", color = colors.ac, fontSize = 10.sp, maxLines = 2)
                     if (includeVideo && result.videoCoveredEndMs != null && result.videoCoveredEndMs < result.logCoveredEndMs) {
                         AppText(
-                            "Video coverage ends at ${formatCaptureElapsed(result.videoCoveredEndMs)}; " +
+                            "Last export video coverage ends at ${formatCaptureElapsed(result.videoCoveredEndMs)}; " +
                                 "log coverage ends at ${formatCaptureElapsed(result.logCoveredEndMs)}.",
                             color = colors.ts,
                             fontSize = 10.sp,
@@ -1423,7 +1878,7 @@ private fun CaptureSnapshotPopover(
                 if (state.captureExportBusy) {
                     DialogActionButton("Cancel export", active = true, danger = true) {
                         state.cancelCaptureSnapshot()
-                        onDismiss()
+                        onReturnFocus()
                     }
                 } else {
                     DialogActionButton("Cancel", active = false) {
@@ -1434,37 +1889,16 @@ private fun CaptureSnapshotPopover(
                     // DialogActionButton's active/inactive convention elsewhere (e.g.
                     // SplitPromptDialog's "Split"/"Do Not Split").
                     DialogActionButton("Save ZIP", active = true, enabled = enabled) {
-                        saveAndOpen = false
-                        request?.let { state.exportCaptureSnapshot(tab.id, it) }
+                        request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = false) }
                         onReturnFocus()
                     }
                     DialogActionButton("Save + open", active = false, enabled = enabled) {
-                        saveAndOpen = true
-                        request?.let { state.exportCaptureSnapshot(tab.id, it) }
-                        onReturnFocus()
+                        request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = true) }
+                        // Close the editor after starting the job; the source-matched status
+                        // remains visible outside it and AppState owns the open-on-success intent.
+                        onDismiss()
                     }
                 }
-            }
-        }
-    }
-    LaunchedEffect(exportStatus.result) {
-        if (saveAndOpen) {
-            exportStatus.result?.file?.let { file ->
-                // The export is always our own capture ZIP (a portable archive with a
-                // capture.indagium.json descriptor), never a plain text log — routing it through
-                // plain openFile() parsed the ZIP's raw bytes as a text log and produced a tab full
-                // of "RAW: PK ..." mojibake, with no video attached. openCaptureFile is the designed
-                // entry point: it validates the descriptor, parses the log inside the zip, and
-                // attaches the video. isCaptureArchive still gates it so a hand-edited/corrupted
-                // export that genuinely isn't a capture archive falls back to plain openFile instead
-                // of throwing deep inside openCaptureFile's coroutine.
-                if (com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) {
-                    state.openCaptureFile(file)
-                } else {
-                    state.openFile(file)
-                }
-                saveAndOpen = false
-                onDismiss()
             }
         }
     }

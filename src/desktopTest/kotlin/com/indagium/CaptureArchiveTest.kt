@@ -4,6 +4,7 @@ import com.indagium.capture.CAPTURE_DESCRIPTOR_NAME
 import com.indagium.capture.CaptureArchiveException
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
+import com.indagium.capture.CaptureAvailabilityInterval
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
@@ -59,12 +60,12 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertEquals(rows.last().text, imported.logFile.readText())
-        // Archive v3: one sync anchor instead of a per-row mapping — the sole kept row (ordinal 1)
+        // Archive v4 keeps one sync anchor plus export-local elapsed row timing — the sole kept row (ordinal 1)
         // is the only candidate, and its predicted video position matches what the old row-by-row
         // mapping used to compute for it.
         assertEquals(1, imported.syncAnchor?.row)
         assertEquals(300_000L, imported.syncAnchor?.videoMs)
-        assertNull(imported.timeline)
+        assertEquals(listOf(1), requireNotNull(imported.timeline).rows.map { it.ordinal })
         assertEquals(100L, imported.descriptor.manualOffsetMs)
         assertEquals(destination, imported.source)
         assertTrue(imported.videoFile?.isFile == true)
@@ -73,6 +74,62 @@ class CaptureArchiveTest {
         // Archive v3 defaults the exported container to MP4 (CaptureVideoContainer.MP4) — see
         // CaptureModels.kt.
         assertEquals("screen.mp4", imported.descriptor.video?.path)
+    }
+
+    @Test
+    fun explicitOfflineOnlyRangeExportsTimelineMetadataWithoutLogsOrVideo() {
+        val root = createTempDirectory("capture-archive-offline-only").toFile()
+        val offline = CaptureAvailabilityInterval(
+            startElapsedMs = 2_000,
+            endElapsedMs = 8_000,
+            bootIdBefore = "old-boot",
+            bootIdAfter = "new-boot",
+            rebootConfirmed = true,
+        )
+        val session = session(root).copy(
+            elapsedMs = 10_000,
+            settings = CaptureSettings(recordVideo = false, showUnavailableFrames = false, freeSpaceReserveBytes = 0),
+            availabilityIntervals = listOf(offline),
+        )
+        writeCaptureInput(session, emptyList())
+        val destination = File(root, "offline-only.zip")
+
+        CaptureArchiveExporter(CaptureVideoExporter { _, _, _, _ -> error("video was excluded") }).export(
+            session,
+            CaptureExportRequest(
+                destination = destination,
+                range = CaptureRange.EXPLICIT,
+                includeVideo = false,
+                cutoffElapsedMs = 10_000,
+                explicitStartElapsedMs = 3_000,
+                explicitEndElapsedMs = 5_000,
+            ),
+        )
+
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        assertEquals("", imported.logFile.readText())
+        assertNull(imported.videoFile)
+        assertEquals(3_000L, imported.descriptor.timelineBaseElapsedMs)
+        assertEquals(2_000L, imported.descriptor.timelineDurationMs)
+        assertEquals(listOf(CaptureAvailabilityInterval(0, 2_000, "old-boot", "new-boot", true)), imported.descriptor.availabilityIntervals)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
+        assertEquals(imported.descriptor.availabilityIntervals, imported.timeline?.availabilityIntervals)
+        val timelineText = imported.descriptor.timeline?.let { asset ->
+            ZipFile(destination).use { zip ->
+                zip.getInputStream(zip.getEntry(asset.path)).bufferedReader().readText()
+            }
+        }
+        assertTrue(timelineText.orEmpty().contains("\"type\":\"captureTimeline\""))
+        assertTrue(timelineText.orEmpty().contains("\"type\":\"availability\""))
+        val tampered = File(root, "offline-only-tampered.zip")
+        val timelinePath = requireNotNull(imported.descriptor.timeline).path
+        rewriteZip(destination, tampered) { path, bytes ->
+            if (path == timelinePath) String(bytes, Charsets.UTF_8).replace("\"startMs\":0", "\"startMs\":1").toByteArray()
+            else bytes
+        }
+        assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveReader.open(tampered, File(root, "tampered-cache"))
+        }
     }
 
     @Test
@@ -122,7 +179,7 @@ class CaptureArchiveTest {
         // (derived straight from the selection's real elapsedMs bounds, not from row content) is what
         // still proves the temporal bounds this test's name is about.
         assertNull(imported.syncAnchor)
-        assertNull(imported.timeline)
+        assertEquals(2, requireNotNull(imported.timeline).rows.size)
         assertEquals(2_000L, imported.descriptor.logStartMs)
         assertEquals(3_000L, imported.descriptor.logEndMs)
         assertEquals(CaptureRange.SELECTION, imported.descriptor.range)
@@ -148,6 +205,43 @@ class CaptureArchiveTest {
                 selectedFirstRowOrdinal = 2, selectedLastRowOrdinal = 1,
             ))
         }
+    }
+
+    @Test
+    fun explicitRangeClipsRowsAndRebasesTimelineAndAvailabilityIntervals() {
+        val root = createTempDirectory("capture-archive-explicit-range").toFile()
+        val session = session(root).copy(
+            availabilityIntervals = listOf(
+                CaptureAvailabilityInterval(180_000, 250_000, "boot-a", "boot-b", true),
+            ),
+        )
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 100_000, 1),
+            RawRow("row-2\n", 200_000, 2),
+            RawRow("row-3\n", 300_000, 3),
+            RawRow("row-4\n", 400_000, 4),
+        ))
+        val destination = File(root, "explicit.zip")
+        CaptureArchiveExporter().export(
+            session,
+            CaptureExportRequest(
+                destination = destination,
+                range = CaptureRange.EXPLICIT,
+                cutoffElapsedMs = 400_000,
+                explicitStartElapsedMs = 150_000,
+                explicitEndElapsedMs = 350_000,
+            ),
+        )
+
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        assertEquals("row-2\nrow-3\n", imported.logFile.readText())
+        assertEquals(150_000L, imported.descriptor.timelineBaseElapsedMs)
+        assertEquals(200_000L, imported.descriptor.timelineDurationMs)
+        assertEquals(listOf(50_000L, 150_000L), requireNotNull(imported.timeline).rows.map { it.elapsedMs })
+        val gap = imported.timeline!!.availabilityIntervals.single()
+        assertEquals(30_000L, gap.startElapsedMs)
+        assertEquals(100_000L, gap.endElapsedMs)
+        assertEquals(true, gap.rebootConfirmed)
     }
 
     @Test
@@ -251,11 +345,82 @@ class CaptureArchiveTest {
 
         val preview = CaptureArchiveExporter().preview(
             session,
-            CaptureExportRequest(destination = File(root, "not-published.zip"), range = CaptureRange.SINCE_SAVE, cutoffElapsedMs = 30_000),
+            CaptureExportRequest(destination = File(root, "not-published.zip"), range = CaptureRange.SINCE_SAVE, cutoffElapsedMs = 31_000),
         )
 
         assertNull(preview.logStartMs)
         assertNull(preview.logEndMs)
+    }
+
+    @Test
+    fun sinceSaveRejectsAnEqualEndpointUnlessItsIndependentVideoCursorHasWork() {
+        val root = createTempDirectory("capture-since-save-equal-endpoint").toFile()
+        val session = session(root).copy(snapshotCheckpointMs = 30_000)
+        writeCaptureInput(session, listOf(RawRow("already saved\n", 30_000, 1)))
+        val request = CaptureExportRequest(
+            destination = File(root, "empty.zip"),
+            range = CaptureRange.SINCE_SAVE,
+            includeVideo = false,
+            cutoffElapsedMs = 30_000,
+        )
+        assertFailsWith<IllegalArgumentException> { CaptureArchiveExporter().preview(session, request) }
+        assertFailsWith<IllegalArgumentException> { CaptureArchiveExporter().export(session, request) }
+        assertFalse(request.destination.exists())
+    }
+
+    @Test
+    fun sinceSaveCanExportARealVideoOnlyCatchupAtTheSavedLogEndpoint() {
+        val root = createTempDirectory("capture-since-save-video-only").toFile()
+        val session = session(root, recordVideo = true).copy(
+            elapsedMs = 8_000,
+            snapshotCheckpointMs = 8_000,
+            videoCheckpointMs = 5_000,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("already saved\n", 8_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        val fakeVideo = CaptureVideoExporter { _, destination, start, end ->
+            destination.writeText("new video coverage")
+            CaptureVideoClip(start, end, end - start)
+        }
+        val destination = File(root, "video-only.zip")
+        val result = CaptureArchiveExporter(fakeVideo).export(
+            session,
+            CaptureExportRequest(destination, CaptureRange.SINCE_SAVE, cutoffElapsedMs = 8_000),
+        )
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+
+        assertEquals(8_000L, result.logCoveredEndMs)
+        assertEquals(8_000L, result.videoCoveredEndMs)
+        assertEquals("", imported.logFile.readText())
+        assertTrue(imported.videoFile?.isFile == true)
+        assertEquals(3_000L, imported.descriptor.timelineDurationMs)
+    }
+
+    @Test
+    fun sinceSaveDoesNotPublishOrAdvanceFromAnEmptyVideoOnlyCutWithoutCoverage() {
+        val root = createTempDirectory("capture-since-save-empty-video").toFile()
+        val session = session(root, recordVideo = true).copy(
+            elapsedMs = 8_000,
+            snapshotCheckpointMs = 8_000,
+            videoCheckpointMs = 5_000,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("already saved\n", 8_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        val destination = File(root, "empty-video-only.zip")
+        val request = CaptureExportRequest(destination, CaptureRange.SINCE_SAVE, cutoffElapsedMs = 8_000)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveExporter(CaptureVideoExporter { _, _, _, _ -> error("no readable video interval") })
+                .export(session, request)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("Nothing new to save"))
+        assertFalse(destination.exists())
+        assertEquals(8_000L, session.effectiveSnapshotCheckpointMs)
+        assertEquals(5_000L, session.effectiveVideoCheckpointMs)
     }
 
     @Test
@@ -296,7 +461,7 @@ class CaptureArchiveTest {
         assertNull(imported.videoFile)
         assertNull(imported.descriptor.video)
         assertNull(imported.syncAnchor)
-        assertNull(imported.timeline)
+        assertEquals(2, requireNotNull(imported.timeline).rows.size)
     }
 
     // Archive v3: the anchor estimator must prefer a row whose PREDICTED video position actually
@@ -334,7 +499,7 @@ class CaptureArchiveTest {
         // what the old mapping computed for that same row: videoMs = 1_000).
         assertEquals(2, imported.syncAnchor?.row)
         assertEquals(1_000L, imported.syncAnchor?.videoMs)
-        assertNull(imported.timeline)
+        assertEquals(3, requireNotNull(imported.timeline).rows.size)
     }
 
     @Test
@@ -357,7 +522,7 @@ class CaptureArchiveTest {
         assertEquals(session.videoFile, imported.videoFile)
         assertNull(imported.descriptor.mapping)
         assertEquals("video/screen.mkv", imported.descriptor.video?.path)
-        assertNull(imported.timeline)
+        assertEquals(2, requireNotNull(imported.timeline).rows.size)
         // Same reasoning as exportedVideoArchiveReopensWithASyncAnchorPreferringARowInsideVideoCoverage:
         // row 1 predicts a negative video position (raw/unremuxed video, so there is no clip upper
         // bound — only the lower 0 bound applies) and is skipped in favor of row 2.
@@ -464,7 +629,7 @@ class CaptureArchiveTest {
         // replaces it. Row 1 is the first (and here, only viable) candidate.
         assertEquals(1, imported.syncAnchor?.row)
         assertEquals(500L, imported.syncAnchor?.videoMs)
-        assertNull(imported.timeline)
+        assertEquals(2, requireNotNull(imported.timeline).rows.size)
         assertEquals(File(session.directory, CAPTURE_DESCRIPTOR_NAME), imported.source)
         assertEquals(byteArrayOf(7, 8, 9).toList(), imported.videoFile?.readBytes()?.toList())
         assertFalse(File(session.directory, "mapping/log-video.jsonl").exists())
@@ -583,7 +748,7 @@ class CaptureArchiveTest {
         assertEquals(2_000L, imported.descriptor.logEndMs)
         // No video in this session, so there is nothing to anchor.
         assertNull(imported.syncAnchor)
-        assertNull(imported.timeline)
+        assertEquals(1, requireNotNull(imported.timeline).rows.size)
     }
 
     // Regression test for the "video checkpoint split" fix: before it, Since-last-save always
@@ -743,16 +908,15 @@ class CaptureArchiveTest {
     // openZip's allowlist — including captured_with_indagium.txt, which carries no descriptor asset
     // entry of its own (see CaptureArchive.kt's scanZipEntries/writeZip).
     @Test
-    fun v3ExportProducesTheFlatLayoutIncludingTheCapturedWithIndagiumBlurb() {
-        val root = createTempDirectory("capture-archive-v3-layout").toFile()
+    fun v4ExportAddsTheStreamedTimelineToTheFlatLayout() {
+        val root = createTempDirectory("capture-archive-v4-layout").toFile()
         val zip = exportLogOnly(root)
 
         val names = ZipFile(zip).use { it.entries().asSequence().map { entry -> entry.name }.toSet() }
 
-        // Archive v3: no more row-by-row mapping file (log-video-sync.jsonl) — the log<->video
-        // sync is a single anchor inside the descriptor's own "sync" key instead.
+        // Archive v4 keeps the single sync anchor and adds the checksummed export-local timing asset.
         assertEquals(
-            setOf(CAPTURE_DESCRIPTOR_NAME, "captured_with_indagium.txt", "logcat.log"),
+            setOf(CAPTURE_DESCRIPTOR_NAME, "captured_with_indagium.txt", "logcat.log", "timeline/rows.jsonl"),
             names,
         )
         val blurb = ZipFile(zip).use { zipFile ->
@@ -761,20 +925,20 @@ class CaptureArchiveTest {
         assertTrue(blurb.contains("Indagium"))
         assertTrue(blurb.contains("indagium.com"))
 
-        // The descriptor itself carries "version": 3 (not the old "formatVersion" key) and a flat
+        // The descriptor itself carries "version": 4 (not the old "formatVersion" key) and a flat
         // sha256 map instead of one {path,sizeBytes,sha256} object per asset.
         val descriptorJson = ZipFile(zip).use { zipFile ->
             zipFile.getInputStream(zipFile.getEntry(CAPTURE_DESCRIPTOR_NAME)).readBytes().toString(Charsets.UTF_8)
         }
-        assertTrue(descriptorJson.contains("\"version\":3"))
+        assertTrue(descriptorJson.contains("\"version\":4"))
         assertTrue(descriptorJson.contains("\"sha256\""))
 
         val imported = CaptureArchiveReader.open(zip, File(root, "cache"))
-        assertEquals(3, imported.descriptor.formatVersion)
+        assertEquals(4, imported.descriptor.formatVersion)
         assertEquals("logcat.log", imported.descriptor.log.path)
         assertNull(imported.descriptor.mapping)
         assertNull(imported.syncAnchor, "exportLogOnly has no video, so there is nothing to anchor")
-        assertNull(imported.timeline)
+        assertEquals(1, requireNotNull(imported.timeline).rows.size)
     }
 
     // Archive v3: the reader keeps parsing the old nested logs/video/mapping layout and

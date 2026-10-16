@@ -9,7 +9,9 @@ import com.indagium.utils.TagProcessInfo
 import com.indagium.utils.canFollowTagByToken
 import com.indagium.utils.computeTagPids
 import com.indagium.utils.defaultTagProcessSelection
+import com.indagium.utils.hasTagPrefixPids
 import com.indagium.utils.mergeTagPids
+import com.indagium.utils.tagPrefixProcessInfo
 import com.indagium.utils.tagProcessInfo
 import com.indagium.utils.tagProcessRulePattern
 import kotlin.test.Test
@@ -93,6 +95,40 @@ class TagProcessesTest {
 
         assertFailsWith<IllegalStateException> {
             tagProcessInfo(data, "X", emptyMap()) { error("cancelled") }
+        }
+    }
+
+    @Test
+    fun tagPrefixProcessInfoUsesOneDotBoundaryScopeAndSkipsUnknownPids() {
+        val data = listOf(
+            e("com.app", 100, "10:00:00.000"),
+            e("com.app.UI", 100, "10:00:01.000"),
+            e("com.app.DB", 200, "10:00:02.000"),
+            e("com.application.Worker", 300, "10:00:03.000"),
+            e("com.app.UI", 0, "10:00:04.000"),
+            e("Other", 100, "10:00:05.000"),
+        )
+
+        val infos = tagPrefixProcessInfo(data, "com.app", mapOf(100 to "main"), cancellationCheck = {})
+
+        assertEquals(
+            listOf(
+                TagProcessInfo(100, "main", tagLines = 2, totalLines = 3, distinctTags = 3, firstTs = "10:00:00.000", lastTs = "10:00:05.000"),
+                TagProcessInfo(200, null, tagLines = 1, totalLines = 1, distinctTags = 1, firstTs = "10:00:02.000", lastTs = "10:00:02.000"),
+            ),
+            infos,
+            "prefix children are aggregated, com.application is outside the dot boundary, and pid 0 is ignored",
+        )
+        assertTrue(hasTagPrefixPids(computeTagPids(data), "com.app"))
+        assertFalse(hasTagPrefixPids(computeTagPids(data), "com.missing"))
+    }
+
+    @Test
+    fun tagPrefixProcessInfoPollsCancellationDuringItsSingleScan() {
+        val data = (1..10_000).map { e("com.app.Tag", 100) }
+
+        assertFailsWith<IllegalStateException> {
+            tagPrefixProcessInfo(data, "com.app", emptyMap()) { error("cancelled") }
         }
     }
 

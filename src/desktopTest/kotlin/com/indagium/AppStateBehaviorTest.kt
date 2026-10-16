@@ -2471,18 +2471,16 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         state.autosaveNow()
 
-        // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
-        // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
-        // Six drops, not one: showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath,
-        // and logFormat were appended AFTER archiveCandidate (positions 10-14), so a single strip
-        // would now remove only logFormat and leave archiveCandidate in place — dropping all six
-        // trailing fields is what actually reproduces a token from before any of them existed.
+        // Simulate a pre-PERF-3b cache. Strip archiveCandidate and every field appended after it:
+        // showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat, and
+        // captureArchivePath (positions 10-15). Seven suffix fields total must be removed to
+        // reproduce a token from before archive metadata existed.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
                 line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
-                    .substringBeforeLast('|').substringBeforeLast('|')
+                    .substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
             } else {
                 line
             }
@@ -2507,14 +2505,11 @@ class AppStateBehaviorTest {
         assertEquals("FS/data/anr/main_log.txt", restored.tabs.single().archiveCandidate?.entryPath)
     }
 
-    // Regression: a token that has archiveCandidate (PERF-3b) but predates showTimeDelta is
-    // exactly what an existing user's CURRENT autosave looks like the moment they upgrade to a
-    // build that adds the Δt tab toggle — short by exactly one trailing field, not two. The test
-    // above (missing both trailing fields) doesn't cover this case: stripping only ONE field here
-    // must still restore cleanly, with showTimeDelta defaulting to false and archiveCandidate
-    // (the field that DOES survive) restoring correctly.
+    // Regression: a token with archiveCandidate that predates showTimeDelta must still restore
+    // cleanly, defaulting showTimeDelta to false while keeping the archive candidate. Later fields
+    // are append-only too, so the fixture removes them along with showTimeDelta.
     @Test
-    fun autosaveRestoresTabFromTokenMissingOnlyTheTrailingShowTimeDeltaField() {
+    fun autosaveRestoresTabFromTokenPredatingShowTimeDelta() {
         val dir = createTempDirectory("openlog-missing-showtimedelta").toFile()
         val zip = buildZipFixture(
             dir,
@@ -2527,12 +2522,16 @@ class AppStateBehaviorTest {
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         state.autosaveNow()
 
-        // Strip only the LAST trailing field (showTimeDelta) — archiveCandidate, the field before
-        // it, stays intact, unlike the legacy-token test above which strips both.
+        // Simulate a token written before showTimeDelta: preserve archiveCandidate, but remove
+        // showTimeDelta and every later append-only field (attachment, note target, mapping,
+        // format, and capture archive path).
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
-            if (i > tabsIdx && line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+            if (i > tabsIdx && line.startsWith("tab\t")) {
+                line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+                    .substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+            } else line
         }
         cacheFile.writeText(rewritten.joinToString("\n"))
 
@@ -3936,10 +3935,9 @@ class AppStateBehaviorTest {
 
         val after = checkNotNull(state.tab("log"))
         assertEquals(
-            Annotations(),
+            Annotations(prefix = "From sample.log"),
             after.annotations,
-            "blocks AND prefix/suffix/issueDescription must all be cleared — a truly blank " +
-                "analysis, matching openNoteFile's wholesale replacement when switching files",
+            "the new analysis clears authored notes and carries only a fresh source prefix",
         )
         assertEquals("sample_analysis_2.md", after.noteTargetName)
         assertEquals(
@@ -3987,6 +3985,25 @@ class AppStateBehaviorTest {
 
         assertEquals("sample_analysis_4.md", state.tab("log")?.noteTargetName)
         assertEquals(null, state.pendingNoteOverwrite)
+        assertEquals("From sample.log", state.tab("log")?.annotations?.prefix)
+        assertTrue(state.tab("log")?.annotations?.blocks.orEmpty().isEmpty())
+    }
+
+    @Test
+    fun newAnalysisRebuildsSourcePrefixWithConfiguredLabelAndArchiveQualification() {
+        val dir = createTempDirectory("openlog-new-analysis-prefix").toFile()
+        val archivePath = File(dir, "bundle.zip").absolutePath
+        val state = AppState(
+            File(dir, "state.cache"),
+            notesDir = File(dir, "notes"),
+        ).apply { settings = AppSettings(annotationPrefixLabel = "Evidence") }
+        state.tabs = listOf(
+            mkTab("log", "entry.log", emptyList()).copy(sourcePath = "$archivePath!logs/entry.log"),
+        )
+        state.activeTabId = "log"
+        state.newAnalysis("log")
+
+        assertEquals("Evidence bundle.zip/logs/entry.log", state.tab("log")?.annotations?.prefix)
         assertTrue(state.tab("log")?.annotations?.blocks.orEmpty().isEmpty())
     }
 
@@ -4777,7 +4794,9 @@ class AppStateBehaviorTest {
         state.autosaveNow()
 
         val legacyCache = cacheFile.readLines().map { line ->
-            if (line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+            // The two latest fields are logFormat and captureArchivePath. Strip both to create a
+            // genuine legacy token whose content must be parsed before its format is known.
+            if (line.startsWith("tab\t")) line.substringBeforeLast('|').substringBeforeLast('|') else line
         }
         cacheFile.writeText(legacyCache.joinToString("\n") + "\n")
 

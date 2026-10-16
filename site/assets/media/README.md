@@ -57,3 +57,16 @@ The full-resolution screenshot `posters/ai-tests-authoring-full.webp` is a
 preview is `posters/ai-tests-authoring.webp`. The run results image
 `posters/ai-tests-results-full.webp` is a 3840x2192 frame at 100 seconds from
 the test run; its 1920x1096 preview is `posters/ai-tests-results.webp`.
+
+## Sequence diagram workspace walkthrough
+
+The sequence diagram feature page reuses the public guide animation
+`docs/images/gif-11-sequence-diagram-workspace.gif` as its source. The 1280x726,
+10 fps, 20-second GIF was converted to `web/sequence-diagram-workspace.mp4`
+using H.264, silent audio, and faststart; the poster
+`posters/sequence-diagram-workspace.webp` is a WebP still from 8 seconds. The
+page hero and social preview use `posters/sequence-diagram-complete.webp`, a
+WebP still from 14 seconds where the diagram has two lifelines, four message
+groups, and no unresolved targets; it has no export popover over the canvas. The
+guide GIF remains the source used by repository Markdown; no new screen
+recording was added.

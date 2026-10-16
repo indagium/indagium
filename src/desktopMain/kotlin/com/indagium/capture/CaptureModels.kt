@@ -1,6 +1,8 @@
 package com.indagium.capture
 
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import com.indagium.model.VideoSource
 
 private const val BYTES_PER_GIBIBYTE = 1024L * 1024L * 1024L
 private const val DEFAULT_SESSION_LIMIT_BYTES = 10L * BYTES_PER_GIBIBYTE
@@ -105,6 +107,10 @@ data class CaptureSettings(
      *  Windows/Linux default to the Compose/JavaCV mirror until a user explicitly turns this on in
      *  Settings → Capture. Irrelevant on macOS, which always uses its own VideoToolbox/Metal path. */
     val hardwareMirror: Boolean = false,
+    /** Emit one indexed transition row when the selected device becomes unavailable or returns. */
+    val writeDeviceAvailabilityMarkers: Boolean = true,
+    /** Render the elapsed device-unavailable interval as a card in capture playback/exports. */
+    val showUnavailableFrames: Boolean = true,
 )
 
 const val MICROPHONE_OFF_ID = "off"
@@ -250,6 +256,16 @@ data class CaptureDevice(val serial: String, val state: String, val model: Strin
 
 enum class CaptureStatus { RECORDING, STOPPED, INTERRUPTED }
 
+/** A single monotonic device-offline interval. An open-ended interval extends through Stop. */
+data class CaptureAvailabilityInterval(
+    val startElapsedMs: Long,
+    val endElapsedMs: Long? = null,
+    val bootIdBefore: String? = null,
+    val bootIdAfter: String? = null,
+    /** Null means boot identity could not be read; false means both IDs were read and match. */
+    val rebootConfirmed: Boolean? = null,
+)
+
 data class CaptureSession(
     val id: String,
     val directory: File,
@@ -283,10 +299,19 @@ data class CaptureSession(
     val exportCounter: Int = 0,
     val interruptions: List<String> = emptyList(),
     val manualOffsetMs: Long = 0,
+    val availabilityIntervals: List<CaptureAvailabilityInterval> = emptyList(),
+    /** Optional immutable imported assets used by range exports without copying a large archive. */
+    val logFileOverride: File? = null,
+    val indexFileOverride: File? = null,
+    val videoFileOverride: File? = null,
+    /** Original tab source identity used to rebase portable marker frames from imported archives. */
+    val snapshotVideoSource: VideoSource? = null,
+    /** Local session-only logging settings captured from this device; never copied into ZIPs. */
+    val deviceLoggingConfiguration: DeviceLoggingConfiguration? = null,
 ) {
-    val logFile: File get() = File(directory, "logs/logcat.log")
-    val indexFile: File get() = File(directory, "mapping/capture-index.jsonl")
-    val videoFile: File get() = File(directory, "video/screen.mkv")
+    val logFile: File get() = logFileOverride ?: File(directory, "logs/logcat.log")
+    val indexFile: File get() = indexFileOverride ?: File(directory, "mapping/capture-index.jsonl")
+    val videoFile: File get() = videoFileOverride ?: File(directory, "video/screen.mkv")
 
     /** Effective cursor, including sessions loaded from the legacy logCheckpointMs format. */
     val effectiveSnapshotCheckpointMs: Long
@@ -310,10 +335,36 @@ data class CaptureSession(
         effectiveSnapshotCheckpointMs.takeIf { it >= 0 }?.let { (atElapsedMs - it).coerceAtLeast(0L) }
 }
 
+/** Base of a Since-last-save timeline. Video's cursor may lag log coverage, but that older tail is
+ * part of the cut only when video is requested; log-only exports must not re-export old gaps. */
+internal fun sinceSaveTimelineBaseElapsedMs(
+    logCheckpointMs: Long,
+    videoCheckpointMs: Long,
+    includeVideo: Boolean,
+    videoConfigured: Boolean,
+): Long {
+    val log = logCheckpointMs.coerceAtLeast(0L)
+    return if (includeVideo && videoConfigured && videoCheckpointMs >= 0L) {
+        minOf(log, videoCheckpointMs)
+    } else {
+        log
+    }
+}
+
+/** Serializes archive publication and cursor updates for one retained/imported capture source. */
+internal object CaptureSnapshotCheckpointLocks {
+    private val locks = ConcurrentHashMap<String, Any>()
+
+    fun forSession(session: CaptureSession): Any {
+        val directory = runCatching { session.directory.canonicalPath }.getOrDefault(session.directory.absolutePath)
+        return locks.computeIfAbsent("$directory\u0000${session.id}") { Any() }
+    }
+}
+
 /** One complete raw line; separators have no parsed ordinal. Elapsed time uses a monotonic clock. */
 data class CaptureLogIndexRecord(val byteOffset: Long, val byteLength: Int, val elapsedMs: Long, val rowOrdinal: Int?)
 
-enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION }
+enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION, EXPLICIT }
 
 data class CaptureExportRequest(
     val destination: File,
@@ -325,6 +376,9 @@ data class CaptureExportRequest(
     val selectedFirstRowOrdinal: Int? = null,
     val selectedLastRowOrdinal: Int? = null,
     val overwriteExisting: Boolean = false,
+    /** Inclusive elapsed-time window for [CaptureRange.EXPLICIT], in session elapsed milliseconds. */
+    val explicitStartElapsedMs: Long? = null,
+    val explicitEndElapsedMs: Long? = null,
 )
 
 data class CaptureExportResult(
@@ -355,7 +409,61 @@ data class CaptureTimeline(
     val quality: String = "estimated",
     val uncertaintyMs: Long? = null,
     val manualOffsetMs: Long = 0,
-)
+    /** Capture-relative offline windows shipped by archive v4. */
+    val availabilityIntervals: List<CaptureAvailabilityInterval> = emptyList(),
+    /** Elapsed origin of the exported/live timeline represented by row/video position zero. */
+    val timelineBaseElapsedMs: Long = 0L,
+    /** Full elapsed span, including trailing offline time after the last log row or video frame. */
+    val timelineDurationMs: Long = rows.lastOrNull()?.elapsedMs ?: 0L,
+    /** Capture elapsed time represented by video PTS zero, already adjusted for manual offset. */
+    val videoOriginElapsedMs: Long? = null,
+    /** True when unavailable cards have already been baked into the attached video. */
+    val availabilityFramesRendered: Boolean = false,
+    /** Frozen capture preference; null is reserved for legacy attachments without this setting. */
+    val showUnavailableFrames: Boolean? = null,
+) {
+    private val videoAnchors: List<CaptureMappingRow> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        rows.asSequence().filter { it.videoMs != null }.sortedBy { it.videoMs }.toList()
+    }
+
+    /** Maps a video playhead back to export-local elapsed time and returns its offline window. */
+    fun unavailableIntervalAtVideoMs(videoMs: Long): CaptureAvailabilityInterval? {
+        if (availabilityIntervals.isEmpty()) return null
+        val origin = videoOriginElapsedMs
+        if (origin != null) return intervalAtLocalElapsed(videoMs, origin)
+        if (videoAnchors.isEmpty()) return intervalAtLocalElapsed(videoMs, timelineBaseElapsedMs)
+        var low = 0
+        var high = videoAnchors.lastIndex
+        while (low < high) {
+            val mid = (low + high) ushr 1
+            if (requireNotNull(videoAnchors[mid].videoMs) < videoMs) low = mid + 1 else high = mid
+        }
+        val later = videoAnchors[low]
+        val earlier = videoAnchors.getOrNull((low - 1).coerceAtLeast(0))
+        val anchor = when {
+            earlier == null -> later
+            absDistance(requireNotNull(earlier.videoMs), videoMs) <= absDistance(requireNotNull(later.videoMs), videoMs) -> earlier
+            else -> later
+        }
+        val elapsedMs = runCatching {
+            Math.addExact(anchor.elapsedMs, Math.subtractExact(videoMs, requireNotNull(anchor.videoMs)))
+        }.getOrNull() ?: return null
+        return availabilityIntervals.firstOrNull { interval -> elapsedMs in interval.startElapsedMs..(interval.endElapsedMs ?: Long.MAX_VALUE) }
+    }
+
+    private fun intervalAtLocalElapsed(videoMs: Long, absoluteOriginElapsedMs: Long): CaptureAvailabilityInterval? {
+        val absoluteElapsedMs = runCatching { Math.addExact(absoluteOriginElapsedMs, videoMs) }.getOrNull() ?: return null
+        val elapsedMs = runCatching { Math.subtractExact(absoluteElapsedMs, timelineBaseElapsedMs) }.getOrNull() ?: return null
+        return availabilityIntervals.firstOrNull { interval ->
+            elapsedMs >= interval.startElapsedMs && (interval.endElapsedMs == null || elapsedMs <= interval.endElapsedMs)
+        }
+    }
+
+    private fun absDistance(left: Long, right: Long): Long {
+        val difference = runCatching { Math.subtractExact(left, right) }.getOrDefault(Long.MIN_VALUE)
+        return if (difference == Long.MIN_VALUE) Long.MAX_VALUE else kotlin.math.abs(difference)
+    }
+}
 
 data class CaptureVideoClip(val actualStartMs: Long, val coveredEndMs: Long, val durationMs: Long)
 

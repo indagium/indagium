@@ -109,7 +109,7 @@ class CaptureStripTest {
     }
 
     @Test
-    fun sinceSaveIsDisabledUntilARealCheckpointAndThenShowsItsAge() {
+    fun sinceSaveIsDisabledUntilARealCheckpointAndShowsItsCoverageEndpoint() {
         val session = CaptureSession(
             id = "session",
             directory = File("capture"),
@@ -123,7 +123,17 @@ class CaptureStripTest {
 
         val saved = session.copy(snapshotCheckpointMs = 2_000)
         assertTrue(captureSinceSaveEnabled(saved))
-        assertEquals("Last save 00:03 ago.", captureSinceSaveHint(saved))
+        assertTrue(captureSinceSaveHint(saved).contains("Logs saved through 00:02"))
+        assertTrue(!captureSinceSaveEnabled(saved, atElapsedMs = 2_000))
+        assertTrue(captureSinceSaveHint(saved, atElapsedMs = 2_000).contains("no later range"))
+    }
+
+    @Test
+    fun customSnapshotMinutesRejectsZeroAndMalformedValues() {
+        assertEquals(5, parseCaptureSnapshotMinutes("5"))
+        assertEquals(0, parseCaptureSnapshotMinutes("0"))
+        assertEquals(0, parseCaptureSnapshotMinutes(""))
+        assertEquals(0, parseCaptureSnapshotMinutes("5x"))
     }
 
     @Test

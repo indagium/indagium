@@ -647,8 +647,9 @@ default; set newCapture=true to finalize and retain the current one before a fre
 override recordVideo/includeEarlierDeviceLogs for just that one launch. If stop_device_capture is called
 separately, poll its operation to completion before starting again. mark_device_issue and
 export_capture_snapshot are asynchronous; poll get_capture_operation_status until complete.
-export_capture_snapshot accepts a range (all/last_minutes/since_last_save/selection); once the capture is
-stopped, only range=all is available. get_device_capture_status reports the capture's markers, elapsed time,
+export_capture_snapshot accepts a range (all/last_minutes/since_last_save/selection/explicit); explicit
+ranges use startElapsedMs and endElapsedMs in capture-relative milliseconds. Stopped captures support the same
+ranges, with last_minutes and since_last_save ending at the current video playhead. get_device_capture_status reports the capture's markers, elapsed time,
 and last snapshot path without touching the device.
 """.trimIndent()
 
@@ -1765,18 +1766,22 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "export_capture_snapshot",
         "Export the capture as a non-overwriting ZIP snapshot including available logs, video, notes, and issue " +
-            "markers. Returns an operationId to poll with get_capture_operation_status. Once the capture has been " +
-            "stopped, only range=all is supported (the stopped capture's retained ZIP). " + EXTERNAL_APPROVAL_NOTE,
+            "markers. Returns an operationId to poll with get_capture_operation_status. Live and stopped captures " +
+            "support all, last_minutes, since_last_save, selection, and explicit ranges. Explicit bounds are " +
+            "capture-relative elapsed milliseconds. " + EXTERNAL_APPROVAL_NOTE,
         schema(
             "tabId" to "string", "range" to "string", "minutes" to "integer", "includeVideo" to "boolean",
+            "startElapsedMs" to "integer", "endElapsedMs" to "integer",
             "open" to "boolean", "filename" to "string",
             required = listOf("tabId"),
-            enums = mapOf("range" to listOf("all", "last_minutes", "since_last_save", "selection")),
+            enums = mapOf("range" to listOf("all", "last_minutes", "since_last_save", "selection", "explicit")),
             descriptions = mapOf(
                 "range" to "Which part of the capture to export. Defaults to all.",
                 "minutes" to "Minutes to cover for range=last_minutes (default 5). 5 or 10 match the popover's " +
                     "own presets; any other value is a custom window.",
                 "includeVideo" to "Include the recorded video. Defaults to whatever this session records.",
+                "startElapsedMs" to "Inclusive start time in capture-relative milliseconds (required for range=explicit).",
+                "endElapsedMs" to "Inclusive end time in capture-relative milliseconds (required for range=explicit).",
                 "open" to "Open the saved archive in a new tab once it finishes exporting (default false).",
                 "filename" to "Archive basename (a .zip extension is added automatically). A non-overwriting name " +
                     "is chosen automatically when this is omitted or already taken.",

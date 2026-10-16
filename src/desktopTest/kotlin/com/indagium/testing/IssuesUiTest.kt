@@ -6,6 +6,8 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasSetTextAction
@@ -220,8 +222,13 @@ class IssuesUiTest {
 
         val rowMenus = rule.onAllNodesWithContentDescription("Issue actions")
         assertEquals(2, rowMenus.fetchSemanticsNodes().size, "every row has a ⋯")
-        // Rows list newest first, so the second stored issue is the first row.
-        rowMenus[0].performClick()
+        // Both fixtures can share the same createdAt millisecond, so select the action attached
+        // to the row title instead of assuming the store's tie order matches insertion order.
+        rule.onNode(
+            hasContentDescription("Issue actions") and
+                hasAnyAncestor(hasClickAction() and hasAnyDescendant(hasText("Checkout hangs"))),
+            useUnmergedTree = true,
+        ).performClick()
         rule.waitForIdle()
         rule.onNode(hasText("Delete…") and hasAnyAncestor(isPopup())).performClick()
         rule.waitForIdle()

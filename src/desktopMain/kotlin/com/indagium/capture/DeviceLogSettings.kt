@@ -21,6 +21,69 @@ data class LogBufferSize(
     val maxEntryBytes: Long? = null,
 )
 
+/**
+ * A bounded, local-only snapshot of the device logging configuration captured for one session.
+ * A null field means that read was unknown/failed; an empty map or empty global value is a known
+ * device default and may be restored. This deliberately stores no other getprop values.
+ */
+data class DeviceLoggingConfiguration(
+    val bufferSizesBytes: Map<String, Long>? = null,
+    val globalLogTag: String? = null,
+    val perTagOverrides: Map<String, String>? = null,
+) {
+    fun mergeKnown(update: DeviceLoggingConfiguration): DeviceLoggingConfiguration = copy(
+        bufferSizesBytes = update.bufferSizesBytes ?: bufferSizesBytes,
+        globalLogTag = update.globalLogTag ?: globalLogTag,
+        perTagOverrides = update.perTagOverrides ?: perTagOverrides,
+    )
+}
+
+data class DeviceLoggingConfigurationSnapshot(
+    val configuration: DeviceLoggingConfiguration,
+    val warnings: List<String> = emptyList(),
+)
+
+private val LOG_BUFFER_NAME = Regex("^[A-Za-z0-9_.-]{1,64}$")
+private val LOG_TAG_NAME = Regex("^[A-Za-z0-9_.$-]{1,128}$")
+
+/** Strictly accepts a complete, bounded `logcat -b all -g` listing. A partly parseable response
+ * must stay unknown so a later reboot never applies an incomplete buffer set. */
+fun parseCompleteLogBufferConfiguration(output: String, outputWasTruncated: Boolean = false): Map<String, Long>? {
+    if (outputWasTruncated) return null
+    val lines = output.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
+    if (lines.isEmpty() || lines.size > MAX_LOG_CONFIGURATION_ITEMS) return null
+    val parsed = parseLogcatBufferSizes(output)
+    if (parsed.size != lines.size) return null
+    if (parsed.any { !LOG_BUFFER_NAME.matches(it.buffer) || it.sizeBytes == null || it.sizeBytes <= 0 }) return null
+    val sizes = parsed.associate { it.buffer to requireNotNull(it.sizeBytes) }
+    return sizes.takeIf { it.size == parsed.size }
+}
+
+/** Empty output after a successful getprop command is a known unset property; truncation or an
+ * implausibly long value remains unknown and cannot cause a destructive restore. */
+fun knownGlobalLogTag(raw: String, outputWasTruncated: Boolean = false): String? =
+    raw.trimEnd('\r', '\n').takeIf { !outputWasTruncated && it.length <= MAX_LOG_PROPERTY_VALUE_CHARS }
+
+/** Returns only bounded, validated log.tag.<TAG> properties from a complete getprop listing. */
+fun parseCompletePerTagLogOverrides(output: String, outputWasTruncated: Boolean = false): Map<String, String>? {
+    if (outputWasTruncated || output.isBlank() || output.length > MAX_GETPROP_CONFIGURATION_CHARS) return null
+    val properties = parseCompleteGetpropListing(output) ?: return null
+    val overrides = linkedMapOf<String, String>()
+    properties.forEach { (property, value) ->
+        if (!property.startsWith(LOG_TAG_PROPERTY_PREFIX)) return@forEach
+        val tag = property.removePrefix(LOG_TAG_PROPERTY_PREFIX)
+        if (!LOG_TAG_NAME.matches(tag) || value.length > MAX_LOG_PROPERTY_VALUE_CHARS || '\n' in value || '\r' in value) return null
+        if (value.isNotBlank()) overrides[tag] = value
+    }
+    if (overrides.size > MAX_LOG_CONFIGURATION_ITEMS) return null
+    return overrides
+}
+
+private const val MAX_LOG_CONFIGURATION_ITEMS = 256
+private const val MAX_GETPROP_CONFIGURATION_LINES = 8_192
+private const val MAX_GETPROP_CONFIGURATION_CHARS = 512 * 1024
+private const val MAX_LOG_PROPERTY_VALUE_CHARS = 512
+
 /** `log.tag`/`log.tag.<TAG>` values. Deliberately NOT `V D I W E F S` (adb's own filter-spec
  *  ordering) — [ASSERT] is only ever parsed, never offered by the level picker, since the task this
  *  feature implements only wires the setter for `V|D|I|W|E|S` (see [selectable]). Devices/tools that
@@ -74,15 +137,14 @@ enum class LogBufferSizeChoice(val label: String, val bytes: Long) {
 }
 
 /** One buffer line, tolerant of the unit-spelling drift across adb/Android versions: `256KB`,
- *  `256Kb`, `256 KiB`, `1.00MB`, and a bare byte count with no letter at all. The three trailing
- *  stats (consumed / max entry / max payload) are each independently optional so a line missing one
- *  of them (or ordering them differently) still yields whatever it does carry rather than failing to
- *  match at all. */
+ *  `256Kb`, `256 KiB`, `1.00MB`, and a bare byte count with no letter at all. The parenthetical
+ *  consumed/readable stats and trailing max-entry/max-payload stats are optional; `readable` is
+ *  accepted because current platform-tools prints it even though this UI only needs the ring size. */
 private val BUFFER_SIZE_LINE = Regex(
     """^(\S+):\s*ring buffer is\s*([\d.]+)\s*([A-Za-z]*)""" +
-        """(?:\s*\(\s*([\d.]+)\s*([A-Za-z]*)\s*consumed\s*\))?""" +
+        """(?:\s*\(\s*(?:(?:([\d.]+)\s*([A-Za-z]*)\s*consumed)(?:,\s*[\d.]+\s*[A-Za-z]*\s*readable)?|[\d.]+\s*[A-Za-z]*\s*readable)\s*\))?""" +
         """(?:,\s*max entry is\s*(\d+)\s*[A-Za-z]*)?""" +
-        """(?:,\s*max payload is\s*(\d+)\s*[A-Za-z]*)?""",
+        """(?:,\s*max payload is\s*(\d+)\s*[A-Za-z]*)?$""",
 )
 
 /** Parses every recognizable line of `adb logcat -g` (or `logcat -g -b <buffer>`) output. Unknown or
@@ -157,6 +219,52 @@ fun formatBufferSizeShort(bytes: Long?): String {
 /** One `[key]: [value]` line of a plain `adb shell getprop` listing (no name — the full dump). Lines
  *  that don't match this shape (blank lines, a device's stray stderr) are skipped. */
 private val GETPROP_LINE = Regex("""^\[(.+?)\]:\s*\[(.*)\]$""")
+private val GETPROP_PROPERTY_START = Regex("""^\[(.+?)\]:\s*\[(.*)$""")
+
+/** Parses a complete getprop dump, including property values that contain embedded newlines.
+ * A record begins with `[name]: [` and ends only when its value line ends with `]`; a second
+ * property header before that close is ambiguous and therefore makes the whole read unknown. */
+private fun parseCompleteGetpropListing(output: String): Map<String, String>? {
+    val lines = output.lineSequence().toList()
+    if (lines.isEmpty() || lines.size > MAX_GETPROP_CONFIGURATION_LINES) return null
+
+    val properties = linkedMapOf<String, String>()
+    val value = StringBuilder()
+    var openProperty: String? = null
+    for (rawLine in lines) {
+        val line = rawLine.trim()
+        if (openProperty == null) {
+            if (line.isEmpty()) continue
+            val match = GETPROP_PROPERTY_START.matchEntire(line) ?: return null
+            val property = match.groupValues[1]
+            if (property in properties) return null
+            val firstValueLine = match.groupValues[2]
+            if (firstValueLine.endsWith(']')) {
+                properties[property] = firstValueLine.dropLast(1)
+            } else {
+                openProperty = property
+                value.setLength(0)
+                value.append(firstValueLine)
+            }
+        } else {
+            // If a new property-looking line appears before this value closes, the output may be
+            // truncated. Do not reinterpret it as either an empty result or a partial snapshot.
+            if (GETPROP_PROPERTY_START.matches(line)) return null
+            val content = rawLine.trimEnd().takeIf { it.isNotEmpty() } ?: rawLine
+            val contentEnd = content.trimEnd()
+            if (contentEnd.endsWith(']')) {
+                value.append('\n').append(contentEnd.dropLast(1))
+                val property = openProperty ?: return null
+                properties[property] = value.toString()
+                openProperty = null
+            } else {
+                value.append('\n').append(content)
+            }
+        }
+    }
+    if (openProperty != null || properties.isEmpty()) return null
+    return properties
+}
 
 /** Parses the FULL `adb shell getprop` dump into key/value pairs. Order is preserved (a
  *  [LinkedHashMap]) purely so output stays deterministic for tests; callers needing per-tag
@@ -213,7 +321,11 @@ fun deviceLoggingSummaryLine(state: DeviceLogState?): String {
     state.bufferSizes.firstOrNull { it.buffer == "main" }?.let {
         parts += "main ${formatBufferSizeShort(it.sizeBytes)}"
     }
-    state.globalLevel?.let { parts += "log.tag ${it.propValue}" }
+    if (!state.globalLevelKnown) {
+        parts += "log.tag unknown"
+    } else {
+        state.globalLevel?.let { parts += "log.tag ${it.propValue}" }
+    }
     if (state.perTagOverrides.isNotEmpty()) {
         val count = state.perTagOverrides.size
         parts += "$count override${if (count == 1) "" else "s"}"
@@ -225,9 +337,15 @@ fun deviceLoggingSummaryLine(state: DeviceLogState?): String {
  *  built from the device's own re-read state — NEVER from whatever the user just picked in a
  *  dropdown — so the line only changes once the apply has actually landed and been confirmed by a
  *  fresh read, which is the whole point of showing it at all. */
-fun formatDeviceLogStatusLine(sizes: List<LogBufferSize>, globalLevel: LogTagLevel?): String {
+fun formatDeviceLogStatusLine(
+    sizes: List<LogBufferSize>,
+    globalLevel: LogTagLevel?,
+    globalLevelKnown: Boolean = true,
+): String {
     val bufferPart = if (sizes.isEmpty()) "buffer info unavailable" else formatBufferSizesCompact(sizes)
-    val levelPart = if (globalLevel == null) {
+    val levelPart = if (!globalLevelKnown) {
+        "log.tag unknown"
+    } else if (globalLevel == null) {
         "log.tag not set (device default)"
     } else {
         "log.tag = ${globalLevel.propValue} (${globalLevel.label})"
@@ -344,9 +462,16 @@ data class DeviceLogState(
      *  Keeps the button from reappearing and looping on the same unresolved permission problem;
      *  cleared only by a fresh, from-scratch read (a device switch or the panel's own "Refresh"). */
     val rootAttempted: Boolean = false,
+    /** True when the last global `log.tag` read completed and its value was either unset/blank or
+     *  a recognized level. False distinguishes an unknown or failed read from device default. */
+    val globalLevelKnown: Boolean = true,
 ) {
     val busy: Boolean get() = activity != DeviceLogActivity.IDLE
 }
+
+/** Shows the device default only after a successful read confirmed an empty property. */
+fun deviceLogGlobalLevelButtonLabel(state: DeviceLogState?): String =
+    if (state?.loaded == true && state.globalLevelKnown) logLevelButtonLabel(state.globalLevel) else "Unknown"
 
 /** The device-logging panel's status line (item 3): prefers the last successfully-read values over
  *  whatever is currently in flight, so a background refresh never blanks a line the panel already
@@ -363,7 +488,7 @@ fun deviceLogStatusText(state: DeviceLogState?): String = when {
     // to reconnect, so the cached buffer/level line is about to be stale anyway.
     state?.activity == DeviceLogActivity.ROOTING -> "Restarting adb as root…"
     state != null && state.loaded -> {
-        val cached = formatDeviceLogStatusLine(state.bufferSizes, state.globalLevel)
+        val cached = formatDeviceLogStatusLine(state.bufferSizes, state.globalLevel, state.globalLevelKnown)
         if (state.activity == DeviceLogActivity.REFRESHING) "$cached · Refreshing…" else cached
     }
     state?.activity == DeviceLogActivity.REFRESHING -> "Reading device settings…"
