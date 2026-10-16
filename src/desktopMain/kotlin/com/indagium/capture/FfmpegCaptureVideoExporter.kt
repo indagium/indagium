@@ -59,6 +59,7 @@ import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import kotlin.math.roundToInt
 
 private const val MICROS_PER_SECOND = 1_000_000L
 private const val MILLIS_PER_SECOND = 1_000L
@@ -332,6 +333,13 @@ private data class RenderedUnavailableInterval(
 
 private const val GAP_CARD_FPS = 30.0
 private const val GAP_CARD_STEP_US = 1_000_000L / GAP_CARD_FPS.toLong()
+
+// Re-encoded exports carry a keyframe about this often. Without an explicit GOP the encoders default
+// to a very long interval (a whole mostly-static snapshot became a single keyframe), and the player
+// seeks by decoding forward from the previous keyframe — so seek and resume cost grows with the
+// distance to it, and JavaCV's setTimestamp gives up after 1000 grabs, landing seconds short.
+private const val EXPORT_KEYFRAME_INTERVAL_SECONDS = 2
+private const val GAP_CARD_GOP_SIZE = GAP_CARD_FPS.toInt() * EXPORT_KEYFRAME_INTERVAL_SECONDS
 private const val GAP_AUDIO_WRITE_CHUNK_FRAMES = 4_096
 private const val GAP_CARD_FALLBACK_WIDTH = 1280
 private const val GAP_CARD_FALLBACK_HEIGHT = 720
@@ -397,6 +405,7 @@ private fun renderAvailabilityTimeline(
             videoCodec = videoEncoder.second
             videoCodecName = videoEncoder.first
             frameRate = GAP_CARD_FPS
+            gopSize = GAP_CARD_GOP_SIZE
             videoBitrate = REENCODE_FALLBACK_BITRATE
             pixelFormat = AV_PIX_FMT_YUV420P
             setVideoOption("threads", EXPORT_FFMPEG_THREADS)
@@ -1010,6 +1019,7 @@ private fun configureReencodeRecorder(
     recorder.videoCodec = encoderId
     recorder.videoCodecName = encoderName
     recorder.frameRate = grabber.videoFrameRate.takeIf { it > 0.0 } ?: REENCODE_FALLBACK_FRAME_RATE
+    recorder.gopSize = (recorder.frameRate * EXPORT_KEYFRAME_INTERVAL_SECONDS).roundToInt().coerceAtLeast(1)
     recorder.videoBitrate = REENCODE_FALLBACK_BITRATE
     recorder.setVideoOption("threads", EXPORT_FFMPEG_THREADS)
     recorder.setDisplayRotation(grabber.displayRotation)

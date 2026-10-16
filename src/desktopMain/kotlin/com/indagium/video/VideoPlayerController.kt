@@ -449,6 +449,35 @@ internal class PlaybackTimeline(initialUs: Long = 0L) {
 }
 
 /**
+ * Whether a freshly grabbed frame (video or audio) means the decoder has reached the seek/play
+ * position, so the frozen playback clock can start. Frames before [minimumPlaybackTimestampUs] are
+ * the keyframe preroll `setTimestamp` decodes through and say nothing about having arrived. Pure,
+ * like [shouldDropLateFrame], so the rule is unit testable without FFmpeg natives.
+ */
+internal fun shouldAnchorClockOnFrame(
+    clockAnchorPending: Boolean,
+    frameTimestampUs: Long,
+    minimumPlaybackTimestampUs: Long,
+): Boolean = clockAnchorPending && frameTimestampUs >= minimumPlaybackTimestampUs
+
+/**
+ * The playback clock: frozen at [positionUs] while the anchor is pending (the decoder is still
+ * catching up to a seek target), otherwise the wall time elapsed since the anchor scaled by [rate].
+ */
+internal fun playbackClockUs(
+    clockAnchorPending: Boolean,
+    positionUs: Long,
+    startNanos: Long,
+    startTimestampUs: Long,
+    nowNanos: Long,
+    rate: Float,
+): Long {
+    if (clockAnchorPending) return positionUs
+    val elapsedUs = (nowNanos - startNanos) / NANOS_PER_MICRO
+    return startTimestampUs + (elapsedUs * rate).toLong()
+}
+
+/**
  * Decides whether a decoded video frame should be skipped rather than converted and shown, given
  * how far behind the playback clock its presentation timestamp already is. [latenessUs] is
  * `currentClock - frame.timestamp` (positive once the frame's moment has passed);
@@ -1016,6 +1045,12 @@ private fun detectDisplayRotation(grabber: FFmpegFrameGrabber): Int = ffmpegDisp
  *  substitute a fake [VideoPlayerController] instead (see AppState's videoControllerFactory). */
 fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVideoPlayerController(path)
 
+/** Test seam: the production controller with [beforeGrab] run before every `grabber.grab()` on the
+ *  decode thread, so a test can make long-GOP catch-up deterministically slow (tiny test frames
+ *  decode too fast to reproduce the lag a real recording shows). Production never uses this. */
+internal fun videoPlayerControllerWithGrabHook(path: String, beforeGrab: () -> Unit): VideoPlayerController =
+    FfmpegVideoPlayerController(path, beforeGrab)
+
 /** Internal capability implemented by production controllers without widening the established
  * public player interface. Older test doubles continue to work and are treated as discovering
  * until they report a positive duration. */
@@ -1066,8 +1101,10 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
     override fun close() = Unit
 }
 
-private class FfmpegVideoPlayerController(private val path: String) :
-    VideoPlayerController,
+private class FfmpegVideoPlayerController(
+    private val path: String,
+    private val beforeGrab: (() -> Unit)? = null,
+) : VideoPlayerController,
     SeekReadinessAwareVideoPlayerController,
     VideoDisplayRotationAware {
     private val grabber = FFmpegFrameGrabber(path)
@@ -1175,6 +1212,27 @@ private class FfmpegVideoPlayerController(private val path: String) :
     // keyframe, so refillReadAheadQueue must not publish its pre-target video or feed pre-target
     // audio while it catches back up. The decoder thread is the only reader/writer.
     private var minimumPlaybackTimestampUs = 0L
+
+    // True from the moment a seek is applied until the decoder has actually reached the requested
+    // position (refillReadAheadQueue grabbed its first frame >= minimumPlaybackTimestampUs, or the
+    // grabber ran out / failed). While true the playback clock is frozen at timeline.positionUs
+    // (see currentClockUs): grabber.setTimestamp() lands on an earlier keyframe and the catch-up
+    // forward can take seconds on a long-GOP file, and a clock that already ran during it would make
+    // the first frames at/after the target arrive late (dropped, then hidden behind the position
+    // guard) and keep audio/video permanently behind. Play does not start the clock while this is
+    // true either; anchorPlaybackClock does, once the decoder is there. The decoder thread is the
+    // only reader/writer.
+    private var clockAnchorPending = false
+
+    // Set when applyPendingSeek leaves the grabber repositioned, consumed by the first refill grab.
+    // setTimestamp() ends with frameGrabbed = true, so that first grab() just hands back the frame
+    // left in the grabber's buffer — the seek preview's picture at/after the target — while the
+    // demuxer may still sit back at the previous keyframe: setTimestamp() skips its forward catch-up
+    // whenever the last decoded timestamp is already >= the target, which is exactly the state the
+    // preview leaves behind (restoreGrabberToSeekTarget). That frame is a valid picture to show but
+    // proves nothing about the decoder having arrived, so it must not anchor the clock. Decoder
+    // thread only.
+    private var firstGrabAfterReposition = false
 
     // A single audio frame can be encountered well before its PTS after a sparse stream gap. Keep
     // that grabber-owned Frame in place and let the normal clock advance before writing it; never
@@ -1395,15 +1453,21 @@ private class FfmpegVideoPlayerController(private val path: String) :
             if (frame.timestamp >= minimumPlaybackTimestampUs) presentAudioFrame(frame)
         }
         while (!closed && playRequested && !grabberExhausted && isCurrentEpoch(epoch)) {
-            if (!shouldReadAhead(videoQueueCount(), videoQueueAheadUs(), currentAudioBufferedAheadUs())) return
+            if (!mayReadAhead()) return
             val frame = grabNextFrame()
             if (frame == null) {
                 // Null with no exception means end of stream — see grabNextFrame. Stop grabbing;
                 // presentQueuedVideoFrame drains whatever is already queued before reporting stopped.
                 grabberExhausted = true
+                // Nothing more will arrive to anchor the clock on (also the failed-grab case), and
+                // a frozen clock would wedge the tail/end-of-stream handling.
+                if (clockAnchorPending) anchorPlaybackClock()
                 return
             }
             if (!isCurrentEpoch(epoch)) return // a seek landed while this grab() was in flight
+            // Start the clock before this frame is handled, so the audioFrameTooFarAhead check below
+            // already sees a running clock.
+            anchorClockIfDecoderArrived(frame)
             when {
                 // JavaCV reuses this Frame's own buffers on the very next grab() call — a reference
                 // held past that point would see corrupted/overwritten pixel data. clone() deep-copies
@@ -1428,6 +1492,21 @@ private class FfmpegVideoPlayerController(private val path: String) :
                 !frame.samples.isNullOrEmpty() -> presentAudioFrame(frame)
                 else -> Unit // data/subtitle frames — nothing to do with them here
             }
+        }
+    }
+
+    /** [shouldReadAhead]'s bound, except while the clock waits for the decoder: the clock is frozen
+     *  then, so "ahead of the clock" means nothing and stopping the catch-up would wedge playback. */
+    private fun mayReadAhead(): Boolean =
+        clockAnchorPending || shouldReadAhead(videoQueueCount(), videoQueueAheadUs(), currentAudioBufferedAheadUs())
+
+    /** Starts the frozen clock once [frame] shows the decoder has reached the seek/play position.
+     *  The first grab after a reposition is excluded — see [firstGrabAfterReposition]. */
+    private fun anchorClockIfDecoderArrived(frame: Frame) {
+        val cachedAfterSeek = firstGrabAfterReposition
+        firstGrabAfterReposition = false
+        if (!cachedAfterSeek && shouldAnchorClockOnFrame(clockAnchorPending, frame.timestamp, minimumPlaybackTimestampUs)) {
+            anchorPlaybackClock()
         }
     }
 
@@ -1488,7 +1567,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
             }
             consecutiveDrops = 0
             val image = runCatching { converter.convert(frame) }.getOrNull() ?: return
-            publishFrame(image, frame.timestamp, entry.epoch)
+            publishFrame(image, frame.timestamp, entry.epoch, showIfLate = true)
         } finally {
             // Release this clone's native buffers now that it has been shown or dropped — the
             // original (unclonded) grabber Frame this was copied from was already reused/overwritten
@@ -1746,6 +1825,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
         } ?: return false
         if (!isCurrentEpoch(command.epoch)) return true
         minimumPlaybackTimestampUs = command.targetUs
+        clockAnchorPending = true // the clock waits for the decoder to catch up; see the field
         deferredAudioFrame = null // it belongs to the grabber position being replaced below
         needsInitialFrame = false // this seek owns the first preview; don't let startup overwrite it
         runCatching { grabber.setTimestamp(command.targetUs) }
@@ -1767,15 +1847,12 @@ private class FfmpegVideoPlayerController(private val path: String) :
         // timestamp so playback can read both audio and video from the same position. If FFmpeg's
         // seek preview is a held frame from before a sparse PTS gap, it leaves the playhead at the
         // request; a dense preview may still advance to its next frame as before.
+        // The playback clock is deliberately not started here: neither this preview nor the restore
+        // above has decoded up to the target for playback (see clockAnchorPending); refill anchors
+        // the clock at timeline.positionUs once its first frame at/after the target arrives, so
+        // time spent finding a held image or catching up does not consume the gap.
         presentImageImmediately(isInitialFrame = false, epoch = command.epoch, minimumTimestampUs = command.targetUs)
-        if (!closed && isCurrentEpoch(command.epoch)) {
-            // Preview decoding may take longer than a frame interval. Start the playback clock once
-            // the seek is ready so that time spent finding a held image does not consume the gap.
-            synchronized(presentationLock) {
-                playbackStartNanos = System.nanoTime()
-                playbackStartTimestampUs = timeline.positionUs
-            }
-        }
+        firstGrabAfterReposition = true
         return true
     }
 
@@ -1837,7 +1914,10 @@ private class FfmpegVideoPlayerController(private val path: String) :
     // refilling), so the two don't need to be distinguished here. On failure this also flips
     // playRequested off directly, which is what makes reportPlaybackStopped's own flip a no-op for
     // that case — an error already published isPlayingState = false.
-    private fun grabNextFrame(): Frame? = runCatching { grabber.grab() }
+    private fun grabNextFrame(): Frame? = runCatching {
+        beforeGrab?.invoke()
+        grabber.grab()
+    }
         .onFailure {
             AppLogger.error("video", "video frame grab failed", it)
             publishUiState {
@@ -1886,8 +1966,9 @@ private class FfmpegVideoPlayerController(private val path: String) :
     }
 
     private fun currentClockUs(): Long {
-        val elapsedUs = (System.nanoTime() - playbackStartNanos) / NANOS_PER_MICRO
-        return playbackStartTimestampUs + (elapsedUs * rate).toLong()
+        // Frozen at the seek position until the decoder reaches it — see clockAnchorPending.
+        val positionUs = if (clockAnchorPending) synchronized(presentationLock) { timeline.positionUs } else 0L
+        return playbackClockUs(clockAnchorPending, positionUs, playbackStartNanos, playbackStartTimestampUs, System.nanoTime(), rate)
     }
 
     private fun applyPendingRateWhilePaused() {
@@ -1921,10 +2002,21 @@ private class FfmpegVideoPlayerController(private val path: String) :
         }
         if (resetPlaybackClockRequested) {
             resetPlaybackClockRequested = false
-            synchronized(presentationLock) {
-                playbackStartNanos = System.nanoTime()
-                playbackStartTimestampUs = timeline.positionUs
-            }
+            // After a seek whose catch-up has not finished, the clock stays frozen instead; refill
+            // anchors it (at the same timeline position) once the decoder reaches the target.
+            if (!clockAnchorPending) anchorPlaybackClock()
+        }
+    }
+
+    /** Starts the playback clock at the published position and un-freezes it. Called by the decode
+     *  thread when the decoder reaches the seek target, on Play, or when no frame will ever arrive.
+     *  Anchors at [PlaybackTimeline.positionUs], not at the arriving frame's PTS, so a seek inside
+     *  a sparse gap still lets the clock traverse the gap up to the next frame. */
+    private fun anchorPlaybackClock() {
+        synchronized(presentationLock) {
+            playbackStartNanos = System.nanoTime()
+            playbackStartTimestampUs = timeline.positionUs
+            clockAnchorPending = false
         }
     }
 
@@ -1965,17 +2057,29 @@ private class FfmpegVideoPlayerController(private val path: String) :
         }
     }
 
-    private fun publishFrame(image: BufferedImage, timestampUs: Long, epoch: Long) {
+    /**
+     * Shows [image] and advances the published position to [timestampUs]. A frame behind the
+     * published position is handled by [showIfLate]:
+     *  - `false` (seek previews): the frame is stale — an old preview racing a newer position — and
+     *    is discarded. Do not merely retain the newer position for an old bitmap: that would leave
+     *    logs following one moment while the video visibly shows another.
+     *  - `true` (the queued-playback path): the frame was already chosen for display by
+     *    [shouldDropLateFrame], and the position only ran ahead because the clock-driven publishes
+     *    (dropped frames, the empty-queue poll) advance it past frames still waiting to be shown.
+     *    Discarding it would freeze the picture while the slider keeps moving, so the image is
+     *    shown anyway; the position never moves backwards.
+     */
+    private fun publishFrame(image: BufferedImage, timestampUs: Long, epoch: Long, showIfLate: Boolean = false) {
         synchronized(presentationLock) {
             if (closed || !isCurrentEpoch(epoch)) return
-            // Keep one timestamp for the bitmap and controller position. Do not merely retain the
-            // newer position for an old bitmap: that would leave logs following one moment while
-            // the video visibly shows another. A backward frame is stale and is discarded.
-            if (timestampUs.coerceAtLeast(0L) < timeline.positionUs) return
+            // Keep one timestamp for the bitmap and controller position (see above for why a stale
+            // preview is dropped rather than shown with the newer position).
+            val late = timestampUs.coerceAtLeast(0L) < timeline.positionUs
+            if (late && !showIfLate) return
             val positionUs = timeline.advance(timestampUs)
             lastImage = image
             runCatching { publishUiState { currentFrameState = image.toComposeImageBitmap() } }
-            setPositionMs(positionUs / MICROS_PER_MS)
+            if (!late) setPositionMs(positionUs / MICROS_PER_MS)
             // Deliberately NOT rebasing playbackStartNanos/playbackStartTimestampUs here. This used
             // to reset the wall-clock origin to "now = this frame's timestamp" on every published
             // frame, which made currentClockUs() measure decode throughput instead of real elapsed
@@ -1983,10 +2087,10 @@ private class FfmpegVideoPlayerController(private val path: String) :
             // which is also why setRate had no way to speed anything up: doing so requires the
             // clock to outrun frames so shouldDropLateFrame can skip them, and a clock that
             // re-anchors to every frame it shows can never get ahead of the frame it just showed.
-            // The clock origin is established ONLY at a seek (applyPendingSeek), a play
-            // (applyPendingPlaybackClockChanges' resetPlaybackClockRequested branch), and a rate
-            // change (applyPendingPlaybackClockChanges' pendingRate branch) — see those for why each
-            // one is still correct without this rebase.
+            // The clock origin is established ONLY by anchorPlaybackClock (a play, or the decoder
+            // reaching a seek target — applyPendingSeek just freezes the clock until then) and a
+            // rate change (applyPendingPlaybackClockChanges' pendingRate branch) — see those for
+            // why each one is still correct without this rebase.
         }
     }
 
