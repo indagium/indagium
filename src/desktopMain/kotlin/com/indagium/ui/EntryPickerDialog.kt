@@ -18,9 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.runtime.Composable
@@ -93,7 +91,7 @@ internal fun EntryPickerDialog(
                 AppText(truncatedNotice, color = tc2.td, fontSize = 10.sp, maxLines = 2)
             }
             Spacer(Modifier.height(10.dp))
-            Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+            ScrollColumnWithBar(Modifier.heightIn(max = 260.dp)) {
                 candidates.forEach { candidate ->
                     val displayEntryPath = zipEntryPathForDisplay(candidate.entryPath)
                     CheckRow(
@@ -142,7 +140,7 @@ internal fun EntryPickerDialog(
                     maxLines = 2,
                 )
                 Spacer(Modifier.height(5.dp))
-                Column(Modifier.heightIn(max = 130.dp).verticalScroll(rememberScrollState())) {
+                ScrollColumnWithBar(Modifier.heightIn(max = 130.dp)) {
                     ArchiveVideoChoiceRow(
                         label = "No video",
                         selected = selectedVideoPath == null,

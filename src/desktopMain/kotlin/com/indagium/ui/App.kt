@@ -901,7 +901,6 @@ fun App(
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                                 .width(menuWidth)
                                 .heightIn(max = (maxHeight - y - 8.dp).coerceAtLeast(160.dp))
-                                .verticalScroll(menuScroll)
                                 .focusRequester(menuFr)
                                 .focusable()
                                 .onPreviewKeyEvent { ev ->
@@ -940,7 +939,7 @@ fun App(
                                     }
                                 },
                         ) {
-                            Column {
+                            ScrollColumnWithBar(state = menuScroll) {
                                 menuEntries.forEach { e ->
                                     when (e) {
                                         is CtxMenuEntry.ActionHeader -> {
@@ -1646,11 +1645,11 @@ fun App(
                                     onDismissRequest = { pickerExpanded = false },
                                     properties = PopupProperties(focusable = true),
                                 ) {
-                                    Column(
-                                        Modifier.width(280.dp).heightIn(max = 220.dp).verticalScroll(rememberScrollState())
+                                    ScrollColumnWithBar(
+                                        Modifier.width(280.dp).heightIn(max = 220.dp)
                                             .background(tc2.p, RoundedCornerShape(7.dp))
-                                            .border(1.dp, tc2.br, RoundedCornerShape(7.dp))
-                                            .padding(vertical = 4.dp),
+                                            .border(1.dp, tc2.br, RoundedCornerShape(7.dp)),
+                                        contentPadding = PaddingValues(vertical = 4.dp),
                                     ) {
                                         state.savedFilters.forEach { sf ->
                                             HoverBox(
@@ -1944,7 +1943,7 @@ fun App(
                         Spacer(Modifier.height(6.dp))
                         AppText("Choose which normal saved filters to export.", color = tc2.td, fontSize = 11.sp, maxLines = 2)
                         Spacer(Modifier.height(10.dp))
-                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                        ScrollColumnWithBar(Modifier.heightIn(max = 260.dp)) {
                             state.savedFilters.forEach { sf ->
                                 CheckRow(
                                     checked = sf.id in state.filterExportSelectedIds,
@@ -2052,8 +2051,8 @@ fun App(
                             )
                         }
                         Spacer(Modifier.height(8.dp))
-                        Column(
-                            Modifier.heightIn(max = 320.dp).verticalScroll(rememberScrollState()),
+                        ScrollColumnWithBar(
+                            Modifier.heightIn(max = 320.dp),
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             grouped.forEach { (folderName, rowsInFolder) ->
@@ -2303,7 +2302,7 @@ fun App(
                             maxLines = 2,
                         )
                         Spacer(Modifier.height(10.dp))
-                        Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                        ScrollColumnWithBar(Modifier.heightIn(max = 260.dp)) {
                             state.tabs.forEach { candidateTab ->
                                 CheckRow(
                                     checked = candidateTab.id in selected,
@@ -2751,13 +2750,12 @@ private fun SavedFilterFolderPicker(
                 onDismissRequest = { open = false },
                 properties = PopupProperties(focusable = true),
             ) {
-                Column(
+                ScrollColumnWithBar(
                     Modifier.width(300.dp).heightIn(max = 220.dp)
-                        .verticalScroll(rememberScrollState())
                         .shadow(8.dp, RoundedCornerShape(8.dp))
                         .background(tc.p, RoundedCornerShape(8.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                        .padding(4.dp),
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp)),
+                    contentPadding = PaddingValues(4.dp),
                 ) {
                     (listOf<SavedFilterFolder?>(null) + folders).forEach { folder ->
                         val selected = folder?.id == selectedFolderId

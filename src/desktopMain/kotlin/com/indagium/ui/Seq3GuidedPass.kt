@@ -16,10 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
@@ -107,9 +105,8 @@ internal fun Seq3GuidedPass(
     val suggestion = remember(message.id, document, entries) { suggestSeq3Target(message, document, entries) }
 
     Box(modifier.background(tc.bg), contentAlignment = Alignment.TopCenter) {
-        Column(
-            Modifier.widthIn(max = SHEET_MAX_WIDTH).fillMaxWidth().padding(20.dp)
-                .verticalScroll(rememberScrollState()),
+        ScrollColumnWithBar(
+            Modifier.widthIn(max = SHEET_MAX_WIDTH).fillMaxWidth().padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Seq3GuidedHeader(pass) {

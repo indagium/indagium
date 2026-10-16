@@ -1,12 +1,15 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -14,6 +17,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -280,8 +285,20 @@ private fun Seq3RegenRowList(state: AppState, session: Seq3WorkspaceSession, rev
     // UNCHANGED rows exist only so `applySeq3Regeneration` can rebuild the full message list from
     // rows alone (see Seq3Regeneration.kt) — they are not decisions, so they are never shown.
     val visible = remember(review) { review.rows.filter { it.kind != Seq3RegenChangeKind.UNCHANGED } }
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = ROW_LIST_MAX_HEIGHT)) {
-        items(visible, key = Seq3RegenRow::id) { row -> Seq3RegenReviewRow(state, session, row) }
+    val listState = rememberLazyListState()
+    // The scrollbar sits in a matchParentSize() overlay so its fillMaxHeight() doesn't pin the
+    // heightIn(max) box to its cap (same pattern as BoundedScrollBoxDp).
+    Box(Modifier.fillMaxWidth().heightIn(max = ROW_LIST_MAX_HEIGHT)) {
+        LazyColumn(Modifier.fillMaxWidth(), state = listState, contentPadding = PaddingValues(end = 8.dp)) {
+            items(visible, key = Seq3RegenRow::id) { row -> Seq3RegenReviewRow(state, session, row) }
+        }
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(listState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
     }
 }
 

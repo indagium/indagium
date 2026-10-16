@@ -503,6 +503,49 @@ internal fun BoundedScrollBoxDp(
     }
 }
 
+/**
+ * A vertically scrolling [Column] that always shows the app scrollbar (the thumb appears only while
+ * the content actually overflows). Use it wherever a plain `Column(... .verticalScroll(...))` would
+ * otherwise scroll silently.
+ *
+ * Put sizing and decoration (width, weight, `heightIn(max = ...)`, shadow, background, border) on
+ * [modifier]: it lands on the outer [Box], and the scrollbar sits in a `matchParentSize()` overlay so
+ * its `fillMaxHeight()` never pins a `heightIn(max = ...)` box to its cap (same reason as
+ * [BoundedScrollBoxDp]). Min constraints are propagated, so a fixed/filled outer size still reaches
+ * the scrolling column. [contentPadding] is applied inside the scroll area. [endGutter] is extra end
+ * padding reserved only while the content overflows, so a list that fits keeps its exact layout and
+ * an overflowing one doesn't run text under the thumb; pass `0.dp` when [contentPadding] already
+ * leaves room at the end.
+ */
+@Composable
+internal fun ScrollColumnWithBar(
+    modifier: Modifier = Modifier,
+    state: ScrollState = rememberScrollState(),
+    contentPadding: PaddingValues = PaddingValues(0.dp),
+    endGutter: Dp = 8.dp,
+    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    // ScrollState.maxValue is Int.MAX_VALUE until the first layout; treat that as "not known yet".
+    val overflowing = state.maxValue in 1 until Int.MAX_VALUE
+    Box(modifier, propagateMinConstraints = true) {
+        Column(
+            Modifier.verticalScroll(state).padding(contentPadding).padding(end = if (overflowing) endGutter else 0.dp),
+            verticalArrangement = verticalArrangement,
+            horizontalAlignment = horizontalAlignment,
+            content = content,
+        )
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(state),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
+    }
+}
+
 @Composable
 @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 internal fun FullTextHint(
@@ -2128,17 +2171,16 @@ private fun CtxHighlightAction(
                 onDismissRequest = { pickerOpen = false },
                 properties = PopupProperties(focusable = false),
             ) {
-                Column(
+                ScrollColumnWithBar(
                     Modifier.width(pickerWidth)
                         .heightIn(max = minOf(380.dp, maxHeight))
-                        .verticalScroll(rememberScrollState())
                         .shadow(8.dp, RoundedCornerShape(7.dp))
                         .background(tc.p, RoundedCornerShape(7.dp))
                         .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                        .padding(9.dp)
                         .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
                         .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false }
                         .testTag("context-highlight-popup"),
+                    contentPadding = PaddingValues(9.dp),
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
                     HighlightPaletteGrid(

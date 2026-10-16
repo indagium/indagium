@@ -3,10 +3,8 @@ package com.indagium.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -35,19 +33,21 @@ internal fun RetraceDialog(state: AppState, result: RetraceDialogState) {
                     IndeterminateLoadingLine(Modifier.fillMaxWidth())
                 }
                 is RetraceDialogState.Success -> {
-                    SelectionContainer(
+                    ScrollColumnWithBar(
                         Modifier.weight(1f).fillMaxWidth().background(tc.bg, CORNER_SM)
-                            .border(1.dp, tc.br.copy(.6f), CORNER_SM)
-                            .padding(10.dp)
-                            .verticalScroll(rememberScrollState()),
+                            .border(1.dp, tc.br.copy(.6f), CORNER_SM),
+                        contentPadding = PaddingValues(10.dp),
+                        endGutter = 0.dp,
                     ) {
-                        AppText(
-                            result.text,
-                            color = tc.tx,
-                            fontSize = 11.sp,
-                            fontFamily = MONO,
-                            maxLines = Int.MAX_VALUE,
-                        )
+                        SelectionContainer {
+                            AppText(
+                                result.text,
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                fontFamily = MONO,
+                                maxLines = Int.MAX_VALUE,
+                            )
+                        }
                     }
                 }
                 is RetraceDialogState.Failure -> {

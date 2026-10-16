@@ -108,19 +108,22 @@ internal fun HighlighterColorPicker(
                 onDismissRequest = { onPickerOpenChange(false) },
                 properties = PopupProperties(focusable = true),
             ) {
-                HighlighterColorPickerContent(
-                    color = color,
-                    onColorChange = onColorChange,
-                    customColors = customColors,
-                    onSaveCustomColor = onSaveCustomColor,
-                    onDeleteCustomColor = onDeleteCustomColor,
-                    testTagPrefix = testTagPrefix,
-                    customColorEditorExpanded = editorExpanded,
-                    onCustomColorEditorExpandedChange = setEditorExpanded,
-                    onDismiss = { onPickerOpenChange(false) },
-                    modifier = Modifier.width(popupWidth)
-                        .heightIn(max = popupHeight).verticalScroll(rememberScrollState()),
-                )
+                // The scrollbar overlays the content's own 7dp outer margin (outside its card border), so
+                // no extra gutter is reserved.
+                ScrollColumnWithBar(Modifier.width(popupWidth).heightIn(max = popupHeight), endGutter = 0.dp) {
+                    HighlighterColorPickerContent(
+                        color = color,
+                        onColorChange = onColorChange,
+                        customColors = customColors,
+                        onSaveCustomColor = onSaveCustomColor,
+                        onDeleteCustomColor = onDeleteCustomColor,
+                        testTagPrefix = testTagPrefix,
+                        customColorEditorExpanded = editorExpanded,
+                        onCustomColorEditorExpandedChange = setEditorExpanded,
+                        onDismiss = { onPickerOpenChange(false) },
+                        modifier = Modifier,
+                    )
+                }
             }
         }
     }

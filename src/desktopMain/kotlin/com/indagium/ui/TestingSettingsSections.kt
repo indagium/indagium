@@ -5,15 +5,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -132,10 +131,11 @@ private fun <T> SettingsChoiceDropdown(
                 },
                 properties = PopupProperties(focusable = false),
             ) {
-                Column(
-                    Modifier.width(fieldWidth).heightIn(max = 320.dp).verticalScroll(rememberScrollState())
+                ScrollColumnWithBar(
+                    Modifier.width(fieldWidth).heightIn(max = 320.dp)
                         .shadow(8.dp, RoundedCornerShape(8.dp)).background(tc.p, RoundedCornerShape(8.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(4.dp),
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp)),
+                    contentPadding = PaddingValues(4.dp),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     if (options.isEmpty()) AppText(emptyText, color = tc.td, fontSize = 11.sp, modifier = Modifier.padding(8.dp), maxLines = 3)

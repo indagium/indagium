@@ -1682,7 +1682,7 @@ private fun Seq3FragmentsAndNotesSection(
                     AppText("No artifacts yet", color = tc.td, fontSize = 10.sp)
                 }
             } else {
-                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                ScrollColumnWithBar(Modifier.weight(1f).fillMaxWidth()) {
                     document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
                     document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
                     document.delays.forEach { delayItem -> Seq3DelayRenameRow(state, session, view, delayItem) }
