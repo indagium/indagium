@@ -10,12 +10,14 @@ import com.indagium.debug.AppLogger
 import org.bytedeco.ffmpeg.avcodec.AVPacket
 import org.bytedeco.ffmpeg.global.avcodec.avcodec_find_decoder_by_name
 import org.bytedeco.ffmpeg.global.avutil
+import org.bytedeco.javacv.FFmpegFrameFilter
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
 import org.bytedeco.javacv.Java2DFrameConverter
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.nio.ShortBuffer
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
@@ -346,6 +348,41 @@ private const val AUDIO_READ_AHEAD_STOP_US = 500_000L
 internal fun audioFrameTooFarAhead(frameTimestampUs: Long, playbackClockUs: Long): Boolean =
     frameTimestampUs > playbackClockUs && frameTimestampUs - playbackClockUs > AUDIO_READ_AHEAD_STOP_US
 
+// FFmpeg's atempo filter only accepts a tempo in [0.5, 2.0] per instance; anything outside is
+// reached by chaining stages (the stage tempi multiply). Rates below the lower bound are rounded to
+// a whole number of halvings plus one residual stage, so the chain never contains a stage outside it.
+private const val ATEMPO_MIN_STAGE = 0.5
+private const val ATEMPO_MAX_STAGE = 2.0
+
+/**
+ * The FFmpeg audio filter description that changes tempo by [rate] while preserving pitch: a comma-
+ * separated chain of `atempo` stages, each inside atempo's supported [0.5, 2.0] range, whose product
+ * is [rate] (e.g. 1.5 -> `atempo=1.5`, 0.25 -> `atempo=0.5,atempo=0.5`, 4 -> `atempo=2.0,atempo=2.0`).
+ * Numbers are formatted with [Locale.ROOT] so a decimal-comma locale never produces an invalid
+ * filter string. A non-finite or non-positive [rate] falls back to the identity `atempo=1.0`. Pure,
+ * so the chain is unit testable without FFmpeg natives.
+ */
+internal fun atempoChain(rate: Float): String {
+    var remaining = rate.toDouble()
+    if (!remaining.isFinite() || remaining <= 0.0) remaining = 1.0
+    val stages = mutableListOf<Double>()
+    while (remaining > ATEMPO_MAX_STAGE) {
+        stages += ATEMPO_MAX_STAGE
+        remaining /= ATEMPO_MAX_STAGE
+    }
+    while (remaining < ATEMPO_MIN_STAGE) {
+        stages += ATEMPO_MIN_STAGE
+        remaining /= ATEMPO_MIN_STAGE
+    }
+    stages += remaining
+    return stages.joinToString(",") { String.format(Locale.ROOT, "atempo=%s", formatAtempo(it)) }
+}
+
+private fun formatAtempo(value: Double): String {
+    val text = String.format(Locale.ROOT, "%.6f", value).trimEnd('0')
+    return if (text.endsWith('.')) text + "0" else text
+}
+
 // Below this linear gain, treat the line as silent rather than computing a (very large negative)
 // decibel value from log10(0..epsilon) — MASTER_GAIN's own minimum already represents "silent" for
 // this hardware line, so clamping to it directly avoids depending on log10's behavior near zero.
@@ -578,9 +615,10 @@ internal fun audioBufferedAheadUs(bufferedBytes: Long, sampleRate: Int, frameByt
  *
  * [audioBufferedAheadUs] (see that function above for the bytes-to-microseconds conversion) is
  * expected to already read as [Long.MAX_VALUE] — from the caller whenever audio isn't actually being
- * consumed: no audio stream, a line that failed to open, or `rate != 1x` muting `presentAudioFrame`
- * (see that function's KDoc). Without that, the audio term would read as permanently empty and this
- * function would never stop reading ahead for a video-only file or during a rate change — see
+ * consumed: no audio stream, a line that failed to open, or a failed audio tempo filter muting
+ * `presentAudioFrame` (see that function's KDoc). Without that, the audio term would read as
+ * permanently empty and this function would never stop reading ahead for a video-only file or while
+ * the audio is muted — see
  * [FfmpegVideoPlayerController.currentAudioBufferedAheadUs] for where that substitution happens. This
  * sentinel is checked explicitly below (never merely "a very large number"), so the video-only/muted
  * cases fall straight through to exactly the same soft video bound as before this change, regardless
@@ -674,10 +712,9 @@ internal enum class DecodedStateKind { VIDEO_QUEUE, AUDIO_CARRYOVER }
  *    something entirely different, and a close tears the whole pipeline down — anything already
  *    decoded for the OLD position (or for a grabber about to be released) is simply wrong to play.
  *  - **RATE_CHANGE invalidates AUDIO_CARRYOVER but not VIDEO_QUEUE.** These genuinely differ, unlike
- *    every other row above. Audio has no in-between state: `presentAudioFrame` writes it verbatim at
- *    rate == 1 or mutes it completely otherwise (see `setRate`'s KDoc — no pitch-correct resampling
- *    here), so a carried-over fragment written under the OLD rate assumption is wrong the instant the
- *    rate changes, in either direction. A queued VIDEO frame has no such rate-dependent identity: it
+ *    every other row above. Carried-over PCM was already tempo-adjusted for the OLD rate
+ *    (`presentAudioFrame` writes it verbatim at rate == 1 and through an `atempo` filter otherwise —
+ *    see `setRate`'s KDoc), so it is wrong the instant the rate changes, in either direction. A queued VIDEO frame has no such rate-dependent identity: it
  *    is decoded picture data timestamped for one specific moment regardless of playback speed: at a
  *    faster rate more of the queue's frames get skipped by [shouldDropLateFrame] as the clock outruns
  *    them, and at a slower rate fewer do, but every frame already in the queue remains exactly the
@@ -1009,14 +1046,13 @@ interface VideoPlayerController {
 
     fun seek(ms: Long)
 
-    /** Playback speed multiplier. MVP limitation (documented, not silently wrong): real
-     *  variable-speed audio needs pitch-correct resampling, out of scope for this substrate, so
-     *  audio is silenced entirely whenever rate != 1x instead — playing it unmodified would be
-     *  wrong-pitched (rate < 1) or reduced to chopped garbage by the truncate-to-available() path
-     *  in `writeAudio` (rate > 1). Audio resumes automatically once rate returns to 1x. Video
-     *  presentation re-paces correctly at any rate: frames whose timestamps the (rate-scaled)
-     *  playback clock has already passed are dropped rather than decoded, which is also the
-     *  mechanism that lets rate > 1 actually play faster (see `shouldDropLateFrame`). */
+    /** Playback speed multiplier. Audio follows the rate with its pitch preserved: at rate != 1x
+     *  decoded audio is run through an FFmpeg `atempo` filter chain (see `atempoChain`) before it
+     *  reaches the audio line; at 1x it is written unmodified. If that filter cannot be created or
+     *  fails, audio is muted until the next rate change rather than played at the wrong pitch or
+     *  speed. Video presentation re-paces correctly at any rate: frames whose timestamps the
+     *  (rate-scaled) playback clock has already passed are dropped rather than decoded, which is
+     *  also the mechanism that lets rate > 1 actually play faster (see `shouldDropLateFrame`). */
     fun setRate(rate: Float)
 
     /** Sets the linear gain in [0, 1]. Does not change [isMuted]. */
@@ -1186,6 +1222,14 @@ private class FfmpegVideoPlayerController(
     // writeAudio, so no synchronization is needed for them specifically.
     private var audioFrameBytes: Int = BYTES_PER_SAMPLE
     private var audioCarryoverCapBytes: Int = 0
+
+    // Pitch-preserving tempo filter for rate != 1x. Owned exclusively by the decode thread (created,
+    // fed, released and rebuilt there — FFmpegFrameFilter is not for concurrent use), so it is
+    // deliberately never touched from close(); releaseAll() releases it on that same thread. Null at
+    // 1x and until the first non-1x audio frame arrives. audioTempoFailed latches a creation/runtime
+    // failure (audio stays muted, as before this filter existed) until the next rate change.
+    private var audioTempoFilter: FFmpegFrameFilter? = null
+    private var audioTempoFailed = false
 
     // PCM that writeAudio couldn't fit into the line this pass, retried at the top of the next
     // writeAudio call and on every decode-loop pass (including during waitUntilPresentationTime's
@@ -1496,7 +1540,7 @@ private class FfmpegVideoPlayerController(
     /** Plays a held-back future audio frame once the clock is close enough; false while it must keep waiting. */
     private fun releaseDeferredAudioFrame(): Boolean {
         val frame = deferredAudioFrame ?: return true
-        if (rate == 1f && audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) return false
+        if (audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) return false
         deferredAudioFrame = null
         if (frame.timestamp >= minimumPlaybackTimestampUs) presentAudioFrame(frame)
         return true
@@ -1519,7 +1563,7 @@ private class FfmpegVideoPlayerController(
         // outlive this grab() the way a queued video Frame would. Data/subtitle frames have
         // nothing to do here.
         if (frame.samples.isNullOrEmpty() || frame.timestamp < minimumPlaybackTimestampUs) return true
-        if (rate == 1f && audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) {
+        if (audioLine != null && audioFrameTooFarAhead(frame.timestamp, currentClockUs())) {
             // Keep the grabber-owned buffer in place until its PTS is close enough to the
             // playback clock. Returning lets the queued video (or the clock-only gap path)
             // make progress without starting this future audio early.
@@ -1694,20 +1738,24 @@ private class FfmpegVideoPlayerController(
      * into one that always buffers the hard cap's worth of frames):
      *  - No audio stream, or [openAudioLine] failed to open one (`audioLine == null`): there is
      *    nothing to wait on — a video-only file must read ahead exactly as it did before this change.
-     *  - `rate != 1f`: [presentAudioFrame] silently drops every audio frame at any rate other than
-     *    1x (see its own KDoc — no pitch-correct resampling here), so nothing would ever fill the
-     *    buffer for as long as a non-1x rate is in effect; treating that as "starved" would make
-     *    refill ignore the video queue's soft bound the entire time the rate stayed changed.
+     *  - A failed audio tempo filter ([audioTempoFailed]): [presentAudioFrame] then drops every audio
+     *    frame until the next rate change, so nothing would ever fill the buffer; treating that as
+     *    "starved" would make refill ignore the video queue's soft bound the whole time.
+     *
+     * The result is in MEDIA time, like the clock and the video queue it is compared with: the line
+     * holds output-rate PCM, so its wall-clock duration is scaled by [rate] (at 2x each second of
+     * buffered output covers two seconds of media; at 0.5x, half a second).
      *
      * Called only from the decode thread (via [refillReadAheadQueue]), same as [videoQueueAheadUs]
      * above — [grabber]/[audioFrameBytes] are safe to read from here for the same reasons documented
      * at their own declarations.
      */
     private fun currentAudioBufferedAheadUs(): Long {
-        if (!hasAudioStream || rate != 1f) return Long.MAX_VALUE
+        if (!hasAudioStream || audioTempoFailed) return Long.MAX_VALUE
         val line = audioLine ?: return Long.MAX_VALUE
         val bufferedBytes = (line.bufferSize - line.available()).toLong().coerceAtLeast(0L) + pendingAudioTail.size
-        return audioBufferedAheadUs(bufferedBytes, grabber.sampleRate, audioFrameBytes)
+        val wallClockUs = audioBufferedAheadUs(bufferedBytes, grabber.sampleRate, audioFrameBytes)
+        return (wallClockUs * rate.toDouble()).toLong()
     }
 
     /** Drops every queued read-ahead frame and releases its cloned native buffers — called
@@ -1872,7 +1920,11 @@ private class FfmpegVideoPlayerController(
         // frames queued before this seek) is simply wrong to play. Gated on the shared predicate
         // (rather than an unconditional call) so this stays in lockstep with pause()/rate-change/
         // close, which consult the exact same table for their own transitions.
-        if (invalidatesDecodedState(PlaybackTransition.SEEK, DecodedStateKind.AUDIO_CARRYOVER)) pendingAudioTail = ByteArray(0)
+        if (invalidatesDecodedState(PlaybackTransition.SEEK, DecodedStateKind.AUDIO_CARRYOVER)) {
+            pendingAudioTail = ByteArray(0)
+            // The filter holds samples from before the discontinuity; rebuilt lazily on the next frame.
+            releaseAudioTempoFilter()
+        }
         if (invalidatesDecodedState(PlaybackTransition.SEEK, DecodedStateKind.VIDEO_QUEUE)) clearVideoQueue()
         // A seek — even backward from end of stream — repositions the grabber to produce frames
         // again, so a prior EOF no longer applies.
@@ -1968,18 +2020,75 @@ private class FfmpegVideoPlayerController(
         }
         .getOrNull()
 
+    /**
+     * At 1x the decoded PCM goes straight to the line. At any other rate it first passes through an
+     * `atempo` filter ([atempoChain]) so the audio keeps its pitch while its duration matches the
+     * rate-scaled playback clock. The filter is created lazily on this (decode) thread, and rebuilt
+     * after every rate change or seek ([releaseAudioTempoFilter]). If it cannot be created or throws,
+     * the failure is logged once, the filter is released and audio is muted — the pre-filter
+     * behaviour — until the next rate change ([audioTempoFailed]).
+     */
     private fun presentAudioFrame(frame: Frame) {
-        // JavaSound plays PCM at a fixed sample rate, i.e. always at 1x pitch — there is no
-        // resampling here (see setRate's KDoc). Writing frames unmodified at rate != 1x would be
-        // wrong in two different ways depending on direction: at rate < 1 the audio would play at
-        // the wrong (higher) pitch and finish before the video does; at rate > 1, writeAudio's
-        // truncate-to-line.available() path would silently drop most of it, since audio frames are
-        // still decoded and offered at their normal real-time cadence while a faster clock consumes
-        // video sooner — the result is not slow/fast audio but chopped garbage. Silence is the
-        // correct MVP behavior for either case; audio resumes automatically once rate returns to 1x
-        // (this check is re-evaluated per frame, on the same decode thread that owns `rate`).
-        if (rate != 1f) return
-        writeAudio(frame)
+        if (rate == 1f) {
+            writeAudio(frame)
+            return
+        }
+        if (audioLine == null || audioTempoFailed) return
+        val filter = audioTempoFilter ?: createAudioTempoFilter() ?: return
+        runCatching {
+            (frame.samples?.getOrNull(0) as? ShortBuffer)?.rewind()
+            filter.push(frame)
+            var out = filter.pull()
+            while (out != null) {
+                val sameFormat = out.sampleRate == grabber.sampleRate && out.audioChannels == grabber.audioChannels
+                check(sameFormat && out.samples?.getOrNull(0) is ShortBuffer) {
+                    "atempo output is not S16 interleaved at ${grabber.sampleRate} Hz x ${grabber.audioChannels}"
+                }
+                writeAudio(out)
+                out = filter.pull()
+            }
+        }.onFailure { failAudioTempoFilter(it) }
+    }
+
+    /** Builds and starts the `atempo` filter for the current [rate]; null (and muted) on failure. */
+    private fun createAudioTempoFilter(): FFmpegFrameFilter? = runCatching {
+        // aformat pins the output to S16 in case atempo ever negotiates another sample format.
+        val chain = "${atempoChain(rate)},aformat=sample_fmts=s16"
+        FFmpegFrameFilter(chain, grabber.audioChannels).apply {
+            sampleFormat = avutil.AV_SAMPLE_FMT_S16
+            sampleRate = grabber.sampleRate
+            start()
+        }.also { audioTempoFilter = it }
+    }.onFailure { failAudioTempoFilter(it) }.getOrNull()
+
+    private fun failAudioTempoFilter(cause: Throwable) {
+        if (!audioTempoFailed) {
+            AppLogger.warn("video", "audio tempo filter failed at rate $rate; muting audio until the rate changes", cause)
+        }
+        audioTempoFailed = true
+        releaseAudioTempoFilter()
+    }
+
+    /** Stops and releases the tempo filter (decode thread only). Safe to call when none exists. */
+    private fun releaseAudioTempoFilter() {
+        val filter = audioTempoFilter ?: return
+        audioTempoFilter = null
+        runCatching { filter.stop() }
+        runCatching { filter.release() }
+    }
+
+    /** A new rate invalidates the tempo filter and any PCM it produced under the old tempo. */
+    private fun resetAudioForRateChange() {
+        releaseAudioTempoFilter()
+        audioTempoFailed = false
+        // AUDIO_CARRYOVER: carried-over PCM was tempo-adjusted for the previous rate, so it would
+        // play at the wrong speed under the new one. See invalidatesDecodedState(RATE_CHANGE, *)'s
+        // KDoc for why VIDEO_QUEUE is deliberately NOT cleared here: a queued video frame's picture
+        // stays correct for its own timestamp at any rate, only whether it gets shown or skipped by
+        // shouldDropLateFrame changes.
+        if (invalidatesDecodedState(PlaybackTransition.RATE_CHANGE, DecodedStateKind.AUDIO_CARRYOVER)) {
+            pendingAudioTail = ByteArray(0)
+        }
     }
 
     // Waits in short bounded sleeps (not a tight spin) until [targetUs] reaches the playback
@@ -2015,15 +2124,7 @@ private class FfmpegVideoPlayerController(
         pendingRate?.let {
             rate = it
             pendingRate = null
-            // AUDIO_CARRYOVER: a rate change discards audio either way (presentAudioFrame mutes
-            // whenever rate != 1x) — clear any carry-over so a later return to 1x doesn't play stale
-            // pre-change PCM. See invalidatesDecodedState(RATE_CHANGE, *)'s KDoc for why VIDEO_QUEUE
-            // is deliberately NOT cleared here: a queued video frame's picture stays correct for its
-            // own timestamp at any rate, only whether it gets shown or skipped by shouldDropLateFrame
-            // changes — nothing in it needs discarding just because the pace changed while paused.
-            if (invalidatesDecodedState(PlaybackTransition.RATE_CHANGE, DecodedStateKind.AUDIO_CARRYOVER)) {
-                pendingAudioTail = ByteArray(0)
-            }
+            resetAudioForRateChange()
         }
     }
 
@@ -2034,11 +2135,7 @@ private class FfmpegVideoPlayerController(
             pendingRate = null
             playbackStartNanos = System.nanoTime()
             playbackStartTimestampUs = position
-            // Same AUDIO_CARRYOVER-only reasoning as applyPendingRateWhilePaused above — videoQueue
-            // is deliberately left untouched; see invalidatesDecodedState(RATE_CHANGE, *)'s KDoc.
-            if (invalidatesDecodedState(PlaybackTransition.RATE_CHANGE, DecodedStateKind.AUDIO_CARRYOVER)) {
-                pendingAudioTail = ByteArray(0)
-            }
+            resetAudioForRateChange()
         }
         if (resetPlaybackClockRequested) {
             resetPlaybackClockRequested = false
@@ -2252,6 +2349,7 @@ private class FfmpegVideoPlayerController(
     private fun releaseAll() {
         runCatching { audioLine?.stop() }
         runCatching { audioLine?.close() }
+        releaseAudioTempoFilter()
         // CLOSE invalidates everything — see invalidatesDecodedState(CLOSE, *), both true: the whole
         // pipeline is being torn down, so nothing already decoded has anywhere left to play. The
         // decode thread is also the sole owner of the queue by this point (runLoop's while(!closed)
