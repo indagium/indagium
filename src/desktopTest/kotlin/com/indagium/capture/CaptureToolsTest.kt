@@ -293,7 +293,11 @@ class CaptureToolsTest {
     @Test
     fun runAdbSurfacesANonZeroExitInsteadOfThrowing() {
         val runner = FakeCaptureRunner()
-        runner.enqueue(CompletedFakeProcess("", "Permission denied\n", 1))
+        runner.runHandler = { spec ->
+            if (spec.command.takeLast(4) == listOf("shell", "setprop", "log.tag", "D")) {
+                CaptureCommandResult(1, byteArrayOf(), "Permission denied\n".toByteArray())
+            } else null
+        }
         val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
 
         val result = tools.runAdb("SERIAL", listOf("shell", "setprop", "log.tag", "D"))

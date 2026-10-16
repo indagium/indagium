@@ -6,6 +6,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 /**
  * Phase 1 (buffer modes) regression coverage. `CaptureSettingsCodec` is shared by three writers —
@@ -207,6 +209,18 @@ class CaptureSettingsCodecTest {
     fun hardwareMirrorRoundTrips() {
         val decoded = assertNotNull(captureSettingsFromJson(captureSettingsToJson(CaptureSettings(hardwareMirror = true))))
         assertEquals(true, decoded.hardwareMirror)
+    }
+
+    @Test
+    fun deviceAvailabilityControlsDefaultOnAndRoundTripIndependently() {
+        val defaults = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
+        assertTrue(defaults.writeDeviceAvailabilityMarkers)
+        assertTrue(defaults.showUnavailableFrames)
+
+        val configured = CaptureSettings(writeDeviceAvailabilityMarkers = false, showUnavailableFrames = false)
+        val restored = assertNotNull(captureSettingsFromJson(captureSettingsToJson(configured)))
+        assertFalse(restored.writeDeviceAvailabilityMarkers)
+        assertFalse(restored.showUnavailableFrames)
     }
 
     @Test

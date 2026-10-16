@@ -1553,8 +1553,8 @@ private fun IssuesSettingsSection(state: AppState) {
 /**
  * The twelve note and copy settings on one four-column grid (content-sized columns, equal gaps —
  * SettingsGrid). Rows group them by purpose: note behaviour, what copying includes, and the
- * formats. The three wide format controls use tighter segments so all four columns fit with
- * comfortable gaps.
+ * formats. Copy default uses a dropdown so each destination keeps its full label in this compact
+ * grid.
  */
 @Composable
 private fun ExportSettingsGrid(state: AppState) {
@@ -1704,12 +1704,19 @@ private fun CopyDefaultSetting(state: AppState) {
         tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
     ) {
         val formats = AnnotationCopyFormat.entries
-        SegmentedControl(
-            segmentHorizontalPadding = 6.dp,
-            options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
-            selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
-            onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
-        )
+        val selectedFormat = state.settings.annotationCopyFormat
+        Seq3DropdownButton(
+            label = selectedFormat.label,
+            menuWidth = 180.dp,
+            fixedHeight = 28.dp,
+        ) { close ->
+            formats.forEach { format ->
+                Seq3DropdownMenuItem(label = format.label, active = format == selectedFormat) {
+                    state.updateSettings { it.copy(annotationCopyFormat = format) }
+                    close()
+                }
+            }
+        }
     }
 }
 

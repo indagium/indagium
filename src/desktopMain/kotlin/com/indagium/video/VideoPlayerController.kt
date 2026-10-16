@@ -805,6 +805,9 @@ interface VideoPlayerController {
     val positionMs: Long
     val durationMs: Long
 
+    /** Extends a media file's playhead through known trailing capture time after the last packet. */
+    fun setVirtualDurationMs(durationMs: Long) = Unit
+
     val isPlaying: Boolean
 
     /** Linear gain in [0, 1] applied to the audio line, independent of [isMuted]. Defaults to 1
@@ -982,6 +985,9 @@ private class FfmpegVideoPlayerController(private val path: String) :
     override val error: String? get() = errorState
     override val displayRotationDegrees: Int get() = sourceRotationDegreesState
 
+    /** A capture timeline can outlive the final video packet (for example Stop during a reboot). */
+    @Volatile private var virtualDurationMs = 0L
+
     // Written only from the decode thread; read from any thread (Compose recomposition, MCP,
     // grabCurrentFrame callers) — a plain @Volatile is enough since it's always assigned wholesale
     // (a fresh BufferedImage), never mutated in place.
@@ -1083,6 +1089,14 @@ private class FfmpegVideoPlayerController(private val path: String) :
 
     override fun start() {
         if (!closed && decodeStarted.compareAndSet(false, true)) decodeThread.start()
+    }
+
+    override fun setVirtualDurationMs(durationMs: Long) {
+        val duration = durationMs.coerceAtLeast(0L)
+        if (duration <= virtualDurationMs) return
+        virtualDurationMs = duration
+        publishDurationState(observedDurationMs = duration)
+        wakeDecoder()
     }
 
     override fun play() {

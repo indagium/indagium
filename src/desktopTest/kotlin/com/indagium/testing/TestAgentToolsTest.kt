@@ -30,6 +30,8 @@ import com.indagium.testing.script.TestScriptRunner
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -38,6 +40,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assume.assumeFalse
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
@@ -74,6 +78,7 @@ class TestAgentToolsTest {
         scriptRunner: TestScriptRunner = TestScriptRunner(hostShell = listOf("/bin/sh", "-c")),
         onSequenceBudgetReleased: (reserved: Int, consumed: Int) -> Unit = { _, _ -> },
         onSequenceAction: (index: Int, result: DeviceInputActionResult) -> Unit = { _, _ -> },
+        remainingExecutionMs: suspend (com.indagium.testing.run.LaneStepIdentity?) -> Long? = { null },
     ): LaneTools {
         val lane = runBlocking { openFixtureSession(runner, laneDir) }.also { session = it }
         return buildLaneTools(
@@ -90,6 +95,7 @@ class TestAgentToolsTest {
                 inputSequence = InputSequenceCallbacks(
                     releaseBudget = { _, reserved, consumed -> onSequenceBudgetReleased(reserved, consumed) },
                     onAction = { _, index, result -> onSequenceAction(index, result) },
+                    remainingExecutionMs = remainingExecutionMs,
                 ),
             ),
         )
@@ -108,7 +114,7 @@ class TestAgentToolsTest {
         assertEquals(BUILT_IN_NAMES, lane.names().toSet(), "built-in lane tools match the names scripts may not take")
         val global = MCP_TOOLS.map { it.name }.toSet()
         assertTrue(lane.names().none { it in global }, "no lane tool is a global tool: ${lane.names().filter { it in global }}")
-        assertEquals(20, lane.names().size)
+        assertEquals(21, lane.names().size)
     }
 
     @Test
@@ -308,6 +314,61 @@ class TestAgentToolsTest {
         assertTrue(runner.specs.count { "uiautomator" in it.command } >= 2, "the selector is polled until it appears")
         val match = found["untrusted_data"].toString()
         assertTrue(match.contains("Continue"), match)
+    }
+
+    @Test
+    fun waitForDeviceReadyRequiresAuthorizedResponsiveCompletedBootAndReportsIdentity() {
+        val lane = tools(allowed = setOf("wait_for_device_ready"))
+        val ready = lane.call("wait_for_device_ready", "timeoutMs" to 1_000)
+        assertEquals(true, ready["ready"], ready.toString())
+        assertEquals("SER-1", ready["serial"])
+        assertEquals("device", ready["adbState"])
+        assertEquals(true, ready["shellResponsive"])
+        assertEquals(true, ready["bootCompleted"])
+        assertEquals("fixture-boot-1", ready["bootIdAfter"])
+
+        runner.bootId = "fixture-boot-2"
+        val rebooted = lane.call("wait_for_device_ready", "timeoutMs" to 1_000)
+        assertEquals("fixture-boot-1", rebooted["bootIdBefore"])
+        assertEquals("fixture-boot-2", rebooted["bootIdAfter"])
+        assertEquals(true, rebooted["rebootConfirmed"])
+
+        runner.adbState = "unauthorized"
+        val unavailable = lane.call("wait_for_device_ready", "timeoutMs" to 1_000)
+        assertEquals(false, unavailable["ready"])
+        assertEquals(true, unavailable["timedOut"])
+        assertEquals("unauthorized", unavailable["adbState"], unavailable.toString())
+        assertEquals(false, unavailable["authorized"])
+        assertTrue(unavailable["diagnostic"].toString().contains("authorization"), unavailable.toString())
+    }
+
+    @Test
+    fun waitForDeviceReadyHonorsStepBudgetAndCancelsABlockedBootIdentityProbe() = runBlocking {
+        val lane = tools(
+            allowed = setOf("wait_for_device_ready"),
+            remainingExecutionMs = { 30L },
+        )
+        runner.adbState = "offline"
+        val stepBounded = lane.call("wait_for_device_ready", "timeoutMs" to 5_000)
+        assertEquals(30L, stepBounded["timeoutMs"])
+        assertTrue(stepBounded["diagnostic"].toString().contains("step execution allowance"), stepBounded.toString())
+
+        runner.adbState = "device"
+        val bootProbeStarted = CountDownLatch(1)
+        val bootProbeInterrupted = CountDownLatch(1)
+        runner.beforeBootId = {
+            bootProbeStarted.countDown()
+            try {
+                CountDownLatch(1).await()
+            } catch (interrupted: InterruptedException) {
+                bootProbeInterrupted.countDown()
+                throw interrupted
+            }
+        }
+        val waiting = async(Dispatchers.Default) { requireNotNull(session).waitForDeviceReady(60_000) }
+        assertTrue(bootProbeStarted.await(2, TimeUnit.SECONDS), "readiness did not reach the cancellable boot-id probe")
+        waiting.cancelAndJoin()
+        assertTrue(bootProbeInterrupted.await(2, TimeUnit.SECONDS), "cancellation did not interrupt the blocking adb probe")
     }
 
     @Test

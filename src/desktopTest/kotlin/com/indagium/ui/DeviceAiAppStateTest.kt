@@ -131,11 +131,11 @@ class DeviceAiAppStateTest {
                 }
             }
             // Distinct fake tab ids per call: markIssueForAi's own failure completes that tab's
-            // marker barrier as "failed" (see DeviceAiMarkerBarrier), and a subsequent export on
-            // the SAME tab would then report that instead of its own "no longer live" refusal.
+            // marker barrier as "failed" (see DeviceAiMarkerBarrier), and a subsequent snapshot on
+            // the SAME tab would report that before checking whether the tab still exists.
             assertTrue(awaitError(state.markIssueForAi("missing-tab-1", "Custom label", "Extra note")).contains("no longer live"))
             assertTrue(awaitError(state.captureDeviceScreenshotForAi("missing-tab-2")).contains("no longer live"))
-            assertTrue(awaitError(state.exportCaptureSnapshotForAi("missing-tab-3")).contains("no longer live"))
+            assertTrue(awaitError(state.exportCaptureSnapshotForAi("missing-tab-3")).contains("no longer available"))
             assertTrue(
                 awaitError(state.exportCaptureSnapshotForAi("missing-tab-4", rangeParam = "bogus")).contains("range must be one of"),
             )

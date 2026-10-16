@@ -147,6 +147,45 @@ class TagPidPopoverStateTest {
     }
 
     @Test
+    fun packagePrefixAndExactTagWithTheSameTextHaveIndependentPopoverStateAndRules() {
+        val h = Harness()
+        h.state.open("com.example")
+        h.state.onScanResult(listOf(info(100)))
+
+        h.state.open("com.example", packagePrefixScope = true)
+        assertTrue(h.state.packagePrefixScope)
+        assertNull(h.state.infos, "switching scope with the same text must start a fresh scan")
+        assertFalse(h.state.keepFollowing)
+        h.state.onScanResult(listOf(info(200)))
+        h.state.closeIfMissing(listOf("com.example" to false))
+        assertFalse(h.state.isOpen, "an exact-tag row with the same string is not the package anchor")
+
+        h.state.open("com.example", packagePrefixScope = true)
+        h.state.onScanResult(listOf(info(200), info(300)))
+        h.state.add()
+
+        assertEquals("200,300", h.committed.single(), "package filters are numeric snapshots, never dynamic tag tokens")
+        assertFalse(h.state.isOpen)
+    }
+
+    @Test
+    fun packagePrefixKeyboardMovesOnlyAcrossPidRowsAndAddsNumericSelection() {
+        val h = Harness()
+        h.state.open("com.example", packagePrefixScope = true)
+        h.state.onScanResult(listOf(info(100), info(200)))
+
+        h.key(Key.DirectionDown)
+        h.key(Key.Spacebar)
+        assertEquals(setOf(100), h.state.selected)
+        h.key(Key.DirectionDown)
+        assertEquals(1, h.state.cursor, "the package popup has no additional Keep following keyboard row")
+        assertFalse(h.state.keepFollowing)
+        h.key(Key.Enter)
+
+        assertEquals("100", h.committed.single())
+    }
+
+    @Test
     fun popoverOpensRightOfTheEdgeAndFlipsLeftWhenItDoesNotFit() {
         assertEquals(306, tagPopoverX(rightEdgePx = 300, leftEdgePx = null, popupWidthPx = 400, windowWidthPx = 1000))
         assertEquals(306, tagPopoverX(300, leftEdgePx = 100, popupWidthPx = 400, windowWidthPx = 1000))

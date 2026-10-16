@@ -194,6 +194,9 @@ internal fun lanePrompt(
                 "verification failed; verify transition evidence or establish its precondition before acting, and do not weaken a transition " +
                 "into a destination-state-only check or blindly repeat toggles. You may use wait_for_ui for a transient loading state or to confirm " +
                 "that a skippable ad's skip control is visible, at most twice. Dismiss only a visible skip control, then do the required action. " +
+                "If the case expects Android to reboot or the device becomes temporarily unavailable, call wait_for_device_ready " +
+                "(default 120 seconds; up to 10 minutes) before resuming interaction. It waits for the same lane device to be authorized, " +
+                "shell-responsive and fully booted, and reports whether a reboot was confirmed; the step deadline and cancellation still apply. " +
                 "Never bypass a tested condition, substitute app/content, or weaken expected. Use perform_input_sequence only for up to eight " +
                 "already-known actions in a stable layout, without intermediate screen reads; it charges each action and its final screenshot. " +
                 "For playback, if a control's position is already known in the same stable layout, reveal the controls and press that control " +

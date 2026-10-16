@@ -41,6 +41,37 @@ class DeviceLogSettingsTest {
     }
 
     @Test
+    fun parsesCurrentPlatformToolsConsumedAndReadableMetrics() {
+        // Captured from `adb -s emulator-5554 logcat -g` on 2026-10-16. Recent platform-tools
+        // appends a readable metric inside the parentheses; the ring size and consumed value must
+        // remain available to the Device logging panel.
+        val output = """
+            main: ring buffer is 2 MiB (1 MiB consumed, 8 MiB readable), max entry is 5120 B, max payload is 4068 B
+            system: ring buffer is 2 MiB (682 KiB consumed, 1 MiB readable), max entry is 5120 B, max payload is 4068 B
+        """.trimIndent()
+
+        val sizes = parseLogcatBufferSizes(output)
+
+        assertEquals(
+            listOf(
+                LogBufferSize("main", 2L * 1024 * 1024, 1024L * 1024, 5120L),
+                LogBufferSize("system", 2L * 1024 * 1024, 682L * 1024, 5120L),
+            ),
+            sizes,
+        )
+    }
+
+    @Test
+    fun manualFourMiBBufferReadbackShowsTheDeviceValue() {
+        val output = "main: ring buffer is 4 MiB (1 MiB consumed, 4 MiB readable), max entry is 5120 B, max payload is 4068 B"
+
+        val sizes = parseLogcatBufferSizes(output)
+
+        assertEquals("4 MB", bufferSizeButtonLabel(sizes))
+        assertEquals(4L * 1024 * 1024, sizes.single().sizeBytes)
+    }
+
+    @Test
     fun parsesKibibyteUnitAndFractionalMegabytes() {
         val kib = parseLogcatBufferSizes("main: ring buffer is 256KiB (0KiB consumed), max entry is 5120B, max payload is 4068B")
         assertEquals(256L * 1024L, kib.single().sizeBytes)
@@ -220,6 +251,23 @@ class DeviceLogSettingsTest {
         assertEquals("Verbose", logLevelButtonLabel(LogTagLevel.VERBOSE))
     }
 
+    @Test
+    fun globalLevelButtonDistinguishesKnownDeviceDefaultFromUnknownReadback() {
+        assertEquals("Unknown", deviceLogGlobalLevelButtonLabel(null))
+        assertEquals(
+            "Unknown",
+            deviceLogGlobalLevelButtonLabel(DeviceLogState(serial = "s1", loaded = true, globalLevelKnown = false)),
+        )
+        assertEquals(
+            "Default (device)",
+            deviceLogGlobalLevelButtonLabel(DeviceLogState(serial = "s1", loaded = true, globalLevelKnown = true)),
+        )
+        assertEquals(
+            "Debug",
+            deviceLogGlobalLevelButtonLabel(DeviceLogState(serial = "s1", globalLevel = LogTagLevel.DEBUG, loaded = true)),
+        )
+    }
+
     // deviceLoggingSummaryLine (the New tab launcher's collapsed "Device logging" section header —
     // item 3 of the "make it compact" pass): built only from a loaded state, never from an
     // in-flight read, so collapsing the section never shows stale-looking data.
@@ -273,6 +321,12 @@ class DeviceLogSettingsTest {
     fun formatDeviceLogStatusLineReportsDeviceDefaultWhenLogTagIsUnset() {
         val sizes = listOf(LogBufferSize("main", 4L * 1024 * 1024))
         assertEquals("On device: main 4 MB · log.tag not set (device default)", formatDeviceLogStatusLine(sizes, null))
+    }
+
+    @Test
+    fun formatDeviceLogStatusLineReportsUnknownGlobalLevelAfterFailedRead() {
+        val sizes = listOf(LogBufferSize("main", 4L * 1024 * 1024))
+        assertEquals("On device: main 4 MB · log.tag unknown", formatDeviceLogStatusLine(sizes, null, globalLevelKnown = false))
     }
 
     @Test

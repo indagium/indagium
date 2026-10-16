@@ -4,6 +4,7 @@ import com.indagium.capture.CaptureExportResult
 import com.indagium.ui.CaptureExportStatusView
 import com.indagium.ui.CaptureExportWarning
 import com.indagium.ui.captureExportStatusFor
+import com.indagium.ui.captureExportStatusOwnerForSurface
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -53,5 +54,16 @@ class CaptureExportStatusTest {
         // ...but not a retained-session save, and a stopped tab's strip does not show the snapshot's.
         assertEquals(hidden, captureExportStatusFor(null, "s1", busy = true, result = result, error = null))
         assertEquals(hidden, captureExportStatusFor("s1", null, busy = true, result = result, error = null))
+    }
+
+    @Test
+    fun stoppedSurfaceKeepsTheResultForAnExportThatStartedInTheLivePopover() {
+        val owner = captureExportStatusOwnerForSurface("s1", owner = null, sourceSessionId = "s1")
+        assertEquals(
+            CaptureExportStatusView(busy = false, result = result, error = null),
+            captureExportStatusFor("s1", owner, busy = false, result = result, error = null),
+        )
+        val otherSessionOwner = captureExportStatusOwnerForSurface("s2", owner = null, sourceSessionId = "s1")
+        assertEquals(hidden, captureExportStatusFor("s2", otherSessionOwner, busy = false, result = result, error = null))
     }
 }

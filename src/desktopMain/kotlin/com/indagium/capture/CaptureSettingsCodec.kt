@@ -55,6 +55,8 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("liveAudioVolume", settings.liveAudioVolume)
     put("microphoneDeviceId", settings.microphoneDeviceId)
     put("hardwareMirror", settings.hardwareMirror)
+    put("writeDeviceAvailabilityMarkers", settings.writeDeviceAvailabilityMarkers)
+    put("showUnavailableFrames", settings.showUnavailableFrames)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -122,6 +124,10 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         // order. Absent on any settings JSON written before this feature existed, which decodes to
         // false (the standard Compose/JavaCV mirror stays the default).
         hardwareMirror = root.optional("hardwareMirror", defaults.hardwareMirror, ::booleanValue),
+        writeDeviceAvailabilityMarkers = root.optional(
+            "writeDeviceAvailabilityMarkers", defaults.writeDeviceAvailabilityMarkers, ::booleanValue,
+        ),
+        showUnavailableFrames = root.optional("showUnavailableFrames", defaults.showUnavailableFrames, ::booleanValue),
     )
 }.getOrNull()
 

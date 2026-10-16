@@ -7,6 +7,7 @@
 - [Home](https://indagium.com/): Analysis-focused overview, application metadata for version 1.8.10, features, and downloads.
 - [Android Logcat Viewer](https://indagium.com/android-logcat-viewer/): Open and read large logcat text files, use the minimap and thread map, and compare tabs.
 - [Android Logcat Analyzer](https://indagium.com/logcat-analyzer/): Filter, highlight, search, fold sequences, and export findings.
+- [Sequence Diagrams](https://indagium.com/sequence-diagrams/): Create editable interaction diagrams from selected Android log rows or a filtered view, retain source evidence, and export an image snapshot or Mermaid/PlantUML source.
 - [Android Logcat Capture](https://indagium.com/android-logcat-capture/): Record Android logs and screen video together by USB or wireless debugging, mark issues, save snapshots without stopping, and reopen the ZIP with synchronized evidence.
 - [AI Tests](https://indagium.com/ai-tests/): Build Android suites with reusable steps, scripts, checks, and setup hooks; run cases on device lanes, inspect saved evidence and reports, and follow up with issues.
 - [Android Bug Report Viewer](https://indagium.com/android-bug-report-viewer/): Open adb bugreport .zip/.7z archives and choose logs to analyze.

@@ -42,11 +42,13 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
@@ -61,6 +63,7 @@ import com.indagium.utils.cachedCrossingThreadHintsFor
 import com.indagium.utils.containsPattern
 import com.indagium.utils.firstRegexMatch
 import com.indagium.utils.groupIssueSites
+import com.indagium.utils.hasTagPrefixPids
 import com.indagium.utils.issueSitesForCategory
 import com.indagium.utils.matchesPidTidTokens
 import com.indagium.utils.matchingHighlighter
@@ -652,6 +655,9 @@ internal fun FilterPanel(
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
     keyboardFocusVisible: Boolean = false,
+    captureDeviceEvents: CaptureDeviceEventsModel? = null,
+    captureDeviceEventsState: AppState? = null,
+    onCaptureDeviceEventReturnFocus: () -> Unit = {},
 ) {
     val tc = tc()
     val filter = tab.filter
@@ -749,18 +755,27 @@ internal fun FilterPanel(
         pkgs + tags
     }
 
+    val packagePrefixHasPids = remember(tab.analysis.tagPids, combinedTagCandidates) {
+        combinedTagCandidates.asSequence().filter { it.second }
+            .associate { (prefix, _) -> prefix to hasTagPrefixPids(tab.analysis.tagPids, prefix) }
+    }
+
     // The popup's clickable pid button steals focus and the panel's key handler would go deaf, so
     // every open/close hands it back to the tag field (the field's key handler drives the popover).
     pidPopover.refocus = { tagFr.requestFocus() }
     // Unscoped, so the whole process shows, not just this tag's lines.
     pidPopover.commitRule = { pattern -> onAddMessageRule(true, pattern, false, null, null, RuleTarget.PID_TID) }
 
-    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean =
-        candidate != null && !candidate.second && !tab.analysis.tagPids[candidate.first].isNullOrEmpty()
+    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean = candidate?.let { (value, isPackage) ->
+        if (isPackage) packagePrefixHasPids[value] == true
+        else !tab.analysis.tagPids[value].isNullOrEmpty()
+    } ?: false
 
     // Typing in the tag field can drop the anchor row while the popover is open; close it then
     // instead of leaving it (and the keep-alive above) stranded.
-    LaunchedEffect(combinedTagCandidates, pidPopover.tag) { pidPopover.closeIfMissing(combinedTagCandidates) }
+    LaunchedEffect(combinedTagCandidates, pidPopover.tag, pidPopover.packagePrefixScope) {
+        pidPopover.closeIfMissing(combinedTagCandidates)
+    }
     TagPidPopoverScanEffect(pidPopover, tab)
 
     // Debounced keyword state — display updates immediately, filter applies after 150ms pause.
@@ -1242,6 +1257,7 @@ internal fun FilterPanel(
                     { tagInput = it; tagSelectedIdx = -1 },
                     "pkg prefix or tag…",
                     Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                        .testTag("filter-panel-tags-input")
                         .focusRequester(tagFr)
                         .onFocusChanged { tagFieldFocused = it.isFocused }
                         .onPreviewKeyEvent { ev ->
@@ -1279,7 +1295,7 @@ internal fun FilterPanel(
                                     val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
                                     if (c != null) {
                                         if (tagSelectedAction == TAG_ACTION_PID && pidAvailableFor(c)) {
-                                            pidPopover.open(c.first)
+                                            pidPopover.open(c.first, packagePrefixScope = c.second)
                                         } else if (c.second) {
                                             if (tagSelectedAction == 0) onAddPkgPrefix(c.first) else onAddExcludePkgPrefix(c.first)
                                         } else if (tagSelectedAction == 0) {
@@ -1314,7 +1330,12 @@ internal fun FilterPanel(
                                 val isIncluded = value in filter.pkgPrefixes
                                 val isExcluded = value in filter.excludePkgPrefixes
                                 HoverBox(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                        .testTag("filter-panel-tags-package-candidate-$idx")
+                                        .onPointerEvent(PointerEventType.Enter) { pidPopover.hoveredPackagePrefix = value }
+                                        .onPointerEvent(PointerEventType.Exit) {
+                                            if (pidPopover.hoveredPackagePrefix == value) pidPopover.hoveredPackagePrefix = null
+                                        },
                                     baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                     hoverBg = tc.hv,
                                     onClick = { onAddPkgPrefix(value); tagSelectedIdx = -1; tagSelectedAction = 0 },
@@ -1338,7 +1359,18 @@ internal fun FilterPanel(
                                                 modifier = Modifier.fillMaxWidth(), overflow = TextOverflow.Ellipsis, maxLines = 1,
                                                 onTextLayout = onTextLayout)
                                         }
-                                        Spacer(Modifier.width(26.dp))
+                                        Box(Modifier.width(26.dp), contentAlignment = Alignment.Center) {
+                                            TagPidSlot(
+                                                tag = value,
+                                                state = pidPopover,
+                                                hasPids = packagePrefixHasPids[value] == true,
+                                                rowSelected = isRowSelected,
+                                                kbd = isRowSelected && tagSelectedAction == TAG_ACTION_PID,
+                                                positionProvider = remember(panelRightPx) { RightOfEdgePositionProvider(panelRightPx) },
+                                                buttonModifier = Modifier.testTag("filter-panel-tags-candidate-$idx-pid"),
+                                                packagePrefixScope = true,
+                                            )
+                                        }
                                         val incKbd = isRowSelected && tagSelectedAction == 0
                                         Box(
                                             Modifier.size(20.dp)
@@ -2126,10 +2158,19 @@ internal fun FilterPanel(
                                 ) {
                                     AppText("⠿", color = tc.td, fontSize = 12.sp)
                                     AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
-                                    ColorPickerSwatch(
-                                        color = if (def.enabled) def.color else tc.br, size = 10.dp,
+                                    HighlighterColorPicker(
+                                        color = def.color,
+                                        onColorChange = { onSetSeqColor(def.id, it) },
+                                        customColors = highlighterActions.customColors,
+                                        onSaveCustomColor = highlighterActions.onSaveCustomColor,
+                                        onDeleteCustomColor = highlighterActions.onDeleteCustomColor,
+                                        paletteColumns = highlighterActions.paletteColumns,
+                                        onPaletteColumnsChange = highlighterActions.onPaletteColumnsChange,
                                         pickerOpen = colorPickerSeqId == def.id,
-                                        onClick = { colorPickerSeqId = if (colorPickerSeqId == def.id) null else def.id },
+                                        onPickerOpenChange = { open -> colorPickerSeqId = if (open) def.id else null },
+                                        testTagPrefix = "sequence-color-${def.id}",
+                                        customColorEditorExpanded = highlighterActions.customColorEditorExpanded,
+                                        onCustomColorEditorExpandedChange = highlighterActions.onCustomColorEditorExpandedChange,
                                     )
                                     AppText(
                                         sequenceLabel(def),
@@ -2208,21 +2249,6 @@ internal fun FilterPanel(
                 tab.filter.sequences.firstOrNull { it.id == editingSeqId }?.let { def ->
                     SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
                 }
-                tab.filter.sequences.firstOrNull { it.id == colorPickerSeqId }?.let { def ->
-                    FlowRow(
-                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        SEQ_COLORS.forEach { c ->
-                            Box(
-                                Modifier.size(14.dp).background(c, CORNER_SM)
-                                    .border(2.dp, if (c == def.color) tc.tx else Color.Transparent, CORNER_SM)
-                                    .clickable { onSetSeqColor(def.id, c); colorPickerSeqId = null },
-                            )
-                        }
-                    }
-                }
             }
             // Task 4: "these two sequences interleave on different threads — scope them?" —
             // reuses computeItems' OWN crossing-resolution pass (cachedCrossingThreadHintsFor,
@@ -2293,19 +2319,23 @@ internal fun FilterPanel(
                     }
                 }
                 tab.manualBlocks.firstOrNull { it.id == colorPickerManualId }?.let { block ->
-                    FlowRow(
-                        Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        SEQ_COLORS.forEach { c ->
-                            Box(
-                                Modifier.size(14.dp).background(c, CORNER_SM)
-                                    .border(2.dp, if (c == block.color) tc.tx else Color.Transparent, CORNER_SM)
-                                    .clickable { onSetManualBlockColor(block.id, c); colorPickerManualId = null },
-                            )
-                        }
-                    }
+                    HighlighterColorPicker(
+                        color = block.color,
+                        onColorChange = { color ->
+                            onSetManualBlockColor(block.id, color)
+                            colorPickerManualId = null
+                        },
+                        customColors = highlighterActions.customColors,
+                        onSaveCustomColor = highlighterActions.onSaveCustomColor,
+                        onDeleteCustomColor = highlighterActions.onDeleteCustomColor,
+                        paletteColumns = highlighterActions.paletteColumns,
+                        onPaletteColumnsChange = highlighterActions.onPaletteColumnsChange,
+                        pickerOpen = true,
+                        onPickerOpenChange = { open -> if (!open) colorPickerManualId = null },
+                        testTagPrefix = "manual-collapse-color-${block.id}",
+                        customColorEditorExpanded = highlighterActions.customColorEditorExpanded,
+                        onCustomColorEditorExpandedChange = highlighterActions.onCustomColorEditorExpandedChange,
+                    )
                 }
             }
             Row(
@@ -2338,11 +2368,19 @@ internal fun FilterPanel(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Bottom) {
                         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             AppText("Color", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                            Box(
-                                Modifier.size(20.dp)
-                                    .border(0.5.dp, if (seqColorPickerOpen) tc.tx else tc.br, CORNER_SM)
-                                    .background(newSeqColor, CORNER_SM)
-                                    .clickable { seqColorPickerOpen = !seqColorPickerOpen },
+                            HighlighterColorPicker(
+                                color = newSeqColor,
+                                onColorChange = onSetNewSeqColor,
+                                customColors = highlighterActions.customColors,
+                                onSaveCustomColor = highlighterActions.onSaveCustomColor,
+                                onDeleteCustomColor = highlighterActions.onDeleteCustomColor,
+                                paletteColumns = highlighterActions.paletteColumns,
+                                onPaletteColumnsChange = highlighterActions.onPaletteColumnsChange,
+                                pickerOpen = seqColorPickerOpen,
+                                onPickerOpenChange = { seqColorPickerOpen = it },
+                                testTagPrefix = "new-sequence-color",
+                                customColorEditorExpanded = highlighterActions.customColorEditorExpanded,
+                                onCustomColorEditorExpandedChange = highlighterActions.onCustomColorEditorExpandedChange,
                             )
                         }
                         AppButton("+ Add", onClick = {
@@ -2351,35 +2389,35 @@ internal fun FilterPanel(
                             seqColorPickerOpen = false
                         }, variant = ButtonVariant.Ghost, enabled = newSeqText.isNotBlank())
                     }
-                    if (seqColorPickerOpen) {
-                        FlowRow(
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            SEQ_COLORS.forEach { c ->
-                                ColorSwatch(c, c == newSeqColor) { onSetNewSeqColor(c); seqColorPickerOpen = false }
-                            }
-                        }
-                    }
                 }
             }
         }
         Divider()
 
         // ── Crashes & ANRs ────────────────────────────────────────
-        // Same row-limit/collapse shape as Highlighters — always-on detection, not a user-defined
-        // list, so there's nothing to add/remove here, only to browse and jump from.
-        // Header badge and the category dropdown's per-option counts (issueCategoryOptions below)
+        // The category dropdown's per-option counts (issueCategoryOptions below)
         // both deliberately show raw occurrence counts, not group counts: issueSitesForCategory's
         // ALL de-dupe is already per *line* (see its doc comment), so mixing in a second, signature
         // based de-dupe here would make the same number mean two different things depending on
         // category. "38 issues" also matches what the minimap marks (every occurrence), whereas the
         // number of rows actually rendered below (one per signature) is visible directly from the
-        // rows themselves plus each group's own ×N badge.
+        // rows themselves plus each group's own ×N badge. Device events appear only when their
+        // dedicated category is selected, and only that selected category contributes their count.
+        val showingDeviceEventsCategory = fpState.crashCategory == IssueCategorySelection.DeviceEvents
+        val eventCount = captureDeviceEvents?.summary?.disconnectCount ?: 0
+        val shouldRenderDeviceEventRows = showingDeviceEventsCategory
+        val hasDeviceEventRows = shouldRenderDeviceEventRows && captureDeviceEvents != null && captureDeviceEventsState != null
+        val issueHeaderCount = if (showingDeviceEventsCategory) eventCount else crashSites.size
         SectionHeader(
             "Issues",
-            trailing = if (crashSites.isNotEmpty()) ({
-                AppText("${crashSites.size}", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            trailing = if (issueHeaderCount > 0) ({
+                AppText(
+                    "$issueHeaderCount",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    fontFamily = UI,
+                    modifier = Modifier.testTag("issues-header-count"),
+                )
             }) else null,
             expanded = fpState.crashExpanded,
             onToggle = {
@@ -2388,8 +2426,8 @@ internal fun FilterPanel(
             },
         )
         if (fpState.crashExpanded) {
-            val issueCategoryOptions = remember(allCrashSites, customIssueSites, customIssueRules) {
-                issueCategoryOptions(allCrashSites, customIssueSites, customIssueRules)
+            val issueCategoryOptions = remember(allCrashSites, customIssueSites, customIssueRules, eventCount) {
+                issueCategoryOptions(allCrashSites, customIssueSites, customIssueRules, eventCount)
             }
             LaunchedEffect(issueCategoryOptions, fpState.crashCategory) {
                 if (issueCategoryOptions.none { it.selection == fpState.crashCategory }) {
@@ -2407,7 +2445,16 @@ internal fun FilterPanel(
                     },
                 )
             }
-            Row(
+            if (showingDeviceEventsCategory) {
+                AppText(
+                    "Events detected by Indagium during capture",
+                    color = tc.ts,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                )
+            }
+            if (!showingDeviceEventsCategory) Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -2449,17 +2496,27 @@ internal fun FilterPanel(
             // carrying stale ids from a now-unrelated group list.
             var expandedGroupIds by remember(tab.id, fpState.crashCategory) { mutableStateOf(emptySet<String>()) }
             if (crashGroups.isEmpty()) {
-                Column(
-                    Modifier.fillMaxWidth().padding(vertical = 16.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
+                if (!hasDeviceEventRows && !showingDeviceEventsCategory) {
+                    Column(
+                        Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
+                        AppText(
+                            crashListEmptyText(tab.analysis, tab.logData.lastOrNull()?.id, live = tab.tailing),
+                            color = tc.td,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                        )
+                    }
+                }
+                if (showingDeviceEventsCategory && !hasDeviceEventRows) {
                     AppText(
-                        crashListEmptyText(tab.analysis, tab.logData.lastOrNull()?.id, live = tab.tailing),
-                        color = tc.td,
+                        "No device events detected during this capture.",
+                        color = tc.ts,
                         fontSize = 10.sp,
-                        maxLines = 2,
+                        modifier = Modifier.padding(10.dp),
                     )
                 }
             } else {
@@ -2487,6 +2544,17 @@ internal fun FilterPanel(
                             onRetrace = onRetraceIssue,
                         )
                     }
+                }
+            }
+            if (shouldRenderDeviceEventRows && captureDeviceEvents != null && captureDeviceEventsState != null) {
+                val eventRowsHeight = minOf(captureDeviceEvents.intervals.size.coerceAtLeast(1), filterListRows.coerceAtLeast(1)) * 96
+                BoundedScrollBoxDp(eventRowsHeight) {
+                    CaptureDeviceEventsIssueRows(
+                        state = captureDeviceEventsState,
+                        tab = tab,
+                        events = captureDeviceEvents,
+                        onReturnFocus = onCaptureDeviceEventReturnFocus,
+                    )
                 }
             }
         }
@@ -3415,11 +3483,13 @@ private fun issueCategoryOptions(
     crashSites: List<CrashSite>,
     customSites: List<CustomIssueSite>,
     rules: List<CustomIssueRule>,
+    deviceEventCount: Int,
 ): List<IssueCategoryOption> = buildList {
     CrashCategory.entries.forEach { category ->
         val selection = IssueCategorySelection.BuiltIn(category)
         add(IssueCategoryOption(selection, category.label(), issueSitesForCategory(crashSites, customSites, selection).size))
     }
+    add(IssueCategoryOption(IssueCategorySelection.DeviceEvents, "Device events", deviceEventCount))
     rules.filter { it.enabled }.forEach { rule ->
         val selection = IssueCategorySelection.Custom(rule.id)
         add(IssueCategoryOption(selection, rule.name, issueSitesForCategory(crashSites, customSites, selection).size))
@@ -3451,7 +3521,8 @@ private fun IssueCategoryDropdown(
             modifier = Modifier.fillMaxWidth().height(26.dp)
                 .clip(CORNER_SM)
                 .background(tc.p2, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM),
+                .border(1.dp, tc.br, CORNER_SM)
+                .testTag("issue-category-dropdown-trigger"),
             onClick = {
                 if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
             },
@@ -3486,7 +3557,8 @@ private fun IssueCategoryDropdown(
                     options.forEach { option ->
                         val active = option.selection == category
                         HoverBox(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
+                                .then(if (option.selection == IssueCategorySelection.DeviceEvents) Modifier.testTag("issue-category-device-events") else Modifier),
                             baseBg = if (active) tc.abg else Color.Transparent,
                             onClick = { open = false; onSelect(option.selection) },
                         ) {
@@ -3501,7 +3573,16 @@ private fun IssueCategoryDropdown(
                                     fontSize = 11.sp,
                                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                 )
-                                AppText("${option.count}", color = if (active) tc.ac else tc.td, fontSize = 10.sp)
+                                AppText(
+                                    "${option.count}",
+                                    color = if (active) tc.ac else tc.td,
+                                    fontSize = 10.sp,
+                                    modifier = if (option.selection == IssueCategorySelection.DeviceEvents) {
+                                        Modifier.testTag("issue-category-device-events-count")
+                                    } else {
+                                        Modifier
+                                    },
+                                )
                             }
                         }
                     }

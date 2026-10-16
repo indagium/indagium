@@ -131,5 +131,38 @@ internal fun annotationClipboardTransferable(
             maskWordForCopy(markdown(AnnotationLogBlockStyle.INDENTED), settings),
         )
         AnnotationCopyFormat.HTML -> StringSelection(html)
+        AnnotationCopyFormat.TEAMS -> HtmlTransferable(
+            html = html,
+            plainText = teamsAnnotationFallback(tab, settings, lineContext),
+        )
     }
+}
+
+private fun teamsAnnotationFallback(
+    tab: LogTab,
+    settings: AppSettings,
+    lineContext: Lazy<LogLinePresentationContext>,
+): String {
+    val plainSettings = settings.copy(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED)
+    val markdown = buildMd(tab, plainSettings, lineContext)
+    var imageOrdinal = 0
+    return markdown.lineSequence().joinToString("\n") { line ->
+        when {
+            line.trim() == "[screenshot]" -> {
+                imageOrdinal += 1
+                val image = tab.annotations.blocks.filterIsInstance<com.indagium.model.AnnBlock.Image>().getOrNull(imageOrdinal - 1)
+                val fileName = image?.let {
+                    com.indagium.utils.annotationImageFileName(imageOrdinal, it.format, tab.annotations.frameStamp)
+                }
+                "[Image${image?.caption?.takeIf(String::isNotBlank)?.let { ": $it"}.orEmpty()} — export ${fileName ?: "frame image"} from Notes]"
+            }
+            Regex("^!\\[([^]]*)]\\((diagram-[^)]+\\.png)\\)$").matchEntire(line) != null -> {
+                val match = Regex("^!\\[([^]]*)]\\((diagram-[^)]+\\.png)\\)$").matchEntire(line)!!
+                val caption = match.groupValues[1]
+                val fileName = match.groupValues[2]
+                "[Sequence diagram${caption.takeIf(String::isNotBlank)?.let { ": $it"}.orEmpty()} — export $fileName from Notes]"
+            }
+            else -> line
+        }
+    }.let { maskWordForCopy(it, settings) }
 }

@@ -284,6 +284,12 @@ Click a tag to include it; there is a separate exclude list. Indagium also group
 prefix, so you can include or exclude `com.example.network.*` in one action. The panel shows the most
 frequent tags first; the count is configurable in Settings.
 
+In either Tags search dropdown (the sidebar or filter bar), hover a tag or package result and click
+**pid** to choose its processes. A package lists processes that logged any tag under that package
+prefix. **Add pid filter** shows every log line from the selected PIDs, including other tags.
+Package picks use the current PIDs; choose an individual tag to use **Keep following if the app
+restarts**.
+
 ### Keyword and regex
 
 The panel has two modes:
@@ -380,6 +386,10 @@ Define a **start** pattern and optionally an **end** pattern. Every occurrence o
 group; it closes at the matching end pattern, or at the next start of any sequence if no end matches.
 Each sequence has a colour and a **priority** — when two sequences could claim the same line, the
 lower priority number wins.
+
+The colour swatches for new and existing sequences use the same preset palette and saved custom
+colours as highlighters. Existing sequence colours are preserved, and automatic colour assignment
+continues to choose from the usual sequence colours.
 
 Sequences nest one level deep, so a "network request" sequence containing a "retry" sequence renders
 as a group inside a group.
@@ -558,7 +568,7 @@ Beyond blocks, a note has:
 
 | Action | Result |
 |---|---|
-| **Copy** (`⌘C` / `Ctrl+C`) | Markdown on the clipboard |
+| **Copy** (`⌘C` / `Ctrl+C`) | Copies using the selected default format; its menu offers a one-time format choice |
 | **Copy rich preview** | HTML with inline images — paste into a rich-text ticket field |
 | **Save** (`⌘S` / `Ctrl+S`) | Writes `<logname>_analysis.md` plus a `.ann` sidecar |
 | **Open Note** (`⌘O` / `Ctrl+O`) | Reopens a saved note, restoring every block exactly |
@@ -567,16 +577,28 @@ Beyond blocks, a note has:
 The `.ann` sidecar is what makes a saved note fully reversible — it preserves block structure, image
 bytes, and log references that plain Markdown cannot carry. Keep the two files together.
 
-**Copy formats and masking.** **Copy** uses the selected default format; its menu offers Jira Cloud,
-Jira wiki, Markdown, or HTML. **Copy rich preview** copies HTML with inline images so one paste can
-reproduce the note and its pictures in a rich-text editor. Ordered text-replacement rules in Settings
+**Copy formats and masking.** **Copy** uses the selected default format; its menu offers Microsoft
+Teams, Jira Cloud, Jira wiki, Markdown, or HTML. Teams copy preserves formatted notes and log code
+blocks, with a plain-text fallback. Images and diagrams are represented by captions and export
+filenames; use **Export frames** to attach those files separately. Choosing a format for one copy
+does not change the default selected in the **Copy default** dropdown under Settings → Export &
+annotations. **Copy rich preview** copies HTML with inline
+images so one paste can reproduce the note and its pictures in a rich-text editor. Ordered
+text-replacement rules in Settings
 → Export & annotations apply to copied notes (including rich preview), so you can mask identifiers
 before sharing. The rules affect copied output; they do not rewrite the stored note. The optional
 block-numbering setting is reflected in the rendered note and its copied/exported representation.
 `Ctrl+Enter` adds a text block below the selected block, `Alt+↑` / `Alt+↓` reorders blocks, and
 `⌘C` / `Ctrl+C` copies the annotation in its chosen format.
 
+**New** starts a fresh notes document and restores **From** using the current log source and your
+configured prefix label. It clears the previous analysis content and selects a fresh save filename;
+the previously saved document remains available through Open Note.
+
 ### Sequence-diagram workspaces
+
+The [sequence-diagram walkthrough page](https://indagium.com/sequence-diagrams/) presents the
+workflow with a 20-second video adapted from the guide animation below.
 
 A sequence diagram is a dedicated, closable tab rather than a modal dialog. Create one from a
 non-empty row selection to use that inclusive range, or start from the current filtered view. Its
@@ -1220,14 +1242,90 @@ display. Log capture remains available, and the Capture screen reports active ca
    attaches its video using the saved timing anchor. The log and screen video are ready to investigate
    together.
 
+### Reboots and temporary disconnects
+
+Capture remains active when the original device becomes unavailable. The capture strip shows
+**Waiting for device**, and Indagium retries logcat and screen recording until the device returns or
+you press Stop. Disk limits and storage failures still end capture. Recovery follows the selected
+ADB serial. If wireless debugging returns under a different serial or address, restore the original
+connection or start a new capture for that address. Capture keeps waiting rather than guessing a
+replacement from its model or name. Existing session metadata does not carry a verified hardware
+identity for automatically following changed endpoints.
+
+At the bottom of Settings → Capture, **Device availability** offers **Write device availability
+markers to the log** and **Show unavailable device periods in playback and exported video**, both
+enabled by default for new captures. The marker wording is fixed. Transition rows describe the loss and return
+without adding a row for every retry. Playback and exported video retain the full offline duration
+with a **Device unavailable** card. Disabling either presentation option does not discard the timing
+metadata. A reboot is confirmed only when boot identity is available before and after the outage.
+
+After a disconnect, **Device events** in the capture bar shows the recorded events. Open it to see
+each interval's elapsed time, downtime, and reboot evidence, or select its matching log transition.
+**Issues → Device events** in the existing category dropdown provides the same evidence when
+reviewing a saved archive. Device events appear only in that category, with a short tip identifying
+them as events detected by Indagium during capture. **All** and the Android issue categories do not
+include device-event rows. Selecting an event preserves your
+filters and does not automatically open the Unfiltered panel; if a filter hides the marker, the
+event explains how to find it. To search manually, use
+the tag **IndagiumCapture** and the message **reboot=true** for confirmed reboots; **Device
+unavailable** and **Device reconnected** locate the other transitions. If log markers were disabled,
+the event list still retains timing and reboot evidence, but a marker-row jump is unavailable.
+
+Reconnection continues the same capture with the recording options chosen when it started.
+At Start, Indagium reads the device's actual logging buffer sizes, global log level, and per-tag
+overrides. It restores the saved values after a verified reboot or emulator restart when Android
+permits the changes. Log capture resumes immediately; settings restoration waits for Android boot
+completion and verifies the values through a bounded settling period, including the emulator’s own
+boot-time buffer reset. Successful logging changes made through Indagium during the capture update
+the values to restore. An ordinary connection loss does not overwrite device logging settings.
+If the startup values cannot be read or a restore is denied, capture continues and reports the
+problem in diagnostics; Indagium does not automatically restart ADB as root. **Refresh** in the
+Device logging panel reads back the device's current values. The panel also refreshes after
+restoration completes. **Unknown** means a value could not be read; **Default (device)** means
+Android confirmed that no global log level is set.
+
+When **Include earlier device logs** is enabled, recovery avoids appending replayed buffer rows
+again. A confirmed new boot starts a new device-log cursor so genuine early-boot messages remain
+available, even when their text also appeared before the reboot.
+
+For AI tests, call `wait_for_device_ready` after an expected reboot. It waits for authorized ADB,
+a responsive shell, and completed Android boot. Its default allowance is two minutes, with a maximum
+of ten minutes, but the current step's timeout and cancellation still apply. Configure reboot steps
+with enough time for the device to restart. The lane's capture continues recovering while it waits.
+
+### Cut snapshots after Stop or reopening
+
+Use **Save snapshot** on a stopped capture to export the same range types as during recording.
+A reopened capture directory or ZIP opens for analysis without recording controls; to cut a new
+archive from it, choose **Export → Export capture range…** above the log. Relative ranges use the
+current video playhead; when there is no playhead, they use session end. **Around playhead** starts
+with five minutes before and five minutes
+after. You can also export from session start through the playhead plus an offset, or enter exact
+start/end times. Ranges are bounded by the capture duration.
+
+Closing the export popup with its close button, Escape, or a click outside it leaves an active
+export running. Progress moves to the capture or archive status area, and the editor can be reopened.
+Only **Cancel export** cancels the export. **Save + open** still opens the completed ZIP if you close
+the popup while it is saving. Cutting a range never rewrites the source archive.
+
+**Since last save** starts at the previous successful export's endpoint. On a stopped capture,
+its end follows the video playhead, so move the playhead beyond that saved endpoint to select new
+content. The popup explains when the playhead is too early or there is nothing new to save. An
+included video tail can still be saved when its earlier export lagged the logs; log and video save
+boundaries are tracked separately. To cut an earlier part again, choose **Around playhead** or
+**Start and end**. Reopening a ZIP stores later save boundaries locally; the original ZIP is not
+rewritten. Cancelled or failed exports do not advance the boundary, and exporting an earlier
+interval never moves it backward.
+
 ### What is saved
 
-The portable capture ZIP uses archive version 3 and a flat layout: `capture.indagium.json`,
+The portable capture ZIP uses archive version 4: `capture.indagium.json`,
 `logcat.log`, optional `screen.mp4` (or `screen.mkv` when needed to preserve audio), and optional
 marker/note data and screenshots, plus a small `captured_with_indagium.txt` file. The descriptor
-contains checksums, capture/timing metadata, and one synchronization anchor; the archive does not
-contain a per-row timing map. When reopened, that anchor links the log and video for synchronized
-review. The retained working session directory has a separate layout with its raw log, growing video,
+contains checksums, capture/timing metadata, a synchronization anchor, and availability intervals.
+A checksummed timeline asset preserves each log row's elapsed time, including across reboots and
+further snapshot cuts. Archives from versions 1–3 still open using their saved mappings or estimated
+anchor timing. The retained working session directory has a separate layout with its raw log, growing video,
 session metadata and capture index; it is not the portable ZIP layout.
 
 By default video recording is on and the log stream begins at capture start, so earlier Android

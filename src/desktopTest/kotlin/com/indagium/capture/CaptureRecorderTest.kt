@@ -126,6 +126,930 @@ class CaptureRecorderTest {
     }
 
     @Test
+    fun healthyLogcatEofRetriesWithTimestampCursorWithoutRecordingDeviceDowntime() {
+        val root = Files.createTempDirectory("capture-logcat-reconnect-test").toFile()
+        val runner = FakeCaptureRunner()
+        val disconnected = StreamingFakeProcess()
+        val reconnected = StreamingFakeProcess()
+        runner.enqueue(disconnected)
+        runner.enqueue(reconnected)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            val boundary = "01-02 03:04:05.006  100  101 I Tag: first overlap\n" +
+                "01-02 03:04:06.007  100  101 I Tag: second overlap\n"
+            disconnected.emit(boundary)
+            awaitCapture { recorder.snapshot.value.indexedRows == 2 }
+            disconnected.finish()
+            awaitCapture { runner.specs.size >= 2 }
+            reconnected.emit(boundary + "01-02 03:04:07.008  100  101 I Tag: after reconnect\n")
+            awaitCapture { session.logFile.readText().contains("after reconnect") }
+
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+            assertEquals(1, session.logFile.readText().windowed("first overlap".length).count { it == "first overlap" })
+            assertEquals(1, session.logFile.readText().windowed("second overlap".length).count { it == "second overlap" })
+            assertEquals(1, session.logFile.readText().windowed("after reconnect".length).count { it == "after reconnect" })
+            assertTrue(recorder.snapshot.value.session!!.availabilityIntervals.isEmpty())
+            assertTrue(runner.specs[1].command.containsAll(listOf("-T", "01-02 03:04:06.007")))
+            assertFalse(runner.runSpecs.any(::isDeviceLoggingRestoreCommand), "a healthy same-boot EOF must not reapply device settings")
+            assertTrue(session.logFile.readText().contains("after reconnect"))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun yearWrappedReconnectDropsOldDecemberRowsAndKeepsNewJanuaryRows() {
+        val root = Files.createTempDirectory("capture-year-wrap-reconnect-test").toFile()
+        val runner = FakeCaptureRunner()
+        val disconnected = StreamingFakeProcess()
+        val reconnected = StreamingFakeProcess()
+        runner.enqueue(disconnected)
+        runner.enqueue(reconnected)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val december = "12-31 23:59:59.900  100  101 I Tag: previous year row\n"
+        val januaryBoundary = "01-01 00:00:00.050  100  101 I Tag: boundary row\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            disconnected.emit(december + januaryBoundary)
+            awaitCapture { recorder.snapshot.value.indexedRows == 2 }
+            disconnected.finish()
+            awaitCapture { runner.specs.size >= 2 }
+            reconnected.emit(december + januaryBoundary +
+                "01-01 00:00:00.051  100  101 I Tag: after year wrap\n")
+            awaitCapture { session.logFile.readText().contains("after year wrap") }
+
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("previous year row".length).count { it == "previous year row" })
+            assertEquals(1, text.windowed("boundary row".length).count { it == "boundary row" })
+            assertEquals(1, text.windowed("after year wrap".length).count { it == "after year wrap" })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun rebootReconnectKeepsEarlyBootBufferAndConfirmsIdentityChange() {
+        val root = Files.createTempDirectory("capture-reboot-buffer-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            initial.emit("01-02 03:04:05.006  100  101 I Tag: before reboot\n")
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "replacement-boot-id"
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+            returned.emit("01-02 03:04:05.006  100  101 I Tag: before reboot\n" +
+                "01-02 03:04:06.007  100  101 I Tag: early boot buffered\n")
+            awaitCapture { session.logFile.readText().contains("early boot buffered") }
+
+            val interval = recorder.snapshot.value.session!!.availabilityIntervals.single()
+            assertNotNull(interval.endElapsedMs)
+            assertEquals(true, interval.rebootConfirmed)
+            assertEquals(2, session.logFile.readText().windowed("before reboot".length).count { it == "before reboot" })
+            assertTrue(session.logFile.readText().contains("early boot buffered"))
+            val resumedCommand = runner.specs[1].command
+            assertFalse(resumedCommand.contains("-T"), "a new boot must retain its logcat ring buffer")
+            awaitCapture { runner.runSpecs.count(::isDeviceLoggingRestoreCommand) >= 4 }
+            assertEquals(2, runner.runSpecs.count { "-G" in it.command }, "each captured buffer size is restored")
+            assertTrue(runner.runSpecs.any { it.command.any { argument -> "setprop 'log.tag' ''" in argument } })
+            assertTrue(runner.runSpecs.any { it.command.any { argument -> "setprop 'log.tag.FOO' 'D'" in argument } })
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun bootRecoveryWaitsForBootAndRepairsLateEmulatorBufferResetWhileStreamingContinues() {
+        val root = Files.createTempDirectory("capture-emulator-buffer-bootstrap-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val savedSizes = linkedMapOf(
+            "main" to FOUR_MIB,
+            "radio" to FOUR_MIB,
+            "events" to FOUR_MIB,
+            "system" to FOUR_MIB,
+            "crash" to FOUR_MIB,
+            "stats" to FOUR_MIB,
+            "security" to FOUR_MIB,
+            "kernel" to FOUR_MIB,
+        )
+        runner.setFakeBufferSizes(savedSizes)
+        runner.globalLogTagValue = "D\n"
+        runner.getpropListing = "[log.tag.FOO]: [D]\n"
+        runner.bootCompletedValue = "0"
+        var resetAtNanos = 0L
+        var resetApplied = false
+        val defaultSizedBuffers = mapOf(
+            "main" to TWO_MIB,
+            "system" to TWO_MIB,
+            "crash" to TWO_MIB,
+            "kernel" to TWO_MIB,
+        )
+        runner.runHandler = { spec ->
+            val args = spec.command
+            if (args.contains("-G") && args.getOrNull(args.indexOf("-b") + 1) == "kernel" && resetAtNanos == 0L) {
+                // Model the emulator host callback after boot-complete has already been reported.
+                resetAtNanos = System.nanoTime() + 80_000_000L
+            }
+            if (args.takeLast(4) == listOf("logcat", "-b", "all", "-g")) {
+                if (!resetApplied && resetAtNanos != 0L && System.nanoTime() >= resetAtNanos) {
+                    runner.setFakeBufferSizes(defaultSizedBuffers)
+                    resetApplied = true
+                }
+                CaptureCommandResult(0, runner.bufferListing.toByteArray(), byteArrayOf())
+            } else null
+        }
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            reconnectBaseDelayMs = 1,
+            loggingRestoreStabilityWindowMs = 300,
+            loggingRestoreSampleIntervalMs = 25,
+            loggingRestoreBootWaitMs = 2_000,
+        )
+        val liveRow = "01-02 03:04:06.007  100  101 I Tag: log while boot waits\n"
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                DeviceLoggingConfiguration(savedSizes, "D", mapOf("FOO" to "D")),
+            )
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "emulator-bootstrap-boot"
+            runner.setFakeBufferSizes(defaultSizedBuffers)
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+
+            returned.emit(liveRow)
+            awaitCapture { session.logFile.readText().contains("log while boot waits") }
+            Thread.sleep(80)
+            assertFalse(runner.runSpecs.any { "-G" in it.command }, "buffer restoration must wait for Android boot completion")
+
+            runner.bootCompletedValue = "1"
+            awaitCapture {
+                recorder.snapshot.value.diagnostics.any { it == "Device logging settings were restored and verified after restart." }
+            }
+
+            val finalSizes = parseLogcatBufferSizes(runner.bufferListing).associate { it.buffer to it.sizeBytes }
+            assertTrue(savedSizes.all { (buffer, size) -> finalSizes[buffer] == size }, "saved buffer sizes should survive the emulator's later 2 MiB initialization")
+            assertTrue(resetApplied, "the fake emulator should perform its delayed post-boot reset")
+            assertTrue(runner.runSpecs.count { "-G" in it.command } >= savedSizes.size + defaultSizedBuffers.size)
+            assertTrue(session.logFile.readText().contains("log while boot waits"), "recovery must keep streaming while boot initialization settles")
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun restartRestoreUsesLatestConfigurationAndStopCancelsBootWait() {
+        val root = Files.createTempDirectory("capture-restore-latest-config-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        runner.bootCompletedValue = "0"
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            reconnectBaseDelayMs = 1,
+            loggingRestoreStabilityWindowMs = 100,
+            loggingRestoreSampleIntervalMs = 20,
+            loggingRestoreBootWaitMs = 2_000,
+        )
+        val latestSizes = mapOf("main" to TWO_MIB)
+        try {
+            recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                DeviceLoggingConfiguration(mapOf("main" to ONE_MIB), "", emptyMap()),
+            )
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "latest-config-recovery-boot"
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+            awaitCapture { runner.runSpecs.any { it.command.takeLast(3) == listOf("shell", "getprop", "sys.boot_completed") } }
+
+            recorder.updateDeviceLoggingConfiguration(
+                DEVICE.serial,
+                DeviceLoggingConfiguration(latestSizes, "D", mapOf("FOO" to "I")),
+            )
+            runner.bootCompletedValue = "1"
+            awaitCapture { recorder.snapshot.value.diagnostics.any { it == "Device logging settings were restored and verified after restart." } }
+
+            assertTrue(runner.runSpecs.any { it.command.takeLast(2) == listOf("-G", TWO_MIB.toString()) })
+            assertFalse(runner.runSpecs.any { it.command.takeLast(2) == listOf("-G", ONE_MIB.toString()) }, "the pre-wait session snapshot must not overwrite a newer saved size")
+            assertEquals("D\n", runner.globalLogTagValue)
+            assertTrue(runner.getpropListing.contains("[log.tag.FOO]: [I]"))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stopCancelsRecoveryWhileWaitingForBootCompletion() {
+        val root = Files.createTempDirectory("capture-restore-boot-wait-stop-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        runner.bootCompletedValue = "0"
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            reconnectBaseDelayMs = 1,
+            loggingRestoreStabilityWindowMs = 100,
+            loggingRestoreSampleIntervalMs = 20,
+            loggingRestoreBootWaitMs = 2_000,
+        )
+        try {
+            recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "stop-during-boot-wait"
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+            awaitCapture { runner.runSpecs.any { it.command.takeLast(3) == listOf("shell", "getprop", "sys.boot_completed") } }
+
+            val stopped = requireNotNull(recorder.stop())
+            assertEquals(CaptureStatus.STOPPED, stopped.status)
+            assertFalse(runner.runSpecs.any { "-G" in it.command }, "Stop must cancel recovery before it resizes any buffers")
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sameIdentityUptimeRewindRestoresSettingsAndKeepsRepeatedRowsBeyondThe256LineOverlap() {
+        val root = Files.createTempDirectory("capture-quickboot-overlap-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val repeated = "01-02 03:04:05.006  100  101 I Tag: same timestamp repeated\n"
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            initial.emit(repeated.repeat(300))
+            awaitCapture { recorder.snapshot.value.indexedRows == 300 }
+            runner.bufferedLogcatOutput = repeated.repeat(344)
+            runner.bootUptimeMs = 1_000L // Same boot id, but corroborated QuickBoot uptime rewind.
+            initial.finish()
+            awaitCapture {
+                runner.specs.size >= 2 &&
+                    session.logFile.readText().windowed("same timestamp repeated".length)
+                        .count { it == "same timestamp repeated" } == 344
+            }
+            // The replacement stream replays the inspected ring, then one genuinely new
+            // identical event. Ring-sequence filtering must preserve that one.
+            Thread.sleep(40)
+            returned.emit(repeated.repeat(345))
+            awaitCapture {
+                session.logFile.readText().windowed("same timestamp repeated".length)
+                    .count { it == "same timestamp repeated" } == 345
+            }
+            awaitCapture { runner.runSpecs.count(::isDeviceLoggingRestoreCommand) >= 4 }
+
+            val interval = recorder.snapshot.value.session!!.availabilityIntervals.single()
+            assertEquals(false, interval.rebootConfirmed, "same boot id is not reported as confirmed reboot")
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+            assertFalse(runner.specs[1].command.contains("-T"), "a same-ID uptime rewind must not reuse its old timestamp cursor")
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sameIdentityWallClockRollbackDetectsQuickBootWhenUptimeContinues() {
+        val root = Files.createTempDirectory("capture-quickboot-wall-clock-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        var monotonicMs = 1_000L
+        var deviceWallClock = "01-02T03:04:05"
+        runner.runHandler = { spec ->
+            when {
+                spec.command.takeLast(4) == listOf("shell", "date", "-u", "+%m-%dT%H:%M:%S") ->
+                    CaptureCommandResult(0, deviceWallClock.toByteArray(), byteArrayOf())
+                spec.command.takeLast(3) == listOf("shell", "cat", "/proc/uptime") -> {
+                    val uptimeSeconds = 10_000.0 + (monotonicMs - 1_000L) / 1_000.0
+                    CaptureCommandResult(0, "$uptimeSeconds 0.00\n".toByteArray(), byteArrayOf())
+                }
+                else -> null
+            }
+        }
+        // Uptime advances in lockstep with the monotonic clock, proving the restart is found from
+        // the device wall clock alone.
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            clock = CaptureClock { monotonicMs },
+            reconnectBaseDelayMs = 1,
+        )
+        val startup = "01-02 03:04:05.006  297  297 I vold: Vold 3.0 (the awakening) firing up\n"
+        val early = "01-02 03:04:05.007  100  101 I Tag: early boot buffered\n"
+        val live = "01-02 03:04:05.008  100  101 I Tag: after QuickBoot\n"
+        try {
+            val session = recorder.start(
+                DEVICE,
+                testSettings().copy(includeBufferedLogs = true),
+                CaptureTools(ADB, null, runner),
+            )
+            initial.emit(startup)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bufferedLogcatOutput = startup + early
+            monotonicMs += 10_000L
+            deviceWallClock = "01-02T03:00:00" // Same boot id and advancing uptime, restored clock is older.
+            initial.finish()
+            awaitCapture { runner.specs.size >= 2 && session.logFile.readText().contains("early boot buffered") }
+
+            assertFalse(runner.specs[1].command.contains("-T"), "a wall-clock rollback must avoid the stale cursor")
+            returned.emit(startup + early + live)
+            awaitCapture { session.logFile.readText().contains("after QuickBoot") }
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("firing up".length).count { it == "firing up" })
+            assertEquals(1, text.windowed("early boot buffered".length).count { it == "early boot buffered" })
+            assertEquals(1, text.windowed("after QuickBoot".length).count { it == "after QuickBoot" })
+            assertEquals(false, recorder.snapshot.value.session!!.availabilityIntervals.single().rebootConfirmed)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun quickbootGroupedBufferReplayDeduplicatesRowsBeyondTheRecentSuffixAndKeepsNewOccurrences() {
+        val root = Files.createTempDirectory("capture-quickboot-grouped-buffer-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val repeat = "01-02 03:04:11.000  100  101 I Main: same timestamp repeated\n"
+        fun row(millisAfterStart: Int, pid: Int, tag: String): String {
+            val second = 10 + millisAfterStart / 1_000
+            val millis = (millisAfterStart % 1_000).toString().padStart(3, '0')
+            val secondText = second.toString().padStart(2, '0')
+            return "01-02 03:04:$secondText.$millis  $pid  101 I $tag: captured row $millisAfterStart\n"
+        }
+        val systemRows = (0 until 300).map { row(it * 3, 110, "System") }
+        val crashRows = (0 until 300).map { row(it * 3 + 1, 120, "Crash") }
+        val mainRows = (0 until 300).map { row(it * 3 + 2, 130, "Main") }
+        val liveSnapshot = buildString {
+            for (index in 0 until 300) {
+                append(systemRows[index])
+                append(crashRows[index])
+                append(mainRows[index])
+            }
+            append(repeat.repeat(300))
+        }
+        val bufferedSnapshot = buildString {
+            append("--------- beginning of system\n")
+            append(systemRows.joinToString(separator = ""))
+            append("--------- beginning of crash\n")
+            append(crashRows.joinToString(separator = ""))
+            append("--------- beginning of main\n")
+            append(mainRows.joinToString(separator = ""))
+            append(repeat.repeat(344))
+            append("01-02 03:04:11.001  130  131 I Main: buffered after QuickBoot\n")
+        }
+        try {
+            val session = recorder.start(
+                DEVICE,
+                testSettings().copy(includeBufferedLogs = true),
+                CaptureTools(ADB, null, runner),
+            )
+            initial.emit(liveSnapshot)
+            assertFalse(runner.specs.single().command.contains("-T"), "Include earlier logs starts with the saved buffer")
+            awaitCapture { recorder.snapshot.value.indexedRows == 1_200 }
+            runner.bufferedLogcatOutput = bufferedSnapshot
+            runner.bootUptimeMs = 1_000L
+            initial.finish()
+            awaitCapture {
+                runner.specs.size >= 2 &&
+                    session.logFile.readText().windowed("same timestamp repeated".length)
+                        .count { it == "same timestamp repeated" } == 344
+            }
+
+            // The replacement stream reports the same saved rows grouped in another order, then
+            // emits one truly new event whose raw row happens to match the prior repeated row.
+            val interleavedReplay = buildString {
+                append("--------- beginning of main\n")
+                append(mainRows.joinToString(separator = ""))
+                append(repeat.repeat(344))
+                append("--------- beginning of system\n")
+                append(systemRows.joinToString(separator = ""))
+                append("--------- beginning of crash\n")
+                append(crashRows.joinToString(separator = ""))
+                append("01-02 03:04:11.001  130  131 I Main: buffered after QuickBoot\n")
+                append(repeat)
+                append("01-02 03:04:11.002  130  132 I Main: live after QuickBoot\n")
+            }
+            returned.emit(interleavedReplay)
+            awaitCapture { session.logFile.readText().contains("live after QuickBoot") }
+
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("captured row 0".length).count { it == "captured row 0" })
+            assertEquals(1, text.windowed("captured row 897".length).count { it == "captured row 897" })
+            assertEquals(345, text.windowed("same timestamp repeated".length).count { it == "same timestamp repeated" })
+            assertEquals(1, text.windowed("buffered after QuickBoot".length).count { it == "buffered after QuickBoot" })
+            assertEquals(1, text.windowed("live after QuickBoot".length).count { it == "live after QuickBoot" })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun quickbootReplayOverflowScansOnlyDrainCandidatesAndCarriesOldQuotasIntoStreamReplay() {
+        val root = Files.createTempDirectory("capture-quickboot-overflow-scan-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        // Force FIFO eviction with a tiny history cap while keeping the production defaults
+        // unchanged; the file-scan fallback must recover old quiet-buffer rows from disk.
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            reconnectBaseDelayMs = 1,
+            replayHistoryByteLimitForTests = 128,
+        )
+        val quietRows = (0 until 5).map { index ->
+            "01-02 03:04:00.${index.toString().padStart(3, '0')}  297  297 I vold: quiet startup row $index\n"
+        }
+        val busyRows = (0 until 80).map { index ->
+            "01-02 03:04:01.${index.toString().padStart(3, '0')}  400  401 I Main: recent busy row $index\n"
+        }
+        val repeat = "01-02 03:04:02.000  400  401 I Main: repeated exact event\n"
+        val buffered = "01-02 03:04:02.001  400  402 I Main: buffered after QuickBoot\n"
+        val live = "01-02 03:04:02.002  400  403 I Main: live after QuickBoot\n"
+        val priorInterleaved = buildString {
+            for (index in busyRows.indices) {
+                if (index < quietRows.size) append(quietRows[index])
+                append(busyRows[index])
+            }
+            append(repeat.repeat(2))
+        }
+        val groupedDrain = buildString {
+            append("--------- beginning of system\n")
+            append(quietRows.joinToString(separator = ""))
+            append("--------- beginning of main\n")
+            append(busyRows.joinToString(separator = ""))
+            append(repeat.repeat(5))
+            append(buffered)
+        }
+        val groupedStreamReplay = buildString {
+            append("--------- beginning of main\n")
+            append(busyRows.joinToString(separator = ""))
+            append(repeat.repeat(6)) // five buffered occurrences plus one new identical event
+            append("--------- beginning of system\n")
+            append(quietRows.joinToString(separator = ""))
+            append(buffered)
+            append(live)
+        }
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings().copy(includeBufferedLogs = true),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            initial.emit(priorInterleaved)
+            awaitCapture { recorder.snapshot.value.indexedRows == quietRows.size + busyRows.size + 2 }
+            runner.bufferedLogcatOutput = groupedDrain
+            runner.bootUptimeMs = 1_000L
+            initial.finish()
+            awaitCapture {
+                runner.specs.size >= 2 &&
+                    session.logFile.readText().contains("buffered after QuickBoot")
+            }
+
+            returned.emit(groupedStreamReplay)
+            awaitCapture { session.logFile.readText().contains("live after QuickBoot") }
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("quiet startup row 0".length).count { it == "quiet startup row 0" })
+            assertEquals(1, text.windowed("quiet startup row 4".length).count { it == "quiet startup row 4" })
+            assertEquals(1, text.windowed("recent busy row 0".length).count { it == "recent busy row 0" })
+            assertEquals(1, text.windowed("recent busy row 79".length).count { it == "recent busy row 79" })
+            assertEquals(6, text.windowed("repeated exact event".length).count { it == "repeated exact event" })
+            assertEquals(1, text.windowed("buffered after QuickBoot".length).count { it == "buffered after QuickBoot" })
+            assertEquals(1, text.windowed("live after QuickBoot".length).count { it == "live after QuickBoot" })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun failedDeviceLoggingRestoreWarnsAndLeavesCaptureRunning() {
+        val root = Files.createTempDirectory("capture-logging-restore-denied-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        try {
+            recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            runner.failRestoreCommands = true
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "replacement-boot-id"
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+            awaitCapture {
+                recorder.snapshot.value.diagnostics.any { "Android denied permission" in it }
+            }
+
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+            assertEquals(CaptureStatus.RECORDING, recorder.snapshot.value.session?.status)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun failedCurrentOverrideReadWarnsEvenWhenSavedOverrideMapIsKnownEmpty() {
+        val root = Files.createTempDirectory("capture-empty-override-restore-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        try {
+            recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                DeviceLoggingConfiguration(bufferSizesBytes = emptyMap(), perTagOverrides = emptyMap()),
+            )
+            runner.runHandler = { spec ->
+                if (spec.command.takeLast(2) == listOf("shell", "getprop")) {
+                    CaptureCommandResult(1, byteArrayOf(), "getprop failed".toByteArray())
+                } else null
+            }
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "replacement-boot-id"
+            runner.adbState = "device"
+            awaitCapture { runner.specs.size >= 2 }
+            awaitCapture {
+                recorder.snapshot.value.diagnostics.any { "Could not read current per-tag overrides" in it }
+            }
+
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stopInterruptsAnInFlightLoggingRestoreBeforeItCanIssueMoreCommands() {
+        val root = Files.createTempDirectory("capture-logging-restore-stop-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val restoreEntered = CountDownLatch(1)
+        val commandInterrupted = AtomicBoolean(false)
+        val restoreCommandCount = AtomicInteger(0)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        try {
+            recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                testDeviceLoggingConfiguration(),
+            )
+            runner.runHandler = { spec ->
+                if (spec.command.any { "setprop" in it }) {
+                    restoreCommandCount.incrementAndGet()
+                    restoreEntered.countDown()
+                    try {
+                        CountDownLatch(1).await()
+                    } catch (failure: InterruptedException) {
+                        commandInterrupted.set(true)
+                        throw failure
+                    }
+                }
+                null
+            }
+            runner.adbState = "offline"
+            initial.finish()
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            runner.bootId = "replacement-boot-id"
+            runner.adbState = "device"
+            assertTrue(restoreEntered.await(5, TimeUnit.SECONDS), "the restore worker did not reach its bounded adb call")
+
+            val stopped = requireNotNull(recorder.stop())
+            Thread.sleep(40)
+            assertEquals(CaptureStatus.STOPPED, stopped.status)
+            assertTrue(commandInterrupted.get(), "Stop should interrupt the in-flight adb restore command")
+            assertEquals(1, restoreCommandCount.get(), "no restore commands may start after Stop")
+            assertFalse(stopped.interruptions.any { "could not be restored" in it })
+            assertFalse(recorder.snapshot.value.diagnostics.any { "could not be restored" in it })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun cappedReconnectDrainIndexesOnlyCompleteRowsAndResumesFromTheNewSafeCursor() {
+        val root = Files.createTempDirectory("capture-capped-drain-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val before = "01-02 03:04:05.006  100  101 I Tag: before rewind\n"
+        val early = "01-02 03:04:06.007  100  101 I Tag: complete buffered row\n"
+        val partial = "01-02 03:04:07.008  100  101 I Tag: incomplete partial row"
+        try {
+            val session = recorder.startWithDeviceLoggingConfiguration(
+                DEVICE,
+                testSettings(),
+                CaptureTools(ADB, null, runner),
+                DeviceLoggingConfiguration(bufferSizesBytes = mapOf("main" to 262_144L)),
+            )
+            initial.emit(before)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            val prefix = before + early + partial
+            runner.bufferedLogcatOutput = prefix + "x".repeat(32 * 1024 * 1024 - prefix.length)
+            runner.bootUptimeMs = 1_000L
+            initial.finish()
+            awaitCapture {
+                runner.specs.size >= 2 && session.logFile.readText().contains("complete buffered row")
+            }
+
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("before rewind".length).count { it == "before rewind" })
+            assertEquals(1, text.windowed("complete buffered row".length).count { it == "complete buffered row" })
+            assertFalse(text.contains("incomplete partial row"), "an unterminated bounded-output tail must not be indexed")
+            assertTrue(runner.specs[1].command.containsAll(listOf("-T", "01-02 03:04:06.007")), "the partial drain establishes a safe cursor from its complete new row")
+            assertTrue(runner.runSpecs.none { "-G" in it.command }, "a capped drain must never resize log buffers")
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun sameIdentityRewindRetriesFailedFirstDrainBeforeStartingTimestampFilteredLogcat() {
+        val root = Files.createTempDirectory("capture-rewind-drain-retry-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val drainAttempts = AtomicInteger(0)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val oldRow = "01-02 03:04:09.009  100  101 I Tag: before reset\n"
+        val earlyRow = "01-02 03:04:02.002  100  101 I Tag: early after reset\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            initial.emit(oldRow)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bootUptimeMs = 1_000L
+            runner.bufferedLogcatOutput = earlyRow
+            runner.runHandler = { spec ->
+                if (spec.command.contains("logcat") && spec.command.contains("-d") && drainAttempts.incrementAndGet() == 1) {
+                    CaptureCommandResult(1, byteArrayOf(), "temporary adb transport failure".toByteArray())
+                } else null
+            }
+            initial.finish()
+
+            awaitCapture {
+                drainAttempts.get() >= 2 && runner.specs.size >= 2 && session.logFile.readText().contains("early after reset")
+            }
+            returned.emit(earlyRow + "01-02 03:04:03.003  100  101 I Tag: after reset\n")
+            awaitCapture { session.logFile.readText().contains("after reset") }
+
+            assertFalse(runner.specs[1].command.contains("-T"), "the old future cursor must not be used after a same-ID rewind")
+            assertEquals(1, session.logFile.readText().windowed("early after reset".length).count { it == "early after reset" })
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun completeEmptyRingClearsTheOldCursorAndAcceptsLowerTimestampRows() {
+        val root = Files.createTempDirectory("capture-rewind-empty-ring-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val oldRow = "01-02 03:04:09.009  100  101 I Tag: before reset\n"
+        val newRow = "01-02 03:04:02.002  100  101 I Tag: first row in empty ring\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            initial.emit(oldRow)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bootUptimeMs = 1_000L
+            runner.bufferedLogcatOutput = ""
+            initial.finish()
+            awaitCapture { runner.specs.size >= 2 }
+            returned.emit(newRow)
+            awaitCapture { session.logFile.readText().contains("first row in empty ring") }
+
+            assertFalse(runner.specs[1].command.contains("-T"), "an inspected empty ring must clear the stale cursor")
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun completeReplayOnlyRingUsesItsKnownSequenceWithoutOldClockComparisons() {
+        val root = Files.createTempDirectory("capture-rewind-replay-only-ring-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val replay = "01-02 03:04:09.009  100  101 I Tag: captured before reset\n"
+        val newRow = "01-02 03:04:02.002  100  101 I Tag: lower timestamp after reset\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            initial.emit(replay)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bootUptimeMs = 1_000L
+            runner.bufferedLogcatOutput = replay
+            initial.finish()
+            awaitCapture { runner.specs.size >= 2 }
+            returned.emit(replay + newRow)
+            awaitCapture { session.logFile.readText().contains("lower timestamp after reset") }
+
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("captured before reset".length).count { it == "captured before reset" })
+            assertTrue(text.contains("lower timestamp after reset"))
+            assertFalse(runner.specs[1].command.contains("-T"))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun changedRingPrefixStillCapturesNewLowerTimestampRows() {
+        val root = Files.createTempDirectory("capture-rewind-ring-mismatch-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val before = "01-02 03:04:09.009  100  101 I Tag: before reset\n"
+        val inspected = "01-02 03:04:02.001  100  101 I Tag: inspected ring row\n"
+        val newFirst = "01-02 03:04:01.001  100  101 I Tag: changed ring first row\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            initial.emit(before)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bootUptimeMs = 1_000L
+            runner.bufferedLogcatOutput = inspected
+            initial.finish()
+            awaitCapture { runner.specs.size >= 2 && session.logFile.readText().contains("inspected ring row") }
+            returned.emit(newFirst + inspected)
+            awaitCapture { session.logFile.readText().contains("changed ring first row") }
+
+            assertTrue(session.logFile.readText().contains("changed ring first row"), "a replay mismatch must immediately stop suppression")
+            assertFalse(runner.specs[1].command.contains("-T"))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun evictedRingPrefixAlignsAtTheFirstInspectedSuffixRow() {
+        val root = Files.createTempDirectory("capture-rewind-ring-evicted-prefix-test").toFile()
+        val runner = FakeCaptureRunner()
+        val initial = StreamingFakeProcess()
+        val returned = StreamingFakeProcess()
+        runner.enqueue(initial)
+        runner.enqueue(returned)
+        val recorder = CaptureRecorder(root, runner, reconnectBaseDelayMs = 1)
+        val before = "01-02 03:04:09.009  100  101 I Tag: before reset\n"
+        val first = "01-02 03:04:02.001  100  101 I Tag: inspected first row\n"
+        val second = "01-02 03:04:02.002  100  101 I Tag: inspected second row\n"
+        val third = "01-02 03:04:02.003  100  101 I Tag: inspected third row\n"
+        val after = "01-02 03:04:01.001  100  101 I Tag: after evicted prefix\n"
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            initial.emit(before)
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            runner.bootUptimeMs = 1_000L
+            runner.bufferedLogcatOutput = first + second + third
+            initial.finish()
+            awaitCapture { runner.specs.size >= 2 && session.logFile.readText().contains("inspected third row") }
+            returned.emit(second + third + after)
+            awaitCapture { session.logFile.readText().contains("after evicted prefix") }
+
+            val text = session.logFile.readText()
+            assertEquals(1, text.windowed("inspected first row".length).count { it == "inspected first row" })
+            assertEquals(1, text.windowed("inspected second row".length).count { it == "inspected second row" })
+            assertEquals(1, text.windowed("inspected third row".length).count { it == "inspected third row" })
+            assertTrue(text.contains("after evicted prefix"))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun logcatConfigurationErrorStopsOnlyTheLogCaptureWithoutMarkingDeviceUnavailable() {
+        val root = Files.createTempDirectory("capture-logcat-config-error-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(CompletedFakeProcess(stderr = "logcat: unknown buffer name".toByteArray(), code = 1))
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val started = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            awaitCapture { recorder.snapshot.value.state == RecorderState.INTERRUPTED }
+            val stopped = recorder.snapshot.value.session
+            assertEquals(started.id, stopped?.id)
+            assertTrue(stopped?.availabilityIntervals.orEmpty().isEmpty())
+            assertTrue(stopped?.interruptions.orEmpty().any { "rejected its configuration" in it })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun defaultLogcatStartsAtCurrentTailAndAlwaysSelectsTheDevice() {
         // DEFAULT buffer mode emits no -b at all (CaptureBufferMode.DEFAULT / logcatBufferArgs()):
         // this used to assert 3 hardcoded "-b" flags (main/system/crash), but that silently
@@ -193,7 +1117,7 @@ class CaptureRecorderTest {
     }
 
     @Test
-    fun disconnectInterruptsSessionAndPersistsRecoveryMetadata() {
+    fun disconnectedDeviceKeepsOneRecordingSessionWaitingUntilStop() {
         val root = Files.createTempDirectory("capture-disconnect-test").toFile()
         val runner = FakeCaptureRunner()
         val logcat = StreamingFakeProcess()
@@ -201,13 +1125,36 @@ class CaptureRecorderTest {
         val recorder = CaptureRecorder(root, runner)
         try {
             val started = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            runner.adbState = "offline"
             logcat.finish()
-            awaitCapture { recorder.snapshot.value.state == RecorderState.INTERRUPTED }
+            awaitCapture { recorder.snapshot.value.session?.availabilityIntervals?.isNotEmpty() == true }
+            assertEquals(RecorderState.RECORDING, recorder.snapshot.value.state)
+            assertEquals(CaptureStatus.RECORDING, recorder.snapshot.value.session?.status)
+            assertEquals(started.id, recorder.snapshot.value.session?.id)
 
-            val recovered = recorder.listSessions().single()
-            assertEquals(started.id, recovered.id)
-            assertEquals(CaptureStatus.INTERRUPTED, recovered.status)
-            assertTrue(recovered.interruptions.single().contains("disconnected"))
+            val stopped = requireNotNull(recorder.stop())
+            assertEquals(CaptureStatus.STOPPED, stopped.status)
+            assertTrue(stopped.availabilityIntervals.single().endElapsedMs == null)
+            assertTrue(stopped.interruptions.isEmpty())
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun stopDrainsTheFinalBufferedLogcatLineWithoutInterruptingTheReader() {
+        val root = Files.createTempDirectory("capture-stop-tail-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess(emitOnTerminate = "01-02 03:04:05.006  100  101 I Tag: final tail\n")
+        runner.enqueue(logcat)
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            val stopped = requireNotNull(recorder.stop())
+            assertEquals(CaptureStatus.STOPPED, stopped.status)
+            assertEquals(1, session.logFile.readText().windowed("final tail".length).count { it == "final tail" })
+            assertEquals(1, session.indexFile.readLines().map(Json::parseToJsonElement).size)
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -500,6 +1447,31 @@ class CaptureRecorderTest {
             } finally {
                 reloaded.close()
             }
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun availabilityIntervalsRoundTripThroughSessionMetadata() {
+        val root = Files.createTempDirectory("capture-availability-persist-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            recorder.stop()
+            val interval = CaptureAvailabilityInterval(
+                startElapsedMs = 1_200,
+                endElapsedMs = 4_800,
+                bootIdBefore = "old-boot",
+                bootIdAfter = "new-boot",
+                rebootConfirmed = true,
+            )
+            File(session.directory, "session.json").writeText(sessionJson(session.copy(availabilityIntervals = listOf(interval))))
+            val restored = requireNotNull(readCaptureSessionDirectory(session.directory))
+            assertEquals(listOf(interval), restored.availabilityIntervals)
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -845,6 +1817,15 @@ class CaptureRecorderTest {
         }
     }
 
+    private fun testDeviceLoggingConfiguration() = DeviceLoggingConfiguration(
+        bufferSizesBytes = linkedMapOf("main" to 262_144L, "system" to 131_072L),
+        globalLogTag = "",
+        perTagOverrides = mapOf("FOO" to "D"),
+    )
+
+    private fun isDeviceLoggingRestoreCommand(spec: CaptureProcessSpec): Boolean =
+        "-G" in spec.command || spec.command.any { "setprop " in it }
+
     private fun testSettings(
         recordVideo: Boolean = false,
         sessionLimitBytes: Long = ONE_MIB,
@@ -858,6 +1839,8 @@ class CaptureRecorderTest {
         val DEVICE = CaptureDevice("SERIAL", "device", "Pixel")
         val ADB = CaptureExecutable("adb")
         const val ONE_MIB = 1024L * 1024L
+        const val TWO_MIB = 2L * ONE_MIB
+        const val FOUR_MIB = 4L * ONE_MIB
     }
 }
 

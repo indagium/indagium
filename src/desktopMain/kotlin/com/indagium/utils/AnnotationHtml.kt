@@ -33,6 +33,7 @@ fun buildAnnotationsHtml(
     settings: AppSettings = AppSettings(),
     maskText: (String) -> String = { it },
     lineContext: Lazy<LogLinePresentationContext> = sharedLogLineContext(tab, settings),
+    embedImages: Boolean = true,
     renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray? = { null },
 ): String = buildString {
     append("<div>")
@@ -40,11 +41,29 @@ fun buildAnnotationsHtml(
         append(annotationMarkdownToHtml(maskText(tab.annotations.prefix)))
     }
     var blockNumber = 1
+    var imageOrdinal = 0
+    var diagramOrdinal = 0
     for (block in tab.annotations.blocks) {
         blockNumber = when (block) {
-            is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber, maskText, renderDiagramPng)
+            is AnnBlock.Note -> {
+                val diagram = com.indagium.diagram3.parseSeq3Note(block.text)
+                if (diagram != null) diagramOrdinal += 1
+                appendNoteHtml(
+                    block, settings, blockNumber, maskText, renderDiagramPng,
+                    embedImages = embedImages,
+                    diagramFileName = diagramOrdinal.takeIf { diagram != null }
+                        ?.let { annotationDiagramFileName(it, tab.annotations.frameStamp) },
+                )
+            }
             is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber, maskText, lineContext)
-            is AnnBlock.Image -> appendImageHtml(block, settings, blockNumber, maskText)
+            is AnnBlock.Image -> {
+                imageOrdinal += 1
+                appendImageHtml(
+                    block, settings, blockNumber, maskText,
+                    imageFileName = annotationImageFileName(imageOrdinal, block.format, tab.annotations.frameStamp),
+                    embedImage = embedImages,
+                )
+            }
         }
     }
     if (tab.annotations.suffix.isNotBlank()) {
@@ -64,6 +83,8 @@ private fun StringBuilder.appendNoteHtml(
     blockNumber: Int,
     maskText: (String) -> String,
     renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray?,
+    embedImages: Boolean,
+    diagramFileName: String?,
 ): Int {
     if (block.text.isBlank()) return blockNumber
     val prefix = if (settings.numberAnnotationBlocks) "$blockNumber. " else ""
@@ -76,15 +97,25 @@ private fun StringBuilder.appendNoteHtml(
         // Unlike v1/v2's ParsedDiagram.model, [Seq3Document] is never null here — v3's header
         // always carries the whole document (see Seq3Codec.kt's own doc) — so this only degrades
         // to the `<pre>` fallback below when [renderDiagramPng] itself can't rasterize.
-        val png = renderDiagramPng(diagram.document)
         if (prefix.isNotEmpty()) append(annotationMarkdownToHtml(prefix.trim()))
-        if (png != null) {
+        if (!embedImages && diagram.exportMode == com.indagium.diagram3.DiagramExportMode.IMAGE) {
+            if (diagram.caption.isNotBlank()) append(annotationMarkdownToHtml(maskText(diagram.caption)))
+            append("<p><em>Sequence diagram image: ")
+                .append("<code>").append(escapeHtml(diagramFileName.orEmpty())).append("</code>")
+                .append(". Export frames from Notes to attach it.</em></p>")
+        } else if (!embedImages && diagram.exportMode == com.indagium.diagram3.DiagramExportMode.SOURCE) {
+            if (diagram.caption.isNotBlank()) append(annotationMarkdownToHtml(maskText(diagram.caption)))
+            append("<pre><code>").append(escapeHtmlMultiline(maskText(diagram.source))).append("</code></pre>")
+        } else {
+            val png = renderDiagramPng(diagram.document)
+            if (png != null) {
             append("<img src=\"data:image/png;base64,")
             append(Base64.getEncoder().encodeToString(png))
             append("\" alt=\"Sequence diagram\">")
-        } else {
-            // No model to draw (an older or hand-authored note) — the source still communicates.
-            append("<pre>").append(escapeHtmlMultiline(maskText(diagram.source))).append("</pre>")
+            } else {
+                // No model to draw (an older or hand-authored note) — the source still communicates.
+                append("<pre>").append(escapeHtmlMultiline(maskText(diagram.source))).append("</pre>")
+            }
         }
         return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
     }
@@ -130,16 +161,28 @@ private fun StringBuilder.appendLogRefHtml(
 // clipboard, not just a reference to it. Raw Base64 encoder (not the .b64()/unb64() helpers used
 // elsewhere in this codebase for token persistence) since those round-trip through UTF-8 text and
 // would corrupt binary JPEG bytes.
-private fun StringBuilder.appendImageHtml(block: AnnBlock.Image, settings: AppSettings, blockNumber: Int, maskText: (String) -> String): Int {
+private fun StringBuilder.appendImageHtml(
+    block: AnnBlock.Image,
+    settings: AppSettings,
+    blockNumber: Int,
+    maskText: (String) -> String,
+    imageFileName: String,
+    embedImage: Boolean,
+): Int {
     var num = blockNumber
     if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
         val prefix = if (settings.numberAnnotationBlocks) "${num++}. " else ""
         append(annotationMarkdownToHtml(prefix + maskText(block.caption)))
     }
-    block.displayProvenance?.let { append("<p><i>").append(escapeHtml(it)).append("</i></p>") }
-    val encoded = Base64.getEncoder().encodeToString(block.bytes)
-    append("<p><img src=\"data:image/${safeAnnotationImageSubtype(block.format)};base64,")
-        .append(encoded).append("\" style=\"max-width:100%\"></p>")
+    block.displayProvenance?.let { append("<p><i>").append(escapeHtml(maskText(it))).append("</i></p>") }
+    if (embedImage) {
+        val encoded = Base64.getEncoder().encodeToString(block.bytes)
+        append("<p><img src=\"data:image/${safeAnnotationImageSubtype(block.format)};base64,")
+            .append(encoded).append("\" style=\"max-width:100%\"></p>")
+    } else {
+        append("<p><em>Image file: <code>").append(escapeHtml(imageFileName))
+            .append("</code>. Export frames from Notes to attach it.</em></p>")
+    }
     return num
 }
 

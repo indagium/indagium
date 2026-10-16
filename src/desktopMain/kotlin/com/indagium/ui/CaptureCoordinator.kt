@@ -24,6 +24,8 @@ import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.DeviceLogActivity
 import com.indagium.capture.DeviceLogRetryableChange
 import com.indagium.capture.DeviceLogState
+import com.indagium.capture.DeviceLoggingConfiguration
+import com.indagium.capture.DeviceLoggingConfigurationSnapshot
 import com.indagium.capture.ImportedCapture
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
@@ -36,6 +38,9 @@ import com.indagium.capture.classifyAdbRootOutput
 import com.indagium.capture.codePairingCandidates
 import com.indagium.capture.isPermissionFailure
 import com.indagium.capture.parseLogcatBufferSizes
+import com.indagium.capture.parseCompleteLogBufferConfiguration
+import com.indagium.capture.parseCompletePerTagLogOverrides
+import com.indagium.capture.knownGlobalLogTag
 import com.indagium.capture.perTagLogLevelOverrides
 import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
@@ -51,6 +56,30 @@ import java.awt.Frame
 import java.io.File
 import java.net.URI
 import java.time.Duration
+
+internal enum class DeviceLogReadField { BUFFER_SIZES, GLOBAL_LEVEL, PER_TAG_OVERRIDES }
+
+/** Field-specific read failure, so a failed global property read cannot be presented as the
+ * device's implicit default while other cached fields remain useful. */
+internal class DeviceLogReadFailure(
+    val field: DeviceLogReadField,
+    message: String,
+    cause: Throwable? = null,
+) : IllegalStateException(message, cause)
+
+internal fun deviceLogReadFailureState(
+    base: DeviceLogState,
+    failure: Exception,
+    fallbackMessage: String,
+): DeviceLogState {
+    val globalLevelFailed = failure is DeviceLogReadFailure && failure.field == DeviceLogReadField.GLOBAL_LEVEL
+    return base.copy(
+        activity = DeviceLogActivity.IDLE,
+        error = failure.message ?: fallbackMessage,
+        globalLevel = if (globalLevelFailed) null else base.globalLevel,
+        globalLevelKnown = if (globalLevelFailed) false else base.globalLevelKnown,
+    )
+}
 
 internal data class CaptureToolResolution(
     val adbPath: String?,
@@ -179,10 +208,7 @@ internal class CaptureService(
                 throw cancelled
             } catch (failure: Exception) {
                 setDeviceLogState(serial) {
-                    (it ?: DeviceLogState(serial)).copy(
-                        activity = DeviceLogActivity.IDLE,
-                        error = failure.message ?: "Could not read device logging state",
-                    )
+                    deviceLogReadFailureState(it ?: DeviceLogState(serial), failure, "Could not read device logging state")
                 }
             }
         }
@@ -217,6 +243,69 @@ internal class CaptureService(
     internal fun readDeviceLogStateNow(serial: String): DeviceLogState =
         readDeviceLogState(toolsForStart(app.settings.captureSettings), serial)
 
+    /** A bounded per-session snapshot used only for reboot recovery. Failed and truncated reads
+     * remain unknown; they never get encoded as device defaults or cleared during restore. */
+    internal fun readDeviceLoggingConfiguration(tools: CaptureTools, serial: String): DeviceLoggingConfigurationSnapshot {
+        val warnings = mutableListOf<String>()
+        val bufferLimit = DEVICE_LOG_CONFIG_BUFFER_OUTPUT_LIMIT
+        val bufferResult = runCatching {
+            tools.runAdb(
+                serial,
+                listOf("logcat", "-b", "all", "-g"),
+                timeout = DEVICE_LOG_CONFIG_READ_TIMEOUT,
+                outputLimitBytes = bufferLimit,
+            )
+        }.getOrNull()
+        val buffers = bufferResult?.let { result ->
+            parseCompleteLogBufferConfiguration(
+                result.stdoutText(),
+                outputWasTruncated = result.timedOut || result.exitCode != 0 ||
+                    result.stdout.size >= bufferLimit || result.stderr.size >= bufferLimit,
+            )
+        }
+        if (buffers == null) warnings += "Buffer sizes could not be fully read; reboot restore will leave unknown buffers unchanged."
+
+        val globalLimit = DEVICE_LOG_CONFIG_PROPERTY_OUTPUT_LIMIT
+        val globalResult = runCatching {
+            tools.runAdb(
+                serial,
+                listOf("shell", "getprop", "log.tag"),
+                timeout = DEVICE_LOG_CONFIG_READ_TIMEOUT,
+                outputLimitBytes = globalLimit,
+            )
+        }.getOrNull()
+        val global = globalResult?.let { result ->
+            knownGlobalLogTag(
+                result.stdoutText(),
+                outputWasTruncated = result.timedOut || result.exitCode != 0 ||
+                    result.stdout.size >= globalLimit || result.stderr.size >= globalLimit,
+            )
+        }
+        if (global == null) warnings += "Global log.tag could not be read; reboot restore will leave it unchanged."
+
+        val propsLimit = DEVICE_LOG_CONFIG_PROPS_OUTPUT_LIMIT
+        val propsResult = runCatching {
+            tools.runAdb(
+                serial,
+                listOf("shell", "getprop"),
+                timeout = DEVICE_LOG_CONFIG_READ_TIMEOUT,
+                outputLimitBytes = propsLimit,
+            )
+        }.getOrNull()
+        val overrides = propsResult?.let { result ->
+            parseCompletePerTagLogOverrides(
+                result.stdoutText(),
+                outputWasTruncated = result.timedOut || result.exitCode != 0 ||
+                    result.stdout.size >= propsLimit || result.stderr.size >= propsLimit,
+            )
+        }
+        if (overrides == null) warnings += "Per-tag log.tag overrides could not be fully read; reboot restore will leave them unchanged."
+        return DeviceLoggingConfigurationSnapshot(
+            DeviceLoggingConfiguration(buffers, global, overrides),
+            warnings,
+        )
+    }
+
     /** Synchronous counterpart of [setDeviceLogBufferSize]/[setDeviceGlobalLogLevel] for the AI/MCP
      *  `set_device_log_settings` tool: applies one change and returns the re-read state, throwing on
      *  failure instead of publishing to [deviceLogStates] — see [readDeviceLogStateNow]'s own doc for
@@ -225,7 +314,9 @@ internal class CaptureService(
         val tools = toolsForStart(app.settings.captureSettings)
         val result = runRetryableChange(tools, serial, change)
         check(result.exitCode == 0) { adbFailureMessage("Could not apply device log setting", result) }
-        return readDeviceLogState(tools, serial)
+        val state = readDeviceLogState(tools, serial)
+        recordSuccessfulDeviceLogChange(serial, change, tools)
+        return state
     }
 
     /** Runs the exact adb command one [DeviceLogRetryableChange] represents — the single place all
@@ -262,11 +353,7 @@ internal class CaptureService(
                 throw cancelled
             } catch (failure: Exception) {
                 setDeviceLogState(serial) {
-                    (it ?: DeviceLogState(serial)).copy(
-                        activity = DeviceLogActivity.IDLE,
-                        error = failure.message ?: failurePrefix,
-                        failedChange = null,
-                    )
+                    deviceLogReadFailureState(it ?: DeviceLogState(serial), failure, failurePrefix).copy(failedChange = null)
                 }
             }
         }
@@ -274,10 +361,35 @@ internal class CaptureService(
 
     private fun applyDeviceLogChangeOutcome(serial: String, change: DeviceLogRetryableChange, outcome: DeviceLogChangeOutcome) {
         when (outcome) {
-            is DeviceLogChangeOutcome.Applied -> setDeviceLogState(serial) { outcome.state }
+            is DeviceLogChangeOutcome.Applied -> {
+                setDeviceLogState(serial) { outcome.state }
+                recordSuccessfulDeviceLogChange(serial, change, runCatching { toolsForStart(app.settings.captureSettings) }.getOrNull())
+            }
             is DeviceLogChangeOutcome.Failed -> setDeviceLogState(serial) { current ->
                 deviceLogFailedChangeState(current ?: DeviceLogState(serial), change, outcome.message, outcome.permissionFailure)
             }
+        }
+    }
+
+    private fun recordSuccessfulDeviceLogChange(serial: String, change: DeviceLogRetryableChange, tools: CaptureTools?) {
+        val configuration = tools?.let { readDeviceLoggingConfiguration(it, serial).configuration } ?: DeviceLoggingConfiguration()
+        val direct = when (change) {
+            is DeviceLogRetryableChange.BufferSize -> app.activeCaptureDeviceLoggingConfiguration(serial)?.let { current ->
+                val sizes = current.bufferSizesBytes?.mapValues { change.choice.bytes }
+                DeviceLoggingConfiguration(bufferSizesBytes = sizes)
+            } ?: DeviceLoggingConfiguration()
+            is DeviceLogRetryableChange.GlobalLevel -> DeviceLoggingConfiguration(globalLogTag = change.level?.propValue.orEmpty())
+            is DeviceLogRetryableChange.ClearTagOverride -> app.activeCaptureDeviceLoggingConfiguration(serial)?.let { current ->
+                current.perTagOverrides?.let { DeviceLoggingConfiguration(perTagOverrides = it - change.tag) }
+            } ?: DeviceLoggingConfiguration()
+        }
+        val merged = configuration.copy(
+            bufferSizesBytes = configuration.bufferSizesBytes ?: direct.bufferSizesBytes,
+            globalLogTag = configuration.globalLogTag ?: direct.globalLogTag,
+            perTagOverrides = configuration.perTagOverrides ?: direct.perTagOverrides,
+        )
+        if (merged.bufferSizesBytes != null || merged.globalLogTag != null || merged.perTagOverrides != null) {
+            app.updateActiveCaptureDeviceLoggingConfiguration(serial, merged)
         }
     }
 
@@ -302,7 +414,12 @@ internal class CaptureService(
                 throw cancelled
             } catch (failure: Exception) {
                 setDeviceLogState(serial) { current ->
-                    deviceLogRootAttemptFailedState(current ?: DeviceLogState(serial), failure.message ?: "Could not restart adb as root")
+                    val failedRead = deviceLogReadFailureState(
+                        current ?: DeviceLogState(serial),
+                        failure,
+                        "Could not restart adb as root",
+                    )
+                    deviceLogRootAttemptFailedState(failedRead, failure.message ?: "Could not restart adb as root")
                 }
             }
         }
@@ -356,14 +473,31 @@ internal class CaptureService(
         // Each of the three reads is checked individually (an unauthorized device or an SELinux
         // denial on just one of them must still surface as a readable inline error, not a silently
         // empty panel) rather than only checking apply-time commands.
-        val sizesResult = tools.runAdb(serial, listOf("logcat", "-g"))
-        check(sizesResult.exitCode == 0) { adbFailureMessage("Could not read buffer sizes", sizesResult) }
+        val sizesResult = runDeviceLogRead(
+            tools,
+            serial,
+            listOf("logcat", "-g"),
+            DeviceLogReadField.BUFFER_SIZES,
+            "Could not read buffer sizes",
+        )
         val sizes = parseLogcatBufferSizes("${sizesResult.stdoutText()}\n${sizesResult.stderrText()}")
-        val levelResult = tools.runAdb(serial, listOf("shell", "getprop", "log.tag"))
-        check(levelResult.exitCode == 0) { adbFailureMessage("Could not read the global log level", levelResult) }
-        val globalLevel = LogTagLevel.fromPropValue(levelResult.stdoutText())
-        val propsResult = tools.runAdb(serial, listOf("shell", "getprop"))
-        check(propsResult.exitCode == 0) { adbFailureMessage("Could not read per-tag overrides", propsResult) }
+        val levelResult = runDeviceLogRead(
+            tools,
+            serial,
+            listOf("shell", "getprop", "log.tag"),
+            DeviceLogReadField.GLOBAL_LEVEL,
+            "Could not read the global log level",
+        )
+        val rawGlobalLevel = levelResult.stdoutText()
+        val globalLevel = LogTagLevel.fromPropValue(rawGlobalLevel)
+        val globalLevelKnown = rawGlobalLevel.isBlank() || globalLevel != null
+        val propsResult = runDeviceLogRead(
+            tools,
+            serial,
+            listOf("shell", "getprop"),
+            DeviceLogReadField.PER_TAG_OVERRIDES,
+            "Could not read per-tag overrides",
+        )
         val overrides = perTagLogLevelOverrides(propsResult.stdoutText())
         return DeviceLogState(
             serial = serial,
@@ -373,7 +507,26 @@ internal class CaptureService(
             activity = DeviceLogActivity.IDLE,
             error = null,
             loaded = true,
+            globalLevelKnown = globalLevelKnown,
         )
+    }
+
+    private fun runDeviceLogRead(
+        tools: CaptureTools,
+        serial: String,
+        args: List<String>,
+        field: DeviceLogReadField,
+        failurePrefix: String,
+    ): CaptureCommandResult {
+        val result = try {
+            tools.runAdb(serial, args)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            throw DeviceLogReadFailure(field, failure.message ?: failurePrefix, failure)
+        }
+        if (result.exitCode != 0) throw DeviceLogReadFailure(field, adbFailureMessage(failurePrefix, result))
+        return result
     }
 
     init {
@@ -589,7 +742,7 @@ internal class CaptureService(
 
     fun exportRetainedSession(sessionId: String, destination: File, notes: Annotations? = null): CaptureExportResult {
         val session = requireNotNull(retainedSession(sessionId)) { "Capture session not found: $sessionId" }
-        return CaptureArchiveExporter().export(
+        return exportRetainedSnapshot(
             session,
             CaptureExportRequest(
                 destination = destination,
@@ -599,6 +752,28 @@ internal class CaptureService(
             ),
             notes = notes,
         )
+    }
+
+    /** Range export for a stopped on-disk session; cursor writes follow archive publication. */
+    fun exportRetainedSnapshot(
+        session: CaptureSession,
+        request: CaptureExportRequest,
+        notes: Annotations? = null,
+    ): CaptureExportResult = synchronized(com.indagium.capture.CaptureSnapshotCheckpointLocks.forSession(session)) {
+        CaptureRecorder(session.directory.parentFile).use { recorder ->
+            // A service can receive an older retained-session value while another AppState or AI
+            // operation has already advanced its cursor. Reload inside the source lock so
+            // Since-last-save selects from the newest durable checkpoint.
+            val current = recorder.listSessions().firstOrNull { it.id == session.id } ?: session
+            val result = CaptureArchiveExporter().export(current, request, notes = notes)
+            val updated = recorder.updateSuccessfulExportCheckpoints(
+                sessionId = current.id,
+                logCheckpointMs = result.logCoveredEndMs,
+                videoCheckpointMs = result.videoCoveredEndMs,
+            )
+            sessions = sessions.map { if (it.id == updated.id) updated else it }
+            result
+        }
     }
 
     // The one place that reads [sessionsRoot] for anything other than listing/recovery — called
@@ -713,6 +888,7 @@ internal class TabCaptureController(
 
     val snapshot get() = recorder.snapshot
     val selectedSession get() = recorder.selectedSession
+    val deviceLoggingRestoreEvents get() = recorder.deviceLoggingRestoreEvents
 
     fun start(
         device: CaptureDevice,
@@ -724,6 +900,25 @@ internal class TabCaptureController(
         startupNotice: String? = null,
         beforeLogcatLaunch: (CaptureSession) -> Unit,
     ): CaptureSession = recorder.start(device, settings, tools, startupNotice, beforeLogcatLaunch)
+
+    fun startWithDeviceLoggingConfiguration(
+        device: CaptureDevice,
+        settings: CaptureSettings,
+        tools: CaptureTools,
+        deviceLoggingConfiguration: DeviceLoggingConfiguration?,
+        startupNotice: String? = null,
+        beforeLogcatLaunch: (CaptureSession) -> Unit,
+    ): CaptureSession = recorder.startWithDeviceLoggingConfiguration(
+        device,
+        settings,
+        tools,
+        deviceLoggingConfiguration,
+        startupNotice,
+        beforeLogcatLaunch,
+    )
+
+    fun updateDeviceLoggingConfiguration(serial: String, configuration: DeviceLoggingConfiguration) =
+        recorder.updateDeviceLoggingConfiguration(serial, configuration)
 
     fun stop(): CaptureSession? = recorder.stop()
 
@@ -871,6 +1066,11 @@ private sealed class DeviceLogChangeOutcome {
 
     data class Failed(val message: String, val permissionFailure: Boolean) : DeviceLogChangeOutcome()
 }
+
+private val DEVICE_LOG_CONFIG_READ_TIMEOUT: Duration = Duration.ofSeconds(4)
+private const val DEVICE_LOG_CONFIG_BUFFER_OUTPUT_LIMIT = 256 * 1024
+private const val DEVICE_LOG_CONFIG_PROPERTY_OUTPUT_LIMIT = 4 * 1024
+private const val DEVICE_LOG_CONFIG_PROPS_OUTPUT_LIMIT = 256 * 1024
 
 // "Restart adb as root" timing (CaptureService.restartAdbAsRoot/rootThenRetry/waitForDeviceShell):
 // `adb root` itself is normally near-instant (it just asks the existing adbd to restart), 15s is

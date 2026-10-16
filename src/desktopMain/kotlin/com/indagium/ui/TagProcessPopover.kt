@@ -41,6 +41,7 @@ import com.indagium.model.LogTab
 import com.indagium.utils.TagProcessInfo
 import com.indagium.utils.canFollowTagByToken
 import com.indagium.utils.defaultTagProcessSelection
+import com.indagium.utils.tagPrefixProcessInfo
 import com.indagium.utils.tagProcessInfo
 import com.indagium.utils.tagProcessRulePattern
 import kotlinx.coroutines.Dispatchers
@@ -67,7 +68,8 @@ internal fun clampTagRowAction(action: Int, pidAvailable: Boolean): Int =
     action.coerceIn(if (pidAvailable) TAG_ACTION_PID else 0, TAG_ACTION_EXCLUDE)
 
 /** The popover's keyboard items: one per pid row plus the final "Keep following" row. */
-internal fun popoverItemCount(infos: List<TagProcessInfo>?): Int = (infos?.size ?: 0) + 1
+internal fun popoverItemCount(infos: List<TagProcessInfo>?, includeKeepFollowing: Boolean = true): Int =
+    (infos?.size ?: 0) + if (includeKeepFollowing) 1 else 0
 
 /** ↑/↓ in the popover: clamps at the ends, never wraps; a cursor of -1 (none) lands on the first item. */
 internal fun movePopoverCursor(cursor: Int, delta: Int, itemCount: Int): Int =
@@ -108,12 +110,13 @@ fun TagProcessPopover(
     // Keyboard cursor over [infos] plus the final "Keep following" row (-1 = none). The popover is
     // not focusable, so the caller (the tag field's key handler) moves it.
     cursor: Int = -1,
+    packagePrefixScope: Boolean = false,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     val tokenable = canFollowTagByToken(tag)
     val keepEnabled = canKeepFollowing(tag, infos, selected)
-    val keepCursor = cursor >= 0 && cursor == (infos?.size ?: 0)
+    val keepCursor = !packagePrefixScope && cursor >= 0 && cursor == (infos?.size ?: 0)
     Column(
         modifier.width(400.dp)
             .shadow(8.dp, shape)
@@ -124,7 +127,12 @@ fun TagProcessPopover(
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                AppText("Follow the process of", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                AppText(
+                    if (packagePrefixScope) "Current PIDs under" else "Follow the process of",
+                    color = tc.tx,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
                 AppText(
                     tag,
                     color = tc.ac,
@@ -135,11 +143,21 @@ fun TagProcessPopover(
                     modifier = Modifier.weight(1f, fill = false),
                 )
             }
-            AppText("Shows every line from that process, all tags included.", color = tc.td, fontSize = 10.sp)
+            AppText(
+                if (packagePrefixScope) "Select current PIDs from tags under this prefix."
+                else "Shows every line from that process, all tags included.",
+                color = tc.td,
+                fontSize = 10.sp,
+            )
         }
         when {
             infos == null -> AppText("Scanning…", color = tc.td, fontSize = 11.sp, modifier = Modifier.padding(vertical = 6.dp))
-            infos.isEmpty() -> AppText("No process logged this tag.", color = tc.td, fontSize = 11.sp, modifier = Modifier.padding(vertical = 6.dp))
+            infos.isEmpty() -> AppText(
+                if (packagePrefixScope) "No process logged tags under this prefix." else "No process logged this tag.",
+                color = tc.td,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(vertical = 6.dp),
+            )
             else -> ScrollableItems(
                 itemCount = infos.size,
                 rowDp = POPOVER_ROW_DP,
@@ -151,29 +169,33 @@ fun TagProcessPopover(
                 }
             }
         }
-        Row(
-            Modifier.fillMaxWidth()
-                .testTag("tag-process-keep-row")
-                .semantics { cursorSelected = keepCursor }
-                .background(if (keepCursor) tc.abg else Color.Transparent)
-                .clickable(enabled = keepEnabled) { onKeepFollowingChange(!keepFollowing) },
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            CompactCheckBox(
-                checked = keepFollowing && keepEnabled,
-                onToggle = { onKeepFollowingChange(!keepFollowing) },
-                enabled = keepEnabled,
-                modifier = Modifier.testTag("tag-process-keep-following"),
-            )
-            Column {
-                AppText("Keep following if the app restarts (new pid)", color = if (keepEnabled) tc.tx else tc.td, fontSize = 11.sp)
-                if (!keepEnabled && infos != null) {
-                    AppText(
-                        if (tokenable) "Following restarts needs all pids checked" else "Can't follow restarts for this tag name",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                    )
+        if (packagePrefixScope) {
+            AppText("To follow app restarts, choose an individual tag.", color = tc.td, fontSize = 10.sp)
+        } else {
+            Row(
+                Modifier.fillMaxWidth()
+                    .testTag("tag-process-keep-row")
+                    .semantics { cursorSelected = keepCursor }
+                    .background(if (keepCursor) tc.abg else Color.Transparent)
+                    .clickable(enabled = keepEnabled) { onKeepFollowingChange(!keepFollowing) },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                CompactCheckBox(
+                    checked = keepFollowing && keepEnabled,
+                    onToggle = { onKeepFollowingChange(!keepFollowing) },
+                    enabled = keepEnabled,
+                    modifier = Modifier.testTag("tag-process-keep-following"),
+                )
+                Column {
+                    AppText("Keep following if the app restarts (new pid)", color = if (keepEnabled) tc.tx else tc.td, fontSize = 11.sp)
+                    if (!keepEnabled && infos != null) {
+                        AppText(
+                            if (tokenable) "Following restarts needs all pids checked" else "Can't follow restarts for this tag name",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                        )
+                    }
                 }
             }
         }
@@ -239,6 +261,8 @@ private fun ProcessRow(info: TagProcessInfo, checked: Boolean, onCursor: Boolean
 internal class TagPidPopoverState {
     var tag by mutableStateOf<String?>(null)
         private set
+    var packagePrefixScope by mutableStateOf(false)
+        private set
     var infos by mutableStateOf<List<TagProcessInfo>?>(null)
         private set
     var selected by mutableStateOf<Set<Int>>(emptySet())
@@ -249,6 +273,7 @@ internal class TagPidPopoverState {
 
     // The tag row the pointer is on: its pid button is only drawn for the hovered row.
     var hoveredTag by mutableStateOf<String?>(null)
+    var hoveredPackagePrefix by mutableStateOf<String?>(null)
 
     var refocus: () -> Unit = {}
     var commitRule: (String) -> Unit = {}
@@ -262,15 +287,18 @@ internal class TagPidPopoverState {
     /** Every close path (Cancel, outside click, Esc, after Add) hands focus back to the tag field. */
     fun close() {
         tag = null
+        packagePrefixScope = false
         infos = null
         runCatching { refocus() }
     }
 
     /** Shared by the pid button's click and Enter on a row whose keyboard action is the pid button. */
-    fun open(tag: String) {
+    fun open(tag: String, packagePrefixScope: Boolean = false) {
         infos = null
         cursor = -1
         this.tag = tag
+        this.packagePrefixScope = packagePrefixScope
+        keepFollowing = !packagePrefixScope
         runCatching { refocus() }
     }
 
@@ -281,9 +309,14 @@ internal class TagPidPopoverState {
     }
 
     /** The pid button was clicked: opens the popover, or closes it if open for [forTag]. */
-    fun toggleFor(forTag: String, nowMs: Long = System.currentTimeMillis()) {
+    fun toggleFor(forTag: String, nowMs: Long = System.currentTimeMillis()) = toggleForScope(forTag, false, nowMs)
+
+    fun togglePackagePrefixFor(prefix: String, nowMs: Long = System.currentTimeMillis()) =
+        toggleForScope(prefix, true, nowMs)
+
+    private fun toggleForScope(forTag: String, packagePrefixScope: Boolean, nowMs: Long) {
         if (nowMs < toggleSuppressedUntilMs) return
-        if (tag == forTag) close() else open(forTag)
+        if (tag == forTag && this.packagePrefixScope == packagePrefixScope) close() else open(forTag, packagePrefixScope)
     }
 
     fun togglePid(pid: Int) {
@@ -293,7 +326,7 @@ internal class TagPidPopoverState {
     /** Closes the popover when its anchor tag is no longer among the dropdown's tag rows. */
     fun closeIfMissing(candidates: List<Pair<String, Boolean>>) {
         val open = tag ?: return
-        if (candidates.none { (value, isPkg) -> !isPkg && value == open }) close()
+        if (candidates.none { (value, isPkg) -> value == open && isPkg == packagePrefixScope }) close()
     }
 
     /** Applies a scan result: the first one seeds the checkboxes, later ones (live tail) keep them. */
@@ -302,10 +335,10 @@ internal class TagPidPopoverState {
         infos = result
         if (seed) {
             selected = defaultTagProcessSelection(result)
-            keepFollowing = true
+            keepFollowing = !packagePrefixScope
             cursor = 0
         } else {
-            cursor = clampPopoverCursor(cursor, popoverItemCount(result))
+            cursor = clampPopoverCursor(cursor, popoverItemCount(result, includeKeepFollowing = !packagePrefixScope))
         }
     }
 
@@ -313,7 +346,12 @@ internal class TagPidPopoverState {
     fun add() {
         val open = tag ?: return
         val list = infos.orEmpty()
-        val pattern = tagProcessRulePattern(open, selected, list.mapTo(HashSet()) { it.pid }, keepFollowing)
+        val pattern = tagProcessRulePattern(
+            open,
+            selected,
+            list.mapTo(HashSet()) { it.pid },
+            keepFollowing = keepFollowing && !packagePrefixScope,
+        )
         commitRule(pattern)
         close()
     }
@@ -326,7 +364,8 @@ internal class TagPidPopoverState {
     fun handleKey(key: Key, onTab: () -> Unit): Boolean {
         val openTag = tag ?: return false
         val list = infos
-        val itemCount = popoverItemCount(list)
+        val packageScope = packagePrefixScope
+        val itemCount = popoverItemCount(list, includeKeepFollowing = !packageScope)
         when (key) {
             Key.DirectionDown -> cursor = movePopoverCursor(cursor, +1, itemCount)
             Key.DirectionUp -> cursor = movePopoverCursor(cursor, -1, itemCount)
@@ -334,7 +373,7 @@ internal class TagPidPopoverState {
                 val item = list?.getOrNull(cursor)
                 if (item != null) {
                     togglePid(item.pid)
-                } else if (list != null && cursor == list.size && canKeepFollowing(openTag, list, selected)) {
+                } else if (!packageScope && list != null && cursor == list.size && canKeepFollowing(openTag, list, selected)) {
                     keepFollowing = !keepFollowing
                 }
             }
@@ -358,12 +397,16 @@ internal class TagPidPopoverState {
  */
 @Composable
 internal fun TagPidPopoverScanEffect(state: TagPidPopoverState, tab: LogTab) {
-    LaunchedEffect(state.tag, tab.logData) {
+    LaunchedEffect(state.tag, state.packagePrefixScope, tab.logData, tab.analysis.processNames) {
         val scanTag = state.tag ?: return@LaunchedEffect
+        val packageScope = state.packagePrefixScope
         val data = tab.logData
         val names = tab.analysis.processNames
-        val result = withContext(Dispatchers.Default) { tagProcessInfo(data, scanTag, names) { ensureActive() } }
-        state.onScanResult(result)
+        val result = withContext(Dispatchers.Default) {
+            if (packageScope) tagPrefixProcessInfo(data, scanTag, names) { ensureActive() }
+            else tagProcessInfo(data, scanTag, names) { ensureActive() }
+        }
+        if (state.tag == scanTag && state.packagePrefixScope == packageScope) state.onScanResult(result)
     }
 }
 
@@ -396,11 +439,15 @@ internal fun TagPidSlot(
     kbd: Boolean,
     positionProvider: PopupPositionProvider,
     buttonModifier: Modifier = Modifier,
+    packagePrefixScope: Boolean = false,
 ) {
-    val open = state.tag == tag
+    val open = state.tag == tag && state.packagePrefixScope == packagePrefixScope
     Box(Modifier.size(20.dp)) {
-        if (hasPids && (state.hoveredTag == tag || rowSelected || open)) {
-            TagPidButton(open = open, kbd = kbd, modifier = buttonModifier) { state.toggleFor(tag) }
+        val hovered = if (packagePrefixScope) state.hoveredPackagePrefix == tag else state.hoveredTag == tag
+        if (hasPids && (hovered || rowSelected || open)) {
+            TagPidButton(open = open, kbd = kbd, modifier = buttonModifier) {
+                if (packagePrefixScope) state.togglePackagePrefixFor(tag) else state.toggleFor(tag)
+            }
         }
         if (open) {
             Popup(
@@ -418,6 +465,7 @@ internal fun TagPidSlot(
                     onAdd = { state.add() },
                     onCancel = { state.close() },
                     cursor = state.cursor,
+                    packagePrefixScope = packagePrefixScope,
                 )
             }
         }

@@ -38,10 +38,11 @@ class TagProcessPopoverUiTest {
         loaded: List<TagProcessInfo>? = infos,
         onAdd: (Set<Int>, Boolean) -> Unit = { _, _ -> },
         cursor: Int = -1,
+        packagePrefixScope: Boolean = false,
     ) {
         rule.setContent {
             var selected by remember { mutableStateOf(initiallySelected) }
-            var keep by remember { mutableStateOf(true) }
+            var keep by remember { mutableStateOf(!packagePrefixScope) }
             TagProcessPopover(
                 tag = tag,
                 infos = loaded,
@@ -52,6 +53,7 @@ class TagProcessPopoverUiTest {
                 onAdd = { onAdd(selected, keep) },
                 onCancel = {},
                 cursor = cursor,
+                packagePrefixScope = packagePrefixScope,
             )
         }
     }
@@ -143,5 +145,23 @@ class TagProcessPopoverUiTest {
         rule.onNodeWithTag("tag-process-item-100").assertIsNotSelected()
         rule.onNodeWithTag("tag-process-keep-row").assertIsNotSelected()
         rule.onNodeWithText("↑↓ move · Space toggle · Enter add · Esc close").assertExists()
+    }
+
+    @Test
+    fun packageScopeExplainsCurrentPidSnapshotAndHidesKeepFollowingControl() {
+        var added: Pair<Set<Int>, Boolean>? = null
+        setPopover(
+            tag = "com.example",
+            packagePrefixScope = true,
+            initiallySelected = setOf(100),
+            onAdd = { selected, keep -> added = selected to keep },
+        )
+
+        rule.onNodeWithText("Current PIDs under").assertExists()
+        rule.onNodeWithText("Select current PIDs from tags under this prefix.").assertExists()
+        rule.onNodeWithText("To follow app restarts, choose an individual tag.").assertExists()
+        rule.onNodeWithTag("tag-process-keep-row").assertDoesNotExist()
+        rule.onNodeWithTag("tag-process-add").performClick()
+        rule.runOnIdle { assertEquals(setOf(100) to false, added) }
     }
 }

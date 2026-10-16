@@ -786,7 +786,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 }
             }
             val remainingMs = remainingExecutionMs(identity)
-            val enforceAttemptDeadline = tool == "perform_input_sequence" || tool == "wait_for_ui" || tool == "gesture"
+            val enforceAttemptDeadline = tool == "perform_input_sequence" || tool == "wait_for_ui" ||
+                tool == "wait_for_device_ready" || tool == "gesture"
 
             suspend fun executeWithinAdmission(): AdmittedToolResult {
                 val value = if (mutatesDevice(tool)) {

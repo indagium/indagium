@@ -51,7 +51,7 @@ import com.indagium.capture.bufferSizeButtonLabel
 import com.indagium.capture.deviceLogStatusText
 import com.indagium.capture.deviceLoggingSummaryLine
 import com.indagium.capture.deviceStateGuidance
-import com.indagium.capture.logLevelButtonLabel
+import com.indagium.capture.deviceLogGlobalLevelButtonLabel
 import com.indagium.capture.mainBufferIsSmall
 import com.indagium.capture.matchingBufferSizeChoice
 import kotlinx.coroutines.delay
@@ -480,11 +480,12 @@ private fun DeviceLoggingPanelContent(
     val tc = tc()
     val logState = service.deviceLogStates[device.serial]
     val busy = logState?.busy == true
+    val globalLevelKnown = logState?.loaded == true && logState.globalLevelKnown
     val sizes = logState?.bufferSizes.orEmpty()
 
     AppText(
-        "These change the DEVICE's own settings: buffer size usually persists across reboots, " +
-            "the log level does not.",
+        "At capture start, Indagium saves Android’s current logging values and restores them after " +
+            "a detected reboot when permitted. Restore failures appear in capture diagnostics.",
         color = tc.td, fontSize = 10.sp, maxLines = 2,
     )
 
@@ -511,12 +512,12 @@ private fun DeviceLoggingPanelContent(
         }
         DeviceLogDropdown(
             label = "Log level",
-            buttonText = logLevelButtonLabel(logState?.globalLevel),
+            buttonText = deviceLogGlobalLevelButtonLabel(logState),
             enabled = !busy,
             onReclaimFocus = onReclaimFocus,
             modifier = Modifier.weight(1f),
         ) { close ->
-            DeviceLogDropdownItem("Default (device)", active = logState?.globalLevel == null) {
+            DeviceLogDropdownItem("Default (device)", active = globalLevelKnown && logState?.globalLevel == null) {
                 service.setDeviceGlobalLogLevel(device.serial, null)
                 close()
             }
@@ -524,7 +525,7 @@ private fun DeviceLoggingPanelContent(
             // ASSERT is excluded here even though it can still show up read-only under Per-tag
             // overrides below).
             LogTagLevel.selectable.forEach { level ->
-                DeviceLogDropdownItem(level.label, active = logState?.globalLevel == level) {
+                DeviceLogDropdownItem(level.label, active = globalLevelKnown && logState?.globalLevel == level) {
                     service.setDeviceGlobalLogLevel(device.serial, level)
                     close()
                 }
@@ -692,8 +693,12 @@ internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSe
     // A failure for a session that has no row any more (it was discarded, or is gone from disk) has
     // nowhere else to show; every other save status renders under its own row.
     state.captureExportOwner?.takeIf { it !in retainedIds }?.let { owner ->
-        val orphan = captureExportStatusFor(owner, owner, false, null, state.captureExportError)
-        orphan.error?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
+        val orphan = captureExportStatusFor(
+            owner, owner, false, null, state.captureExportError,
+            cancelled = state.captureExportCancelled,
+        )
+        orphan.error?.let { AppText("Export failed: $it", color = DANGER_RED, fontSize = 10.sp) }
+        if (orphan.cancelled) AppText("Export cancelled", color = tc().ts, fontSize = 10.sp)
     }
     LaunchedEffect(retainedIds) { selectedIds = selectedIds.intersect(retainedIds) }
 
@@ -780,7 +785,7 @@ private fun UnfinishedSessionRow(
     val tc = tc()
     val exportStatus = captureExportStatusFor(
         session.id, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
-        state.captureExportWarning,
+        state.captureExportWarning, state.captureExportCancelled,
     )
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -814,6 +819,7 @@ private fun UnfinishedSessionRow(
             onClose = { state.clearCaptureExportStatus() },
             onReclaimFocus = {},
             warning = exportStatus.warning,
+            cancelled = exportStatus.cancelled,
         )
         if (discardId == session.id) {
             AppText("Discard this retained capture? The raw session directory will be removed.", color = DANGER_RED, fontSize = 10.sp)

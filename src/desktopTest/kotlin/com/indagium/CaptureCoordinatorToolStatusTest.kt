@@ -2,9 +2,14 @@ package com.indagium
 
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.DeviceLogActivity
+import com.indagium.capture.LogBufferSize
 import com.indagium.capture.DeviceLogRetryableChange
 import com.indagium.capture.DeviceLogState
 import com.indagium.capture.LogBufferSizeChoice
+import com.indagium.capture.deviceLogGlobalLevelButtonLabel
+import com.indagium.ui.DeviceLogReadFailure
+import com.indagium.ui.DeviceLogReadField
+import com.indagium.ui.deviceLogReadFailureState
 import com.indagium.ui.deviceLogFailedChangeState
 import com.indagium.ui.deviceLogRootAttemptFailedState
 import com.indagium.ui.toolStatusLine
@@ -142,5 +147,43 @@ class DeviceLogRootRecoveryStateTest {
 
         assertEquals(loadedState.perTagOverrides, result.perTagOverrides)
         assertTrue(result.loaded)
+    }
+}
+
+class DeviceLogReadFailureStateTest {
+    @Test
+    fun failedGlobalReadInvalidatesOnlyThatCachedFieldInsteadOfShowingDeviceDefault() {
+        val cached = DeviceLogState(
+            serial = "SERIAL",
+            bufferSizes = listOf(LogBufferSize("main", 4L * 1024 * 1024)),
+            globalLevel = null,
+            loaded = true,
+        )
+
+        val result = deviceLogReadFailureState(
+            cached,
+            DeviceLogReadFailure(DeviceLogReadField.GLOBAL_LEVEL, "Could not read the global log level (exit 1)"),
+            "Could not read device logging state",
+        )
+
+        assertEquals("Unknown", deviceLogGlobalLevelButtonLabel(result))
+        assertEquals("Could not read the global log level (exit 1)", result.error)
+        assertEquals(cached.bufferSizes, result.bufferSizes)
+        assertEquals("On device: main 4 MB · log.tag unknown", com.indagium.capture.deviceLogStatusText(result))
+    }
+
+    @Test
+    fun unrelatedReadFailureDoesNotEraseAConfirmedDeviceDefault() {
+        val cached = DeviceLogState(serial = "SERIAL", globalLevel = null, loaded = true)
+
+        val result = deviceLogReadFailureState(
+            cached,
+            DeviceLogReadFailure(DeviceLogReadField.PER_TAG_OVERRIDES, "Could not read per-tag overrides (exit 1)"),
+            "Could not read device logging state",
+        )
+
+        assertEquals("Default (device)", deviceLogGlobalLevelButtonLabel(result))
+        assertTrue(result.globalLevelKnown)
+        assertEquals(cached.globalLevel, result.globalLevel)
     }
 }

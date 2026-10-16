@@ -303,9 +303,10 @@ class AutosaveSchedulerTest {
             base.copy(attachedVideo = VideoAttachment(path = "/tmp/repro.mp4", sourceLabel = "/tmp/repro.mp4")),
             base.copy(noteTargetName = "custom_name.md"),
             base.copy(retraceMappingPath = "/tmp/mapping.txt"),
+            base.copy(captureArchivePath = "/tmp/capture.zip"),
         )
 
-        assertEquals(15, base.persistedSnapshot().size)
+        assertEquals(16, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())

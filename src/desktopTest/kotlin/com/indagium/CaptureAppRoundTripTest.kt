@@ -8,6 +8,8 @@ import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
+import com.indagium.video.VideoPlayerController
+import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -43,6 +45,117 @@ private const val FIXTURE_ROW_COUNT = 3
 private const val SECOND_ROW_INDEX = 1
 
 class CaptureAppRoundTripTest {
+    @Test
+    fun importedAiLastMinutesAndExplicitSnapshotsUseTheEditorPlayheadAndFullCaptureBounds() = runBlocking {
+        val root = createTempDirectory("capture-ai-explicit-range").toFile()
+        val durationMs = 20L * 60_000L
+        val playheadMs = 10L * 60_000L
+        try {
+            val source = CaptureSession(
+                id = "ai-range-source",
+                directory = File(root, "source"),
+                device = CaptureDevice("emulator-5554", "device"),
+                settings = CaptureSettings(recordVideo = true, freeSpaceReserveBytes = NO_FREE_SPACE_RESERVE_BYTES),
+                startedEpochMs = FIXTURE_EPOCH_MS,
+                elapsedMs = durationMs,
+                status = CaptureStatus.STOPPED,
+                videoStartElapsedMs = 0L,
+            )
+            source.logFile.parentFile.mkdirs()
+            source.indexFile.parentFile.mkdirs()
+            source.videoFile.parentFile.mkdirs()
+            source.videoFile.writeText("synthetic source video")
+            var offset = 0L
+            source.logFile.outputStream().use { log ->
+                source.indexFile.bufferedWriter().use { index ->
+                    for (ordinal in 1..20) {
+                        val elapsed = ordinal * 60_000L
+                        val line = "09-19 12:00:${ordinal.toString().padStart(2, '0')}.000  100  101 I Tag: row $ordinal\n"
+                        val bytes = line.toByteArray()
+                        log.write(bytes)
+                        index.appendLine(
+                            "{\"byteOffset\":$offset,\"byteLength\":${bytes.size}," +
+                                "\"elapsedMs\":$elapsed,\"rowOrdinal\":$ordinal}",
+                        )
+                        offset += bytes.size
+                    }
+                }
+            }
+            val sourceArchive = CaptureArchiveExporter(CaptureVideoExporter { _, destination, start, end ->
+                destination.writeText("synthetic exported video")
+                CaptureVideoClip(start, end, end - start)
+            }).export(
+                source,
+                CaptureExportRequest(File(root, "source.zip"), cutoffElapsedMs = durationMs),
+            ).file
+            val fakeVideoController = object : VideoPlayerController {
+                override val currentFrame: ImageBitmap? = null
+                override val positionMs: Long = playheadMs
+                override val durationMs: Long = durationMs
+                override val isPlaying: Boolean = false
+                override val volume: Float = 1f
+                override val isMuted: Boolean = false
+                override val error: String? = null
+                override fun play() = Unit
+                override fun pause() = Unit
+                override fun seek(ms: Long) = Unit
+                override fun setRate(rate: Float) = Unit
+                override fun setVolume(volume: Float) = Unit
+                override fun setMuted(muted: Boolean) = Unit
+                override fun grabCurrentFrame(): ByteArray? = null
+                override fun grabFrameAt(ms: Long): ByteArray? = null
+                override fun close() = Unit
+            }
+            val state = AppState(
+                autosaveFile = File(root, "autosave"),
+                autoExportNotes = false,
+                archiveCacheDir = File(root, "cache"),
+                videoControllerFactory = { fakeVideoController },
+            )
+            try {
+                val tabId = state.openCaptureFile(sourceArchive)
+                waitLoaded(state, tabId)
+                state.videoController(tabId)
+
+                val lastMinutes = awaitCaptureAiExport(
+                    state,
+                    state.exportCaptureSnapshotForAi(
+                        tabId,
+                        rangeParam = "last_minutes",
+                        minutes = 5,
+                        includeVideo = false,
+                        filenameParam = "ai-last-minutes",
+                    ),
+                    root,
+                )
+                assertEquals(300_000L, lastMinutes.descriptor.logStartMs)
+                assertEquals(playheadMs, lastMinutes.descriptor.logEndMs)
+
+                val explicit = awaitCaptureAiExport(
+                    state,
+                    state.exportCaptureSnapshotForAi(
+                        tabId,
+                        rangeParam = "explicit",
+                        includeVideo = false,
+                        filenameParam = "ai-explicit",
+                        startElapsedMs = 15L * 60_000L,
+                        endElapsedMs = 18L * 60_000L,
+                    ),
+                    root,
+                )
+                assertEquals(15L * 60_000L, explicit.descriptor.timelineBaseElapsedMs)
+                assertEquals(3L * 60_000L, explicit.descriptor.timelineDurationMs)
+                assertEquals(15L * 60_000L, explicit.descriptor.logStartMs)
+                assertEquals(18L * 60_000L, explicit.descriptor.logEndMs)
+            } finally {
+                state.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+        Unit
+    }
+
     @Test
     fun capturePreferencesUseJsonWithoutChangingLegacyDefaults() {
         val settings = AppSettings(
@@ -92,12 +205,15 @@ class CaptureAppRoundTripTest {
                     restored.startPendingRestoredTabLoads()
                     waitLoaded(restored, id)
                     val reopened = assertNotNull(restored.tab(id))
-                    // Archive v3: no CaptureTimeline to rehydrate — the calibrated VideoAnchor set
-                    // above is small enough to already be part of the restored tab token (see
-                    // AutosaveCodec's anchorVideoMs/anchorLogId fields), and AppState.restoreCaptureLink
+                    // Archive v4 restores row timing, but the calibrated VideoAnchor set above is
+                    // small enough to already be part of the restored tab token (see
+                    // AutosaveCodec's anchorVideoMs/anchorLogId fields), and restoreCaptureLink
                     // must not clobber it with the archive's own (uncalibrated) estimate.
-                    assertNull(reopened.captureTimeline)
+                    assertNotNull(reopened.captureTimeline)
                     assertNotNull(reopened.attachedVideo?.anchor)
+                    assertEquals(source.absolutePath, reopened.captureArchivePath)
+                    assertEquals("test", reopened.captureSourceSessionId)
+                    assertNotNull(restored.captureSnapshotSessionFor(id), "the stopped snapshot source survives restart")
                     assertEquals(
                         CALIBRATED_VIDEO_MS,
                         restored.logIdToVideoMs(reopened, reopened.logData[SECOND_ROW_INDEX].id),
@@ -109,6 +225,51 @@ class CaptureAppRoundTripTest {
         } finally {
             root.deleteRecursively()
         }
+    }
+
+    @Test
+    fun importedLogOnlyCaptureRestoresSnapshotSourceAfterArchiveCacheIsRemoved() = runBlocking {
+        val root = createTempDirectory("capture-imported-log-only-restore").toFile()
+        try {
+            val session = writeRetainedFixture(root, "log-only-snapshot")
+            val archive = CaptureArchiveExporter().export(
+                session,
+                CaptureExportRequest(File(root, "log-only.zip"), cutoffElapsedMs = session.elapsedMs, includeVideo = false),
+            ).file
+            val autosave = File(root, "autosave")
+            val cache = File(root, "cache-before-restart")
+            val app = AppState(autosaveFile = autosave, autoExportNotes = false, archiveCacheDir = cache)
+            val id = app.openCaptureFile(archive)
+            waitLoaded(app, id)
+            assertNull(app.tab(id)?.attachedVideo)
+            assertEquals("log-only-snapshot", app.tab(id)?.captureSourceSessionId)
+            app.autosaveNow()
+            app.close()
+
+            // The imported source is the ZIP plus an app-local cursor, never the extracted cache.
+            cache.deleteRecursively()
+            val restored = AppState(
+                autosaveFile = autosave,
+                restoreOnCreate = true,
+                autoExportNotes = false,
+                archiveCacheDir = File(root, "cache-after-restart"),
+            )
+            try {
+                restored.startPendingRestoredTabLoads()
+                waitLoaded(restored, id)
+                val tab = assertNotNull(restored.tab(id))
+                assertNull(tab.attachedVideo)
+                assertEquals("log-only-snapshot", tab.captureSourceSessionId)
+                assertEquals(archive.absolutePath, tab.captureArchivePath)
+                assertTrue(restored.isImportedCaptureSnapshot(id))
+                assertNotNull(restored.captureSnapshotSessionFor(id), "log-only imports keep Save snapshot available")
+            } finally {
+                restored.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+        Unit
     }
 
     // Opening the FOLDER of an unpacked capture export (or a capture session folder) must behave
@@ -238,10 +399,10 @@ class CaptureAppRoundTripTest {
                 restored.startPendingRestoredTabLoads()
                 withTimeout(WAIT_TIMEOUT_MS) { while (restored.isLoadInFlight(id)) delay(POLL_INTERVAL_MS) }
                 assertNull(restored.tab(id)?.captureTimeline)
-                // Archive v3 tabs have no CaptureTimeline to begin with, so the assertion above
-                // alone would be vacuous here — the real regression check for v3 is that a failed
-                // asset verification disables double-click seek while preserving the restored log.
+                // The damaged video prevents restoring v4 timing metadata. The readable log must
+                // remain available while the bad asset disables seeking and capture synchronization.
                 val restoredTab = assertNotNull(restored.tab(id))
+                assertEquals(FIXTURE_ROW_COUNT, restoredTab.logData.size, "the checksum-valid log remains restored")
                 val attachment = assertNotNull(restoredTab.attachedVideo)
                 assertFalse(attachment.doubleClickSeekEnabled)
                 assertFalse(
@@ -321,11 +482,10 @@ class CaptureAppRoundTripTest {
         }
     }
 
-    // Save ZIP pressed twice on a retained session: the filename is deterministic, so the second press
-    // used to throw "destination already exists" into captureExportError and paint the session red.
-    // It must now be a plain warning notice that leaves the error untouched.
+    // Each successful retained snapshot advances its counter, so saving the same session again
+    // produces the next snapshot instead of replacing or warning about the previous archive.
     @Test
-    fun secondRetainedSaveWarnsInsteadOfFailing() = runBlocking {
+    fun secondRetainedSaveCreatesNextSnapshotWithoutFailing() = runBlocking {
         val root = createTempDirectory("capture-retained-twice").toFile()
         try {
             val sessionId = "session-twice"
@@ -340,10 +500,9 @@ class CaptureAppRoundTripTest {
                 app.saveRetainedCapture(sessionId)
                 withTimeout(WAIT_TIMEOUT_MS) { while (app.captureExportBusy) delay(POLL_INTERVAL_MS) }
                 assertNull(app.captureExportError, "an already-saved ZIP is not a failure")
-                assertNull(app.captureExportResult)
-                val warning = assertNotNull(app.captureExportWarning)
-                assertEquals(saved, warning.file)
-                assertEquals("Already saved: ${saved.name}", warning.message)
+                val second = assertNotNull(app.captureExportResult).file
+                assertTrue(saved != second, "each successful snapshot gets a fresh archive path")
+                assertNull(app.captureExportWarning)
                 assertEquals(sessionId, app.captureExportOwner)
 
                 app.clearCaptureExportStatus()
@@ -411,6 +570,26 @@ class CaptureAppRoundTripTest {
     private suspend fun waitLoaded(app: AppState, id: String) {
         withTimeout(WAIT_TIMEOUT_MS) { while (app.isLoadInFlight(id)) delay(POLL_INTERVAL_MS) }
         assertNotNull(app.tab(id), app.openError?.message)
+    }
+
+    private suspend fun awaitCaptureAiExport(
+        app: AppState,
+        started: Map<String, Any?>,
+        root: File,
+    ): ImportedCapture {
+        val operationId = assertNotNull(started["operationId"] as? String, started.toString())
+        val status = withTimeout(WAIT_TIMEOUT_MS) {
+            var current = app.deviceAiOperationStatus(operationId)
+            while (current["status"] == "running") {
+                delay(POLL_INTERVAL_MS)
+                current = app.deviceAiOperationStatus(operationId)
+            }
+            current
+        }
+        assertEquals("completed", status["status"], status.toString())
+        val result = assertNotNull(status["result"] as? Map<*, *>, status.toString())
+        val path = assertNotNull(result["path"] as? String, result.toString())
+        return CaptureArchiveReader.open(File(path), File(root, "ai-result-cache"))
     }
 
     private fun exportFixture(root: File): File {

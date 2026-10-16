@@ -23,12 +23,17 @@ import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureSnapshotCheckpointLocks
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.ImportedCaptureSnapshot
 import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.adaptedToNativeMedia
+import com.indagium.capture.importedCaptureSnapshot
+import com.indagium.capture.persistImportedCaptureSnapshotCursors
+import com.indagium.capture.refreshImportedCaptureSnapshotCursors
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.nativeMediaAdaptationNotice
@@ -463,12 +468,13 @@ internal fun attachFinalizedCapture(
     }
     return tab.copy(
         attachedVideo = attachment,
-        captureTimeline = imported.timeline.takeIf { attachment != null },
+        captureTimeline = imported.timeline,
         captureSessionId = null,
         // Recorded independently of attachment (which is null whenever the session had no video)
         // so a video-off capture can still be found by its session id after Stop — see the field's
         // doc in Model.kt for why attachedVideo.captureSourcePath alone isn't enough.
         captureSourceSessionId = imported.descriptor.sessionId,
+        captureArchivePath = imported.source.absolutePath,
         tailing = false,
     )
 }
@@ -1882,6 +1888,9 @@ class AppState(
     // Where the issue tracker's access token lives (security/SecretStore.kt): the OS keychain, or memory for the session when
     // that fails. Never touched until the tracker is configured or sent to, and always off the UI thread. Tests pass a fake.
     internal val secretStore: SecretStore = defaultSecretStore(),
+    // Blocks immediately before archive generation in deterministic export-lifecycle tests. Runs on
+    // the interruptible IO lane and defaults to an allocation-free no-op in production.
+    internal val beforeCaptureSnapshotExport: () -> Unit = {},
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -3277,6 +3286,8 @@ class AppState(
     }
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+    /** Imported archives keep their immutable extracted assets and source-local cursor per tab. */
+    private val importedCaptureSnapshots = ConcurrentHashMap<String, ImportedCaptureSnapshot>()
 
     /** Test-lane captures (see beginLaneCapture). The devices AI test lanes record right now, by serial, and which lane. Guarded by [stateLock]. */
     private val laneCaptureSerials = HashMap<String, TestLaneTabRef>()
@@ -3412,7 +3423,15 @@ class AppState(
         private set
     internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
         private set
+    /** Request identity keeps a completed preview from enabling Save after a range/playhead edit. */
+    internal var captureExportPreviewKey by mutableStateOf<CaptureExportPreviewIdentity?>(null)
+        private set
+    internal var captureExportPreviewError by mutableStateOf<String?>(null)
+        private set
     internal var captureExportError by mutableStateOf<String?>(null)
+        private set
+    /** True only after the user explicitly cancels the active export. */
+    internal var captureExportCancelled by mutableStateOf(false)
         private set
 
     /** A non-failure notice for a retained Save ZIP that had nothing to do (the destination already
@@ -3425,6 +3444,9 @@ class AppState(
      * global, so each surface compares this against its own id (see [captureExportStatusFor]) to avoid
      * showing another capture's "Saved" line. */
     internal var captureExportOwner by mutableStateOf<String?>(null)
+        private set
+    /** Source session behind the result, retained when a live-popover export's owner is null. */
+    internal var captureExportSessionId by mutableStateOf<String?>(null)
         private set
     private var captureExportJob: Job? = null
 
@@ -3453,6 +3475,24 @@ class AppState(
      */
     internal fun captureControllerFor(tabId: String): TabCaptureController? =
         synchronized(stateLock) { captureControllersByTab[tabId] }
+
+    internal fun activeCaptureDeviceLoggingConfiguration(serial: String): com.indagium.capture.DeviceLoggingConfiguration? =
+        activeCaptureControllers().firstNotNullOfOrNull { controller ->
+            controller.selectedSession.value?.takeIf { it.device.serial == serial && it.status == com.indagium.capture.CaptureStatus.RECORDING }
+                ?.deviceLoggingConfiguration
+        }
+
+    internal fun updateActiveCaptureDeviceLoggingConfiguration(
+        serial: String,
+        configuration: com.indagium.capture.DeviceLoggingConfiguration,
+    ) {
+        activeCaptureControllers().forEach { it.updateDeviceLoggingConfiguration(serial, configuration) }
+    }
+
+    private fun activeCaptureControllers(): List<TabCaptureController> {
+        val tabControllers = synchronized(stateLock) { captureControllersByTab.values.toList() }
+        return (tabControllers + tablessLaneControllers.values).distinct()
+    }
 
     internal fun aiCaptureDevices(): List<CaptureDevice> = captureService.discoverDevicesNow()
 
@@ -3689,12 +3729,9 @@ class AppState(
         )
     }
 
-    /** AI/MCP `export_capture_snapshot`. Mirrors the Capture snapshot popover's own range/minutes/
-     *  includeVideo/filename choices (see [buildCaptureSnapshotExportRequest], the construction the
-     *  two share) plus `open`, matching the popover's "Save + open". Once the capture has stopped,
-     *  only [rangeParam] "all" is supported — a stopped session has no live index/video to compute
-     *  any other range against, so it goes through [saveRetainedCapture]'s own retained-ZIP path
-     *  instead of [TabCaptureController.export]. */
+    /** AI/MCP `export_capture_snapshot`. Mirrors the snapshot popover's range/minutes/
+     *  includeVideo/filename choices (see [buildCaptureSnapshotExportRequest]) for live and stopped
+     *  sources, plus `open`, matching the popover's "Save + open" action. */
     internal fun exportCaptureSnapshotForAi(
         tabId: String,
         rangeParam: String? = null,
@@ -3702,6 +3739,8 @@ class AppState(
         includeVideo: Boolean? = null,
         open: Boolean = false,
         filenameParam: String? = null,
+        startElapsedMs: Long? = null,
+        endElapsedMs: Long? = null,
     ): Map<String, Any?> = launchDeviceAiOperation("Exporting the capture as a ZIP archive", action = {
         // Marker creation includes its post-window and screenshot attachment. If the model
         // requests a snapshot immediately after mark_device_issue, wait for durable evidence
@@ -3710,17 +3749,25 @@ class AppState(
             "An issue marker failed to finish; the snapshot was not exported without its evidence."
         }
         val range = resolveCaptureSnapshotRangeForAi(rangeParam, minutes)
+        val explicitBounds = if (range == com.indagium.capture.CaptureRange.EXPLICIT) {
+            val start = requireNotNull(startElapsedMs) { "range=explicit requires startElapsedMs" }
+            val end = requireNotNull(endElapsedMs) { "range=explicit requires endElapsedMs" }
+            require(start >= 0L && end > start) { "Explicit capture range must be non-negative and ordered" }
+            start to end
+        } else {
+            require(startElapsedMs == null && endElapsedMs == null) {
+                "startElapsedMs and endElapsedMs are only valid with range=explicit"
+            }
+            null
+        }
         val filename = filenameParam?.let {
             requireNotNull(captureArchiveName(it)) { "filename must be a valid archive basename" }
         }
         val controller = captureControllerFor(tabId)
         val result = if (controller == null) {
-            check(range == com.indagium.capture.CaptureRange.ALL) {
-                "This capture has already stopped; only range=all is available (the stopped capture's retained ZIP)."
-            }
-            exportStoppedCaptureSnapshotForAi(tabId, filename)
+            exportStoppedCaptureSnapshotForAi(tabId, range, minutes ?: 5, includeVideo, filename, explicitBounds)
         } else {
-            exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename)
+            exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename, explicitBounds)
         }
         if (open) openExportedCaptureForAi(result.file)
         mapOf(
@@ -3731,18 +3778,71 @@ class AppState(
         )
     })
 
-    private fun exportStoppedCaptureSnapshotForAi(tabId: String, filenameOverride: String?): CaptureExportResult {
-        val sessionId = tab(tabId)?.captureSessionId ?: error("The bound capture tab is no longer live")
-        val session = captureService.retainedSession(sessionId) ?: error("This capture session is no longer on disk")
+    private fun exportStoppedCaptureSnapshotForAi(
+        tabId: String,
+        range: com.indagium.capture.CaptureRange,
+        customMinutes: Int,
+        includeVideo: Boolean?,
+        filenameOverride: String?,
+        explicitBounds: Pair<Long, Long>?,
+    ): CaptureExportResult {
+        val tabNow = tab(tabId) ?: error("The bound capture tab is no longer available")
+        val session = captureSnapshotSessionFor(tabId) ?: error("This capture session is no longer available")
+        if (range == com.indagium.capture.CaptureRange.SELECTION && selectedCaptureOrdinals(tabNow) == null) {
+            error("No rows are selected in this tab; select rows before requesting range=selection.")
+        }
         val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
         check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
         val suggestedName = filenameOverride ?: com.indagium.capture.renderCaptureFilename(
             session.settings.filenameTemplate, session.device, session.startedEpochMs,
-            com.indagium.capture.CaptureRange.ALL, session.exportCounter, session.settings.label,
+            range, session.exportCounter, session.settings.label,
         )
         val destination = uniqueSnapshotDestination(directory, suggestedName)
-        val notes = tab(tabId)?.let { it.annotations.preparedForSave(it) }
-        return captureService.exportRetainedSession(sessionId, destination, notes = notes)
+        val request = buildCaptureSnapshotExportRequest(
+            tab = tabNow,
+            destination = destination,
+            range = range,
+            customMinutes = customMinutes,
+            includeVideo = includeVideo ?: session.settings.recordVideo,
+            cutoffElapsedMs = captureSnapshotCutoffForAi(
+                session,
+                range,
+                capturePlayheadElapsedMs(this, tabNow, session),
+            ),
+            overwriteExisting = false,
+            explicitStartElapsedMs = explicitBounds?.first,
+            explicitEndElapsedMs = explicitBounds?.second,
+        )
+        val notes = tabNow.annotations.preparedForSave(tabNow)
+        return exportStoppedSnapshotSession(tabId, session, request, notes)
+    }
+
+    private fun exportStoppedSnapshotSession(
+        tabId: String,
+        session: CaptureSession,
+        request: CaptureExportRequest,
+        notes: Annotations?,
+    ): CaptureExportResult {
+        val imported = importedCaptureSnapshots[tabId]
+        return if (imported != null && imported.session.id == session.id) {
+            synchronized(CaptureSnapshotCheckpointLocks.forSession(session)) {
+                // Another tab or AI operation can export this same immutable source. Reload its
+                // sidecar cursor inside the shared source lock before resolving Since last save.
+                val refreshed = refreshImportedCaptureSnapshotCursors(imported)
+                val result = com.indagium.capture.CaptureArchiveExporter().export(refreshed.session, request, notes = notes)
+                val updated = persistImportedCaptureSnapshotCursors(
+                    refreshed,
+                    result.logCoveredEndMs,
+                    result.videoCoveredEndMs,
+                )
+                importedCaptureSnapshots.compute(tabId) { _, current ->
+                    if (current?.identity == imported.identity) updated else current
+                }
+                result
+            }
+        } else {
+            captureService.exportRetainedSnapshot(session, request, notes)
+        }
     }
 
     private suspend fun exportLiveCaptureSnapshotForAi(
@@ -3752,6 +3852,7 @@ class AppState(
         customMinutes: Int,
         includeVideo: Boolean?,
         filenameOverride: String?,
+        explicitBounds: Pair<Long, Long>?,
     ): CaptureExportResult {
         val tabNow = tab(tabId) ?: error("The bound capture tab is no longer live")
         if (range == com.indagium.capture.CaptureRange.SELECTION && selectedCaptureOrdinals(tabNow) == null) {
@@ -3771,8 +3872,14 @@ class AppState(
             range = range,
             customMinutes = customMinutes,
             includeVideo = includeVideo ?: session.settings.recordVideo,
-            cutoffElapsedMs = boundary.elapsedMs,
+            cutoffElapsedMs = captureSnapshotCutoffForAi(
+                session,
+                range,
+                capturePlayheadElapsedMs(this, tabNow, session),
+            ).coerceAtMost(boundary.elapsedMs),
             overwriteExisting = false,
+            explicitStartElapsedMs = explicitBounds?.first,
+            explicitEndElapsedMs = explicitBounds?.second,
         )
         val notes = tabNow.annotations.preparedForSave(tabNow)
         return kotlinx.coroutines.runInterruptible { controller.export(request, notes = notes) }
@@ -3795,7 +3902,7 @@ class AppState(
         val controller = captureControllerFor(resolvedTabId)
         val live = controller != null
         val session = controller?.selectedSession?.value
-            ?: tabNow.captureSessionId?.let { captureService.retainedSession(it) }
+            ?: captureSnapshotSessionFor(resolvedTabId)
             ?: error("$resolvedTabId is not a capture tab")
         val storageBytesUsed = listOf(session.logFile, session.indexFile, session.videoFile)
             .filter { it.isFile }
@@ -3812,12 +3919,26 @@ class AppState(
                 )
             }
         }
+        val availability = session.availabilityIntervals.map { interval ->
+            mapOf(
+                "startElapsedMs" to interval.startElapsedMs,
+                "endElapsedMs" to interval.endElapsedMs,
+                "durationMs" to interval.endElapsedMs?.let { (it - interval.startElapsedMs).coerceAtLeast(0L) },
+                "bootIdBefore" to interval.bootIdBefore,
+                "bootIdAfter" to interval.bootIdAfter,
+                "rebootConfirmed" to interval.rebootConfirmed,
+            )
+        }
+        val deviceUnavailable = session.availabilityIntervals.lastOrNull()?.let { it.endElapsedMs == null } == true
         mapOf(
             "tabId" to resolvedTabId,
             "deviceModel" to session.device.model,
             "deviceSerial" to session.device.serial,
             "status" to if (live) "live" else "stopped",
+            "deviceStatus" to if (deviceUnavailable) "unavailable" else "available",
             "elapsedMs" to session.elapsedMs,
+            "availabilityIntervals" to availability,
+            "rebootConfirmed" to session.availabilityIntervals.any { it.rebootConfirmed == true },
             "videoRecording" to (session.settings.recordVideo && session.videoStartElapsedMs != null),
             "storageBytesUsed" to storageBytesUsed,
             "markers" to markers,
@@ -4692,34 +4813,41 @@ class AppState(
         handle?.close()
     }
 
-    /**
-     * Starts a snapshot export on the IO lane without stopping the live recorder.
-     *
-     * This was the worst of the capture regressions: `captureControllerFor(tabId) ?: return`, with
-     * no error and no feedback, was reachable from an ordinary button click any time the capture
-     * had already stopped (the controller is removed by stopCaptureTab's finally block) — the user
-     * would click Save/Save+open in the snapshot popover and nothing would happen. That specific
-     * path is now unreachable in the UI (a stopped tab's strip routes through saveRetainedCapture
-     * instead, see CaptureStoppedStrip in CaptureStrip.kt), but the same start/stop race described
-     * on screenshotCapture above still applies here, so this reports through captureExportError —
-     * the same field every other failure in this function already uses — rather than staying silent.
-     */
+    /** Starts a fixed snapshot request for a live, retained, or imported capture on the IO lane.
+     * Missing source state is reported through the same visible export status as other failures. */
     @Suppress("TooGenericExceptionCaught")
-    internal fun exportCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+    internal fun exportCaptureSnapshot(
+        tabId: String,
+        request: CaptureExportRequest,
+        openAfterSuccess: Boolean = false,
+    ) {
         cancelCapturePreview(tabId)
-        val controller = captureControllerFor(tabId) ?: run {
-            if (!captureExportBusy) captureExportOwner = null
-            captureExportError = "Capture export failed: capture has already stopped"
+        val controller = captureControllerFor(tabId)
+        val snapshotSession = captureSnapshotSessionFor(tabId)
+        if (controller == null && snapshotSession == null) {
+            if (!captureExportBusy) {
+                captureExportOwner = null
+                captureExportSessionId = null
+                captureExportResult = null
+                captureExportWarning = null
+                captureExportCancelled = false
+            }
+            captureExportError = "The capture source is no longer available"
             return
         }
         if (captureExportBusy) return
-        // The snapshot popover owns this status (null owner), not any retained session.
-        captureExportOwner = null
+        // Active snapshots are popover-owned (null); stopped and imported snapshots belong to
+        // their immutable session so every stopped strip can resolve its own status correctly.
+        captureExportOwner = if (controller != null) null else snapshotSession?.id
+        captureExportSessionId = snapshotSession?.id
         captureExportBusy = true
         captureExportBusyMessage = null
         captureExportResult = null
         captureExportPreview = null
+        captureExportPreviewKey = null
+        captureExportPreviewError = null
         captureExportError = null
+        captureExportCancelled = false
         captureExportWarning = null
         // Captured once, at click time, from the tab's CURRENT notes — same "one fixed snapshot of
         // the request" treatment `request` itself already gets. preparedForSave resolves LogRef
@@ -4727,18 +4855,43 @@ class AppState(
         val preparedNotes = tab(tabId)?.let { t -> t.annotations.preparedForSave(t) }
         captureExportJob = ioScope.launch {
             try {
-                val result = runInterruptible {
-                    controller.export(
-                        request,
-                        onWaitingForVideo = { captureExportBusyMessage = "Waiting for the recording to catch up…" },
-                        notes = preparedNotes,
-                    )
+                val result = if (controller != null) {
+                    runInterruptible {
+                        beforeCaptureSnapshotExport()
+                        controller.export(
+                            request,
+                            onWaitingForVideo = { captureExportBusyMessage = "Waiting for the recording to catch up…" },
+                            notes = preparedNotes,
+                        )
+                    }
+                } else {
+                    val session = requireNotNull(snapshotSession)
+                    runInterruptible {
+                        beforeCaptureSnapshotExport()
+                        exportStoppedSnapshotSession(tabId, session, request, preparedNotes)
+                    }
                 }
                 captureExportResult = result
+                if (openAfterSuccess) {
+                    if (com.indagium.capture.CaptureArchiveReader.isCaptureArchive(result.file)) {
+                        openCaptureFile(result.file)
+                    } else {
+                        openFile(result.file)
+                    }
+                }
             } catch (cancelled: CancellationException) {
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                }
                 throw cancelled
             } catch (failure: Throwable) {
-                captureExportError = failure.message ?: failure::class.simpleName ?: "Capture export failed"
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                } else {
+                    captureExportError = failure.message ?: failure::class.simpleName ?: "Capture export failed"
+                }
             } finally {
                 captureExportBusy = false
                 captureExportBusyMessage = null
@@ -4748,16 +4901,45 @@ class AppState(
         }
     }
 
-    internal fun previewCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+    internal fun previewCaptureSnapshot(
+        tabId: String,
+        request: CaptureExportRequest,
+        rangeChoice: SnapshotRangeChoice? = null,
+        rangeControls: String = "",
+    ) {
         // Preview is not itself a direct button click (it runs off a LaunchedEffect while the
         // snapshot popover is open), so unlike the other three lookups above this doesn't warrant
         // captureExportError — but leaving a stale preview on screen from before the capture
         // stopped would be actively misleading, so clear it instead of the previous silent no-op.
-        val controller = captureControllerFor(tabId) ?: run {
+        val controller = captureControllerFor(tabId)
+        val snapshotSession = captureSnapshotSessionFor(tabId)
+        if (controller == null && snapshotSession == null) {
             cancelCapturePreview(tabId)
             captureExportPreview = null
+            captureExportPreviewKey = null
+            captureExportPreviewError = null
             return
         }
+        val previewSession = snapshotSession ?: controller?.snapshot?.value?.session
+        val previewKey = previewSession?.let { captureExportPreviewIdentity(it, request, rangeChoice, rangeControls) }
+        if (previewKey == null) {
+            cancelCapturePreview(tabId)
+            captureExportPreview = null
+            captureExportPreviewKey = null
+            captureExportPreviewError = null
+            return
+        }
+        val requestChanged = captureExportPreviewKey != previewKey
+        if (requestChanged) {
+            captureExportPreview = null
+            captureExportPreviewKey = previewKey
+            captureExportPreviewError = null
+        }
+        // A preview can take longer than the live refresh interval. Do not cancel the identical
+        // request on every timer tick, or a slow probe would never finish and Since last save
+        // would remain disabled forever.
+        if (!requestChanged && synchronized(stateLock) { capturePreviewJobsByTab[tabId]?.isActive == true }) return
+        captureExportPreviewError = null
         val generation = synchronized(stateLock) {
             capturePreviewJobsByTab[tabId]?.cancel()
             val next = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
@@ -4770,19 +4952,26 @@ class AppState(
                 // by coalescing those updates instead of starting one exporter job per cadence
                 // tick; cancellation also interrupts a growing-video preview/remux promptly.
                 delay(CAPTURE_PREVIEW_DEBOUNCE_MS)
-                val preview = runInterruptible { controller.preview(request) }
+                val preview = runInterruptible {
+                    if (controller != null) controller.preview(request)
+                    else com.indagium.capture.CaptureArchiveExporter().preview(requireNotNull(snapshotSession), request)
+                }
                 synchronized(stateLock) {
                     if (capturePreviewGenerationByTab[tabId] == generation && isActive) {
                         captureExportPreview = preview
+                        captureExportPreviewKey = previewKey
+                        captureExportPreviewError = null
                         capturePreviewJobsByTab.remove(tabId)
                     }
                 }
             } catch (_: CancellationException) {
                 // A newer range edit, Save press, or popover dismissal owns the preview lane now.
-            } catch (_: Throwable) {
+            } catch (failure: Throwable) {
                 synchronized(stateLock) {
                     if (capturePreviewGenerationByTab[tabId] == generation) {
                         captureExportPreview = null
+                        captureExportPreviewKey = previewKey
+                        captureExportPreviewError = failure.message ?: "Capture preview failed"
                         capturePreviewJobsByTab.remove(tabId)
                     }
                 }
@@ -4796,8 +4985,35 @@ class AppState(
     private fun captureDeviceFor(tabId: String): CaptureDevice? {
         val tab = tab(tabId) ?: return null
         captureControllerFor(tabId)?.snapshot?.value?.session?.let { return it.device }
+        importedCaptureSnapshots[tabId]?.session?.let { return it.device }
         val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
         return captureService.sessionById(sessionId)?.device
+    }
+
+    /** Session backing the same snapshot range editor for live, retained, and imported captures. */
+    internal fun captureSnapshotSessionFor(tabId: String): CaptureSession? {
+        captureControllerFor(tabId)?.snapshot?.value?.session?.let { return it }
+        importedCaptureSnapshots[tabId]?.session?.let { return it }
+        val tabNow = tab(tabId) ?: return null
+        val sessionId = tabNow.captureSessionId ?: tabNow.captureSourceSessionId ?: return null
+        return captureService.sessionById(sessionId)
+    }
+
+    internal fun isImportedCaptureSnapshot(tabId: String): Boolean = importedCaptureSnapshots.containsKey(tabId)
+
+    /** Timeline passed to playback, including the active recorder's current outage tail. */
+    internal fun captureTimelineFor(tabId: String): CaptureTimeline? {
+        tab(tabId)?.captureTimeline?.let { return it }
+        val session = captureControllerFor(tabId)?.snapshot?.value?.session ?: return null
+        val videoOrigin = session.videoStartElapsedMs?.minus(session.manualOffsetMs)
+        return CaptureTimeline(
+            rows = emptyList(),
+            availabilityIntervals = session.availabilityIntervals,
+            timelineBaseElapsedMs = 0L,
+            timelineDurationMs = session.elapsedMs.coerceAtLeast(0L),
+            videoOriginElapsedMs = videoOrigin,
+            showUnavailableFrames = session.settings.showUnavailableFrames,
+        )
     }
 
     /** The remembered mirror/Notes split and detached-window size for a capture tab: this device's
@@ -4813,15 +5029,28 @@ class AppState(
 
     /** Cancels only the export job; the per-tab recorder remains active. */
     internal fun cancelCaptureSnapshot() {
+        if (!captureExportBusy) return
+        captureExportCancelled = true
+        captureExportError = null
+        captureExportResult = null
         captureExportJob?.cancel()
     }
 
     internal fun clearCaptureExportStatus() {
         cancelAllCapturePreviews()
+        // Popup dismissal and the notice's close button must not erase the owner/source while the
+        // export job is still running. Its completion will publish a result that the same source
+        // can show outside the popup or after it is reopened.
+        if (captureExportBusy) return
         captureExportResult = null
         captureExportPreview = null
+        captureExportPreviewKey = null
+        captureExportPreviewError = null
         captureExportError = null
+        captureExportCancelled = false
         captureExportWarning = null
+        captureExportSessionId = null
+        captureExportOwner = null
     }
 
     private fun cancelCapturePreview(tabId: String) {
@@ -4840,6 +5069,16 @@ class AppState(
             capturePreviewJobsByTab.values.toList().also { capturePreviewJobsByTab.clear() }
         }
         jobs.forEach { it.cancel() }
+        captureExportPreviewKey = null
+        captureExportPreviewError = null
+    }
+
+    /** Invalidates coverage from a previous range as soon as the current bounds become invalid. */
+    internal fun invalidateCaptureSnapshotPreview(tabId: String) {
+        cancelCapturePreview(tabId)
+        captureExportPreview = null
+        captureExportPreviewKey = null
+        captureExportPreviewError = null
     }
 
     internal fun updateCaptureSessionCalibration(sourcePath: String, additionalOffsetMs: Long) {
@@ -4906,8 +5145,10 @@ class AppState(
         captureExportBusy = true
         captureExportBusyMessage = "Saving ZIP…"
         captureExportOwner = sessionId
+        captureExportSessionId = sessionId
         captureExportResult = null
         captureExportError = null
+        captureExportCancelled = false
         captureExportWarning = null
         val preparedNotes = tabId?.let { id -> tab(id)?.let { t -> t.annotations.preparedForSave(t) } }
         captureExportJob = ioScope.launch {
@@ -4943,9 +5184,18 @@ class AppState(
                     }
                 }
             } catch (cancelled: CancellationException) {
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                }
                 throw cancelled
             } catch (failure: Throwable) {
-                captureExportError = failure.message ?: "Retained capture export failed"
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                } else {
+                    captureExportError = failure.message ?: "Retained capture export failed"
+                }
             } finally {
                 captureExportBusy = false
                 captureExportBusyMessage = null
@@ -5077,6 +5327,11 @@ class AppState(
         ioScope.launch {
             try {
                 runCaptureStart(plan)
+            } catch (cancelled: CancellationException) {
+                // App shutdown or controller removal can invalidate a start while its synchronous
+                // adb preflight is in flight. Treat that as lifecycle cancellation, not a capture
+                // failure shown to the user.
+                throw cancelled
             } catch (failure: java.io.IOException) {
                 captureService.reportError(failure.message ?: "Capture could not start")
             } catch (failure: IllegalArgumentException) {
@@ -5119,8 +5374,25 @@ class AppState(
             // tools.scrcpy is already resolved, so the EMBEDDED->EXTERNAL fallback can tell whether one is actually installed.
             val mediaSupport = captureMediaSupportProvider()
             val adaptedSettings = plan.settings.adaptedToNativeMedia(mediaSupport, tools.scrcpy != null)
-            val startupNotice = nativeMediaAdaptationNotice(plan.settings, adaptedSettings, mediaSupport, tools.scrcpy != null)
-            val session = plan.controller.start(plan.device, adaptedSettings, tools, startupNotice) { started ->
+            val startupNotices = mutableListOf<String>().apply {
+                nativeMediaAdaptationNotice(plan.settings, adaptedSettings, mediaSupport, tools.scrcpy != null)?.let(::add)
+            }
+            checkCaptureStartOwnership(plan)
+            val loggingSnapshot = captureService.readDeviceLoggingConfiguration(tools, plan.device.serial)
+            if (loggingSnapshot.warnings.isNotEmpty()) {
+                startupNotices += "Some device logging settings could not be read. Capture will continue; only read settings can be restored after a verified restart."
+            }
+            // These synchronous adb reads do not stop promptly when ioJob is cancelled. Re-check
+            // ownership after them so shutdown or controller removal cannot be followed by a new
+            // recorder start.
+            checkCaptureStartOwnership(plan)
+            val session = plan.controller.startWithDeviceLoggingConfiguration(
+                plan.device,
+                adaptedSettings,
+                tools,
+                loggingSnapshot.configuration,
+                startupNotices.joinToString(" ").ifBlank { null },
+            ) { started ->
                 val tabId = plan.tabId
                 if (tabId != null) {
                     publishCaptureTab(plan, tabId, started)
@@ -5132,9 +5404,17 @@ class AppState(
                     // in-memory view either: pause it straight away (it shows 0 rows and the paused
                     // message; recording proceeds). Runs on this IO coroutine, where the join is fine.
                     if (heapPressure == HeapPressure.CRITICAL) tailCoordinator.pauseTailing(tabId)
+                } else {
+                    // Tabless lane captures have no publication mutation to serve as the callback's
+                    // ownership check, but still must be cancelled if shutdown removed the lane.
+                    checkCaptureStartOwnership(plan)
                 }
+                // A tab may be closed while its tailer is being started. Avoid opening a display for
+                // an owner that was removed during that work.
+                checkCaptureStartOwnership(plan)
                 openCaptureDisplay(plan, adaptedSettings)
             }
+            checkCaptureStartOwnership(plan)
             captureService.updateSessions()
             if (plan.lane == null && plan.takeFocus) closeCaptureLauncherTabs()
             plan.tabId?.let { monitorCaptureLifecycle(it, plan.controller) }
@@ -5167,6 +5447,7 @@ class AppState(
             testLane = plan.lane,
         )
         synchronized(stateLock) {
+            checkCaptureStartOwnershipLocked(plan)
             if (plan.lane == null && plan.takeFocus) {
                 check(tabs.none { it.captureSessionId != null && it.testLane == null }) { "A capture is already recording" }
                 publishOpenedTab(liveTab, plan.originLauncherId)
@@ -5176,6 +5457,21 @@ class AppState(
                 if (activeSurface == null) setActiveSurfaceToTab(liveTab.id)
             }
         }
+    }
+
+    /** Checks owner identity without carrying stateLock into recorder, adb, tailer, or UI work. */
+    private fun checkCaptureStartOwnership(plan: CaptureStartPlan) {
+        synchronized(stateLock) { checkCaptureStartOwnershipLocked(plan) }
+    }
+
+    /** Caller holds [stateLock], making this check atomic with capture-tab publication. */
+    private fun checkCaptureStartOwnershipLocked(plan: CaptureStartPlan) {
+        val owned = !closed.get() && if (plan.tabId != null) {
+            captureControllersByTab[plan.tabId] === plan.controller
+        } else {
+            plan.lane?.let { tablessLaneControllers[laneKeyOf(it)] === plan.controller } == true
+        }
+        if (!owned) throw CancellationException("Capture start was cancelled because its owner was closed")
     }
 
     /** Opens the device display the capture's settings ask for. A display failure never tears down log/video capture. */
@@ -5202,9 +5498,19 @@ class AppState(
         }
     }
 
-    /** Watches unexpected recorder termination so a disconnected device is finalized automatically. */
+    /** Watches fatal recorder termination and refreshes logging readback after recovery restoration. */
     private fun monitorCaptureLifecycle(tabId: String, controller: TabCaptureController) {
         val monitor = ioScope.launch {
+            launch {
+                controller.deviceLoggingRestoreEvents.collect { event ->
+                    if (closed.get() || event.serial != controller.selectedSession.value?.device?.serial) return@collect
+                    val stillOwned = synchronized(stateLock) {
+                        captureControllersByTab[tabId] === controller &&
+                            tabs.any { it.id == tabId && it.captureSessionId != null }
+                    }
+                    if (stillOwned && !closed.get()) captureService.refreshDeviceLog(event.serial)
+                }
+            }
             controller.snapshot.collect { snapshot ->
                 if (snapshot.state == com.indagium.capture.RecorderState.INTERRUPTED &&
                     tab(tabId)?.captureSessionId != null
@@ -5524,7 +5830,12 @@ class AppState(
             // must survive the transition from recording to a durable capture attachment.
             attachFinalizedCapture(it, imported, settings.enableDoubleClickVideoSeekOnLink)
         }
-        if (tab(tabId)?.attachedVideo != null) videoPanelVisible = true
+        val timelineOnlyGap = imported.timeline?.let { timeline ->
+            timeline.availabilityIntervals.isNotEmpty() &&
+                !timeline.availabilityFramesRendered &&
+                timeline.showUnavailableFrames != false
+        } == true
+        if (tab(tabId)?.attachedVideo != null || timelineOnlyGap) videoPanelVisible = true
     }
 
     private fun closeCaptureLauncherTabs() {
@@ -8410,6 +8721,9 @@ class AppState(
         }
     }
 
+    /** Current playhead when a video controller is already open; does not instantiate a decoder. */
+    internal fun existingVideoPositionMs(tabId: String): Long? = videoControllers[tabId]?.positionMs
+
     private fun videoUnavailableMessage(attachment: VideoAttachment): String = when (val source = attachment.source) {
         is VideoSource.LocalFile -> "No video path is set for \"${attachment.sourceLabel}\""
         is VideoSource.ArchiveEntry -> "Could not read \"${attachment.sourceLabel}\" — " +
@@ -10400,6 +10714,7 @@ class AppState(
                 // log for the lifetime of the app.
                 captureIndexByTab.remove(tabId)
                 captureFollowFloorIndexByTab.remove(tabId)
+                importedCaptureSnapshots.remove(tabId)
                 captureScreenshotCapabilities.remove(tabId)
                 capturePreviewGenerationByTab.remove(tabId)
                 capturePreviewJobsByTab.remove(tabId)?.cancel()
@@ -11023,7 +11338,9 @@ class AppState(
     /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
     @Suppress("TooGenericExceptionCaught")
     fun openCaptureFile(file: File): String {
-        val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
+        val existing = tabs.firstOrNull {
+            it.captureArchivePath == file.absolutePath || it.attachedVideo?.captureSourcePath == file.absolutePath
+        }
         if (existing != null) {
             activateAlreadyOpenTab(existing.id)
             offerCaptureNotesReimportIfNeeded(existing, file)
@@ -11038,6 +11355,14 @@ class AppState(
                 val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
                 val logData = parseLogcat(imported.logFile)
                 ensureActive()
+                val retained = retainedCaptureSessionForArchive(imported, file)
+                val snapshotSource = if (retained == null) importedCaptureSnapshot(
+                    imported = imported,
+                    source = file,
+                    parsedLog = logData,
+                    indexDirectory = File(archiveCacheDir, "imported-snapshot-index"),
+                    checkpointDirectory = File(notesDir, "capture-snapshot-cursors"),
+                ) else null
                 val sourcePath = if (file.name == "capture.indagium.json") {
                     imported.logFile.absolutePath
                 } else {
@@ -11081,6 +11406,8 @@ class AppState(
                 var captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
                     analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
                     .copy(sourcePath = sourcePath, attachedVideo = video, captureTimeline = imported.timeline,
+                        captureSourceSessionId = imported.descriptor.sessionId,
+                        captureArchivePath = file.absolutePath,
                         largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
                         showUnfiltered = settings.openNewFilesWithUnfiltered)
                 // A brand-new tab never has existing notes to protect (see
@@ -11090,6 +11417,7 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     publishOpenedTab(captureTab, originLauncherId)
+                    if (snapshotSource != null) importedCaptureSnapshots[tabId] = snapshotSource
                     if (video != null) videoPanelVisible = true
                 }
                 rememberRecentFile(file)
@@ -11154,17 +11482,33 @@ class AppState(
     }
 
     @Suppress("TooGenericExceptionCaught")
-    private fun restoreCaptureLink(tabId: String) {
-        val original = tab(tabId)?.attachedVideo ?: return
-        val path = original.captureSourcePath ?: return
+    private fun restoreCaptureLink(tabId: String, alreadyOpened: com.indagium.capture.ImportedCapture? = null) {
+        val initial = tab(tabId) ?: return
+        val path = captureArchivePathForTab(initial) ?: return
         try {
-            val imported = com.indagium.capture.CaptureArchiveReader.open(File(path), File(archiveCacheDir, "captures"))
+            val imported = alreadyOpened ?: com.indagium.capture.CaptureArchiveReader.open(File(path), File(archiveCacheDir, "captures"))
             val loaded = tab(tabId) ?: return
             // The restored source could have been replaced separately from its descriptor.
             require(parseLogcat(imported.logFile) == loaded.logData) { "Restored logs no longer match the capture" }
+            val retained = retainedCaptureSessionForArchive(imported, File(path))
+            if (retained == null) {
+                importedCaptureSnapshots[tabId] = importedCaptureSnapshot(
+                    imported = imported,
+                    source = File(path),
+                    parsedLog = loaded.logData,
+                    indexDirectory = File(archiveCacheDir, "imported-snapshot-index"),
+                    checkpointDirectory = File(notesDir, "capture-snapshot-cursors"),
+                )
+            }
             upTab(tabId) { current ->
                 val currentVideo = current.attachedVideo
-                if (currentVideo?.captureSourcePath != path) return@upTab current
+                // This block runs on the UI dispatcher. Only compare already-published path
+                // metadata here; captureArchivePathForTab opens/parses descriptors and is kept
+                // on the IO restore path above.
+                if (current.sourcePath != initial.sourcePath ||
+                    current.captureArchivePath != initial.captureArchivePath ||
+                    currentVideo?.captureSourcePath != initial.attachedVideo?.captureSourcePath
+                ) return@upTab current
                 // Archive v3 (no per-row mapping file): unlike a v1/v2 CaptureTimeline — too large
                 // to persist, so it must be rehydrated from the reopened archive on every restore —
                 // a v3 VideoAnchor is small enough that it's already part of the restored tab token
@@ -11180,14 +11524,16 @@ class AppState(
                 // corrected one instead of resurrecting the wrong row.
                 val stale = imported.staleSyncAnchor?.let { stale ->
                     val staleId = current.logData.getOrNull(stale.row - 1)?.id
-                    currentVideo.anchor?.takeIf { it.logId == staleId && it.videoMs == stale.videoMs }
+                    currentVideo?.anchor?.takeIf { it.logId == staleId && it.videoMs == stale.videoMs }
                 }
-                val anchor = currentVideo.anchor.takeIf { stale == null } ?: imported.syncAnchor?.let { syncAnchor ->
+                val anchor = currentVideo?.anchor?.takeIf { stale == null } ?: imported.syncAnchor?.let { syncAnchor ->
                     current.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
                 }
                 current.copy(
                     captureTimeline = imported.timeline,
-                    attachedVideo = currentVideo.copy(anchor = anchor),
+                    captureSourceSessionId = imported.descriptor.sessionId,
+                    captureArchivePath = path,
+                    attachedVideo = currentVideo?.copy(anchor = anchor),
                 )
             }
         } catch (error: Exception) {
@@ -11195,6 +11541,54 @@ class AppState(
                 attachedVideo = current.attachedVideo?.copy(doubleClickSeekEnabled = false)) }
             showOpenError("Capture synchronization unavailable", path,
                 "${error.message}. The log remains open; automatic video linking is disabled.")
+        }
+    }
+
+    private fun captureArchivePathForTab(tab: LogTab): String? {
+        val candidates = listOfNotNull(tab.captureArchivePath, tab.attachedVideo?.captureSourcePath)
+        candidates.firstOrNull { path -> runCatching {
+            com.indagium.capture.CaptureArchiveReader.isCaptureArchive(File(path))
+        }.getOrDefault(false) }?.let { return it }
+        val sourcePath = tab.sourcePath ?: return null
+        val bang = sourcePath.indexOf('!')
+        if (bang > 0) {
+            val archive = File(sourcePath.substring(0, bang))
+            val entryPath = sourcePath.substring(bang + 1)
+            val imported = runCatching {
+                com.indagium.capture.CaptureArchiveReader.open(archive, File(archiveCacheDir, "captures"))
+            }.getOrNull()
+            if (imported?.descriptor?.log?.path == entryPath) return archive.absolutePath
+        }
+        // Legacy retained captures did not persist captureArchivePath. Recognize only their known
+        // logcat location and then verify that the descriptor resolves to this exact file. Walking
+        // arbitrary ancestors can accidentally associate an unrelated log in a parent directory.
+        val sourceFile = File(sourcePath)
+        if (sourceFile.name != "logcat.log" || sourceFile.parentFile?.name != "logs") return null
+        val sessionDirectory = sourceFile.parentFile?.parentFile ?: return null
+        val descriptor = File(sessionDirectory, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME)
+        if (descriptor.isFile) {
+            val imported = runCatching {
+                com.indagium.capture.CaptureArchiveReader.open(descriptor, File(archiveCacheDir, "captures"))
+            }.getOrNull()
+            if (imported != null && runCatching {
+                    imported.logFile.canonicalFile == sourceFile.canonicalFile
+                }.getOrDefault(false)
+            ) return descriptor.absolutePath
+        }
+        return null
+    }
+
+    private fun retainedCaptureSessionForArchive(
+        imported: com.indagium.capture.ImportedCapture,
+        source: File,
+    ): CaptureSession? {
+        val descriptorParent = when {
+            source.isDirectory -> source
+            source.name == com.indagium.capture.CAPTURE_DESCRIPTOR_NAME -> source.parentFile
+            else -> null
+        } ?: return null
+        return captureService.retainedSession(imported.descriptor.sessionId)?.takeIf { session ->
+            runCatching { session.directory.canonicalFile == descriptorParent.canonicalFile }.getOrDefault(false)
         }
     }
 
@@ -11966,12 +12360,13 @@ class AppState(
         val t = tab(tabId) ?: return null
         val currentSettings = settings
         val lineContext = sharedLogLineContext(t, currentSettings)
-        val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML) {
+        val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML || format == AnnotationCopyFormat.TEAMS) {
             buildAnnotationsHtml(
                 t,
                 currentSettings,
                 maskText = { maskWordForCopy(it, currentSettings) },
                 lineContext = lineContext,
+                embedImages = format != AnnotationCopyFormat.TEAMS,
             ) { document ->
                 Seq3RenderCache.brandedPngBytes(
                     Seq3RenderCache.layout(document),
@@ -12489,14 +12884,9 @@ class AppState(
     // this function, no way to begin a new analysis without either editing over the old one or
     // closing and reopening the tab (which just auto-loads the same notes right back).
     //
-    // One click, no prompt, by design: clears every field Annotations carries — blocks, prefix,
-    // suffix, AND issueDescription — down to a totally blank Annotations(), not just the block
-    // list. This is the same "switch, don't merge" call openNoteFile's .ann branch already makes
-    // when moving to a different file wholesale; prefix/suffix/issueDescription are as much part of
-    // "the previous analysis" as its blocks are; leaving them behind would produce a Notes panel
-    // that LOOKS blank (no blocks) but still exports the old issue's heading/footer/AI context on
-    // the very first new note, which is exactly the kind of silent leftover-state bug this whole fix
-    // set exists to stop causing.
+    // One click, no prompt, by design: clears authored blocks, suffix, and private issue context,
+    // then seeds a fresh From prefix from this tab's current source and the configured label. The
+    // old prefix belongs to the previous analysis and must not leak into the new one.
     //
     // Pins noteTargetName to the next genuinely-free "_N" slot via the SAME nextFreeNoteTargetName
     // walk, and the SAME "conflict means either .md OR .ann exists" predicate, saveNotesToNewNoteFile
@@ -12521,7 +12911,15 @@ class AppState(
         val newName = nextFreeNoteTargetName(analysisNoteMarkdownName(t.filename, t.sourcePath), MAX_NOTE_TARGET_SUFFIX) { name ->
             File(targetDir, name).exists() || File(targetDir, "${name.removeSuffix(".md")}.ann").exists()
         }
-        upTab(tabId) { it.copy(annotations = Annotations(), noteTargetName = newName, recoveredNoteRows = emptyMap()) }
+        val sourceName = archiveQualifiedLabel(t.sourcePath) ?: t.filename
+        val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
+        upTab(tabId) {
+            it.copy(
+                annotations = Annotations(prefix = "$prefixLabel $sourceName"),
+                noteTargetName = newName,
+                recoveredNoteRows = emptyMap(),
+            )
+        }
     }
 
     // ── Save folders (Settings → General → Storage) ─────────────────────────────────
@@ -14876,7 +15274,7 @@ class AppState(
                         largeFileMode = result.largeFileMode,
                     )
                 }
-                restoreCaptureLink(tabId)
+                restoreCaptureLink(tabId, result.captureArchive)
                 markActiveLoadFinished(tabId)
                 published = true
                 (source as? RestoredTabSource.FileSource)?.let { scheduleUnfinalizedCaptureAdoption(tabId, it.file) }
@@ -14933,6 +15331,38 @@ class AppState(
 
     private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult {
         return when (source) {
+            is RestoredTabSource.CaptureSource -> {
+                val imported = runCatching {
+                    com.indagium.capture.CaptureArchiveReader.open(
+                        source.archiveFile,
+                        File(archiveCacheDir, "captures"),
+                    )
+                }.getOrNull()
+                if (imported == null) {
+                    val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
+                        source.archiveFile,
+                        source.logEntryPath,
+                        File(archiveCacheDir, "capture-log-restore"),
+                    ) ?: return RestoredTabLoadResult.MissingArchiveEntry(
+                        source.archiveFile,
+                        source.logEntryPath ?: com.indagium.capture.CAPTURE_DESCRIPTOR_NAME,
+                    )
+                    val parsed = runCatching { parser(verifiedLog) }
+                        .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+                    return RestoredTabLoadResult.Loaded(
+                        logData = parsed.entries,
+                        archiveCandidate = null,
+                        largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
+                        logFormat = parsed.format,
+                    )
+                }
+                RestoredTabLoadResult.Loaded(
+                    logData = parseLogcat(imported.logFile),
+                    archiveCandidate = null,
+                    largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
+                    captureArchive = imported,
+                )
+            }
             is RestoredTabSource.FileSource -> {
                 val parsed = runCatching { parser(source.file) }
                     .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
@@ -14944,6 +15374,38 @@ class AppState(
                 )
             }
             is RestoredTabSource.ArchiveSource -> {
+                if (runCatching {
+                        com.indagium.capture.CaptureArchiveReader.isCaptureArchive(source.archiveFile)
+                    }.getOrDefault(false)
+                ) {
+                    val imported = runCatching {
+                        com.indagium.capture.CaptureArchiveReader.open(
+                            source.archiveFile,
+                            File(archiveCacheDir, "captures"),
+                        )
+                    }.getOrNull()
+                    if (imported == null || imported.descriptor.log.path != source.entryPath) {
+                        val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
+                            source.archiveFile,
+                            source.entryPath,
+                            File(archiveCacheDir, "capture-log-restore"),
+                        ) ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
+                        val parsed = runCatching { parser(verifiedLog) }
+                            .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+                        return RestoredTabLoadResult.Loaded(
+                            logData = parsed.entries,
+                            archiveCandidate = null,
+                            largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
+                            logFormat = parsed.format,
+                        )
+                    }
+                    return RestoredTabLoadResult.Loaded(
+                        logData = parseLogcat(imported.logFile),
+                        archiveCandidate = null,
+                        largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
+                        captureArchive = imported,
+                    )
+                }
                 val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
                     ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
                 val parsed = runCatching {

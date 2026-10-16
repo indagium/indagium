@@ -14,14 +14,18 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
@@ -36,6 +40,7 @@ import com.indagium.ui.FilterBar
 import com.indagium.ui.FilterBarActions
 import com.indagium.ui.FilterBarModel
 import com.indagium.ui.FilterBarToolbarButton
+import com.indagium.utils.passesFilter
 import org.junit.Rule
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -437,14 +442,93 @@ class FilterBarUiTest {
         assertTrue(rule.onAllNodes(hasTestTag("filter-bar-tags-candidate-0-pid")).fetchSemanticsNodes().isEmpty())
     }
 
+    @Test
+    fun packagePrefixPidActionAddsNumericProcessFilterAcrossTagsAndHonorsPrefixBoundary() {
+        var latestFilter = Filter(mode = TAGS)
+        val log = listOf(
+            LogEntry(1, "00:00:00", LogLevel.I, "com.example.Alpha", "alpha", pid = 100, tid = 1),
+            LogEntry(2, "00:00:01", LogLevel.D, "com.example.Beta", "beta", pid = 100, tid = 1),
+            LogEntry(3, "00:00:02", LogLevel.I, "com.example.Alpha", "other pid", pid = 200, tid = 2),
+            LogEntry(4, "00:00:03", LogLevel.I, "com.exampleSibling.Bad", "sibling prefix", pid = 300, tid = 3),
+            LogEntry(5, "00:00:04", LogLevel.I, "OtherTag", "same process, outside prefix", pid = 100, tid = 1),
+        )
+        val model = TEST_MODEL.copy(
+            sortedTags = listOf("com.example.Alpha", "com.example.Beta", "com.exampleSibling.Bad"),
+            tagUsage = mapOf("com.example.Alpha" to 10, "com.example.Beta" to 5, "com.exampleSibling.Bad" to 1),
+        )
+        installBar(
+            initialFilter = latestFilter,
+            logData = log,
+            model = model,
+            processNames = mapOf(100 to "main-app", 200 to "other-app", 300 to "sibling-app"),
+        ) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        rule.onNodeWithTag(TAG_INPUT).performTextInput("com.example")
+        waitForTagCandidates()
+        rule.waitUntil(POPUP_TIMEOUT_MS) {
+            rule.onAllNodesWithTag("filter-bar-tags-package-candidate-0", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithTag("filter-bar-tags-package-candidate-0", useUnmergedTree = true)
+            .performMouseInput { moveTo(center) }
+        rule.waitUntilAtLeastOneExists(hasTestTag("filter-bar-tags-candidate-0-pid"), 2_000)
+        rule.onNodeWithTag("filter-bar-tags-candidate-0-pid").performMouseInput {
+            moveTo(center)
+            press()
+            release()
+        }
+
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-add"), POPUP_TIMEOUT_MS)
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-item-100"), POPUP_TIMEOUT_MS)
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-item-200"), POPUP_TIMEOUT_MS)
+        rule.onNodeWithTag("tag-process-row-100").assertIsOn()
+        rule.onNodeWithTag("tag-process-row-200").assertIsOff()
+        rule.onNodeWithText("To follow app restarts, choose an individual tag.").assertExists()
+        rule.onNodeWithTag("tag-process-keep-row").assertDoesNotExist()
+        rule.onNodeWithTag("tag-process-item-300").assertDoesNotExist()
+        rule.onNodeWithTag("tag-process-add").performClick()
+
+        val pidRule = latestFilter.messageRules.single()
+        assertEquals(com.indagium.model.RuleTarget.PID_TID, pidRule.target)
+        assertEquals("100", pidRule.pattern, "package actions capture selected numeric PIDs instead of a dynamic tag token")
+        assertEquals(setOf(1, 2, 5), log.filter { passesFilter(it, latestFilter) }.mapTo(mutableSetOf()) { it.id })
+    }
+
+    @Test
+    fun packagePrefixPidActionIsReachableFromTheKeyboard() {
+        var latestFilter = Filter(mode = TAGS)
+        installBar(
+            initialFilter = latestFilter,
+            logData = PACKAGE_PID_LOG,
+            model = TEST_MODEL.copy(sortedTags = listOf("com.example.Alpha", "com.example.Beta")),
+            processNames = mapOf(100 to "main-app", 200 to "other-app"),
+        ) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        rule.onNodeWithTag(TAG_INPUT).performTextInput("com.example")
+        waitForTagCandidates()
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput {
+            pressKey(Key.DirectionDown) // select the package-prefix candidate
+            pressKey(Key.DirectionLeft) // include -> package PID action
+            pressKey(Key.Enter)
+        }
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-add"), POPUP_TIMEOUT_MS)
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-item-100"), POPUP_TIMEOUT_MS)
+        assertTrue(latestFilter.activeTags.isEmpty(), "opening a package PID popup must not include a tag")
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.Escape) }
+        rule.waitUntil(2_000) { rule.onAllNodes(hasTestTag("tag-process-add")).fetchSemanticsNodes().isEmpty() }
+    }
+
     private fun installBar(
         initialFilter: Filter,
         logData: List<LogEntry> = emptyList(),
         model: FilterBarModel = TEST_MODEL,
+        processNames: Map<Int, String> = emptyMap(),
         onRememberRegex: (String) -> Unit = {},
         onFilterChanged: (Filter) -> Unit,
     ) {
-        val initialTab = testTab(initialFilter, logData)
+        val initialTab = testTab(initialFilter, logData, processNames)
         rule.setContent {
             var tab by remember { mutableStateOf(initialTab) }
             val updateFilter: (Filter) -> Unit = { next ->
@@ -521,7 +605,11 @@ class FilterBarUiTest {
         rule.waitUntilAtLeastOneExists(hasTestTag(SCOPE_CHOOSER), POPUP_TIMEOUT_MS)
     }
 
-    private fun testTab(filter: Filter, logData: List<LogEntry> = emptyList()) = LogTab(
+    private fun testTab(
+        filter: Filter,
+        logData: List<LogEntry> = emptyList(),
+        processNames: Map<Int, String> = emptyMap(),
+    ) = LogTab(
         id = "filter-bar-ui-test",
         filename = "filter-bar-ui-test.log",
         logData = logData,
@@ -530,6 +618,7 @@ class FilterBarUiTest {
         analysis = com.indagium.model.LogAnalysis(
             tagCounts = logData.groupingBy { it.tag }.eachCount(),
             tagPids = logData.groupBy({ it.tag }, { it.pid }).mapValues { (_, pids) -> pids.filterNotNull().toSet() },
+            processNames = processNames,
             pending = false,
         ),
     )
@@ -568,6 +657,12 @@ class FilterBarUiTest {
         val SAMPLE_LOG = listOf(
             LogEntry(1, "00:00:00", LogLevel.I, "com.example.Alpha", "timeout happened", pid = 1234, tid = 1),
             LogEntry(2, "00:00:01", LogLevel.D, "com.example.Beta", "ready", pid = 1234, tid = 1),
+        )
+
+        val PACKAGE_PID_LOG = listOf(
+            LogEntry(1, "00:00:00", LogLevel.I, "com.example.Alpha", "alpha", pid = 100, tid = 1),
+            LogEntry(2, "00:00:01", LogLevel.D, "com.example.Beta", "beta", pid = 100, tid = 1),
+            LogEntry(3, "00:00:02", LogLevel.I, "com.example.Alpha", "other pid", pid = 200, tid = 2),
         )
     }
 }

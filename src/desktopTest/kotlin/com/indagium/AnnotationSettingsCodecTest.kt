@@ -44,5 +44,7 @@ class AnnotationSettingsCodecTest {
 
         val cloud = settingsFromJson(AppSettings(annotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD).settingsJson())!!
         assertEquals(AnnotationCopyFormat.JIRA_CLOUD, cloud.annotationCopyFormat)
+        val teams = settingsFromJson(AppSettings(annotationCopyFormat = AnnotationCopyFormat.TEAMS).settingsJson())!!
+        assertEquals(AnnotationCopyFormat.TEAMS, teams.annotationCopyFormat)
     }
 }

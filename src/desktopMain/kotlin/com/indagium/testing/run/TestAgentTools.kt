@@ -52,6 +52,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
 import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 
 // The tools one test-run lane's agent gets: a per-lane IndagiumToolGateway holding ONLY these tools, never the
 // app's global catalogue, so an agent cannot reach tabs, notes, files or other devices. Built-in tools cover the
@@ -66,6 +67,8 @@ const val LANE_MAX_WAIT_FOR_LOG_MS = 30_000L
 const val LANE_DEFAULT_WAIT_FOR_LOG_MS = 10_000L
 const val LANE_DEFAULT_WAIT_FOR_UI_MS = 10_000L
 const val LANE_MAX_WAIT_FOR_UI_MS = 30_000L
+const val LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS = 120_000L
+const val LANE_MAX_WAIT_FOR_DEVICE_READY_MS = 600_000L
 const val LANE_UI_READ_TIMEOUT_MS = 2_000L
 internal const val MAX_UI_RECOVERY_ATTEMPTS = 2
 private const val DEFAULT_LOG_READ_LIMIT = 100
@@ -542,6 +545,7 @@ private fun uiNodeMap(view: UiTreeNodeView): Map<String, Any?> = buildMap {
 private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
     inputSequenceTool(context),
     waitForUiTool(context),
+    waitForDeviceReadyTool(context),
     LaneTool(
         IndagiumToolDescriptor(
             "tap",
@@ -819,6 +823,72 @@ private fun waitForUiTool(context: LaneToolContext): LaneTool =
             ),
         ),
         guarded { args -> waitForUi(context.session, args) },
+    )
+
+private fun waitForDeviceReadyTool(context: LaneToolContext): LaneTool =
+    LaneTool(
+        IndagiumToolDescriptor(
+            "wait_for_device_ready",
+            "Wait for this lane's original Android device to be adb-authorized, shell-responsive and fully booted. Use after an expected " +
+                "reboot or temporary disconnect; it never switches to another device. The timeout defaults to $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS ms and is capped at $LANE_MAX_WAIT_FOR_DEVICE_READY_MS ms.",
+            schema(
+                "timeoutMs" to "integer",
+                descriptions = mapOf(
+                    "timeoutMs" to "Wait time in milliseconds, 1..$LANE_MAX_WAIT_FOR_DEVICE_READY_MS (default $LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS). The active step deadline can shorten this wait.",
+                ),
+            ),
+        ),
+        guarded { args ->
+            val timeoutMs = args.long("timeoutMs") ?: LANE_DEFAULT_WAIT_FOR_DEVICE_READY_MS
+            requireLaneToolArgument(timeoutMs in 1..LANE_MAX_WAIT_FOR_DEVICE_READY_MS) {
+                "timeoutMs must be between 1 and $LANE_MAX_WAIT_FOR_DEVICE_READY_MS."
+            }
+            val identity = context.inputSequence.dispatchIdentity()
+            val stepRemainingMs = context.inputSequence.remainingExecutionMs(identity)
+            val effectiveTimeoutMs = minOf(timeoutMs, stepRemainingMs ?: timeoutMs)
+            val started = System.nanoTime()
+            val latestProgress = AtomicReference<Map<String, Any?>?>(null)
+            val result = withTimeoutOrNull(effectiveTimeoutMs) {
+                context.session.waitForDeviceReady(effectiveTimeoutMs, latestProgress::set)
+            }
+            val stepDeadlineExpired = stepRemainingMs != null && stepRemainingMs <= timeoutMs
+            fun timeoutDiagnostic(observed: String?): String = when {
+                !stepDeadlineExpired -> observed ?: "The device did not become ready before timeout."
+                observed == null -> "The step execution allowance expired before an adb readiness probe completed."
+                else -> "The step execution allowance expired while waiting for the device. Last observed status: $observed"
+            }
+            when {
+                result != null && result["timedOut"] == true && stepDeadlineExpired ->
+                    result + ("diagnostic" to timeoutDiagnostic(result["diagnostic"]?.toString()))
+                result != null -> result
+                else -> {
+                    val progress = latestProgress.get()
+                    val fallback = progress ?: mapOf(
+                        "ready" to false,
+                        "timedOut" to true,
+                        "timeoutMs" to effectiveTimeoutMs,
+                        "waitedMs" to 0L,
+                        "serial" to context.session.serial,
+                        "adbState" to "unavailable",
+                        "authorized" to false,
+                        "shellResponsive" to false,
+                        "bootCompleted" to false,
+                        "bootIdBefore" to null,
+                        "bootIdAfter" to null,
+                        "rebootConfirmed" to null,
+                        "diagnostic" to null,
+                    )
+                    fallback + mapOf(
+                        "ready" to false,
+                        "timedOut" to true,
+                        "timeoutMs" to effectiveTimeoutMs,
+                        "waitedMs" to ((System.nanoTime() - started) / NANOS_PER_MILLISECOND).coerceAtLeast(0L),
+                        "serial" to context.session.serial,
+                        "diagnostic" to timeoutDiagnostic(progress?.get("diagnostic")?.toString()),
+                    )
+                }
+            }
+        },
     )
 
 /** Full syntactic and allowlist validation, also called by the sequence budget guard before any batch is admitted. */

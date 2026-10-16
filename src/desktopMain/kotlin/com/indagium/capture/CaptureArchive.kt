@@ -60,11 +60,12 @@ const val CAPTURED_WITH_INDAGIUM_NAME = "captured_with_indagium.txt"
 // backward-incompatible WRITER change (not on every new optional field) is what makes an old build
 // fail with an honest "unsupported/newer archive version" instead of a confusing "unreferenced
 // file" error.
-const val CAPTURE_ARCHIVE_VERSION = 3
+const val CAPTURE_ARCHIVE_VERSION = 4
 
 private const val MAX_DESCRIPTOR_BYTES = 1024 * 1024L
 private const val MAX_MAPPING_BYTES = MAX_ARCHIVE_ENTRY_BYTES
 private const val MAX_MAPPING_ROWS = 10_000_000
+private const val MAX_TIMELINE_BYTES = 1024L * 1024L * 1024L
 private const val MAX_MAPPING_LINE_BYTES = 64 * 1024
 private const val MAX_SCREENSHOT_BYTES = 100 * 1024 * 1024L
 private const val MAX_SCREENSHOTS_BYTES = 500 * 1024 * 1024L
@@ -158,6 +159,18 @@ data class CaptureArchiveDescriptor(
     // finalized with no video, or with no row that had both a parseable log timestamp and a known
     // video position.
     val syncAnchor: CaptureSyncAnchor? = null,
+    /** v4 bounded JSONL row timing asset; row ordinals restart at one for every archive cut. */
+    val timeline: CaptureArchiveAsset? = null,
+    /** v4 device-offline intervals, relative to the export's first elapsed millisecond. */
+    val availabilityIntervals: List<CaptureAvailabilityInterval> = emptyList(),
+    /** Session elapsed value represented by timeline row 0; every child archive cut rebases this. */
+    val timelineBaseElapsedMs: Long = 0L,
+    /** Timeline duration from [timelineBaseElapsedMs], including trailing periods without log rows. */
+    val timelineDurationMs: Long = 0L,
+    /** Whether unavailable cards are already part of the exported media track. */
+    val availabilityFramesRendered: Boolean = false,
+    /** Frozen record-time preference; null only for legacy archives. */
+    val showUnavailableFrames: Boolean? = null,
 )
 
 /**
@@ -316,6 +329,21 @@ class CaptureArchiveExporter(
                 clip = null,
                 includeRawVideo = videoFile != null,
             )
+            val clippedAvailability = clipAvailabilityIntervals(
+                session.availabilityIntervals,
+                baseElapsedMs = 0L,
+                endElapsedMs = session.elapsedMs.coerceAtLeast(0L),
+            )
+            val stagedTimeline = File(staging, "timeline/rows.jsonl").apply { parentFile?.mkdirs() }
+            writeTimelineRows(
+                session.indexFile,
+                session.indexFile.length(),
+                stagedTimeline,
+                baseElapsedMs = 0L,
+                durationMs = session.elapsedMs.coerceAtLeast(0L),
+                availabilityIntervals = clippedAvailability,
+            )
+            val timelineAsset = asset("timeline/rows.jsonl", stagedTimeline)
 
             val logAsset = asset("logs/logcat.log", session.logFile)
             val videoAsset = videoFile?.let { asset("video/screen.mkv", it) }
@@ -354,7 +382,14 @@ class CaptureArchiveExporter(
                 notes = null,
                 markers = emptyList(),
                 syncAnchor = syncAnchor,
+                timeline = timelineAsset,
+                availabilityIntervals = clippedAvailability,
+                timelineBaseElapsedMs = 0L,
+                timelineDurationMs = session.elapsedMs.coerceAtLeast(0L),
+                availabilityFramesRendered = false,
+                showUnavailableFrames = session.settings.showUnavailableFrames,
             )
+            publishReplacing(stagedTimeline, File(session.directory, "timeline/rows.jsonl"))
             stagingDescriptor.writeText(descriptor.toJson(), Charsets.UTF_8)
 
             publishReplacing(stagingDescriptor, descriptorFile)
@@ -410,9 +445,10 @@ class CaptureArchiveExporter(
         // findSelectionBounds) fixes both directions. Deliberately NOT reused for the video range
         // below — video coverage is independent of whether any *log* row matched.
         val logBounds = selectionBounds ?: run {
-            val requestedStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
+            val requestedStartMs = requestedRangeStartMs(request, snapshotCheckpoint)
+            val requestedEndMs = requestedRangeEndMs(request)
             val excludeStart = request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0
-            scanElapsedBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, requestedStartMs, request.cutoffElapsedMs, excludeStart)
+            scanElapsedBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, requestedStartMs, requestedEndMs, excludeStart)
         }
         // Deliberately session.effectiveVideoCheckpointMs, not the log's snapshotCheckpoint: video
         // coverage lags the log (muxer/AVIO buffering — see FfmpegCaptureVideoExporter), so reusing
@@ -420,11 +456,19 @@ class CaptureArchiveExporter(
         // (before the video cursor existed) or silently dropped whatever tail the previous export's
         // lag left uncovered (a shared cursor advanced past real video coverage). See CaptureModels.
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.effectiveVideoCheckpointMs)
-        val videoRangeEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
+            ?: requestedRangeStartMs(request, if (request.range == CaptureRange.SINCE_SAVE) session.effectiveVideoCheckpointMs else snapshotCheckpoint)
+        val videoRangeEndMs = selectionBounds?.lastElapsedMs ?: requestedRangeEndMs(request)
         val includeVideo = session.settings.recordVideo && request.includeVideo
+        val availabilityRangeStartMs = videoRangeStartMs.takeUnless { it == Long.MIN_VALUE } ?: 0L
+        val renderAvailability = includeVideo && session.settings.showUnavailableFrames &&
+            videoExporter is CaptureAvailabilityVideoExporter &&
+            hasAvailabilityMetadataInRange(session, availabilityRangeStartMs, videoRangeEndMs)
         val videoCoverage = if (includeVideo) {
-            previewVideoCoverage(session, videoRangeStartMs, videoRangeEndMs)
+            if (renderAvailability) {
+                PreviewVideoCoverage(coveredEndMs = videoRangeEndMs, shortfallMs = 0L)
+            } else {
+                previewVideoCoverage(session, videoRangeStartMs, videoRangeEndMs)
+            }
         } else {
             null
         }
@@ -658,12 +702,24 @@ class CaptureArchiveExporter(
             null
         }
         val logStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
-        val selectedEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
+            ?: requestedRangeStartMs(request, snapshotCheckpoint)
+        val selectedEndMs = selectionBounds?.lastElapsedMs ?: requestedRangeEndMs(request)
         // See the matching comment in preview() above: the video range's Since-last-save start is
         // its own cursor, not the log's.
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.effectiveVideoCheckpointMs)
+            ?: requestedRangeStartMs(request, if (request.range == CaptureRange.SINCE_SAVE) session.effectiveVideoCheckpointMs else snapshotCheckpoint)
+        val timelineBaseMs = when {
+            request.range == CaptureRange.ALL -> 0L
+            request.range == CaptureRange.SELECTION -> selectionBounds?.firstElapsedMs ?: 0L
+            request.range == CaptureRange.SINCE_SAVE -> sinceSaveTimelineBaseElapsedMs(
+                logCheckpointMs = snapshotCheckpoint,
+                videoCheckpointMs = session.effectiveVideoCheckpointMs,
+                includeVideo = request.includeVideo,
+                videoConfigured = session.settings.recordVideo,
+            )
+            logStartMs != Long.MIN_VALUE -> logStartMs
+            else -> 0L
+        }
         val videoConfigured = session.settings.recordVideo && request.includeVideo
         val videoStartElapsed = session.videoStartElapsedMs
         val requestedSourceStart = videoStartElapsed?.let {
@@ -676,13 +732,18 @@ class CaptureArchiveExporter(
         val requestedSourceEnd = videoStartElapsed?.let {
             (selectedEndMs - it + session.manualOffsetMs).coerceAtLeast(requestedSourceStart ?: 0L)
         }
-        val includeVideo = videoConfigured &&
+        val normalVideoRange = videoConfigured &&
             videoStartElapsed != null &&
             session.videoFile.isFile &&
             session.videoFile.length() > 0L &&
             requestedSourceStart != null &&
             requestedSourceEnd != null &&
             requestedSourceEnd > requestedSourceStart
+        val renderAvailability = videoConfigured && session.settings.showUnavailableFrames &&
+            videoExporter is CaptureAvailabilityVideoExporter &&
+            hasAvailabilityMetadataInRange(session, timelineBaseMs, selectedEndMs)
+        val hasOfflineMetadata = hasAvailabilityMetadataInRange(session, timelineBaseMs, selectedEndMs)
+        val includeVideo = normalVideoRange || renderAvailability
         val snapshotScreenshots = snapshotScreenshots(session.directory, logStartMs, selectedEndMs)
         require(snapshotScreenshots.sumOf { it.length } <= MAX_SCREENSHOTS_BYTES) {
             "Capture screenshots exceed the combined size limit"
@@ -702,7 +763,7 @@ class CaptureArchiveExporter(
                 selectedLastRowOrdinal = request.selectedLastRowOrdinal.takeIf { request.range == CaptureRange.SELECTION },
                 destination = File(work, ".selected-index.jsonl"),
             )
-            require(selection.recordCount > 0 || (request.range == CaptureRange.SINCE_SAVE && includeVideo)) {
+            require(selection.recordCount > 0 || (request.range == CaptureRange.SINCE_SAVE && includeVideo) || hasOfflineMetadata) {
                 "The selected capture range contains no complete log lines"
             }
             preflight(
@@ -711,9 +772,25 @@ class CaptureArchiveExporter(
                 logBytes = selection.logBytes,
                 videoBytes = if (includeVideo) session.videoFile.length() else 0,
                 screenshotsBytes = snapshotScreenshots.sumOf { it.length },
+                timelineBytes = saturatingAdd(0L, selection.recordCount * 48L),
             )
             val stagedLog = File(work, "logcat.log")
             copySelectedLog(session.logFile, selection.indexFile, stagedLog)
+            val clippedAvailability = clipAvailabilityIntervals(
+                session.availabilityIntervals,
+                baseElapsedMs = timelineBaseMs,
+                endElapsedMs = selectedEndMs,
+            )
+            val stagedTimeline = File(work, "timeline/rows.jsonl").apply { parentFile?.mkdirs() }
+            writeTimelineRows(
+                selection.indexFile,
+                selection.indexFile.length(),
+                stagedTimeline,
+                timelineBaseMs,
+                (selectedEndMs - timelineBaseMs).coerceAtLeast(0L),
+                clippedAvailability,
+            )
+            val timelineAsset = asset("timeline/rows.jsonl", stagedTimeline)
 
             // Archive v3 / MP4 export: the container is chosen per export from the session's own
             // settings, not fixed at "mkv" — see CaptureModels.kt's CaptureVideoContainer. Audio
@@ -732,7 +809,32 @@ class CaptureArchiveExporter(
             val videoEntryName = "screen.${container.extension}"
             val stagedVideo = if (includeVideo) File(work, videoEntryName) else null
             var videoUnavailableForRange = videoConfigured && !includeVideo
-            val clip = if (stagedVideo != null && requestedSourceStart != null && requestedSourceEnd != null) {
+            var availabilityFramesRendered = false
+            val clip = if (stagedVideo != null && renderAvailability) {
+                try {
+                    val source = session.videoFile.takeIf { it.isFile && it.length() > 0L }
+                    if (source != null && session.status == CaptureStatus.RECORDING &&
+                        requestedSourceStart != null && requestedSourceEnd != null
+                    ) {
+                        waitForVideoCoverage(source, requestedSourceStart, requestedSourceEnd, onWaitingForVideo)
+                    }
+                    val availabilityExporter = videoExporter as CaptureAvailabilityVideoExporter
+                    val sourceOrigin = (videoStartElapsed ?: timelineBaseMs) - session.manualOffsetMs
+                    availabilityExporter.exportWithAvailability(
+                        source = source,
+                        destination = stagedVideo,
+                        timelineStartElapsedMs = timelineBaseMs,
+                        timelineEndElapsedMs = selectedEndMs,
+                        sourceElapsedOriginMs = sourceOrigin,
+                        availabilityIntervals = session.availabilityIntervals,
+                        sourceIsFinal = source != null && isVideoFinal(session),
+                    ).also { availabilityFramesRendered = true }
+                } catch (failure: Exception) {
+                    if (!isNoUsableVideoInterval(failure)) throw failure
+                    videoUnavailableForRange = true
+                    null
+                }
+            } else if (stagedVideo != null && requestedSourceStart != null && requestedSourceEnd != null) {
                 try {
                     // A still-recording session's MKV lags the wall clock by several seconds (the
                     // Matroska muxer only writes a cluster when it closes). Give it a bounded chance
@@ -763,6 +865,12 @@ class CaptureArchiveExporter(
 
             val videoAvailable = stagedVideo?.let { it.isFile && it.length() > 0L } == true
             val effectiveClip = clip.takeIf { videoAvailable }
+            if (request.range == CaptureRange.SINCE_SAVE) {
+                val hasUsableVideo = effectiveClip?.durationMs?.let { it > 0L } == true
+                require(selection.recordCount > 0 || hasUsableVideo || hasOfflineMetadata) {
+                    "Nothing new to save: this Since last save range has no complete log rows, usable video coverage, or device-availability records"
+                }
+            }
             // Archive v3: no row-by-row mapping file — a single sync anchor replaces it (see this
             // file's module doc and estimateCaptureSyncAnchor). Computed from the just-staged log
             // (stagedLog), so the ordinals this scans agree exactly with the ones LogParser assigns
@@ -793,16 +901,24 @@ class CaptureArchiveExporter(
                 manualOffsetMs = session.manualOffsetMs,
                 interruptions = session.interruptions,
                 log = logAsset,
-                logStartMs = selection.firstElapsedMs ?: request.cutoffElapsedMs,
+                logStartMs = selection.firstElapsedMs ?: timelineBaseMs,
                 logEndMs = selection.lastElapsedMs ?: selectedEndMs,
                 mapping = null,
                 video = videoAsset,
-                videoStartMs = effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
-                videoEndMs = effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                videoStartMs = if (availabilityFramesRendered) timelineBaseMs
+                    else effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                videoEndMs = if (availabilityFramesRendered) selectedEndMs
+                    else effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
                 screenshots = screenshotAssets,
                 notes = notesAsset,
                 markers = markerAssets,
                 syncAnchor = syncAnchor,
+                timeline = timelineAsset,
+                availabilityIntervals = clippedAvailability,
+                timelineBaseElapsedMs = timelineBaseMs,
+                timelineDurationMs = (selectedEndMs - timelineBaseMs).coerceAtLeast(0L),
+                availabilityFramesRendered = availabilityFramesRendered,
+                showUnavailableFrames = session.settings.showUnavailableFrames,
             )
             File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
             writeZip(work, archiveTemp, descriptor)
@@ -858,6 +974,55 @@ object CaptureArchiveReader {
             else -> throw CaptureArchiveException("Capture does not exist: $file")
         }
     }
+
+    /**
+     * Restores the verified log when an unrelated capture asset (usually video) no longer matches
+     * its checksum. The caller keeps the tab as a plain log and separately disables capture sync;
+     * this path never blesses the damaged archive or returns its timeline/video metadata.
+     */
+    fun extractVerifiedLogForRestore(source: File, expectedLogPath: String?, cacheDirectory: File): File? = runCatching {
+        require(cacheDirectory.mkdirs() || cacheDirectory.isDirectory) { "Cannot create capture restore cache" }
+        if (source.isDirectory || source.name == CAPTURE_DESCRIPTOR_NAME) {
+            val descriptorFile = if (source.isDirectory) descriptorFile(source) else source
+            val root = descriptorFile.parentFile ?: error("Capture descriptor has no parent")
+            val descriptor = parseDescriptor(readSmallFile(descriptorFile))
+            require(expectedLogPath == null || descriptor.log.path == expectedLogPath) {
+                "Restored capture log entry no longer matches its descriptor"
+            }
+            val logFile = resolveSafe(root, descriptor.log.path)
+            require(logFile.isFile && !hasSymbolicLink(root, logFile)) { "Capture log is missing or unsafe" }
+            require(logFile.length() <= assetLimit(descriptor, descriptor.log)) { "Capture log exceeds its size limit" }
+            require(sha256(logFile) == descriptor.log.sha256) { "Capture log checksum mismatch" }
+            return@runCatching logFile
+        }
+        require(source.isFile) { "Capture archive is missing" }
+        val output = File(cacheDirectory, "capture-log-restore-${UUID.randomUUID()}")
+        require(output.mkdir()) { "Cannot create capture log restore directory" }
+        var success = false
+        try {
+            ZipFile.builder().setFile(source).get().use { zip ->
+                val scan = scanZipEntries(zip)
+                val descriptorEntry = scan.descriptorEntry ?: error("Capture descriptor is missing")
+                val descriptorText = zip.getInputStream(descriptorEntry).use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
+                val descriptor = parseDescriptor(descriptorText)
+                require(expectedLogPath == null || descriptor.log.path == expectedLogPath) {
+                    "Restored capture log entry no longer matches its descriptor"
+                }
+                val entrySize = scan.entrySizes[descriptor.log.path] ?: error("Capture log is missing")
+                require(entrySize <= assetLimit(descriptor, descriptor.log)) { "Capture log exceeds its size limit" }
+                val entry = zip.getEntry(descriptor.log.path) ?: error("Capture log is missing")
+                val target = resolveSafe(output, descriptor.log.path)
+                target.parentFile?.mkdirs()
+                zip.getInputStream(entry).use { input ->
+                    extractVerified(input, target, descriptor.log, assetLimit(descriptor, descriptor.log))
+                }
+                success = true
+                target
+            }
+        } finally {
+            if (!success) deleteTree(output)
+        }
+    }.getOrNull()
 
     private fun openZip(source: File, cacheDirectory: File): ImportedCapture {
         val output = File(cacheDirectory, "capture-${UUID.randomUUID()}")
@@ -943,12 +1108,67 @@ object CaptureArchiveReader {
         // v3: no mapping file at all — descriptor.mapping is null (see its own doc) and there is
         // nothing here to read; AppState instead turns descriptor.syncAnchor into a plain
         // VideoAnchor once it has parsed the log itself.
-        val timeline = descriptor.mapping?.let { mappingAsset ->
+        val timeline = descriptor.timeline?.let { timelineAsset ->
+            val elapsedRows = readTimelineRows(
+                resolveSafe(root, timelineAsset.path),
+                parsedLogCount,
+                descriptor.timelineBaseElapsedMs,
+                descriptor.timelineDurationMs,
+                descriptor.availabilityIntervals,
+            )
+            val anchor = descriptor.syncAnchor
+            val anchorElapsed = anchor?.let { elapsedRows.getOrNull(it.row - 1)?.second }
+            val videoDurationMs = if (descriptor.videoStartMs != null && descriptor.videoEndMs != null) {
+                (descriptor.videoEndMs - descriptor.videoStartMs).coerceAtLeast(0L)
+            } else {
+                null
+            }
+            val rows = elapsedRows.mapIndexed { index, (ordinal, elapsedMs) ->
+                val videoMs = if (anchor != null && anchorElapsed != null && descriptor.video != null) {
+                    runCatching {
+                        Math.addExact(anchor.videoMs, Math.subtractExact(elapsedMs, anchorElapsed))
+                    }.getOrNull()?.takeIf { position ->
+                        position >= 0L && (videoDurationMs == null || position <= videoDurationMs)
+                    }
+                } else {
+                    null
+                }
+                require(elapsedMs <= descriptor.timelineDurationMs) { "Capture timeline row exceeds its declared duration" }
+                CaptureMappingRow(index + 1, elapsedMs, videoMs)
+            }
+            CaptureTimeline(
+                rows = rows,
+                quality = if (anchor != null) "estimated" else "unmapped",
+                availabilityIntervals = descriptor.availabilityIntervals,
+                timelineBaseElapsedMs = descriptor.timelineBaseElapsedMs,
+                timelineDurationMs = descriptor.timelineDurationMs,
+                // The row anchor is authoritative for the PTS-to-capture mapping. In particular,
+                // it preserves the manual calibration already reflected in the rows instead of
+                // deriving a subtly different origin from the descriptor's coverage edge.
+                videoOriginElapsedMs = if (anchor != null && anchorElapsed != null) {
+                    runCatching {
+                        Math.addExact(
+                            descriptor.timelineBaseElapsedMs,
+                            Math.subtractExact(anchorElapsed, anchor.videoMs),
+                        )
+                    }.getOrNull()
+                } else descriptor.videoStartMs,
+                availabilityFramesRendered = descriptor.availabilityFramesRendered,
+                showUnavailableFrames = descriptor.showUnavailableFrames,
+            )
+        } ?: descriptor.mapping?.let { mappingAsset ->
             val rows = readMapping(resolveSafe(root, mappingAsset.path))
             require(rows.size == parsedLogCount) {
                 "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
             }
-            CaptureTimeline(rows, manualOffsetMs = descriptor.manualOffsetMs)
+            CaptureTimeline(
+                rows = rows,
+                manualOffsetMs = descriptor.manualOffsetMs,
+                timelineDurationMs = rows.lastOrNull()?.elapsedMs ?: 0L,
+                videoOriginElapsedMs = rows.firstNotNullOfOrNull { row ->
+                    row.videoMs?.let { row.elapsedMs - it }
+                },
+            )
         }
         descriptor.syncAnchor?.let { anchor ->
             require(anchor.row in 1..parsedLogCount) {
@@ -1172,12 +1392,15 @@ private fun rewriteExportedVideoFrames(
     clip: CaptureVideoClip?,
     videoEntryName: String?,
 ): Annotations {
-    val sessionVideoSource = VideoSource.LocalFile(session.videoFile.absolutePath)
+    val sessionVideoSources = buildSet {
+        add(VideoSource.LocalFile(session.videoFile.absolutePath))
+        session.snapshotVideoSource?.let(::add)
+    }
     var changed = false
     val rewrittenBlocks = notes.blocks.map { block ->
         if (block !is AnnBlock.Image) return@map block
         val frame = block.videoFrame ?: return@map block
-        if (frame.source != sessionVideoSource) return@map block
+        if (frame.source !in sessionVideoSources) return@map block
         changed = true
         val inClip = clip != null && frame.positionMs in clip.actualStartMs..clip.coveredEndMs
         if (videoEntryName == null || clip == null || !inClip) {
@@ -1619,12 +1842,58 @@ private fun rangeStartMs(range: CaptureRange, cutoffMs: Long, customMinutes: Int
     CaptureRange.CUSTOM -> cutoffMs - customMinutes.toLong() * RANGE_MINUTES
     CaptureRange.SINCE_SAVE -> if (checkpointMs >= 0) checkpointMs else Long.MIN_VALUE
     CaptureRange.SELECTION -> error("Selection range requires explicit row bounds")
+    CaptureRange.EXPLICIT -> error("Explicit range requires elapsed-time bounds")
+}
+
+private fun requestedRangeStartMs(request: CaptureExportRequest, checkpointMs: Long): Long =
+    if (request.range == CaptureRange.EXPLICIT) {
+        val start = requireNotNull(request.explicitStartElapsedMs) { "Explicit range requires a start time" }
+        val end = requireNotNull(request.explicitEndElapsedMs) { "Explicit range requires an end time" }
+        require(start >= 0L && end > start) { "Explicit capture range must be non-negative and ordered" }
+        start
+    } else {
+        rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, checkpointMs)
+            .takeIf { it == Long.MIN_VALUE }
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, checkpointMs).coerceAtLeast(0L)
+    }
+
+private fun requestedRangeEndMs(request: CaptureExportRequest): Long =
+    if (request.range == CaptureRange.EXPLICIT) {
+        val start = requireNotNull(request.explicitStartElapsedMs) { "Explicit range requires a start time" }
+        val end = requireNotNull(request.explicitEndElapsedMs) { "Explicit range requires an end time" }
+        require(start >= 0L && end > start) { "Explicit capture range must be non-negative and ordered" }
+        val boundedEnd = minOf(end, request.cutoffElapsedMs.coerceAtLeast(0L))
+        require(boundedEnd > start) { "Explicit capture range is empty at the current capture boundary" }
+        boundedEnd
+    } else {
+        request.cutoffElapsedMs.coerceAtLeast(0L)
+    }
+
+private fun hasAvailabilityMetadataInRange(session: CaptureSession, startElapsedMs: Long, endElapsedMs: Long): Boolean {
+    if (endElapsedMs <= startElapsedMs) return false
+    val start = startElapsedMs.coerceAtLeast(0L)
+    val end = minOf(endElapsedMs, session.elapsedMs.coerceAtLeast(0L))
+    if (end <= start) return false
+    return session.availabilityIntervals.any { interval ->
+        val intervalEnd = interval.endElapsedMs ?: session.elapsedMs.coerceAtLeast(0L)
+        start < intervalEnd && interval.startElapsedMs < end
+    }
 }
 
 private fun requireSnapshotCheckpoint(session: CaptureSession, request: CaptureExportRequest): Long {
     val checkpoint = session.effectiveSnapshotCheckpointMs
     require(request.range != CaptureRange.SINCE_SAVE || checkpoint >= 0) {
         "Since last save is unavailable until the first successful snapshot"
+    }
+    val end = requestedRangeEndMs(request).coerceAtMost(session.elapsedMs.coerceAtLeast(0L))
+    require(request.range != CaptureRange.SINCE_SAVE || checkpoint <= end) {
+        "Since last save is unavailable because its saved endpoint is later than this capture range"
+    }
+    if (request.range == CaptureRange.SINCE_SAVE && checkpoint == end) {
+        val videoCursor = session.effectiveVideoCheckpointMs
+        require(request.includeVideo && session.settings.recordVideo && videoCursor < end) {
+            "Nothing new to save: the range ends at the saved endpoint"
+        }
     }
     return checkpoint
 }
@@ -1646,6 +1915,92 @@ private fun copySelectedLog(source: File, selectionIndex: File, destination: Fil
                 }
             }
         }
+    }
+}
+
+/** Stream one export-local elapsed time for each parsed log row; no mapping row is retained in memory. */
+private fun writeTimelineRows(
+    indexFile: File,
+    frozenBytes: Long,
+    destination: File,
+    baseElapsedMs: Long,
+    durationMs: Long,
+    availabilityIntervals: List<CaptureAvailabilityInterval>,
+) {
+    require(indexFile.length() <= MAX_TIMELINE_BYTES) { "Capture timeline source exceeds the size limit" }
+    require(baseElapsedMs >= 0L && durationMs >= 0L) { "Capture timeline has invalid bounds" }
+    var rows = 0
+    var previousElapsedMs: Long? = null
+    destination.parentFile?.mkdirs()
+    indexFile.inputStream().use { base ->
+        val input = LimitedInputStream(BufferedInputStream(base), frozenBytes)
+        destination.bufferedWriter(Charsets.UTF_8).use { output ->
+            fun writeLine(line: String) {
+                require(line.length <= MAX_MAPPING_LINE_BYTES) { "Capture timeline metadata line exceeds the size limit" }
+                output.append(line).append('\n')
+                require(destination.length() <= MAX_TIMELINE_BYTES) { "Capture timeline exceeds the size limit" }
+            }
+            writeLine(
+                buildJsonObject {
+                    put("type", "captureTimeline")
+                    put("baseElapsedMs", baseElapsedMs)
+                    put("durationMs", durationMs)
+                }.toString(),
+            )
+            availabilityIntervals.forEach { interval ->
+                require(interval.endElapsedMs != null && interval.endElapsedMs > interval.startElapsedMs) {
+                    "Capture timeline contains an open or empty availability interval"
+                }
+                require(interval.startElapsedMs >= 0L && interval.endElapsedMs <= durationMs) {
+                    "Capture timeline availability is outside its declared duration"
+                }
+                writeLine(
+                    buildJsonObject {
+                        put("type", "availability")
+                        put("startMs", interval.startElapsedMs)
+                        nullableLong("endMs", interval.endElapsedMs)
+                        nullableString("bootIdBefore", interval.bootIdBefore)
+                        nullableString("bootIdAfter", interval.bootIdAfter)
+                        if (interval.rebootConfirmed == null) put("rebootConfirmed", JsonNull)
+                        else put("rebootConfirmed", interval.rebootConfirmed)
+                    }.toString(),
+                )
+            }
+            forEachCompleteLine(input, MAX_MAPPING_LINE_BYTES) { line ->
+                checkNotInterrupted()
+                val record = parseIndexRecord(line)
+                if (record.rowOrdinal != null) {
+                    require(++rows <= MAX_MAPPING_ROWS) { "Capture timeline contains too many rows" }
+                    require(record.elapsedMs >= baseElapsedMs) { "Capture timeline row precedes its export base" }
+                    require(previousElapsedMs == null || record.elapsedMs >= previousElapsedMs!!) {
+                        "Capture timeline times are not ordered"
+                    }
+                    previousElapsedMs = record.elapsedMs
+                    writeLine(
+                        buildJsonObject {
+                            put("row", rows)
+                            put("elapsedMs", record.elapsedMs - baseElapsedMs)
+                        }.toString(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun clipAvailabilityIntervals(
+    intervals: List<CaptureAvailabilityInterval>,
+    baseElapsedMs: Long,
+    endElapsedMs: Long,
+): List<CaptureAvailabilityInterval> {
+    if (endElapsedMs <= baseElapsedMs) return emptyList()
+    return intervals.mapNotNull { interval ->
+        val start = maxOf(interval.startElapsedMs, baseElapsedMs)
+        val end = minOf(interval.endElapsedMs ?: endElapsedMs, endElapsedMs)
+        if (end <= start) null else interval.copy(
+            startElapsedMs = start - baseElapsedMs,
+            endElapsedMs = end - baseElapsedMs,
+        )
     }
 }
 
@@ -1725,6 +2080,66 @@ private fun readMapping(file: File): List<CaptureMappingRow> {
     return rows
 }
 
+private fun readTimelineRows(
+    file: File,
+    expectedRowCount: Int,
+    expectedBaseElapsedMs: Long,
+    expectedDurationMs: Long,
+    expectedAvailability: List<CaptureAvailabilityInterval>,
+): List<Pair<Int, Long>> {
+    require(file.length() <= MAX_TIMELINE_BYTES) { "Capture timeline exceeds the size limit" }
+    val rows = ArrayList<Pair<Int, Long>>(expectedRowCount.coerceAtMost(MAX_MAPPING_ROWS))
+    var timelineHeaderSeen = false
+    var headerBaseElapsedMs: Long? = null
+    var headerDurationMs: Long? = null
+    val availability = ArrayList<CaptureAvailabilityInterval>()
+    file.inputStream().use { input ->
+        forEachCompleteLine(BufferedInputStream(input), MAX_MAPPING_LINE_BYTES, rejectTrailingPartial = true) { line ->
+            val root = Json.parseToJsonElement(line).jsonObject
+            when (root.string("type")) {
+                "captureTimeline" -> {
+                    require(!timelineHeaderSeen && rows.isEmpty() && availability.isEmpty()) {
+                        "Capture timeline metadata header is misplaced or duplicated"
+                    }
+                    timelineHeaderSeen = true
+                    headerBaseElapsedMs = root.long("baseElapsedMs")
+                        ?: error("Capture timeline metadata is missing its base time")
+                    headerDurationMs = root.long("durationMs")
+                        ?: error("Capture timeline metadata is missing its duration")
+                    return@forEachCompleteLine
+                }
+                "availability" -> {
+                    require(timelineHeaderSeen && rows.isEmpty()) { "Capture timeline availability is misplaced" }
+                    require(availability.size < MAX_MAPPING_ROWS) { "Capture timeline has too many availability intervals" }
+                    availability += root.toAvailabilityInterval()
+                    return@forEachCompleteLine
+                }
+                null -> Unit // Headerless v4 assets from early development builds remain readable.
+                else -> error("Capture timeline has an unknown record type")
+            }
+            require(rows.size < MAX_MAPPING_ROWS) { "Capture timeline has too many rows" }
+            val ordinal = root.int("row") ?: error("Capture timeline row is missing its local ordinal")
+            require(ordinal == rows.size + 1) { "Capture timeline ordinals are not contiguous" }
+            val elapsed = root.long("elapsedMs") ?: error("Capture timeline row is missing elapsedMs")
+            require(elapsed >= 0L) { "Capture timeline contains a negative elapsed time" }
+            require(rows.lastOrNull()?.second?.let { elapsed >= it } != false) { "Capture timeline times are not ordered" }
+            rows += ordinal to elapsed
+        }
+    }
+    require(rows.size == expectedRowCount) {
+        "Capture timeline row count ${rows.size} does not match parsed log row count $expectedRowCount"
+    }
+    if (timelineHeaderSeen) {
+        require(headerBaseElapsedMs == expectedBaseElapsedMs && headerDurationMs == expectedDurationMs) {
+            "Capture timeline metadata does not match the capture descriptor"
+        }
+        require(availability == expectedAvailability) {
+            "Capture timeline availability does not match the capture descriptor"
+        }
+    }
+    return rows
+}
+
 /**
  * v3's own flat, simplified shape (see this file's module doc and the archive-v3 plan): a plain
  * `sessionId`/`app`/`device`/`range`/`interruptions` header, one object per asset carrying just its
@@ -1794,10 +2209,32 @@ private fun CaptureArchiveDescriptor.toJson(): String = buildJsonObject {
     )
     put("screenshots", buildJsonArray { screenshots.forEach { add(it.path) } })
     put("interruptions", buildJsonArray { interruptions.forEach { add(it) } })
+    nullableString("timeline", timeline?.path)
+    put("timelineBaseMs", timelineBaseElapsedMs)
+    put("timelineDurationMs", timelineDurationMs)
+    put("availabilityFramesRendered", availabilityFramesRendered)
+    if (showUnavailableFrames == null) put("showUnavailableFrames", JsonNull)
+    else put("showUnavailableFrames", showUnavailableFrames)
+    put("availability", buildJsonArray {
+        availabilityIntervals.forEach { interval ->
+            add(buildJsonObject {
+                put("startMs", interval.startElapsedMs)
+                nullableLong("endMs", interval.endElapsedMs)
+                nullableString("bootIdBefore", interval.bootIdBefore)
+                nullableString("bootIdAfter", interval.bootIdAfter)
+                if (interval.rebootConfirmed == null) put("rebootConfirmed", JsonNull)
+                else put("rebootConfirmed", interval.rebootConfirmed)
+            })
+        }
+    })
     put("sha256", buildJsonObject { assets().forEach { put(it.path, it.sha256) } })
 }.toString()
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.nullableLong(name: String, value: Long?) {
+    if (value == null) put(name, JsonNull) else put(name, value)
+}
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.nullableString(name: String, value: String?) {
     if (value == null) put(name, JsonNull) else put(name, value)
 }
 
@@ -1879,8 +2316,24 @@ private fun parseDescriptorV3(root: JsonObject, version: Int): CaptureArchiveDes
         notes = root.string("notes")?.let(::assetFor),
         markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toMarkerV3() } ?: emptyList(),
         syncAnchor = syncAnchor,
+        timeline = if (version >= 4) root.string("timeline")?.let(::assetFor) else null,
+        availabilityIntervals = if (version >= 4) {
+            (root["availability"] as? JsonArray)?.map { it.jsonObject.toAvailabilityInterval() } ?: emptyList()
+        } else emptyList(),
+        timelineBaseElapsedMs = root.long("timelineBaseMs") ?: 0L,
+        timelineDurationMs = root.long("timelineDurationMs") ?: 0L,
+        availabilityFramesRendered = root.boolean("availabilityFramesRendered") ?: false,
+        showUnavailableFrames = root.boolean("showUnavailableFrames"),
     )
 }
+
+private fun JsonObject.toAvailabilityInterval(): CaptureAvailabilityInterval = CaptureAvailabilityInterval(
+    startElapsedMs = requiredLong("startMs"),
+    endElapsedMs = nullableLong("endMs"),
+    bootIdBefore = string("bootIdBefore"),
+    bootIdAfter = string("bootIdAfter"),
+    rebootConfirmed = boolean("rebootConfirmed"),
+)
 
 private fun JsonObject.toMarkerV3(): CaptureArchiveMarker {
     val rows = this["rows"] as? JsonArray ?: error("Capture marker is missing rows")
@@ -1971,6 +2424,31 @@ private fun validateParsedDescriptor(descriptor: CaptureArchiveDescriptor) {
     require((descriptor.mapping == null) == (descriptor.formatVersion >= 3)) {
         "Capture descriptor mapping presence does not match its format version"
     }
+    require(descriptor.formatVersion < 4 || descriptor.timeline != null) {
+        "Capture archive v4 is missing its timeline asset"
+    }
+    require(descriptor.timelineBaseElapsedMs >= 0L) { "Capture timeline has an invalid base time" }
+    require(descriptor.timelineDurationMs >= 0L) { "Capture timeline has an invalid duration" }
+    if (descriptor.formatVersion >= 4) {
+        var previousEnd = 0L
+        descriptor.availabilityIntervals.forEachIndexed { index, interval ->
+            val end = interval.endElapsedMs
+            require(interval.startElapsedMs >= 0L && interval.startElapsedMs < descriptor.timelineDurationMs) {
+                "Capture descriptor has an availability interval outside its timeline"
+            }
+            require(end != null && end > interval.startElapsedMs && end <= descriptor.timelineDurationMs) {
+                "Capture descriptor has an invalid availability interval"
+            }
+            require(index == 0 || interval.startElapsedMs >= previousEnd) {
+                "Capture availability intervals overlap or are out of order"
+            }
+            previousEnd = end
+        }
+    } else {
+        require(descriptor.availabilityIntervals.all { interval ->
+            interval.startElapsedMs >= 0L && (interval.endElapsedMs == null || interval.endElapsedMs >= interval.startElapsedMs)
+        }) { "Capture descriptor has an invalid availability interval" }
+    }
     require(descriptor.syncAnchor == null || descriptor.video != null) {
         "Capture descriptor has a sync anchor but no video"
     }
@@ -1989,6 +2467,7 @@ private fun CaptureArchiveDescriptor.assets(): List<CaptureArchiveAsset> =
         video?.let(::add)
         addAll(screenshots)
         notes?.let(::add)
+        timeline?.let(::add)
     }
 
 private fun JsonObject.requiredObject(key: String): JsonObject = this[key] as? JsonObject
@@ -2056,8 +2535,15 @@ private fun writeCapturedWithIndagiumBlurb(work: File) {
     )
 }
 
-private fun preflight(destination: File, reserveBytes: Long, logBytes: Long, videoBytes: Long, screenshotsBytes: Long) {
-    val payload = saturatingAdd(saturatingAdd(logBytes, videoBytes), screenshotsBytes)
+private fun preflight(
+    destination: File,
+    reserveBytes: Long,
+    logBytes: Long,
+    videoBytes: Long,
+    screenshotsBytes: Long,
+    timelineBytes: Long,
+) {
+    val payload = saturatingAdd(saturatingAdd(saturatingAdd(logBytes, videoBytes), screenshotsBytes), timelineBytes)
     val workingAndArchive = saturatingAdd(payload, payload)
     val required = saturatingAdd(saturatingAdd(workingAndArchive, PREFLIGHT_OVERHEAD_BYTES), reserveBytes)
     val usable = destination.parentFile?.usableSpace ?: 0
@@ -2113,6 +2599,7 @@ private fun extractVerified(input: InputStream, target: File, asset: CaptureArch
 private fun assetLimit(descriptor: CaptureArchiveDescriptor, asset: CaptureArchiveAsset): Long = when (asset) {
     descriptor.log -> MAX_ARCHIVE_ENTRY_BYTES
     descriptor.mapping -> MAX_MAPPING_BYTES
+    descriptor.timeline -> MAX_TIMELINE_BYTES
     descriptor.video -> MAX_VIDEO_BYTES
     descriptor.notes -> MAX_NOTES_BYTES
     else -> MAX_SCREENSHOT_BYTES

@@ -318,6 +318,8 @@ internal class IndagiumToolOperations(
                 includeVideo = a.anyBool("includeVideo"),
                 open = a.anyBool("open") == true,
                 filenameParam = a.str("filename"),
+                startElapsedMs = a.anyLong("startElapsedMs"),
+                endElapsedMs = a.anyLong("endElapsedMs"),
             )
         },
         "get_device_capture_status" to { a -> appState.deviceCaptureStatusForAi(a.str("tabId")) },
@@ -563,7 +565,7 @@ internal class IndagiumToolOperations(
         "bufferSizes" to state.bufferSizes.map {
             mapOf("buffer" to it.buffer, "sizeBytes" to it.sizeBytes, "consumedBytes" to it.consumedBytes, "maxEntryBytes" to it.maxEntryBytes)
         },
-        "globalLevel" to (state.globalLevel?.propValue ?: "default"),
+        "globalLevel" to deviceLogGlobalLevelForTool(state),
         "perTagOverrides" to state.perTagOverrides,
         "error" to state.error,
     )
@@ -2465,6 +2467,12 @@ internal class IndagiumToolOperations(
         is String -> v.toIntOrNull()
         else -> null
     }
+
+    private fun Map<String, Any?>.anyLong(key: String): Long? = when (val v = this[key]) {
+        is Number -> v.toLong()
+        is String -> v.toLongOrNull()
+        else -> null
+    }
 }
 
 internal fun requireDeviceTapCoordinates(x: Int, y: Int, width: Int, height: Int) {
@@ -2728,6 +2736,13 @@ internal fun parseDeviceLogChanges(bufferSize: String?, logLevel: String?): List
         bufferSize?.let { com.indagium.capture.DeviceLogRetryableChange.BufferSize(parseLogBufferSizeChoice(it)) },
         logLevel?.let { com.indagium.capture.DeviceLogRetryableChange.GlobalLevel(parseLogTagLevel(it)) },
     )
+}
+
+/** Preserves the distinction between an unread/unknown value and a confirmed empty `log.tag`. */
+internal fun deviceLogGlobalLevelForTool(state: com.indagium.capture.DeviceLogState): String = when {
+    !state.loaded || !state.globalLevelKnown -> "unknown"
+    state.globalLevel == null -> "default"
+    else -> state.globalLevel.propValue
 }
 
 private fun parseLogBufferSizeChoice(raw: String): com.indagium.capture.LogBufferSizeChoice =
