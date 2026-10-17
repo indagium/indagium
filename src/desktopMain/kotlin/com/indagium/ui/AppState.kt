@@ -8945,6 +8945,7 @@ class AppState(
                             anchor = null,
                             captureOffsetMs = calibratedOffsetMs,
                             doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                            linkCleared = false,
                         ),
                     )
                 }
@@ -8954,6 +8955,7 @@ class AppState(
                         // A created/replaced linkage takes today's default exactly once. Later
                         // setting changes must not silently rewrite this explicit per-video choice.
                         doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                        linkCleared = false,
                     ),
                 )
             } ?: t
@@ -8971,11 +8973,12 @@ class AppState(
                             doubleClickSeekEnabled = false,
                             captureSourcePath = null,
                             captureOffsetMs = 0L,
+                            linkCleared = true,
                         ),
                         captureTimeline = null,
                     )
                 } else {
-                    t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
+                    t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false, linkCleared = true))
                 }
             } ?: t
         }
@@ -11532,6 +11535,16 @@ class AppState(
                 // When the archive reports that exact anchor as corrected on load and the restored
                 // one is still identical to it, it was never touched by the user — take the
                 // corrected one instead of resurrecting the wrong row.
+                //
+                // An explicitly unlinked recording (clearVideoAnchor) opts out of all of this: the
+                // archive stays associated for export/snapshot purposes, but neither its timeline
+                // nor its sync anchor is re-applied to the attachment.
+                if (currentVideo?.linkCleared == true) {
+                    return@upTab current.copy(
+                        captureSourceSessionId = imported.descriptor.sessionId,
+                        captureArchivePath = path,
+                    )
+                }
                 val stale = imported.staleSyncAnchor?.let { stale ->
                     val staleId = current.logData.getOrNull(stale.row - 1)?.id
                     currentVideo?.anchor?.takeIf { it.logId == staleId && it.videoMs == stale.videoMs }

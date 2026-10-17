@@ -215,6 +215,9 @@ data class ImportedCapture(
     // wrong anchor, so a caller that persisted it elsewhere (a restored tab's autosaved VideoAnchor)
     // can tell "untouched stale anchor" from a deliberate manual re-link.
     val staleSyncAnchor: CaptureSyncAnchor? = null,
+    // Appended last. The descriptor's screenshot assets resolved inside the opened archive root, in
+    // descriptor order; the imported snapshot session re-exports them from here.
+    val screenshotFiles: List<File> = emptyList(),
 )
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -750,7 +753,7 @@ class CaptureArchiveExporter(
             hasAvailabilityMetadataInRange(session, timelineBaseMs, selectedEndMs)
         val hasOfflineMetadata = hasAvailabilityMetadataInRange(session, timelineBaseMs, selectedEndMs)
         val includeVideo = normalVideoRange || renderAvailability
-        val snapshotScreenshots = snapshotScreenshots(session.directory, logStartMs, selectedEndMs)
+        val snapshotScreenshots = snapshotScreenshots(session, logStartMs, selectedEndMs)
         require(snapshotScreenshots.sumOf { it.length } <= MAX_SCREENSHOTS_BYTES) {
             "Capture screenshots exceed the combined size limit"
         }
@@ -1215,6 +1218,7 @@ object CaptureArchiveReader {
             notes = notes,
             syncAnchor = if (correctedAnchor != null) correctedAnchor.anchor else descriptor.syncAnchor,
             staleSyncAnchor = correctedAnchor?.let { descriptor.syncAnchor },
+            screenshotFiles = descriptor.screenshots.map { resolveSafe(root, it.path) },
         )
     }
 }
@@ -1325,22 +1329,30 @@ private fun scanZipEntries(zip: ZipFile): ZipEntryScan {
 
 private data class FrozenScreenshot(val source: File, val length: Long, val path: String)
 
-private fun snapshotScreenshots(sessionDirectory: File, startElapsedMs: Long, endElapsedMs: Long): List<FrozenScreenshot> {
-    val directory = File(sessionDirectory, "screenshots")
-    if (!directory.isDirectory) return emptyList()
+private fun snapshotScreenshots(session: CaptureSession, startElapsedMs: Long, endElapsedMs: Long): List<FrozenScreenshot> {
+    val candidates: List<Pair<File, Long>> = session.screenshotsOverride?.map { it.file to it.elapsedMs }
+        ?.sortedWith(compareBy({ it.second }, { it.first.name }))
+        ?: run {
+            val directory = File(session.directory, "screenshots")
+            if (!directory.isDirectory) return emptyList()
+            directory.walkTopDown().mapNotNull { file ->
+                SCREENSHOT_NAME.matchEntire(file.name)?.groupValues?.get(1)?.toLongOrNull()?.let { file to it }
+            }.toList()
+        }
     var index = 0
-    return directory.walkTopDown().filter { file ->
-        if (!file.isFile || Files.isSymbolicLink(file.toPath())) return@filter false
-        val elapsed = SCREENSHOT_NAME.matchEntire(file.name)?.groupValues?.get(1)?.toLongOrNull()
-        elapsed != null && elapsed in startElapsedMs..endElapsedMs
-    }.map { file ->
+    return candidates.filter { (file, elapsed) ->
+        file.isFile && !Files.isSymbolicLink(file.toPath()) && elapsed in startElapsedMs..endElapsedMs
+    }.map { (file, elapsed) ->
         checkNotInterrupted()
         require(file.length() <= MAX_SCREENSHOT_BYTES) { "Capture screenshot exceeds the size limit: ${file.name}" }
         val extension = file.extension.takeIf { it.matches(Regex("[A-Za-z0-9]{1,8}")) }?.lowercase(Locale.ROOT)
-        val name = sanitizeFilename(file.nameWithoutExtension).ifBlank { "screenshot" }
+        // The name is rebuilt from the elapsed time on every export (never from the previous archive's
+        // entry name) so re-exporting an imported capture does not accumulate index prefixes.
+        val name = if (session.screenshotsOverride != null) "screenshot-$elapsed"
+        else sanitizeFilename(file.nameWithoutExtension).ifBlank { "screenshot" }
         val suffix = if (extension == null) "" else ".$extension"
         FrozenScreenshot(file, file.length(), "screenshots/${++index}-${name.take(MAX_SCREENSHOT_NAME_LENGTH)}$suffix")
-    }.toList()
+    }
 }
 
 private fun stageScreenshots(screenshots: List<FrozenScreenshot>, work: File): List<Pair<String, File>> = screenshots.map { shot ->

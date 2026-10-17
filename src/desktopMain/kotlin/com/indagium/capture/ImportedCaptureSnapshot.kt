@@ -99,8 +99,25 @@ internal fun importedCaptureSnapshot(
         indexFileOverride = indexFile,
         videoFileOverride = video,
         snapshotVideoSource = snapshotVideoSource,
+        screenshotsOverride = importedScreenshots(imported),
     )
     return ImportedCaptureSnapshot(identity, session, checkpointFile)
+}
+
+private val EXPORTED_SCREENSHOT_NAME = Regex("(?:\\d+-)?screenshot-(\\d+)\\.[A-Za-z0-9]{1,8}")
+
+/**
+ * The archive's screenshots on the imported session's local time base. An exported entry is named
+ * `<index>-screenshot-<elapsed>.<ext>` where `<elapsed>` is on the exporting session's time base, i.e.
+ * [CaptureArchiveDescriptor.timelineBaseElapsedMs] ahead of this session's local zero. Screenshots
+ * whose name carries no elapsed time (or that precede the base) cannot be placed and are omitted.
+ */
+private fun importedScreenshots(imported: ImportedCapture): List<CaptureSessionScreenshot> {
+    val base = imported.descriptor.timelineBaseElapsedMs
+    return imported.screenshotFiles.mapNotNull { file ->
+        val original = EXPORTED_SCREENSHOT_NAME.matchEntire(file.name)?.groupValues?.get(1)?.toLongOrNull()
+        original?.minus(base)?.takeIf { it >= 0L }?.let { CaptureSessionScreenshot(file, it) }
+    }
 }
 
 /** Refreshes the app-local cursors while holding the same source lock used through export. */
