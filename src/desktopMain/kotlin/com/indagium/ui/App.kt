@@ -209,6 +209,26 @@ fun App(
     var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
     var pendingFilterSearchRequest by remember { mutableStateOf<FilterSearchRequest?>(null) }
 
+    // Hoisted above the provider so focusable popups can reach it too (LocalFileDropTarget).
+    val dropTarget = remember(state, window) {
+        object : DragAndDropTarget {
+            override fun onStarted(event: DragAndDropEvent) {
+                raiseWindowForIncomingDrag(window)
+            }
+
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                val dropped = runCatching { localFilesFromDropData(event.dragData()) }
+                    .getOrDefault(emptyList())
+                if (dropped.isEmpty()) return false
+                // Keep the pairing decision in AppState: opening a log publishes its tab
+                // asynchronously, so attaching here would race it and bind the video to the
+                // previously active tab instead.
+                state.openDroppedFiles(dropped)
+                return true
+            }
+        }
+    }
+
     CompositionLocalProvider(
         LocalTheme provides theme,
         LocalFontBase provides state.settings.fontSize,
@@ -219,6 +239,7 @@ fun App(
         LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
         LocalTextContextMenu provides IndagiumTextContextMenu,
         LocalMirrorOverlayAppState provides state,
+        LocalFileDropTarget provides dropTarget,
     ) {
         val tc = tc()
         val nativeMirrorOccluded = appHasNativeMirrorOccludingOverlay(state)
@@ -271,24 +292,6 @@ fun App(
         // command-line file argument still being parsed, so home never flashes open underneath it.
         LaunchedEffect(state.tabs.isEmpty(), state.seq3Sessions.sessions.isEmpty(), state.testsTabOpen, state.isLoading) {
             state.ensureHomeTab()
-        }
-        val dropTarget = remember(state, window) {
-            object : DragAndDropTarget {
-                override fun onStarted(event: DragAndDropEvent) {
-                    raiseWindowForIncomingDrag(window)
-                }
-
-                override fun onDrop(event: DragAndDropEvent): Boolean {
-                    val dropped = runCatching { localFilesFromDropData(event.dragData()) }
-                        .getOrDefault(emptyList())
-                    if (dropped.isEmpty()) return false
-                    // Keep the pairing decision in AppState: opening a log publishes its tab
-                    // asynchronously, so attaching here would race it and bind the video to the
-                    // previously active tab instead.
-                    state.openDroppedFiles(dropped)
-                    return true
-                }
-            }
         }
         val dc by dragCursorOverride
         Box(
