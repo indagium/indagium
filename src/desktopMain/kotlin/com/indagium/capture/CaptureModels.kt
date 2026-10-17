@@ -308,6 +308,11 @@ data class CaptureSession(
     val snapshotVideoSource: VideoSource? = null,
     /** Local session-only logging settings captured from this device; never copied into ZIPs. */
     val deviceLoggingConfiguration: DeviceLoggingConfiguration? = null,
+    /**
+     * Explicit screenshot source for sessions whose screenshots do not live in `<directory>/screenshots`
+     * under live recorder names (an imported archive). Null means the live recorder layout is scanned.
+     */
+    val screenshotsOverride: List<CaptureSessionScreenshot>? = null,
 ) {
     val logFile: File get() = logFileOverride ?: File(directory, "logs/logcat.log")
     val indexFile: File get() = indexFileOverride ?: File(directory, "mapping/capture-index.jsonl")
@@ -363,6 +368,9 @@ internal object CaptureSnapshotCheckpointLocks {
 
 /** One complete raw line; separators have no parsed ordinal. Elapsed time uses a monotonic clock. */
 data class CaptureLogIndexRecord(val byteOffset: Long, val byteLength: Int, val elapsedMs: Long, val rowOrdinal: Int?)
+
+/** A screenshot file and its elapsed time on the owning [CaptureSession]'s own time base. */
+data class CaptureSessionScreenshot(val file: File, val elapsedMs: Long)
 
 enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION, EXPLICIT }
 

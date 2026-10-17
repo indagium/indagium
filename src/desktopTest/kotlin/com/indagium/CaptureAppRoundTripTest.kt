@@ -237,6 +237,88 @@ class CaptureAppRoundTripTest {
     }
 
     @Test
+    fun unlinkedCaptureVideoStaysUnlinkedAfterRestart() = runBlocking {
+        val root = createTempDirectory("capture-app-unlink-restore").toFile()
+        try {
+            val zip = exportFixture(root)
+            val autosave = File(root, "autosave")
+            val app = AppState(autosaveFile = autosave, autoExportNotes = false, archiveCacheDir = File(root, "cache"))
+            val id = app.openCaptureFile(zip)
+            waitLoaded(app, id)
+            val rowId = assertNotNull(app.tab(id)).logData[SECOND_ROW_INDEX].id
+            assertEquals(EXPECTED_VIDEO_MS, app.logIdToVideoMs(assertNotNull(app.tab(id)), rowId))
+
+            app.clearVideoAnchor(id)
+            assertNull(app.logIdToVideoMs(assertNotNull(app.tab(id)), rowId))
+            app.autosaveNow()
+            app.close()
+
+            val restored = AppState(autosaveFile = autosave, restoreOnCreate = true, autoExportNotes = false,
+                archiveCacheDir = File(root, "fresh-cache"))
+            try {
+                restored.startPendingRestoredTabLoads()
+                waitLoaded(restored, id)
+                val reopened = assertNotNull(restored.tab(id))
+                assertNull(reopened.captureTimeline)
+                assertNull(reopened.attachedVideo?.anchor)
+                assertNull(restored.logIdToVideoMs(reopened, rowId))
+                assertEquals(zip.absolutePath, reopened.captureArchivePath)
+                assertNotNull(restored.captureSnapshotSessionFor(id), "an unlinked tab can still export snapshots")
+
+                // An explicit re-link works again and survives another restart.
+                restored.setVideoAnchor(id, CALIBRATED_VIDEO_MS, rowId)
+                assertEquals(CALIBRATED_VIDEO_MS, restored.logIdToVideoMs(assertNotNull(restored.tab(id)), rowId))
+                restored.autosaveNow()
+            } finally {
+                restored.close()
+            }
+            val relinked = AppState(autosaveFile = autosave, restoreOnCreate = true, autoExportNotes = false,
+                archiveCacheDir = File(root, "fresh-cache-2"))
+            try {
+                relinked.startPendingRestoredTabLoads()
+                waitLoaded(relinked, id)
+                assertEquals(
+                    CALIBRATED_VIDEO_MS,
+                    relinked.logIdToVideoMs(assertNotNull(relinked.tab(id)), rowId),
+                )
+            } finally {
+                relinked.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun linkedCaptureVideoIsRelinkedAfterRestartWithoutAnUnlink() = runBlocking {
+        val root = createTempDirectory("capture-app-linked-restore").toFile()
+        try {
+            val zip = exportFixture(root)
+            val autosave = File(root, "autosave")
+            val app = AppState(autosaveFile = autosave, autoExportNotes = false, archiveCacheDir = File(root, "cache"))
+            val id = app.openCaptureFile(zip)
+            waitLoaded(app, id)
+            val rowId = assertNotNull(app.tab(id)).logData[SECOND_ROW_INDEX].id
+            app.autosaveNow()
+            app.close()
+
+            val restored = AppState(autosaveFile = autosave, restoreOnCreate = true, autoExportNotes = false,
+                archiveCacheDir = File(root, "fresh-cache"))
+            try {
+                restored.startPendingRestoredTabLoads()
+                waitLoaded(restored, id)
+                val reopened = assertNotNull(restored.tab(id))
+                assertNotNull(reopened.captureTimeline)
+                assertEquals(EXPECTED_VIDEO_MS, restored.logIdToVideoMs(reopened, rowId))
+            } finally {
+                restored.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun importedLogOnlyCaptureRestoresSnapshotSourceAfterArchiveCacheIsRemoved() = runBlocking {
         val root = createTempDirectory("capture-imported-log-only-restore").toFile()
         try {

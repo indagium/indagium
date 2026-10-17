@@ -89,6 +89,24 @@ class VideoAttachmentTokenTest {
     }
 
     @Test
+    fun roundTripsExplicitUnlinkAndOlderTokensRestoreAsLinked() {
+        val unlinked = tabFixture(
+            VideoAttachment(
+                path = "/videos/capture.mkv",
+                sourceLabel = "capture.zip/video/screen.mkv",
+                doubleClickSeekEnabled = false,
+                linkCleared = true,
+            ),
+        )
+        assertEquals(true, unlinked.tabToken().tabShellFromToken()?.tab?.attachedVideo?.linkCleared)
+
+        val linked = tabFixture(
+            VideoAttachment(path = "/videos/capture.mkv", sourceLabel = "capture.zip/video/screen.mkv"),
+        )
+        assertEquals(false, linked.tabToken().tabShellFromToken()?.tab?.attachedVideo?.linkCleared)
+    }
+
+    @Test
     fun roundTripsNoAttachedVideoAsNull() {
         val original = tabFixture(attachedVideo = null)
         val restored = original.tabToken().tabShellFromToken()
@@ -200,5 +218,24 @@ class VideoAttachmentTokenTest {
         val restored = rawFields.joinToString("|").tabShellFromToken()
 
         assertTrue(restored?.tab?.attachedVideo?.doubleClickSeekEnabled == true)
+    }
+
+    @Test
+    fun attachmentTokenWrittenBeforeLinkClearedRestoresAsLinked() {
+        val rawFields = tabFixture(
+            VideoAttachment(
+                path = "/videos/capture.mkv",
+                sourceLabel = "capture.zip/video/screen.mkv",
+                captureSourcePath = "/reports/capture.zip",
+                linkCleared = true,
+            ),
+        ).tabToken().split("|").toMutableList()
+        // Fields 0..11 are everything a token carried before the append-only linkCleared field.
+        rawFields[11] = rawFields[11].unb64().split("|").take(12).joinToString("|").b64()
+
+        val restored = rawFields.joinToString("|").tabShellFromToken()
+
+        assertEquals(false, restored?.tab?.attachedVideo?.linkCleared)
+        assertEquals("/reports/capture.zip", restored?.tab?.attachedVideo?.captureSourcePath)
     }
 }

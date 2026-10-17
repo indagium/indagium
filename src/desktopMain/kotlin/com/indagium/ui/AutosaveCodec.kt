@@ -1746,6 +1746,9 @@ private fun VideoAttachment.attachedVideoToken(): String {
         // intentionally absent; restore rehydrates it from captureSourcePath after parsing the log.
         captureSourcePath.orEmpty(),
         captureOffsetMs.toString(),
+        // Field 12 (append-only): the user explicitly unlinked this capture video. Absent on older
+        // tokens, which restore as not-unlinked.
+        linkCleared.toString(),
     )
 }
 
@@ -1780,6 +1783,8 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         // Fields 10-11 (append-only). Old attachments remain ordinary anchor-mapped videos.
         captureSourcePath = p.getOrNull(10)?.takeIf { it.isNotBlank() },
         captureOffsetMs = p.getOrNull(11)?.toLongOrNull() ?: 0L,
+        // Field 12 (append-only); absent or unparsable means the link was never explicitly cleared.
+        linkCleared = p.getOrNull(12)?.toBooleanStrictOrNull() ?: false,
     )
 }.getOrNull()
 

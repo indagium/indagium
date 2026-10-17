@@ -742,6 +742,10 @@ data class VideoAttachment(
     // User calibration applied on top of the imported clip-relative mapping. Export-time manual
     // offset is already baked into CaptureTimeline.rows[].videoMs and must not be added here.
     val captureOffsetMs: Long = 0,
+    // True once the user explicitly unlinked this recording from its capture archive (clearVideoAnchor).
+    // Restore must then not re-apply the archive's timeline or sync anchor to the attachment. Any
+    // link action (setVideoAnchor) or a new attachment resets it.
+    val linkCleared: Boolean = false,
 ) {
     constructor(
         path: String,
@@ -751,6 +755,7 @@ data class VideoAttachment(
         doubleClickSeekEnabled: Boolean = anchor != null,
         captureSourcePath: String? = null,
         captureOffsetMs: Long = 0,
+        linkCleared: Boolean = false,
     ) : this(
         source = VideoSource.LocalFile(path),
         sourceLabel = sourceLabel,
@@ -759,6 +764,7 @@ data class VideoAttachment(
         doubleClickSeekEnabled = doubleClickSeekEnabled,
         captureSourcePath = captureSourcePath,
         captureOffsetMs = captureOffsetMs,
+        linkCleared = linkCleared,
     )
 
     /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */
