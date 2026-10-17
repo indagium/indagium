@@ -274,8 +274,14 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             variant = ButtonVariant.Secondary, isDanger = true,
         )
     }
+    // Right under the Edit / Delete row: the saved files are what the reader came for, before the re-check line and the Markdown.
+    // Resolved on IO: each stored file is checked on disk, so a deleted one shows as missing instead of a button that fails.
+    val evidence by produceState(emptyList<EvidenceRow>(), issue) {
+        value = withContext(Dispatchers.IO) { issueEvidenceRows(issue.draft.attachments) { ui.state.issueStore.attachmentFile(issue, it) } }
+    }
+    IssueEvidenceSection(evidence, onOpen = ui::openIssueAttachment, onReveal = ui::revealIssueFile)
     if (issue.recheck != null) {
-        Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(issue.recheck.outcome.label(), recheckColor(issue.recheck.outcome))
             AppText("Last re-check ${formatRunMoment(issue.recheck.checkedAt, nowMs)}", color = tc.td, fontSize = 10.sp)
         }
@@ -284,11 +290,6 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(10.dp)) {
         AppText(markdown, color = tc.tx.copy(alpha = DETAIL_ALPHA), fontSize = 11.sp, fontFamily = MONO, maxLines = MARKDOWN_MAX_LINES)
     }
-    // Resolved on IO: each stored file is checked on disk, so a deleted one shows as missing instead of a button that fails.
-    val evidence by produceState(emptyList<EvidenceRow>(), issue) {
-        value = withContext(Dispatchers.IO) { issueEvidenceRows(issue.draft.attachments) { ui.state.issueStore.attachmentFile(issue, it) } }
-    }
-    IssueEvidenceSection(evidence, onOpen = ui::openIssueAttachment, onReveal = ui::revealIssueFile)
     if (issue.destinationResults.isNotEmpty()) {
         TestsSectionTitle("Where it went")
         issue.destinationResults.asReversed().forEach { result ->

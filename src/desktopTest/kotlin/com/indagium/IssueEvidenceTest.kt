@@ -12,15 +12,20 @@ import com.indagium.testing.model.IssueAttachmentKind
 import com.indagium.ui.ArtifactOpenMode
 import com.indagium.ui.EvidenceAvailability
 import com.indagium.ui.IssueEvidenceSection
+import com.indagium.ui.isTextLikeFile
 import com.indagium.ui.issueAttachmentOpenMode
 import com.indagium.ui.issueEvidenceRows
 import com.indagium.ui.openFileCommand
+import com.indagium.ui.textEditorOpenCommand
+import com.indagium.ui.usuallyHasNoDefaultApp
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Which issue evidence opens in Indagium and which with the system, the Evidence rows, and the open commands. */
@@ -114,5 +119,26 @@ class IssueEvidenceTest {
         assertEquals(listOf("open", file.absolutePath), openFileCommand(file, "Mac OS X"))
         assertEquals(listOf("xdg-open", file.absolutePath), openFileCommand(file, "Linux"))
         assertTrue(openFileCommand(file, "Windows 11").first() == "rundll32")
+    }
+
+    @Test
+    fun textFilesOpenInTheSystemTextEditorWhenNothingIsRegisteredForThem() {
+        val transcript = File("/tmp/a b/attachments/transcript-slice.jsonl")
+        assertEquals(listOf("open", "-t", transcript.absolutePath), textEditorOpenCommand(transcript, "Mac OS X"))
+        assertEquals(listOf("notepad.exe", transcript.absolutePath), textEditorOpenCommand(transcript, "Windows 11"))
+        // Linux has no text-editor command of its own: xdg-open already resolves one from the MIME type.
+        assertNull(textEditorOpenCommand(transcript, "Linux"))
+    }
+
+    @Test
+    fun onlyPlainTextExtensionsAreTextLikeAndOnlyJsonlStyleOnesSkipTheDefaultApp() {
+        for (name in listOf("t.jsonl", "t.NDJSON", "t.json", "t.txt", "t.log", "t.md", "t.csv")) {
+            assertTrue(isTextLikeFile(File(name)), name)
+        }
+        for (name in listOf("clip.mp4", "shot.png", "bugreport.zip", "noextension")) assertFalse(isTextLikeFile(File(name)), name)
+        assertTrue(usuallyHasNoDefaultApp(File("transcript-slice.jsonl")))
+        assertTrue(usuallyHasNoDefaultApp(File("x.ndjson")))
+        assertFalse(usuallyHasNoDefaultApp(File("notes.txt")))
+        assertFalse(usuallyHasNoDefaultApp(File("data.json")))
     }
 }
