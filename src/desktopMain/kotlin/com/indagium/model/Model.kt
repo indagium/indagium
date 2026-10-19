@@ -1263,6 +1263,12 @@ data class VoiceInputSettings(
     val recognitionEngine: VoiceRecognitionEngine = VoiceRecognitionEngine.WHISPER,
 )
 
+/** On-device spelling and grammar suggestions for English prose fields. */
+data class ProofreadingSettings(
+    val enabled: Boolean = true,
+    val language: String = "en-US",
+)
+
 /** Linux-only AWT FileDialog backend preference. Changes take effect after restarting Indagium. */
 enum class LinuxFilePickerMode(val label: String) {
     AUTOMATIC("Automatic"),
@@ -1559,6 +1565,9 @@ data class AppSettings(
     // frozen positional settings decoder must not gain a field. Kept last to preserve positional
     // AppSettings source callers as well.
     val setupAssistantRevision: Int = 0,
+    // Local English spelling/grammar suggestions; JSON-only so the legacy positional settings
+    // decoder remains frozen. Decorations are transient UI state and are never serialized.
+    val proofreading: ProofreadingSettings = ProofreadingSettings(),
 )
 
 /** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,

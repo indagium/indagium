@@ -109,7 +109,7 @@ target.
 | Production Kotlin lines | 155,102 |
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
-| Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
+| Packages | 17 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `proofread`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
 | MCP/automation tools exposed | 156: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
@@ -392,6 +392,7 @@ observed in the code and enforced by convention and review rather than by toolin
 | `edition` | `Edition`, `EditionLimits` and the `EditionService` that holds the active edition. | — | Everything else |
 | `security` | OS-keychain secret storage with a session-only fallback. | `ai` (log redaction), `testing.script` (the child-process runner) | `ui` |
 | `voice` | Audio capture and the three transcription backends. | — | `ui` |
+| `proofread` | UI-independent English spelling and grammar checks with UTF-16 ranges and Markdown/technical-text exclusions. | LanguageTool rules and dictionaries | `ui`, network services, app state |
 | `update` | GitHub release check and asset download. | — | `ui` |
 | `singleinstance` | File-lock + loopback-socket single-instance IPC. | — | Everything else |
 | `debug` | Control server, tool catalogue, tool handlers, diagnostic logger. | `ui` (`AppState`), `model`, `utils`, `cases`, `diagram3`, `testing`, `edition` | Compose UI composables |
@@ -632,6 +633,7 @@ flowchart TB
     model["model"]
     video["video"]
     voice["voice"]
+    proofread["proofread<br/>local English rules"]
     update["update"]
     single["singleinstance"]
     capture["capture"]
@@ -648,6 +650,7 @@ flowchart TB
     ui --> model
     ui --> video
     ui --> voice
+    ui --> proofread
     ui --> update
     ui --> capture
     ui --> testing
@@ -1025,6 +1028,7 @@ classDiagram
         +Map~String, WorkflowAiSelection~ workflowAiSelections
         +Int aiMaxToolRounds
         +VoiceInputSettings voiceInput
+        +ProofreadingSettings proofreading
         +CaptureSettings captureSettings
         +List~String~ sourceFolders
         +List~SourceLogConfiguration~ sourceLogConfigurations
@@ -1081,6 +1085,11 @@ classDiagram
         +VoiceRecognitionEngine recognitionEngine
     }
 
+    class ProofreadingSettings {
+        +Boolean enabled
+        +String language
+    }
+
     class CaptureSettings {
         +String adbPath
         +String scrcpyPath
@@ -1102,6 +1111,7 @@ classDiagram
     AppSettings "1" *-- "many" AiProviderProfile
     AppSettings "1" *-- "many" CustomIssueRule
     AppSettings "1" *-- "1" VoiceInputSettings
+    AppSettings "1" *-- "1" ProofreadingSettings
     AppSettings "1" *-- "1" CaptureSettings
     AiProviderProfile --> AiProviderKind
     SavedFilter "many" --> "0..1" SavedFilterFolder : folderId
@@ -1278,6 +1288,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and index-assisted range/synchronization-anchor generation |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
+| `voice/VoiceInputSessionCoordinator.kt` / `VoiceInputControllerFactory.kt` | One app-wide recording owner, stable editor leases, and shared engine construction for AI, notes and test prose |
+| `proofread/EnglishProofreader.kt` / `ProofreadingText.kt` | Local LanguageTool English checks, bounded prose chunks, UTF-16 issue ranges, and offset-preserving exclusions for Markdown and technical content |
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
 | `singleinstance/SingleInstance.kt` | File lock plus loopback socket; forwards file arguments to the running instance |
 
@@ -1963,6 +1975,8 @@ is resolved against current settings on open, and stale discovered catalog choic
 (appended last to `settingsJson()`); the issue tracker's access token is **not** part of settings — it
 lives only in the OS keychain (§26.9.3). Test suites, runs and issues are stored in the three test folders
 (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only, §26.3), not in the autosave.
+`AppSettings.proofreading` is also keyed-JSON-only; it defaults to enabled English (`en-US`), with
+`en-GB` as the alternate variant. The frozen positional settings decoder is unchanged.
 
 ### 13.5 Restore is metadata-only
 
@@ -2264,7 +2278,30 @@ Three transcription backends, selected per OS by `voice/VoiceRecognitionEngines.
 | Windows Speech | Out-of-process helper, base64 PCM over the pipe | Requires an installed offline language pack |
 
 The Whisper model is downloaded only after explicit consent, verified by SHA-256, and stored in
-`voice-models/`. Recordings and transcripts are never written to disk.
+`voice-models/`. Recording audio is not saved. Transient recognition results are not stored as
+separate voice artifacts; text inserted into an editor is saved through that editor's normal
+workflow.
+
+`VoiceInputControllerFactory` builds the platform controller from the shared `VoiceInputSettings`,
+and `VoiceInputSessionCoordinator` grants one active editor a lease at a time. A lease is tied to a
+stable editor identity, not a row position. Closing, locking, disabling or replacing the target
+cancels its session, and delayed results are dropped unless the same lease still owns it. The AI
+composer keeps its existing append-at-end behavior; notes and explicitly opted-in test-authoring
+fields insert at the retained selection or caret as one editor change. Escape cancels recording
+without discarding text already typed. Model installation is local except for the consented Whisper
+model download.
+
+English proofreading runs only in notes. `LanguageToolEnglishProofreader` uses the bundled English
+rules locally; `EnglishProofreadingService` serializes checks on a lazy worker. The UI debounces
+edits, accepts results only for the exact text revision that was checked, and presents suggested
+replacements without changing text automatically. Markdown syntax, code, URLs, paths, diagram
+metadata and other technical spans are excluded while source offsets are preserved. Decorations and
+ignored suggestions are session UI state, not note content or exported markup. The JSON-only
+`ProofreadingSettings` defaults to enabled with `en-US`; `en-GB` is the other supported variant.
+Suggestion popups remain passive while typing. Press Alt+Enter (Option+Return on macOS) with the
+caret on an issue to enter keyboard mode; Tab/Shift+Tab move between replacements and Ignore,
+Enter/Space activates the focused choice, and Escape returns to the editor without changing text.
+Escape suppresses the passive popup until the caret or text changes.
 
 ### 14.5 Update checker
 
@@ -3357,6 +3394,8 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | `testing.tracker` | `TrackerMcpClient.kt`, `SdkTrackerMcpClient.kt`, `TrackerConfig.kt`, `TrackerIssueCreator.kt`, `TrackerTools.kt`, `TrackerPrompts.kt` | The issue-tracker MCP client (official Kotlin SDK client), setup checks, and the one-shot agent job that files an issue |
 | `edition` | `Edition.kt` | `Edition`, `EditionLimits`, `EditionService` |
 | `security` | `SecretStore.kt` | OS-keychain secret storage with a session-only fallback |
+| `voice` | `VoiceInput.kt`, `VoiceInputController.kt`, `VoiceInputControllerFactory.kt`, `VoiceInputSessionCoordinator.kt` | Local capture/backends, shared controller construction and app-wide stable editor-session ownership |
+| `proofread` | `EnglishProofreader.kt`, `ProofreadingText.kt` | Local English rules, bounded checks, UTF-16 ranges and offset-preserving technical-text exclusions |
 | `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `TestRunCaptureArgs.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
 | `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsStepKinds.kt`, `TestsExternalRows.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsAgentExamplesScreen.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `TestsFormat.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `AiModelEffortPickers.kt`, `TestsStepAuthoring.kt`, `TestsStepImprove.kt`, `TestsStepImproveState.kt`, `TestsRecordingRewrite.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`; layout in §26.15), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
 

@@ -277,10 +277,16 @@ private fun ImproveReviewPhase(review: ImproveReview, working: Boolean) {
                 ImproveWas("Was · expected", step.previous.expected.ifBlank { "(blank)" })
             }
             TestsLabeled(if (step.previous.kind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
-                CommitTextField(row.action, { text -> row.action = text; StoreResult.Ok(Unit) }, enabled = !working)
+                CommitTextField(
+                    row.action, { text -> row.action = text; StoreResult.Ok(Unit) }, enabled = !working,
+                    proseTargetId = "test-step:${step.previous.id}:improved-action",
+                )
             }
             TestsLabeled("Expected result") {
-                CommitTextField(row.expected, { text -> row.expected = text; StoreResult.Ok(Unit) }, enabled = !working, multiline = true)
+                CommitTextField(
+                    row.expected, { text -> row.expected = text; StoreResult.Ok(Unit) }, enabled = !working, multiline = true,
+                    proseTargetId = "test-step:${step.previous.id}:improved-expected",
+                )
             }
             if (row.canBeOptional) {
                 CheckRow(checked = row.optional, onToggle = { row.optional = !row.optional }, enabled = !working) {
@@ -288,7 +294,10 @@ private fun ImproveReviewPhase(review: ImproveReview, working: Boolean) {
                 }
                 if (row.optional) {
                     TestsLabeled("Perform only when") {
-                        CommitTextField(row.condition, { text -> row.condition = text; StoreResult.Ok(Unit) }, enabled = !working, multiline = true)
+                        CommitTextField(
+                            row.condition, { text -> row.condition = text; StoreResult.Ok(Unit) }, enabled = !working, multiline = true,
+                            proseTargetId = "test-step:${step.previous.id}:improved-condition",
+                        )
                     }
                 }
             }

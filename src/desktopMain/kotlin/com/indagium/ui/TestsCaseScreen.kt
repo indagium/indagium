@@ -91,6 +91,7 @@ private fun CaseHeader(suite: TestSuite, case: TestCase, editable: Boolean, onDe
         onTitleCommit = { t -> ui.state.updateTestCase(case.id) { it.copy(name = t.trim()) } },
         titleEditable = editable,
         titleDescription = "Case name",
+        proseTargetId = "test-case:${case.id}:title",
         titlePlaceholder = "Case name",
         breadcrumb = {
             val suiteName = suite.name.ifBlank { "Suite" }
@@ -140,6 +141,7 @@ private fun CaseGoal(case: TestCase, editable: Boolean) {
                 CommitTextField(
                     case.description, { t -> ui.state.updateTestCase(case.id) { it.copy(description = t) } },
                     enabled = editable, multiline = true, minHeight = GOAL_MIN_HEIGHT, maxHeight = GOAL_MAX_HEIGHT,
+                    proseTargetId = "test-case:${case.id}:goal",
                     placeholder = "What should this case prove?",
                 )
             }
@@ -197,12 +199,14 @@ private fun CaseFieldInspector(case: TestCase, field: CaseField, editable: Boole
                     CommitTextField(
                         case.preconditions, { t -> update { it.copy(preconditions = t) } },
                         enabled = editable, multiline = true, placeholder = "State the app must be in before step 1",
+                        proseTargetId = "test-case:${case.id}:preconditions",
                     )
                 }
                 CaseField.Instructions -> TestsLabeled("Hints that apply to every step") {
                     CommitTextField(
                         case.instructions, { t -> update { it.copy(instructions = t) } },
                         enabled = editable, multiline = true, placeholder = "For example: prefer what is on screen over recorded coordinates.",
+                        proseTargetId = "test-case:${case.id}:instructions",
                     )
                 }
                 CaseField.Hooks -> {

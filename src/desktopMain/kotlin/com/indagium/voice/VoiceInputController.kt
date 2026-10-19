@@ -30,25 +30,31 @@ class VoiceInputController(
     private val nowMillis: () -> Long = System::currentTimeMillis,
     private val onStateChanged: (VoiceInputState) -> Unit = {},
 ) {
+    private val lock = Any()
     private var activeSession: VoiceCaptureSession? = null
     private var requestGeneration = 0L
 
     private val mutableState = MutableStateFlow<VoiceInputState>(VoiceInputState.Idle)
     val state: StateFlow<VoiceInputState> = mutableState.asStateFlow()
+    private val mutableStateEvent = MutableStateFlow(VoiceInputStateEvent(0L, VoiceInputState.Idle))
+    val stateEvent: StateFlow<VoiceInputStateEvent> = mutableStateEvent.asStateFlow()
+    private var stateRevision = 0L
 
     fun startRecording(): VoiceInputState {
-        if (activeSession != null || state.value is VoiceInputState.Transcribing) return state.value
-        if (!hasInstalledModel()) {
-            return transition(
+        synchronized(lock) {
+            if (activeSession != null || state.value is VoiceInputState.Transcribing) return state.value
+            if (!hasInstalledModel()) {
+                return transition(
                 if (requiresInstallation) VoiceInputState.ModelRequired
                 else VoiceInputState.Failed(unavailableMessage() ?: "Local speech recognition is unavailable. Choose Whisper instead."),
-            )
-        }
-        return when (val start = capture.start()) {
-            is VoiceCaptureStartResult.Failure -> transition(VoiceInputState.Failed(start.message))
-            is VoiceCaptureStartResult.Started -> {
-                activeSession = start.session
-                transition(VoiceInputState.Recording(nowMillis()))
+                )
+            }
+            return when (val start = capture.start()) {
+                is VoiceCaptureStartResult.Failure -> transition(VoiceInputState.Failed(start.message))
+                is VoiceCaptureStartResult.Started -> {
+                    activeSession = start.session
+                    transition(VoiceInputState.Recording(nowMillis()))
+                }
             }
         }
     }
@@ -58,13 +64,16 @@ class VoiceInputController(
      * tests and to a UI that wants to await shutdown; it never sends the resulting text.
      */
     fun stopAndTranscribe(translateToEnglish: Boolean? = null): Job? {
-        val session = activeSession ?: return null
-        activeSession = null
-        val generation = ++requestGeneration
-        transition(VoiceInputState.Transcribing)
+        val (session, generation) = synchronized(lock) {
+            val current = activeSession ?: return null
+            activeSession = null
+            val nextGeneration = ++requestGeneration
+            transition(VoiceInputState.Transcribing)
+            current to nextGeneration
+        }
         return scope.launch(dispatcher) {
             val result = session.stop()
-            if (generation != requestGeneration) return@launch
+            if (!isCurrent(generation)) return@launch
             when (result) {
                 is VoiceCaptureResult.Captured -> {
                     if (result.audio.isSilentOrEmpty()) {
@@ -86,17 +95,23 @@ class VoiceInputController(
     }
 
     fun cancel() {
-        requestGeneration++
-        activeSession?.cancel()
-        activeSession = null
-        transition(idleOrModelRequired())
+        val session = synchronized(lock) {
+            requestGeneration++
+            activeSession.also {
+                activeSession = null
+                transition(idleOrModelRequired())
+            }
+        }
+        session?.cancel()
     }
 
     /** Returns the result once, which prevents a stale transcript being inserted twice. */
     fun consumeTranscript(): VoiceTranscript? {
-        val ready = state.value as? VoiceInputState.TranscriptReady ?: return null
-        transition(idleOrModelRequired())
-        return ready.transcript
+        synchronized(lock) {
+            val ready = state.value as? VoiceInputState.TranscriptReady ?: return null
+            transition(idleOrModelRequired())
+            return ready.transcript
+        }
     }
 
     private fun transcribe(generation: Long, audio: VoiceAudio, translateToEnglish: Boolean?) {
@@ -109,26 +124,36 @@ class VoiceInputController(
         } catch (error: Exception) {
             VoiceTranscriptionResult.Failure("Local transcription failed. Try again.", error)
         }
-        if (generation != requestGeneration) return
-        when (result) {
-            is VoiceTranscriptionResult.Success -> {
-                if (result.transcript.text.isBlank()) transitionIfCurrent(generation, VoiceInputState.Failed("No speech was recognized. Try again."))
-                else transitionIfCurrent(generation, VoiceInputState.TranscriptReady(result.transcript))
+        synchronized(lock) {
+            if (generation != requestGeneration) return
+            when (result) {
+                is VoiceTranscriptionResult.Success -> {
+                    if (result.transcript.text.isBlank()) transition(VoiceInputState.Failed("No speech was recognized. Try again."))
+                    else transition(VoiceInputState.TranscriptReady(result.transcript))
+                }
+                is VoiceTranscriptionResult.Failure -> transition(VoiceInputState.Failed(result.message))
             }
-            is VoiceTranscriptionResult.Failure -> transitionIfCurrent(generation, VoiceInputState.Failed(result.message))
         }
     }
 
     private fun idleOrModelRequired(): VoiceInputState =
-        if (hasInstalledModel() || !requiresInstallation) VoiceInputState.Idle else VoiceInputState.ModelRequired
+        if (!requiresInstallation || hasInstalledModel()) VoiceInputState.Idle else VoiceInputState.ModelRequired
 
     private fun transitionIfCurrent(generation: Long, next: VoiceInputState) {
-        if (generation == requestGeneration) transition(next)
+        synchronized(lock) {
+            if (generation == requestGeneration) transition(next)
+        }
     }
+
+    private fun isCurrent(generation: Long): Boolean = synchronized(lock) { generation == requestGeneration }
 
     private fun transition(next: VoiceInputState): VoiceInputState {
         mutableState.value = next
+        mutableStateEvent.value = VoiceInputStateEvent(++stateRevision, next)
         onStateChanged(next)
         return next
     }
 }
+
+/** Monotonic event identity prevents a queued StateFlow value from an earlier session reaching a new owner. */
+data class VoiceInputStateEvent(val revision: Long, val state: VoiceInputState)

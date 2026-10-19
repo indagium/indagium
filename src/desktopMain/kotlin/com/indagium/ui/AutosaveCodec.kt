@@ -642,6 +642,10 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
         put("recognitionEngine", voiceInput.recognitionEngine.name)
         put("recognitionLanguageCodes", buildJsonArray { voiceInput.recognitionLanguageCodes.forEach(::add) })
     })
+    put("proofreading", buildJsonObject {
+        put("enabled", proofreading.enabled)
+        put("language", proofreading.language)
+    })
     put("copyMaskRules", copyMaskRulesJson(copyMaskRules))
     put("mcpAllowBrowserClients", mcpAllowBrowserClients)
     put("showRowNumbers", showRowNumbers)
@@ -960,6 +964,15 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         aiMaxToolRounds = o.intOrDefault("aiMaxToolRounds", DEFAULT_AI_MAX_TOOL_ROUNDS)
             .coerceIn(MIN_AI_MAX_TOOL_ROUNDS, MAX_AI_MAX_TOOL_ROUNDS),
         voiceInput = o.voiceInputFromJson("voiceInput"),
+        proofreading = run {
+            val proofreading = o["proofreading"] as? JsonObject
+            val language = (proofreading?.get("language") as? JsonPrimitive)?.contentOrNull
+                ?.takeIf { it == "en-US" || it == "en-GB" } ?: "en-US"
+            ProofreadingSettings(
+                enabled = (proofreading?.get("enabled") as? JsonPrimitive)?.booleanOrNull ?: true,
+                language = language,
+            )
+        },
         sourceFolderInfo = o.sourceFolderInfoFromJson("sourceFolderInfo"),
         sourceLogConfigurations = o.sourceLogConfigurationsFromJson("sourceLogConfigurations"),
         sourceFolderConfigurationIds = o.sourceFolderConfigurationIdsFromJson("sourceFolderConfigurationIds"),

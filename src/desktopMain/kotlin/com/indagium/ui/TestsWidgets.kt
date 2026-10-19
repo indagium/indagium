@@ -9,6 +9,7 @@ import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -52,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -73,6 +75,8 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -382,21 +386,52 @@ internal fun CommitTextField(
     maxHeight: Dp = MULTILINE_MAX_HEIGHT,
     /** Single-line only: styled as a screen title (14sp SemiBold, border only on hover/focus), see [TestsTitleField]. */
     title: Boolean = false,
+    /** Non-null only for natural-language prose; technical values and regex fields stay untouched. */
+    proseTargetId: String? = null,
 ) {
-    var draft by remember { mutableStateOf(value) }
+    val draftState = remember(proseTargetId) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    var editorValue by draftState
+    val draft = editorValue.text
     var focused by remember { mutableStateOf(false) }
+    var editorGroupFocused by remember { mutableStateOf(false) }
+    var retainedVoiceSelection by remember(proseTargetId) { mutableStateOf<TextRange?>(null) }
+    var lastNonCollapsedVoiceSelection by remember(proseTargetId) { mutableStateOf<TextRange?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    val proseFocusRequester = remember(proseTargetId) { FocusRequester() }
     val storedValue by rememberUpdatedState(value)
     val commitAction by rememberUpdatedState(onCommit)
     val editable by rememberUpdatedState(enabled)
+    fun acceptEditorValue(updated: TextFieldValue) {
+        if (updated.text != editorValue.text) {
+            retainedVoiceSelection = null
+            lastNonCollapsedVoiceSelection = null
+        } else if (updated.selection.start != updated.selection.end) {
+            retainedVoiceSelection = null
+            lastNonCollapsedVoiceSelection = updated.selection
+        } else if (lastNonCollapsedVoiceSelection != null && retainedVoiceSelection == null) {
+            // Compose may collapse a selection as focus moves from the field to the mic.
+            // Keep the last real range until a pointer/key/text edit proves the user moved it.
+            retainedVoiceSelection = lastNonCollapsedVoiceSelection
+        }
+        editorValue = updated
+    }
+    fun insertTranscript(transcript: com.indagium.voice.VoiceTranscript) {
+        if (!editable) return
+        val insertionBase = retainedVoiceSelection?.let { editorValue.copy(selection = it) } ?: editorValue
+        editorValue = insertVoiceTranscript(insertionBase, transcript)
+        retainedVoiceSelection = null
+        lastNonCollapsedVoiceSelection = null
+    }
 
     fun commit() {
         if (!editable || draft == storedValue) return
         error = commitAction(draft).userMessage()
     }
     LaunchedEffect(value) {
-        if (!focused) {
-            draft = value
+        if (!focused && editorValue.text != value) {
+            editorValue = TextFieldValue(value, TextRange(value.length))
+            retainedVoiceSelection = null
+            lastNonCollapsedVoiceSelection = null
             error = null
         }
     }
@@ -408,47 +443,112 @@ internal fun CommitTextField(
     }
     val focusTracker = Modifier.onFocusChanged {
         if (focused && !it.hasFocus) commit()
+        if (focused && !it.hasFocus && proseTargetId != null && retainedVoiceSelection == null) {
+            retainedVoiceSelection = editorValue.selection.takeIf { selection -> selection.start != selection.end }
+                ?: lastNonCollapsedVoiceSelection
+        }
         focused = it.hasFocus
     }
+    val fieldModifier = Modifier.fillMaxWidth().then(focusTracker)
+        .then(
+            if (proseTargetId != null) {
+                Modifier
+                    .onPointerEvent(PointerEventType.Press) {
+                        retainedVoiceSelection = null
+                        lastNonCollapsedVoiceSelection = null
+                    }
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key != Key.Escape) {
+                            retainedVoiceSelection = null
+                            lastNonCollapsedVoiceSelection = null
+                        }
+                        false
+                    }
+                    .focusRequester(proseFocusRequester)
+                    .cancelVoiceOnEscape(proseTargetId)
+            } else Modifier,
+        )
+    val editorGroupModifier = Modifier.fillMaxWidth().onFocusChanged { editorGroupFocused = it.hasFocus }.focusGroup()
     val font = if (mono) MONO else LocalUiFontFamily.current
     CompositionLocalProvider(LocalUiFontFamily provides font) {
         Column(modifier.fillMaxWidth()) {
             when {
-                multiline -> ScrollableTextArea(
-                    value = draft,
-                    onValue = { draft = it },
-                    placeholder = placeholder,
-                    modifier = Modifier.fillMaxWidth().then(focusTracker),
-                    fontSize = FIELD_FONT_SIZE,
-                    minHeight = minHeight,
-                    maxHeight = maxHeight,
-                    borderColor = if (error != null) DANGER_RED else null,
-                    enabled = enabled,
-                )
-                enabled && title -> TitleInput(
-                    value = draft,
-                    onValue = { draft = it },
-                    placeholder = placeholder,
-                    focused = focused,
-                    modifier = Modifier.fillMaxWidth().then(focusTracker),
-                    onSubmit = ::commit,
-                    onCancel = {
-                        draft = storedValue
-                        error = null
-                    },
-                )
-                enabled -> InlineField(
-                    value = draft,
-                    onValue = { draft = it },
-                    placeholder = placeholder,
-                    modifier = Modifier.fillMaxWidth().then(focusTracker),
-                    fontSize = FIELD_FONT_SIZE,
-                    onSubmit = ::commit,
-                    onCancel = {
-                        draft = storedValue
-                        error = null
-                    },
-                )
+                multiline -> Row(editorGroupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box(Modifier.weight(1f)) {
+                        ScrollableTextArea(
+                            value = draft,
+                            onValue = { editorValue = editorValue.copy(text = it) },
+                            placeholder = placeholder,
+                            modifier = fieldModifier,
+                            fontSize = FIELD_FONT_SIZE,
+                            minHeight = minHeight,
+                            maxHeight = maxHeight,
+                            borderColor = if (error != null) DANGER_RED else null,
+                            enabled = enabled,
+                            textFieldValueState = draftState,
+                            onTextFieldValueChange = ::acceptEditorValue,
+                        )
+                    }
+                    if (proseTargetId != null) VoiceDictationButton(
+                        targetId = proseTargetId,
+                        enabled = enabled,
+                        onTranscript = ::insertTranscript,
+                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
+                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
+                        visible = editorGroupFocused,
+                    )
+                }
+                enabled && title -> Row(
+                    editorGroupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Box(Modifier.weight(1f)) {
+                        TitleInput(
+                            value = editorValue,
+                            onValue = ::acceptEditorValue,
+                            placeholder = placeholder,
+                            focused = focused,
+                            modifier = fieldModifier,
+                            onSubmit = ::commit,
+                            visualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+                            onCancel = {
+                                editorValue = TextFieldValue(storedValue, TextRange(storedValue.length))
+                                error = null
+                            },
+                        )
+                    }
+                    if (proseTargetId != null) VoiceDictationButton(
+                        targetId = proseTargetId,
+                        enabled = enabled,
+                        onTranscript = ::insertTranscript,
+                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
+                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
+                        visible = editorGroupFocused,
+                    )
+                }
+                enabled -> Row(editorGroupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Box(Modifier.weight(1f)) {
+                        InlineField(
+                            value = editorValue,
+                            onValue = ::acceptEditorValue,
+                            placeholder = placeholder,
+                            modifier = fieldModifier,
+                            fontSize = FIELD_FONT_SIZE,
+                            onSubmit = ::commit,
+                            onCancel = {
+                                editorValue = TextFieldValue(storedValue, TextRange(storedValue.length))
+                                error = null
+                            },
+                        )
+                    }
+                    if (proseTargetId != null) VoiceDictationButton(
+                        targetId = proseTargetId,
+                        enabled = enabled,
+                        onTranscript = ::insertTranscript,
+                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
+                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
+                        visible = editorGroupFocused,
+                    )
+                }
                 else -> ReadOnlyValue(draft, placeholder)
             }
             error?.let { TestsErrorText(it) }
@@ -459,13 +559,14 @@ internal fun CommitTextField(
 /** The text input behind [TestsTitleField]: no border at rest, the neutral border on hover, the accent one with focus. */
 @Composable
 private fun TitleInput(
-    value: String,
-    onValue: (String) -> Unit,
+    value: TextFieldValue,
+    onValue: (TextFieldValue) -> Unit,
     placeholder: String,
     focused: Boolean,
     modifier: Modifier,
     onSubmit: () -> Unit,
     onCancel: () -> Unit,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -477,6 +578,7 @@ private fun TitleInput(
     BasicTextField(
         value = value,
         onValueChange = onValue,
+        visualTransformation = visualTransformation,
         singleLine = true,
         textStyle = TextStyle(color = tc.tx, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold, fontFamily = LocalUiFontFamily.current),
         cursorBrush = SolidColor(tc.ac),
@@ -500,7 +602,7 @@ private fun TitleInput(
             .border(1.dp, borderColor, CORNER_SM)
             .padding(horizontal = 6.dp, vertical = 3.dp),
         decorationBox = { inner ->
-            if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold)
+            if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold)
             inner()
         },
     )
@@ -547,6 +649,7 @@ internal fun TestsTitleField(
     enabled: Boolean = true,
     placeholder: String = "",
     contentDescription: String? = null,
+    proseTargetId: String? = null,
 ) {
     CommitTextField(
         value = value,
@@ -555,6 +658,7 @@ internal fun TestsTitleField(
         enabled = enabled,
         placeholder = placeholder,
         title = true,
+        proseTargetId = proseTargetId,
     )
 }
 
@@ -572,6 +676,7 @@ internal fun TestsPageHeader(
     onTitleCommit: ((String) -> StoreResult<*>)? = null,
     titleEditable: Boolean = true,
     titleDescription: String? = null,
+    proseTargetId: String? = null,
     titlePlaceholder: String = "",
     primary: (@Composable () -> Unit)? = null,
     overflowItems: List<TestsMenuItem> = emptyList(),
@@ -584,7 +689,14 @@ internal fun TestsPageHeader(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) {
                 if (onTitleCommit != null) {
-                    TestsTitleField(title, onTitleCommit, enabled = titleEditable, placeholder = titlePlaceholder, contentDescription = titleDescription)
+                    TestsTitleField(
+                        title,
+                        onTitleCommit,
+                        enabled = titleEditable,
+                        placeholder = titlePlaceholder,
+                        contentDescription = titleDescription,
+                        proseTargetId = proseTargetId,
+                    )
                 } else {
                     AppText(title, color = tc.tx, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold, overflow = TextOverflow.Ellipsis)
                 }

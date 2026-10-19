@@ -1016,6 +1016,11 @@ fun ScrollableTextArea(
     contentPadding: PaddingValues = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
     enabled: Boolean = true,
     onClear: (() -> Unit)? = null,
+    /** Optional externally-owned selection state for voice dictation/proofreading adapters. */
+    textFieldValueState: MutableState<TextFieldValue>? = null,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    onTextFieldValueChange: ((TextFieldValue) -> Unit)? = null,
+    proofreadingAnchorState: ProofreadingPopupAnchorState? = null,
 ) {
     val tc = tc()
     val density = LocalDensity.current
@@ -1024,13 +1029,25 @@ fun ScrollableTextArea(
     var fieldHeightPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    var fieldValue by remember(resetKey) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    var textLayoutCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    var localFieldValue by remember(resetKey) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    val fieldValue = textFieldValueState?.value ?: localFieldValue
+
+    fun setFieldValue(updated: TextFieldValue) {
+        // Notify selection adapters before replacing their state so they can distinguish text
+        // edits from the same-text caret collapse caused by clicking an editor control.
+        onTextFieldValueChange?.invoke(updated)
+        if (textFieldValueState != null) textFieldValueState.value = updated else localFieldValue = updated
+    }
 
     // The caller's String is the source of truth (MCP tool calls, loading a different tab/folder
     // all write it directly); TextFieldValue only adds the caret position needed to reveal the
     // line being edited. Reseat it whenever an external write changes the text under us.
     LaunchedEffect(value) {
-        if (value != fieldValue.text) fieldValue = TextFieldValue(value, TextRange(value.length))
+        if (value != fieldValue.text) setFieldValue(TextFieldValue(value, TextRange(value.length)))
+    }
+    LaunchedEffect(fieldValue, layout, textLayoutCoordinates, scroll.value) {
+        proofreadingAnchorState?.update(textLayoutCoordinates, layout, fieldValue.selection.end)
     }
     LaunchedEffect(fieldValue, layout, viewportHeightPx) {
         val l = layout ?: return@LaunchedEffect
@@ -1047,9 +1064,10 @@ fun ScrollableTextArea(
             value = fieldValue,
             onValueChange = {
                 if (!enabled) return@BasicTextField
-                fieldValue = it
+                setFieldValue(it)
                 onValue(it.text)
             },
+            visualTransformation = visualTransformation,
             readOnly = !enabled,
             textStyle = TextStyle(color = tc.tx, fontSize = fontSize, lineHeight = lineHeight, fontFamily = LocalUiFontFamily.current),
             cursorBrush = SolidColor(tc.ac),
@@ -1060,6 +1078,7 @@ fun ScrollableTextArea(
             // AiPromptComposer uses inside its fixed-height editor) would pin it at maxHeight.
             modifier = modifier
                 .then(focusReporter)
+                .onPreviewKeyEvent { event -> proofreadingAnchorState?.handleKeyEvent(event) == true }
                 .heightIn(min = minHeight, max = maxHeight)
                 .onSizeChanged { fieldHeightPx = it.height }
                 .background(tc.bg, shape)
@@ -1072,8 +1091,13 @@ fun ScrollableTextArea(
                 .onSizeChanged { viewportHeightPx = it.height }
                 .verticalScroll(scroll),
             decorationBox = { inner ->
-                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
-                inner()
+                Box(Modifier.fillMaxWidth().onGloballyPositioned {
+                    textLayoutCoordinates = it
+                    proofreadingAnchorState?.update(it, layout, fieldValue.selection.end)
+                }) {
+                    if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                    inner()
+                }
             },
         )
         val clearAction = onClear?.takeIf { value.isNotBlank() }

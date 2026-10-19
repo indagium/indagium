@@ -1,6 +1,7 @@
 @file:OptIn(
     androidx.compose.ui.ExperimentalComposeUiApi::class,
     androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
 )
 
 package com.indagium.ui
@@ -20,6 +21,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -37,11 +39,14 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -61,6 +66,7 @@ import com.indagium.model.*
 import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.presentAnnotationLogLine
 import java.io.File
+import java.util.UUID
 import kotlin.math.roundToInt
 
 internal enum class MarkdownFormatAction {
@@ -123,7 +129,10 @@ internal fun retainedMarkdownSelectionAfterEditorUpdate(
     previous: TextFieldValue,
     updated: TextFieldValue,
     retainedSelection: TextRange?,
+    voiceSessionActive: Boolean = false,
 ): TextRange? = when {
+    voiceSessionActive && updated.text == previous.text && updated.selection != previous.selection &&
+        updated.selection.start == updated.selection.end -> null
     updated.selection.start != updated.selection.end -> updated.selection
     updated.text != previous.text -> null
     retainedSelection != null -> retainedSelection
@@ -357,6 +366,7 @@ internal fun AddAnnDialog(
     windowSize: IntSize,
     fileLabel: String? = null,
     locked: Boolean = false,
+    sessionKey: Any? = null,
     initialPresentation: AnnBlock.LogRefPresentation? = null,
     onConfirm: (String, AnnBlock.LogRefPresentationOptions) -> Unit,
     onDismiss: () -> Unit,
@@ -368,6 +378,7 @@ internal fun AddAnnDialog(
         rows = rows,
         windowSize = windowSize,
         fileLabel = fileLabel,
+        sessionKey = sessionKey,
         locked = locked,
         initialPresentation = initialPresentation,
         onPresentationConfirm = onConfirm,
@@ -440,7 +451,12 @@ internal fun AnnotationMarkdownEditorDialog(
     // highlighted instead of appending a placeholder after it.
     var retainedSelection by remember { mutableStateOf<TextRange?>(null) }
     val editorFocusRequester = remember { FocusRequester() }
+    var editorFocused by remember(sessionKey) { mutableStateOf(false) }
     val editorHistory = remember(sessionKey) { MarkdownEditorUndoHistory() }
+    val voiceUi = LocalVoiceInputUi.current
+    val voiceTargetId = remember(sessionKey) { "note-editor:${sessionKey ?: UUID.randomUUID()}" }
+    val proofreadingAnchor = rememberProofreadingPopupAnchorState(voiceTargetId)
+    var voiceInsertionSelection by remember(sessionKey) { mutableStateOf<TextRange?>(null) }
 
     val summary = remember(rows) { evidenceSummary(rows) }
     val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
@@ -493,9 +509,35 @@ internal fun AnnotationMarkdownEditorDialog(
 
     fun updateEditor(updated: TextFieldValue) {
         if (locked) return
-        retainedSelection = retainedMarkdownSelectionAfterEditorUpdate(editorValue, updated, retainedSelection)
+        if (updated.text != editorValue.text || !updated.selection.collapsed) voiceInsertionSelection = null
+        retainedSelection = retainedMarkdownSelectionAfterEditorUpdate(
+            editorValue,
+            updated,
+            retainedSelection,
+            voiceSessionActive = voiceUi?.coordinator?.isOwner(voiceTargetId) == true,
+        )
         editorHistory.record(editorValue, updated)
         editorValue = updated
+    }
+
+    val proofreadingTransformation = ProofreadingAssist(
+        value = editorValue,
+        available = !locked && !hasConflict && !previewMode,
+        editorFocused = editorFocused,
+        targetId = voiceTargetId,
+        onValueChange = ::updateEditor,
+        onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
+        anchorState = proofreadingAnchor,
+    )
+
+    fun insertVoice(transcript: com.indagium.voice.VoiceTranscript) {
+        if (locked || hasConflict) return
+        val base = voiceInsertionSelection?.let { editorValue.copy(selection = it) }
+            ?: restoreMarkdownSelection(editorValue, retainedSelection)
+        updateEditor(insertVoiceTranscript(base, transcript))
+        voiceInsertionSelection = null
+        retainedSelection = null
+        runCatching { editorFocusRequester.requestFocus() }
     }
 
     fun updatePresentationOptions(updated: AnnBlock.LogRefPresentationOptions) {
@@ -573,7 +615,11 @@ internal fun AnnotationMarkdownEditorDialog(
                 when {
                     // Esc closes the Heading popup first, same as the header's own ✕/dismiss.
                     headingMenuOpen && ev.key == Key.Escape -> { closeHeadingMenu(); true }
-                    ev.key == Key.Escape -> { onDismiss(); true }
+                    ev.key == Key.Escape -> {
+                        if (voiceUi?.coordinator?.isOwner(voiceTargetId) == true) voiceUi.coordinator.cancel(voiceTargetId)
+                        else onDismiss()
+                        true
+                    }
                     ev.isActionKey && ev.key == Key.Z && !ev.isAltPressed && !previewMode -> {
                         if (ev.isShiftPressed) redoEditor() else undoEditor()
                         true
@@ -674,12 +720,13 @@ internal fun AnnotationMarkdownEditorDialog(
                         .clip(EDITOR_BOX_SHAPE),
                 ) {
                     if (!previewMode) {
-                        // No weighted children here, so a horizontal scroll is safe: on a narrow
-                        // window the row just scrolls instead of clipping the trailing buttons.
-                        Row(
-                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                                .padding(horizontal = 6.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                        // Wrapping keeps the voice controls reachable on a narrow window while
+                        // letting the formatting buttons share the available toolbar width.
+                        FlowRow(
+                            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(0.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                            itemVerticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box {
                                 MarkdownToolbarButton(
@@ -738,6 +785,20 @@ internal fun AnnotationMarkdownEditorDialog(
                             MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Link) }) {
                                 AppText("Link", color = tc.ts, fontSize = 11.sp)
                             }
+                            MarkdownToolbarSeparator()
+                            VoiceDictationButton(
+                                targetId = voiceTargetId,
+                                enabled = !locked && !hasConflict && !previewMode,
+                                onTranscript = ::insertVoice,
+                                onBeforeAction = {
+                                    if (voiceInsertionSelection == null) voiceInsertionSelection = editorValue.selection
+                                },
+                                onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
+                            )
+                            if (LocalVoiceInputUi.current != null) VoiceLanguageControls(
+                                enabled = !locked && !hasConflict,
+                                onRestoreFocus = { runCatching { editorFocusRequester.requestFocus() } },
+                            )
                         }
                         NoteDialogDivider()
                     }
@@ -756,8 +817,18 @@ internal fun AnnotationMarkdownEditorDialog(
                             onValueChange = ::updateEditor,
                             placeholder = "Write your note…",
                             focusRequester = editorFocusRequester,
+                            onPointerInteraction = {
+                                voiceInsertionSelection = null
+                                if (voiceUi?.coordinator?.isOwner(voiceTargetId) == true) retainedSelection = null
+                            },
+                            onFocusedChange = { editorFocused = it },
+                            proofreadingAnchorState = proofreadingAnchor,
                             enabled = !locked && !hasConflict && !previewMode,
-                            modifier = Modifier.alpha(if (previewMode) 0f else 1f),
+                            visualTransformation = proofreadingTransformation,
+                            modifier = Modifier.alpha(if (previewMode) 0f else 1f).onPreviewKeyEvent {
+                                if (it.type == KeyEventType.KeyDown) voiceInsertionSelection = null
+                                false
+                            },
                         )
                         if (previewMode) {
                             MarkdownPreviewArea(
@@ -1176,19 +1247,28 @@ private fun MarkdownWriteArea(
     onValueChange: (TextFieldValue) -> Unit,
     placeholder: String,
     focusRequester: FocusRequester,
+    onPointerInteraction: () -> Unit,
+    onFocusedChange: (Boolean) -> Unit,
+    proofreadingAnchorState: ProofreadingPopupAnchorState,
     enabled: Boolean = true,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
     val editorScroll = rememberScrollState()
     val density = LocalDensity.current
     var caretBounds by remember { mutableStateOf<MarkdownCaretBounds?>(null) }
+    var textLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var textLayoutCoordinates by remember { mutableStateOf<LayoutCoordinates?>(null) }
 
     // BasicTextField owns the scrollable viewport, so BringIntoViewRequester cannot target the
     // caret (the field itself is the viewport). Use the layout's exact caret rectangle instead,
     // keeping the cursor visible as text grows past the bottom or when the user moves it with the
     // arrow keys. The effect is keyed only by editor content/selection and therefore never fights
     // an intentional mouse-wheel scroll while the user is merely reading the draft.
+    LaunchedEffect(value.text, value.selection, textLayout, textLayoutCoordinates, editorScroll.value) {
+        proofreadingAnchorState.update(textLayoutCoordinates, textLayout, value.selection.end)
+    }
     LaunchedEffect(value.text, value.selection, caretBounds, editorScroll.viewportSize, editorScroll.maxValue) {
         val caret = caretBounds?.takeIf { it.offset == value.selection.end } ?: return@LaunchedEffect
         if (value.selection.start != value.selection.end) return@LaunchedEffect
@@ -1212,6 +1292,7 @@ private fun MarkdownWriteArea(
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
+            visualTransformation = visualTransformation,
             textStyle = TextStyle(
                 color = tc.tx,
                 fontSize = 13.sp,
@@ -1222,7 +1303,10 @@ private fun MarkdownWriteArea(
             modifier = Modifier.fillMaxSize()
                 .testTag("annotation-markdown-editor")
                 .focusRequester(focusRequester)
+                .onPointerEvent(PointerEventType.Press) { onPointerInteraction() }
+                .onFocusChanged { onFocusedChange(it.hasFocus) }
                 .onPreviewKeyEvent { ev ->
+                    if (proofreadingAnchorState.handleKeyEvent(ev)) return@onPreviewKeyEvent true
                     // Plain Enter/NumPadEnter only — no modifiers. The dialog root's own
                     // onPreviewKeyEvent sees ⌘/Ctrl+Enter (save) first since preview events
                     // dispatch top-down, and Shift+Enter must still insert a plain newline, so both
@@ -1242,14 +1326,20 @@ private fun MarkdownWriteArea(
                 .padding(horizontal = 14.dp, vertical = 12.dp)
                 .verticalScroll(editorScroll),
             onTextLayout = { result ->
+                textLayout = result
                 val offset = value.selection.end.coerceIn(0, value.text.length)
                 val rect = result.getCursorRect(offset)
                 val next = MarkdownCaretBounds(offset, rect.top, rect.bottom)
                 if (caretBounds != next) caretBounds = next
             },
             decorationBox = { inner ->
-                if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
-                inner()
+                Box(Modifier.fillMaxWidth().onGloballyPositioned {
+                    textLayoutCoordinates = it
+                    proofreadingAnchorState.update(it, textLayout, value.selection.end)
+                }) {
+                    if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
+                    inner()
+                }
             },
             readOnly = !enabled,
         )

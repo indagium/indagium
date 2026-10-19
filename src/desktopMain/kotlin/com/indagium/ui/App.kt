@@ -49,12 +49,15 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
+import com.indagium.proofread.EnglishProofreadingService
 import com.indagium.source.SourceCodeView
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.tidMapProcessLabel
 import com.indagium.video.formatVideoTimeShort
+import com.indagium.voice.VoiceInputControllerFactory
+import com.indagium.voice.VoiceInputSessionCoordinator
 import kotlinx.coroutines.delay
 import java.awt.Toolkit
 import java.io.File
@@ -188,6 +191,31 @@ fun App(
     val theme = themeColors(state.settings.theme)
     val platformDensity = LocalDensity.current
     val mainWindowSize = LocalWindowInfo.current.containerSize
+    val voiceSettings = state.settings.voiceInput
+    val voiceScope = rememberCoroutineScope()
+    val voiceRuntime = remember(state, voiceSettings.recognitionEngine, voiceSettings.modelId) {
+        VoiceInputControllerFactory.create(
+            settings = { state.settings.voiceInput },
+            modelsDirectory = DesktopStorage.voiceModelsDir(),
+            scope = voiceScope,
+        )
+    }
+    val voiceCoordinator = remember(voiceRuntime) { VoiceInputSessionCoordinator(voiceRuntime.controller, voiceScope) }
+    DisposableEffect(voiceCoordinator) { onDispose { voiceCoordinator.close() } }
+    val voiceUi = remember(voiceRuntime, voiceCoordinator, voiceSettings) {
+        VoiceInputUi(
+            runtime = voiceRuntime,
+            coordinator = voiceCoordinator,
+            settings = voiceSettings,
+            updateSettings = { updated -> state.updateSettings { it.copy(voiceInput = updated) } },
+        )
+    }
+    val proofreadingService = remember { EnglishProofreadingService() }
+    val ignoredProofreadingSuggestions = remember { mutableStateSetOf<String>() }
+    DisposableEffect(proofreadingService) { onDispose { proofreadingService.close() } }
+    val proofreadingUi = remember(proofreadingService, state.settings.proofreading) {
+        ProofreadingUi(proofreadingService, state.settings.proofreading, ignoredProofreadingSuggestions)
+    }
     // The runtime revision is the single Compose invalidation source for active AI runs. App-level
     // dialogs (such as Add Annotation) sit outside RightSidebarPanel, so they observe it here too.
     val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
@@ -240,6 +268,8 @@ fun App(
         LocalTextContextMenu provides IndagiumTextContextMenu,
         LocalMirrorOverlayAppState provides state,
         LocalFileDropTarget provides dropTarget,
+        LocalVoiceInputUi provides voiceUi,
+        LocalProofreadingUi provides proofreadingUi,
     ) {
         val tc = tc()
         val nativeMirrorOccluded = appHasNativeMirrorOccludingOverlay(state)
@@ -1245,6 +1275,7 @@ fun App(
                         windowSize = mainWindowSize,
                         fileLabel = req.sourceFilename ?: state.tab(req.sourceTabId)?.filename,
                         locked = state.aiSessions.sessionFor(req.targetTabId).activeRun != null,
+                        sessionKey = "${req.targetTabId}:new-note",
                         initialPresentation = req.capture?.presentation,
                         onConfirm = { caption, options ->
                             state.confirmAddAnn(req, caption, options)

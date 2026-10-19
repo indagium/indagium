@@ -133,6 +133,32 @@ class MarkdownAnnotationEditorTest {
     }
 
     @Test
+    fun voiceSessionUsesCaretOrSelectionMovedAfterTheMicClick() {
+        val selected = TextFieldValue("crash and go", TextRange(0, 5))
+        val focusCollapse = selected.copy(selection = TextRange(5))
+        val retained = retainedMarkdownSelectionAfterEditorUpdate(selected, focusCollapse, null)
+
+        val movedCaret = focusCollapse.copy(selection = TextRange(9))
+        val afterCaretMove = retainedMarkdownSelectionAfterEditorUpdate(
+            focusCollapse,
+            movedCaret,
+            retained,
+            voiceSessionActive = true,
+        )
+        assertNull(afterCaretMove)
+        assertEquals(movedCaret, restoreMarkdownSelection(movedCaret, afterCaretMove))
+
+        val movedSelection = focusCollapse.copy(selection = TextRange(6, 12))
+        val afterSelectionMove = retainedMarkdownSelectionAfterEditorUpdate(
+            focusCollapse,
+            movedSelection,
+            retained,
+            voiceSessionActive = true,
+        )
+        assertEquals(TextRange(6, 12), afterSelectionMove)
+    }
+
+    @Test
     fun inlineActionsToggleExistingFormattingOff() {
         val expected = mapOf(
             MarkdownFormatAction.Bold to "**crash**",

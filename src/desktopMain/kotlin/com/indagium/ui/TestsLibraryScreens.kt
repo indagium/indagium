@@ -375,9 +375,16 @@ private fun exportScriptJson(ui: TestsUi, script: TestScript, onError: (String) 
 @Composable
 private fun ScriptFields(script: TestScript, editable: Boolean, update: ((TestScript) -> TestScript) -> StoreResult<*>) {
     TestsLabeled("Description (shown to the agent)") {
-        CommitTextField(script.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What the script does")
+        CommitTextField(
+            script.description,
+            { t -> update { it.copy(description = t) } },
+            enabled = editable,
+            multiline = true,
+            placeholder = "What the script does",
+            proseTargetId = "test-script:${script.id}:description",
+        )
     }
-    ParamsEditor(script.params, editable) { params -> update { it.copy(params = params) } }
+    ParamsEditor(script.id, script.params, editable) { params -> update { it.copy(params = params) } }
     TestsSectionTitle("Command")
     CommitTextField(
         script.commandTemplate, { t -> update { it.copy(commandTemplate = t) } },
@@ -611,6 +618,7 @@ private fun SharedStepEditor(
         onTitleCommit = { t -> update { it.copy(name = t.trim()) } },
         titleEditable = editable,
         titleDescription = "Shared step name",
+        proseTargetId = "shared-step:${shared.id}:title",
         titlePlaceholder = "Log in",
         overflowDescription = "More shared step actions",
         overflowItems = listOf(
@@ -622,6 +630,7 @@ private fun SharedStepEditor(
         CommitTextField(
             shared.description, { t -> update { it.copy(description = t) } },
             enabled = editable, multiline = true, placeholder = "What this sequence does",
+            proseTargetId = "shared-step:${shared.id}:description",
         )
     }
     StepListSection(stepOps)
