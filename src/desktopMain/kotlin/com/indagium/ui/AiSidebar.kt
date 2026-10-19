@@ -36,12 +36,9 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.Mic
-import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -73,7 +70,6 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -109,23 +105,17 @@ import com.indagium.model.DEFAULT_CAPTURE_MIRROR_SPLIT
 import com.indagium.model.LogTab
 import com.indagium.model.MAX_CAPTURE_MIRROR_SPLIT
 import com.indagium.model.MIN_CAPTURE_MIRROR_SPLIT
-import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.utils.formatDuration
-import com.indagium.voice.VoiceAudio
 import com.indagium.voice.VoiceInputSessionCoordinator
 import com.indagium.voice.VoiceInputState
-import com.indagium.voice.VoiceLanguageCatalog
-import com.indagium.voice.VoiceRecognitionEngines
 import com.indagium.voice.appendVoiceTranscript
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -335,15 +325,9 @@ private fun AiSidebarPanel(
     var error by remember(tab.id, profile.id) { mutableStateOf<String?>(null) }
     var modelDiscovery by remember(profile.id) { mutableStateOf<ModelDiscoveryResult?>(null) }
     val voiceUi = checkNotNull(LocalVoiceInputUi.current)
-    val voiceSettings = voiceUi.settings
-    val selectedVoiceEngine = voiceUi.runtime.engine
-    val voiceModelInstaller = voiceUi.runtime.modelInstaller
     val voiceTargetId = "ai:${tab.id}"
     val voiceSnapshot by voiceUi.coordinator.snapshot.collectAsState()
     val voiceState = if (voiceSnapshot.ownerId == voiceTargetId) voiceSnapshot.state else VoiceInputState.Idle
-    val voiceBusyForOther = voiceUi.coordinator.isBusyForOther(voiceTargetId)
-    val translateVoiceToEnglish = voiceSettings.translateToEnglish
-    var voiceInstallDialogOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
 
     // Without this, switching providers and back showed the saved model but silently hid its
@@ -622,33 +606,9 @@ private fun AiSidebarPanel(
             },
             onStop = { session.activeRun?.let(runtime::cancel) },
             voiceSupported = voiceInputSupported,
-            voiceBusyForOther = voiceBusyForOther,
             voiceCoordinator = voiceUi.coordinator,
             voiceTargetId = voiceTargetId,
             voiceState = voiceState,
-            translateVoiceToEnglish = translateVoiceToEnglish,
-            voiceTranslationSupported = VoiceRecognitionEngines.supportsTranslation(selectedVoiceEngine),
-            voiceRecognitionLanguageCodes = voiceSettings.recognitionLanguageCodes,
-            selectedVoiceRecognitionLanguageCode = voiceSettings.selectedRecognitionLanguageCode,
-            onVoiceTranslationToggle = {
-                state.updateSettings { settings ->
-                    settings.copy(voiceInput = settings.voiceInput.copy(translateToEnglish = !settings.voiceInput.translateToEnglish))
-                }
-            },
-            onVoiceRecognitionLanguageSelect = { code ->
-                state.updateSettings { settings ->
-                    settings.copy(voiceInput = settings.voiceInput.copy(selectedRecognitionLanguageCode = code))
-                }
-            },
-            onVoiceAction = {
-                when (voiceState) {
-                    is VoiceInputState.Recording -> voiceUi.coordinator.stop(voiceTargetId)
-                    VoiceInputState.Transcribing -> Unit
-                    else -> if (voiceUi.coordinator.start(voiceTargetId) is VoiceInputState.ModelRequired && selectedVoiceEngine == VoiceRecognitionEngine.WHISPER) {
-                        voiceInstallDialogOpen = true
-                    }
-                }
-            },
             onRetry = {
                 val currentProfile = profileForRun() ?: return@AiPromptComposer
                 state.setAiProviderApiKey(currentProfile.id, keyDraft)
@@ -658,13 +618,6 @@ private fun AiSidebarPanel(
                 }
             },
         )
-        if (voiceInputSupported && voiceInstallDialogOpen) {
-            VoiceModelInstallDialog(
-                installer = voiceModelInstaller,
-                onDismiss = { voiceInstallDialogOpen = false },
-                onInstalled = { voiceInstallDialogOpen = false },
-            )
-        }
     }
 }
 
@@ -1598,31 +1551,13 @@ private fun AiPromptComposer(
     onSend: (AiComposerSubmission) -> Boolean,
     onStop: () -> Unit,
     voiceSupported: Boolean,
-    voiceBusyForOther: Boolean,
     voiceCoordinator: VoiceInputSessionCoordinator,
     voiceTargetId: String,
     voiceState: VoiceInputState,
-    translateVoiceToEnglish: Boolean,
-    voiceTranslationSupported: Boolean,
-    voiceRecognitionLanguageCodes: List<String>,
-    selectedVoiceRecognitionLanguageCode: String,
-    onVoiceTranslationToggle: () -> Unit,
-    onVoiceRecognitionLanguageSelect: (String) -> Unit,
-    onVoiceAction: () -> Unit,
     onRetry: () -> Unit,
 ) {
     val colors = tc()
     val density = LocalDensity.current
-    var voiceLanguageMenuOpen by remember { mutableStateOf(false) }
-    var recordingElapsedSeconds by remember(voiceState) { mutableStateOf(0L) }
-    LaunchedEffect(voiceState) {
-        val recording = voiceState as? VoiceInputState.Recording ?: return@LaunchedEffect
-        while (true) {
-            recordingElapsedSeconds = ((System.currentTimeMillis() - recording.startedAtMillis) / 1_000L)
-                .coerceIn(0L, VoiceAudio.MAX_DURATION_MILLIS / 1_000L)
-            delay(250)
-        }
-    }
     // Custom commands intentionally win name collisions, matching resolveSlashCommand(). This
     // preserves an existing user's /name behavior after predefined commands were introduced.
     val availableCommands = remember(customCommands) {
@@ -1662,12 +1597,19 @@ private fun AiPromptComposer(
         onPromptChange(updated.text)
     }
     val latestPromptValue = rememberUpdatedState(promptValue)
-    DisposableEffect(voiceCoordinator, voiceTargetId) {
-        val registration = voiceCoordinator.registerTarget(voiceTargetId) { transcript ->
-            val appended = appendVoiceTranscript(latestPromptValue.value.text, transcript)
-            replacePromptValue.value(TextFieldValue(appended, TextRange(appended.length)))
-        }
-        onDispose { registration.close() }
+    // Registered for as long as the composer exists (not just while the pill is drawn), so a transcript that finishes
+    // after a run starts still lands in the prompt.
+    val dictation = if (voiceSupported) {
+        rememberDictationControl(
+            targetId = voiceTargetId,
+            enabled = true,
+            onTranscript = { transcript ->
+                val appended = appendVoiceTranscript(latestPromptValue.value.text, transcript)
+                replacePromptValue.value(TextFieldValue(appended, TextRange(appended.length)))
+            },
+        )
+    } else {
+        null
     }
 
     // The string belongs to the tab-level composer state, while TextFieldValue keeps the cursor
@@ -1853,120 +1795,11 @@ private fun AiPromptComposer(
                     variant = ButtonVariant.Primary,
                     enabled = prompt.isNotBlank() || selectedCommand != null,
                 )
-                val voiceRecording = voiceSupported && voiceState is VoiceInputState.Recording
-                val voiceTranscribing = voiceSupported && voiceState is VoiceInputState.Transcribing
-                if (voiceSupported) {
-                    if (voiceTranslationSupported) TooltipArea(
-                        tooltip = {
-                            Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
-                                AppText(
-                                    if (translateVoiceToEnglish) {
-                                        "Translate dictated speech to English locally. Click to keep the spoken language."
-                                    } else {
-                                        "Keep the spoken language. Click to translate to English locally."
-                                    },
-                                    color = colors.tx,
-                                    fontSize = 10.sp,
-                                    maxLines = 3,
-                                )
-                            }
-                        },
-                    ) {
-                        AppButton(
-                            label = "EN",
-                            onClick = onVoiceTranslationToggle,
-                            // Match the Δt stateful toolbar control: filled when the local
-                            // translation mode is on, outlined when it is off.
-                            variant = if (translateVoiceToEnglish) ButtonVariant.Primary else ButtonVariant.Secondary,
-                            enabled = !voiceTranscribing,
-                            horizontalPadding = 7.dp,
-                        )
-                    }
-                    Box {
-                        TooltipArea(
-                            tooltip = {
-                                Box(Modifier.background(colors.p2, CORNER_SM).border(1.dp, colors.br, CORNER_SM).padding(7.dp)) {
-                                    AppText(
-                                        "Recognition language: " +
-                                            "${VoiceLanguageCatalog.label(selectedVoiceRecognitionLanguageCode)}. " +
-                                            "Choose another configured language.",
-                                        color = colors.tx,
-                                        fontSize = 10.sp,
-                                        maxLines = 3,
-                                    )
-                                }
-                            },
-                        ) {
-                            AppButton(
-                                label = if (selectedVoiceRecognitionLanguageCode == "auto") "Auto" else selectedVoiceRecognitionLanguageCode.uppercase(),
-                                onClick = { voiceLanguageMenuOpen = !voiceLanguageMenuOpen },
-                                variant = ButtonVariant.Secondary,
-                                enabled = !voiceRecording && !voiceTranscribing,
-                                horizontalPadding = 7.dp,
-                            )
-                        }
-                        if (voiceLanguageMenuOpen) {
-                            Popup(
-                                alignment = Alignment.BottomStart,
-                                offset = IntOffset(0, with(density) { 4.dp.roundToPx() }),
-                                onDismissRequest = { voiceLanguageMenuOpen = false },
-                                properties = PopupProperties(focusable = true),
-                            ) {
-                                Column(
-                                    Modifier.width(150.dp).background(colors.p, CORNER_SM)
-                                        .border(1.dp, colors.br, CORNER_SM).padding(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    voiceRecognitionLanguageCodes.forEach { code ->
-                                        val selected = code == selectedVoiceRecognitionLanguageCode
-                                        HoverBox(
-                                            modifier = Modifier.fillMaxWidth().clip(CORNER_SM),
-                                            baseBg = if (selected) colors.abg else Color.Transparent,
-                                            onClick = {
-                                                onVoiceRecognitionLanguageSelect(code)
-                                                voiceLanguageMenuOpen = false
-                                            },
-                                        ) {
-                                            AppText(
-                                                VoiceLanguageCatalog.label(code),
-                                                color = if (selected) colors.ac else colors.tx,
-                                                fontSize = 11.sp,
-                                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    val elapsedLabel = "${recordingElapsedSeconds / 60}:${(recordingElapsedSeconds % 60).toString().padStart(2, '0')}"
-                    AppButton(
-                        label = when {
-                            voiceRecording -> elapsedLabel
-                            voiceTranscribing -> "Transcribing…"
-                            else -> ""
-                        },
-                        onClick = onVoiceAction,
-                        variant = if (voiceRecording) ButtonVariant.Primary else ButtonVariant.Ghost,
-                        isDanger = voiceRecording,
-                        enabled = !voiceTranscribing && !voiceBusyForOther,
-                        modifier = Modifier.semantics {
-                            contentDescription = when {
-                                voiceRecording -> "Stop voice input"
-                                voiceTranscribing -> "Transcribing voice input"
-                                else -> "Voice input"
-                            }
-                        },
-                        leadingIcon = if (voiceRecording) Icons.Outlined.Stop else Icons.Outlined.Mic,
-                        horizontalPadding = if (voiceRecording || voiceTranscribing) 8.dp else 6.dp,
-                        tooltip = "Dictate locally into the AI prompt",
-                    )
-                }
+                if (dictation != null) DictationPill(dictation)
                 if (retryAvailable) AppButton("Retry", onClick = onRetry, variant = ButtonVariant.Secondary)
                 val composerHint = if (!voiceSupported) "Ctrl/Cmd + Enter to send" else when (voiceState) {
                     is VoiceInputState.Recording -> "Recording — click stop or Esc"
-                    VoiceInputState.Transcribing -> "Transcribing locally…"
+                    VoiceInputState.Transcribing -> "Transcribing…"
                     is VoiceInputState.Failed -> voiceState.message
                     else -> "Ctrl/Cmd + Enter to send"
                 }
@@ -1974,6 +1807,8 @@ private fun AiPromptComposer(
                     composerHint,
                     color = if (voiceSupported && voiceState is VoiceInputState.Failed) DANGER_RED else colors.td,
                     fontSize = 10.sp,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
             } else {
                 AppButton("Stop", onClick = onStop, variant = ButtonVariant.Secondary, isDanger = true)

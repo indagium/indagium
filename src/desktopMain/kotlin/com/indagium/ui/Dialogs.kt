@@ -45,8 +45,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -387,6 +387,10 @@ internal fun AddAnnDialog(
     )
 }
 
+// The idle dictation pill's footprint (`Dictate | Auto → EN ▾`), reserved so the toolbar's buttons keep
+// their wrapping while it turns into the shorter recording pill.
+private val DICTATION_TOOLBAR_RESERVED_WIDTH = 156.dp
+
 // Plain rounded box — the tabs above no longer join it directly (see the 8dp gap in the
 // Write/Preview tabs + editor box section below), so every corner stays the same radius.
 private val EDITOR_BOX_SHAPE = RoundedCornerShape(6.dp)
@@ -520,7 +524,7 @@ internal fun AnnotationMarkdownEditorDialog(
         editorValue = updated
     }
 
-    val proofreadingTransformation = ProofreadingAssist(
+    ProofreadingAssist(
         value = editorValue,
         available = !locked && !hasConflict && !previewMode,
         editorFocused = editorFocused,
@@ -615,6 +619,8 @@ internal fun AnnotationMarkdownEditorDialog(
                 when {
                     // Esc closes the Heading popup first, same as the header's own ✕/dismiss.
                     headingMenuOpen && ev.key == Key.Escape -> { closeHeadingMenu(); true }
+                    // A suggestion popup opened by hover or click closes before the dialog does.
+                    ev.key == Key.Escape && proofreadingAnchor.handleKeyEvent(ev) -> true
                     ev.key == Key.Escape -> {
                         if (voiceUi?.coordinator?.isOwner(voiceTargetId) == true) voiceUi.coordinator.cancel(voiceTargetId)
                         else onDismiss()
@@ -720,84 +726,86 @@ internal fun AnnotationMarkdownEditorDialog(
                         .clip(EDITOR_BOX_SHAPE),
                 ) {
                     if (!previewMode) {
-                        // Wrapping keeps the voice controls reachable on a narrow window while
-                        // letting the formatting buttons share the available toolbar width.
-                        FlowRow(
+                        // The dictation pill stays right-aligned beside the formatting buttons, which wrap
+                        // within whatever width it leaves, so a narrow dialog never pushes it out of view.
+                        Row(
                             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp),
-                            horizontalArrangement = Arrangement.spacedBy(0.dp),
-                            verticalArrangement = Arrangement.spacedBy(2.dp),
-                            itemVerticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Box {
-                                MarkdownToolbarButton(
-                                    enabled = !locked && !hasConflict,
-                                    onClick = {
-                                        if (System.currentTimeMillis() >= suppressHeadingToggleUntilMs) {
-                                            headingMenuOpen = !headingMenuOpen
-                                        }
-                                    },
-                                ) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            FlowRow(
+                                Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(0.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
+                                itemVerticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box {
+                                    MarkdownToolbarButton(
+                                        enabled = !locked && !hasConflict,
+                                        onClick = {
+                                            if (System.currentTimeMillis() >= suppressHeadingToggleUntilMs) {
+                                                headingMenuOpen = !headingMenuOpen
+                                            }
+                                        },
                                     ) {
-                                        AppText("Heading", color = tc.ts, fontSize = 11.sp)
-                                        AppText("▾", color = tc.td, fontSize = 8.sp)
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                        ) {
+                                            AppText("Heading", color = tc.ts, fontSize = 11.sp)
+                                            AppText("▾", color = tc.td, fontSize = 8.sp)
+                                        }
+                                    }
+                                    if (headingMenuOpen) {
+                                        HeadingFormatMenu(
+                                            onSelect = { action -> applyFormat(action); closeHeadingMenu() },
+                                            onDismiss = { closeHeadingMenu() },
+                                        )
                                     }
                                 }
-                                if (headingMenuOpen) {
-                                    HeadingFormatMenu(
-                                        onSelect = { action -> applyFormat(action); closeHeadingMenu() },
-                                        onDismiss = { closeHeadingMenu() },
-                                    )
+                                MarkdownToolbarSeparator()
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Bold) }) {
+                                    AppText("B", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                }
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Italic) }) {
+                                    // AppText has no italic param; this is the one glyph that needs it. Serif,
+                                    // because a sans-serif italic capital I renders as a bare slash.
+                                    Text("I", color = tc.ts, fontSize = 13.sp, fontStyle = FontStyle.Italic, fontFamily = FontFamily.Serif)
+                                }
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Strikethrough) }) {
+                                    AppText("S", color = tc.ts, fontSize = 12.sp, textDecoration = TextDecoration.LineThrough)
+                                }
+                                MarkdownToolbarSeparator()
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.InlineCode) }) {
+                                    AppText("Code", color = tc.ts, fontSize = 11.sp)
+                                }
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.CodeBlock) }) {
+                                    AppText("Code block", color = tc.ts, fontSize = 11.sp)
+                                }
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Quote) }) {
+                                    AppText("Quote", color = tc.ts, fontSize = 11.sp)
+                                }
+                                MarkdownToolbarSeparator()
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.BulletList) }) {
+                                    AppText("• List", color = tc.ts, fontSize = 11.sp)
+                                }
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.NumberedList) }) {
+                                    AppText("1. List", color = tc.ts, fontSize = 11.sp)
+                                }
+                                MarkdownToolbarSeparator()
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Link) }) {
+                                    AppText("Link", color = tc.ts, fontSize = 11.sp)
                                 }
                             }
-                            MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Bold) }) {
-                                AppText("B", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                            }
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Italic) }) {
-                                // AppText has no italic param; this is the one glyph that needs it. Serif,
-                                // because a sans-serif italic capital I renders as a bare slash.
-                                Text("I", color = tc.ts, fontSize = 13.sp, fontStyle = FontStyle.Italic, fontFamily = FontFamily.Serif)
-                            }
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Strikethrough) }) {
-                                AppText("S", color = tc.ts, fontSize = 12.sp, textDecoration = TextDecoration.LineThrough)
-                            }
-                            MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.InlineCode) }) {
-                                AppText("Code", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.CodeBlock) }) {
-                                AppText("Code block", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Quote) }) {
-                                AppText("Quote", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.BulletList) }) {
-                                AppText("• List", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.NumberedList) }) {
-                                AppText("1. List", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Link) }) {
-                                AppText("Link", color = tc.ts, fontSize = 11.sp)
-                            }
-                            MarkdownToolbarSeparator()
-                            VoiceDictationButton(
+                            DictationPill(
                                 targetId = voiceTargetId,
                                 enabled = !locked && !hasConflict && !previewMode,
+                                modifier = Modifier.padding(start = 8.dp),
+                                minWidth = DICTATION_TOOLBAR_RESERVED_WIDTH,
                                 onTranscript = ::insertVoice,
                                 onBeforeAction = {
                                     if (voiceInsertionSelection == null) voiceInsertionSelection = editorValue.selection
                                 },
                                 onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
-                            )
-                            if (LocalVoiceInputUi.current != null) VoiceLanguageControls(
-                                enabled = !locked && !hasConflict,
-                                onRestoreFocus = { runCatching { editorFocusRequester.requestFocus() } },
                             )
                         }
                         NoteDialogDivider()
@@ -824,7 +832,6 @@ internal fun AnnotationMarkdownEditorDialog(
                             onFocusedChange = { editorFocused = it },
                             proofreadingAnchorState = proofreadingAnchor,
                             enabled = !locked && !hasConflict && !previewMode,
-                            visualTransformation = proofreadingTransformation,
                             modifier = Modifier.alpha(if (previewMode) 0f else 1f).onPreviewKeyEvent {
                                 if (it.type == KeyEventType.KeyDown) voiceInsertionSelection = null
                                 false
@@ -1251,7 +1258,6 @@ private fun MarkdownWriteArea(
     onFocusedChange: (Boolean) -> Unit,
     proofreadingAnchorState: ProofreadingPopupAnchorState,
     enabled: Boolean = true,
-    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
@@ -1292,7 +1298,6 @@ private fun MarkdownWriteArea(
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
-            visualTransformation = visualTransformation,
             textStyle = TextStyle(
                 color = tc.tx,
                 fontSize = 13.sp,
@@ -1333,10 +1338,12 @@ private fun MarkdownWriteArea(
                 if (caretBounds != next) caretBounds = next
             },
             decorationBox = { inner ->
-                Box(Modifier.fillMaxWidth().onGloballyPositioned {
-                    textLayoutCoordinates = it
-                    proofreadingAnchorState.update(it, textLayout, value.selection.end)
-                }) {
+                Box(
+                    Modifier.fillMaxWidth().proofreadingDecoration(proofreadingAnchorState) { textLayout }.onGloballyPositioned {
+                        textLayoutCoordinates = it
+                        proofreadingAnchorState.update(it, textLayout, value.selection.end)
+                    },
+                ) {
                     if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
                     inner()
                 }

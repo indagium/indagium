@@ -1,20 +1,24 @@
 package com.indagium
 
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextInputSelection
-import androidx.compose.ui.test.click
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.text.TextRange
@@ -22,6 +26,7 @@ import androidx.compose.ui.unit.IntSize
 import com.indagium.model.ProofreadingSettings
 import com.indagium.proofread.EnglishProofreader
 import com.indagium.proofread.EnglishProofreadingService
+import com.indagium.proofread.ProofreadingCategory
 import com.indagium.proofread.ProofreadingIssue
 import com.indagium.ui.AnnotationMarkdownEditorDialog
 import com.indagium.ui.LIGHT_THEME
@@ -68,11 +73,9 @@ class ProofreadingPopupUiTest {
 
         val editor = rule.onNodeWithTag("annotation-markdown-editor")
         editor.performMouseInput { click() }
-        editor.performTextInputSelection(TextRange(4))
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
         val popup = rule.onNodeWithTag("proofreading-suggestion-popup")
-        rule.waitUntil(5_000) {
-            runCatching { popup.fetchSemanticsNode() }.isSuccess
-        }
         popup.assertIsDisplayed()
 
         val editorBounds = editor.fetchSemanticsNode().boundsInRoot
@@ -112,6 +115,186 @@ class ProofreadingPopupUiTest {
     }
 
     @Test
+    fun popupShowsTheWordItsKindAndReplacementsWithoutBoilerplate() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake found.", listOf("spelling", "spewing"), "pill-content"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-popup-content",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click() }
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
+
+        rule.onNodeWithTag("proofreading-suggestion-popup").assertIsDisplayed()
+        rule.onNodeWithText("speling").assertIsDisplayed()
+        // The kind label and the first replacement chip both read "spelling".
+        rule.onAllNodesWithText("spelling").assertCountEquals(2)
+        rule.onNodeWithTag("proofreading-suggestion-key-cap").assertIsDisplayed()
+        rule.onNodeWithTag("proofreading-suggestion-option-0").assertIsDisplayed()
+        rule.onNodeWithTag("proofreading-suggestion-option-1").assertIsDisplayed()
+        assertTrue(
+            runCatching { rule.onNodeWithText("Possible spelling mistake found.").fetchSemanticsNode() }.isFailure,
+            "the boilerplate message must not repeat the category",
+        )
+        assertTrue(
+            runCatching { rule.onNodeWithTag("proofreading-suggestion-keyboard-hint").fetchSemanticsNode() }.isFailure,
+            "the long keyboard hint belongs to keyboard mode only",
+        )
+    }
+
+    @Test
+    fun aMessageThatAddsInformationIsKept() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("alot")
+            if (start < 0) emptyList()
+            else listOf(
+                ProofreadingIssue(start, start + 4, "Write 'a lot' as two words.", listOf("a lot"), "compound", ProofreadingCategory.GRAMMAR),
+            )
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "It crashed alot today",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-popup-message",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click() }
+        rule.letProofreadingSettle()
+        rule.hoverUntilSuggestionOpens(editor)
+
+        rule.onNodeWithText("Write 'a lot' as two words.").assertIsDisplayed()
+        rule.onNodeWithText("grammar").assertIsDisplayed()
+    }
+
+    @Test
+    fun caretInsideAMarkedWordDoesNotOpenThePopupUntilHoverClickOrAltEnter() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "caret-only"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-caret-only",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        editor.performTextInputSelection(TextRange(4))
+        rule.letProofreadingSettle()
+        assertTrue(!rule.suggestionPopupExists(), "a caret in the word is not a request for suggestions")
+
+        editor.performKeyInput { withKeyDown(Key.AltLeft) { pressKey(Key.Enter) } }
+        rule.waitForIdle()
+        rule.onNodeWithTag("proofreading-suggestion-popup").assertIsDisplayed()
+        rule.onNodeWithTag("proofreading-suggestion-keyboard-hint").assertIsDisplayed()
+    }
+
+    @Test
+    fun clickingAMarkedWordOpensTheSuggestionAndEscapeClosesIt() {
+        val proofreading = proofreadingUi { text ->
+            val start = text.indexOf("speling")
+            if (start < 0) emptyList()
+            else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "click-open"))
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-click-open",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        val editor = rule.onNodeWithTag("annotation-markdown-editor")
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
+        var opened = false
+        for (x in 24..260 step 8) {
+            editor.performMouseInput { click(Offset(x.toFloat(), 9f)) }
+            rule.waitForIdle()
+            if (rule.suggestionPopupExists()) {
+                opened = true
+                break
+            }
+        }
+        assertTrue(opened, "a click on the marked word must open its suggestion immediately")
+
+        editor.performKeyInput { pressKey(Key.Escape) }
+        rule.waitForIdle()
+        assertPopupMissing()
+    }
+
+    @Test
+    fun marksSurviveTypingElsewhereWhileTheNextCheckIsPending() {
+        val checks = java.util.concurrent.atomic.AtomicInteger()
+        val release = java.util.concurrent.CountDownLatch(1)
+        val proofreading = proofreadingUi { text ->
+            // The second check never finishes within the test, so what the pointer finds after typing can only be the
+            // mark that was kept and shifted by the edit.
+            if (checks.incrementAndGet() > 1) {
+                release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+                emptyList()
+            } else {
+                val start = text.indexOf("speling")
+                if (start < 0) emptyList()
+                else listOf(ProofreadingIssue(start, start + 7, "Possible spelling mistake", listOf("spelling"), "shifted"))
+            }
+        }
+        setContent(proofreading) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "A speling mistake",
+                confirmLabel = "Save note",
+                windowSize = IntSize(760, 760),
+                sessionKey = "proofreading-shift",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        try {
+            val editor = rule.onNodeWithTag("annotation-markdown-editor")
+            editor.performMouseInput { click(Offset(400f, 150f)) }
+            rule.letProofreadingSettle()
+            assertTrue(checks.get() >= 1)
+
+            editor.performTextInputSelection(TextRange(0))
+            editor.performTextInput("Oh. ")
+            rule.waitForIdle()
+            rule.hoverUntilSuggestionOpens(editor, xRange = 24..300 step 6, hoverMillis = 270)
+            rule.onNodeWithText("speling").assertIsDisplayed()
+            editor.assertTextEquals("Oh. A speling mistake")
+        } finally {
+            release.countDown()
+        }
+    }
+
+    @Test
     fun ignoreForSessionRemovesEveryMatchingOccurrenceImmediately() {
         val proofreading = proofreadingUi { text ->
             Regex("speling").findAll(text).map { match ->
@@ -131,15 +314,21 @@ class ProofreadingPopupUiTest {
         }
 
         val editor = rule.onNodeWithTag("annotation-markdown-editor")
-        editor.performMouseInput { click() }
-        editor.performTextInputSelection(TextRange(3))
+        editor.performMouseInput { click(Offset(400f, 150f)) }
+        rule.letProofreadingSettle()
         val popup = rule.onNodeWithTag("proofreading-suggestion-popup")
-        rule.waitUntil(5_000) { runCatching { popup.fetchSemanticsNode() }.isSuccess }
+        rule.hoverUntilSuggestionOpens(editor)
         popup.assertIsDisplayed()
         rule.onNodeWithText("Ignore").performMouseInput { click() }
-        editor.performTextInputSelection(TextRange(16))
         rule.waitForIdle()
-        assertTrue(runCatching { rule.onNodeWithTag("proofreading-suggestion-popup").fetchSemanticsNode() }.isFailure)
+        assertPopupMissing()
+        // The second occurrence is covered by the same ignore: sweeping the whole line finds nothing.
+        for (x in 24..320 step 8) {
+            editor.performMouseInput { moveTo(Offset(x.toFloat(), 9f)) }
+            rule.mainClock.advanceTimeBy(400)
+            rule.waitForIdle()
+            assertPopupMissing()
+        }
     }
 
     @Test
@@ -162,12 +351,10 @@ class ProofreadingPopupUiTest {
         }
 
         val editor = rule.onNodeWithTag("annotation-markdown-editor")
-        val popup = rule.onNodeWithTag("proofreading-suggestion-popup")
-        editor.performMouseInput { click() }
+        editor.performMouseInput { click(Offset(400f, 150f)) }
         editor.performTextInputSelection(TextRange(2, 9))
-        rule.waitUntil(5_000) { runCatching { popup.fetchSemanticsNode() }.isSuccess }
+        rule.letProofreadingSettle()
         editor.assertIsFocused()
-        rule.onNodeWithTag("proofreading-suggestion-keyboard-hint").assertIsDisplayed()
 
         editor.performKeyInput {
             withKeyDown(Key.AltLeft) { pressKey(Key.Enter) }
@@ -202,9 +389,9 @@ class ProofreadingPopupUiTest {
 
         val editor = rule.onNodeWithTag("annotation-markdown-editor")
         val popup = rule.onNodeWithTag("proofreading-suggestion-popup")
-        editor.performMouseInput { click() }
+        editor.performMouseInput { click(Offset(400f, 150f)) }
         editor.performTextInputSelection(TextRange(4))
-        rule.waitUntil(5_000) { runCatching { popup.fetchSemanticsNode() }.isSuccess }
+        rule.letProofreadingSettle()
         editor.performKeyInput { withKeyDown(Key.AltLeft) { pressKey(Key.Enter) } }
         rule.waitForIdle()
         popup.performKeyInput { pressKey(Key.Escape) }

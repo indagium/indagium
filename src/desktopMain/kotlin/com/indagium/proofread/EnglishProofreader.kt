@@ -5,10 +5,19 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.languagetool.JLanguageTool
 import org.languagetool.Languages
+import org.languagetool.rules.Rule
 import java.io.Closeable
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.coroutineContext
+
+/** Drives how a mark is drawn and labelled. In memory only: never persisted. */
+enum class ProofreadingCategory(val label: String) {
+    SPELLING("spelling"),
+    GRAMMAR("grammar"),
+    STYLE("style"),
+    CAPITALIZATION("capitalization"),
+}
 
 /** UTF-16 offsets refer to the original Markdown, matching Compose text selections. */
 data class ProofreadingIssue(
@@ -17,6 +26,7 @@ data class ProofreadingIssue(
     val message: String,
     val replacements: List<String>,
     val ruleId: String,
+    val category: ProofreadingCategory = ProofreadingCategory.SPELLING,
 )
 
 fun interface EnglishProofreader {
@@ -46,9 +56,23 @@ class LanguageToolEnglishProofreader : EnglishProofreader {
                     match.message.replace(explanationMarkup, ""),
                     match.suggestedReplacements.toList(),
                     match.rule.id,
+                    categoryOf(match.rule),
                 )
             }
         }
+    }
+}
+
+private val STYLE_CATEGORIES = setOf("STYLE", "REDUNDANCY", "COLLOQUIALISMS", "BARBARISM", "WIKIPEDIA", "GENDER_NEUTRALITY")
+
+/** Maps a LanguageTool rule to the handful of kinds the editor distinguishes visually. */
+internal fun categoryOf(rule: Rule): ProofreadingCategory {
+    val category = rule.category?.id?.toString().orEmpty()
+    return when {
+        rule.isDictionaryBasedSpellingRule || category == "TYPOS" -> ProofreadingCategory.SPELLING
+        category == "CASING" -> ProofreadingCategory.CAPITALIZATION
+        category in STYLE_CATEGORIES -> ProofreadingCategory.STYLE
+        else -> ProofreadingCategory.GRAMMAR
     }
 }
 

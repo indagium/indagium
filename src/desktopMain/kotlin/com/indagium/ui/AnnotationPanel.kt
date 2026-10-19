@@ -63,8 +63,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -1376,7 +1376,7 @@ fun AnnotationPanel(
                         val issueTargetId = "${tab.id}:issue-description"
                         val proofreadingAnchor = rememberProofreadingPopupAnchorState(issueTargetId)
                         var retainedIssueSelection by remember(tab.id) { mutableStateOf<TextRange?>(null) }
-                        val proofread = ProofreadingAssist(
+                        ProofreadingAssist(
                             value = editorValue.value,
                             available = !notesLocked,
                             editorFocused = issueDescFocused,
@@ -1391,12 +1391,23 @@ fun AnnotationPanel(
                             onFocusRestored = { runCatching { focusRequester.requestFocus() } },
                             anchorState = proofreadingAnchor,
                         )
-                        Row(
-                            Modifier.onFocusChanged { issueDescFocused = it.hasFocus }.focusGroup(),
-                            horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            verticalAlignment = Alignment.Top,
-                        ) {
-                            Box(Modifier.weight(1f)) {
+                        val issueDictation = rememberDictationControl(
+                            targetId = issueTargetId,
+                            enabled = !notesLocked,
+                            onBeforeAction = {
+                                if (retainedIssueSelection == null) retainedIssueSelection = editorValue.value.selection
+                            },
+                            onTranscript = { transcript ->
+                                val base = retainedIssueSelection?.let { editorValue.value.copy(selection = it) } ?: editorValue.value
+                                val updated = insertVoiceTranscript(base, transcript)
+                                retainedIssueSelection = null
+                                editorValue.value = updated
+                                mutate { onUpdateIssueDescription(updated.text) }
+                            },
+                            onFocusRestored = { runCatching { focusRequester.requestFocus() } },
+                        )
+                        Box(Modifier.onFocusChanged { issueDescFocused = it.hasFocus }.dictationActivity(issueDictation).focusGroup()) {
+                            Box(Modifier.fillMaxWidth()) {
                                 ScrollableTextArea(
                                     value = ann.issueDescription,
                                     onValue = { mutate { onUpdateIssueDescription(it) } },
@@ -1420,26 +1431,10 @@ fun AnnotationPanel(
                                         if (updated.text != ann.issueDescription) retainedIssueSelection = null
                                         else if (!updated.selection.collapsed) retainedIssueSelection = updated.selection
                                     },
-                                    visualTransformation = proofread,
                                     proofreadingAnchorState = proofreadingAnchor,
+                                    dictation = issueDictation,
                                 )
                             }
-                            VoiceDictationButton(
-                                targetId = issueTargetId,
-                                enabled = !notesLocked,
-                                visible = issueDescFocused,
-                                onBeforeAction = {
-                                    if (retainedIssueSelection == null) retainedIssueSelection = editorValue.value.selection
-                                },
-                                onTranscript = { transcript ->
-                                    val base = retainedIssueSelection?.let { editorValue.value.copy(selection = it) } ?: editorValue.value
-                                    val updated = insertVoiceTranscript(base, transcript)
-                                    retainedIssueSelection = null
-                                    editorValue.value = updated
-                                    mutate { onUpdateIssueDescription(updated.text) }
-                                },
-                                onFocusRestored = { runCatching { focusRequester.requestFocus() } },
-                            )
                         }
                     }
                 }
@@ -2636,10 +2631,10 @@ private fun BlockCard(
 
 /**
  * Shared "empty fields collapse to one line" text field for a block's caption/note text: no fixed
- * minimum height, so an empty-and-unfocused field sits at its natural one-line height instead of
- * the old fixed 40-60dp box that was the main source of empty space between blocks. Focusing an
- * empty field grows it to a comfortable 52dp so there's room to start typing; a field with content
- * already sizes to that content regardless of focus, exactly as before.
+ * minimum height, so an empty field sits at its natural one-line height instead of the old fixed
+ * 40-60dp box that was the main source of empty space between blocks. Focus never changes its size
+ * (an earlier 52dp grow-on-focus moved the panel's stick-to-bottom scroll by the growth), and the
+ * dictation microphone's corner is reserved permanently for the same reason.
  */
 @Composable
 private fun BlockTextField(
@@ -2653,10 +2648,9 @@ private fun BlockTextField(
     modifier: Modifier = Modifier,
     fieldValueState: MutableState<TextFieldValue>? = null,
     onEditorValueChange: ((TextFieldValue) -> Unit)? = null,
-    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
     proofreadingAnchorState: ProofreadingPopupAnchorState? = null,
+    dictation: DictationControl? = null,
 ) {
-    var isFocused by remember { mutableStateOf(false) }
     var localValue by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
     var textLayout by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
     var textLayoutCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
@@ -2670,38 +2664,46 @@ private fun BlockTextField(
     LaunchedEffect(textValue.text, textValue.selection, textLayout, textLayoutCoordinates) {
         proofreadingAnchorState?.update(textLayoutCoordinates, textLayout, textValue.selection.end)
     }
-    BasicTextField(
-        value = textValue,
-        visualTransformation = visualTransformation,
-        onValueChange = {
-            if (enabled) {
-                if (fieldValueState != null) fieldValueState.value = it else localValue = it
-                onEditorValueChange?.invoke(it)
-                onValueChange(it.text)
-            }
-        },
-        readOnly = !enabled,
-        onTextLayout = { textLayout = it },
-        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
-        cursorBrush = SolidColor(tc.ac),
-        modifier = modifier.fillMaxWidth()
-            .background(tc.bg, FIELD_CORNER)
-            .border(1.dp, tc.br, FIELD_CORNER)
-            .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-            .onFocusChanged { isFocused = it.isFocused; onFieldFocusChanged(it.isFocused) }
-            .onPreviewKeyEvent { event -> proofreadingAnchorState?.handleKeyEvent(event) == true }
-            .then(if (value.isEmpty() && isFocused) Modifier.heightIn(min = 52.dp) else Modifier)
-            .padding(horizontal = 8.dp, vertical = 5.dp),
-        decorationBox = { inner ->
-            Box(Modifier.fillMaxWidth().onGloballyPositioned {
-                textLayoutCoordinates = it
-                proofreadingAnchorState?.update(it, textLayout, textValue.selection.end)
-            }) {
-                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 12.sp)
-                inner()
-            }
-        },
-    )
+    Box(Modifier.fillMaxWidth().dictationActivity(dictation)) {
+        BasicTextField(
+            value = textValue,
+            onValueChange = {
+                if (enabled) {
+                    if (fieldValueState != null) fieldValueState.value = it else localValue = it
+                    onEditorValueChange?.invoke(it)
+                    onValueChange(it.text)
+                }
+            },
+            readOnly = !enabled,
+            onTextLayout = { textLayout = it },
+            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
+            cursorBrush = SolidColor(tc.ac),
+            modifier = modifier.fillMaxWidth()
+                .background(tc.bg, FIELD_CORNER)
+                .border(1.dp, tc.br, FIELD_CORNER)
+                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
+                .onPreviewKeyEvent { event -> proofreadingAnchorState?.handleKeyEvent(event) == true }
+                .padding(start = 8.dp, top = 5.dp, end = if (dictation != null) INLINE_MIC_TEXT_INSET else 8.dp, bottom = 5.dp),
+            decorationBox = { inner ->
+                Box(
+                    Modifier.fillMaxWidth().proofreadingDecoration(proofreadingAnchorState) { textLayout }.onGloballyPositioned {
+                        textLayoutCoordinates = it
+                        proofreadingAnchorState?.update(it, textLayout, textValue.selection.end)
+                    },
+                ) {
+                    if (value.isEmpty()) AppText(dictation?.placeholder(placeholder) ?: placeholder, color = tc.td, fontSize = 12.sp)
+                    inner()
+                }
+            },
+        )
+        if (dictation != null) DictationFieldOverlay(
+            control = dictation,
+            hasText = textValue.text.isNotEmpty(),
+            singleLine = false,
+            shape = FIELD_CORNER,
+        )
+    }
 }
 
 /**
@@ -2774,7 +2776,7 @@ internal fun MarkdownInlineOrTextField(
         runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() }
     }
 
-    val proofreadingTransformation = ProofreadingAssist(
+    ProofreadingAssist(
         value = editorValue.value,
         available = enabled && (!renderInlineMarkdown || value.isBlank() || inlineEditing),
         editorFocused = inlineEditorFocused,
@@ -2790,6 +2792,14 @@ internal fun MarkdownInlineOrTextField(
         onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
         anchorState = proofreadingAnchor,
         onInteractionActiveChange = { proofreadingKeyboardPopupOpen = it },
+    )
+    val dictation = rememberDictationControl(
+        targetId = stableVoiceTargetId,
+        enabled = enabled,
+        onInteractionActiveChange = { assistanceDialogOpen = it },
+        onTranscript = ::applyVoiceTranscript,
+        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
+        onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
     )
 
     LaunchedEffect(inlineEditing) {
@@ -2845,6 +2855,7 @@ internal fun MarkdownInlineOrTextField(
         }
         val groupModifier = Modifier.fillMaxWidth()
             .onFocusChanged { editorGroupFocused = it.hasFocus }
+            .dictationActivity(dictation)
             .focusGroup()
         val inputModifier = modifier.fillMaxWidth()
             .onPointerEvent(PointerEventType.Press) { retainedVoiceSelection = null }
@@ -2853,8 +2864,8 @@ internal fun MarkdownInlineOrTextField(
                 false
             }
         if (maxHeight != null) {
-            Row(groupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(Modifier.weight(1f)) {
+            Box(groupModifier) {
+                Box(Modifier.fillMaxWidth()) {
                     ScrollableTextArea(
                         value = value,
                         onValue = ::acceptText,
@@ -2868,23 +2879,14 @@ internal fun MarkdownInlineOrTextField(
                         onClear = onClear,
                         textFieldValueState = editorValue,
                         onTextFieldValueChange = ::trackEditorValue,
-                        visualTransformation = proofreadingTransformation,
                         proofreadingAnchorState = proofreadingAnchor,
+                        dictation = dictation,
                     )
                 }
-                VoiceDictationButton(
-                    targetId = stableVoiceTargetId,
-                    enabled = enabled,
-                    visible = editorGroupFocused,
-                    onInteractionActiveChange = { assistanceDialogOpen = it },
-                    onTranscript = ::applyVoiceTranscript,
-                    onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
-                    onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
-                )
             }
         } else {
-            Row(groupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Box(Modifier.weight(1f)) {
+            Box(groupModifier) {
+                Box(Modifier.fillMaxWidth()) {
                     BlockTextField(
                         value = value,
                         onValueChange = ::acceptText,
@@ -2896,19 +2898,10 @@ internal fun MarkdownInlineOrTextField(
                         modifier = inputModifier.cancelVoiceOnEscape(stableVoiceTargetId),
                         fieldValueState = editorValue,
                         onEditorValueChange = ::trackEditorValue,
-                        visualTransformation = proofreadingTransformation,
                         proofreadingAnchorState = proofreadingAnchor,
+                        dictation = dictation,
                     )
                 }
-                VoiceDictationButton(
-                    targetId = stableVoiceTargetId,
-                    enabled = enabled,
-                    visible = editorGroupFocused,
-                    onInteractionActiveChange = { assistanceDialogOpen = it },
-                    onTranscript = ::applyVoiceTranscript,
-                    onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
-                    onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
-                )
             }
         }
     }

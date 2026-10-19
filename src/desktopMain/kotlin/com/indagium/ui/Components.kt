@@ -78,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -930,6 +931,8 @@ fun InlineField(
     // 16dp one — for fields that sit beside that bar (ui/FilterBar.kt). Drawn without growing the
     // field's height; see overflowVertically.
     searchStyleClear: Boolean = false,
+    // Extra room at the trailing edge, e.g. for an in-field dictation microphone laid over the field.
+    contentEndPadding: Dp = 7.dp,
 ) {
     val tc = tc()
     val text = value.text
@@ -953,7 +956,7 @@ fun InlineField(
                 }
             }
             .then(if (flat) Modifier else Modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM))
-            .padding(horizontal = 7.dp, vertical = 4.dp),
+            .padding(start = 7.dp, top = 4.dp, end = contentEndPadding, bottom = 4.dp),
         decorationBox = { inner ->
             if (onClear != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1021,11 +1024,16 @@ fun ScrollableTextArea(
     visualTransformation: VisualTransformation = VisualTransformation.None,
     onTextFieldValueChange: ((TextFieldValue) -> Unit)? = null,
     proofreadingAnchorState: ProofreadingPopupAnchorState? = null,
+    /** In-field dictation: reserves the microphone's corner permanently, so focusing never moves the text. */
+    dictation: DictationControl? = null,
 ) {
     val tc = tc()
     val density = LocalDensity.current
     val focusReporter = textInputFocusReporter()
     val scroll = rememberScrollState()
+    // The × and the scrollbar share the trailing edge, so a clearable field keeps the microphone one column further in.
+    val micEndPadding = if (onClear != null) 24.dp else 11.dp
+    val trailingTextInset = if (dictation == null) 21.dp else micEndPadding + INLINE_MIC_SIZE + 4.dp - contentPadding.calculateEndPadding(LayoutDirection.Ltr)
     var fieldHeightPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -1059,7 +1067,7 @@ fun ScrollableTextArea(
         scroll.animateScrollTo(target)
     }
 
-    Box(Modifier.fillMaxWidth()) {
+    Box(Modifier.fillMaxWidth().dictationActivity(dictation)) {
         BasicTextField(
             value = fieldValue,
             onValueChange = {
@@ -1084,21 +1092,30 @@ fun ScrollableTextArea(
                 .background(tc.bg, shape)
                 .border(1.dp, borderColor ?: tc.br, shape)
                 .padding(contentPadding)
-                .padding(end = 21.dp)
+                .padding(end = trailingTextInset)
                 // Measured *inside* the padding: caret positions come from the text layout, which
                 // shares that inner coordinate space. Measuring the padded outer height instead
                 // leaves the caret short of the bottom edge by the padding on every reveal.
                 .onSizeChanged { viewportHeightPx = it.height }
                 .verticalScroll(scroll),
             decorationBox = { inner ->
-                Box(Modifier.fillMaxWidth().onGloballyPositioned {
-                    textLayoutCoordinates = it
-                    proofreadingAnchorState?.update(it, layout, fieldValue.selection.end)
-                }) {
-                    if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                Box(
+                    Modifier.fillMaxWidth().proofreadingDecoration(proofreadingAnchorState) { layout }.onGloballyPositioned {
+                        textLayoutCoordinates = it
+                        proofreadingAnchorState?.update(it, layout, fieldValue.selection.end)
+                    },
+                ) {
+                    if (value.isEmpty()) AppText(dictation?.placeholder(placeholder) ?: placeholder, color = tc.td, fontSize = fontSize)
                     inner()
                 }
             },
+        )
+        if (dictation != null) DictationFieldOverlay(
+            control = dictation,
+            hasText = value.isNotEmpty(),
+            singleLine = false,
+            shape = shape,
+            micEndPadding = micEndPadding,
         )
         val clearAction = onClear?.takeIf { value.isNotBlank() }
         if (fieldHeightPx > 0) {
