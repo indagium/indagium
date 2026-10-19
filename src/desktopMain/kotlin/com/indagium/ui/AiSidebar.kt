@@ -1597,7 +1597,7 @@ private fun AiPromptComposer(
         onPromptChange(updated.text)
     }
     val latestPromptValue = rememberUpdatedState(promptValue)
-    // Registered for as long as the composer exists (not just while the pill is drawn), so a transcript that finishes
+    // Registered for as long as the composer exists (not just while the microphone is drawn), so a transcript that finishes
     // after a run starts still lands in the prompt.
     val dictation = if (voiceSupported) {
         rememberDictationControl(
@@ -1795,27 +1795,37 @@ private fun AiPromptComposer(
                     variant = ButtonVariant.Primary,
                     enabled = prompt.isNotBlank() || selectedCommand != null,
                 )
-                if (dictation != null) DictationPill(dictation)
+                if (dictation != null) DictationMic(dictation, size = COMPOSER_MIC_SIZE, standalone = true)
                 if (retryAvailable) AppButton("Retry", onClick = onRetry, variant = ButtonVariant.Secondary)
-                val composerHint = if (!voiceSupported) "Ctrl/Cmd + Enter to send" else when (voiceState) {
-                    is VoiceInputState.Recording -> "Recording — click stop or Esc"
-                    VoiceInputState.Transcribing -> "Transcribing…"
-                    is VoiceInputState.Failed -> voiceState.message
-                    else -> "Ctrl/Cmd + Enter to send"
-                }
-                AppText(
-                    composerHint,
-                    color = if (voiceSupported && voiceState is VoiceInputState.Failed) DANGER_RED else colors.td,
-                    fontSize = 10.sp,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+                ComposerHint(voiceSupported, voiceState, dictation)
             } else {
                 AppButton("Stop", onClick = onStop, variant = ButtonVariant.Secondary, isDanger = true)
                 AppText("Esc to stop", color = colors.td, fontSize = 10.sp)
             }
         }
     }
+}
+
+private val COMPOSER_MIC_SIZE = 24.dp
+
+/** The line beside the composer's buttons: the send shortcut, or the live dictation status with its elapsed time. */
+@Composable
+private fun RowScope.ComposerHint(voiceSupported: Boolean, voiceState: VoiceInputState, dictation: DictationControl?) {
+    val colors = tc()
+    val hint = if (!voiceSupported) "Ctrl/Cmd + Enter to send" else when (voiceState) {
+        // Reading the elapsed time here keeps the ticking clock inside this small scope.
+        is VoiceInputState.Recording -> "Recording ${formatDictationElapsed(dictation?.elapsedSeconds() ?: 0)} — click stop or Esc"
+        VoiceInputState.Transcribing -> "Transcribing…"
+        is VoiceInputState.Failed -> voiceState.message
+        else -> "Ctrl/Cmd + Enter to send"
+    }
+    AppText(
+        hint,
+        color = if (voiceSupported && voiceState is VoiceInputState.Failed) DANGER_RED else colors.td,
+        fontSize = 10.sp,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.weight(1f, fill = false),
+    )
 }
 
 @Composable

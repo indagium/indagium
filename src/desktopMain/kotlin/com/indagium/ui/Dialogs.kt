@@ -387,9 +387,8 @@ internal fun AddAnnDialog(
     )
 }
 
-// The idle dictation pill's footprint (`Dictate | Auto → EN ▾`), reserved so the toolbar's buttons keep
-// their wrapping while it turns into the shorter recording pill.
-private val DICTATION_TOOLBAR_RESERVED_WIDTH = 156.dp
+// Matches the toolbar's other buttons (26dp min height), so the microphone lines up with them.
+private val TOOLBAR_MIC_SIZE = 26.dp
 
 // Plain rounded box — the tabs above no longer join it directly (see the 8dp gap in the
 // Write/Preview tabs + editor box section below), so every corner stays the same radius.
@@ -543,6 +542,17 @@ internal fun AnnotationMarkdownEditorDialog(
         retainedSelection = null
         runCatching { editorFocusRequester.requestFocus() }
     }
+
+    // Created here, not inside the toolbar, so the footer can show "Listening… 0:07" for the same dictation.
+    val dictation = rememberDictationControl(
+        targetId = voiceTargetId,
+        enabled = !locked && !hasConflict && !previewMode,
+        onTranscript = ::insertVoice,
+        onBeforeAction = {
+            if (voiceInsertionSelection == null) voiceInsertionSelection = editorValue.selection
+        },
+        onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
+    )
 
     fun updatePresentationOptions(updated: AnnBlock.LogRefPresentationOptions) {
         if (locked || hasConflict) return
@@ -726,7 +736,7 @@ internal fun AnnotationMarkdownEditorDialog(
                         .clip(EDITOR_BOX_SHAPE),
                 ) {
                     if (!previewMode) {
-                        // The dictation pill stays right-aligned beside the formatting buttons, which wrap
+                        // The dictation microphone stays right-aligned beside the formatting buttons, which wrap
                         // within whatever width it leaves, so a narrow dialog never pushes it out of view.
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp),
@@ -796,17 +806,9 @@ internal fun AnnotationMarkdownEditorDialog(
                                     AppText("Link", color = tc.ts, fontSize = 11.sp)
                                 }
                             }
-                            DictationPill(
-                                targetId = voiceTargetId,
-                                enabled = !locked && !hasConflict && !previewMode,
-                                modifier = Modifier.padding(start = 8.dp),
-                                minWidth = DICTATION_TOOLBAR_RESERVED_WIDTH,
-                                onTranscript = ::insertVoice,
-                                onBeforeAction = {
-                                    if (voiceInsertionSelection == null) voiceInsertionSelection = editorValue.selection
-                                },
-                                onFocusRestored = { runCatching { editorFocusRequester.requestFocus() } },
-                            )
+                            if (dictation != null) {
+                                DictationMic(dictation, Modifier.padding(start = 8.dp), size = TOOLBAR_MIC_SIZE, standalone = true)
+                            }
                         }
                         NoteDialogDivider()
                     }
@@ -862,6 +864,7 @@ internal fun AnnotationMarkdownEditorDialog(
                             AppText("·", color = tc.td, fontSize = 10.sp, fontFamily = mono)
                             AppText("unsaved changes", color = tc.td, fontSize = 10.sp, fontFamily = mono)
                         }
+                        DictationFooterStatus(dictation, mono)
                         Spacer(Modifier.weight(1f))
                         AppText(shortcutHint, color = tc.td, fontSize = 11.sp)
                     }
@@ -1437,6 +1440,8 @@ private fun EditorDialogActionButton(label: String, filled: Boolean, enabled: Bo
 }
 
 // ── Custom AI command editor ──────────────────────────────────────────
+private val TEMPLATE_AREA_HEIGHT = 260.dp
+
 @Composable
 internal fun CustomAiCommandEditorDialog(
     state: AppState,
@@ -1466,38 +1471,19 @@ internal fun CustomAiCommandEditorDialog(
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Prompt template", color = tc.td, fontSize = 10.sp)
-            val templateScroll = rememberScrollState()
-            // Keep the dialog compact regardless of template length. verticalScroll changes its
-            // child's height constraints, so placing it outside the old heightIn modifier allowed
-            // a large template to grow the entire dialog before its scrollbar could take effect.
-            Box(Modifier.fillMaxWidth().height(260.dp)) {
-                BasicTextField(
-                    value = template,
-                    onValueChange = { template = it },
-                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
-                    cursorBrush = SolidColor(tc.ac),
-                    modifier = Modifier.fillMaxSize()
-                        .background(tc.bg, CORNER_MD)
-                        .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
-                        .padding(10.dp)
-                        .verticalScroll(templateScroll),
-                    decorationBox = { inner ->
-                        if (template.isEmpty()) {
-                            AppText(
-                                "What should the assistant do when this command is invoked?",
-                                color = tc.td,
-                                fontSize = 12.sp,
-                            )
-                        }
-                        inner()
-                    },
-                )
-                VerticalScrollbar(
-                    adapter = rememberScrollbarAdapter(templateScroll),
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                    style = appScrollbarStyle(tc),
-                )
-            }
+            // A fixed-height, internally scrolling area keeps the dialog compact regardless of template length.
+            DictatedTextArea(
+                value = template,
+                onValue = { template = it },
+                proseTargetId = "ai-command:${target.name.ifBlank { "new" }}:template",
+                placeholder = "What should the assistant do when this command is invoked?",
+                lineHeight = 18.sp,
+                minHeight = TEMPLATE_AREA_HEIGHT,
+                maxHeight = TEMPLATE_AREA_HEIGHT,
+                shape = CORNER_MD,
+                borderColor = tc.ac.copy(.5f),
+                contentPadding = PaddingValues(10.dp),
+            )
         }
         error?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp) }
         Row(
@@ -1539,9 +1525,10 @@ internal fun SourceFolderInfoDialog(
         AppText(truncatePathForDisplay(path), color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Description", color = tc.td, fontSize = 10.sp)
-            ScrollableTextArea(
+            DictatedTextArea(
                 value = description,
                 onValue = { description = it },
+                proseTargetId = "project-info:$path:description",
                 placeholder = "What is this project / what should the AI know about it?",
                 modifier = Modifier.fillMaxWidth(),
                 fontSize = 12.sp,

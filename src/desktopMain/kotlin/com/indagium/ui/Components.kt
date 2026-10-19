@@ -784,14 +784,22 @@ fun ToolbarBtn(
  * time, and its clicks still pass straight through to the device either way — left unregistered
  * on purpose. */
 @Composable
-internal fun ToolbarTooltip(text: String, maxLines: Int = 2) {
+internal fun ToolbarTooltip(text: String, maxLines: Int = 2, detail: String? = null) {
     val tc = tc()
     Box(
         Modifier.background(tc.p2, RoundedCornerShape(4.dp))
             .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = maxLines)
+        if (detail == null) {
+            AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = maxLines)
+        } else {
+            // A second, muted line for a hint that should not compete with the label.
+            Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = maxLines)
+                AppText(detail, color = tc.td, fontSize = 10.sp, maxLines = 1)
+            }
+        }
     }
 }
 
@@ -1031,9 +1039,14 @@ fun ScrollableTextArea(
     val density = LocalDensity.current
     val focusReporter = textInputFocusReporter()
     val scroll = rememberScrollState()
-    // The × and the scrollbar share the trailing edge, so a clearable field keeps the microphone one column further in.
-    val micEndPadding = if (onClear != null) 24.dp else 11.dp
-    val trailingTextInset = if (dictation == null) 21.dp else micEndPadding + INLINE_MIC_SIZE + 4.dp - contentPadding.calculateEndPadding(LayoutDirection.Ltr)
+    // The microphone keeps the same corner as every other prose field. A clearable field puts its × just left of
+    // it, and the text always stays clear of both, so nothing reflows when the × appears.
+    val clearBesideMic = dictation != null && onClear != null
+    val trailingTextInset = when {
+        dictation == null -> 21.dp
+        clearBesideMic -> INLINE_MIC_TEXT_INSET + CLEAR_BESIDE_MIC_WIDTH
+        else -> INLINE_MIC_TEXT_INSET
+    } - contentPadding.calculateEndPadding(LayoutDirection.Ltr)
     var fieldHeightPx by remember { mutableStateOf(0) }
     var viewportHeightPx by remember { mutableStateOf(0) }
     var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
@@ -1115,9 +1128,9 @@ fun ScrollableTextArea(
             hasText = value.isNotEmpty(),
             singleLine = false,
             shape = shape,
-            micEndPadding = micEndPadding,
         )
-        val clearAction = onClear?.takeIf { value.isNotBlank() }
+        // While dictating, the status label takes the spot beside the microphone that the × would use.
+        val clearAction = onClear?.takeIf { value.isNotBlank() && (dictation == null || dictation.phase == DictationPhase.Idle) }
         if (fieldHeightPx > 0) {
             // Can't fillMaxHeight() here: in AnnotationPanel this component sits inside the panel's
             // own verticalScroll Column — an infinite max-height constraint, where fillMaxHeight
@@ -1129,18 +1142,31 @@ fun ScrollableTextArea(
                 adapter = rememberScrollbarAdapter(scroll),
                 modifier = Modifier.align(Alignment.CenterEnd)
                     .height(with(density) { fieldHeightPx.toDp() })
-                    .padding(top = if (clearAction != null) 24.dp else 2.dp, bottom = 2.dp),
+                    .padding(
+                        top = if (clearAction != null && !clearBesideMic) 24.dp else 2.dp,
+                        // Stop above the microphone's corner so the thumb never draws under it.
+                        bottom = if (dictation != null) INLINE_MIC_SIZE + 5.dp else 2.dp,
+                    ),
                 style = appScrollbarStyle(tc),
             )
         }
         if (clearAction != null) {
             SquareIconButton(
                 "×", fontSize = 12.sp, enabled = enabled, onClick = clearAction,
-                modifier = Modifier.align(Alignment.TopEnd).padding(4.dp), size = 16.dp,
+                modifier = if (clearBesideMic) {
+                    // Centred on the microphone's row (mic: 22dp, 3dp off the bottom, 4dp off the end).
+                    Modifier.align(Alignment.BottomEnd).padding(end = INLINE_MIC_END_PADDING + INLINE_MIC_SIZE + 2.dp, bottom = 6.dp)
+                } else {
+                    Modifier.align(Alignment.TopEnd).padding(4.dp)
+                },
+                size = 16.dp,
             )
         }
     }
 }
+
+/** Room for the 16dp × plus its gap when it sits beside an in-field microphone. */
+private val CLEAR_BESIDE_MIC_WIDTH = 18.dp
 
 @Composable
 fun CheckRow(

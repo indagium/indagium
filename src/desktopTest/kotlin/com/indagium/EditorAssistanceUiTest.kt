@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
@@ -395,7 +396,7 @@ class EditorAssistanceUiTest {
     }
 
     @Test
-    fun dictationPillShowsTheModeAndItsMenuChangesLanguageAndTranslation() {
+    fun rightClickingTheToolbarMicrophoneOpensTheMenuThatChangesLanguageAndTranslation() {
         val settings = mutableStateOf(VoiceInputSettings())
         setContent(settings = settings) {
             AnnotationMarkdownEditorDialog(
@@ -403,15 +404,17 @@ class EditorAssistanceUiTest {
                 initialText = "text",
                 confirmLabel = "Save note",
                 windowSize = IntSize(900, 850),
-                sessionKey = "pill-menu",
+                sessionKey = "mic-menu",
                 onConfirm = {},
                 onDismiss = {},
             )
         }
-        rule.onNodeWithText("Dictate").assertIsDisplayed()
-        rule.onNodeWithText("Auto → EN").assertIsDisplayed()
+        // One icon, no split pill: there is no "Dictate" label and no language segment next to the microphone.
+        rule.onNodeWithText("Dictate").assertDoesNotExist()
+        rule.onNodeWithText("Auto → EN").assertDoesNotExist()
+        rule.onAllNodesWithContentDescription("Voice input").assertCountEquals(1)
 
-        rule.onNodeWithContentDescription("Dictation language, Auto → English").performClick()
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { rightClick() }
         rule.onNodeWithTag("dictation-menu").assertIsDisplayed()
         rule.onNodeWithText("Spoken language").assertIsDisplayed()
         rule.onNodeWithText("Detect automatically").assertIsDisplayed()
@@ -422,45 +425,97 @@ class EditorAssistanceUiTest {
         rule.onNodeWithTag("dictation-language-uk").performClick()
         rule.waitForIdle()
         assertEquals("uk", settings.value.selectedRecognitionLanguageCode)
-        rule.onNodeWithText("UK → EN").assertIsDisplayed()
         assertTrue(runCatching { rule.onNodeWithTag("dictation-menu").fetchSemanticsNode() }.isFailure, "choosing a language closes the menu")
 
-        // Dismissing the menu briefly ignores a toggle, so the click that closed it cannot reopen it.
+        // Dismissing the menu briefly ignores a reopen, so the click that closed it cannot reopen it.
         Thread.sleep(350)
-        rule.onNodeWithContentDescription("Dictation language, Ukrainian → English").performClick()
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { rightClick() }
         rule.onNodeWithTag("dictation-translate-toggle").performClick()
         assertEquals(false, settings.value.translateToEnglish)
-        rule.onNodeWithText("UK").assertIsDisplayed()
         rule.onNodeWithTag("dictation-menu").assertIsDisplayed()
     }
 
     @Test
-    fun recordingTurnsThePillIntoOneStopControlAndHidesTheLanguageSegment() {
+    fun aLeftClickOnTheToolbarMicrophoneStartsDictationInsteadOfOpeningTheMenu() {
         setContent {
             AnnotationMarkdownEditorDialog(
                 title = "Edit note",
                 initialText = "text",
                 confirmLabel = "Save note",
                 windowSize = IntSize(900, 850),
-                sessionKey = "pill-recording",
+                sessionKey = "mic-left-click",
                 onConfirm = {},
                 onDismiss = {},
             )
         }
         rule.onNodeWithContentDescription("Voice input").performMouseInput { click() }
-        rule.onNode(hasText("· Stop", substring = true)).assertIsDisplayed()
         rule.onNodeWithContentDescription("Stop voice input").assertIsDisplayed()
-        assertTrue(
-            runCatching { rule.onNodeWithContentDescription("Dictation language", substring = true).fetchSemanticsNode() }.isFailure,
-            "the language segment is hidden while recording",
-        )
+        assertTrue(runCatching { rule.onNodeWithTag("dictation-menu").fetchSemanticsNode() }.isFailure, "a left click never opens the menu")
         rule.onNodeWithContentDescription("Stop voice input").performMouseInput { click() }
         rule.waitUntil(5_000) { coordinator?.snapshot?.value?.state == VoiceInputState.Idle }
-        rule.onNodeWithText("Dictate").assertIsDisplayed()
     }
 
     @Test
-    fun transcribingShowsADisabledNeutralPill() {
+    fun theMicrophoneTooltipHasTwoLinesAndNamesTheModeAndTheMenu() {
+        val settings = mutableStateOf(VoiceInputSettings())
+        setContent(settings = settings) {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "text",
+                confirmLabel = "Save note",
+                windowSize = IntSize(900, 850),
+                sessionKey = "mic-tooltip",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { moveTo(center) }
+        rule.mainClock.advanceTimeBy(1_500)
+        rule.onNodeWithText("Dictate · Auto → English").assertIsDisplayed()
+        rule.onNodeWithText("Right-click for language and translation").assertIsDisplayed()
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { moveTo(Offset(-50f, -50f)) }
+        rule.mainClock.advanceTimeBy(1_500)
+
+        // Translating English into English changes nothing, so the tooltip names just the language.
+        rule.runOnIdle { settings.value = VoiceInputSettings(selectedRecognitionLanguageCode = "en") }
+        rule.mainClock.advanceTimeBy(100)
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { moveTo(center) }
+        rule.mainClock.advanceTimeBy(1_500)
+        rule.onNodeWithText("Dictate · English").assertIsDisplayed()
+        rule.onNodeWithText("Right-click for language and translation").assertIsDisplayed()
+        rule.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun theNoteFooterReportsListeningAndTheElapsedTimeWhileRecording() {
+        setContent {
+            AnnotationMarkdownEditorDialog(
+                title = "Edit note",
+                initialText = "text",
+                confirmLabel = "Save note",
+                windowSize = IntSize(900, 850),
+                sessionKey = "footer-recording",
+                onConfirm = {},
+                onDismiss = {},
+            )
+        }
+        rule.onNode(hasText("Listening…", substring = true)).assertDoesNotExist()
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { click() }
+        rule.onNode(hasText("Listening… 0:0", substring = true)).assertIsDisplayed()
+        rule.onNodeWithContentDescription("Stop voice input").assertIsDisplayed()
+        assertTrue(
+            runCatching { rule.onNodeWithContentDescription("Dictation language", substring = true).fetchSemanticsNode() }.isFailure,
+            "there is no second control to hide while recording",
+        )
+        rule.onNodeWithContentDescription("Stop voice input").performMouseInput { click() }
+        rule.waitUntil(5_000) { coordinator?.snapshot?.value?.state == VoiceInputState.Idle }
+        rule.onNode(hasText("Listening…", substring = true)).assertDoesNotExist()
+        rule.onNodeWithText("Markdown").assertIsDisplayed()
+    }
+
+    @Test
+    fun theNoteFooterReportsTranscribingWhileTheModelWorks() {
         val started = CountDownLatch(1)
         val release = CountDownLatch(1).also { releaseTranscriber = it }
         setContent(
@@ -475,7 +530,7 @@ class EditorAssistanceUiTest {
                 initialText = "text",
                 confirmLabel = "Save note",
                 windowSize = IntSize(900, 850),
-                sessionKey = "pill-transcribing",
+                sessionKey = "footer-transcribing",
                 onConfirm = {},
                 onDismiss = {},
             )
@@ -491,7 +546,7 @@ class EditorAssistanceUiTest {
     }
 
     @Test
-    fun aFailedRecordingReadsRetryOnThePillWithTheReasonInItsState() {
+    fun aFailedRecordingShowsTheReasonInTheFooterAndOnTheMicrophone() {
         val failure = "Microphone permission was denied."
         setContent(captureFailure = failure) {
             AnnotationMarkdownEditorDialog(
@@ -499,13 +554,13 @@ class EditorAssistanceUiTest {
                 initialText = "text",
                 confirmLabel = "Save note",
                 windowSize = IntSize(900, 850),
-                sessionKey = "pill-failed",
+                sessionKey = "footer-failed",
                 onConfirm = {},
                 onDismiss = {},
             )
         }
         rule.onNodeWithContentDescription("Voice input").performMouseInput { click() }
-        rule.onNodeWithText("Retry").assertIsDisplayed()
+        rule.onNodeWithText(failure).assertIsDisplayed()
         val node = rule.onNodeWithContentDescription("Voice input").fetchSemanticsNode()
         assertEquals(failure, node.config[SemanticsProperties.StateDescription])
     }
@@ -608,10 +663,7 @@ class EditorAssistanceUiTest {
         val bounds = dialog.fetchSemanticsNode().boundsInRoot
         assertTrue(microphone.left >= bounds.left && microphone.right <= bounds.right)
         assertTrue(microphone.top >= bounds.top && microphone.bottom <= bounds.bottom)
-        listOf("Dictate", "Auto → EN").forEach { label ->
-            val control = rule.onNodeWithText(label).assertIsDisplayed().fetchSemanticsNode().boundsInRoot
-            assertTrue(control.left >= bounds.left && control.right <= bounds.right, "$label must fit inside a narrow dialog")
-        }
+        assertTrue(bounds.right - microphone.right < 40f, "the microphone is right-aligned in the toolbar: mic=$microphone dialog=$bounds")
         val image = dialog.captureToImage()
         val pixels = image.toPixelMap()
         val bitmap = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
@@ -637,7 +689,7 @@ class EditorAssistanceUiTest {
                 override fun start(): VoiceCaptureStartResult {
                     if (captureFailure != null) return VoiceCaptureStartResult.Failure(captureFailure)
                     return VoiceCaptureStartResult.Started(object : VoiceCaptureSession {
-                        override fun stop() = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(1, 0)))
+                        override fun stop() = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(0, 64)))
 
                         override fun cancel() = Unit
                     })

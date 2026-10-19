@@ -31,6 +31,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -720,6 +721,8 @@ private fun SuggestionChip(
             }
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            // Clip first: clickable's hover/press indication is drawn in the chip's bounds and would show as a rectangle.
+            .clip(shape)
             .background(
                 when {
                     focused || hovered -> if (primary) tc.ac.copy(alpha = .22f) else tc.hv

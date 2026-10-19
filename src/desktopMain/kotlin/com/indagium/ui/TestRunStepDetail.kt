@@ -491,9 +491,10 @@ private fun AgentErrorDialog(runId: String, laneId: String, row: MatrixRow.Step,
             status = { problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) } },
             body = {
                 TestsHint("Say what the agent got wrong (the app is fine). The note is kept with the step's result.")
-                InlineField(
+                DictatedInlineField(
                     value = note,
                     onValue = { note = it },
+                    proseTargetId = "agent-error:$runId:$laneId:${row.stepId}:note",
                     placeholder = "What did the agent get wrong?",
                     modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                     fontSize = 12.sp,

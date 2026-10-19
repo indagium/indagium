@@ -67,6 +67,23 @@ class VoiceInputControllerTest {
     }
 
     @Test
+    fun nearSilentRecordingFailsWithoutReachingTheRecognizer() = runBlocking {
+        // What macOS hands an app without microphone access: low-level noise around -65 dBFS.
+        val muted = VoiceAudio(ShortArray(16_000) { if (it % 2 == 0) 18 else -21 }.toPcm16le())
+        val controller = controller(capture = FakeCapture(audio = muted)) { _, _ -> error("silence must not be transcribed") }
+
+        assertIs<VoiceInputState.Recording>(controller.startRecording())
+        assertNotNull(controller.stopAndTranscribe()?.join())
+        assertEquals(VoiceInputState.Failed(TOO_QUIET_MESSAGE), controller.state.value)
+    }
+
+    @Test
+    fun quietThresholdSeparatesSpeechFromSilence() {
+        assertTrue(VoiceAudio(ShortArray(100) { 300 }.toPcm16le()).isTooQuiet())
+        assertTrue(!VoiceAudio(ShortArray(100) { if (it == 50) -2_000 else 0 }.toPcm16le()).isTooQuiet())
+    }
+
+    @Test
     fun explicitTranslationOverrideWinsOverSavedSetting() = runBlocking {
         var translate: Boolean? = null
         val controller = controller(optionsProvider = { VoiceTranscriptionOptions(translateToEnglish = false) }) { _, transcriptionOptions ->
@@ -202,6 +219,12 @@ class VoiceInputControllerTest {
     }
 
     private companion object {
-        fun audio() = VoiceAudio(byteArrayOf(1, 0, 2, 0))
+        fun audio() = VoiceAudio(byteArrayOf(0, 64, 0, 32))
+
+        fun ShortArray.toPcm16le(): ByteArray {
+            val buffer = java.nio.ByteBuffer.allocate(size * VoiceAudio.BYTES_PER_SAMPLE).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            buffer.asShortBuffer().put(this)
+            return buffer.array()
+        }
     }
 }
