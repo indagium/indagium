@@ -96,7 +96,7 @@ import com.indagium.model.VideoFrameReference
 import com.indagium.model.hasSameRow
 import com.indagium.model.resolveRows
 import com.indagium.utils.LogLinePresentationContext
-import com.indagium.utils.presentLogLine
+import com.indagium.utils.presentAnnotationLogLine
 import com.indagium.utils.visibleEntries
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
@@ -597,6 +597,9 @@ fun AnnotationPanel(
     onUnhandledFileDrop: (List<File>) -> Unit,
     onNavigateLogRef: (AnnBlock.LogRef) -> Unit,
     onNavigateVideoFrame: (VideoFrameReference) -> Unit,
+    onUpdateLogRefPresentation: (String, String, AnnBlock.LogRefPresentation) -> Unit = { blockId, caption, _ ->
+        onUpdateBlock(blockId, caption)
+    },
     // Diagram notes (com.indagium.diagram) are ordinary AnnBlock.Notes whose text carries a spec
     // header + fenced source — see DiagramSpecCodec. Defaulted so every existing call site (and the
     // test harness) keeps compiling; a caller that doesn't wire them just gets a non-interactive
@@ -999,9 +1002,22 @@ fun AnnotationPanel(
                             windowSize = mainWindowSize,
                             rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
                             fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
+                            initialPresentation = (block as? AnnBlock.LogRef)?.presentation,
                             locked = notesLocked,
                             sessionKey = "${tab.id}:${block.id}",
                             onDelete = { mutate { onRemoveBlock(block.id) }; editingTarget = null },
+                            onPresentationConfirm = (block as? AnnBlock.LogRef)?.presentation?.let { original ->
+                                { updated, options ->
+                                    mutate {
+                                        onUpdateLogRefPresentation(
+                                            block.id,
+                                            updated,
+                                            original.copy(options = options),
+                                        )
+                                    }
+                                    editingTarget = null
+                                }
+                            },
                             onConfirm = { updated ->
                                 mutate { onUpdateBlock(block.id, updated) }
                                 editingTarget = null
@@ -2350,8 +2366,8 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
 
                 is AnnBlock.LogRef -> {
                     val rows = block.resolveRows(tab)
-                    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
-                    val context = rememberAnnotationLogLineContext(tab, settings, localSource)
+                    val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
+                    val context = if (block.presentation == null) rememberAnnotationLogLineContext(tab, settings, localSource) else null
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
                             AnnotationMarkdownText(
@@ -2372,7 +2388,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                         ) {
                             rows.forEach { row ->
                                 AppText(
-                                    presentLogLine(tab, row, settings, context, allowProcessName = localSource),
+                                    presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource),
                                     color = tc.ts,
                                     fontSize = 12.sp,
                                     fontFamily = mono,
@@ -2417,9 +2433,10 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
 }
 
 /**
- * Keeps the two on-screen annotation surfaces in lockstep with buildMd()/rich copy. A
- * persisted or cross-tab block has no safe relationship to this tab's visible-row baseline or
- * process-name map, so it deliberately omits Δt and falls back to a numeric PID.
+ * Keeps the two on-screen annotation surfaces in lockstep with buildMd()/rich copy. Legacy
+ * persisted or cross-tab blocks without a snapshot have no safe relationship to this tab's
+ * visible-row baseline or process-name map, so they omit Δt and use numeric PIDs. Snapshot blocks
+ * bypass this live context and render their captured fields directly.
  */
 @Composable
 private fun rememberAnnotationLogLineContext(
@@ -3193,8 +3210,8 @@ private fun LogRefBlock(
     editingEnabled: Boolean = true,
 ) {
     val rows = block.resolveRows(tab)
-    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
-    val context = rememberAnnotationLogLineContext(tab, settings, localSource)
+    val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
+    val context = if (block.presentation == null) rememberAnnotationLogLineContext(tab, settings, localSource) else null
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
     BlockCard(
@@ -3229,7 +3246,7 @@ private fun LogRefBlock(
             enabled = editingEnabled,
         )
         LogExcerpt(
-            rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
+            block = block, rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
             mono = mono, tc = tc, expanded = excerptExpanded, onToggleExpanded = onToggleExcerpt,
         )
     }
@@ -3245,6 +3262,7 @@ private fun LogRefBlock(
  */
 @Composable
 private fun LogExcerpt(
+    block: AnnBlock.LogRef,
     rows: List<LogEntry>,
     tab: LogTab,
     settings: AppSettings,
@@ -3298,7 +3316,7 @@ private fun LogExcerpt(
                 // wrapped, no truncation. Nothing is lost by collapsing first.
                 rows.forEach { r ->
                     AppText(
-                        presentLogLine(tab, r, settings, context, allowProcessName = localSource),
+                        presentAnnotationLogLine(block, r, tab, settings, context, allowProcessName = localSource),
                         color = tc.ts,
                         fontSize = 9.sp,
                         fontFamily = mono,

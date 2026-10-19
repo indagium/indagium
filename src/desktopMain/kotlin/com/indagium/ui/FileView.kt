@@ -403,7 +403,9 @@ internal fun FileView(
                 settings = state.settings,
                 onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
                 onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
-                onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
+                onCtxMenu = { id, x, y, sel, panelSel, capture ->
+                    state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel, annotationCapture = capture)
+                },
                 onToggleGroup = { state.toggleGroup(tab.id, it) },
                 onClearFilter = { state.requestClearFilter(tab.id) },
                 onExpandAll = { state.expandAll(tab.id) },
@@ -427,7 +429,7 @@ internal fun FileView(
                 onSelectAll = { state.selectAll(tab.id) },
                 onClearSelection = { state.clearSelection(tab.id) },
                 onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
-                onAddAnnotation = { ids -> state.requestAddAnn(tab.id, ids) },
+                onAddAnnotation = { capture -> state.requestAddAnn(tab.id, capture) },
                 onCopyText = { text -> state.copyToClipboard(text) },
                 onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
                 onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
@@ -544,6 +546,9 @@ internal fun FileView(
                             onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
                             onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
                             onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
+                            onUpdateLogRefPresentation = { blockId, caption, presentation ->
+                                state.updateLogRefPresentation(tab.id, blockId, caption, presentation)
+                            },
                             onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
                             onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
                             onImportLinkedDiagram = { blockId, source, dialect, confirm ->

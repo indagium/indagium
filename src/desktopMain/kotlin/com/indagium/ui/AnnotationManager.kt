@@ -9,6 +9,11 @@ import com.indagium.model.LogEntry
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.utils.downscaleAndEncodeJpeg
+import com.indagium.utils.captureFilteredAnnotationLogRef
+import com.indagium.utils.captureAnnotationLogRef
+import com.indagium.utils.asLogEntryView
+import com.indagium.utils.computeItems
+import com.indagium.model.entry
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -29,10 +34,11 @@ internal class AnnotationManager(private val appState: AppState) {
     // so it stays a plain mutableStateOf var rather than a callback-driven method.
     var addAnnRequest by mutableStateOf<AddAnnRequest?>(null)
 
-    fun requestAddAnn(sourceTabId: String, logIds: List<Int>) {
+    fun requestAddAnn(sourceTabId: String, logIds: List<Int>, capture: AnnBlock.LogRefCapture? = null) {
         val targetTabId = if (appState.compareMode && sourceTabId != appState.activeTabId) appState.activeTabId else sourceTabId
         val crossFile = targetTabId != sourceTabId
         val sourceTab = appState.tab(sourceTabId)
+        val frozenCapture = capture ?: sourceTab?.let { captureFilteredAnnotationLogRef(it, logIds, appState.settings) }
         addAnnRequest = AddAnnRequest(
             targetTabId = targetTabId,
             sourceTabId = sourceTabId,
@@ -42,8 +48,33 @@ internal class AnnotationManager(private val appState: AppState) {
             } else {
                 null
             },
+            capture = frozenCapture,
         )
         appState.ctx = null
+    }
+
+    fun confirmAddAnn(request: AddAnnRequest, caption: String, options: AnnBlock.LogRefPresentationOptions) {
+        val crossFile = request.sourceTabId != request.targetTabId
+        val capture = request.capture ?: appState.tab(request.sourceTabId)?.let {
+            captureFilteredAnnotationLogRef(it, request.logIds, appState.settings)
+        }
+        val rows = capture?.rows.orEmpty()
+        val ids = request.logIds.distinct().sorted()
+        appState.upAnn(request.targetTabId) { t ->
+            val block = AnnBlock.LogRef(
+                id = "r${System.nanoTime()}",
+                logIds = ids,
+                caption = caption,
+                sourceTabId = if (crossFile) request.sourceTabId else null,
+                sourceFilename = if (crossFile) request.sourceFilename else null,
+                // Always freeze the excerpt rows: this both survives a closed compare source and
+                // keeps subsequent rendering independent of a live source tab's lifetime.
+                sourceEntries = rows,
+                presentation = capture?.presentation?.copy(options = options),
+            )
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
+        }
+        addAnnRequest = null
     }
 
     fun confirmAddAnn(
@@ -53,25 +84,10 @@ internal class AnnotationManager(private val appState: AppState) {
         caption: String,
         sourceFilename: String?
     ) {
-        val crossFile = sourceTabId != targetTabId
-        val sourceEntries = if (crossFile) {
-            val rmap = appState.tab(sourceTabId)?.rmap ?: emptyMap()
-            logIds.sorted().mapNotNull { rmap[it] }
-        } else {
-            null
-        }
-        appState.upAnn(targetTabId) { t ->
-            val block = AnnBlock.LogRef(
-                id = "r${System.nanoTime()}",
-                logIds = logIds.sorted(),
-                caption = caption,
-                sourceTabId = if (crossFile) sourceTabId else null,
-                sourceFilename = if (crossFile) sourceFilename else null,
-                sourceEntries = sourceEntries,
-            )
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + block))
-        }
-        addAnnRequest = null
+        val sourceTab = appState.tab(sourceTabId)
+        val capture = sourceTab?.let { captureFilteredAnnotationLogRef(it, logIds, appState.settings) }
+        val req = AddAnnRequest(targetTabId, sourceTabId, logIds, sourceFilename, capture)
+        confirmAddAnn(req, caption, capture?.presentation?.options ?: AnnBlock.LogRefPresentationOptions())
     }
 
     fun addNoteBlock(tabId: String, afterId: String? = null) {
@@ -102,18 +118,30 @@ internal class AnnotationManager(private val appState: AppState) {
         // Phase 3's tail-lag fallback (AppState.markIssue): when some of [logIds] aren't in the
         // tab's live `rmap` yet (the tail-append coordinator hasn't caught up to rows the recorder
         // already flushed), the caller resolves them straight from the capture log by byte offset
-        // and passes the complete, ordered result here. resolveRows (Model.kt) prefers
-        // AnnBlock.LogRef.sourceEntries over `logIds`/`rmap` for exactly this reason. Left null for
-        // every other caller (MCP's add_log_note, the plain in-app "add note from selection" flow),
-        // which keeps today's live-rmap-only behaviour unchanged.
+        // and passes the complete, ordered result here. Both capture-log rows and rows from the
+        // tab's rmap are frozen into the new block with their presentation metadata.
         sourceEntries: List<LogEntry>? = null,
     ): String? {
         val t = appState.tab(tabId) ?: return null
         val cleanIds = logIds.distinct().sorted().let { ids -> if (sourceEntries != null) ids else ids.filter { it in t.rmap } }
         if (cleanIds.isEmpty() && sourceEntries.isNullOrEmpty()) return null
+        val captured = captureAnnotationLogRef(
+            tab = t,
+            targetIds = cleanIds,
+            selection = t.selected,
+            displayedEntries = computeItems(t, applyFilter = true).asLogEntryView(),
+            settings = appState.settings,
+            fallbackEntries = sourceEntries.orEmpty(),
+        )
         val id = "r${System.nanoTime()}"
         appState.upAnn(tabId) { tab ->
-            val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption, sourceEntries = sourceEntries)
+            val block = AnnBlock.LogRef(
+                id = id,
+                logIds = cleanIds,
+                caption = caption,
+                sourceEntries = sourceEntries ?: captured.rows,
+                presentation = captured.presentation,
+            )
             val blocks = tab.annotations.blocks.toMutableList()
             val idx =
                 if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
@@ -144,6 +172,17 @@ internal class AnnotationManager(private val appState: AppState) {
             ),
         )
     }
+
+    fun updateLogRefPresentation(tabId: String, blockId: String, caption: String, presentation: AnnBlock.LogRefPresentation) =
+        appState.upAnn(tabId) { t ->
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks.map { block ->
+                if (block is AnnBlock.LogRef && block.id == blockId) {
+                    block.copy(caption = caption, presentation = presentation)
+                } else {
+                    block
+                }
+            }))
+        }
 
     // Downscale+re-encode happens here (not at the call site) so every entry point — video panel
     // "Add frame to notes" today, MCP/other producers later — gets the same storage guard: a raw

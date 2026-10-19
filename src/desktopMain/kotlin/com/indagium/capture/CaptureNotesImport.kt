@@ -16,6 +16,41 @@ import com.indagium.model.VideoSource
  *  dropping a zip always opens a brand-new tab, which never has existing notes to protect). */
 enum class CaptureNotesImportAction { APPEND, REPLACE, SKIP }
 
+private data class SnapshotRowKey(
+    val ts: String,
+    val level: Char,
+    val tag: String,
+    val msg: String,
+    val pid: Int,
+    val tid: Int,
+)
+
+private fun LogEntry.snapshotRowKey() = SnapshotRowKey(ts, level.key, tag, msg, pid, tid)
+
+private fun remapLogRefPresentation(
+    block: AnnBlock.LogRef,
+    ids: List<Int>,
+    importedById: Map<Int, LogEntry>,
+): AnnBlock.LogRefPresentation? {
+    val presentation = block.presentation ?: return null
+    val sourceRowsByValue = block.sourceEntries.orEmpty()
+        .mapNotNull { source -> presentation.row(source.id)?.let { source.snapshotRowKey() to it } }
+        .groupBy({ it.first }, { it.second })
+        .mapValuesTo(HashMap()) { (_, values) -> ArrayDeque(values) }
+    val oldRowsByPosition = if (block.logIds.size == ids.size) {
+        block.logIds.mapNotNull(presentation::row)
+    } else {
+        emptyList()
+    }
+    val rows = ids.mapIndexedNotNull { index, id ->
+        val imported = importedById[id] ?: return@mapIndexedNotNull null
+        val frozen = sourceRowsByValue[imported.snapshotRowKey()]?.removeFirstOrNull()
+            ?: oldRowsByPosition.getOrNull(index)
+        frozen?.copy(logId = id)
+    }
+    return presentation.copy(rows = rows)
+}
+
 /** Merges already-re-anchored [incoming] notes (see [reanchorImportedCaptureNotes]) into [existing]
  *  per the user's choice. */
 fun mergeCaptureNotesImport(existing: Annotations, incoming: Annotations, action: CaptureNotesImportAction): Annotations =
@@ -55,6 +90,7 @@ fun reanchorImportedCaptureNotes(notes: Annotations, markers: List<CaptureArchiv
 
     val clipByNoteId = markers.associateBy { it.noteBlockId }
     val validIds = logData.mapTo(HashSet()) { it.id }
+    val importedById: Map<Int, LogEntry> by lazy(LazyThreadSafetyMode.NONE) { logData.associateBy { it.id } }
     val claimed = HashSet<String>()
 
     // Which marker (by its Note's own id) [ref] belongs to, or null when it isn't a marker's LogRef
@@ -83,7 +119,9 @@ fun reanchorImportedCaptureNotes(notes: Annotations, markers: List<CaptureArchiv
         if (ownerNoteId == null) return block
         val clip = clipByNoteId[ownerNoteId] ?: return null
         val ids = (clip.firstOrdinal..clip.lastOrdinal).filter { it in validIds }
-        return if (ids.isEmpty()) null else block.copy(logIds = ids, sourceEntries = null)
+        if (ids.isEmpty()) return null
+        val remappedPresentation = remapLogRefPresentation(block, ids, importedById)
+        return block.copy(logIds = ids, sourceEntries = null, presentation = remappedPresentation)
     }
 
     val blocks = notes.blocks.mapNotNull { block ->

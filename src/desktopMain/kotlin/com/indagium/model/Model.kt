@@ -442,6 +442,51 @@ sealed class AnnBlock {
     /** Pure text / commentary block */
     data class Note(override val id: String, val text: String) : AnnBlock()
 
+    /**
+     * Presentation choices are frozen with a log reference so later view and copy-setting changes
+     * cannot rewrite evidence that has already been added to a note.  Per-row values contain only
+     * the optional metadata needed to render that particular excerpt.
+     */
+    data class LogRefPresentationOptions(
+        val timeDelta: Boolean = false,
+        val rowNumber: Boolean = false,
+        val pidTid: Boolean = false,
+        val processName: Boolean = false,
+        /** Explicit checkbox choice to show all captured candidates, beyond names visible at capture. */
+        val allProcessNameCandidates: Boolean = false,
+    )
+
+    data class LogRefRowPresentation(
+        val logId: Int,
+        /** Original row label, retained if an imported capture later reanchors the LogRef IDs. */
+        val rowNumberText: String = logId.toString(),
+        /** Formatted at capture time; null means the displayed sequence had no usable baseline. */
+        val timeDeltaText: String? = null,
+        /** Name chosen by the source view, including a MANUAL per-row pick. */
+        val displayedProcessName: String? = null,
+        /** Name candidate captured even if the source view was showing numeric PIDs. */
+        val processNameCandidate: String? = null,
+    )
+
+    data class LogRefPresentation(
+        val options: LogRefPresentationOptions,
+        val rows: List<LogRefRowPresentation>,
+        /** Fixed capture-time availability; remains stable when the user toggles Δt off. */
+        val deltaAvailable: Boolean = options.timeDelta || rows.any { !it.timeDeltaText.isNullOrBlank() && it.timeDeltaText != "—" },
+    ) {
+        private val rowsById: Map<Int, LogRefRowPresentation> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+            rows.associateBy { it.logId }
+        }
+
+        fun row(logId: Int): LogRefRowPresentation? = rowsById[logId]
+    }
+
+    /** The bounded excerpt captured by an Add annotation action. */
+    data class LogRefCapture(
+        val rows: List<LogEntry>,
+        val presentation: LogRefPresentation,
+    )
+
     /** One or more log lines with an optional caption.
      *  sourceTabId / sourceFilename are set when the lines come from a different tab (compare mode).
      *  sourceEntries caches the actual rows so the annotation survives tab switches. */
@@ -452,6 +497,8 @@ sealed class AnnBlock {
         val sourceTabId: String? = null,
         val sourceFilename: String? = null,
         val sourceEntries: List<LogEntry>? = null,
+        /** Null only for legacy blocks that still need one-time migration on open/restore. */
+        val presentation: LogRefPresentation? = null,
     ) : AnnBlock()
 
     /** A video frame or screenshot, captured via the video panel's "Add frame to notes" button
@@ -970,6 +1017,18 @@ data class LogTab(
     // snapshot controls even when they have no video attachment. The archive remains the source
     // of truth; this path reopens its descriptor and app-local snapshot cursor.
     val captureArchivePath: String? = null,
+    // Choices used to migrate pre-snapshot LogRefs after a restored tab's rows and analysis have
+    // loaded. Session-only: restoration captures them before asynchronous parsing, then clears
+    // this field once migration completes. Never serialize it.
+    val pendingLegacyLogRefPreferences: LegacyLogRefPreferences? = null,
+)
+
+/** Copy presentation preferences captured when a legacy note is opened/restored. */
+data class LegacyLogRefPreferences(
+    val copyRowNumber: Boolean,
+    val showRowNumbers: Boolean,
+    val copyPidTid: Boolean,
+    val copyPidAsName: Boolean,
 )
 
 fun LogTab.searchFor(scope: SearchScope): LogSearchState = searches[scope]
@@ -1572,6 +1631,8 @@ data class CtxMenuState(
     /** Non-empty when the right-click came from a panel with its own local selection
      *  (e.g. the "Original" panel in split/unfiltered view). Preferred over tab.selected. */
     val panelSelectedIds: Set<Int> = emptySet(),
+    /** Excerpt-only rows/metadata captured by the originating panel for Add annotation. */
+    val annotationCapture: AnnBlock.LogRefCapture? = null,
 )
 
 // Right-click on a tab (not a log row) — deliberately separate from CtxMenuState, whose
@@ -1584,6 +1645,8 @@ data class AddAnnRequest(
     val sourceTabId: String,
     val logIds: List<Int>,
     val sourceFilename: String? = null,
+    /** Captured at the Add annotation action, so closing/switching the source cannot lose it. */
+    val capture: AnnBlock.LogRefCapture? = null,
 )
 
 sealed class LogItem {

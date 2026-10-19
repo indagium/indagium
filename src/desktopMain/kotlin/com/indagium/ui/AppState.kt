@@ -134,6 +134,7 @@ import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.SearchComputeResult
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.freezeLegacyLogRefPresentation
 import com.indagium.utils.annotationDiagramFileName
 import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.archiveVideoCacheFileName
@@ -4476,7 +4477,13 @@ class AppState(
         pendingCaptureNotesImport = null
         if (action == com.indagium.capture.CaptureNotesImportAction.SKIP) return
         upAnn(pending.tabId) { t ->
-            t.copy(annotations = com.indagium.capture.mergeCaptureNotesImport(t.annotations, pending.incoming, action))
+            val merged = com.indagium.capture.mergeCaptureNotesImport(t.annotations, pending.incoming, action)
+            val preferences = legacyLogRefPreferences()
+            val frozen = merged.freezeLegacyLogRefs(t, preferences)
+            t.copy(
+                annotations = frozen,
+                pendingLegacyLogRefPreferences = preferences.takeIf { frozen.hasUnresolvedLegacyLogRefs(t) },
+            )
         }
     }
 
@@ -4859,8 +4866,8 @@ class AppState(
         captureExportCancelled = false
         captureExportWarning = null
         // Captured once, at click time, from the tab's CURRENT notes — same "one fixed snapshot of
-        // the request" treatment `request` itself already gets. preparedForSave resolves LogRef
-        // sourceEntries against this tab's own live rmap, exactly like an ordinary .ann sidecar save.
+        // the request" treatment `request` itself already gets. Newly added refs already carry
+        // frozen rows; preparedForSave resolves only legacy refs that still need a row payload.
         val preparedNotes = tab(tabId)?.let { t -> t.annotations.preparedForSave(t) }
         captureExportJob = ioScope.launch {
             try {
@@ -7008,7 +7015,7 @@ class AppState(
     // "restored tab counter" test once autosave restore became async).
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
         val before = tab(tabId)
-        val candidate = before?.let(fn)
+        val candidate = before?.let(fn)?.freezeDeferredLegacyLogRefsIfResolvable()
         val compositionInputsChanged = before != null && candidate != null &&
             (before.logData !== candidate.logData ||
                 before.analysis.stackTraceGroups !== candidate.analysis.stackTraceGroups)
@@ -9724,10 +9731,17 @@ class AppState(
 
     // Annotation block-model mutations are owned by AnnotationManager (Task 12 slice 5) — see
     // its doc comment for the auto-export-on-change rationale these forward to unchanged.
-    fun requestAddAnn(sourceTabId: String, logIds: List<Int>) = annotationManager.requestAddAnn(sourceTabId, logIds)
+    fun requestAddAnn(sourceTabId: String, logIds: List<Int>, capture: AnnBlock.LogRefCapture? = null) =
+        annotationManager.requestAddAnn(sourceTabId, logIds, capture)
+
+    fun requestAddAnn(sourceTabId: String, capture: AnnBlock.LogRefCapture) =
+        annotationManager.requestAddAnn(sourceTabId, capture.rows.map { it.id }, capture)
 
     fun confirmAddAnn(targetTabId: String, sourceTabId: String, logIds: List<Int>, caption: String, sourceFilename: String?) =
         annotationManager.confirmAddAnn(targetTabId, sourceTabId, logIds, caption, sourceFilename)
+
+    fun confirmAddAnn(request: AddAnnRequest, caption: String, options: AnnBlock.LogRefPresentationOptions) =
+        annotationManager.confirmAddAnn(request, caption, options)
 
     fun addNoteBlock(tabId: String, afterId: String? = null) = annotationManager.addNoteBlock(tabId, afterId)
 
@@ -9741,6 +9755,9 @@ class AppState(
         afterId: String? = null,
         sourceEntries: List<LogEntry>? = null,
     ): String? = annotationManager.addLogRefBlock(tabId, logIds, caption, afterId, sourceEntries)
+
+    fun updateLogRefPresentation(tabId: String, blockId: String, caption: String, presentation: AnnBlock.LogRefPresentation) =
+        annotationManager.updateLogRefPresentation(tabId, blockId, caption, presentation)
 
     fun addImageBlock(
         tabId: String,
@@ -11351,6 +11368,7 @@ class AppState(
     /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
     @Suppress("TooGenericExceptionCaught")
     fun openCaptureFile(file: File): String {
+        val legacyPreferences = legacyLogRefPreferences()
         val existing = tabs.firstOrNull {
             it.captureArchivePath == file.absolutePath || it.attachedVideo?.captureSourcePath == file.absolutePath
         }
@@ -11426,7 +11444,14 @@ class AppState(
                 // A brand-new tab never has existing notes to protect (see
                 // offerCaptureNotesReimportIfNeeded's doc for the one case that does), so this always
                 // applies directly — no Append/Replace/Skip prompt on this path, ever.
-                if (importedNotes != null) captureTab = captureTab.copy(annotations = importedNotes)
+                if (importedNotes != null) {
+                    captureTab = captureTab.copy(
+                        annotations = importedNotes,
+                        pendingLegacyLogRefPreferences = legacyPreferences.takeIf {
+                            importedNotes.blocks.any { block -> block is AnnBlock.LogRef && block.presentation == null }
+                        },
+                    )
+                }
                 synchronized(stateLock) {
                     ensureActive()
                     publishOpenedTab(captureTab, originLauncherId)
@@ -11467,6 +11492,7 @@ class AppState(
      * silently losing markers, since a v3 archive's log/mapping/notes assets are all still small.
      */
     private fun offerCaptureNotesReimportIfNeeded(existing: LogTab, file: File) {
+        val legacyPreferences = legacyLogRefPreferences()
         ioScope.launch {
             val imported = runCatching {
                 com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
@@ -11487,9 +11513,18 @@ class AppState(
             // suspended — it may have gained its first note while this was reopening the archive.
             val current = tab(existing.id) ?: return@launch
             if (current.annotations.blocks.isEmpty()) {
-                upAnn(existing.id) { t -> t.copy(annotations = repointed) }
+                upAnn(existing.id) { t ->
+                    val frozen = repointed.freezeLegacyLogRefs(t, legacyPreferences)
+                    t.copy(
+                        annotations = frozen,
+                        pendingLegacyLogRefPreferences = legacyPreferences.takeIf {
+                            frozen.hasUnresolvedLegacyLogRefs(t)
+                        },
+                    )
+                }
             } else {
-                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, repointed, file.name)
+                val frozen = repointed.freezeLegacyLogRefs(current, legacyPreferences)
+                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, frozen, file.name)
             }
         }
     }
@@ -12579,25 +12614,18 @@ class AppState(
     private fun Annotations.withDetectedFingerprint(logData: List<LogEntry>): Annotations =
         if (logData.isEmpty()) this else copy(fingerprint = computeLogFingerprint(logData))
 
-    // Change 1 (relink-log bugfix): fills in AnnBlock.LogRef.sourceEntries for every block that
-    // doesn't already have one, so the note written to disk is self-contained — reopening it into
-    // a log-less tab (Case Library's "Open notes only", or a log that's since gone missing) still
-    // renders the lines it describes, instead of the empty blocks AnnotationPanel.kt/utils/
-    // Filter.kt/utils/AnnotationHtml.kt's renderers show when both sourceEntries and the loading
-    // tab's rmap come up empty.
+    // Completes any legacy AnnBlock.LogRef.sourceEntries still missing from older notes so a
+    // sidecar stays self-contained when reopened into a log-less tab. Newly created LogRefs capture
+    // their excerpt rows and presentation before the editor opens.
     //
     // Resolves each block through AnnBlock.LogRef.resolveRows (Model.kt) — the same rmap-then-
     // recovered-rows precedence every renderer uses — rather than rmap alone, so Change 2's .md-
     // recovered rows (tab.recoveredNoteRows, populated by openNoteFile) get baked into
     // sourceEntries on the very next save instead of being silently dropped again.
     //
-    // Deliberately save-time ONLY, called from the three call sites that write a `.ann` sidecar —
-    // never from AnnotationManager.confirmAddAnn, and never folded into how blocks are held on the
-    // live tab. Annotations round-trips through autosave on every debounced edit (see
-    // AutosaveCodec.kt's tabToken/persistedSnapshot); inlining every referenced row into THAT path
-    // would bloat it for no benefit, since a live tab can always resolve logIds through its own
-    // rmap. A block that already carries sourceEntries (cross-file/compare-mode blocks — see
-    // AnnBlock.LogRef's own doc comment) is left exactly as-is.
+    // This is a save-time fallback for legacy refs and recovered rows. New refs already carry
+    // sourceEntries in the live tab and autosave token. Any block already carrying sourceEntries
+    // (including compare-mode and frozen excerpts) is left exactly as-is.
     private fun Annotations.materializeLogRefs(tab: LogTab): Annotations {
         if (tab.rmap.isEmpty() && tab.recoveredNoteRows.isEmpty()) return this
         var changed = false
@@ -12617,21 +12645,93 @@ class AppState(
         return if (changed) copy(blocks = updatedBlocks) else this
     }
 
+    private fun legacyLogRefPreferences(source: AppSettings = settings): LegacyLogRefPreferences =
+        LegacyLogRefPreferences(
+            copyRowNumber = source.copyRowNumber,
+            showRowNumbers = source.showRowNumbers,
+            copyPidTid = source.copyPidTid,
+            copyPidAsName = source.copyPidAsName,
+        )
+
+    /** Freeze resolvable legacy excerpts without inventing timestamps or touching files. */
+    private fun Annotations.freezeLegacyLogRefs(
+        tab: LogTab,
+        preferences: LegacyLogRefPreferences,
+    ): Annotations {
+        var changed = false
+        val frozen = blocks.map { block ->
+            if (block !is AnnBlock.LogRef || block.presentation != null) return@map block
+            val rows = if (block.sourceTabId == null) {
+                block.resolveRows(tab)
+            } else {
+                block.sourceEntries ?: tab.recoveredNoteRows[block.id].orEmpty()
+            }
+            if (rows.isEmpty() && block.logIds.isNotEmpty() && block.sourceEntries == null) return@map block
+            changed = true
+            val namesBelongToSource = block.sourceTabId == null && rows.isNotEmpty() && rows.all(tab::hasSameRow)
+            val presentationTab = if (namesBelongToSource) tab else tab.copy(
+                analysis = tab.analysis.copy(processNames = emptyMap()),
+            )
+            block.copy(
+                sourceEntries = block.sourceEntries ?: rows.toList(),
+                presentation = freezeLegacyLogRefPresentation(rows, presentationTab, preferences),
+            )
+        }
+        return if (changed) copy(blocks = frozen) else this
+    }
+
+    private fun Annotations.hasUnresolvedLegacyLogRefs(tab: LogTab): Boolean =
+        blocks.filterIsInstance<AnnBlock.LogRef>().any { block ->
+            block.presentation == null && block.logIds.isNotEmpty() &&
+                block.sourceEntries == null &&
+                (if (block.sourceTabId == null) block.resolveRows(tab) else tab.recoveredNoteRows[block.id].orEmpty()).isEmpty()
+        }
+
+    private fun LogTab.freezeDeferredLegacyLogRefsIfResolvable(): LogTab {
+        val preferences = pendingLegacyLogRefPreferences ?: return this
+        val hasRowsToResolve = logData.isNotEmpty() || recoveredNoteRows.isNotEmpty() ||
+            annotations.blocks.filterIsInstance<AnnBlock.LogRef>().any { it.sourceEntries != null }
+        if (!hasRowsToResolve) return this
+        val frozen = annotations.freezeLegacyLogRefs(this, preferences)
+        return copy(
+            annotations = frozen,
+            pendingLegacyLogRefPreferences = preferences.takeIf { frozen.hasUnresolvedLegacyLogRefs(this) },
+        )
+    }
+
     // Shared prep for every place that writes a `.ann` sidecar (saveAnnotationsTo/saveAnalysis/
     // autoExportAnnotations) — NOT used by the autosave tab-token path (AutosaveCodec.kt's
     // tabToken), which serializes the tab's live Annotations completely unmodified. Order between
     // the three doesn't matter: each touches a disjoint part of Annotations (appVersion/
     // fingerprint/blocks respectively).
-    private fun Annotations.preparedForSave(tab: LogTab): Annotations =
-        withDetectedAppVersion(tab.logData).withDetectedFingerprint(tab.logData).materializeLogRefs(tab)
+    private fun Annotations.preparedForSave(tab: LogTab): Annotations {
+        val prefs = tab.pendingLegacyLogRefPreferences ?: legacyLogRefPreferences()
+        return freezeLegacyLogRefs(tab, prefs)
+            .withDetectedAppVersion(tab.logData)
+            .withDetectedFingerprint(tab.logData)
+            .materializeLogRefs(tab)
+    }
 
     fun loadAnnotationsFrom(tabId: String, file: File): Boolean {
         val annotations = runCatching { file.readText().annotationsFromToken() }.getOrNull() ?: return false
-        // The pin MUST be set inside this same upAnn lambda, not after: upAnn re-reads the tab and
-        // auto-exports immediately, so setting noteTargetName afterwards would let one unpinned
-        // export fire first — the exact overwrite this whole mechanism exists to prevent.
-        upAnn(tabId) { t -> t.copy(annotations = annotations, noteTargetName = file.name) }
-        return tab(tabId)?.annotations == annotations
+        val recovered = recoveredNoteRowsFor(file, annotations)
+        var loaded = false
+        // Loading a sidecar is not an edit: migrate resolvable legacy rows in memory, but do not
+        // trigger an immediate auto-export that would rewrite the user's file on open.
+        upTab(tabId) { t ->
+            loaded = true
+            val withRows = t.copy(recoveredNoteRows = recovered)
+            val preferences = legacyLogRefPreferences()
+            val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
+            withRows.copy(
+                annotations = frozen,
+                noteTargetName = noteExportTargetName(file),
+                pendingLegacyLogRefPreferences = preferences.takeIf {
+                    frozen.hasUnresolvedLegacyLogRefs(withRows)
+                },
+            )
+        }
+        return loaded
     }
 
     fun saveAnalysis(tabId: String) {
@@ -12796,7 +12896,16 @@ class AppState(
                 // Uses upTab, not upAnn: opening a file is not itself an annotation edit, so this
                 // must not trigger an immediate (and here, redundant) re-export.
                 upTab(tabId) { t ->
-                    t.copy(annotations = annotations, noteTargetName = pinName, recoveredNoteRows = recovered)
+                    val withRows = t.copy(recoveredNoteRows = recovered)
+                    val preferences = legacyLogRefPreferences()
+                    val frozen = annotations.freezeLegacyLogRefs(withRows, preferences)
+                    withRows.copy(
+                        annotations = frozen,
+                        noteTargetName = pinName,
+                        pendingLegacyLogRefPreferences = preferences.takeIf {
+                            frozen.hasUnresolvedLegacyLogRefs(withRows)
+                        },
+                    )
                 }
                 return
             }
@@ -15252,7 +15361,14 @@ class AppState(
         val shells = tabLines.mapNotNull { it.removePrefix("tab\t").tabShellFromToken() }
         // processNameMode is session-only (see LogTab.processNameMode) so the token carries none —
         // a restored tab starts from the setting, exactly as a freshly opened one does.
-        tabs = shells.map { it.tab.copy(processNameMode = newTabProcessNameMode()) }
+        val migrationPreferences = legacyLogRefPreferences()
+        tabs = shells.map { shell ->
+            val hasLegacyRefs = shell.tab.annotations.blocks.any { it is AnnBlock.LogRef && it.presentation == null }
+            shell.tab.copy(
+                processNameMode = newTabProcessNameMode(),
+                pendingLegacyLogRefPreferences = migrationPreferences.takeIf { hasLegacyRefs },
+            ).freezeDeferredLegacyLogRefsIfResolvable()
+        }
         if (tabs.none { it.id == activeTabId }) activeTabId = tabs.firstOrNull()?.id ?: ""
         if (tabs.none { it.id == compareTabId }) compareTabId =
             tabs.getOrNull(1)?.id ?: tabs.firstOrNull()?.id ?: ""
@@ -15312,7 +15428,23 @@ class AppState(
                 val full = buildLogAnalysis(result.logData, issueRules, logFormat)
                 ensureActive()
                 upTab(tabId) { current ->
-                    if (settings.customIssueRules == issueRules && current.logData == result.logData) current.copy(analysis = full) else current
+                    if (current.logData != result.logData) current
+                    else {
+                        val analyzed = current.copy(
+                            analysis = if (settings.customIssueRules == issueRules) full else current.analysis,
+                        )
+                        val preferences = analyzed.pendingLegacyLogRefPreferences
+                        if (preferences == null) analyzed
+                        else {
+                            val frozen = analyzed.annotations.freezeLegacyLogRefs(analyzed, preferences)
+                            analyzed.copy(
+                                annotations = frozen,
+                                pendingLegacyLogRefPreferences = preferences.takeIf {
+                                    frozen.hasUnresolvedLegacyLogRefs(analyzed)
+                                },
+                            )
+                        }
+                    }
                 }
             } finally {
                 val load = activeLoads.remove(tabId)

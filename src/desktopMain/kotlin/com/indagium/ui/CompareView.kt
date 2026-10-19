@@ -151,8 +151,8 @@ internal fun CompareView(
                         settings = state.settings,
                         onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(leftTab.id, ids) },
-                        onCtxMenu = { id, x, y, sel, panelSel ->
-                            state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel)
+                        onCtxMenu = { id, x, y, sel, panelSel, capture ->
+                            state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel, annotationCapture = capture)
                         },
                         onToggleGroup = { state.toggleGroup(leftTab.id, it) },
                         onClearFilter = { state.requestClearFilter(leftTab.id) },
@@ -177,7 +177,7 @@ internal fun CompareView(
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
-                        onAddAnnotation = { ids -> state.requestAddAnn(leftTab.id, ids) },
+                        onAddAnnotation = { capture -> state.requestAddAnn(leftTab.id, capture) },
                         onCopyText = { text -> state.copyToClipboard(text) },
                         onLogRowDoubleClick = { id -> state.seekVideoToLogRow(leftTab.id, id) },
                         onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(leftTab.id) },
@@ -240,8 +240,8 @@ internal fun CompareView(
                         settings = state.settings,
                         onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
                         onSelRowRange = { ids -> state.setSelectedRows(rightTab.id, ids) },
-                        onCtxMenu = { id, x, y, sel, panelSel ->
-                            state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel)
+                        onCtxMenu = { id, x, y, sel, panelSel, capture ->
+                            state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel, annotationCapture = capture)
                         },
                         onToggleGroup = { state.toggleGroup(rightTab.id, it) },
                         onClearFilter = { state.requestClearFilter(rightTab.id) },
@@ -266,7 +266,7 @@ internal fun CompareView(
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
-                        onAddAnnotation = { ids -> state.requestAddAnn(rightTab.id, ids) },
+                        onAddAnnotation = { capture -> state.requestAddAnn(rightTab.id, capture) },
                         onCopyText = { text -> state.copyToClipboard(text) },
                         onLogRowDoubleClick = { id -> state.seekVideoToLogRow(rightTab.id, id) },
                         onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(rightTab.id) },
@@ -371,6 +371,9 @@ internal fun CompareView(
                                     onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
                                     onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
                                     onNavigateVideoFrame = { state.navigateToVideoFrame(leftTab.id, it) },
+                                    onUpdateLogRefPresentation = { blockId, caption, presentation ->
+                                        state.updateLogRefPresentation(leftTab.id, blockId, caption, presentation)
+                                    },
                                     onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(leftTab.id, blockId) },
                                     onNavigateDiagramLine = { entryId -> state.navigateToLogLine(leftTab.id, entryId) },
                                     onImportLinkedDiagram = { blockId, source, dialect, confirm ->

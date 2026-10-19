@@ -854,6 +854,7 @@ classDiagram
         +List~Int~ logIds
         +String caption
         +List~LogEntry~ sourceEntries
+        +LogRefPresentation presentation
     }
     class Image {
         +String caption
@@ -1185,7 +1186,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `LogEntry`, `LogLevel` | `model/Model.kt:10,23` | One parsed log line |
 | `LogTab` | `model/Model.kt:463` | Aggregate root: one open file and all state attached to it |
 | `Filter` | `model/Model.kt:154` | The complete filter specification, 18 fields |
-| `Annotations`, `AnnBlock` | `model/Model.kt:276,201` | The note document attached to a tab |
+| `Annotations`, `AnnBlock` | `model/Model.kt:276,201` | The note document attached to a tab; each new LogRef freezes its excerpt rows and presentation choices |
 | `LogAnalysis`, `CrashSite`, `IssueSite` | `model/Model.kt:116,78,73` | Crash/ANR/custom-issue detection results |
 | `LogItem` | `model/Model.kt:882` | Render model produced by `computeItems` |
 | `AppSettings`, `ThemePreset` | `model/Model.kt:704,835` | All persisted preferences; 20 themes |
@@ -1987,6 +1988,24 @@ Saved analyses are written as `<base>_analysis.md` plus a `.ann` sidecar holding
 structure, including image bytes and log references, when the note is reopened. The 5th token field
 carries `sourcePath` (`ui/AppState.kt:5327`), which is what lets the case index associate a note with
 the log it came from.
+
+Each `AnnBlock.LogRef` also persists a `LogRefPresentation`: the captured row labels, formatted
+delta strings, process-name candidates and the names actually displayed by the originating view,
+plus the four presentation flags. The Add action captures only the selected excerpt and this
+metadata before opening the editor, using the source view (or the current filtered context when no
+panel is available); all four optional flags start off for a new block.
+Changing a flag previews the same frozen rows that Notes, Markdown/Jira and HTML clipboard output
+will render. Editing an existing block restores its saved choices. A saved block never consults
+current selection, copy settings, analysis, or process-name maps. Ordinary row copy and filtered
+export retain their existing settings behavior.
+
+The `LogRef` token keeps its existing positional fields and appends the presentation token last, so
+old `.ann` and autosave tokens still decode with `presentation == null`. On open or autosave
+restore, resolvable legacy refs are frozen in memory using the effective legacy copy preferences;
+there is no historical baseline from which to invent Δt values. Deferred autosave shells retain
+the migration preferences until rows resolve. Opening a note does not rewrite its file; the
+snapshot is persisted by the next normal save or autosave. Capture archive reanchoring remaps the
+frozen presentation rows alongside the marker's local row IDs.
 
 ### 13.7 Diagram note codec (v3) and PNG export
 

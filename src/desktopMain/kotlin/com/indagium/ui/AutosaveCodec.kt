@@ -297,7 +297,7 @@ private fun String.fieldToken(): String = if (isEmpty()) "~" else b64()
 
 private fun String.fieldValue(): String = if (this == "~") "" else unb64()
 
-private fun tokenFields(vararg values: String): String = values.joinToString("|") { it.fieldToken() }
+internal fun tokenFields(vararg values: String): String = values.joinToString("|") { it.fieldToken() }
 
 internal fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VALUE).map { it.fieldValue() }
 
@@ -1496,6 +1496,7 @@ private fun AnnBlock.annBlockToken(): String = when (this) {
         sourceTabId.orEmpty(),
         sourceFilename.orEmpty(),
         sourceEntries?.joinToString(";") { it.toAnnToken() }.orEmpty(),
+        presentation?.let(AnnotationLogRefPresentationCodec::encode).orEmpty(),
     )
     // bytes is base64'd with a plain java.util.Base64 call (NOT the .b64() field helper below,
     // which round-trips a String through UTF-8 and would corrupt raw JPEG bytes) — the result is
@@ -1522,6 +1523,8 @@ private fun String.annBlockFromToken(): AnnBlock? = runCatching {
             sourceFilename = p.getOrElse(5) { "" }.takeIf { it.isNotBlank() },
             sourceEntries = p.getOrElse(6) { "" }.takeIf { it.isNotBlank() }
                 ?.split(";")?.mapNotNull { it.toLogEntryFromAnnToken() },
+            presentation = p.getOrElse(7) { "" }.takeIf { it.isNotBlank() }
+                ?.let(AnnotationLogRefPresentationCodec::decode),
         )
         "I" -> AnnBlock.Image(
             id = p[1],
