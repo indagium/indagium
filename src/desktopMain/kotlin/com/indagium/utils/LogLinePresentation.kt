@@ -1,11 +1,11 @@
 package com.indagium.utils
 
-import com.indagium.model.AppSettings
 import com.indagium.model.AnnBlock
+import com.indagium.model.AppSettings
+import com.indagium.model.LegacyLogRefPreferences
 import com.indagium.model.LogEntry
 import com.indagium.model.LogItem
 import com.indagium.model.LogTab
-import com.indagium.model.LegacyLogRefPreferences
 import com.indagium.model.ProcessNameMode
 import com.indagium.model.entry
 
@@ -190,6 +190,7 @@ fun captureFilteredAnnotationLogRef(
 /** A zero-copy, random-access view over the rows and headers that ItemList actually renders. */
 fun List<LogItem>.asLogEntryView(): List<LogEntry> = object : AbstractList<LogEntry>() {
     override val size: Int get() = this@asLogEntryView.size
+
     override fun get(index: Int): LogEntry = this@asLogEntryView[index].entry
 }
 
@@ -217,7 +218,8 @@ fun freezeLegacyLogRefPresentation(
     preferences: LegacyLogRefPreferences,
 ): AnnBlock.LogRefPresentation = AnnBlock.LogRefPresentation(
     options = AnnBlock.LogRefPresentationOptions(
-        timeDelta = false, // Older notes contain no baseline; never fabricate historical values.
+        // Older notes contain no baseline; never fabricate historical values.
+        timeDelta = false,
         rowNumber = preferences.copyRowNumber && preferences.showRowNumbers,
         pidTid = preferences.copyPidTid,
         processName = preferences.copyPidTid && preferences.copyPidAsName,

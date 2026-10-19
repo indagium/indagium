@@ -134,7 +134,6 @@ import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.SearchComputeResult
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
-import com.indagium.utils.freezeLegacyLogRefPresentation
 import com.indagium.utils.annotationDiagramFileName
 import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.archiveVideoCacheFileName
@@ -159,6 +158,7 @@ import com.indagium.utils.extractAppVersionHeuristic
 import com.indagium.utils.extractArchiveVideoToCache
 import com.indagium.utils.extractCandidateResult
 import com.indagium.utils.formatElapsedAsClock
+import com.indagium.utils.freezeLegacyLogRefPresentation
 import com.indagium.utils.indexOfEntryId
 import com.indagium.utils.invalidateComputeCache
 import com.indagium.utils.isLikelyDltSourceFile
@@ -15428,14 +15428,16 @@ class AppState(
                 val full = buildLogAnalysis(result.logData, issueRules, logFormat)
                 ensureActive()
                 upTab(tabId) { current ->
-                    if (current.logData != result.logData) current
-                    else {
+                    if (current.logData != result.logData) {
+                        current
+                    } else {
                         val analyzed = current.copy(
                             analysis = if (settings.customIssueRules == issueRules) full else current.analysis,
                         )
                         val preferences = analyzed.pendingLegacyLogRefPreferences
-                        if (preferences == null) analyzed
-                        else {
+                        if (preferences == null) {
+                            analyzed
+                        } else {
                             val frozen = analyzed.annotations.freezeLegacyLogRefs(analyzed, preferences)
                             analyzed.copy(
                                 annotations = frozen,
