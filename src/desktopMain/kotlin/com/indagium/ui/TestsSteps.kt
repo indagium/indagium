@@ -437,6 +437,7 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
                     StepKind.SCRIPT -> "What the script does (shown in the report)"
                     StepKind.REPLAY -> "What the recorded input does (shown in the report)"
                 },
+                proseTargetId = "test-step:${step.id}:action",
             )
         }
         StepKindFields(step, ops, update)
@@ -445,6 +446,7 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
                 step.expected, { text -> update { it.copy(expected = text) } },
                 enabled = ops.editable, multiline = true,
                 placeholder = if (step.optional) "What should be true when this optional action runs" else "What should be true afterwards",
+                proseTargetId = "test-step:${step.id}:expected",
             )
         }
         if (step.kind == StepKind.AGENT) {
@@ -520,12 +522,14 @@ private fun OptionalStepEditor(
             CommitTextField(
                 step.condition.orEmpty(), { text -> update { it.copy(condition = text) } },
                 enabled = ops.editable, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing",
+                proseTargetId = "test-step:${step.id}:condition",
             )
         }
     } else if (configuringOptional) {
         TestsLabeled("Perform only when") {
             CommitTextField(optionalCondition, { text -> onCondition(text); StoreResult.Ok(Unit) }, enabled = ops.editable,
-                multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
+                multiline = true, placeholder = "Describe the visible condition, such as an ad is playing",
+                proseTargetId = "test-step:${step.id}:condition")
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             AppButton("Save condition", enabled = ops.editable && optionalCondition.isNotBlank(), onClick = {
@@ -700,6 +704,7 @@ private fun CheckBody(check: StepCheck, step: TestStep, editable: Boolean, updat
             CommitTextField(
                 check.text, { t -> update { s -> s.mapCheck<StepCheck.AskJudge>(check.id) { it.copy(text = t) } } },
                 enabled = editable, multiline = true, placeholder = "A question the judge answers yes or no",
+                proseTargetId = "test-step:${step.id}:check:${check.id}:question",
             )
         }
         is StepCheck.DeviceState -> DeviceStateCheckBody(check, editable) { changed -> update { s -> s.mapCheck<StepCheck.DeviceState>(check.id) { changed } } }
@@ -734,6 +739,7 @@ private fun ScreenJudgeBody(check: StepCheck.ScreenJudge, step: TestStep, editab
     CommitTextField(
         check.text, { t -> update { s -> s.mapCheck<StepCheck.ScreenJudge>(check.id) { it.copy(text = t) } } },
         enabled = editable, multiline = true, placeholder = "What the screen should look like",
+        proseTargetId = "test-step:${step.id}:check:${check.id}:screen",
     )
     WrapRow {
         AppText("Compare with", color = tc().td, fontSize = 10.sp)
@@ -892,6 +898,7 @@ private fun ExampleBody(example: StepExample, ops: StepListOps, update: ((TestSt
                 CommitTextField(
                     example.caption, { c -> update { s -> s.mapExample<StepExample.ReferenceLog>(example.id) { it.copy(caption = c) } } },
                     Modifier.weight(1f), ops.editable, "caption (optional)",
+                    proseTargetId = "step-example:${example.id}:caption",
                 )
             }
             CommitTextField(
@@ -917,6 +924,7 @@ private fun GoldenScreenshotBody(example: StepExample.GoldenScreenshot, ops: Ste
         CommitTextField(
             example.caption, { c -> update { s -> s.mapExample<StepExample.GoldenScreenshot>(example.id) { it.copy(caption = c) } } },
             Modifier.weight(1f), ops.editable, "caption (optional)",
+            proseTargetId = "step-example:${example.id}:caption",
         )
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {

@@ -465,10 +465,10 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                                 AppButton("Remove", onClick = { editableSteps.removeAt(index) }, variant = ButtonVariant.Ghost)
                             }
                             TestsLabeled("Action") {
-                                CommitTextField(step.action, { value -> editableSteps[index] = editableSteps[index].copy(action = value); StoreResult.Ok(Unit) }, placeholder = "What the tester does")
+                                CommitTextField(step.action, { value -> editableSteps[index] = editableSteps[index].copy(action = value); StoreResult.Ok(Unit) }, placeholder = "What the tester does", proseTargetId = "test-step:${step.id}:action")
                             }
                             TestsLabeled("Expected result") {
-                                CommitTextField(step.expected, { value -> editableSteps[index] = editableSteps[index].copy(expected = value); StoreResult.Ok(Unit) }, multiline = true, placeholder = "What should happen")
+                                CommitTextField(step.expected, { value -> editableSteps[index] = editableSteps[index].copy(expected = value); StoreResult.Ok(Unit) }, multiline = true, placeholder = "What should happen", proseTargetId = "test-step:${step.id}:expected")
                             }
                         }
                         Spacer(Modifier.height(6.dp))
@@ -763,6 +763,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             row.authorAdded -> "What the AI agent should do"
                             else -> "Recorded action"
                         },
+                        proseTargetId = "recorded-step:${row.id}:action",
                     )
                 }
                 TestsLabeled("Expected result") {
@@ -779,6 +780,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             row.optional -> "May be blank for an optional action"
                             else -> "Required before applying"
                         },
+                        proseTargetId = "recorded-step:${row.id}:expected",
                     )
                 }
                 if (row.stepKind == StepKind.AGENT) {
@@ -802,6 +804,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             enabled = editable,
                             multiline = true,
                             placeholder = "Describe the visible condition, such as an ad is playing",
+                            proseTargetId = "recorded-step:${row.id}:condition",
                         )
                     }
                 }

@@ -163,6 +163,7 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () 
         onTitleCommit = { t -> ui.state.updateTestSuite(suite.id) { it.copy(name = t.trim()) } },
         titleEditable = access.editable,
         titleDescription = "Suite name",
+        proseTargetId = "test-suite:${suite.id}:title",
         titlePlaceholder = "Suite name",
         primary = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -503,13 +504,13 @@ private fun SuiteSettingsTab(suite: TestSuite, editable: Boolean) {
         Spacer(Modifier.height(10.dp))
         Divider()
         TestsSectionTitle("Agent instructions")
-        TestsLabeled("Suite goal") { CommitTextField(suite.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What this suite covers") }
+        TestsLabeled("Suite goal") { CommitTextField(suite.description, { t -> update { it.copy(description = t) } }, enabled = editable, multiline = true, placeholder = "What this suite covers", proseTargetId = "test-suite:${suite.id}:goal") }
         Spacer(Modifier.height(8.dp))
-        TestsLabeled("Instructions shown to every testing agent") { CommitTextField(suite.instructions, { t -> update { it.copy(instructions = t) } }, enabled = editable, multiline = true, placeholder = "Context every case shares") }
+        TestsLabeled("Instructions shown to every testing agent") { CommitTextField(suite.instructions, { t -> update { it.copy(instructions = t) } }, enabled = editable, multiline = true, placeholder = "Context every case shares", proseTargetId = "test-suite:${suite.id}:instructions") }
         Spacer(Modifier.height(8.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             TestsLabeled("Target package", Modifier.weight(1f)) { CommitTextField(suite.targetPackage, { t -> update { it.copy(targetPackage = t.trim()) } }, enabled = editable, placeholder = "com.example.app", mono = true) }
-            TestsLabeled("Device hint", Modifier.weight(1f)) { CommitTextField(suite.deviceProfileHint, { t -> update { it.copy(deviceProfileHint = t) } }, enabled = editable, placeholder = "Pixel, Android version…") }
+            TestsLabeled("Device hint", Modifier.weight(1f)) { CommitTextField(suite.deviceProfileHint, { t -> update { it.copy(deviceProfileHint = t) } }, enabled = editable, placeholder = "Pixel, Android version…", proseTargetId = "test-suite:${suite.id}:device-hint") }
         }
         Spacer(Modifier.height(8.dp))
         TestsLabeled("Tags") { TagsEditor(suite.tags, editable) { tags -> update { it.copy(tags = tags) } } }

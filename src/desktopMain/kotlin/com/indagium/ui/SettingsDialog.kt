@@ -1402,6 +1402,28 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 )
             }
         }
+        SettingsControlRow {
+            CompactSettingWithTooltip(
+                label = "English proofreading",
+                tooltip = "Suggests English spelling and grammar corrections in notes and captions. Text is checked locally; changes are applied when you choose a suggestion.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.proofreading.enabled) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(enabled = idx == 0)) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "English variant",
+                tooltip = "Chooses American or British English spelling rules for local suggestions.",
+            ) {
+                SegmentedControl(
+                    options = listOf("US", "UK"),
+                    selectedIndices = setOf(if (state.settings.proofreading.language == "en-GB") 1 else 0),
+                    onToggle = { idx -> state.updateSettings { it.copy(proofreading = it.proofreading.copy(language = if (idx == 0) "en-US" else "en-GB")) } },
+                )
+            }
+        }
     }
 }
 

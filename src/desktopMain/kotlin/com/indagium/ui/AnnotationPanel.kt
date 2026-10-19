@@ -58,14 +58,17 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -113,6 +116,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
 import java.io.File
+import java.util.UUID
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -1365,22 +1369,78 @@ fun AnnotationPanel(
                         // Keep the private issue note compact inside the panel. Once it reaches the
                         // same bounded height used by the other annotation text areas, scrolling
                         // stays inside the field and the clear action remains available.
-                        ScrollableTextArea(
-                            value = ann.issueDescription,
-                            onValue = { mutate { onUpdateIssueDescription(it) } },
-                            placeholder = "Not included in previews or exports…",
-                            modifier = Modifier.fillMaxWidth()
-                                // ScrollableTextArea groups focus around the scrolling field, so
-                                // hasFocus is the correct value for shortcut gating.
-                                .onFocusChanged { issueDescFocused = it.hasFocus },
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            minHeight = 60.dp,
-                            maxHeight = 160.dp,
-                            resetKey = tab.id,
-                            enabled = !notesLocked,
-                            onClear = { mutate { onUpdateIssueDescription("") } },
+                        val editorValue = remember(tab.id) {
+                            mutableStateOf(TextFieldValue(ann.issueDescription, TextRange(ann.issueDescription.length)))
+                        }
+                        val focusRequester = remember(tab.id) { FocusRequester() }
+                        val issueTargetId = "${tab.id}:issue-description"
+                        val proofreadingAnchor = rememberProofreadingPopupAnchorState(issueTargetId)
+                        var retainedIssueSelection by remember(tab.id) { mutableStateOf<TextRange?>(null) }
+                        val proofread = ProofreadingAssist(
+                            value = editorValue.value,
+                            available = !notesLocked,
+                            editorFocused = issueDescFocused,
+                            targetId = issueTargetId,
+                            onValueChange = { updated ->
+                                if (!notesLocked) {
+                                    editorValue.value = updated
+                                    retainedIssueSelection = null
+                                    mutate { onUpdateIssueDescription(updated.text) }
+                                }
+                            },
+                            onFocusRestored = { runCatching { focusRequester.requestFocus() } },
+                            anchorState = proofreadingAnchor,
                         )
+                        Row(
+                            Modifier.onFocusChanged { issueDescFocused = it.hasFocus }.focusGroup(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            verticalAlignment = Alignment.Top,
+                        ) {
+                            Box(Modifier.weight(1f)) {
+                                ScrollableTextArea(
+                                    value = ann.issueDescription,
+                                    onValue = { mutate { onUpdateIssueDescription(it) } },
+                                    placeholder = "Not included in previews or exports…",
+                                    modifier = Modifier.fillMaxWidth().focusRequester(focusRequester)
+                                        .onPointerEvent(PointerEventType.Press) { retainedIssueSelection = null }
+                                        .onPreviewKeyEvent {
+                                            if (it.type == KeyEventType.KeyDown) retainedIssueSelection = null
+                                            false
+                                        }
+                                        .cancelVoiceOnEscape(issueTargetId),
+                                    fontSize = 11.sp,
+                                    lineHeight = 16.sp,
+                                    minHeight = 60.dp,
+                                    maxHeight = 160.dp,
+                                    resetKey = tab.id,
+                                    enabled = !notesLocked,
+                                    onClear = { mutate { onUpdateIssueDescription("") } },
+                                    textFieldValueState = editorValue,
+                                    onTextFieldValueChange = { updated ->
+                                        if (updated.text != ann.issueDescription) retainedIssueSelection = null
+                                        else if (!updated.selection.collapsed) retainedIssueSelection = updated.selection
+                                    },
+                                    visualTransformation = proofread,
+                                    proofreadingAnchorState = proofreadingAnchor,
+                                )
+                            }
+                            VoiceDictationButton(
+                                targetId = issueTargetId,
+                                enabled = !notesLocked,
+                                visible = issueDescFocused,
+                                onBeforeAction = {
+                                    if (retainedIssueSelection == null) retainedIssueSelection = editorValue.value.selection
+                                },
+                                onTranscript = { transcript ->
+                                    val base = retainedIssueSelection?.let { editorValue.value.copy(selection = it) } ?: editorValue.value
+                                    val updated = insertVoiceTranscript(base, transcript)
+                                    retainedIssueSelection = null
+                                    editorValue.value = updated
+                                    mutate { onUpdateIssueDescription(updated.text) }
+                                },
+                                onFocusRestored = { runCatching { focusRequester.requestFocus() } },
+                            )
+                        }
                     }
                 }
                 Divider()
@@ -1405,6 +1465,7 @@ fun AnnotationPanel(
                         onClear = { mutate { onUpdatePrefix("") } },
                         modifier = Modifier.fillMaxWidth().testTag("annotation-prefix-field"),
                         enabled = !notesLocked,
+                        proseTargetId = "${tab.id}:prefix:inline",
                     )
                 }
 
@@ -1424,7 +1485,7 @@ fun AnnotationPanel(
                 fun BlockContent(block: AnnBlock, isFirst: Boolean, isLast: Boolean, dragHandleModifier: Modifier) {
                     when (block) {
                         is AnnBlock.Note -> NoteBlock(
-                            block = block, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
+                            block = block, tabId = tab.id, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { focused ->
@@ -1474,7 +1535,7 @@ fun AnnotationPanel(
                             dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.Image -> ImageBlockView(
-                            block = block, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
+                            block = block, tabId = tab.id, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { focused ->
@@ -1650,6 +1711,7 @@ fun AnnotationPanel(
                             onClear = { mutate { onUpdateSuffix("") } },
                             modifier = Modifier.fillMaxWidth().testTag("annotation-next-steps-field"),
                             enabled = !notesLocked,
+                            proseTargetId = "${tab.id}:suffix:inline",
                         )
                     }
                 }
@@ -2589,12 +2651,37 @@ private fun BlockTextField(
     onFieldFocusChanged: (Boolean) -> Unit,
     enabled: Boolean = true,
     modifier: Modifier = Modifier,
+    fieldValueState: MutableState<TextFieldValue>? = null,
+    onEditorValueChange: ((TextFieldValue) -> Unit)? = null,
+    visualTransformation: androidx.compose.ui.text.input.VisualTransformation = androidx.compose.ui.text.input.VisualTransformation.None,
+    proofreadingAnchorState: ProofreadingPopupAnchorState? = null,
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    var localValue by remember { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    var textLayout by remember { mutableStateOf<androidx.compose.ui.text.TextLayoutResult?>(null) }
+    var textLayoutCoordinates by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val textValue = fieldValueState?.value ?: localValue
+    LaunchedEffect(value) {
+        if (textValue.text != value) {
+            val updated = TextFieldValue(value, TextRange(value.length))
+            if (fieldValueState != null) fieldValueState.value = updated else localValue = updated
+        }
+    }
+    LaunchedEffect(textValue.text, textValue.selection, textLayout, textLayoutCoordinates) {
+        proofreadingAnchorState?.update(textLayoutCoordinates, textLayout, textValue.selection.end)
+    }
     BasicTextField(
-        value = value,
-        onValueChange = { if (enabled) onValueChange(it) },
+        value = textValue,
+        visualTransformation = visualTransformation,
+        onValueChange = {
+            if (enabled) {
+                if (fieldValueState != null) fieldValueState.value = it else localValue = it
+                onEditorValueChange?.invoke(it)
+                onValueChange(it.text)
+            }
+        },
         readOnly = !enabled,
+        onTextLayout = { textLayout = it },
         textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
         cursorBrush = SolidColor(tc.ac),
         modifier = modifier.fillMaxWidth()
@@ -2602,11 +2689,17 @@ private fun BlockTextField(
             .border(1.dp, tc.br, FIELD_CORNER)
             .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
             .onFocusChanged { isFocused = it.isFocused; onFieldFocusChanged(it.isFocused) }
+            .onPreviewKeyEvent { event -> proofreadingAnchorState?.handleKeyEvent(event) == true }
             .then(if (value.isEmpty() && isFocused) Modifier.heightIn(min = 52.dp) else Modifier)
             .padding(horizontal = 8.dp, vertical = 5.dp),
         decorationBox = { inner ->
-            if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 12.sp)
-            inner()
+            Box(Modifier.fillMaxWidth().onGloballyPositioned {
+                textLayoutCoordinates = it
+                proofreadingAnchorState?.update(it, textLayout, textValue.selection.end)
+            }) {
+                if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 12.sp)
+                inner()
+            }
         },
     )
 }
@@ -2631,6 +2724,7 @@ internal fun MarkdownInlineOrTextField(
     maxHeight: Dp? = null,
     onClear: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    proseTargetId: String? = null,
 ) {
     // An empty Markdown field has to enter edit mode as soon as it gains focus. Otherwise the
     // first character makes `value.isNotBlank()` true before inlineEditing changes, so this branch
@@ -2639,7 +2733,64 @@ internal fun MarkdownInlineOrTextField(
     var inlineEditing by remember { mutableStateOf(false) }
     var hasFocusedInlineEditor by remember { mutableStateOf(false) }
     var inlineEditorFocused by remember { mutableStateOf(false) }
+    var editorGroupFocused by remember { mutableStateOf(false) }
+    var assistanceDialogOpen by remember { mutableStateOf(false) }
+    var proofreadingKeyboardPopupOpen by remember { mutableStateOf(false) }
     val inlineEditRequester = remember { FocusRequester() }
+    val stableVoiceTargetId = remember(proseTargetId, fieldFocusRequester) {
+        proseTargetId ?: "note-inline:${UUID.randomUUID()}"
+    }
+    val proofreadingAnchor = rememberProofreadingPopupAnchorState(stableVoiceTargetId)
+    val editorValue = remember(stableVoiceTargetId) { mutableStateOf(TextFieldValue(value, TextRange(value.length))) }
+    var retainedVoiceSelection by remember(stableVoiceTargetId) { mutableStateOf<TextRange?>(null) }
+    val voiceSnapshot = LocalVoiceInputUi.current?.coordinator?.snapshot?.collectAsState()?.value
+    val dictatingHere = voiceSnapshot?.ownerId == stableVoiceTargetId &&
+        (voiceSnapshot.state is com.indagium.voice.VoiceInputState.Recording ||
+            voiceSnapshot.state is com.indagium.voice.VoiceInputState.Transcribing)
+    LaunchedEffect(value) {
+        if (editorValue.value.text != value) {
+            retainedVoiceSelection = null
+            editorValue.value = TextFieldValue(value, TextRange(value.length))
+        }
+    }
+
+    fun acceptText(updated: String) {
+        if (updated != value) retainedVoiceSelection = null
+        onValueChange(updated)
+    }
+
+    fun trackEditorValue(updated: TextFieldValue) {
+        if (updated.text != value) retainedVoiceSelection = null
+        else if (!updated.selection.collapsed) retainedVoiceSelection = updated.selection
+    }
+
+    fun applyVoiceTranscript(transcript: com.indagium.voice.VoiceTranscript) {
+        if (!enabled) return
+        val base = retainedVoiceSelection?.let { editorValue.value.copy(selection = it) } ?: editorValue.value
+        val updated = insertVoiceTranscript(base, transcript)
+        retainedVoiceSelection = null
+        editorValue.value = updated
+        onValueChange(updated.text)
+        runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() }
+    }
+
+    val proofreadingTransformation = ProofreadingAssist(
+        value = editorValue.value,
+        available = enabled && (!renderInlineMarkdown || value.isBlank() || inlineEditing),
+        editorFocused = inlineEditorFocused,
+        targetId = stableVoiceTargetId,
+        onValueChange = { updated ->
+            if (enabled) {
+                retainedVoiceSelection = null
+                editorValue.value = updated
+                onValueChange(updated.text)
+                runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() }
+            }
+        },
+        onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
+        anchorState = proofreadingAnchor,
+        onInteractionActiveChange = { proofreadingKeyboardPopupOpen = it },
+    )
 
     LaunchedEffect(inlineEditing) {
         if (inlineEditing) {
@@ -2655,13 +2806,14 @@ internal fun MarkdownInlineOrTextField(
     // Some desktop focus transitions briefly report a blur while the BasicTextField is updating
     // its value/caret. Treat a blur as an exit only if focus is still gone after a frame; this
     // keeps a populated inline editor alive through the first and subsequent keystrokes.
-    LaunchedEffect(inlineEditing, hasFocusedInlineEditor, inlineEditorFocused) {
-        if (inlineEditing && hasFocusedInlineEditor && !inlineEditorFocused) {
+    LaunchedEffect(inlineEditing, hasFocusedInlineEditor, editorGroupFocused, assistanceDialogOpen, dictatingHere, proofreadingKeyboardPopupOpen) {
+        val canLeaveEditor = !editorGroupFocused && !assistanceDialogOpen && !dictatingHere && !proofreadingKeyboardPopupOpen
+        if (inlineEditing && hasFocusedInlineEditor && canLeaveEditor) {
             // Allow another inline editor to receive focus before treating this as a genuine
             // exit. A single frame is enough for ordinary text edits but can race the focus
             // request when moving directly from Prefix to Next steps on desktop.
             delay(100)
-            if (inlineEditing && !inlineEditorFocused) inlineEditing = false
+            if (inlineEditing && canLeaveEditor) inlineEditing = false
         }
     }
 
@@ -2682,6 +2834,7 @@ internal fun MarkdownInlineOrTextField(
     } else {
         val activeFocusRequester = if (inlineEditing) inlineEditRequester else fieldFocusRequester
         val focusChange: (Boolean) -> Unit = { focused ->
+            if (!focused && inlineEditorFocused && retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection
             if (focused) {
                 hasFocusedInlineEditor = true
                 if (renderInlineMarkdown && value.isBlank() && enabled) inlineEditing = true
@@ -2690,29 +2843,73 @@ internal fun MarkdownInlineOrTextField(
             // The callback from the parent still runs so panel-level keyboard state remains accurate.
             onFieldFocusChanged(focused)
         }
+        val groupModifier = Modifier.fillMaxWidth()
+            .onFocusChanged { editorGroupFocused = it.hasFocus }
+            .focusGroup()
+        val inputModifier = modifier.fillMaxWidth()
+            .onPointerEvent(PointerEventType.Press) { retainedVoiceSelection = null }
+            .onPreviewKeyEvent {
+                if (it.type == KeyEventType.KeyDown) retainedVoiceSelection = null
+                false
+            }
         if (maxHeight != null) {
-            ScrollableTextArea(
-                value = value,
-                onValue = onValueChange,
-                placeholder = placeholder,
-                modifier = modifier
-                    .then(if (activeFocusRequester != null) Modifier.focusRequester(activeFocusRequester) else Modifier)
-                    .onFocusChanged { focusChange(it.hasFocus) },
-                maxHeight = maxHeight,
-                enabled = enabled,
-                onClear = onClear,
-            )
+            Row(groupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.weight(1f)) {
+                    ScrollableTextArea(
+                        value = value,
+                        onValue = ::acceptText,
+                        placeholder = placeholder,
+                        modifier = inputModifier
+                            .then(if (activeFocusRequester != null) Modifier.focusRequester(activeFocusRequester) else Modifier)
+                            .onFocusChanged { focusChange(it.hasFocus) }
+                            .cancelVoiceOnEscape(stableVoiceTargetId),
+                        maxHeight = maxHeight,
+                        enabled = enabled,
+                        onClear = onClear,
+                        textFieldValueState = editorValue,
+                        onTextFieldValueChange = ::trackEditorValue,
+                        visualTransformation = proofreadingTransformation,
+                        proofreadingAnchorState = proofreadingAnchor,
+                    )
+                }
+                VoiceDictationButton(
+                    targetId = stableVoiceTargetId,
+                    enabled = enabled,
+                    visible = editorGroupFocused,
+                    onInteractionActiveChange = { assistanceDialogOpen = it },
+                    onTranscript = ::applyVoiceTranscript,
+                    onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
+                    onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
+                )
+            }
         } else {
-            BlockTextField(
-                value = value,
-                onValueChange = onValueChange,
-                placeholder = placeholder,
-                tc = tc,
-                fieldFocusRequester = activeFocusRequester,
-                enabled = enabled,
-                onFieldFocusChanged = focusChange,
-                modifier = modifier,
-            )
+            Row(groupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Box(Modifier.weight(1f)) {
+                    BlockTextField(
+                        value = value,
+                        onValueChange = ::acceptText,
+                        placeholder = placeholder,
+                        tc = tc,
+                        fieldFocusRequester = activeFocusRequester,
+                        enabled = enabled,
+                        onFieldFocusChanged = focusChange,
+                        modifier = inputModifier.cancelVoiceOnEscape(stableVoiceTargetId),
+                        fieldValueState = editorValue,
+                        onEditorValueChange = ::trackEditorValue,
+                        visualTransformation = proofreadingTransformation,
+                        proofreadingAnchorState = proofreadingAnchor,
+                    )
+                }
+                VoiceDictationButton(
+                    targetId = stableVoiceTargetId,
+                    enabled = enabled,
+                    visible = editorGroupFocused,
+                    onInteractionActiveChange = { assistanceDialogOpen = it },
+                    onTranscript = ::applyVoiceTranscript,
+                    onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.value.selection },
+                    onFocusRestored = { runCatching { (if (inlineEditing) inlineEditRequester else fieldFocusRequester)?.requestFocus() } },
+                )
+            }
         }
     }
 }
@@ -2746,6 +2943,7 @@ private fun AddNoteButton(tc: ThemeColors, enabled: Boolean = true, onClick: () 
 @Composable
 private fun NoteBlock(
     block: AnnBlock.Note,
+    tabId: String,
     tc: ThemeColors,
     settings: AppSettings,
     isFirst: Boolean, isLast: Boolean,
@@ -2820,6 +3018,7 @@ private fun NoteBlock(
         if (diagram != null) {
             DiagramNoteView(
                 noteText = block.text,
+                proseTargetId = "$tabId:${block.id}:diagram-caption",
                 summary = diagram,
                 tc = tc,
                 settings = settings,
@@ -2846,6 +3045,7 @@ private fun NoteBlock(
                 enabled = editingEnabled,
                 onValueChange = onUpdate,
                 modifier = Modifier.testTag("annotation-note-field"),
+                proseTargetId = "$tabId:${block.id}:text",
             )
         }
     }
@@ -2929,6 +3129,7 @@ private fun DiagramExportModeSwitcher(
 @Suppress("MaxLineLength")
 private fun DiagramNoteView(
     noteText: String,
+    proseTargetId: String,
     summary: Seq3NoteSummary,
     tc: ThemeColors,
     settings: AppSettings,
@@ -2959,6 +3160,7 @@ private fun DiagramNoteView(
             onValueChange = { caption -> updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText) },
             onFieldFocusChanged = onFieldFocusChanged,
             enabled = editingEnabled,
+            proseTargetId = proseTargetId,
         )
         DiagramSummaryRow(summary = summary, tc = tc, expanded = expanded, onToggleExpanded = onToggleExpanded)
         // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
@@ -3244,6 +3446,7 @@ private fun LogRefBlock(
             onFieldFocusChanged = onFieldFocusChanged,
             onValueChange = onUpdateCaption,
             enabled = editingEnabled,
+            proseTargetId = "${tab.id}:${block.id}:caption",
         )
         LogExcerpt(
             block = block, rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
@@ -3372,6 +3575,7 @@ private fun LogExcerptLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
 @Composable
 private fun ImageBlockView(
     block: AnnBlock.Image,
+    tabId: String,
     tc: ThemeColors,
     settings: AppSettings,
     isFirst: Boolean, isLast: Boolean,
@@ -3416,6 +3620,7 @@ private fun ImageBlockView(
             onFieldFocusChanged = onFieldFocusChanged,
             onValueChange = onUpdateCaption,
             enabled = editingEnabled,
+            proseTargetId = "$tabId:${block.id}:caption",
         )
         // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — it
         // disappears entirely for a pasted or dropped image, which is why this is one nullable

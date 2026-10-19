@@ -10,3 +10,19 @@ Copyright (C) 2018 Genymobile. Licensed under the Apache License, Version 2.0:
 https://www.apache.org/licenses/LICENSE-2.0
 Release: https://github.com/Genymobile/scrcpy/releases/tag/v4.1
 SHA-256: deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae
+
+Offline English proofreading
+
+Indagium uses unmodified LanguageTool 6.8 (languagetool-core and language-en),
+Copyright (C) the LanguageTool contributors, under the GNU Lesser General Public
+License 2.1 or later. A copy is bundled at licenses/languagetool-LGPL-2.1.txt.
+Source and build instructions: https://github.com/languagetool-org/languagetool/tree/v6.8
+Source artifacts: https://repo.maven.apache.org/maven2/org/languagetool/
+The libraries are distributed as separate, replaceable JARs.
+
+English dictionary resources retain their upstream notices inside language-en:
+org/languagetool/resource/en/pos-readme.txt (Moby public-domain data and WordNet
+1.6, Copyright 1997 Princeton University, with its permission and disclaimer),
+agid-readme.txt (Kevin Atkinson), and 12dicts-readme.html (Alan Beale).
+Their original notices remain bundled with the library, along with the license
+and notice resources supplied by its dependency JARs.

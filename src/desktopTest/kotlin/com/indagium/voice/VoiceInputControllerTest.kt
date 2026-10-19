@@ -147,6 +147,28 @@ class VoiceInputControllerTest {
         assertEquals(2, capture.starts)
     }
 
+    @Test
+    fun nativeEngineCancelAndTranscriptConsumeDoNotProbeModelReadiness() = runBlocking {
+        var readinessChecks = 0
+        val controller = VoiceInputController(
+            hasInstalledModel = { readinessChecks++; true },
+            requiresInstallation = false,
+            capture = FakeCapture(audio = audio()),
+            transcriber = VoiceTranscriber { _, _ -> VoiceTranscriptionResult.Success(VoiceTranscript("hello")) },
+        )
+
+        assertIs<VoiceInputState.Recording>(controller.startRecording())
+        val afterStart = readinessChecks
+        controller.cancel()
+        assertEquals(afterStart, readinessChecks, "cancel must not initialize a native recognition engine")
+
+        assertIs<VoiceInputState.Recording>(controller.startRecording())
+        controller.stopAndTranscribe()!!.join()
+        val beforeConsume = readinessChecks
+        assertNotNull(controller.consumeTranscript())
+        assertEquals(beforeConsume, readinessChecks, "consuming a native transcript must not recheck model readiness")
+    }
+
     private fun controller(
         hasModel: Boolean = true,
         capture: FakeCapture = FakeCapture(audio = audio()),

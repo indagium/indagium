@@ -230,7 +230,13 @@ internal fun VariablesEditor(variables: List<TestVariable>, enabled: Boolean, on
                     CommitTextField(variable.name, { replace(variable.copy(name = it.trim())) }, Modifier.weight(1f), enabled, "name", mono = true)
                     CommitTextField(variable.value, { replace(variable.copy(value = it)) }, Modifier.weight(1.4f), enabled, "value")
                 }
-                CommitTextField(variable.description, { replace(variable.copy(description = it)) }, enabled = enabled, placeholder = "description")
+                CommitTextField(
+                    variable.description,
+                    { replace(variable.copy(description = it)) },
+                    enabled = enabled,
+                    placeholder = "description",
+                    proseTargetId = "test-variable:${variable.id}:description",
+                )
             }
         }
     }
@@ -243,7 +249,7 @@ private val PARAM_TYPE_LABELS = mapOf(ScriptParamType.STRING to "Text", ScriptPa
 
 /** The parameters of a script. A parameter is identified by its (unique) name, so renaming goes through the store's validation. */
 @Composable
-internal fun ParamsEditor(params: List<ScriptParam>, enabled: Boolean, onChange: (List<ScriptParam>) -> StoreResult<*>) {
+internal fun ParamsEditor(scriptId: String, params: List<ScriptParam>, enabled: Boolean, onChange: (List<ScriptParam>) -> StoreResult<*>) {
     var error by remember { mutableStateOf<String?>(null) }
     val apply: (List<ScriptParam>) -> Unit = { error = onChange(it).userMessage() }
     TestsSectionTitle("Parameters") {
@@ -292,7 +298,13 @@ internal fun ParamsEditor(params: List<ScriptParam>, enabled: Boolean, onChange:
                         "default",
                     )
                 }
-                CommitTextField(param.description, { replace(param.copy(description = it)) }, enabled = enabled, placeholder = "description")
+                CommitTextField(
+                    param.description,
+                    { replace(param.copy(description = it)) },
+                    enabled = enabled,
+                    placeholder = "description",
+                    proseTargetId = "test-script-param:$scriptId:${param.name}:description",
+                )
             }
         }
     }

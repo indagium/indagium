@@ -255,6 +255,16 @@ private fun editorBehavior() = listOf(
         listOf("video", "anchor", "double click", "seek"),
         anchor = "New video links:\ndouble-click seeks",
     ),
+    entry(
+        SettingsSection.EditorBehavior, "English proofreading",
+        "Local, optional English spelling and grammar suggestions in editable prose.",
+        listOf("proofread", "grammar", "spelling", "language tool", "writing", "suggestions", "english"),
+    ),
+    entry(
+        SettingsSection.EditorBehavior, "English variant",
+        "Choose American or British English rules for local proofreading suggestions.",
+        listOf("proofread", "grammar", "spelling", "en-us", "en-gb", "american", "british"),
+    ),
 )
 
 private fun exportAnnotations() = listOf(

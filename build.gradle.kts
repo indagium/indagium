@@ -320,6 +320,8 @@ kotlin {
                 // natives; the multilingual model itself is deliberately downloaded only after an
                 // explicit user action (see voice/VoiceModelCatalog.kt).
                 implementation("io.github.givimad:whisper-jni:1.7.1")
+                // Embedded offline note proofreading: English resources only, no server or remote rules.
+                implementation("org.languagetool:language-en:6.8")
                 // Streaming AI answers are Markdown. This Compose Multiplatform renderer supports
                 // the app's Material 3 stack without adding a web view or a second UI toolkit.
                 implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")
