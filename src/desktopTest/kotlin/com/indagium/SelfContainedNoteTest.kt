@@ -11,16 +11,12 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Covers relink-log Change 1: a note opened without its log shows no log lines, because ordinary
- * (same-tab) AnnBlock.LogRef blocks are saved with sourceEntries == null and rely on the loading
- * tab's own rmap — which is empty for a log-less tab (Case Library's "Open notes only", or a log
- * that's since gone missing). The fix is save-time materialization (AppState's
- * Annotations.materializeLogRefs, chained into preparedForSave) — this file exercises that through
- * the public save/load API, not the private helper directly.
+ * Selected note excerpts retain their rows and presentation metadata at creation, so closing the
+ * source tab while the editor is open or later reopening the note without a log cannot drop the
+ * evidence. This also keeps the existing save-time materialization path covered.
  */
 class SelfContainedNoteTest {
     private var openState: AppState? = null
@@ -55,14 +51,10 @@ class SelfContainedNoteTest {
     fun aSavedNotesLogRefBlockCarriesItsRowsAndStillRendersWithAnEmptyRmap() {
         val state = newState()
         state.tabs = listOf(mkTab("t1", "sample.log", sampleEntries))
-        // A same-tab LogRef block, added the way confirmAddAnn always leaves one: logIds only, no
-        // sourceEntries cache (that cache is only ever pre-populated for cross-file/compare-mode
-        // blocks — see AnnBlock.LogRef's own doc comment).
         state.confirmAddAnn(targetTabId = "t1", sourceTabId = "t1", logIds = listOf(1, 2), caption = "evidence", sourceFilename = null)
-        assertNull(
-            (state.tab("t1")!!.annotations.blocks.single() as AnnBlock.LogRef).sourceEntries,
-            "a same-tab block must NOT carry sourceEntries in memory before it's ever been saved",
-        )
+        val captured = state.tab("t1")!!.annotations.blocks.single() as AnnBlock.LogRef
+        assertEquals(sampleEntries, captured.sourceEntries, "the excerpt is frozen before the editor closes")
+        assertTrue(captured.presentation != null, "presentation metadata is frozen with its rows")
         val outFile = File.createTempFile("openlog-self-contained-note", ".ann")
 
         assertTrue(state.saveAnnotationsTo("t1", outFile))
@@ -81,7 +73,7 @@ class SelfContainedNoteTest {
     }
 
     @Test
-    fun inMemoryAnnotationsAreUnchangedBySaving() {
+    fun inMemorySnapshotIsUnchangedBySaving() {
         val state = newState()
         state.tabs = listOf(mkTab("t1", "sample.log", sampleEntries))
         state.confirmAddAnn(targetTabId = "t1", sourceTabId = "t1", logIds = listOf(1, 2), caption = "evidence", sourceFilename = null)
@@ -89,12 +81,11 @@ class SelfContainedNoteTest {
 
         assertTrue(state.saveAnnotationsTo("t1", outFile))
 
-        // The save materializes sourceEntries into the FILE only — the live tab's own in-memory
-        // annotations (still resolved through its own rmap on every render) must be untouched, or
-        // autosave (which serializes this exact same object on every debounced edit) would have
-        // silently started inlining full log rows on every keystroke.
+        // Captured rows are already part of the live snapshot. Save may materialize other legacy
+        // rows into its output, but it must leave this selected excerpt unchanged in memory.
         val liveBlock = state.tab("t1")!!.annotations.blocks.single() as AnnBlock.LogRef
-        assertNull(liveBlock.sourceEntries, "a same-tab annotation must still hold no sourceEntries after a save")
+        assertEquals(sampleEntries, liveBlock.sourceEntries)
+        assertTrue(liveBlock.presentation != null)
     }
 
     @Test

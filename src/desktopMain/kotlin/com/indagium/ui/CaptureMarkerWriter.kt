@@ -124,7 +124,23 @@ internal class LaneNotes(initial: Annotations = Annotations()) : MarkerNotesTarg
     override fun addLogRef(logIds: List<Int>, afterId: String?, sourceEntries: List<LogEntry>?): String? {
         if (logIds.isEmpty() && sourceEntries.isNullOrEmpty()) return null
         val id = "r${System.nanoTime()}"
-        val block = AnnBlock.LogRef(id = id, logIds = logIds.distinct().sorted(), caption = "", sourceEntries = sourceEntries)
+        val frozenRows = sourceEntries.orEmpty()
+        val presentation = AnnBlock.LogRefPresentation(
+            // A tabless lane has no source-view settings to inherit. Keep its excerpt explicit
+            // while leaving optional presentation fields disabled until a user edits the note.
+            options = AnnBlock.LogRefPresentationOptions(),
+            rows = frozenRows.map { entry ->
+                AnnBlock.LogRefRowPresentation(logId = entry.id, rowNumberText = entry.id.toString())
+            },
+            deltaAvailable = false,
+        )
+        val block = AnnBlock.LogRef(
+            id = id,
+            logIds = logIds.distinct().sorted(),
+            caption = "",
+            sourceEntries = sourceEntries?.toList(),
+            presentation = presentation,
+        )
         updateAnnotations { insertAfter(it, block, afterId) }
         return id
     }

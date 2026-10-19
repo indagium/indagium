@@ -61,6 +61,8 @@ import com.indagium.model.*
 import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.cachedSeqGroupsFor
+import com.indagium.utils.captureAnnotationLogRef
+import com.indagium.utils.asLogEntryView
 import com.indagium.utils.computeItems
 import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
@@ -1221,7 +1223,7 @@ fun LogViewer(
     settings: AppSettings = AppSettings(),
     onSelRow: (Int, Boolean, Boolean) -> Unit,
     onSelRowRange: (List<Int>) -> Unit = { _ -> },
-    onCtxMenu: (Int, Float, Float, String, Set<Int>) -> Unit,
+    onCtxMenu: (Int, Float, Float, String, Set<Int>, AnnBlock.LogRefCapture) -> Unit,
     onToggleGroup: (String) -> Unit,
     onClearFilter: () -> Unit,
     onExpandAll: () -> Unit,
@@ -1259,7 +1261,7 @@ fun LogViewer(
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
-    onAddAnnotation: ((List<Int>) -> Unit)? = null,
+    onAddAnnotation: ((AnnBlock.LogRefCapture) -> Unit)? = null,
     onCopyText: (String) -> Unit = {},
     // A one-shot, non-selection action for an unmodified primary-button double-click on a plain
     // row. The caller owns the tab binding and any video mapping; nullable keeps previews/tests
@@ -1528,10 +1530,33 @@ fun LogViewer(
             itemOnSelectAll: (() -> Unit)? = onSelectAll,
             itemOnClearSelection: (() -> Unit)? = onClearSelection,
             itemOnCopySelection: ((Set<Int>?) -> Unit)? = onCopySelection,
-            itemOnAddAnnotation: ((List<Int>) -> Unit)? = onAddAnnotation,
+            itemOnAddAnnotation: ((List<Int>) -> Unit)? = { ids ->
+                onAddAnnotation?.invoke(
+                    captureAnnotationLogRef(
+                        effectiveTab,
+                        ids,
+                        effectiveTab.selected,
+                        listItems.asLogEntryView(),
+                        settings,
+                    ),
+                )
+            },
             itemsLoading: Boolean = computedItems.loading,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
-            itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
+            itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel ->
+                // Context-menu Add follows its long-standing target rule: a multi-row selection
+                // becomes the excerpt, while a single selected anchor remains the Δt baseline for
+                // the row actually right-clicked.
+                val ids = if (effectiveTab.selected.size > 1) effectiveTab.selected.sorted() else listOf(id)
+                val capture = captureAnnotationLogRef(
+                    effectiveTab,
+                    ids,
+                    effectiveTab.selected,
+                    listItems.asLogEntryView(),
+                    settings,
+                )
+                onCtxMenu(id, x, y, sel, effectiveTab.selected, capture)
+            },
             panelKey: String = effectiveTab.id,
             listState: LazyListState? = null,
             externalFr: FocusRequester? = null,
@@ -2600,9 +2625,7 @@ fun LogViewer(
                         itemOnSelectAll = allOnSelectAll,
                         itemOnClearSelection = allOnClearSelection,
                         itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
-                        itemOnAddAnnotation = onAddAnnotation,
                         itemsLoading = computedAllItems.loading,
-                        itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
                         listState = allLazyState,
                         externalFr = originalFocusRequester,

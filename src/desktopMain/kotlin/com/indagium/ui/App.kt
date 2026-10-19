@@ -540,6 +540,7 @@ fun App(
                         // panelSelectedIds is non-empty when the right-click came from a panel
                         // with its own local selection (e.g. the "Original" unfiltered panel).
                         val selectedIds = ctx.panelSelectedIds.ifEmpty { ctxTab.selected }
+                        val annotationIds = ctx.annotationCapture?.rows?.map { it.id } ?: selectedIds.sorted().ifEmpty { listOf(ctx.entryId) }
                         val selCount = selectedIds.size
                         // manualCollapseAvailability re-derives a range (and re-scans every existing
                         // manual block) each call — remember it per menu-open so unrelated
@@ -632,10 +633,13 @@ fun App(
                         val menuEntries = buildList {
                             add(
                                 CtxMenuEntry.ActionHeader(
-                                    if (selCount > 1) "Add annotation for $selCount lines" else "Add annotation",
+                                    if (annotationIds.size > 1) "Add annotation for ${annotationIds.size} lines" else "Add annotation",
                                 ) {
-                                    val ids = if (selCount > 1) selectedIds.toSortedSet().toList() else listOf(ctx.entryId)
-                                    state.requestAddAnn(ctx.tabId, ids)
+                                    state.requestAddAnn(
+                                        ctx.tabId,
+                                        annotationIds,
+                                        ctx.annotationCapture,
+                                    )
                                 },
                             )
                             add(CtxMenuEntry.Divider)
@@ -1228,7 +1232,7 @@ fun App(
 
             // ── Add annotation dialog ─────────────────────────────────
             state.addAnnRequest?.let { req ->
-                val rows = req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
+                val rows = req.capture?.rows ?: req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
                 Dialog(
                     onDismissRequest = { state.addAnnRequest = null },
                     properties = DialogProperties(
@@ -1241,14 +1245,9 @@ fun App(
                         windowSize = mainWindowSize,
                         fileLabel = req.sourceFilename ?: state.tab(req.sourceTabId)?.filename,
                         locked = state.aiSessions.sessionFor(req.targetTabId).activeRun != null,
-                        onConfirm = { caption ->
-                            state.confirmAddAnn(
-                                req.targetTabId,
-                                req.sourceTabId,
-                                req.logIds,
-                                caption,
-                                req.sourceFilename
-                            )
+                        initialPresentation = req.capture?.presentation,
+                        onConfirm = { caption, options ->
+                            state.confirmAddAnn(req, caption, options)
                         },
                         onDismiss = { state.addAnnRequest = null },
                     )

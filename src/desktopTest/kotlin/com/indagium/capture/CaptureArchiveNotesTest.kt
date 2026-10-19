@@ -4,6 +4,8 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
+import com.indagium.ui.annotationsFromToken
+import com.indagium.ui.annotationsToken
 import com.indagium.utils.parseLogcat
 import java.io.File
 import java.util.zip.ZipEntry
@@ -158,6 +160,44 @@ class CaptureArchiveNotesTest {
         assertNull(clearedHeader?.lastOrdinal)
         assertTrue("rC" !in byId)
         assertEquals(6, reanchored.blocks.size) // 7 source blocks minus the dropped rC LogRef
+    }
+
+    @Test
+    fun clippedMarkerReanchorKeepsFrozenPresentationAfterTokenDropsDayOfYear() {
+        val root = createTempDirectory("capture-notes-presentation-reanchor").toFile()
+        val destination = exportWithNotes(root, "notes.zip", sourceNotes())
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        val logData = parseLogcat(imported.logFile)
+        val originalNotes = requireNotNull(imported.notes)
+        val originalRef = originalNotes.blocks.filterIsInstance<AnnBlock.LogRef>().single { it.id == "rA" }
+        // Original session ids 3/4 point at the exported log's local ids 2/3. Persist rows that
+        // include LogParser's dayOfYear, then round-trip the annotation token: that transient field
+        // is not serialized, so data-class equality would fail even though the row is identical.
+        val sourceRows = listOf(logData[1].copy(id = 3), logData[2].copy(id = 4))
+        val withPresentation = originalNotes.copy(
+            blocks = originalNotes.blocks.map { block ->
+                if (block.id != "rA") return@map block
+                originalRef.copy(
+                    sourceEntries = sourceRows,
+                    presentation = AnnBlock.LogRefPresentation(
+                        options = AnnBlock.LogRefPresentationOptions(timeDelta = true, rowNumber = true),
+                        rows = listOf(
+                            AnnBlock.LogRefRowPresentation(3, "3", "0.000"),
+                            AnnBlock.LogRefRowPresentation(4, "4", "+1.000"),
+                        ),
+                    ),
+                )
+            },
+        )
+        val reopened = requireNotNull(withPresentation.annotationsToken().annotationsFromToken())
+        val reanchored = reanchorImportedCaptureNotes(reopened, imported.descriptor.markers, logData)
+        val result = reanchored.blocks.filterIsInstance<AnnBlock.LogRef>().single { it.id == "rA" }
+
+        assertEquals(listOf(2, 3), result.logIds)
+        assertEquals("3", result.presentation?.row(2)?.rowNumberText)
+        assertEquals("0.000", result.presentation?.row(2)?.timeDeltaText)
+        assertEquals("4", result.presentation?.row(3)?.rowNumberText)
+        assertEquals("+1.000", result.presentation?.row(3)?.timeDeltaText)
     }
 
     @Test

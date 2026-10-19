@@ -1411,23 +1411,23 @@ private fun StringBuilder.appendLogRefBlock(
     }
     if (block.sourceFilename != null) appendLine("${sourcePrefixLabel(settings)} ${block.sourceFilename}")
     val rows = block.resolveRows(tab)
-    // A recovered/cross-tab LogRef has no reliable current viewer baseline or process-name map.
-    // It still copies its own PID/TID data, but deliberately falls back to numeric PID and omits Δt.
-    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
-    val context = annotationLogLineContext(tab, settings, localSource, lineContext)
+    // Legacy recovered/cross-tab refs have no reliable current baseline or name map, so this
+    // fallback uses numeric PIDs and omits Δt. Snapshot refs bypass it and use captured metadata.
+    val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
+    val context = if (block.presentation == null) annotationLogLineContext(tab, settings, localSource, lineContext) else null
     when (settings.annotationLogBlockStyle) {
         AnnotationLogBlockStyle.INDENTED ->
-            rows.forEach { row -> appendLine("    ${presentLogLine(tab, row, settings, context, allowProcessName = localSource)}") }
+            rows.forEach { row -> appendLine("    ${presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource)}") }
 
         AnnotationLogBlockStyle.JIRA_JAVA -> {
             appendLine("{code:java}")
-            rows.forEach { row -> appendLine(presentLogLine(tab, row, settings, context, allowProcessName = localSource)) }
+            rows.forEach { row -> appendLine(presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource)) }
             appendLine("{code}")
         }
 
         AnnotationLogBlockStyle.JIRA_CLOUD -> {
             appendLine("```java")
-            rows.forEach { row -> appendLine(presentLogLine(tab, row, settings, context, allowProcessName = localSource)) }
+            rows.forEach { row -> appendLine(presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource)) }
             appendLine("```")
         }
     }

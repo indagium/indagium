@@ -1,9 +1,14 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 
 package com.indagium.ui
 
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Text
@@ -12,10 +17,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -29,6 +39,8 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -47,6 +59,7 @@ import androidx.compose.ui.zIndex
 import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
 import com.indagium.utils.MemoryShortfall
+import com.indagium.utils.presentAnnotationLogLine
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -344,7 +357,8 @@ internal fun AddAnnDialog(
     windowSize: IntSize,
     fileLabel: String? = null,
     locked: Boolean = false,
-    onConfirm: (String) -> Unit,
+    initialPresentation: AnnBlock.LogRefPresentation? = null,
+    onConfirm: (String, AnnBlock.LogRefPresentationOptions) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AnnotationMarkdownEditorDialog(
@@ -355,7 +369,9 @@ internal fun AddAnnDialog(
         windowSize = windowSize,
         fileLabel = fileLabel,
         locked = locked,
-        onConfirm = onConfirm,
+        initialPresentation = initialPresentation,
+        onPresentationConfirm = onConfirm,
+        onConfirm = { text -> onConfirm(text, initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions()) },
         onDismiss = onDismiss,
     )
 }
@@ -384,7 +400,9 @@ internal fun AnnotationMarkdownEditorDialog(
     /** Stable identity of the edited block; keeps a draft alive while upstream Notes change. */
     sessionKey: Any? = null,
     locked: Boolean = false,
+    initialPresentation: AnnBlock.LogRefPresentation? = null,
     onDelete: (() -> Unit)? = null,
+    onPresentationConfirm: ((String, AnnBlock.LogRefPresentationOptions) -> Unit)? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -399,7 +417,17 @@ internal fun AnnotationMarkdownEditorDialog(
 
     var baselineText by remember(sessionKey) { mutableStateOf(initialText) }
     var editorValue by remember(sessionKey) { mutableStateOf(TextFieldValue(initialText)) }
+    var presentationOptions by remember(sessionKey) {
+        mutableStateOf(initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions())
+    }
+    val effectivePresentation = remember(initialPresentation, presentationOptions) {
+        initialPresentation?.copy(options = presentationOptions)
+    }
+    var baselinePresentationOptions by remember(sessionKey) {
+        mutableStateOf(initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions())
+    }
     var conflictLatest by remember(sessionKey) { mutableStateOf<String?>(null) }
+    var conflictLatestPresentationOptions by remember(sessionKey) { mutableStateOf<AnnBlock.LogRefPresentationOptions?>(null) }
     var previewMode by remember { mutableStateOf(false) }
     var evidenceExpanded by remember { mutableStateOf(false) }
     var headingMenuOpen by remember { mutableStateOf(false) }
@@ -418,18 +446,24 @@ internal fun AnnotationMarkdownEditorDialog(
     val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
     // MCP/external and AI writes can arrive while this dialog is open. Keep a pristine draft in
     // sync; preserve a dirty draft and make the user resolve it explicitly.
-    LaunchedEffect(initialText) {
-        val sync = reconcileMarkdownDraft(baselineText, editorValue.text, initialText)
-        if (sync.conflict) {
-            conflictLatest = sync.latest
+    LaunchedEffect(initialText, initialPresentation?.options) {
+        val latestOptions = initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions()
+        val latestChanged = initialText != baselineText || latestOptions != baselinePresentationOptions
+        val locallyDirty = editorValue.text != baselineText || presentationOptions != baselinePresentationOptions
+        if (latestChanged && locallyDirty) {
+            conflictLatest = initialText
+            conflictLatestPresentationOptions = latestOptions
         } else {
-            baselineText = sync.baseline
-            editorValue = TextFieldValue(sync.draft, TextRange(sync.draft.length))
+            baselineText = initialText
+            baselinePresentationOptions = latestOptions
+            editorValue = TextFieldValue(initialText, TextRange(initialText.length))
+            presentationOptions = latestOptions
             conflictLatest = null
+            conflictLatestPresentationOptions = null
             editorHistory.clear()
         }
     }
-    val hasUnsavedChanges = editorValue.text != baselineText
+    val hasUnsavedChanges = editorValue.text != baselineText || presentationOptions != baselinePresentationOptions
     val hasConflict = conflictLatest != null
     val shortcutHint = if (isMacOs) "⌘↵ save · esc cancel" else "Ctrl↵ save · esc cancel"
     val displayTitle = if (rows.isNotEmpty()) {
@@ -464,6 +498,12 @@ internal fun AnnotationMarkdownEditorDialog(
         editorValue = updated
     }
 
+    fun updatePresentationOptions(updated: AnnBlock.LogRefPresentationOptions) {
+        if (locked || hasConflict) return
+        presentationOptions = updated
+        runCatching { editorFocusRequester.requestFocus() }
+    }
+
     fun applyFormat(action: MarkdownFormatAction) {
         if (locked || hasConflict) return
         val valueForAction = restoreMarkdownSelection(editorValue, retainedSelection)
@@ -478,9 +518,13 @@ internal fun AnnotationMarkdownEditorDialog(
 
     fun reloadLatest() {
         val latest = conflictLatest ?: initialText
+        val latestOptions = conflictLatestPresentationOptions ?: initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions()
         baselineText = latest
         editorValue = TextFieldValue(latest, TextRange(latest.length))
+        baselinePresentationOptions = latestOptions
+        presentationOptions = latestOptions
         conflictLatest = null
+        conflictLatestPresentationOptions = null
         retainedSelection = null
         editorHistory.clear()
     }
@@ -505,15 +549,23 @@ internal fun AnnotationMarkdownEditorDialog(
         if (locked) return
         val draft = editorValue.text
         baselineText = conflictLatest ?: initialText
+        baselinePresentationOptions = conflictLatestPresentationOptions ?: initialPresentation?.options ?: AnnBlock.LogRefPresentationOptions()
         conflictLatest = null
-        onConfirm(draft)
+        conflictLatestPresentationOptions = null
+        if (onPresentationConfirm != null) onPresentationConfirm(draft, presentationOptions) else onConfirm(draft)
+    }
+
+    fun confirmDraft() {
+        if (locked || hasConflict) return
+        if (onPresentationConfirm != null) onPresentationConfirm(editorValue.text, presentationOptions)
+        else onConfirm(editorValue.text)
     }
 
     val dialogShape = RoundedCornerShape(10.dp)
     Box(
         // Make the actual dialog window, not merely its content, a same-axis fraction of the
         // main window. This keeps its aspect ratio stable while the user resizes the app.
-        Modifier.width(dialogWidth).height(dialogHeight)
+        Modifier.width(dialogWidth).height(dialogHeight).testTag("annotation-editor-dialog")
             .background(tc.p, dialogShape)
             .border(1.dp, tc.br, dialogShape)
             .onPreviewKeyEvent { ev ->
@@ -527,7 +579,7 @@ internal fun AnnotationMarkdownEditorDialog(
                         true
                     }
                     ev.isActionKey && (ev.key == Key.Enter || ev.key == Key.NumPadEnter) -> {
-                        if (!locked && !hasConflict) onConfirm(editorValue.text)
+                        confirmDraft()
                         true
                     }
                     else -> false
@@ -579,15 +631,25 @@ internal fun AnnotationMarkdownEditorDialog(
                 }
             }
 
-            // ── Evidence panel (collapsed by default) ────────────────────
+            // ── Evidence panel and frozen log-field choices ────────────
             if (rows.isNotEmpty()) {
-                Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) {
+                Column(
+                    Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     NoteEvidencePanel(
                         rows = rows,
                         summary = summary,
+                        presentation = effectivePresentation,
                         expanded = evidenceExpanded,
                         onToggle = { evidenceExpanded = !evidenceExpanded },
                         mono = mono,
+                        editBlockedReason = when {
+                            locked -> "Notes are locked"
+                            hasConflict -> "Resolve the conflict first"
+                            else -> null
+                        },
+                        onOptionsChange = ::updatePresentationOptions,
                     )
                 }
             }
@@ -739,7 +801,7 @@ internal fun AnnotationMarkdownEditorDialog(
                 if (onDelete != null) DeleteNoteButton(enabled = !locked, onClick = onDelete)
                 Spacer(Modifier.weight(1f))
                 EditorDialogActionButton("Cancel", filled = false, onClick = onDismiss)
-                EditorDialogActionButton(confirmLabel, filled = true, enabled = !locked && !hasConflict, onClick = { onConfirm(editorValue.text) })
+                EditorDialogActionButton(confirmLabel, filled = true, enabled = !locked && !hasConflict, onClick = ::confirmDraft)
             }
         }
     }
@@ -760,9 +822,12 @@ private fun NoteDialogDivider() {
 private fun NoteEvidencePanel(
     rows: List<LogEntry>,
     summary: EvidenceSummary,
+    presentation: AnnBlock.LogRefPresentation?,
     expanded: Boolean,
     onToggle: () -> Unit,
     mono: FontFamily,
+    editBlockedReason: String?,
+    onOptionsChange: (AnnBlock.LogRefPresentationOptions) -> Unit,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(6.dp)
@@ -772,22 +837,51 @@ private fun NoteEvidencePanel(
             .border(1.dp, tc.br, shape)
             .clip(shape),
     ) {
-        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onToggle) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 9.sp, modifier = Modifier.width(8.dp))
-                AppText(
-                    summary.rangeLabel(),
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    fontFamily = mono,
-                )
-                Spacer(Modifier.weight(1f))
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    summary.levelCounts.forEach { (level, count) -> EvidenceLevelChip(level, count, mono) }
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().testTag("annotation-evidence-toggle"),
+            onClick = onToggle,
+        ) {
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                // Level counts are the least essential part of the header: drop them first when
+                // the dialog is too narrow to fit them next to the range label and the chips.
+                val showLevels = maxWidth >= 500.dp
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 9.sp, modifier = Modifier.width(8.dp))
+                    // Range label + level chips share the space the toggle chips leave over; the
+                    // label ellipsizes first so the chips are never clipped or overlapped.
+                    Row(
+                        Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AppText(
+                            summary.rangeLabel(),
+                            color = tc.ts,
+                            fontSize = 11.sp,
+                            fontFamily = mono,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                        if (showLevels) {
+                            // Non-weighted, so measured before the label: the label ellipsizes first.
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                summary.levelCounts.forEach { (level, count) -> EvidenceLevelChip(level, count, mono) }
+                            }
+                        }
+                    }
+                    if (presentation != null) {
+                        LogLineDisplayChips(
+                            rows = rows,
+                            presentation = presentation,
+                            editBlockedReason = editBlockedReason,
+                            onChange = onOptionsChange,
+                        )
+                    }
                 }
             }
         }
@@ -800,7 +894,7 @@ private fun NoteEvidencePanel(
                         .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(3.dp),
                 ) {
-                    rows.forEach { row -> NoteEvidenceRow(row, mono) }
+                    rows.forEach { row -> NoteEvidenceRow(row, mono, presentation) }
                 }
                 VerticalScrollbar(
                     adapter = rememberScrollbarAdapter(scroll),
@@ -813,8 +907,19 @@ private fun NoteEvidencePanel(
 }
 
 @Composable
-private fun NoteEvidenceRow(row: LogEntry, mono: FontFamily) {
+private fun NoteEvidenceRow(row: LogEntry, mono: FontFamily, presentation: AnnBlock.LogRefPresentation?) {
     val tc = tc()
+    if (presentation != null) {
+        AppText(
+            presentAnnotationLogLine(row, presentation),
+            color = tc.ts,
+            fontSize = 10.sp,
+            fontFamily = mono,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        return
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -840,6 +945,149 @@ private fun NoteEvidenceRow(row: LogEntry, mono: FontFamily) {
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+    }
+}
+
+/** "Show [Δt] [Row #] [PID/TID] [Process]" toggle chips that live in the evidence header, right
+ *  next to the excerpt they change. Enable rules are the frozen-capture rules: a chip is only
+ *  available when the captured data exists, and Process additionally needs PID/TID on. */
+@Composable
+private fun LogLineDisplayChips(
+    rows: List<LogEntry>,
+    presentation: AnnBlock.LogRefPresentation,
+    editBlockedReason: String?,
+    onChange: (AnnBlock.LogRefPresentationOptions) -> Unit,
+) {
+    val tc = tc()
+    val options = presentation.options
+    val canEdit = editBlockedReason == null
+    val canUseDelta = presentation.deltaAvailable
+    val canUsePidTid = rows.any { it.pid > 0 }
+    val canUseNames = canUsePidTid && presentation.rows.any {
+        !it.displayedProcessName.isNullOrBlank() || !it.processNameCandidate.isNullOrBlank()
+    }
+    // Swallow taps in the gaps between chips (and on disabled chips, which consume nothing
+    // themselves) so they never fall through to the header's expand/collapse click.
+    Row(
+        Modifier.pointerInput(Unit) { detectTapGestures { } }
+            .horizontalScroll(rememberScrollState())
+            // Its own semantics boundary: the header's clickable would otherwise merge this node
+            // (and its tag) away. The chips are merge roots themselves, so they stay addressable.
+            .semantics(mergeDescendants = true) {}
+            .testTag("annotation-metadata-options"),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Show", color = tc.td, fontSize = 10.sp, maxLines = 1, modifier = Modifier.padding(end = 2.dp))
+        MetadataChip(
+            label = "Δt",
+            selected = options.timeDelta,
+            enabled = canUseDelta && canEdit,
+            tooltip = editBlockedReason
+                ?: if (canUseDelta) "Show time since the previous line" else "This excerpt has no timestamps to compare",
+            testTag = "annotation-metadata-time-delta",
+        ) { onChange(options.copy(timeDelta = !options.timeDelta)) }
+        MetadataChip(
+            label = "Row #",
+            selected = options.rowNumber,
+            enabled = rows.isNotEmpty() && canEdit,
+            tooltip = editBlockedReason ?: "Show row numbers",
+            testTag = "annotation-metadata-row-number",
+        ) { onChange(options.copy(rowNumber = !options.rowNumber)) }
+        MetadataChip(
+            label = "PID/TID",
+            selected = options.pidTid,
+            enabled = canUsePidTid && canEdit,
+            tooltip = editBlockedReason
+                ?: if (canUsePidTid) "Show process and thread IDs" else "This log has no PID/TID",
+            testTag = "annotation-metadata-pid-tid",
+        ) { onChange(options.copy(pidTid = !options.pidTid)) }
+        MetadataChip(
+            label = "Process",
+            selected = options.processName,
+            enabled = canUseNames && options.pidTid && canEdit,
+            tooltip = editBlockedReason ?: when {
+                !canUsePidTid -> "This log has no PID/TID"
+                !options.pidTid -> "Turn on PID/TID first"
+                !canUseNames -> "This log has no process names"
+                else -> "Show process names next to PID/TID"
+            },
+            testTag = "annotation-metadata-process-name",
+        ) {
+            val next = !options.processName
+            onChange(options.copy(
+                processName = next,
+                allProcessNameCandidates = if (next && !options.processName) true else options.allProcessNameCandidates,
+            ))
+        }
+    }
+}
+
+/** One pill-shaped toggle chip. ON = accent tint, OFF = outlined, DISABLED = dashed outline and
+ *  dimmed text with no hover. The toggleable consumes its own click, so toggling an option never
+ *  expands/collapses the excerpt row it sits on. */
+@Composable
+private fun MetadataChip(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    tooltip: String,
+    testTag: String,
+    onToggle: () -> Unit,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    val interactive = enabled
+    val background = when {
+        selected && enabled -> tc.ac.copy(alpha = if (hovered) .2f else .12f)
+        selected -> tc.ac.copy(alpha = .06f)
+        interactive && hovered -> tc.hv
+        else -> Color.Transparent
+    }
+    val textColor = when {
+        selected && enabled -> tc.ac
+        selected -> tc.ac.copy(alpha = .5f)
+        enabled -> tc.ts
+        else -> tc.td.copy(alpha = .7f)
+    }
+    val borderModifier = when {
+        selected && enabled -> Modifier.border(1.dp, tc.ac.copy(alpha = .28f), shape)
+        enabled -> Modifier.border(1.dp, tc.br, shape)
+        else -> Modifier.drawBehind {
+            val stroke = 1.dp.toPx()
+            drawRoundRect(
+                color = tc.br,
+                topLeft = androidx.compose.ui.geometry.Offset(stroke / 2, stroke / 2),
+                size = Size(size.width - stroke, size.height - stroke),
+                cornerRadius = CornerRadius(size.height / 2),
+                style = Stroke(width = stroke, pathEffect = PathEffect.dashPathEffect(floatArrayOf(3.dp.toPx(), 2.dp.toPx()))),
+            )
+        }
+    }
+    TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) {
+        Box(
+            Modifier
+                .testTag(testTag)
+                .clip(shape)
+                .background(background, shape)
+                .then(borderModifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .then(if (enabled) Modifier.pointerHoverIcon(PointerIcon.Hand) else Modifier)
+                .toggleable(value = selected, enabled = enabled, role = Role.Checkbox, onValueChange = { onToggle() })
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText(
+                label,
+                color = textColor,
+                fontSize = 10.sp,
+                fontWeight = if (selected && enabled) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Visible,
+            )
+        }
     }
 }
 

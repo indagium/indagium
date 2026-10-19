@@ -145,12 +145,14 @@ private fun StringBuilder.appendLogRefHtml(
         append("<p><i>").append(escapeHtml(maskText("From ${block.sourceFilename}"))).append("</i></p>")
     }
     val rows = block.resolveRows(tab)
-    // See buildMd's LogRef branch: persisted/cross-tab rows retain numeric PID/TID but cannot
-    // safely inherit this tab's process-name mapping or Δt baseline.
-    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
-    val context = annotationLogLineContext(tab, settings, localSource, lineContext)
+    // Legacy persisted/cross-tab refs cannot safely inherit this tab's name map or Δt baseline.
+    // Snapshot refs bypass this live context and use their captured metadata.
+    val localSource = block.presentation == null && block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val context = if (block.presentation == null) annotationLogLineContext(tab, settings, localSource, lineContext) else null
     append("<pre><code>")
-    rows.forEach { row -> appendLine(escapeHtml(maskText(presentLogLine(tab, row, settings, context, allowProcessName = localSource)))) }
+    rows.forEach { row ->
+        appendLine(escapeHtml(maskText(presentAnnotationLogLine(block, row, tab, settings, context, allowProcessName = localSource))))
+    }
     append("</code></pre>")
     return num
 }

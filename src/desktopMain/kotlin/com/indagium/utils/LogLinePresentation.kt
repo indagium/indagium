@@ -1,8 +1,13 @@
 package com.indagium.utils
 
 import com.indagium.model.AppSettings
+import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
+import com.indagium.model.LogItem
 import com.indagium.model.LogTab
+import com.indagium.model.LegacyLogRefPreferences
+import com.indagium.model.ProcessNameMode
+import com.indagium.model.entry
 
 /**
  * One canonical presentation of a log row for every user-facing copy/export surface.  Keeping
@@ -107,6 +112,165 @@ fun presentLogLineMarkdown(
     }.joinToString("  ")
     return "**[$prefix] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
 }
+
+/**
+ * Freeze just the selected excerpt and the metadata needed to show it. [displayedEntries] must be
+ * the originating panel's actual LogItem order (headers included); for a plain programmatic caller
+ * use [captureFilteredAnnotationLogRef], which materializes the tab's current filtered view.
+ * The settings parameter remains for caller compatibility; annotation options are independent of
+ * global copy preferences.
+ */
+@Suppress("UNUSED_PARAMETER")
+fun captureAnnotationLogRef(
+    tab: LogTab,
+    targetIds: List<Int>,
+    selection: Set<Int>,
+    displayedEntries: List<LogEntry>,
+    settings: AppSettings,
+    fallbackEntries: List<LogEntry> = emptyList(),
+): AnnBlock.LogRefCapture {
+    // Log ids and the viewer's displayed item order are ascending. Resolve only the bounded
+    // excerpt and use binary search for no-selection predecessors; opening any row context menu
+    // must not scan/copy a multi-million-row ItemList on the UI thread.
+    val ordered = targetIds.distinct().sorted().mapNotNull { id ->
+        tab.rmap[id] ?: findDisplayedEntry(displayedEntries, id) ?: findDisplayedEntry(fallbackEntries, id)
+    }
+    val anchorId = selection.minOrNull()
+    val anchor = anchorId?.let(tab.rmap::get)
+    val capturedRows = ordered.map { entry ->
+        val deltaText = if (anchorId != null) {
+            anchor?.let { deltaMillis(it, entry) }?.let(::formatSignedDelta)
+                ?: UNKNOWN_ANNOTATION_DELTA
+        } else {
+            val displayedIndex = findDisplayedIndex(displayedEntries, entry.id)
+            displayedEntries.getOrNull(displayedIndex - 1)?.let { deltaMillis(it, entry) }?.let(::formatDelta)
+                ?: UNKNOWN_ANNOTATION_DELTA
+        }
+        val candidate = tab.analysis.processNames[entry.pid]?.takeIf { entry.pid > 0 }
+        val displayed = candidate.takeIf {
+            when (tab.processNameMode) {
+                ProcessNameMode.OFF -> false
+                ProcessNameMode.ALL -> true
+                ProcessNameMode.MANUAL -> entry.pid in tab.manualProcessNamePicks
+            }
+        }
+        AnnBlock.LogRefRowPresentation(
+            logId = entry.id,
+            rowNumberText = entry.id.toString(),
+            timeDeltaText = deltaText,
+            displayedProcessName = displayed,
+            processNameCandidate = candidate,
+        )
+    }
+    return AnnBlock.LogRefCapture(
+        rows = ordered.toList(),
+        presentation = AnnBlock.LogRefPresentation(
+            // New annotation choices are explicit, independent of source-view visibility and
+            // global copy preferences. Keep all captured values above so any option can be enabled
+            // in the editor without consulting mutable tab state.
+            options = AnnBlock.LogRefPresentationOptions(),
+            rows = capturedRows,
+        ),
+    )
+}
+
+/** Current filtered-view fallback for MCP and other callers without a panel context. */
+fun captureFilteredAnnotationLogRef(
+    tab: LogTab,
+    targetIds: List<Int>,
+    settings: AppSettings,
+): AnnBlock.LogRefCapture = captureAnnotationLogRef(
+    tab = tab,
+    targetIds = targetIds,
+    selection = tab.selected,
+    displayedEntries = computeItems(tab, applyFilter = true).asLogEntryView(),
+    settings = settings,
+)
+
+/** A zero-copy, random-access view over the rows and headers that ItemList actually renders. */
+fun List<LogItem>.asLogEntryView(): List<LogEntry> = object : AbstractList<LogEntry>() {
+    override val size: Int get() = this@asLogEntryView.size
+    override fun get(index: Int): LogEntry = this@asLogEntryView[index].entry
+}
+
+private fun findDisplayedIndex(entries: List<LogEntry>, id: Int): Int {
+    var low = 0
+    var high = entries.lastIndex
+    while (low <= high) {
+        val mid = (low + high) ushr 1
+        when {
+            entries[mid].id < id -> low = mid + 1
+            entries[mid].id > id -> high = mid - 1
+            else -> return mid
+        }
+    }
+    return -1
+}
+
+private fun findDisplayedEntry(entries: List<LogEntry>, id: Int): LogEntry? =
+    entries.getOrNull(findDisplayedIndex(entries, id))
+
+/** Freeze an old LogRef once using the copy choices that applied when the note was opened. */
+fun freezeLegacyLogRefPresentation(
+    rows: List<LogEntry>,
+    tab: LogTab,
+    preferences: LegacyLogRefPreferences,
+): AnnBlock.LogRefPresentation = AnnBlock.LogRefPresentation(
+    options = AnnBlock.LogRefPresentationOptions(
+        timeDelta = false, // Older notes contain no baseline; never fabricate historical values.
+        rowNumber = preferences.copyRowNumber && preferences.showRowNumbers,
+        pidTid = preferences.copyPidTid,
+        processName = preferences.copyPidTid && preferences.copyPidAsName,
+        allProcessNameCandidates = preferences.copyPidTid && preferences.copyPidAsName,
+    ),
+    rows = rows.map { entry ->
+        val candidate = tab.analysis.processNames[entry.pid]?.takeIf { entry.pid > 0 }
+        AnnBlock.LogRefRowPresentation(
+            logId = entry.id,
+            rowNumberText = entry.id.toString(),
+            processNameCandidate = candidate,
+        )
+    },
+)
+
+private const val UNKNOWN_ANNOTATION_DELTA = "—"
+
+/** One renderer for every annotation surface. A snapshotted block never reads live settings,
+ * selections, or process-name maps; those values have already been copied into its presentation. */
+fun presentAnnotationLogLine(
+    entry: LogEntry,
+    presentation: AnnBlock.LogRefPresentation,
+): String {
+    val options = presentation.options
+    val row = presentation.row(entry.id)
+    return buildList {
+        if (options.rowNumber) add(row?.rowNumberText ?: entry.id.toString())
+        if (options.timeDelta) add(row?.timeDeltaText ?: UNKNOWN_ANNOTATION_DELTA)
+        add(entry.ts)
+        if (options.pidTid && entry.pid > 0) {
+            val name = if (options.processName) {
+                row?.displayedProcessName ?: row?.processNameCandidate.takeIf { options.allProcessNameCandidates }
+            } else {
+                null
+            }
+            add("${name ?: entry.pid} ${entry.tid}")
+        }
+        add("${entry.level.key}/${entry.tag}")
+        add(entry.msg)
+    }.joinToString("  ")
+}
+
+/** Compatibility renderer used only for transient legacy blocks before their open/restore
+ * migration has resolved rows. New blocks always carry a presentation snapshot. */
+fun presentAnnotationLogLine(
+    block: AnnBlock.LogRef,
+    entry: LogEntry,
+    tab: LogTab,
+    settings: AppSettings,
+    context: LogLinePresentationContext? = null,
+    allowProcessName: Boolean = true,
+): String = block.presentation?.let { presentAnnotationLogLine(entry, it) }
+    ?: presentLogLine(tab, entry, settings, context, allowProcessName)
 
 /** The CSV schema follows the same visible-column order while retaining the stable minimal
  * `ts,level,tag,msg` form when every optional copy setting is off. */

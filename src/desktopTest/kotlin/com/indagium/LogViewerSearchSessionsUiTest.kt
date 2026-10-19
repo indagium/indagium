@@ -24,6 +24,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
+import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.text.TextRange
@@ -63,6 +64,41 @@ class LogViewerSearchSessionsUiTest {
         rule.onNodeWithTag("log-row-$tabId:main-2").assertIsSelected().performClick()
         rule.waitUntil(5_000) { state.tab(tabId)!!.selected.isEmpty() }
         rule.onNodeWithTag("log-row-$tabId:original-2").assertIsNotSelected()
+    }
+
+    @Test
+    fun annotationContextCaptureUsesOriginalPanelSelectionAndDisplayedRows() {
+        val tabId = "annotation-original-context-ui"
+        val rows = (1..40).map { id ->
+            LogEntry(id, "10:00:00.${id}", LogLevel.I, if (id == 2 || id == 5) "Keep" else "Drop", "row $id")
+        }
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(tabId, "original-context.log", rows).copy(
+                showUnfiltered = true,
+                selected = setOf(2),
+                filter = Filter(activeTags = setOf("Keep")),
+            ),
+        )
+        var capturedTarget = 0
+        var capturedRowId = 0
+        var capturedDelta: String? = null
+        rule.setContent {
+            StateBackedLogViewer(state, tabId) { target, _, capture ->
+                capturedTarget = target
+                capturedRowId = capture.rows.single().id
+                capturedDelta = capture.presentation.row(capture.rows.single().id)?.timeDeltaText
+            }
+        }
+
+        rule.onNodeWithTag("log-row-$tabId:original-5").assertIsDisplayed().performMouseInput { rightClick() }
+        rule.runOnIdle {
+            assertEquals(5, capturedTarget)
+            assertEquals(5, capturedRowId, "right-click target remains separate from the anchor")
+            assertEquals("+0.100", capturedDelta, "Original uses its own displayed predecessor")
+            assertEquals(setOf(2), state.tab(tabId)!!.selected, "Original selection stays panel-local")
+        }
+        state.close()
     }
 
     @Test
@@ -758,6 +794,7 @@ private fun StateBackedLogViewer(
     state: AppState,
     tabId: String,
     searchNavigationOverride: SearchNavigationRequest? = null,
+    onContextCapture: ((Int, String, com.indagium.model.AnnBlock.LogRefCapture) -> Unit)? = null,
 ) {
     val tab = state.tab(tabId) ?: return
     val liveSearchRequests = SearchScope.entries.mapNotNull { scope ->
@@ -770,7 +807,9 @@ private fun StateBackedLogViewer(
         settings = state.settings,
         onSelRow = { id, multi, range -> state.selRow(tabId, id, multi, range) },
         onSelRowRange = { state.setSelectedRows(tabId, it) },
-        onCtxMenu = { _, _, _, _, _ -> },
+        onCtxMenu = { target, _, _, selectionText, _, capture ->
+            onContextCapture?.invoke(target, selectionText, capture)
+        },
         onToggleGroup = { state.toggleGroup(tabId, it) },
         onClearFilter = { state.requestClearFilter(tabId) },
         onExpandAll = { state.expandAll(tabId) },

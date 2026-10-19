@@ -1644,7 +1644,8 @@ private fun InlineMarkdownSetting(state: AppState) {
 private fun PidTidCopySetting(state: AppState) {
     CompactSettingWithTooltip(
         label = "Pid/Tid copy",
-        tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
+        tooltip = "Includes PID and TID when copying log lines or filtered exports. " +
+            "New annotations capture their own field choices.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),
@@ -1658,7 +1659,8 @@ private fun PidTidCopySetting(state: AppState) {
 private fun PidCopyAsNameSetting(state: AppState) {
     CompactSettingWithTooltip(
         label = "Pid copy as name",
-        tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
+        tooltip = "Uses a process name learned from the log instead of the numeric PID in ordinary copies. " +
+            "Annotation excerpts capture available names for their own optional display. Available only while PID/TID copying is on.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),
@@ -1673,7 +1675,7 @@ private fun PidCopyAsNameSetting(state: AppState) {
 private fun RowNumberCopySetting(state: AppState) {
     CompactSettingWithTooltip(
         label = "Row number copy",
-        tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
+        tooltip = "Includes the original row number in ordinary copies when the row-number gutter is visible. New annotations choose row numbers in the note dialog.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),
@@ -1687,7 +1689,8 @@ private fun RowNumberCopySetting(state: AppState) {
 private fun TimeDeltaCopySetting(state: AppState) {
     CompactSettingWithTooltip(
         label = "Time delta copy",
-        tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
+        tooltip = "Includes Δt in ordinary copies only when the active tab's Δt column is visible and the log view can calculate it. " +
+            "New annotation excerpts freeze Δt when available, with their option off by default.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),
