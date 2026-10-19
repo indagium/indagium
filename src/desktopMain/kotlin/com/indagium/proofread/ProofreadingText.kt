@@ -3,6 +3,7 @@ package com.indagium.proofread
 /** Spaces protect technical/Markdown content while keeping every original UTF-16 offset and line break. */
 internal object ProofreadingText {
     const val MAX_CHUNK_LENGTH = 4_000
+
     data class Chunk(val offset: Int, val text: String)
 
     private val comments = Regex("<!--[\\s\\S]*?(?:-->|$)")
@@ -44,9 +45,11 @@ internal object ProofreadingText {
 
     internal fun mask(markdown: String): String {
         val chars = markdown.toCharArray()
+
         fun hide(start: Int, end: Int) {
             for (index in start until end) if (chars[index] != '\n' && chars[index] != '\r') chars[index] = ' '
         }
+
         fun hideMatches(regex: Regex) {
             regex.findAll(String(chars)).forEach { hide(it.range.first, it.range.last + 1) }
         }

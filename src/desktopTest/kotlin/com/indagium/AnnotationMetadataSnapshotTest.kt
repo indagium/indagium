@@ -8,24 +8,24 @@ import com.indagium.model.LegacyLogRefPreferences
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.ProcessNameMode
-import com.indagium.ui.AppState
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
+import com.indagium.ui.AppState
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
-import com.indagium.ui.mkTab
 import com.indagium.ui.mkRmap
+import com.indagium.ui.mkTab
 import com.indagium.ui.tabToken
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
 import com.indagium.utils.captureAnnotationLogRef
 import com.indagium.utils.presentAnnotationLogLine
+import java.io.File
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
-import java.io.File
-import kotlin.io.path.createTempDirectory
 
 private const val PICKED_PID = 100
 private const val OTHER_PID = 200

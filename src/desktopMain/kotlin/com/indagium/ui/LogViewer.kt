@@ -60,9 +60,9 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.asLogEntryView
 import com.indagium.utils.cachedSeqGroupsFor
 import com.indagium.utils.captureAnnotationLogRef
-import com.indagium.utils.asLogEntryView
 import com.indagium.utils.computeItems
 import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis

@@ -1405,7 +1405,8 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
         SettingsControlRow {
             CompactSettingWithTooltip(
                 label = "English proofreading",
-                tooltip = "Suggests English spelling and grammar corrections in notes and captions. Text is checked locally; changes are applied when you choose a suggestion.",
+                tooltip = "Suggests English spelling and grammar corrections in notes and captions. " +
+                    "Text is checked locally; changes are applied when you choose a suggestion.",
             ) {
                 SegmentedControl(
                     options = listOf("On", "Off"),
@@ -1697,7 +1698,8 @@ private fun PidCopyAsNameSetting(state: AppState) {
 private fun RowNumberCopySetting(state: AppState) {
     CompactSettingWithTooltip(
         label = "Row number copy",
-        tooltip = "Includes the original row number in ordinary copies when the row-number gutter is visible. New annotations choose row numbers in the note dialog.",
+        tooltip = "Includes the original row number in ordinary copies when the row-number gutter is visible. " +
+            "New annotations choose row numbers in the note dialog.",
     ) {
         SegmentedControl(
             options = listOf("On", "Off"),

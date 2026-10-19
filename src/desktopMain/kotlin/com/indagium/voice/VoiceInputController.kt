@@ -45,8 +45,8 @@ class VoiceInputController(
             if (activeSession != null || state.value is VoiceInputState.Transcribing) return state.value
             if (!hasInstalledModel()) {
                 return transition(
-                if (requiresInstallation) VoiceInputState.ModelRequired
-                else VoiceInputState.Failed(unavailableMessage() ?: "Local speech recognition is unavailable. Choose Whisper instead."),
+                    if (requiresInstallation) VoiceInputState.ModelRequired
+                    else VoiceInputState.Failed(unavailableMessage() ?: "Local speech recognition is unavailable. Choose Whisper instead."),
                 )
             }
             return when (val start = capture.start()) {

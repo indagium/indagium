@@ -24,9 +24,9 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
-import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.text.TextRange
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
@@ -70,7 +70,7 @@ class LogViewerSearchSessionsUiTest {
     fun annotationContextCaptureUsesOriginalPanelSelectionAndDisplayedRows() {
         val tabId = "annotation-original-context-ui"
         val rows = (1..40).map { id ->
-            LogEntry(id, "10:00:00.${id}", LogLevel.I, if (id == 2 || id == 5) "Keep" else "Drop", "row $id")
+            LogEntry(id, "10:00:00.$id", LogLevel.I, if (id == 2 || id == 5) "Keep" else "Drop", "row $id")
         }
         val state = AppState()
         state.tabs = listOf(

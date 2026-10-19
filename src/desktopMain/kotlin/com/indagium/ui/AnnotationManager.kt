@@ -8,12 +8,11 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
-import com.indagium.utils.downscaleAndEncodeJpeg
-import com.indagium.utils.captureFilteredAnnotationLogRef
-import com.indagium.utils.captureAnnotationLogRef
 import com.indagium.utils.asLogEntryView
+import com.indagium.utils.captureAnnotationLogRef
+import com.indagium.utils.captureFilteredAnnotationLogRef
 import com.indagium.utils.computeItems
-import com.indagium.model.entry
+import com.indagium.utils.downscaleAndEncodeJpeg
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
