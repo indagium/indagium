@@ -73,9 +73,9 @@ import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -393,7 +393,6 @@ internal fun CommitTextField(
     var editorValue by draftState
     val draft = editorValue.text
     var focused by remember { mutableStateOf(false) }
-    var editorGroupFocused by remember { mutableStateOf(false) }
     var retainedVoiceSelection by remember(proseTargetId) { mutableStateOf<TextRange?>(null) }
     var lastNonCollapsedVoiceSelection by remember(proseTargetId) { mutableStateOf<TextRange?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -401,6 +400,7 @@ internal fun CommitTextField(
     val storedValue by rememberUpdatedState(value)
     val commitAction by rememberUpdatedState(onCommit)
     val editable by rememberUpdatedState(enabled)
+
     fun acceptEditorValue(updated: TextFieldValue) {
         if (updated.text != editorValue.text) {
             retainedVoiceSelection = null
@@ -415,6 +415,7 @@ internal fun CommitTextField(
         }
         editorValue = updated
     }
+
     fun insertTranscript(transcript: com.indagium.voice.VoiceTranscript) {
         if (!editable) return
         val insertionBase = retainedVoiceSelection?.let { editorValue.copy(selection = it) } ?: editorValue
@@ -466,15 +467,28 @@ internal fun CommitTextField(
                     }
                     .focusRequester(proseFocusRequester)
                     .cancelVoiceOnEscape(proseTargetId)
-            } else Modifier,
+            } else {
+                Modifier
+            },
         )
-    val editorGroupModifier = Modifier.fillMaxWidth().onFocusChanged { editorGroupFocused = it.hasFocus }.focusGroup()
+    val dictation = if (proseTargetId != null) {
+        rememberDictationControl(
+            targetId = proseTargetId,
+            enabled = enabled,
+            onTranscript = ::insertTranscript,
+            onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
+            onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
+        )
+    } else {
+        null
+    }
+    val editorGroupModifier = Modifier.fillMaxWidth().dictationActivity(dictation).focusGroup()
     val font = if (mono) MONO else LocalUiFontFamily.current
     CompositionLocalProvider(LocalUiFontFamily provides font) {
         Column(modifier.fillMaxWidth()) {
             when {
-                multiline -> Row(editorGroupModifier, verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Box(Modifier.weight(1f)) {
+                multiline -> Box(editorGroupModifier) {
+                    Box(Modifier.fillMaxWidth()) {
                         ScrollableTextArea(
                             value = draft,
                             onValue = { editorValue = editorValue.copy(text = it) },
@@ -487,21 +501,12 @@ internal fun CommitTextField(
                             enabled = enabled,
                             textFieldValueState = draftState,
                             onTextFieldValueChange = ::acceptEditorValue,
+                            dictation = dictation,
                         )
                     }
-                    if (proseTargetId != null) VoiceDictationButton(
-                        targetId = proseTargetId,
-                        enabled = enabled,
-                        onTranscript = ::insertTranscript,
-                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
-                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
-                        visible = editorGroupFocused,
-                    )
                 }
-                enabled && title -> Row(
-                    editorGroupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Box(Modifier.weight(1f)) {
+                enabled && title -> Box(editorGroupModifier) {
+                    Box(Modifier.fillMaxWidth()) {
                         TitleInput(
                             value = editorValue,
                             onValue = ::acceptEditorValue,
@@ -514,19 +519,18 @@ internal fun CommitTextField(
                                 editorValue = TextFieldValue(storedValue, TextRange(storedValue.length))
                                 error = null
                             },
+                            dictation = dictation,
+                        )
+                        if (dictation != null) DictationFieldOverlay(
+                            control = dictation,
+                            hasText = editorValue.text.isNotEmpty(),
+                            singleLine = true,
+                            shape = CORNER_SM,
                         )
                     }
-                    if (proseTargetId != null) VoiceDictationButton(
-                        targetId = proseTargetId,
-                        enabled = enabled,
-                        onTranscript = ::insertTranscript,
-                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
-                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
-                        visible = editorGroupFocused,
-                    )
                 }
-                enabled -> Row(editorGroupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Box(Modifier.weight(1f)) {
+                enabled -> Box(editorGroupModifier) {
+                    Box(Modifier.fillMaxWidth()) {
                         InlineField(
                             value = editorValue,
                             onValue = ::acceptEditorValue,
@@ -538,16 +542,15 @@ internal fun CommitTextField(
                                 editorValue = TextFieldValue(storedValue, TextRange(storedValue.length))
                                 error = null
                             },
+                            contentEndPadding = if (dictation != null) INLINE_MIC_TEXT_INSET else 7.dp,
+                        )
+                        if (dictation != null) DictationFieldOverlay(
+                            control = dictation,
+                            hasText = editorValue.text.isNotEmpty(),
+                            singleLine = true,
+                            shape = CORNER_SM,
                         )
                     }
-                    if (proseTargetId != null) VoiceDictationButton(
-                        targetId = proseTargetId,
-                        enabled = enabled,
-                        onTranscript = ::insertTranscript,
-                        onBeforeAction = { if (retainedVoiceSelection == null) retainedVoiceSelection = editorValue.selection },
-                        onFocusRestored = { runCatching { proseFocusRequester.requestFocus() } },
-                        visible = editorGroupFocused,
-                    )
                 }
                 else -> ReadOnlyValue(draft, placeholder)
             }
@@ -567,6 +570,7 @@ private fun TitleInput(
     onSubmit: () -> Unit,
     onCancel: () -> Unit,
     visualTransformation: androidx.compose.ui.text.input.VisualTransformation,
+    dictation: DictationControl? = null,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -600,9 +604,11 @@ private fun TitleInput(
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .background(if (focused) tc.p else Color.Transparent, CORNER_SM)
             .border(1.dp, borderColor, CORNER_SM)
-            .padding(horizontal = 6.dp, vertical = 3.dp),
+            .padding(start = 6.dp, top = 3.dp, end = if (dictation != null) INLINE_MIC_TEXT_INSET else 6.dp, bottom = 3.dp),
         decorationBox = { inner ->
-            if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold)
+            if (value.text.isEmpty()) {
+                AppText(dictation?.placeholder(placeholder) ?: placeholder, color = tc.td, fontSize = TITLE_FONT_SIZE, fontWeight = FontWeight.SemiBold)
+            }
             inner()
         },
     )
