@@ -78,6 +78,8 @@ class VoiceInputController(
                 is VoiceCaptureResult.Captured -> {
                     if (result.audio.isSilentOrEmpty()) {
                         transitionIfCurrent(generation, VoiceInputState.Failed("No speech was captured. Try again."))
+                    } else if (result.audio.isTooQuiet()) {
+                        transitionIfCurrent(generation, VoiceInputState.Failed(TOO_QUIET_MESSAGE))
                     } else {
                         transcribe(generation, result.audio, translateToEnglish)
                     }
@@ -154,6 +156,10 @@ class VoiceInputController(
         return next
     }
 }
+
+internal const val TOO_QUIET_MESSAGE =
+    "The microphone recorded only silence. Check the input device, and on macOS allow microphone access " +
+        "in System Settings › Privacy & Security › Microphone for the app that started Indagium."
 
 /** Monotonic event identity prevents a queued StateFlow value from an earlier session reaching a new owner. */
 data class VoiceInputStateEvent(val revision: Long, val state: VoiceInputState)

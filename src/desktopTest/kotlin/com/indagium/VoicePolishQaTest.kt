@@ -19,8 +19,10 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -46,6 +48,7 @@ import com.indagium.ui.LocalTheme
 import com.indagium.ui.LocalVoiceInputUi
 import com.indagium.ui.MarkdownInlineOrTextField
 import com.indagium.ui.ProofreadingUi
+import com.indagium.ui.TestStepDraftDialog
 import com.indagium.ui.ThemeColors
 import com.indagium.ui.VoiceInputUi
 import com.indagium.ui.tc
@@ -87,12 +90,14 @@ class VoicePolishQaTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     private var coordinator: VoiceInputSessionCoordinator? = null
     private var proofreadingService: EnglishProofreadingService? = null
+    private var promptFixture: AiPromptDialogFixture? = null
     private val output = File("build/qa/voice-polish").apply { mkdirs() }
 
     @After
     fun tearDown() {
         coordinator?.close()
         proofreadingService?.close()
+        promptFixture?.close()
         scope.cancel()
         directory.deleteRecursively()
     }
@@ -102,6 +107,18 @@ class VoicePolishQaTest {
 
     @Test
     fun darkDialogToolbar() = dialogToolbar(DARK_GITHUB, "dark")
+
+    @Test
+    fun lightMicTooltip() = micTooltip(LIGHT_THEME, "light")
+
+    @Test
+    fun darkMicTooltip() = micTooltip(DARK_GITHUB, "dark")
+
+    @Test
+    fun lightDraftStepsDialog() = draftStepsDialog(LIGHT_THEME, "light")
+
+    @Test
+    fun darkDraftStepsDialog() = draftStepsDialog(DARK_GITHUB, "dark")
 
     @Test
     fun lightInlineField() = inlineField(LIGHT_THEME, "light")
@@ -126,9 +143,46 @@ class VoicePolishQaTest {
         rule.onNodeWithContentDescription("Stop voice input").performMouseInput { click() }
         rule.waitUntil(5_000) { coordinator?.snapshot?.value?.state == VoiceInputState.Idle }
 
-        rule.onNodeWithContentDescription("Dictation language", substring = true).performClick()
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { rightClick() }
         rule.waitForIdle()
         save("toolbar-menu-$name", dialog, rule.onNodeWithTag("dictation-menu"))
+    }
+
+    private fun micTooltip(theme: ThemeColors, name: String) {
+        setContent(theme) { dialog("tooltip-$name") }
+        val dialog = rule.onNodeWithTag("annotation-editor-dialog")
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithContentDescription("Voice input").performMouseInput { moveTo(center) }
+        rule.mainClock.advanceTimeBy(1_500)
+        save("toolbar-tooltip-$name", dialog, rule.onNodeWithTag("dictation-tooltip"))
+        rule.mainClock.autoAdvance = true
+    }
+
+    /** A dialog adds a second, empty root to the scene; the window-sized one holds the dialog. */
+    private fun widestRoot(): SemanticsNodeInteraction {
+        val widths = rule.onAllNodes(isRoot()).fetchSemanticsNodes().map { it.boundsInRoot.width }
+        return rule.onAllNodes(isRoot())[widths.indexOf(widths.max())]
+    }
+
+    private fun draftStepsDialog(theme: ThemeColors, name: String) {
+        val fixture = AiPromptDialogFixture().also { promptFixture = it }
+        rule.setContent {
+            fixture.Provide(theme) {
+                CompositionLocalProvider(LocalDensity provides Density(1.25f)) {
+                    TestStepDraftDialog(fixture.suiteId, fixture.case, onDismiss = {})
+                }
+            }
+        }
+        rule.waitForIdle()
+        val tag = "voice-input-test-case:${fixture.case.id}:draft-steps-prompt"
+        rule.onNodeWithTag(tag).assertIsDisplayed()
+        // The dialog frame itself is untagged, so the scene is the whole window around the prompt.
+        save("draft-steps-dialog-$name", widestRoot())
+        rule.onNodeWithTag(tag).performMouseInput { click() }
+        rule.waitForIdle()
+        save("draft-steps-dialog-recording-$name", widestRoot())
+        rule.onNodeWithContentDescription("Stop voice input").performMouseInput { click() }
+        rule.waitUntil(5_000) { fixture.coordinator.snapshot.value.state == VoiceInputState.Idle }
     }
 
     private fun inlineField(theme: ThemeColors, name: String) {
@@ -246,7 +300,7 @@ class VoicePolishQaTest {
             hasInstalledModel = { true },
             capture = object : VoiceCapture {
                 override fun start(): VoiceCaptureStartResult = VoiceCaptureStartResult.Started(object : VoiceCaptureSession {
-                    override fun stop() = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(1, 0)))
+                    override fun stop() = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(0, 64)))
 
                     override fun cancel() = Unit
                 })

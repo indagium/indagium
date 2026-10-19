@@ -144,7 +144,7 @@ class VoiceInputSessionCoordinatorRegressionTest {
         override fun start(): VoiceCaptureStartResult {
             starts++
             return VoiceCaptureStartResult.Started(object : VoiceCaptureSession {
-                override fun stop(): VoiceCaptureResult = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(1, 0)))
+                override fun stop(): VoiceCaptureResult = VoiceCaptureResult.Captured(VoiceAudio(byteArrayOf(0, 64)))
 
                 override fun cancel() = Unit
             })

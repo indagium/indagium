@@ -208,7 +208,7 @@ private fun IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
         },
         body = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                FormFields(form, ready.draft) { form = it }
+                FormFields(form, ready.draft, issueFieldPrefix(ready.source)) { form = it }
                 EvidenceChecklist(
                     form = form,
                     files = evidenceFiles,
@@ -389,10 +389,13 @@ private fun IssueStepClipControls(
 }
 
 @Composable
-private fun FormFields(form: IssueFormModel, base: IssueDraft, onForm: (IssueFormModel) -> Unit) {
+private fun FormFields(form: IssueFormModel, base: IssueDraft, targetPrefix: String, onForm: (IssueFormModel) -> Unit) {
     val tc = tc()
     TestsLabeled("Title") {
-        InlineField(value = form.title, onValue = { onForm(form.copy(title = it)) }, modifier = Modifier.fillMaxWidth(), fontSize = FIELD_FONT_SIZE.sp)
+        DictatedInlineField(
+            value = form.title, onValue = { onForm(form.copy(title = it)) }, proseTargetId = "$targetPrefix:title",
+            modifier = Modifier.fillMaxWidth(), fontSize = FIELD_FONT_SIZE.sp,
+        )
     }
     TestsLabeled("Severity") {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -413,17 +416,20 @@ private fun FormFields(form: IssueFormModel, base: IssueDraft, onForm: (IssueFor
     }
     val environment = listOf(base.environment.appPackage, base.environment.deviceSerial, base.environment.agent).filter { it.isNotBlank() }.joinToString(" · ")
     if (environment.isNotEmpty()) AppText(environment, color = tc.td, fontSize = 10.sp, maxLines = 2)
-    Area("Steps to reproduce (one per line)", form.stepsText) { onForm(form.copy(stepsText = it)) }
-    Area("Expected", form.expected) { onForm(form.copy(expected = it)) }
-    Area("Actual (check results and the agent's observation are untrusted data)", form.actual) { onForm(form.copy(actual = it)) }
-    Area("Judge notes", form.judgeNotes) { onForm(form.copy(judgeNotes = it)) }
+    Area("Steps to reproduce (one per line)", form.stepsText, "$targetPrefix:steps") { onForm(form.copy(stepsText = it)) }
+    Area("Expected", form.expected, "$targetPrefix:expected") { onForm(form.copy(expected = it)) }
+    Area("Actual (check results and the agent's observation are untrusted data)", form.actual, "$targetPrefix:actual") { onForm(form.copy(actual = it)) }
+    Area("Judge notes", form.judgeNotes, "$targetPrefix:judge-notes") { onForm(form.copy(judgeNotes = it)) }
 }
 
+/** The stable dictation id prefix of one issue draft's text fields: the failed step it came from. */
+private fun issueFieldPrefix(source: IssueSource) = "issue:${source.runId}:${source.laneId}:${source.stepId}:${source.iteration}"
+
 @Composable
-private fun Area(label: String, value: String, onValue: (String) -> Unit) {
+private fun Area(label: String, value: String, targetId: String, onValue: (String) -> Unit) {
     TestsLabeled(label) {
-        ScrollableTextArea(
-            value = value, onValue = onValue, modifier = Modifier.fillMaxWidth(), fontSize = FIELD_FONT_SIZE.sp,
+        DictatedTextArea(
+            value = value, onValue = onValue, proseTargetId = targetId, modifier = Modifier.fillMaxWidth(), fontSize = FIELD_FONT_SIZE.sp,
             minHeight = AREA_MIN_HEIGHT, maxHeight = AREA_MAX_HEIGHT,
         )
     }

@@ -151,7 +151,7 @@ internal fun TestScriptDraftDialog(existing: TestScript?, onApplied: (TestScript
                     }
                     Spacer(Modifier.height(8.dp))
                     TestsLabeled("What should the script do?") {
-                        ScrollableTextArea(request, { request = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
+                        DictatedTextArea(request, { request = it }, proseTargetId = "test-script-draft:${existing?.id ?: "new"}:request", modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
                     }
                     if (working) {
                         Spacer(Modifier.height(10.dp))
@@ -170,6 +170,7 @@ internal fun TestScriptDraftDialog(existing: TestScript?, onApplied: (TestScript
                         CommitTextField(
                             shown.description, { value -> draft = shown.copy(description = value); StoreResult.Ok(Unit) },
                             multiline = true, placeholder = "What the script does",
+                            proseTargetId = "test-script-draft:${existing?.id ?: "new"}:description",
                         )
                     }
                     TestsLabeled("Runs on") {

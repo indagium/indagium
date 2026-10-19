@@ -463,8 +463,9 @@ private fun AccessToken(state: AppState, tokenText: String, onTokenText: (String
 @Composable
 private fun IssuePrompt(state: AppState, tracker: TrackerSettings) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        ScrollableTextArea(
+        DictatedTextArea(
             tracker.prompt, { value -> updateTracker(state) { it.copy(prompt = value.take(MAX_TRACKER_PROMPT_CHARS)) } },
+            proseTargetId = "settings:issue-tracker:prompt",
             placeholder = DEFAULT_PROMPT_HINT, modifier = Modifier.width(FIELD_WIDTH * 1.5f), fontSize = 12.sp,
             minHeight = PROMPT_MIN_HEIGHT, maxHeight = PROMPT_MAX_HEIGHT,
         )

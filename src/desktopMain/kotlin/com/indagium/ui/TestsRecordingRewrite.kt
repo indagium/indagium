@@ -133,8 +133,9 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
     }
     Spacer(Modifier.height(6.dp))
     TestsLabeled("What was this test about? (optional)") {
-        ScrollableTextArea(
-            note, { note = it }, placeholder = case.name, modifier = Modifier.fillMaxWidth(), minHeight = NOTE_MIN_HEIGHT, maxHeight = NOTE_MAX_HEIGHT,
+        DictatedTextArea(
+            note, { note = it }, proseTargetId = "recording-rewrite:${session.id}:note",
+            placeholder = case.name, modifier = Modifier.fillMaxWidth(), minHeight = NOTE_MIN_HEIGHT, maxHeight = NOTE_MAX_HEIGHT,
             enabled = !busy,
         )
     }

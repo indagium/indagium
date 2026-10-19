@@ -148,6 +148,7 @@ internal fun TestStepImproveDialog(target: ImproveStepsTarget, onDismiss: () -> 
                         working = working,
                         usageLine = attemptUsage?.let { "Latest attempt · ${it.summaryLabel()}" },
                         progress = { AiWorkProgress("Improving steps", profile?.displayName, selection.modelId ?: profile?.model, stage = null) },
+                        targetId = "test-case:${target.caseId}:improve-note",
                     )
                 } else {
                     ImproveReviewPhase(review = current, working = working)
@@ -222,6 +223,7 @@ private fun ImproveAskPhase(
     working: Boolean,
     usageLine: String?,
     progress: @Composable () -> Unit,
+    targetId: String,
 ) {
     val tc = tc()
     TestsHint(
@@ -238,8 +240,9 @@ private fun ImproveAskPhase(
     profilePicker()
     Spacer(Modifier.height(8.dp))
     TestsLabeled("What should be improved? (optional)") {
-        ScrollableTextArea(
-            note, onNote, placeholder = "For example: make the expected results independent of what the feed shows",
+        DictatedTextArea(
+            note, onNote, proseTargetId = targetId,
+            placeholder = "For example: make the expected results independent of what the feed shows",
             modifier = Modifier.fillMaxWidth(), minHeight = NOTE_MIN_HEIGHT, maxHeight = NOTE_MAX_HEIGHT, enabled = !working,
         )
     }

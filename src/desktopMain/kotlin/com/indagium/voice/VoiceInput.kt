@@ -36,12 +36,29 @@ data class VoiceAudio(
 
     fun isSilentOrEmpty(): Boolean = pcm16le.size < BYTES_PER_SAMPLE
 
+    /**
+     * True when no sample reaches [QUIET_PEAK_FRACTION] of full scale. Speech peaks far above it, while a muted
+     * input, a mic the OS withholds (macOS hands an app without microphone access silent buffers, not an error)
+     * or an idle room stays below. Whisper invents a sentence for such audio, so it never reaches the recognizer.
+     */
+    fun isTooQuiet(): Boolean {
+        val threshold = (Short.MAX_VALUE * QUIET_PEAK_FRACTION).toInt()
+        val samples = java.nio.ByteBuffer.wrap(pcm16le).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        while (samples.hasRemaining()) {
+            if (kotlin.math.abs(samples.get().toInt()) >= threshold) return false
+        }
+        return true
+    }
+
     companion object {
         const val SAMPLE_RATE_HZ = 16_000
         const val CHANNELS = 1
         const val BYTES_PER_SAMPLE = 2
         const val MAX_DURATION_MILLIS = 90_000L
         const val MAX_PCM_BYTES = SAMPLE_RATE_HZ * CHANNELS * BYTES_PER_SAMPLE * 90
+
+        /** About -40 dBFS. A blocked macOS input peaks near -65 dBFS; normal speech near -20 to -6 dBFS. */
+        const val QUIET_PEAK_FRACTION = 0.01
     }
 }
 

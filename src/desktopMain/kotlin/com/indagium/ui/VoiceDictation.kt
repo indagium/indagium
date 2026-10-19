@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -47,7 +46,6 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
@@ -71,13 +69,16 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
@@ -143,8 +144,8 @@ private const val CLOSING_PUNCTUATION = ",.!?;:)]}\u2019\u201d\"'"
 enum class DictationPhase { Idle, Recording, Transcribing, Failed }
 
 /**
- * Everything one dictation target shows and does, shared by the [DictationPill] and the in-field
- * microphone so both read the same state and open the same menu. Built fresh on every composition
+ * Everything one dictation target shows and does, read by the one [DictationMic] wherever it is drawn (inside a
+ * field, in a toolbar or beside a composer) so every placement shows the same state and opens the same menu. Built fresh on every composition
  * by [rememberDictationControl]; the animated clock is read lazily so only the small composables that
  * draw a timer or spinner recompose while recording.
  *
@@ -250,13 +251,6 @@ class DictationControl internal constructor(
 
     fun toggleTranslation() {
         updateSettings(settings.copy(translateToEnglish = !settings.translateToEnglish))
-    }
-
-    /** Compact form for the pill: `Auto`, `UK`, `UK → EN`. */
-    fun modeLabel(): String {
-        val code = settings.selectedRecognitionLanguageCode
-        val language = if (code == "auto") "Auto" else code.uppercase()
-        return if (translatesToEnglish()) "$language → EN" else language
     }
 
     /** Long form for tooltips: `Auto → English`, `Ukrainian`. */
@@ -412,8 +406,12 @@ private fun DictationControl.tooltip(): String = when (phase) {
     DictationPhase.Recording -> "Stop dictation · Esc cancels"
     DictationPhase.Transcribing -> "Transcribing…"
     DictationPhase.Failed -> "$failure Click to retry."
-    DictationPhase.Idle -> "Dictate (${modeDescription()}) · right-click to change"
+    DictationPhase.Idle -> "Dictate · ${modeDescription()}"
 }
+
+/** The muted second tooltip line: how to reach the language and translation menu. Only while the microphone is idle. */
+private fun DictationControl.tooltipDetail(): String? =
+    if (phase == DictationPhase.Idle) "Right-click for language and translation" else null
 
 /** A small arc that turns in discrete steps; driven by the shared clock instead of an infinite animation. */
 @Composable
@@ -434,143 +432,6 @@ private fun DictationSpinner(control: DictationControl, color: Color, size: Dp =
 
 private const val SPINNER_STEP_DEGREES = 45f
 private const val SPINNER_SWEEP_DEGREES = 250f
-
-/**
- * One split pill for dictation: `[mic Dictate | Auto → EN ▾]` at rest, a danger-tinted `● 0:07 · Stop`
- * while recording, a neutral `Transcribing…` while the model works, and `Retry` after a failure. The right
- * segment opens the shared language menu. Used by the note dialog toolbar and the AI composer.
- */
-@Composable
-internal fun DictationPill(
-    targetId: String,
-    enabled: Boolean,
-    onTranscript: (VoiceTranscript) -> Unit,
-    modifier: Modifier = Modifier,
-    minWidth: Dp = 0.dp,
-    onFocusRestored: (() -> Unit)? = null,
-    onInteractionActiveChange: (Boolean) -> Unit = {},
-    onBeforeAction: () -> Unit = {},
-) {
-    val control = rememberDictationControl(
-        targetId = targetId,
-        enabled = enabled,
-        onTranscript = onTranscript,
-        onFocusRestored = onFocusRestored,
-        onInteractionActiveChange = onInteractionActiveChange,
-        onBeforeAction = onBeforeAction,
-    ) ?: return
-    DictationPill(control, modifier, minWidth)
-}
-
-/** The pill for a control the caller already registered (the AI composer keeps its target alive while a run is active). */
-@Composable
-internal fun DictationPill(control: DictationControl, modifier: Modifier = Modifier, minWidth: Dp = 0.dp) {
-    val tc = tc()
-    val targetId = control.targetId
-    val shape = RoundedCornerShape(50)
-    val recording = control.phase == DictationPhase.Recording
-    // minWidth reserves the idle pill's footprint, so a toolbar sharing the row does not reflow when recording starts.
-    Box(modifier.widthIn(min = minWidth), contentAlignment = Alignment.CenterEnd) {
-        Row(
-            Modifier.height(PILL_HEIGHT)
-                .background(if (recording) DANGER_RED.copy(alpha = .13f) else Color.Transparent, shape)
-                .border(1.dp, if (recording) DANGER_RED.copy(alpha = .5f) else tc.br, shape)
-                .clip(shape),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            when (control.phase) {
-                DictationPhase.Recording -> PillSegment(control, control.tooltip(), onClick = control::activate, activate = true) {
-                    RecordingDot(control)
-                    // Reading the clock here keeps the timer recomposing in this scope only.
-                    AppText("${formatDictationElapsed(control.elapsedSeconds())} · Stop", color = DANGER_RED, fontSize = 11.sp, fontWeight = FontWeight.Medium)
-                }
-                DictationPhase.Transcribing -> PillSegment(control, control.tooltip(), onClick = null, activate = true) {
-                    DictationSpinner(control, tc.td)
-                    AppText("Transcribing…", color = tc.td, fontSize = 11.sp)
-                }
-                else -> {
-                    val failed = control.phase == DictationPhase.Failed
-                    PillSegment(
-                        control,
-                        control.tooltip(),
-                        onClick = if (control.clickable) control::activate else null,
-                        activate = true,
-                    ) {
-                        Icon(
-                            Icons.Outlined.Mic,
-                            contentDescription = null,
-                            modifier = Modifier.size(13.dp),
-                            tint = if (failed) DANGER_RED else if (control.clickable) tc.ts else tc.td.copy(alpha = .5f),
-                        )
-                        AppText(
-                            if (failed) "Retry" else "Dictate",
-                            color = if (failed) DANGER_RED else if (control.clickable) tc.ts else tc.td.copy(alpha = .5f),
-                            fontSize = 11.sp,
-                        )
-                    }
-                    Box(Modifier.width(1.dp).height(14.dp).background(tc.br))
-                    PillSegment(
-                        control,
-                        "Spoken language: ${control.modeDescription()}",
-                        onClick = if (control.enabled) control::toggleMenu else null,
-                        activate = false,
-                        tag = "voice-input-menu-$targetId",
-                    ) {
-                        AppText(control.modeLabel(), color = tc.td, fontSize = 11.sp)
-                        AppText("▾", color = tc.td, fontSize = 8.sp)
-                    }
-                }
-            }
-        }
-        if (control.menuOpen) DictationMenuPopup(control)
-    }
-}
-
-private val PILL_HEIGHT = 24.dp
-
-@Composable
-private fun RecordingDot(control: DictationControl) {
-    Box(
-        Modifier.size(7.dp).drawBehind {
-            drawCircle(DANGER_RED.copy(alpha = if (control.blinkOn()) 1f else .25f))
-        },
-    )
-}
-
-/** A clickable region of the pill. Not focusable, so using it never takes keyboard focus from the editor. */
-@Composable
-private fun PillSegment(
-    control: DictationControl,
-    tooltip: String,
-    onClick: (() -> Unit)?,
-    activate: Boolean,
-    tag: String = "voice-input-${control.targetId}",
-    content: @Composable RowScope.() -> Unit,
-) {
-    val tc = tc()
-    var hovered by remember { mutableStateOf(false) }
-    TooltipArea(tooltip = { ToolbarTooltip(tooltip, maxLines = 3) }) {
-        Row(
-            Modifier.fillMaxHeight()
-                .background(if (hovered && onClick != null) tc.hv else Color.Transparent)
-                .semantics {
-                    contentDescription = if (activate) control.semanticDescription() else "Dictation language, ${control.modeDescription()}"
-                    if (activate && control.failure != null) stateDescription = control.failure
-                }
-                .testTag(tag)
-                .then(if (activate) Modifier.dictationPress(control) else Modifier)
-                .onPointerEvent(PointerEventType.Enter) { hovered = true }
-                .onPointerEvent(PointerEventType.Exit) { hovered = false }
-                .then(
-                    if (onClick != null) Modifier.focusProperties { canFocus = false }.clickable(onClick = onClick) else Modifier,
-                )
-                .padding(horizontal = 9.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            content = content,
-        )
-    }
-}
 
 /** Places the menu under its anchor's right edge, flipping above when the window has no room below. */
 internal class DictationMenuPositionProvider(
@@ -593,7 +454,7 @@ internal class DictationMenuPositionProvider(
     }
 }
 
-/** The spoken-language picker and the translate-to-English switch, shared by the pill and the in-field microphone. */
+/** The spoken-language picker and the translate-to-English switch, opened by right-clicking any [DictationMic]. */
 @Composable
 private fun DictationMenuPopup(control: DictationControl) {
     val tc = tc()
@@ -687,20 +548,27 @@ private fun DictationSwitch(on: Boolean) {
 }
 
 /**
- * The microphone that lives inside a prose field, at its bottom-right corner. It is always laid out (so focusing the
- * field moves nothing), muted at rest, brighter while the field is hovered or focused, and right-click opens the
- * language menu. Not focusable, so clicking it never takes the caret away from the text.
+ * The one dictation microphone, a round icon button. Inside a prose field it sits at the bottom-right corner (always laid
+ * out, so focusing the field moves nothing, muted at rest and brighter while the field is hovered or focused); as a
+ * [standalone] button in a toolbar or beside a composer it keeps its normal tint. Left-click starts or stops, right-click
+ * opens the language menu. Not focusable, so clicking it never takes the caret away from the text.
  */
 @Composable
-internal fun InlineDictationMic(control: DictationControl, modifier: Modifier = Modifier) {
+internal fun DictationMic(
+    control: DictationControl,
+    modifier: Modifier = Modifier,
+    size: Dp = INLINE_MIC_SIZE,
+    standalone: Boolean = false,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val phase = control.phase
     val tint = when {
         phase == DictationPhase.Recording || phase == DictationPhase.Failed -> DANGER_RED
         phase == DictationPhase.Transcribing -> tc.td
+        !control.enabled -> tc.td.copy(alpha = .4f)
         hovered -> tc.tx
-        control.fieldActive -> tc.ts
+        standalone || control.fieldActive -> tc.ts
         else -> tc.td.copy(alpha = .55f)
     }
     val background = when {
@@ -708,10 +576,15 @@ internal fun InlineDictationMic(control: DictationControl, modifier: Modifier = 
         hovered && control.clickable -> tc.hv
         else -> Color.Transparent
     }
+    val iconSize = (size.value * MIC_ICON_RATIO).dp
     Box(modifier) {
-        TooltipArea(tooltip = { ToolbarTooltip(control.tooltip(), maxLines = 3) }) {
+        TooltipArea(
+            tooltip = {
+                Box(Modifier.testTag("dictation-tooltip")) { ToolbarTooltip(control.tooltip(), maxLines = 3, detail = control.tooltipDetail()) }
+            },
+        ) {
             Box(
-                Modifier.size(INLINE_MIC_SIZE).clip(CircleShape).background(background, CircleShape)
+                Modifier.size(size).clip(CircleShape).background(background, CircleShape)
                     .semantics {
                         contentDescription = control.semanticDescription()
                         if (control.failure != null) stateDescription = control.failure
@@ -729,8 +602,8 @@ internal fun InlineDictationMic(control: DictationControl, modifier: Modifier = 
             ) {
                 when (phase) {
                     DictationPhase.Transcribing -> DictationSpinner(control, tint)
-                    DictationPhase.Recording -> Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(14.dp), tint = tint)
-                    else -> Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(14.dp), tint = tint)
+                    DictationPhase.Recording -> Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(iconSize), tint = tint)
+                    else -> Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(iconSize), tint = tint)
                 }
             }
         }
@@ -738,7 +611,12 @@ internal fun InlineDictationMic(control: DictationControl, modifier: Modifier = 
     }
 }
 
+private const val MIC_ICON_RATIO = 0.64f
+
 internal val INLINE_MIC_SIZE = 22.dp
+
+/** Every prose field puts its microphone this far from the trailing edge, so they all line up. */
+internal val INLINE_MIC_END_PADDING = 4.dp
 
 /** Width the field's text must stay clear of so the microphone never covers a character. */
 internal val INLINE_MIC_TEXT_INSET = 30.dp
@@ -754,7 +632,6 @@ internal fun BoxScope.DictationFieldOverlay(
     hasText: Boolean,
     singleLine: Boolean,
     shape: Shape,
-    micEndPadding: Dp = 4.dp,
 ) {
     val tc = tc()
     if (control.phase == DictationPhase.Recording) Box(Modifier.matchParentSize().border(1.dp, DANGER_RED, shape))
@@ -766,11 +643,40 @@ internal fun BoxScope.DictationFieldOverlay(
         color = if (control.phase == DictationPhase.Failed) DANGER_RED else tc.td,
         fontSize = 10.sp,
         modifier = Modifier.align(alignment)
-            .padding(end = micEndPadding + INLINE_MIC_SIZE + 2.dp, bottom = bottom)
+            .padding(end = INLINE_MIC_END_PADDING + INLINE_MIC_SIZE + 2.dp, bottom = bottom)
             .background(tc.bg.copy(alpha = .92f), CORNER_SM)
             .padding(horizontal = 4.dp, vertical = 1.dp),
     )
-    InlineDictationMic(control, Modifier.align(alignment).padding(end = micEndPadding, bottom = bottom))
+    DictationMic(control, Modifier.align(alignment).padding(end = INLINE_MIC_END_PADDING, bottom = bottom))
+}
+
+/**
+ * Live dictation status for a footer line that carries no microphone of its own: `· ● Listening… 0:07` in the danger
+ * colour while recording, `· Transcribing…` while the model works and the failure message after a failed attempt.
+ * Draws nothing at rest. Emits into the caller's Row, and reads the animated clock here so only this small scope
+ * recomposes while it ticks.
+ */
+@Composable
+internal fun DictationFooterStatus(control: DictationControl?, fontFamily: FontFamily, fontSize: TextUnit = 10.sp) {
+    val tc = tc()
+    val phase = control?.phase ?: return
+    if (phase == DictationPhase.Idle) return
+    AppText("·", color = tc.td, fontSize = fontSize, fontFamily = fontFamily)
+    when (phase) {
+        DictationPhase.Recording -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("●", color = DANGER_RED.copy(alpha = if (control.blinkOn()) 1f else .3f), fontSize = fontSize, fontFamily = fontFamily)
+            AppText("Listening… ${formatDictationElapsed(control.elapsedSeconds())}", color = DANGER_RED, fontSize = fontSize, fontFamily = fontFamily)
+        }
+        DictationPhase.Transcribing -> AppText("Transcribing…", color = tc.td, fontSize = fontSize, fontFamily = fontFamily)
+        else -> AppText(
+            control.failure ?: "Voice input failed",
+            color = DANGER_RED,
+            fontSize = fontSize,
+            fontFamily = fontFamily,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 360.dp),
+        )
+    }
 }
 
 /** Escape cancels capture/transcription before the enclosing editor handles its own Escape action. */

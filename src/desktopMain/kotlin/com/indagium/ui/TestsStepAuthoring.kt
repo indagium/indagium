@@ -341,7 +341,7 @@ private suspend fun startAuthoringRecording(
 
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
-private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -> Unit) {
+internal fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -> Unit) {
     val ui = LocalTestsUi.current
     val tc = tc()
     val profiles = normalizeAiProviderProfiles(ui.state.settings.aiProviderProfiles)
@@ -436,7 +436,7 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                     }
                     Spacer(Modifier.height(8.dp))
                     TestsLabeled("What should the added steps do?") {
-                        ScrollableTextArea(prompt, { prompt = it }, modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
+                        DictatedTextArea(prompt, { prompt = it }, proseTargetId = "test-case:${case.id}:draft-steps-prompt", modifier = Modifier.fillMaxWidth(), minHeight = 90.dp, maxHeight = 180.dp)
                     }
                     if (working) {
                         Spacer(Modifier.height(10.dp))
