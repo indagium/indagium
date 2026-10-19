@@ -9,7 +9,16 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import java.io.Closeable
 
-/** A single app-wide recording/transcription owner. Target IDs are domain identities, never list positions. */
+/**
+ * A single app-wide recording/transcription owner. Target IDs are domain identities, never list positions.
+ *
+ * Lock order: the controller publishes state while holding its own lock, and an unconfined or
+ * immediate collector then runs [onControllerState] (which takes [lock]) on that same thread. So the
+ * public methods below decide ownership under [lock] and call into the controller only after
+ * releasing it; holding [lock] across a controller call deadlocks against a recognizer worker.
+ * Only [onControllerState] calls the controller under [lock], which is safe because it either
+ * already holds the controller's lock (inline delivery) or runs on a thread no worker waits on.
+ */
 class VoiceInputSessionCoordinator(
     private val controller: VoiceInputController,
     private val scope: CoroutineScope,
@@ -42,41 +51,53 @@ class VoiceInputSessionCoordinator(
         insert: (VoiceTranscript) -> Unit,
     ): Closeable {
         require(id.isNotBlank())
+        var cancelInFlight = false
         val token = synchronized(lock) {
             check(!closed) { "Voice dictation coordinator is closed" }
             if (activeOwnerId == id) {
                 // Reusing the same domain ID after the editor instance was replaced must not
-                // transfer an in-flight transcript to the replacement draft.
+                // transfer an in-flight transcript to the replacement draft. With the owner cleared,
+                // a transcript delivered before the cancel below is dropped by onControllerState.
                 activeOwnerId = null
                 activeOwnerToken = null
-                controller.cancel()
+                cancelInFlight = true
             }
             (++nextToken).also { targets[id] = Target(it, enabled, insert) }
         }
+        if (cancelInFlight) controller.cancel()
         return Closeable { unregister(id, token) }
     }
 
     /** Starts only for a live, enabled target. A second editor cannot take over the microphone. */
-    fun start(id: String): VoiceInputState = synchronized(lock) {
-        if (closed) return controller.state.value
-        val target = targets[id] ?: return VoiceInputState.Failed("This editor is no longer available.")
-        if (!target.enabled()) return VoiceInputState.Failed("This editor is read-only.")
-        if (activeOwnerId != null && activeOwnerId != id) return controller.state.value
-        activeOwnerId = id
-        activeOwnerToken = target.token
-        lastOwnerId = id
-        val next = controller.startRecording()
-        if (next !is VoiceInputState.Recording && next !is VoiceInputState.Transcribing) {
-            activeOwnerId = null
-            activeOwnerToken = null
+    fun start(id: String): VoiceInputState {
+        val token = synchronized(lock) {
+            if (closed) return controller.state.value
+            val target = targets[id] ?: return VoiceInputState.Failed("This editor is no longer available.")
+            if (!target.enabled()) return VoiceInputState.Failed("This editor is read-only.")
+            if (activeOwnerId != null && activeOwnerId != id) return controller.state.value
+            activeOwnerId = id
+            activeOwnerToken = target.token
+            lastOwnerId = id
+            target.token
         }
-        publish(next)
-        next
+        val next = controller.startRecording()
+        val orphaned = synchronized(lock) {
+            if (closed) return@synchronized true
+            if (activeOwnerToken == token && next !is VoiceInputState.Recording && next !is VoiceInputState.Transcribing) {
+                activeOwnerId = null
+                activeOwnerToken = null
+            }
+            publish(controller.state.value)
+            false
+        }
+        // close() ran while the microphone was opening; do not leave a capture nobody owns.
+        if (orphaned) controller.cancel()
+        return next
     }
 
-    fun stop(id: String): Job? = synchronized(lock) {
-        if (activeOwnerId != id) return null
-        controller.stopAndTranscribe()
+    fun stop(id: String): Job? {
+        synchronized(lock) { if (activeOwnerId != id) return null }
+        return controller.stopAndTranscribe()
     }
 
     fun cancel(id: String) {
@@ -85,9 +106,9 @@ class VoiceInputSessionCoordinator(
             activeOwnerId = null
             activeOwnerToken = null
             lastOwnerId = id
-            controller.cancel()
-            publish(controller.state.value)
         }
+        controller.cancel()
+        synchronized(lock) { if (!closed) publish(controller.state.value) }
     }
 
     fun isBusyForOther(id: String): Boolean = synchronized(lock) {
@@ -127,16 +148,19 @@ class VoiceInputSessionCoordinator(
     }
 
     private fun unregister(id: String, token: Long) {
-        synchronized(lock) {
+        val wasOwner = synchronized(lock) {
             if (targets[id]?.token != token) return
             targets.remove(id)
-            if (activeOwnerId == id) {
-                activeOwnerId = null
-                activeOwnerToken = null
-                controller.cancel()
-                publish(controller.state.value)
+            (activeOwnerId == id).also { owner ->
+                if (owner) {
+                    activeOwnerId = null
+                    activeOwnerToken = null
+                }
             }
         }
+        if (!wasOwner) return
+        controller.cancel()
+        synchronized(lock) { if (!closed) publish(controller.state.value) }
     }
 
     private fun publish(state: VoiceInputState) {
@@ -150,9 +174,9 @@ class VoiceInputSessionCoordinator(
             activeOwnerId = null
             activeOwnerToken = null
             targets.clear()
-            controller.cancel()
-            mutableSnapshot.value = Snapshot(null, controller.state.value)
         }
+        controller.cancel()
+        mutableSnapshot.value = Snapshot(null, controller.state.value)
         collector.cancel()
     }
 }
