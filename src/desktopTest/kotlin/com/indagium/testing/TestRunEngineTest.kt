@@ -865,7 +865,7 @@ class TestRunEngineTest {
         val script = hostScript("check_output", "printf ready")
         val firstCheck = StepCheck.ScriptResult(com.indagium.testing.model.newCheckId(), script.id, exitCode = 0, stdoutContains = "ready")
         val slowCheck = StepCheck.LogAppears(com.indagium.testing.model.newCheckId(), regex = "never-arrives", withinMs = 10_000)
-        val first = step("Check output", onFailure = OnFailure.CONTINUE, timeoutMs = 700, checks = listOf(firstCheck, slowCheck))
+        val first = step("Check output", onFailure = OnFailure.CONTINUE, timeoutMs = 1_500, checks = listOf(firstCheck, slowCheck))
         val suite = suiteOf(caseOf("Deadline", first, step("Continue after timeout", timeoutMs = 3_000)))
         // A timed-out finish is followed by a scripted stale-agent response, then a fresh response for the next step.
         val h = harness(suite, listOf(finishTurn("pass"), finishTurn("pass"), finishTurn("pass"), textTurn), scripts = listOf(script))

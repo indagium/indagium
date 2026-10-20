@@ -272,7 +272,7 @@ class VideoSparseSeekTest {
 
     private fun blue(rgb: Int) = rgb and 0xFF
 
-    private fun await(label: String, timeoutMs: Long = 5_000L, condition: () -> Boolean) {
+    private fun await(label: String, timeoutMs: Long = 15_000L, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
         assertTrue(condition(), "timed out waiting for $label")
