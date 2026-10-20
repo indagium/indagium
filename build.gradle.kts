@@ -194,26 +194,33 @@ val configureWhisperNative by tasks.registering(Exec::class) {
     description = "Configures the pinned whisper.cpp and app-owned JNI bridge for this host."
     inputs.file("native/whisper/CMakeLists.txt")
     inputs.file("native/whisper/indagium_whisper.cpp")
+    inputs.file("scripts/configure-windows-whisper.cmd")
     outputs.file(whisperNativeBuildDir.map { it.file("CMakeCache.txt") })
     doFirst {
         val jdkPath = java21Home.get().metadata.installationPath.asFile.absolutePath
-        val arguments = mutableListOf(
-            "cmake", "-S", file("native/whisper").absolutePath,
-            "-B", whisperNativeBuildDir.get().asFile.absolutePath,
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
-            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
-            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
-            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
-            "-DJAVA_HOME=$jdkPath",
-        )
         if (isWindowsHost) {
-            arguments += listOf("-G", "Visual Studio 17 2022", "-A", "x64")
+            // Git Bash does not inherit Visual Studio's C++ toolchain environment on hosted
+            // Windows runners. Configure through the same VsDevCmd bootstrap used by the
+            // D3D11 mirror bridge, so CMake can discover the VS generator reliably.
+            val script = file("scripts/configure-windows-whisper.cmd")
+            commandLine(
+                "cmd.exe", "/d", "/c",
+                "call \"${script.absolutePath}\" \"$jdkPath\" \"${file("native/whisper").absolutePath}\" \"${whisperNativeBuildDir.get().asFile.absolutePath}\" \"${whisperNativeResourceFile.asFile.parentFile.absolutePath}\"",
+            )
         } else {
-            arguments += listOf("-G", "Unix Makefiles")
+            commandLine(
+                "cmake", "-S", file("native/whisper").absolutePath,
+                "-B", whisperNativeBuildDir.get().asFile.absolutePath,
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+                "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+                "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+                "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+                "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+                "-DJAVA_HOME=$jdkPath",
+                "-G", "Unix Makefiles",
+            )
         }
-        commandLine(arguments)
     }
 }
 val compileWhisperNative by tasks.registering(Exec::class) {
