@@ -133,7 +133,11 @@ class TestsRunsScreenUiTest {
         rule.setContent { Box(Modifier.size(1200.dp, 800.dp)) { TestsWorkspace(state) } }
         rule.mainClock.advanceTimeByFrame()
 
-        rule.onNodeWithText("Loading runs…").assertExists()
+        // On fast CI workers the disk read can complete in the first rendered frame. In either
+        // state the screen must never briefly show the empty-state copy while persisted runs load.
+        val loading = rule.onAllNodesWithText("Loading runs…").fetchSemanticsNodes()
+        if (loading.isNotEmpty()) rule.onNodeWithText("Loading runs…").assertExists()
+        else rule.onNodeWithText("Today").assertExists()
         assertTrue(rule.onAllNodesWithText("No runs yet.", substring = true).fetchSemanticsNodes().isEmpty())
 
         rule.mainClock.autoAdvance = true

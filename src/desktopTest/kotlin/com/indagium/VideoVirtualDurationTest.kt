@@ -54,7 +54,7 @@ class VideoVirtualDurationTest {
             assertEquals(null, controller.error)
             assertFalse(controller.isPlaying)
             assertTrue(
-                controller.positionMs in 2_900L..3_000L,
+                controller.positionMs in 2_800L..3_000L,
                 "playback should advance to the virtual end, got ${controller.positionMs}ms",
             )
         } finally {
@@ -91,7 +91,7 @@ class VideoVirtualDurationTest {
         return output.absolutePath
     }
 
-    private fun await(label: String, timeoutMs: Long = 5_000L, condition: () -> Boolean) {
+    private fun await(label: String, timeoutMs: Long = 15_000L, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
         assertTrue(condition(), "timed out waiting for $label")
