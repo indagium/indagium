@@ -215,7 +215,8 @@ class TestsSuiteScreenUiTest {
         state.testsView.selectedSuiteId = suite.id
         rule.mainClock.autoAdvance = false
         rule.setContent { TestsWorkspace(state) }
-        rule.mainClock.advanceTimeByFrame()
+        // No frame has run, so the history read (launched by an effect on the paused clock) cannot have started or finished:
+        // advancing a frame here would race the real disk read on a slow machine and could already show the loaded state.
 
         rule.onNodeWithText("Loading runs…").assertExists()
         rule.onNodeWithText("Not run yet").assertDoesNotExist()
