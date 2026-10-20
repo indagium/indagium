@@ -377,7 +377,7 @@ the [available methods and prompt guide](docs/mcp/AVAILABLE_METHODS.md).
 ## Building from source
 
 **Requirements:** JDK 21+, CMake 3.20 or newer, and a C/C++17 host toolchain. On macOS,
-install Xcode Command Line Tools; on Windows, install Visual Studio 2022 with the Desktop
+install Xcode Command Line Tools; on Windows, install Visual Studio 2022 or 2026 with the Desktop
 development with C++ workload and Windows SDK; on Linux, install `build-essential` and `cmake`.
 The first build downloads the pinned whisper.cpp source archive (about 9 MB) into Gradle's build
 cache and verifies its SHA-256; subsequent builds reuse that source. Packaged applications include
