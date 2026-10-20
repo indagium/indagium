@@ -72,7 +72,6 @@ edu.washington.cs.knowitall:opennlp-chunk-models:1.5=desktopCompileClasspath,des
 edu.washington.cs.knowitall:opennlp-postag-models:1.5=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 edu.washington.cs.knowitall:opennlp-tokenize-models:1.5=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 edu.washington.cs.knowitall:openregex:1.1.1=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
-io.github.givimad:whisper-jni:1.7.1=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 io.github.java-diff-utils:java-diff-utils:4.12=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 io.github.oshai:kotlin-logging-jvm:8.0.4=desktopRuntimeClasspath,desktopTestRuntimeClasspath
 io.github.oshai:kotlin-logging:8.0.4=desktopRuntimeClasspath,desktopTestRuntimeClasspath

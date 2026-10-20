@@ -298,15 +298,29 @@ choices are **Automatic**, **Ukrainian**, and **English**; Settings can add othe
 The `EN` control beside the microphone switches local English translation on or off. Nothing is
 sent and a request is never started until you edit or accept the text and press **Send** yourself.
 
-On first use, Indagium asks before downloading the selected multilingual Whisper model: Base
-(~142 MiB, faster) or Small (~465 MiB, more accurate for short non-English dictation). After that
-one-time model download, recording and transcription work offline and independently of the
-selected chat provider on macOS, Windows, and Linux. **Settings → Voice input** also offers an
-opt-in native engine where available: strictly on-device Apple Speech on macOS or an installed
-offline Windows Speech language pack on Windows. Native engines never fall back to cloud speech;
-they currently transcribe in the spoken language, while Whisper also supports local English
-translation. The downloaded Whisper model lives in the app-data `voice-models` folder; audio
-recordings and transcripts are never written there or kept after the dictation attempt.
+On first use, Indagium asks before downloading the selected multilingual Whisper model. Choose
+Base (~142 MiB, fastest), Small (~465 MiB, stronger on short non-English dictation), Large v3
+(~2.9 GiB, highest accuracy), or Large v3 Turbo (~1.5 GiB, faster Large-class transcription).
+Downloads are explicit and verified; the model list never triggers a background download. Base,
+Small, and Large v3 support local English translation. Large v3 Turbo is transcription-only; the
+saved translation preference stays intact and takes effect again when you choose a capable model.
+
+After the one-time model download, recording and transcription work offline and independently of
+the selected chat provider on macOS, Windows, and Linux. The app builds its own JNI bridge against
+pinned whisper.cpp 1.9.5; audio stays on the device and there is no remote speech-recognition
+provider. macOS uses embedded Metal with CPU fallback, while Windows and Linux use portable CPU
+kernels. Inference is serialized to limit simultaneous model memory use, and model-file checks run
+in the background so opening the microphone does not hash a multi-gigabyte file. **Settings → Voice
+input** also offers an opt-in native engine where available: strictly on-device Apple Speech on
+macOS or an installed offline Windows Speech language pack on Windows. The downloaded Whisper
+model lives in the app-data `voice-models` folder; audio recordings and transcripts are never
+written there or kept after the dictation attempt.
+
+In note editors, **Rewrite with AI…** opens a preview workflow for the selected text or the whole
+draft. It sends only that captured note text and optional instructions to the chosen text profile;
+the rewrite does not include logs, source files, images, or audio. Apply inserts the reviewed text
+as one undoable editor change and leaves saving to the normal note action. Diagrams expose rewriting
+for their captions only.
 
 ### Data and action safety
 
@@ -362,7 +376,12 @@ the [available methods and prompt guide](docs/mcp/AVAILABLE_METHODS.md).
 
 ## Building from source
 
-**Requirements:** JDK 21+
+**Requirements:** JDK 21+, CMake 3.20 or newer, and a C/C++17 host toolchain. On macOS,
+install Xcode Command Line Tools; on Windows, install Visual Studio 2022 with the Desktop
+development with C++ workload and Windows SDK; on Linux, install `build-essential` and `cmake`.
+The first build downloads the pinned whisper.cpp source archive (about 9 MB) into Gradle's build
+cache and verifies its SHA-256; subsequent builds reuse that source. Packaged applications include
+the native bridge, so users do not need CMake or a compiler installed.
 
 ```bash
 # Run

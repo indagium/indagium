@@ -344,6 +344,7 @@ internal fun CompareView(
                                 AnnotationPanel(
                                     tab = leftTab,
                                     settings = state.settings,
+                                    rewriteState = state,
                                     recentNotes = state.recentNotesForTab(leftTab),
                                     recentNotesMenuOpen = state.recentNotesMenuOpen,
                                     activeNotePath = state.activeNoteFilePath(leftTab),

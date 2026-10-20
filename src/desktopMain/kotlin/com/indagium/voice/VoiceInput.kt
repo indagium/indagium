@@ -10,6 +10,8 @@ sealed interface VoiceInputState {
 
     data object ModelRequired : VoiceInputState
 
+    data object CheckingModel : VoiceInputState
+
     data class Recording(val startedAtMillis: Long) : VoiceInputState
 
     data object Transcribing : VoiceInputState
@@ -18,6 +20,8 @@ sealed interface VoiceInputState {
 
     data class Failed(val message: String) : VoiceInputState
 }
+
+enum class VoiceModelAvailability { CHECKING, AVAILABLE, MISSING }
 
 /** Local transcription result. Audio is intentionally not retained here. */
 data class VoiceTranscript(

@@ -12,6 +12,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -367,6 +370,7 @@ internal fun AddAnnDialog(
     fileLabel: String? = null,
     locked: Boolean = false,
     sessionKey: Any? = null,
+    rewriteState: AppState? = null,
     initialPresentation: AnnBlock.LogRefPresentation? = null,
     onConfirm: (String, AnnBlock.LogRefPresentationOptions) -> Unit,
     onDismiss: () -> Unit,
@@ -379,6 +383,7 @@ internal fun AddAnnDialog(
         windowSize = windowSize,
         fileLabel = fileLabel,
         sessionKey = sessionKey,
+        rewriteState = rewriteState,
         locked = locked,
         initialPresentation = initialPresentation,
         onPresentationConfirm = onConfirm,
@@ -414,6 +419,7 @@ internal fun AnnotationMarkdownEditorDialog(
     /** Stable identity of the edited block; keeps a draft alive while upstream Notes change. */
     sessionKey: Any? = null,
     locked: Boolean = false,
+    rewriteState: AppState? = null,
     initialPresentation: AnnBlock.LogRefPresentation? = null,
     onDelete: (() -> Unit)? = null,
     onPresentationConfirm: ((String, AnnBlock.LogRefPresentationOptions) -> Unit)? = null,
@@ -460,6 +466,7 @@ internal fun AnnotationMarkdownEditorDialog(
     val voiceTargetId = remember(sessionKey) { "note-editor:${sessionKey ?: UUID.randomUUID()}" }
     val proofreadingAnchor = rememberProofreadingPopupAnchorState(voiceTargetId)
     var voiceInsertionSelection by remember(sessionKey) { mutableStateOf<TextRange?>(null) }
+    var noteRewriteSnapshot by remember(sessionKey) { mutableStateOf<NoteRewriteSnapshot?>(null) }
 
     val summary = remember(rows) { evidenceSummary(rows) }
     val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
@@ -736,8 +743,8 @@ internal fun AnnotationMarkdownEditorDialog(
                         .clip(EDITOR_BOX_SHAPE),
                 ) {
                     if (!previewMode) {
-                        // The dictation microphone stays right-aligned beside the formatting buttons, which wrap
-                        // within whatever width it leaves, so a narrow dialog never pushes it out of view.
+                        // Formatting controls wrap in their own left group; AI and dictation stay visually
+                        // distinct and right-aligned, while a narrow dialog gives the format group less width.
                         Row(
                             Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -806,8 +813,31 @@ internal fun AnnotationMarkdownEditorDialog(
                                     AppText("Link", color = tc.ts, fontSize = 11.sp)
                                 }
                             }
-                            if (dictation != null) {
-                                DictationMic(dictation, Modifier.padding(start = 8.dp), size = TOOLBAR_MIC_SIZE, standalone = true)
+                            if (rewriteState != null || dictation != null) {
+                                MarkdownToolbarSeparator()
+                                Row(
+                                    Modifier.padding(start = 3.dp).testTag("annotation-ai-action-group"),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    if (rewriteState != null) {
+                                        val rewriteTarget = captureNoteRewriteSnapshot(sessionKey, editorValue, retainedSelection)
+                                        val rewriteDisabled = locked || hasConflict || rewriteTarget == null ||
+                                            dictation?.phase == DictationPhase.Recording || dictation?.phase == DictationPhase.Transcribing
+                                        RewriteToolbarAction(
+                                            enabled = !rewriteDisabled,
+                                            onClick = {
+                                                if (!rewriteDisabled) {
+                                                    noteRewriteSnapshot = rewriteTarget
+                                                    runCatching { editorFocusRequester.requestFocus() }
+                                                }
+                                            },
+                                        )
+                                    }
+                                    if (dictation != null) {
+                                        DictationMic(dictation, size = TOOLBAR_MIC_SIZE, standalone = true)
+                                    }
+                                }
                             }
                         }
                         NoteDialogDivider()
@@ -885,6 +915,30 @@ internal fun AnnotationMarkdownEditorDialog(
                 EditorDialogActionButton(confirmLabel, filled = true, enabled = !locked && !hasConflict, onClick = ::confirmDraft)
             }
         }
+    }
+
+    val rewriteSnapshot = noteRewriteSnapshot
+    if (rewriteState != null && rewriteSnapshot != null) {
+        NoteRewriteDialog(
+            state = rewriteState,
+            snapshot = rewriteSnapshot,
+            isCurrent = {
+                !locked && !hasConflict && sessionKey == rewriteSnapshot.sessionKey && editorValue.text == rewriteSnapshot.draft
+            },
+            onApply = { proposed ->
+                val rewritten = applyNoteRewriteSnapshot(sessionKey, editorValue.text, rewriteSnapshot, proposed)
+                if (!locked && !hasConflict && rewritten != null) {
+                    updateEditor(TextFieldValue(rewritten, TextRange(rewriteSnapshot.start + proposed.length)))
+                    retainedSelection = null
+                    noteRewriteSnapshot = null
+                    runCatching { editorFocusRequester.requestFocus() }
+                }
+            },
+            onDismiss = {
+                noteRewriteSnapshot = null
+                runCatching { editorFocusRequester.requestFocus() }
+            },
+        )
     }
 }
 
@@ -1197,12 +1251,43 @@ private fun MarkdownToolbarButton(enabled: Boolean = true, onClick: () -> Unit, 
             .widthIn(min = 26.dp)
             .background(if (hovered) tc.hv else Color.Transparent, shape)
             .clip(shape)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .clickable(enabled = enabled, onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 8.dp),
         contentAlignment = Alignment.Center,
     ) { content() }
+}
+
+/** Accent-marked action for the adjacent AI/dictation group, distinct from the Markdown formatting controls. */
+@Composable
+private fun RewriteToolbarAction(enabled: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val shape = RoundedCornerShape(5.dp)
+    var hovered by remember { mutableStateOf(false) }
+    val foreground = if (enabled) tc.ac else tc.td
+    val fill = when {
+        !enabled -> Color.Transparent
+        hovered -> tc.ac.copy(alpha = .17f)
+        else -> tc.ac.copy(alpha = .09f)
+    }
+    val outline = if (enabled) tc.ac.copy(alpha = .38f) else tc.br
+    Row(
+        Modifier.heightIn(min = 28.dp)
+            .background(fill, shape)
+            .border(1.dp, outline, shape)
+            .clip(shape)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 8.dp)
+            .testTag("annotation-rewrite-action"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        Icon(Icons.Outlined.AutoAwesome, contentDescription = null, modifier = Modifier.size(13.dp), tint = foreground)
+        AppText("Rewrite with AI…", color = foreground, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+    }
 }
 
 @Composable

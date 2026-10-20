@@ -13,4 +13,11 @@ class VoiceRecognitionEnginesTest {
         assertFalse(VoiceRecognitionEngines.supportsTranslation(VoiceRecognitionEngine.APPLE_SPEECH))
         assertFalse(VoiceRecognitionEngines.supportsTranslation(VoiceRecognitionEngine.WINDOWS_SPEECH))
     }
+
+    @Test
+    fun translationCapabilityDependsOnTheSelectedWhisperModel() {
+        assertTrue(VoiceRecognitionEngines.supportsTranslation(VoiceRecognitionEngine.WHISPER, VoiceModelCatalog.base))
+        assertTrue(VoiceRecognitionEngines.supportsTranslation(VoiceRecognitionEngine.WHISPER, VoiceModelCatalog.largeV3))
+        assertFalse(VoiceRecognitionEngines.supportsTranslation(VoiceRecognitionEngine.WHISPER, VoiceModelCatalog.largeV3Turbo))
+    }
 }

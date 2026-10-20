@@ -519,6 +519,7 @@ internal fun FileView(
                         AnnotationPanel(
                             tab = tab,
                             settings = state.settings,
+                            rewriteState = state,
                             recentNotes = state.recentNotesForTab(tab),
                             recentNotesMenuOpen = state.recentNotesMenuOpen,
                             activeNotePath = state.activeNoteFilePath(tab),

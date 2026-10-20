@@ -31,6 +31,7 @@ import com.indagium.testing.run.laneAccountRunnerFactory
 import com.indagium.testing.run.laneBudgetGuidance
 import com.indagium.testing.run.lanePromptPreamble
 import com.indagium.testing.run.overrideProblems
+import com.indagium.testing.run.profileProblems
 import com.indagium.testing.run.withRunOverrides
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TestRunStore
@@ -38,7 +39,9 @@ import com.indagium.testing.store.readBoundedTestAsset
 import com.indagium.testing.tracker.TrackerMcpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -228,6 +231,39 @@ internal suspend fun AppState.generateTestCaseImprove(request: ImproveGeneration
     ),
 )
 
+private val NOTE_REWRITE_WORDING = AgentTextWording(
+    sessionPrefix = "note-rewrite",
+    failure = "The provider could not rewrite the note",
+    unfinished = "The provider did not finish the note rewrite request.",
+    empty = "The provider returned no rewritten note.",
+    budgetGuidance = { "No tools are available; return only the rewritten note text." },
+    promptPreamble = { "" },
+)
+
+/** Rewrites only the editor's captured text through an existing profile with no tools or app evidence. */
+internal suspend fun AppState.generateNoteRewrite(
+    profileId: String,
+    model: String?,
+    reasoningEffort: String?,
+    targetText: String,
+    instructions: String,
+    onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
+): String = runAgentForText(
+    AgentTextRequest(
+        profileId = profileId,
+        model = model,
+        reasoningEffort = reasoningEffort,
+        prompt = noteRewritePrompt(targetText, instructions),
+        systemPrompt = NOTE_REWRITE_SYSTEM_PROMPT,
+        gateway = IndagiumToolGateway(emptyList(), emptyMap()),
+        toolCallLimit = 1,
+        maxTurns = 2,
+        timeoutMs = NOTE_REWRITE_TIMEOUT_MS,
+        wording = NOTE_REWRITE_WORDING,
+        onUsage = onUsage,
+    ),
+)
+
 /**
  * Runs one agent through the lane launchers (an in-app model over HTTP, or Claude Code / Codex as the signed-in account, which
  * reach [AgentTextRequest.gateway] through the managed MCP lease) and returns what it answered after its last tool call. Cancelling
@@ -240,6 +276,8 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
     val problems = overrideProblems("Model", base, request.model, request.reasoningEffort)
     check(problems.isEmpty()) { problems.joinToString(" ") }
     val profile = base.withRunOverrides(request.model, request.reasoningEffort)
+    val profileProblems = profileProblems("Model", profile, ::aiProviderApiKey)
+    check(profileProblems.isEmpty()) { profileProblems.joinToString(" ") }
     val agent = productionAgentFactory(testRunOverrides).create(profile, aiProviderApiKey(request.profileId))
     val tabId = "${request.wording.sessionPrefix}:${java.util.UUID.randomUUID()}"
     val session = com.indagium.ai.AiSession(tabId)
@@ -281,10 +319,8 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
             }
             job?.join()
         }
-        val error = activeRun.history.filterIsInstance<AiRunEvent.Error>().lastOrNull()
-        check(error == null) { "${request.wording.failure}: ${error?.message}" }
-        check(activeRun.job?.isActive != true) { request.wording.unfinished }
-        return finalAnswerText(activeRun.history).also { check(it.isNotBlank()) { request.wording.empty } }
+        currentCoroutineContext().ensureActive()
+        return completedAgentAnswer(activeRun.history, request.wording)
     } finally {
         run?.cancel()
         withContext(NonCancellable) {
@@ -308,6 +344,15 @@ internal fun finalAnswerText(history: List<AiRunEvent>): String {
     return history.drop(lastTool + 1).filterIsInstance<AiRunEvent.AssistantDelta>().joinToString("") { it.text }
 }
 
+/** Refuse partial provider output. A successful preview needs the explicit terminal event as well as answer text. */
+internal fun completedAgentAnswer(history: List<AiRunEvent>, wording: AgentTextWording): String {
+    val error = history.filterIsInstance<AiRunEvent.Error>().lastOrNull()
+    check(error == null) { "${wording.failure}: ${error?.message}" }
+    check(AiRunEvent.Cancelled !in history) { wording.unfinished }
+    check(AiRunEvent.Done in history) { wording.unfinished }
+    return finalAnswerText(history).also { check(it.isNotBlank()) { wording.empty } }
+}
+
 private const val AGENT_TIMING_LOG_COMPONENT = "test-agent-timing"
 private const val TEST_STEP_DRAFT_TIMEOUT_MS = 120_000L
 private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
@@ -318,6 +363,7 @@ private const val RECORDING_REWRITE_TIMEOUT_MS = 190_000L
 
 /** Same margin over the improvement service's own 180 s. */
 private const val TEST_CASE_IMPROVE_TIMEOUT_MS = 190_000L
+private const val NOTE_REWRITE_TIMEOUT_MS = 120_000L
 
 /** Builds the app's coordinator. [baseDir] is where run folders go; [onChanged] is called after every change of a run. */
 internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, baseDir: () -> File, onChanged: () -> Unit): TestRunCoordinator {

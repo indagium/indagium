@@ -18,6 +18,9 @@ import kotlinx.coroutines.launch
  */
 class VoiceInputController(
     private val hasInstalledModel: () -> Boolean,
+    private val modelAvailability: () -> VoiceModelAvailability = {
+        if (hasInstalledModel()) VoiceModelAvailability.AVAILABLE else VoiceModelAvailability.MISSING
+    },
     /** Native engines use this to surface a permission/language-pack issue without sending the
      * user to Whisper's model installer. */
     private val unavailableMessage: () -> String? = { null },
@@ -43,11 +46,13 @@ class VoiceInputController(
     fun startRecording(): VoiceInputState {
         synchronized(lock) {
             if (activeSession != null || state.value is VoiceInputState.Transcribing) return state.value
-            if (!hasInstalledModel()) {
-                return transition(
+            when (modelAvailability()) {
+                VoiceModelAvailability.CHECKING -> return transition(VoiceInputState.CheckingModel)
+                VoiceModelAvailability.MISSING -> return transition(
                     if (requiresInstallation) VoiceInputState.ModelRequired
                     else VoiceInputState.Failed(unavailableMessage() ?: "Local speech recognition is unavailable. Choose Whisper instead."),
                 )
+                VoiceModelAvailability.AVAILABLE -> Unit
             }
             return when (val start = capture.start()) {
                 is VoiceCaptureStartResult.Failure -> transition(VoiceInputState.Failed(start.message))
@@ -138,8 +143,14 @@ class VoiceInputController(
         }
     }
 
-    private fun idleOrModelRequired(): VoiceInputState =
-        if (!requiresInstallation || hasInstalledModel()) VoiceInputState.Idle else VoiceInputState.ModelRequired
+    private fun idleOrModelRequired(): VoiceInputState {
+        if (!requiresInstallation) return VoiceInputState.Idle
+        return when (modelAvailability()) {
+            VoiceModelAvailability.CHECKING -> VoiceInputState.CheckingModel
+            VoiceModelAvailability.AVAILABLE -> VoiceInputState.Idle
+            VoiceModelAvailability.MISSING -> VoiceInputState.ModelRequired
+        }
+    }
 
     private fun transitionIfCurrent(generation: Long, next: VoiceInputState) {
         synchronized(lock) {

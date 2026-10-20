@@ -253,6 +253,20 @@ jobs:
           done
           exit 1
 
+      # This runs on every distribution host/architecture so the packaged host JNI library is
+      # compiled, loaded and exercised on macOS Metal, Windows CPU and both Linux CPU targets.
+      # The focused test verifies the pinned model checksum itself; ordinary tests never download it.
+      - name: Verify native Whisper transcription
+        env:
+          INDAGIUM_VOICE_MODEL: build/ci-whisper/ggml-base.bin
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$INDAGIUM_VOICE_MODEL")"
+          curl --fail --location --retry 3 \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin" \
+            --output "$INDAGIUM_VOICE_MODEL"
+          ./gradlew --no-daemon desktopTest --tests 'com.indagium.voice.WhisperNativeSmokeTest.baseModelLoadsFromUnicodePathAndTranscribesAutomaticLanguageFixtureWhenConfigured'
+
       - name: Validate packaged Windows D3D11 mirror bridge
         if: startsWith(matrix.os, 'windows')
         shell: pwsh

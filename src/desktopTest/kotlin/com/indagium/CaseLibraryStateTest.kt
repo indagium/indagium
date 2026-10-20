@@ -174,10 +174,13 @@ class CaseLibraryStateTest {
 
         state.reopenInvestigation(caseId)
 
-        // Waits for the notes to actually land, not just the tab to appear — reopenInvestigation
-        // opens the tab and attaches notes in the same coroutine, but a bare tab-count check can
-        // observe the moment right after the tab publishes and before openNoteFile runs.
-        waitUntil { state.tabs.size == 2 && state.tabs.any { it.id != "current" && it.annotations.decisiveTags.isNotEmpty() } }
+        // Wait through both the note attachment and dialog cleanup. The tab's updated annotations
+        // become visible just before reopenInvestigation closes the Case Library dialog.
+        waitUntil {
+            state.tabs.size == 2 &&
+                state.tabs.any { it.id != "current" && it.annotations.decisiveTags.isNotEmpty() } &&
+                state.caseLibraryTabId == null
+        }
         // The tab the dialog was opened from is completely untouched — same annotations object,
         // still the only tab that existed before this call.
         assertEquals(

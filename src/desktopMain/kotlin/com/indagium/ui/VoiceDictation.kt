@@ -141,7 +141,7 @@ private const val SENTENCE_ENDINGS = ".!?\n\r"
 private const val OPENING_PUNCTUATION = "([{\u2018\u201c\"'"
 private const val CLOSING_PUNCTUATION = ",.!?;:)]}\u2019\u201d\"'"
 
-enum class DictationPhase { Idle, Recording, Transcribing, Failed }
+enum class DictationPhase { Idle, CheckingModel, Recording, Transcribing, Failed }
 
 /**
  * Everything one dictation target shows and does, read by the one [DictationMic] wherever it is drawn (inside a
@@ -163,6 +163,7 @@ class DictationControl internal constructor(
     val busyForOther: Boolean,
     val settings: VoiceInputSettings,
     val translationSupported: Boolean,
+    val translationUnavailableReason: String?,
     private val menuOpenState: MutableState<Boolean>,
     private val menuSuppressedUntil: MutableState<Long>,
     private val hoveredState: MutableState<Boolean>,
@@ -174,7 +175,7 @@ class DictationControl internal constructor(
     private val restoreFocus: (() -> Unit)?,
 ) {
     val menuOpen: Boolean get() = menuOpenState.value
-    val clickable: Boolean get() = enabled && phase != DictationPhase.Transcribing && !busyForOther
+    val clickable: Boolean get() = enabled && phase != DictationPhase.Transcribing && phase != DictationPhase.CheckingModel && !busyForOther
     val fieldActive: Boolean get() = hoveredState.value || focusedState.value || phase != DictationPhase.Idle
 
     fun elapsedSeconds(): Int {
@@ -191,6 +192,7 @@ class DictationControl internal constructor(
 
     /** Text for an empty field: the live status while dictating, otherwise the field's own placeholder. */
     fun placeholder(default: String): String = when (phase) {
+        DictationPhase.CheckingModel -> "Checking local model…"
         DictationPhase.Recording -> "Listening… ${formatDictationElapsed(elapsedSeconds())}"
         DictationPhase.Transcribing -> "Transcribing…"
         else -> default
@@ -198,6 +200,7 @@ class DictationControl internal constructor(
 
     /** Short status shown beside the microphone when the field already holds text. */
     fun endLabel(): String? = when (phase) {
+        DictationPhase.CheckingModel -> "Checking model…"
         DictationPhase.Recording -> "● ${formatDictationElapsed(elapsedSeconds())}"
         DictationPhase.Transcribing -> "Transcribing…"
         DictationPhase.Failed -> "Retry"
@@ -234,7 +237,7 @@ class DictationControl internal constructor(
     }
 
     fun openMenu() {
-        if (!enabled || phase == DictationPhase.Recording || phase == DictationPhase.Transcribing) return
+        if (!enabled || phase == DictationPhase.Recording || phase == DictationPhase.Transcribing || phase == DictationPhase.CheckingModel) return
         menuOpenState.value = true
     }
 
@@ -296,6 +299,7 @@ internal fun rememberDictationControl(
     val snapshot by coordinator.snapshot.collectAsState()
     val ownerHere = snapshot.ownerId == targetId
     val state = if (ownerHere) snapshot.state else VoiceInputState.Idle
+    val modelCheckState by ui.runtime.modelInstaller.checkState.collectAsState()
     val failure = (state as? VoiceInputState.Failed)?.message
     var installDialogOpen by remember(targetId, ui.runtime) { mutableStateOf(false) }
     val menuOpen = remember(targetId) { mutableStateOf(false) }
@@ -345,8 +349,20 @@ internal fun rememberDictationControl(
     val phase = when {
         state is VoiceInputState.Recording -> DictationPhase.Recording
         state is VoiceInputState.Transcribing -> DictationPhase.Transcribing
+        state is VoiceInputState.CheckingModel ||
+            (ui.runtime.engine == com.indagium.model.VoiceRecognitionEngine.WHISPER &&
+                modelCheckState == com.indagium.voice.VoiceModelCheckState.CHECKING) -> DictationPhase.CheckingModel
         failure != null -> DictationPhase.Failed
         else -> DictationPhase.Idle
+    }
+    val modelDescriptor = ui.runtime.modelInstaller.descriptor
+    val translationSupported = VoiceRecognitionEngines.supportsTranslation(ui.runtime.engine, modelDescriptor)
+    val translationUnavailableReason = if (
+        ui.runtime.engine == com.indagium.model.VoiceRecognitionEngine.WHISPER && !translationSupported
+    ) {
+        "English translation is unavailable for ${modelDescriptor.displayName}."
+    } else {
+        null
     }
     val control = DictationControl(
         targetId = targetId,
@@ -357,7 +373,8 @@ internal fun rememberDictationControl(
         enabled = enabled,
         busyForOther = coordinator.isBusyForOther(targetId),
         settings = ui.settings,
-        translationSupported = VoiceRecognitionEngines.supportsTranslation(ui.runtime.engine),
+        translationSupported = translationSupported,
+        translationUnavailableReason = translationUnavailableReason,
         menuOpenState = menuOpen,
         menuSuppressedUntil = menuSuppressedUntil,
         hoveredState = hovered,
@@ -397,12 +414,14 @@ internal fun Modifier.dictationActivity(control: DictationControl?): Modifier =
         .onFocusChanged { control.setFocused(it.hasFocus) }
 
 private fun DictationControl.semanticDescription(): String = when (phase) {
+    DictationPhase.CheckingModel -> "Checking local voice model"
     DictationPhase.Recording -> "Stop voice input"
     DictationPhase.Transcribing -> "Transcribing voice input"
     else -> "Voice input"
 }
 
 private fun DictationControl.tooltip(): String = when (phase) {
+    DictationPhase.CheckingModel -> "Checking local Whisper model…"
     DictationPhase.Recording -> "Stop dictation · Esc cancels"
     DictationPhase.Transcribing -> "Transcribing…"
     DictationPhase.Failed -> "$failure Click to retry."
@@ -503,6 +522,15 @@ private fun DictationMenuPopup(control: DictationControl) {
                     AppText("Translate to English", color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f))
                     DictationSwitch(on)
                 }
+            } else if (control.translationUnavailableReason != null) {
+                AppText(
+                    control.translationUnavailableReason,
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp)
+                        .testTag("dictation-translation-unavailable"),
+                )
             }
             Box(Modifier.padding(top = 5.dp, bottom = 3.dp).fillMaxWidth().height(1.dp).background(tc.br))
             AppText("Runs on this device · Esc cancels", color = tc.td, fontSize = 10.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
@@ -565,6 +593,7 @@ internal fun DictationMic(
     val phase = control.phase
     val tint = when {
         phase == DictationPhase.Recording || phase == DictationPhase.Failed -> DANGER_RED
+        phase == DictationPhase.CheckingModel -> tc.td.copy(alpha = .4f)
         phase == DictationPhase.Transcribing -> tc.td
         !control.enabled -> tc.td.copy(alpha = .4f)
         hovered -> tc.tx
@@ -601,6 +630,7 @@ internal fun DictationMic(
                 contentAlignment = Alignment.Center,
             ) {
                 when (phase) {
+                    DictationPhase.CheckingModel -> DictationSpinner(control, tint)
                     DictationPhase.Transcribing -> DictationSpinner(control, tint)
                     DictationPhase.Recording -> Icon(Icons.Outlined.Stop, contentDescription = null, modifier = Modifier.size(iconSize), tint = tint)
                     else -> Icon(Icons.Outlined.Mic, contentDescription = null, modifier = Modifier.size(iconSize), tint = tint)
@@ -663,6 +693,7 @@ internal fun DictationFooterStatus(control: DictationControl?, fontFamily: FontF
     if (phase == DictationPhase.Idle) return
     AppText("·", color = tc.td, fontSize = fontSize, fontFamily = fontFamily)
     when (phase) {
+        DictationPhase.CheckingModel -> AppText("Checking local model…", color = tc.td, fontSize = fontSize, fontFamily = fontFamily)
         DictationPhase.Recording -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("●", color = DANGER_RED.copy(alpha = if (control.blinkOn()) 1f else .3f), fontSize = fontSize, fontFamily = fontFamily)
             AppText("Listening… ${formatDictationElapsed(control.elapsedSeconds())}", color = DANGER_RED, fontSize = fontSize, fontFamily = fontFamily)

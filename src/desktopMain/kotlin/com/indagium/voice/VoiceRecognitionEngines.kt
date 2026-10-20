@@ -19,6 +19,9 @@ object VoiceRecognitionEngines {
 
     fun supportsTranslation(engine: VoiceRecognitionEngine): Boolean = engine == VoiceRecognitionEngine.WHISPER
 
+    fun supportsTranslation(engine: VoiceRecognitionEngine, model: VoiceModelDescriptor): Boolean =
+        engine == VoiceRecognitionEngine.WHISPER && model.supportsTranslation
+
     fun description(engine: VoiceRecognitionEngine): String = when (engine) {
         VoiceRecognitionEngine.WHISPER -> "Runs locally on macOS, Windows, and Linux after the selected Whisper model is installed."
         VoiceRecognitionEngine.APPLE_SPEECH -> "Uses Apple's Speech framework in on-device-only mode. It never falls back to network recognition."

@@ -26,9 +26,22 @@ object VoiceInputControllerFactory {
         val controller = VoiceInputController(
             hasInstalledModel = {
                 when (selectedEngine) {
-                    VoiceRecognitionEngine.WHISPER -> installer.isInstalled()
+                    VoiceRecognitionEngine.WHISPER -> installer.cachedCheckState() == VoiceModelCheckState.INSTALLED
                     VoiceRecognitionEngine.APPLE_SPEECH -> AppleSpeechNative.ensureReady(settings().selectedRecognitionLanguageCode)
                     VoiceRecognitionEngine.WINDOWS_SPEECH -> VoiceRecognitionEngines.isWindows()
+                }
+            },
+            modelAvailability = {
+                if (selectedEngine != VoiceRecognitionEngine.WHISPER) {
+                    if (selectedEngine == VoiceRecognitionEngine.WINDOWS_SPEECH ||
+                        AppleSpeechNative.ensureReady(settings().selectedRecognitionLanguageCode)
+                    ) VoiceModelAvailability.AVAILABLE else VoiceModelAvailability.MISSING
+                } else {
+                    when (installer.cachedCheckState()) {
+                        VoiceModelCheckState.CHECKING -> VoiceModelAvailability.CHECKING
+                        VoiceModelCheckState.INSTALLED -> VoiceModelAvailability.AVAILABLE
+                        VoiceModelCheckState.MISSING_OR_INVALID -> VoiceModelAvailability.MISSING
+                    }
                 }
             },
             unavailableMessage = {
@@ -51,7 +64,8 @@ object VoiceInputControllerFactory {
                 val currentSettings = settings()
                 val language = currentSettings.selectedRecognitionLanguageCode
                 VoiceTranscriptionOptions(
-                    translateToEnglish = currentSettings.translateToEnglish && VoiceRecognitionEngines.supportsTranslation(selectedEngine),
+                    translateToEnglish = currentSettings.translateToEnglish &&
+                        VoiceRecognitionEngines.supportsTranslation(selectedEngine, installer.descriptor),
                     language = language,
                     initialPrompt = VoiceTranscriptionOptions.technicalPrompt(language),
                 )

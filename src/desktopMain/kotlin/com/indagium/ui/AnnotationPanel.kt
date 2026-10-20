@@ -639,6 +639,8 @@ fun AnnotationPanel(
     scrollStateStore: LogViewerScrollStateStore? = null,
     /** Session-only target supplied by a real AI note-tool result. */
     highlightedBlockId: String? = null,
+    /** AI profile access for the editor's text-only rewrite action. */
+    rewriteState: AppState? = null,
     modifier: Modifier = Modifier.fillMaxHeight(),
 ) {
     val tc = tc()
@@ -944,6 +946,7 @@ fun AnnotationPanel(
                     windowSize = mainWindowSize,
                     fileLabel = tab.filename,
                     locked = notesLocked,
+                    rewriteState = rewriteState,
                     sessionKey = "${tab.id}:prefix",
                     onConfirm = { updated -> mutate { onUpdatePrefix(updated) }; editingTarget = null },
                     onDismiss = { editingTarget = null },
@@ -959,6 +962,7 @@ fun AnnotationPanel(
                     windowSize = mainWindowSize,
                     fileLabel = tab.filename,
                     locked = notesLocked,
+                    rewriteState = rewriteState,
                     sessionKey = "${tab.id}:suffix",
                     onConfirm = { updated -> mutate { onUpdateSuffix(updated) }; editingTarget = null },
                     onDismiss = { editingTarget = null },
@@ -982,6 +986,7 @@ fun AnnotationPanel(
                             windowSize = mainWindowSize,
                             fileLabel = tab.filename,
                             locked = notesLocked,
+                            rewriteState = rewriteState,
                             sessionKey = "${tab.id}:${block.id}:caption",
                             onConfirm = { newCaption ->
                                 mutate { updateSeq3NoteCaption(block.text, newCaption)?.let { onUpdateBlock(block.id, it) } }
@@ -1008,6 +1013,7 @@ fun AnnotationPanel(
                             fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
                             initialPresentation = (block as? AnnBlock.LogRef)?.presentation,
                             locked = notesLocked,
+                            rewriteState = rewriteState,
                             sessionKey = "${tab.id}:${block.id}",
                             onDelete = { mutate { onRemoveBlock(block.id) }; editingTarget = null },
                             onPresentationConfirm = (block as? AnnBlock.LogRef)?.presentation?.let { original ->
