@@ -203,9 +203,17 @@ val configureWhisperNative by tasks.registering(Exec::class) {
             // Windows runners. Configure through the same VsDevCmd bootstrap used by the
             // D3D11 mirror bridge, so CMake can discover the VS generator reliably.
             val script = file("scripts/configure-windows-whisper.cmd")
+            val configureCommand = listOf(
+                "call",
+                "\"${script.absolutePath}\"",
+                "\"$jdkPath\"",
+                "\"${file("native/whisper").absolutePath}\"",
+                "\"${whisperNativeBuildDir.get().asFile.absolutePath}\"",
+                "\"${whisperNativeResourceFile.asFile.parentFile.absolutePath}\"",
+            ).joinToString(" ")
             commandLine(
                 "cmd.exe", "/d", "/c",
-                "call \"${script.absolutePath}\" \"$jdkPath\" \"${file("native/whisper").absolutePath}\" \"${whisperNativeBuildDir.get().asFile.absolutePath}\" \"${whisperNativeResourceFile.asFile.parentFile.absolutePath}\"",
+                configureCommand,
             )
         } else {
             commandLine(
