@@ -21,11 +21,28 @@ if not defined VS_ROOT (
   exit /b 4
 )
 
+rem Pick the CMake generator that matches the installed Visual Studio: hosted runners moved from
+rem VS 2022 (17) to VS 2026 (18), so a hardcoded generator breaks when the image rolls forward.
+for /f "usebackq tokens=1 delims=." %%v in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion`) do set "VS_MAJOR=%%v"
+set "CMAKE_VS_GENERATOR="
+if "%VS_MAJOR%"=="17" set "CMAKE_VS_GENERATOR=Visual Studio 17 2022"
+if "%VS_MAJOR%"=="18" set "CMAKE_VS_GENERATOR=Visual Studio 18 2026"
+if not defined CMAKE_VS_GENERATOR (
+  echo Unsupported Visual Studio major version "%VS_MAJOR%" 1>&2
+  exit /b 5
+)
+
 call "%VS_ROOT%\Common7\Tools\VsDevCmd.bat" -no_logo -arch=amd64 -host_arch=amd64
 if errorlevel 1 exit /b %errorlevel%
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 
-cmake -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G "Visual Studio 17 2022" -A x64 ^
+cmake --help | findstr /c:"%CMAKE_VS_GENERATOR%" >nul
+if errorlevel 1 (
+  echo The installed CMake does not support the "%CMAKE_VS_GENERATOR%" generator 1>&2
+  exit /b 6
+)
+
+cmake -S "%SOURCE_DIR%" -B "%BUILD_DIR%" -G "%CMAKE_VS_GENERATOR%" -A x64 ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON ^
   "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=%OUTPUT_DIR%" ^
