@@ -349,9 +349,10 @@ internal fun rememberDictationControl(
     val phase = when {
         state is VoiceInputState.Recording -> DictationPhase.Recording
         state is VoiceInputState.Transcribing -> DictationPhase.Transcribing
-        state is VoiceInputState.CheckingModel ||
-            (ui.runtime.engine == com.indagium.model.VoiceRecognitionEngine.WHISPER &&
-                modelCheckState == com.indagium.voice.VoiceModelCheckState.CHECKING) -> DictationPhase.CheckingModel
+        // The controller's CheckingModel event records a blocked start; only the installer's
+        // live status determines whether verification is still pending and the mic must wait.
+        ui.runtime.engine == com.indagium.model.VoiceRecognitionEngine.WHISPER &&
+            modelCheckState == com.indagium.voice.VoiceModelCheckState.CHECKING -> DictationPhase.CheckingModel
         failure != null -> DictationPhase.Failed
         else -> DictationPhase.Idle
     }
