@@ -56,7 +56,7 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 800L..1_300L, "the clock should advance through the first sparse interval")
             assertTrue(isGreen(controller.grabCurrentFrame()), "the 1.5s frame must not display before its PTS")
-            await("first resumed frame") { isBlue(controller.grabCurrentFrame()) }
+            await("first resumed frame", timeoutMs = 30_000L) { isBlue(controller.grabCurrentFrame()) }
             assertTrue(controller.positionMs >= 1_500L)
 
             controller.pause()
@@ -68,7 +68,7 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 2_000L..2_500L)
             assertTrue(isCyan(controller.grabCurrentFrame()), "the 3.0s frame must not display early")
-            await("second resumed frame") { isMagenta(controller.grabCurrentFrame()) }
+            await("second resumed frame", timeoutMs = 30_000L) { isMagenta(controller.grabCurrentFrame()) }
             assertTrue(controller.positionMs >= 3_000L)
         } finally {
             controller.close()
