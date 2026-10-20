@@ -37,6 +37,14 @@ else()
     set(GGML_METAL OFF CACHE BOOL "" FORCE)
 endif()
 
+# The JNI bridge links the native threading shim itself on Linux. Unlike macOS,
+# CMake does not predefine Threads::Threads there, so discover it before the
+# final target is linked. This also keeps the dependency explicit rather than
+# relying on an implementation detail of whisper.cpp's transitive targets.
+if(UNIX AND NOT APPLE)
+    find_package(Threads REQUIRED)
+endif()
+
 FetchContent_Declare(whispercpp
     URL "${WHISPER_CPP_URL}"
     URL_HASH "SHA256=${WHISPER_CPP_SHA256}"
