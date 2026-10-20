@@ -200,6 +200,14 @@ fun App(
             scope = voiceScope,
         )
     }
+    LaunchedEffect(voiceRuntime) {
+        while (true) {
+            if (voiceRuntime.engine == com.indagium.model.VoiceRecognitionEngine.WHISPER) {
+                voiceRuntime.modelInstaller.requestVerification(voiceScope)
+            }
+            delay(5_000)
+        }
+    }
     val voiceCoordinator = remember(voiceRuntime) { VoiceInputSessionCoordinator(voiceRuntime.controller, voiceScope) }
     DisposableEffect(voiceCoordinator) { onDispose { voiceCoordinator.close() } }
     val voiceUi = remember(voiceRuntime, voiceCoordinator, voiceSettings) {
@@ -1276,6 +1284,7 @@ fun App(
                         fileLabel = req.sourceFilename ?: state.tab(req.sourceTabId)?.filename,
                         locked = state.aiSessions.sessionFor(req.targetTabId).activeRun != null,
                         sessionKey = "${req.targetTabId}:new-note",
+                        rewriteState = state,
                         initialPresentation = req.capture?.presentation,
                         onConfirm = { caption, options ->
                             state.confirmAddAnn(req, caption, options)

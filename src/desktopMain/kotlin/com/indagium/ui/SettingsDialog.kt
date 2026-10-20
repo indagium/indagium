@@ -71,6 +71,7 @@ import com.indagium.model.*
 import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
 import com.indagium.voice.VoiceModelCatalog
+import com.indagium.voice.VoiceModelCheckState
 import com.indagium.voice.VoiceModelInstallResult
 import com.indagium.voice.VoiceModelInstaller
 import com.indagium.voice.VoiceRecognitionEngines
@@ -2585,16 +2586,19 @@ private fun VoiceInputSettingsSection(state: AppState) {
     val voiceSettings = state.settings.voiceInput
     val selectedModel = VoiceModelCatalog.byId(voiceSettings.modelId)
     val installer = remember(selectedModel.id) { VoiceModelInstaller(DesktopStorage.voiceModelsDir(), selectedModel) }
-    var installed by remember { mutableStateOf(false) }
-    var checkingModel by remember { mutableStateOf(true) }
+    val modelCheckState by installer.checkState.collectAsState()
+    val installed = modelCheckState == VoiceModelCheckState.INSTALLED
+    val checkingModel = modelCheckState == VoiceModelCheckState.CHECKING
     var installing by remember { mutableStateOf(false) }
     var downloadedBytes by remember { mutableStateOf(0L) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
     var languageToAdd by remember { mutableStateOf("") }
 
     LaunchedEffect(installer) {
-        installed = withContext(Dispatchers.IO) { installer.isInstalled() }
-        checkingModel = false
+        while (true) {
+            installer.requestVerification(scope)
+            kotlinx.coroutines.delay(5_000)
+        }
     }
 
     fun installModel() {
@@ -2606,7 +2610,6 @@ private fun VoiceInputSettingsSection(state: AppState) {
             }) {
                 is VoiceModelInstallResult.Installed,
                 is VoiceModelInstallResult.AlreadyInstalled -> {
-                    installed = true
                     installing = false
                     statusMessage = "Local voice model is ready."
                 }
@@ -2643,7 +2646,7 @@ private fun VoiceInputSettingsSection(state: AppState) {
             fillWidth = engineChoices.size <= 2,
         )
         AppText(VoiceRecognitionEngines.description(voiceSettings.recognitionEngine), color = tc.td, fontSize = 10.sp, maxLines = 3)
-        if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine)) {
+        if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine, selectedModel)) {
             CheckRow(
                 modifier = Modifier.settingsAnchor("Translate dictated speech to English"),
                 checked = voiceSettings.translateToEnglish,
@@ -2670,8 +2673,12 @@ private fun VoiceInputSettingsSection(state: AppState) {
             )
         } else {
             AppText(
-                "This OS engine returns the recognized spoken language only; English translation " +
-                    "remains available with Whisper.",
+                if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
+                    "Large v3 Turbo supports transcription only. Your saved English translation preference " +
+                        "will apply again when you select a model that supports translation."
+                } else {
+                    "This OS engine returns the recognized spoken language only; English translation remains available with Whisper."
+                },
                 color = tc.td,
                 fontSize = 10.sp,
                 maxLines = 3,
@@ -2780,32 +2787,28 @@ private fun VoiceInputSettingsSection(state: AppState) {
                 "Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI,
                 modifier = Modifier.settingsAnchor("Local model"),
             )
-            SegmentedControl(
-                options = VoiceModelCatalog.all.map { model ->
-                    if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
-                    else "Small (${formatByteSize(model.sizeBytes)})"
-                },
-                selectedIndices = setOf(VoiceModelCatalog.all.indexOfFirst { it.id == selectedModel.id }),
-                onToggle = { index ->
-                    val model = VoiceModelCatalog.all[index]
-                    state.updateSettings { settings ->
-                        settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id))
+            Seq3DropdownButton(
+                label = "${selectedModel.displayName} (${formatByteSize(selectedModel.sizeBytes)})",
+                menuWidth = 280.dp,
+                fixedHeight = 32.dp,
+            ) { close ->
+                VoiceModelCatalog.all.forEach { model ->
+                    Seq3DropdownMenuItem(
+                        label = "${model.displayName} (${formatByteSize(model.sizeBytes)})",
+                        active = model.id == selectedModel.id,
+                    ) {
+                        state.updateSettings { settings ->
+                            settings.copy(voiceInput = settings.voiceInput.copy(modelId = model.id))
+                        }
+                        close()
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
-            )
+                }
+            }
             AppText(
-                (
-                    if (selectedModel.id == VoiceModelCatalog.small.id) {
-                        "Whisper small (multilingual): more accurate for Ukrainian/Russian and short phrases, but uses more disk, memory, and CPU."
-                    } else {
-                        "Whisper base (multilingual): faster and smaller, best for English or longer, clear speech."
-                    }
-                ) + " One explicit HTTPS download; no cloud speech-recognition service.",
+                selectedModel.description + " Downloads start only when you choose Download; speech stays local.",
                 color = tc.tx,
                 fontSize = 12.sp,
-                maxLines = 3,
+                maxLines = 4,
             )
             AppText(
                 when {
@@ -2826,7 +2829,6 @@ private fun VoiceInputSettingsSection(state: AppState) {
                         "Remove model",
                         onClick = {
                             if (installer.remove()) {
-                                installed = false
                                 statusMessage = "Local voice model removed."
                             } else {
                                 statusMessage = "Could not remove the local voice model."
@@ -2840,7 +2842,6 @@ private fun VoiceInputSettingsSection(state: AppState) {
                         "Reinstall",
                         onClick = {
                             installer.remove()
-                            installed = false
                             installModel()
                         },
                         variant = ButtonVariant.Secondary,

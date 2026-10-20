@@ -17,6 +17,7 @@ internal object AiWorkflow {
     const val TEST_SCRIPT_DRAFT = "testScriptDraft"
     const val RECORDING_REWRITE = "recordingRewrite"
     const val TEST_CASE_IMPROVE = "testCaseImprove"
+    const val NOTE_REWRITE = "noteRewrite"
     const val TEST_RUN_LANE = "testRunLane"
     const val TEST_RUN_JUDGE = "testRunJudge"
 }

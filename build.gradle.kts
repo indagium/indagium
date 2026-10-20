@@ -4,6 +4,7 @@ import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.io.File
 import java.security.MessageDigest
 
 plugins {
@@ -175,6 +176,60 @@ val compileLinuxMirrorNative by tasks.registering(Exec::class) {
     }
 }
 
+// The speech recognizer is a small app-owned JNI adapter around pinned whisper.cpp. FetchContent
+// downloads and verifies the release source into build/native/whisper/_deps; no JNI/native binary
+// is committed or fetched as a Maven runtime dependency. The release link statically includes
+// Whisper and GGML so installers do not depend on a separately installed native runtime.
+val whisperNativeBuildDir = layout.buildDirectory.dir("native/whisper")
+val whisperSourceLicense = whisperNativeBuildDir.map { it.file("_deps/whispercpp-src/LICENSE") }
+val whisperNativeResourceFile = when {
+    isMacHost -> generatedNativeResourcesDir.get().file("native/macos/libindagium_whisper.dylib")
+    isWindowsHost -> generatedNativeResourcesDir.get().file("native/windows/indagium_whisper.dll")
+    isLinuxHost -> generatedNativeResourcesDir.get().file("native/linux/libindagium_whisper.so")
+    else -> error("Local Whisper native bridge does not support this OS")
+}
+val java21Home = javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(21)) }
+val configureWhisperNative by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Configures the pinned whisper.cpp and app-owned JNI bridge for this host."
+    inputs.file("native/whisper/CMakeLists.txt")
+    inputs.file("native/whisper/indagium_whisper.cpp")
+    outputs.file(whisperNativeBuildDir.map { it.file("CMakeCache.txt") })
+    doFirst {
+        val jdkPath = java21Home.get().metadata.installationPath.asFile.absolutePath
+        val arguments = mutableListOf(
+            "cmake", "-S", file("native/whisper").absolutePath,
+            "-B", whisperNativeBuildDir.get().asFile.absolutePath,
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+            "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+            "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE=${whisperNativeResourceFile.asFile.parentFile.absolutePath}",
+            "-DJAVA_HOME=$jdkPath",
+        )
+        if (isWindowsHost) {
+            arguments += listOf("-G", "Visual Studio 17 2022", "-A", "x64")
+        } else {
+            arguments += listOf("-G", "Unix Makefiles")
+        }
+        commandLine(arguments)
+    }
+}
+val compileWhisperNative by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Builds the app-owned local Whisper bridge and statically linked whisper.cpp."
+    dependsOn(configureWhisperNative)
+    inputs.file("native/whisper/CMakeLists.txt")
+    inputs.file("native/whisper/indagium_whisper.cpp")
+    outputs.file(whisperNativeResourceFile)
+    doFirst { whisperNativeResourceFile.asFile.parentFile.mkdirs() }
+    commandLine(
+        "cmake", "--build", whisperNativeBuildDir.get().asFile.absolutePath,
+        "--config", "Release", "--target", "indagium_whisper", "--parallel",
+    )
+}
+
 // Windows uses the bundled FFmpeg D3D11VA decoder and a small D3D11 video-processor swapchain
 // presenter. The Visual Studio C++ tools and Windows SDK on windows-latest provide the headers and
 // import libraries; no native runtime dependency is added to the MSI.
@@ -259,14 +314,20 @@ val generateBuildInfo by tasks.registering {
 val generateLicenseResources by tasks.registering {
     val licenseDocuments = listOf("LICENSE", "NOTICE")
     inputs.files(licenseDocuments.map(::file))
+    inputs.file("THIRD_PARTY_NOTICES.md")
+    inputs.file(whisperSourceLicense)
     outputs.dir(generatedLicenseResourcesDir)
+    dependsOn(configureWhisperNative)
     doLast {
-        val outputFile = generatedLicenseResourcesDir.get().file("licenses/indagium-license-agreement.md").asFile
-        outputFile.parentFile.mkdirs()
+        val licenseDirectory = generatedLicenseResourcesDir.get().dir("licenses").asFile
+        licenseDirectory.mkdirs()
+        val outputFile = File(licenseDirectory, "indagium-license-agreement.md")
         val agreement = licenseDocuments.joinToString(separator = "\n\n---\n\n") { path ->
             file(path).readText().trimEnd()
         }
         outputFile.writeText("# Indagium License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
+        whisperSourceLicense.get().asFile.copyTo(File(licenseDirectory, "whisper.cpp-LICENSE.txt"), overwrite = true)
+        file("THIRD_PARTY_NOTICES.md").copyTo(File(licenseDirectory, "THIRD_PARTY_NOTICES.md"), overwrite = true)
     }
 }
 
@@ -316,10 +377,8 @@ kotlin {
                 // In-app AI providers use the same Ktor line as the MCP server. Keeping the
                 // transport explicit avoids depending on the server engine transitively.
                 implementation("io.ktor:ktor-client-cio:$ktorVersion")
-                // Offline AI-composer dictation. The jar carries the macOS arm64/x64 whisper.cpp
-                // natives; the multilingual model itself is deliberately downloaded only after an
-                // explicit user action (see voice/VoiceModelCatalog.kt).
-                implementation("io.github.givimad:whisper-jni:1.7.1")
+                // Whisper and GGML are statically linked into an app-owned native bridge at build
+                // time; the multilingual model is downloaded only after an explicit user action.
                 // Embedded offline note proofreading: English resources only, no server or remote rules.
                 implementation("org.languagetool:language-en:6.8")
                 // Streaming AI answers are Markdown. This Compose Multiplatform renderer supports
@@ -495,6 +554,7 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
+    dependsOn(compileWhisperNative)
     if (isMacHost) {
         dependsOn(compileAppleSpeechNative)
         dependsOn(compileMacMirrorNative)

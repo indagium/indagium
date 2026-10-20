@@ -124,7 +124,7 @@ target.
 | HTTP client | Ktor CIO | 3.4.3 | AI providers and the update checker |
 | Archives | Apache Commons Compress + XZ | 1.28.0 / 1.10 | `.zip` and `.7z` bug reports |
 | Video | bytedeco JavaCV + JavaCPP + FFmpeg | 1.5.13 / 8.0.1-1.5.13 | Per-OS native classifier resolved at configure time |
-| Speech | whisper-jni | 1.7.1 | Plus a build-time-compiled Apple Speech JNI bridge and a Windows helper process |
+| Speech | App-owned JNI bridge to pinned `whisper.cpp` | 1.9.5 (CMake source archive, SHA-256 checked) | Statically links Whisper/GGML into the generated host library; macOS embeds Metal, Linux/Windows use portable CPU kernels |
 | Markdown rendering | multiplatform-markdown-renderer (+ M3) | 0.41.0 | Renders streaming AI answers without a web view |
 | Logging binding | slf4j-nop | 2.0.17 | The app never calls SLF4J; the binding only silences the MCP SDK and Ktor |
 
@@ -1236,6 +1236,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `TagProcessPopover.kt` | Shared process picker and PID slot for sidebar and filter-bar tag/package search; package mode identifies current-PID scope rather than advertising dynamic restart following |
 | `HighlighterSection.kt` / `HighlighterCandidates.kt` | The panel's Highlighters section: rows with a Match/Line chip, badges and match counts, the inline editor, and the search-to-add field with its TEXT / TAGS / MESSAGES dropdown. `HighlighterCandidates.kt` is the pure half (query parsing incl. `tag:Name rest`, candidate ranking, row labels/badges) so tests can pin it without composing |
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
+| `Dialogs.kt` / `NoteRewrite.kt` / `NoteRewriteDialog.kt` | Shared Markdown note editor and text-only rewrite preview; selection snapshots are guarded against stale drafts and Apply is one undoable editor change |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
 | `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | Session-only device launcher, live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
@@ -1968,7 +1969,7 @@ values stored in keyed JSON; the legacy positional settings decoder remains unch
 behavior change applies to the next Find open and never rewrites an open session.
 `AppSettings.captureSettings` is persisted in the keyed settings JSON and is applied immediately by
 the Capture section of Settings. `workflowAiSelections` remembers the provider, optional model and
-reasoning-effort override independently for test-step drafting, recording rewrite, test lanes and the
+reasoning-effort override independently for test-step drafting, note rewrite, recording rewrite, test lanes and the
 judge; it does not change the global selected profile and contains no credentials. A remembered profile
 is resolved against current settings on open, and stale discovered catalog choices fall back safely.
 `AppSettings.tracker` and `AppSettings.testing` are likewise JSON-only
@@ -2273,14 +2274,34 @@ Three transcription backends, selected per OS by `voice/VoiceRecognitionEngines.
 
 | Backend | Mechanism | Notes |
 |---|---|---|
-| Whisper | `whisper-jni` with a downloaded GGML model | The only engine supporting local translation to English |
+| Whisper | App-owned JNI bridge statically linked to pinned `whisper.cpp` 1.9.5 and a downloaded GGML model | Local-only automatic language detection and transcription; Base, Small and Large v3 support translation to English, while Large v3 Turbo is transcription-only |
 | Apple Speech | Objective-C JNI bridge, **compiled at build time** from `native/macos/indagium_speech.m` | Keeping it generated rather than committed makes the native code reviewable and lets notarisation sign the exact dylib built for the release |
 | Windows Speech | Out-of-process helper, base64 PCM over the pipe | Requires an installed offline language pack |
 
-The Whisper model is downloaded only after explicit consent, verified by SHA-256, and stored in
-`voice-models/`. Recording audio is not saved. Transient recognition results are not stored as
-separate voice artifacts; text inserted into an editor is saved through that editor's normal
-workflow.
+The four model files are downloaded only after explicit consent from the pinned Hugging Face
+revision `5359861c739e955e79d9a303bcbc70fb988958b1`, verified by descriptor size and SHA-256, and
+stored in `voice-models/`. The CMake source archive is independently SHA-256 pinned and cached
+under Gradle's build directory; a narrow, anchor-checked patch converts upstream Metal allocation
+failure from a GGML assertion into a load failure, allowing the JNI bridge to retry on CPU. The
+bridge is generated as a platform resource for packaging and statically contains Whisper/GGML; no
+speech-recognition service or provider SDK is used. macOS builds embed Metal, while Linux and
+Windows build portable CPU kernels. Native inference holds one process-wide mutex because multiple
+model contexts would multiply large allocations. Model verification uses shared asynchronous file
+status keyed by normalized absolute path and descriptor; microphone entry reads that status without hashing a
+large model. The Settings view and install/remove operations use the same status. Recording audio is
+not saved. Transient recognition results are not stored as separate voice artifacts; text inserted
+into an editor is saved through that editor's normal workflow.
+
+`AnnotationMarkdownEditorDialog` exposes **Rewrite with AI…** when a nonblank selection or draft is
+available. It captures the selected range (restoring the editor's retained Markdown selection) or
+the full current draft, then uses `AppState.runAgentForText` with an empty tool gateway and only that
+text plus optional user instructions. The request never includes log/source/app context, images or
+audio. Provider, model and effort are stored in `workflowAiSelections.noteRewrite`, separately from
+other AI workflows and without credentials; local, API and Codex/Claude account text profiles are
+eligible, voice profiles are not. The preview appears only after an explicit successful run. Apply
+checks the editor session, lock/conflict state and exact captured draft, changes the selected range
+or full text once (one Undo), and leaves saving to the note's normal action. Cancel, errors, stale
+results and editor closure preserve the draft; diagrams pass only their caption to the same dialog.
 
 `VoiceInputControllerFactory` builds the platform controller from the shared `VoiceInputSettings`,
 and `VoiceInputSessionCoordinator` grants one active editor a lease at a time. A lease is tied to a
@@ -2865,13 +2886,19 @@ Single Gradle project, single source set pair (`desktopMain` / `desktopTest`). V
 once as `app.version` in `gradle.properties` and flows into the generated build info, the packaging
 config, and the README badge.
 
-Three generated inputs are produced at build time rather than committed:
+The following inputs are produced at build time rather than committed:
 
 | Generated | Task | Why |
 |---|---|---|
 | Build info Kotlin source | `generateBuildInfo` | Version and build metadata available to the app |
-| License resources | `generateLicenseResources` | The in-app licence dialog text derives from `LICENSE` + `NOTICE`, so they cannot drift |
-| `libindagium_speech.dylib` | `compileAppleSpeechNative` (macOS only) | Keeps the Objective-C reviewable in-tree and lets notarisation sign the exact dylib built for the release |
+| License resources | `generateLicenseResources` | In-app agreement, full pinned `whisper.cpp` MIT license, and packaged third-party notices |
+| Host Whisper JNI library | `configureWhisperNative` + `compileWhisperNative` | Checksummed 1.9.5 CMake source cache builds the static engine into a host library under generated desktop resources |
+| `libindagium_speech.dylib` | `compileAppleSpeechNative` (macOS only) | Keeps the Objective-C bridge reviewable in-tree and carries the generated dylib as a desktop resource |
+
+Native libraries are generated before desktop resources are packaged. The current macOS distribution
+remains unsigned and un-notarised (there is no Apple signing identity in CI); if distribution
+signing is enabled later, the generated Whisper and Apple Speech libraries must be included in that
+same signing/notarization pass. Windows and Linux likewise package only their host-built bridge.
 
 Note `kotlin.daemon.jvmargs=-Xmx4096m` in `gradle.properties`: the Compose compiler's IR-to-bytecode
 transform runs the Kotlin daemon out of its default heap on `SettingsDialog.kt`'s single large

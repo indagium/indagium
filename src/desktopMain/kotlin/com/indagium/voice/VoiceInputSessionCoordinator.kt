@@ -139,7 +139,9 @@ class VoiceInputSessionCoordinator(
                 publish(controller.state.value)
                 return
             }
-            if (next is VoiceInputState.Failed || next == VoiceInputState.Idle || next == VoiceInputState.ModelRequired) {
+            if (next is VoiceInputState.Failed || next == VoiceInputState.Idle || next == VoiceInputState.ModelRequired ||
+                next == VoiceInputState.CheckingModel
+            ) {
                 activeOwnerId = null
                 activeOwnerToken = null
             }

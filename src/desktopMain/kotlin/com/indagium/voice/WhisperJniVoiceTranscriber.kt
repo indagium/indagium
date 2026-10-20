@@ -2,9 +2,8 @@
 
 package com.indagium.voice
 
-import io.github.givimad.whisperjni.WhisperFullParams
-import io.github.givimad.whisperjni.WhisperJNI
 import java.io.File
+import java.nio.file.Files
 
 /**
  * The production recognizer. It reads the locally installed model and never opens a network
@@ -18,35 +17,17 @@ class WhisperJniVoiceTranscriber(
         if (!model.isFile) return VoiceTranscriptionResult.Failure("Install the local voice model before recording.")
         return try {
             loadLibraryOnce()
-            val whisper = WhisperJNI()
-            val params = WhisperFullParams().apply {
-                translate = options.translateToEnglish
-                // In WhisperJNI this flag performs language detection *instead of* transcription.
-                // `language = "auto"` is the Whisper mode that detects then continues to decode.
-                detectLanguage = false
-                language = options.language
-                noTimestamps = true
-                printProgress = false
-                printRealtime = false
-                initialPrompt = options.initialPrompt
-            }
             val samples = audio.toFloatSamples()
-            val context = whisper.init(model.toPath())
-                ?: return VoiceTranscriptionResult.Failure("Could not load the local voice model.")
-            try {
-                val result = whisper.full(context, params, samples, samples.size)
-                if (result != 0) return VoiceTranscriptionResult.Failure("Local transcription failed (code $result).")
-                val text = buildString {
-                    repeat(whisper.fullNSegments(context)) { append(whisper.fullGetSegmentText(context, it)) }
-                }.trim()
-                VoiceTranscriptionResult.Success(
-                    VoiceTranscript(text = text, translatedToEnglish = options.translateToEnglish),
-                )
-            } finally {
-                context.close()
-            }
-        } catch (error: Exception) {
-            VoiceTranscriptionResult.Failure("Local transcription failed. Try again.", error)
+            val text = WhisperNative.transcribe(
+                model.canonicalPath,
+                samples,
+                options.language,
+                options.translateToEnglish,
+                options.initialPrompt,
+            ).trim()
+            VoiceTranscriptionResult.Success(VoiceTranscript(text = text, translatedToEnglish = options.translateToEnglish))
+        } catch (error: Throwable) {
+            VoiceTranscriptionResult.Failure(error.message?.let { "Local transcription failed: $it" } ?: "Local transcription failed. Try again.", error)
         }
     }
 
@@ -64,12 +45,34 @@ class WhisperJniVoiceTranscriber(
 
     private companion object {
         @Volatile private var loaded = false
+        private var loadFailure: String? = null
 
         @Synchronized
         fun loadLibraryOnce() {
             if (loaded) return
-            WhisperJNI.loadLibrary()
-            WhisperJNI.setLibraryLogger(null)
+            check(loadFailure == null) { loadFailure ?: "Local Whisper support could not be loaded." }
+            val resourcePath = when {
+                VoiceRecognitionEngines.isMac() -> "/native/macos/libindagium_whisper.dylib"
+                VoiceRecognitionEngines.isWindows() -> "/native/windows/indagium_whisper.dll"
+                System.getProperty("os.name").orEmpty().contains("linux", ignoreCase = true) -> "/native/linux/libindagium_whisper.so"
+                else -> error("Local Whisper is not available on this operating system.")
+            }
+            try {
+                WhisperJniVoiceTranscriber::class.java.getResourceAsStream(resourcePath)?.use { source ->
+                    val extension = when {
+                        resourcePath.endsWith(".dylib") -> ".dylib"
+                        resourcePath.endsWith(".dll") -> ".dll"
+                        else -> ".so"
+                    }
+                    val libraryFile = Files.createTempFile("indagium-whisper-", extension).toFile()
+                    libraryFile.deleteOnExit()
+                    libraryFile.outputStream().use(source::copyTo)
+                    System.load(libraryFile.absolutePath)
+                } ?: error("Bundled local Whisper library is missing")
+            } catch (failure: Throwable) {
+                loadFailure = failure.message ?: failure::class.simpleName ?: "Could not load local Whisper support."
+                throw failure
+            }
             loaded = true
         }
     }

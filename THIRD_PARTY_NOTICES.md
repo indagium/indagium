@@ -6,6 +6,8 @@ Indagium includes third-party components. Their licenses apply to those componen
 | --- | --- |
 | Kotlin, JetBrains Compose, AndroidX, Ktor, kotlinx libraries, Skiko, Apache Commons Compress, Jansi, Multiplatform Markdown Renderer, and ZXing | Apache License 2.0 |
 | Model Context Protocol Kotlin SDK and SLF4J | MIT License |
+| `whisper.cpp` 1.9.5, statically linked into the generated native voice bridge | MIT License (upstream `LICENSE`) |
+| OpenAI Whisper model weights distributed through `ggerganov/whisper.cpp` | MIT License (pinned Hugging Face model repository) |
 | XZ for Java 1.10 | 0BSD License |
 
 Native packages also bundle a Java runtime. The bundled Temurin/OpenJDK runtime includes its own notices and is licensed under GPLv2 with the Classpath Exception and additional component notices. Distribution packages must retain the notices supplied with that runtime.
