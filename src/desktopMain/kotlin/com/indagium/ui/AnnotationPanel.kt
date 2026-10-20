@@ -705,14 +705,10 @@ fun AnnotationPanel(
     var dragOffsetY by remember { mutableStateOf(0f) }
     var justReleasedBlockId by remember { mutableStateOf<String?>(null) }
     var liveVisualBlockIds by remember { mutableStateOf(emptyList<String>()) }
-    // Deliberately never cleared/keyed on tab.id: block ids are unique across every tab (never
-    // collide), and keeping a revisited tab's already-known heights around is what lets its
-    // blocks render at the correct position immediately instead of needing to re-measure (see the
-    // heightIn(min=...) block below) — clearing this on every tab switch was tried and reverted:
-    // it forced every revisit through a brief no-real-heights-yet window, and a plain-flow
-    // fallback layout that existed for that window turned out to be more fragile (lost drag
-    // capability on revisit) than just letting old entries accumulate, which costs a few floats
-    // per note ever created in the session — negligible.
+    // Starts empty on every visit to a tab: App.kt composes only the active tab under
+    // key(activeTab.id), so a tab switch disposes this whole panel and this map with it. It is only
+    // filled by onSizeChanged below; until a block reports, its height is estimated (see
+    // estimateBlockHeightPx). Never cleared while the panel stays composed, so drags keep working.
     val blockHeights = remember { mutableStateMapOf<String, Float>() }
     val blockDensity = LocalDensity.current.density
     val autoScrollEdgePx = 56f * blockDensity
@@ -1562,10 +1558,10 @@ fun AnnotationPanel(
                 // maxHeight down onto every child during measurement (Box passes its own
                 // constraints straight through), silently truncating whichever block hadn't
                 // reported its real size yet. A min-height only reserves scroll space; it never
-                // caps how tall a child measures. blockHeights is never cleared on tab switch (see
-                // its declaration) specifically so a revisited tab's blocks — already measured
-                // once — get accurate positions immediately, with no re-measure flicker and no
-                // window where this whole layout would need to fall back to something else.
+                // caps how tall a child measures. blockHeights starts empty on each tab visit (the
+                // panel is disposed on tab switch), so the first frame positions blocks from
+                // estimates; AnnotationMarkdownText parses synchronously so the first measurement is
+                // already the real height and nothing glides afterwards.
                 // Top gap before the first block card, matching the BLOCK_GAP_DP between cards.
                 Box(Modifier.fillMaxWidth().padding(top = BLOCK_GAP_DP.dp).heightIn(min = (totalBlockHeightPx / blockDensity).dp)) {
                     ann.blocks.forEach { block ->
@@ -2517,7 +2513,13 @@ private fun rememberAnnotationLogLineContext(
 internal fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
     if (text.isBlank() && numberPrefix == null) return
     val content: @Composable () -> Unit = {
-        val markdownState = rememberMarkdownState(content = annotationMarkdownRenderSource(text).ifBlank { " " })
+        // immediate = true: parse during composition. A tab switch disposes this panel, so every
+        // visit is a first composition; the async default rendered zero-height text on frame one,
+        // and the real height arriving a frame later made every following block card glide down.
+        val markdownState = rememberMarkdownState(
+            content = annotationMarkdownRenderSource(text).ifBlank { " " },
+            immediate = true,
+        )
         Markdown(
             markdownState,
             colors = annotationMarkdownColors(tc),
