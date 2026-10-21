@@ -6,6 +6,7 @@ import com.indagium.capture.StreamingMkvWriter
 import com.indagium.capture.mirror.MirrorVideoPacket
 import com.indagium.capture.mirror.ScrcpyCodecIds
 import com.indagium.capture.mirror.muxedVideoPacketPayload
+import com.indagium.video.seekToTimestampUs
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HEVC
@@ -453,7 +454,7 @@ internal class RecordedVideoTimeline private constructor(
         localTargetMs: Long,
         request: FrameRequest,
     ): SelectedFrame? {
-        grabber.setTimestamp(seekPtsUs)
+        grabber.seekToTimestampUs(seekPtsUs)
         var selected: SelectedFrame? = null
         try {
             var count = 0
