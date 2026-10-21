@@ -26,6 +26,8 @@ import kotlin.math.abs
 import kotlin.math.roundToLong
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -34,7 +36,9 @@ import kotlin.test.assertTrue
 class FfmpegAv1CompactVideoTranscoderTest {
     @Test
     fun encodesSeekableAv1AndPreservesRotationAndAudioPackets() {
-        val transcoder = FfmpegAv1CompactVideoTranscoder()
+        // The two-second interval pins the PTS-based forcing at 2.3 s and 4.3 s in the sparse fixture;
+        // the production default is ten seconds.
+        val transcoder = FfmpegAv1CompactVideoTranscoder(keyframeIntervalMs = 2_000L)
         val available = runCatching { transcoder.ensureAvailable() }.isSuccess
         assumeTrue("The bundled FFmpeg build does not provide libsvtav1", available)
 
@@ -123,6 +127,88 @@ class FfmpegAv1CompactVideoTranscoderTest {
         } finally {
             controller.close()
         }
+    }
+
+    @Test
+    fun frameCapForcesKeyframesInDenseSectionsBeforeTheIntervalElapses() {
+        val transcoder = FfmpegAv1CompactVideoTranscoder(keyframeIntervalMs = 10_000L, maxFramesPerKeyframe = 5)
+        val available = runCatching { transcoder.ensureAvailable() }.isSuccess
+        assumeTrue("The bundled FFmpeg build does not provide libsvtav1", available)
+
+        val root = createTempDirectory("compact-av1-frame-cap").toFile()
+        val source = File(root, "source.mkv")
+        val compact = File(root, "compact.mkv")
+        createSource(source, withAudio = false)
+
+        transcoder.transcode(source, compact)
+
+        val packets = videoPackets(compact)
+        val keyframeIndices = packets.indices.filter { packets[it].keyFrame }
+        assertEquals(0, keyframeIndices.firstOrNull(), "First frame should be a keyframe")
+        // The dense 10 fps section (0-900 ms) is ten frames, so the cap forces a second keyframe at 500 ms.
+        assertTrue(
+            keyframeIndices.any { packets[it].ptsUs in 400_000L..600_000L },
+            "A keyframe should appear about 0.5 s in, long before the 10 s interval elapses",
+        )
+        // SVT may insert backstop keyframes of its own, so assert upper bounds on the gaps rather than an exact list.
+        val boundaries = keyframeIndices + packets.size
+        assertTrue(
+            boundaries.zipWithNext().all { (start, next) -> next - start <= 5 },
+            "No keyframe gap should exceed five frames: $keyframeIndices of ${packets.size}",
+        )
+        assertTrue(
+            keyframeIndices.zipWithNext().all { (start, next) -> packets[next].ptsUs - packets[start].ptsUs <= 10_000_000L },
+            "No keyframe gap should exceed the interval",
+        )
+    }
+
+    @Test
+    fun defaultsTargetPreset8WithTenSecondKeyframesAndTheGrabCap() {
+        assertEquals(8, COMPACT_AV1_PRESET)
+        assertEquals(10_000L, COMPACT_AV1_KEYFRAME_INTERVAL_MS)
+        assertEquals(300, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME)
+        // 60 fps over ten seconds is 600 frames, so the frame cap (not the interval) sets the GOP.
+        assertEquals(300, compactGopSize(60 to 1, COMPACT_AV1_KEYFRAME_INTERVAL_MS, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME))
+        assertEquals(100, compactGopSize(10 to 1, COMPACT_AV1_KEYFRAME_INTERVAL_MS, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME))
+        assertEquals(1, compactGopSize(1 to 100, 10L, 300))
+    }
+
+    @Test
+    fun keyframeDueOnFirstFrameIntervalAndFrameCap() {
+        assertTrue(compactKeyframeDue(0L, null, 0, 10_000L, 300), "The first frame is always a keyframe")
+        assertFalse(compactKeyframeDue(9_999L, 0L, 10, 10_000L, 300), "Just under the interval is not due")
+        assertTrue(compactKeyframeDue(10_000L, 0L, 10, 10_000L, 300), "Exactly the interval is due")
+        assertTrue(compactKeyframeDue(12_500L, 2_000L, 10, 10_000L, 300), "Interval is measured from the last keyframe")
+        assertFalse(compactKeyframeDue(1_000L, 0L, 299, 10_000L, 300), "One frame under the cap is not due")
+        assertTrue(compactKeyframeDue(1_000L, 0L, 300, 10_000L, 300), "Reaching the cap is due")
+        assertTrue(compactKeyframeDue(1_000L, 0L, 301, 10_000L, 300), "Past the cap is due")
+    }
+
+    @Test
+    fun frameCapKeepsEveryGopWithinMaxFrames() {
+        // Mirrors the encode loop's bookkeeping: a keyframe resets the count, every encoded frame adds one.
+        val frames = 1_000
+        val keyframeIndices = mutableListOf<Int>()
+        var last: Long? = null
+        var since = 0
+        repeat(frames) { index ->
+            val ptsMs = index * 16L
+            if (compactKeyframeDue(ptsMs, last, since, 10_000L, 300)) {
+                keyframeIndices += index
+                last = ptsMs
+                since = 0
+            }
+            since++
+        }
+        assertEquals(listOf(0, 300, 600, 900), keyframeIndices)
+    }
+
+    @Test
+    fun rejectsNonPositiveKeyframeSettings() {
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(keyframeIntervalMs = 0L) }
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(keyframeIntervalMs = -1L) }
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(maxFramesPerKeyframe = 0) }
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(maxFramesPerKeyframe = -5) }
     }
 
     @Test

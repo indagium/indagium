@@ -5184,7 +5184,7 @@ class AppState(
         // click that lands before the disabled state recomposes, and a live snapshot in flight.
         if (captureExportBusy) return
         captureExportBusy = true
-        captureExportBusyMessage = if (format == com.indagium.capture.CaptureExportFormat.IND_AV1) {
+        captureExportBusyMessage = if (format == com.indagium.capture.CaptureExportFormat.COMPACT) {
             "Saving Compact capture…"
         } else {
             "Saving ZIP…"
@@ -5214,8 +5214,8 @@ class AppState(
                         session.exportCounter,
                         session.settings.label,
                     )
-                    val outputFilename = if (format == com.indagium.capture.CaptureExportFormat.IND_AV1) {
-                        filename.removeSuffix(".zip") + ".ind"
+                    val outputFilename = if (format == com.indagium.capture.CaptureExportFormat.COMPACT) {
+                        captureArchiveName(filename, format) ?: filename
                     } else {
                         filename
                     }

@@ -1303,7 +1303,7 @@ with enough time for the device to restart. The lane's capture continues recover
 ### Cut snapshots after Stop or reopening
 
 Use **Save snapshot** on a stopped capture to export the same range types as during recording.
-A reopened capture directory, ZIP, or Compact `.ind` opens for analysis without recording controls; to cut a new
+A reopened capture directory, ZIP, or Compact `.ind.zip` (or legacy `.ind`) opens for analysis without recording controls; to cut a new
 archive from it, choose **Export → Export capture range…** above the log. Relative ranges use the
 current video playhead; when there is no playhead, they use session end. **Around playhead** starts
 with five minutes before and five minutes
@@ -1338,7 +1338,7 @@ These files replace the large `timeline/rows.jsonl` and `mapping/capture-index.j
 
 Versions 1–4 remain readable with their existing timing behavior. Original captures are not
 rewritten automatically; exporting one again produces version 5. New version-5 captures require
-an updated Indagium reader. This format change applies to both ZIP and IND exports.
+an updated Indagium reader. This format change applies to both ZIP and Compact exports.
 If an old per-row mapping cannot be represented reliably by clock anchors, its re-export reports
 uncertain synchronization and keeps the affected logs available without guessed video positions.
 
@@ -1348,33 +1348,34 @@ logs may extend beyond the requested range. The requested video interval stays u
 uncertain rows do not receive a guessed video position. **Since last save** tracks saved byte/row
 boundaries so uncertain timing does not cause rows to repeat or disappear.
 
-**Indagium Compact (`.ind`, experimental).** In the snapshot popup, choose **Indagium Compact (.ind)**
-instead of the default **ZIP**. Stopped captures and retained sessions also offer **Save IND** beside
-**Save ZIP**. Compact uses the same version-5 ZIP structure, with AV1 video in `screen.mkv` and copied
-audio. It preserves the video dimensions and frame timing, but video compression is lossy and export
-takes longer. Logs, notes, markers, screenshots, and synchronization data remain part of the archive.
-This export option is separate from the **Compact** recording-quality preset below.
+**Indagium Compact (`.ind.zip`, experimental).** In the snapshot popup, choose **Indagium Compact
+(.ind.zip) · zstd log + AV1** instead of the default **ZIP**. Stopped captures and retained sessions
+also offer **Save Compact** beside **Save ZIP**. Compact uses the same version-5 ZIP structure, so
+the file is named `<name>.ind.zip`. Logs, notes, markers, screenshots, and synchronization data
+remain part of the archive. This export option is separate from the **Compact** recording-quality
+preset below.
 
-Indagium compares the complete Compact file with the exact ZIP size for the same selected capture range,
-without writing a temporary comparison ZIP. It uses a faster AV1 preset and up to six CPU workers,
-depending on the available processors, and avoids redundant processing for video-only recordings.
-This favors export speed over the original POC's tighter compression; output may
-be larger or show more compression artifacts than with the original settings.
-For video that needs conversion, it saves `.ind` only if it is smaller; otherwise, use **Save ZIP**.
-Video already encoded as AV1 is copied into `.ind` without another lossy conversion. In that case
-ZIP and `.ind` contain the same compact video and may be about the same size; the completed export
-explains that the original AV1 video was copied. Compact requires readable video, and conversion
-requires the bundled AV1 encoder. An unavailable encoder produces an explanation; ZIP remains available.
-Cancel or failure removes temporary export files without advancing the save boundary. Conversion
-needs additional free disk space and never rewrites the recording or source archive.
+Compact makes the archive smaller in two ways. The log is compressed with zstd, which is typically
+about three times smaller than the ordinary ZIP compression on logcat text. The video is converted to
+AV1 only when that makes it smaller. Video compression is lossy and conversion takes longer, but
+dimensions and frame timing are preserved and audio is copied. Video is optional; you can also save a
+Compact archive without it.
 
-Open `.ind` through the normal Open action, drag-and-drop, Recent files, or **Save + open**. It is
-still a ZIP container and can also be extracted with a ZIP utility. Indagium uses bundled software
+If AV1 would not make the video smaller, or the AV1 encoder is unavailable in this build, Indagium
+keeps the original video and the completed export says so. Video that is already AV1 is copied
+without another lossy conversion. If the zstd library cannot be loaded on your system, the log is
+stored with ordinary ZIP compression instead and the result message says so. Cancel or failure
+removes temporary export files without advancing the save boundary. Conversion and the compressed log
+need additional free disk space and never rewrite the recording or source archive.
+
+Open `.ind.zip` through the normal Open action, drag-and-drop, Recent files, or **Save + open**.
+Older `.ind` files still open. Because the log uses zstd, some standard unzip tools (macOS Archive
+Utility, Windows Explorer, and `unzip`) cannot extract it; open the archive in Indagium, or use a
+zstd-aware tool such as 7-Zip-zstd. Cutting a new archive from an imported Compact capture that has
+audio can start up to about ten seconds before the requested start. Indagium uses bundled software
 AV1 encoding and decoding; a GPU with AV1 hardware support is not required. Conversion speed depends
-on the CPU and recording content, and copying the existing video into ZIP is usually faster.
-The POC targets macOS validation; Windows and Linux playback/encoding compatibility have not been
-established. No installer file
-association is added by this POC.
+on the CPU and recording content. The feature targets macOS validation; Windows and Linux
+playback/encoding compatibility have not been established. No installer file association is added.
 
 By default video recording is on and the log stream begins at capture start, so earlier Android
 ring-buffer messages are excluded. **Include earlier device logs** opts into those buffered messages.

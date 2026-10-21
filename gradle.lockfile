@@ -36,6 +36,7 @@ com.fasterxml.jackson.core:jackson-annotations:2.18.0=desktopCompileClasspath,de
 com.fasterxml.jackson.core:jackson-core:2.18.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.fasterxml.jackson.core:jackson-databind:2.18.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.fasterxml.jackson:jackson-bom:2.18.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
+com.github.luben:zstd-jni:1.5.7-4=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.gitlab.dumonts:hunspell:2.1.2=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.google.android:annotations:4.1.1.4=desktopRuntimeClasspath,desktopTestRuntimeClasspath
 com.google.api.grpc:proto-google-common-protos:2.59.2=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath

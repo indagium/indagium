@@ -7,12 +7,12 @@ import org.apache.commons.compress.archivers.ArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.zip.ZipFile
 import java.io.File
 import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
-import java.util.zip.ZipFile
 
 // Applies to extractZipCandidate/extractSevenZCandidate, which fully materialize a candidate's
 // decompressed content into a List<LogEntry> in memory (unlike openZipCandidateStream/
@@ -163,8 +163,8 @@ private class ScanBudget(var remaining: Int)
 
 private fun scanZip(zipFile: File, budget: ScanBudget, logs: MutableList<ZipLogCandidate>, videos: MutableList<ZipLogCandidate>) {
     runCatching {
-        ZipFile(zipFile).use { zf ->
-            for (entry in zf.entries().asSequence()) {
+        openCommonsZip(zipFile).use { zf ->
+            for (entry in zf.entries.asSequence()) {
                 if (budget.remaining <= 0) break
                 if (entry.isDirectory) continue
                 budget.remaining--
@@ -285,6 +285,11 @@ private fun classifyEntry(
 }
 
 private fun sevenZFile(file: File): SevenZFile = SevenZFile.builder().setFile(file).get()
+
+// commons-compress rather than java.util.zip.ZipFile: the JDK rejects the WHOLE archive when any
+// entry uses a method it doesn't know (ZIP method 93 / zstd in Compact capture archives), while
+// commons lists every entry and decodes zstd through zstd-jni.
+private fun openCommonsZip(file: File): ZipFile = ZipFile.builder().setFile(file).get()
 
 /**
  * Content-aware candidate classification shared by archive scanning (via [classifyEntry]) and
@@ -438,7 +443,7 @@ fun openArchiveCandidateStream(archiveFile: File, candidate: ZipLogCandidate): I
 private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): ParsedLog {
     val nested = splitNestedEntryPath(candidate.entryPath)
     val result = runCatching {
-        ZipFile(zipFile).use { zf ->
+        openCommonsZip(zipFile).use { zf ->
             if (nested != null) {
                 val (outerPath, innerPath) = nested
                 val outerEntry = zf.getEntry(outerPath) ?: return@use emptyParsedLog()
@@ -529,7 +534,7 @@ private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, m
 private fun emptyParsedLog(): ParsedLog = ParsedLog(com.indagium.model.LogFormat.LOGCAT, emptyList())
 
 private fun openZipCandidateStream(zipFile: File, candidate: ZipLogCandidate): InputStream? = runCatching {
-    val zf = ZipFile(zipFile)
+    val zf = openCommonsZip(zipFile)
     val nested = splitNestedEntryPath(candidate.entryPath)
     if (nested != null) {
         val (outerPath, innerPath) = nested

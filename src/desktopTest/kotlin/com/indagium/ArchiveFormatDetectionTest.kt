@@ -153,6 +153,32 @@ class ArchiveFormatDetectionTest {
     }
 
     @Test
+    fun zipWithAZstdMethod93EntryStillDetectsAsZipDespiteTheJdkRejectingIt() {
+        val dir = createTempDirectory("archive-format-detect").toFile()
+        val zip = File(dir, "payload.bin")
+        ZstdZipFixture.write(
+            zip,
+            mapOf("readme.txt" to "plain".toByteArray(), "logcat.log" to "log line\n".repeat(200).toByteArray()),
+            zstdEntries = setOf("logcat.log"),
+        )
+
+        // JDK 21's ZipFile refuses the WHOLE archive for one unknown method; isValidZip's commons
+        // fallback is what keeps a Compact capture archive recognized as a zip at all.
+        assertEquals(ArchiveFormat.Zip, detectArchiveFormat(zip))
+    }
+
+    @Test
+    fun truncatedZstdMethod93ZipIsStillNone() {
+        val dir = createTempDirectory("archive-format-detect").toFile()
+        val zip = File(dir, "payload.bin")
+        ZstdZipFixture.write(zip, mapOf("logcat.log" to "log line\n".repeat(200).toByteArray()), zstdEntries = setOf("logcat.log"))
+        val bytes = zip.readBytes()
+        zip.writeBytes(bytes.copyOf(bytes.size / 2))
+
+        assertEquals(ArchiveFormat.None, detectArchiveFormat(zip))
+    }
+
+    @Test
     fun truncatedZipIsNoneProvingValidationDidNotRegress() {
         val dir = createTempDirectory("archive-format-detect").toFile()
         val zip = buildZip(dir, "payload.bin", mapOf("main_log.txt" to "hello world, this is a real zip entry with real content"))

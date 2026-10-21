@@ -17,6 +17,7 @@ class HomeScreenTest {
         assertEquals(RecentKind.LOG, recentKindForName("logcat.log"))
         assertEquals(RecentKind.LOG, recentKindForName("dump.TXT"))
         assertEquals(RecentKind.ARCHIVE, recentKindForName("bugreport.zip"))
+        assertEquals(RecentKind.ARCHIVE, recentKindForName("capture.ind.zip"))
         assertEquals(RecentKind.ARCHIVE, recentKindForName("capture.IND"))
         assertEquals(RecentKind.ARCHIVE, recentKindForName("archive.7Z"))
         assertEquals(RecentKind.ARCHIVE, recentKindForName("logs.tar.gz"))

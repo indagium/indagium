@@ -12,6 +12,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.InputStream
 import java.util.zip.ZipFile
+import org.apache.commons.compress.archivers.zip.ZipFile as CommonsZipFile
 
 // What kind of container (if any) a file is, decided by content — never by extension. Replaces
 // the old "try to ZipFile/SevenZFile it and see if that succeeds" approach (still true for Zip/
@@ -19,9 +20,11 @@ import java.util.zip.ZipFile
 // with 8+ formats in play, opening each candidate reader in turn to find out which one works would
 // mean several full-file attempts per dropped file — see detectArchiveFormat's memoization doc).
 sealed interface ArchiveFormat {
-    // Random access via java.util.zip.ZipFile — also covers every zip-shaped extension this app
-    // already opens by content (.jar/.apk/.cbz/.epub/.odt/... — see BugReportZipTest), since they
-    // share the same PK\x03\x04 signature and ZipFile doesn't care what the entries are named.
+    // Random access via commons-compress' ZipFile (BugReportZip.kt) — also covers every zip-shaped
+    // extension this app already opens by content (.jar/.apk/.cbz/.epub/.odt/... — see
+    // BugReportZipTest), since they share the same PK\x03\x04 signature and ZipFile doesn't care
+    // what the entries are named. Entries compressed with zstd (ZIP method 93, used by Compact
+    // capture archives) are readable through zstd-jni.
     data object Zip : ArchiveFormat
 
     // Random access via SevenZFile, which needs a real File (not just a stream) to seek its
@@ -49,8 +52,9 @@ sealed interface ArchiveFormat {
 }
 
 // Compressor names CompressorStreamFactory.detect() can hand back that this project actually
-// knows how to decompress with what's on the classpath (commons-compress + the xz library — no
-// zstd-jni, no brotli codec, no external `Z`/pack200 tooling). Anything else it recognizes by
+// knows how to decompress as a standalone file with what's on the classpath (commons-compress + the
+// xz library — no brotli codec, no external `Z`/pack200 tooling). zstd-jni is present, but only for
+// ZIP method 93 entries inside a .zip; a bare .zst stays Unsupported. Anything else it recognizes by
 // magic becomes a precise Unsupported instead of silently being treated as "not compressed".
 private val SUPPORTED_COMPRESSOR_NAMES = setOf(
     CompressorStreamFactory.GZIP,
@@ -200,8 +204,14 @@ private fun unsupportedCompressorLabel(name: String): String = when (name) {
 // Confirms once with a real open, same as the pre-rewrite isZipFile/isSevenZFile did unconditionally
 // for every file. Magic bytes alone accept a truncated zip (the local file header is intact but the
 // central directory at the end got cut off) — dropping this step would be a behavior regression, not
-// just a missed optimization.
-private fun isValidZip(file: File): Boolean = runCatching { ZipFile(file).use { } }.isSuccess
+// just a missed optimization. The JDK's ZipFile is tried first (cheapest, and rejects a truncated
+// zip), but it throws for the whole archive as soon as ONE entry uses a method it doesn't know —
+// ZIP method 93 (zstd, Compact capture archives) on JDK 21 — so a failure falls back to
+// commons-compress' ZipFile, which reads the central directory without caring about entry methods
+// and rejects a truncated zip just the same.
+private fun isValidZip(file: File): Boolean =
+    runCatching { ZipFile(file).use { } }.isSuccess ||
+        runCatching { CommonsZipFile.builder().setFile(file).get().use { } }.isSuccess
 
 private fun isValidSevenZ(file: File): Boolean = runCatching { SevenZFile.builder().setFile(file).get().use { } }.isSuccess
 

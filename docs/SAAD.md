@@ -122,7 +122,8 @@ target.
 | MCP client | `io.modelcontextprotocol:kotlin-sdk-client` | 0.14.0 | `testing/tracker/SdkTrackerMcpClient.kt`: the issue-tracker connection (`build.gradle.kts:313`) |
 | HTTP server | Ktor CIO + CORS | 3.4.3 | `debug/ControlServer.kt` |
 | HTTP client | Ktor CIO | 3.4.3 | AI providers and the update checker |
-| Archives | Apache Commons Compress + XZ | 1.28.0 / 1.10 | `.zip` and `.7z` bug reports |
+| Archives | Apache Commons Compress + XZ | 1.28.0 / 1.10 | `.zip` and `.7z` bug reports; capture archive writing |
+| Zstandard | `com.github.luben:zstd-jni` (per-platform classifier jar) | 1.5.7-4 | ZIP method 93 for the Compact capture log (`utils/CaptureZstd.kt`); native selected like the bytedeco classifier |
 | Video | bytedeco JavaCV + JavaCPP + FFmpeg | 1.5.13 / 8.0.1-1.5.13 | Per-OS native classifier resolved at configure time |
 | Speech | App-owned JNI bridge to pinned `whisper.cpp` | 1.9.5 (CMake source archive, SHA-256 checked) | Statically links Whisper/GGML into the generated host library; macOS embeds Metal, Linux/Windows use portable CPU kernels |
 | Markdown rendering | multiplatform-markdown-renderer (+ M3) | 0.41.0 | Renders streaming AI answers without a web view |
@@ -534,34 +535,68 @@ captures must not recreate a dense per-row JSON cache.
 The reproducible million-row fixture and size/navigation measurements are documented in
 [`CAPTURE_METADATA_BENCHMARK.md`](CAPTURE_METADATA_BENCHMARK.md).
 
-**Compact capture POC.** `CaptureExportRequest.format` defaults to `CaptureExportFormat.ZIP`;
-the opt-in `IND_AV1` format writes a `.ind` file using the same v5 ZIP layout and reader. Snapshot
-exports expose a format selector, while stopped/retained saves add Save IND beside Save ZIP.
-AI tools and issue attachments retain their default ZIP requests. Content-based archive detection
-also handles `.ind` in Open, drop, restore, and recents; the recent-file archive classification
-includes the new extension. Installer associations are outside the POC.
+**Compact capture archives.** `CaptureExportRequest.format` defaults to `CaptureExportFormat.ZIP`
+(`"zip"`); the opt-in `COMPACT` format (`"ind.zip"`) writes `<name>.ind.zip` using the same v5 ZIP
+layout and reader. The extension ends in `.zip` so ordinary tools still recognise the container;
+legacy `.ind` files still open because archive detection is by content, and recents keep the `ind`
+classification. Snapshot exports expose a format selector, while stopped/retained saves add Save
+Compact beside Save ZIP. Compact does not require video: an archive without video is valid. AI tools
+and issue attachments retain their default ZIP requests.
 
-`CaptureArchiveExporter` first stages the existing range export and measures the exact standard ZIP
-byte count from that frozen selection. `CaptureArchiveZipWriter` shares the real archive serialization
-with a counting output sink, avoiding a temporary comparison ZIP on disk. `FfmpegAv1CompactVideoTranscoder`
-then encodes the staged video through bundled `libsvtav1` (CRF 28, preset 10, adaptive concurrency capped
-at six logical processors) using millisecond presentation times, unchanged dimensions, and approximately
-two-second keyframes. Decoder concurrency stays at two; a single-processor machine uses one encoder worker.
-Video-only sources publish the encoded MKV directly, retaining source metadata and aspect/frame-rate
-rationals. A separate packet-mux pass runs only when audio or auxiliary streams need copying into
-`screen.mkv`. The exporter refreshes video/notes assets and checksums before
-packaging the Compact candidate, publishing converted video only when its total byte size is below the comparator.
-If the immutable staged clip is already AV1, the exporter instead remuxes/copies that stream into
-`screen.mkv` without invoking the AV1 encoder or running a size comparison. The result identifies
-this passthrough explicitly: ZIP and IND then contain the same compact stream, so no additional
-size saving is claimed. Exact-start rendering or availability cards can still produce H.264 staging
-and take the ordinary conversion/size-gate path.
-Missing video leaves no published Compact file. On the conversion path, an unavailable encoder,
-conversion failure, or no size reduction also prevents publication. Cancellation and failures clean conversion/archive staging; the existing callers
-advance checkpoints only after successful publication. Extra working-space preflight and phase
-messages cover the additional conversion and comparison work. The source recording and ordinary
-ZIP codec settings are unchanged. This experimental path targets macOS validation; other shipped
-platforms require separate native encoding/playback verification.
+Two things differ from a ZIP export. (1) The log: `CaptureArchiveZipWriter` (commons-compress
+`ZipArchiveOutputStream(Path)`, `Zip64Mode.AsNeeded`, deterministic entry time 0, per-entry DEFLATE
+level with already-compressed media at `NO_COMPRESSION`) normally stores `logcat.log` with DEFLATE.
+For Compact the exporter first compresses it with zstd level 12 (`CaptureArchiveLogCodec.ZSTD`;
+workers = cpus-1 clamped to 1..4) into a temp file in the export work directory and adds it with
+`addRawArchiveEntry` as ZIP method 93, carrying the uncompressed CRC and size. On a dev logcat DEFLATE
+reaches about 8.7x and zstd-12 about 29x. `CaptureZstd.isAvailable` (`utils/CaptureZstd.kt`) probes
+the zstd-jni native load, which fails with a `LinkageError` rather than an `Exception`; when it is
+unavailable Compact falls back to DEFLATE and the result message says the log was stored with
+DEFLATE. (2) The video: `chooseCompactVideo` picks it once, after the staged range export and before
+notes, the `captured_with_indagium.txt` blurb, the video asset and the descriptor are produced, so
+those are written a single time. Outcomes: `NO_VIDEO`; `PASSTHROUGH_AV1` (the immutable staged clip is
+already AV1, so `FfmpegAv1CompactVideoTranscoder.copyAlreadyAv1` remuxes it into `screen.mkv` without
+the encoder); `ENCODED_AV1` (transcode to `.compact-screen.mkv`, used only when strictly smaller than
+the staged video, then published as `screen.mkv`); `KEPT_ORIGINAL_NOT_SMALLER` (the encoded file is
+discarded and `screen.mp4`/`screen.mkv` ships as staged); `KEPT_ORIGINAL_ENCODER_UNAVAILABLE`
+(`ensureAvailable()` threw `IOException`, original kept). Comparing only the video is sufficient
+because every other entry is identical between the ZIP and Compact variants, so the earlier exact
+ZIP-size comparison (`countBytes`/counting sink) and its "not smaller, so no archive" gate no longer
+exist. Transcoder errors and cancellation still fail the export. Each outcome has its own result
+message, and the `.mkv` audio note is added whenever the original video ships. Exact-start rendering
+or availability cards can still produce H.264 staging, which then takes the encode-and-compare path.
+
+`FfmpegAv1CompactVideoTranscoder` encodes through bundled `libsvtav1` at CRF 28, preset 8 (presets 9
+and above disable the screen-content tools), adaptive concurrency capped at six logical processors,
+millisecond presentation times and unchanged dimensions; decoder concurrency stays at two and a
+single-processor machine uses one encoder worker. A keyframe is forced at 10 s of source time or after
+300 video frames since the previous keyframe, whichever comes first; the frame cap keeps JavaCV
+`setTimestamp`'s 1000-grab window (audio plus video) safe, and `gop_size = min(fps x 10 s, 300)`.
+On a 180 s emulator clip, preset 10 with 2 s keyframes produced 52.8% of the source size; preset 8
+with 10 s keyframes produced 15.0% with higher SSIM, at roughly twice the encode time (about 35x
+realtime). Video-only sources publish the encoded MKV directly, retaining source metadata and
+aspect/frame-rate rationals; a separate packet-mux pass runs only when audio or auxiliary streams
+need copying into `screen.mkv`. Working-space preflight reserves a second copy of the log (zstd temp
+file included) plus the transcoded video. Cancellation and failures clean conversion/archive staging;
+callers advance save checkpoints only after successful publication.
+
+Reading. `zstd-jni` 1.5.7-4 supplies the codec to commons-compress, with the per-platform classifier
+jar selected like the bytedeco natives (`zstdJniPlatform`, `build.gradle.kts`). The JDK's
+`java.util.zip.ZipFile` rejects an archive when any entry uses method 93, so `ArchiveFormat.isValidZip`
+tries the JDK first and falls back to commons `ZipFile`, and `BugReportZip` scan, extract and stream
+use commons `ZipFile`; this keeps candidate scans, note video frames and the plain-archive fallback
+working on Compact archives. `CaptureArchiveReader` maps a `LinkageError` raised while decoding a
+zstd entry to a `CaptureArchiveException` ("uses zstd compression, which could not be loaded on this
+system"), because `AppState` catches `Exception` only. A bare `.zst` file stays `Unsupported`.
+
+Accepted limitations. Re-cutting an imported Compact archive that has audio can start up to about
+10 s before the requested start, because the copy begins at the preceding keyframe. Video-only
+exact-start cuts of an AV1 source re-encode to H.264 and then to AV1 again (generation loss).
+commons-compress writes "version needed to extract" 1.0 for the method-93 entry, which mainstream
+readers ignore. Standard unzip tools (macOS Archive Utility, Windows Explorer, Info-ZIP `unzip`)
+cannot extract the zstd log, while 7-Zip-zstd, libarchive-based tools and Indagium can; the archive's
+`captured_with_indagium.txt` says so. This path targets macOS validation; other shipped platforms
+require separate native encoding/playback verification.
 
 A new retained working session directory contains `logs/logcat.log`, `mapping/blocks.jsonl`,
 `timeline/sync.json`, `video/screen.mkv`, screenshots, session metadata, and the finalized portable
@@ -1365,7 +1400,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/block writing, synchronized snapshot boundaries, screenshots, watchdog, disk limits, and interruption recovery |
 | `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
 | `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `EmbeddedMirrorRuntime.kt` / `MirrorVideoPacket.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta parser, recording and mirror packet observers, CPU/native decoder fan-out, bounded feeds, and mirror-side Annex-B re-flattening |
-| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP/IND snapshot export/finalization, asset validation, and block-assisted range selection with legacy timing adapters |
+| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP/Compact (`.ind.zip`) snapshot export/finalization, asset validation, and block-assisted range selection with legacy timing adapters |
 | `capture/CaptureSparseMetadata.kt` | Checksummed segment metadata, sparse block writer/reader, bounded automatic anchor estimation, and the shared timing resolver |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
@@ -1938,7 +1973,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
-| `captures/` | New retained sessions: `logs/logcat.log`, `mapping/blocks.jsonl`, `timeline/sync.json`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Sparse timing/storage metadata; interrupted sessions are recoverable from the launcher. Legacy sessions keep their original `mapping/capture-index.jsonl`; v5 ZIP/IND exports use the same compact timing/block metadata with export-local offsets |
+| `captures/` | New retained sessions: `logs/logcat.log`, `mapping/blocks.jsonl`, `timeline/sync.json`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Sparse timing/storage metadata; interrupted sessions are recoverable from the launcher. Legacy sessions keep their original `mapping/capture-index.jsonl`; v5 ZIP/Compact exports use the same compact timing/block metadata with export-local offsets |
 | `testing/` | **Legacy** home of the AI test data (library, suites, assets, `issues/`, `runs/`). Now only read once at startup: `migrateLegacyTestStorage` moves it into the three configurable folders (§26.3), and a bare `AppState` with no save root still uses it as its fallback | — |
 | `<save root>/test-suites/`, `<save root>/test-runs/<runId>/`, `<save root>/test-issues/<issueId>/` | The AI test data: the library (`library.json`, `suites/`, `assets/`), one folder per run (`run.json` (frozen suite + results), `lanes/<laneId>/{capture,screens,transcript.jsonl}`, `judge.jsonl`) and one folder per issue. **Not** under `appDataDir`: each is a user setting (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only) defaulting to a subfolder of the Default save folder | `indagium-test-library`, `indagium-test-suite`, `indagium-issue`, `indagium-test-run`, each a versioned JSON envelope, plus JSON lines (§26.3) |
 | `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
@@ -2414,7 +2449,8 @@ error.
 
 ### 14.6 Archives
 
-`utils/BugReportZip.kt` reads `.zip` and `.7z` bug reports via Commons Compress, with explicit
+`utils/BugReportZip.kt` reads `.zip` and `.7z` bug reports via Commons Compress (commons `ZipFile`, not
+`java.util.zip`, so entries stored with ZIP method 93 are readable), with explicit
 budgets against decompression bombs: 500 MB per entry and 20,000 entries scanned, enforced by a
 `BoundedInputStream` that raises `ArchiveBudgetExceededException`. Videos found inside an archive are
 extracted to `archive-cache/` under a cache budget with unreferenced-file pruning.
@@ -2991,7 +3027,8 @@ composable. That is a build-level symptom of a code-level issue — see
 Gradle: `macosx-arm64`, `macosx-x86_64`, `windows-x86_64`, `linux-arm64`, or `linux-x86_64`. Each
 installer therefore bundles only its own OS's natives, matching how `compose.desktop.currentOs` and
 jpackage already behave. Using `ffmpeg-platform` instead would put every OS's natives into every
-installer.
+installer. `zstdJniPlatform` does the same for zstd-jni (`darwin_aarch64`, `darwin_x86_64`, `win_amd64`,
+`linux_aarch64`, `linux_amd64`), so the classifier jar carries only the host's zstd native.
 
 JavaCV's POM declares eleven unused native libraries (OpenCV, Tesseract, OpenBLAS, RealSense,
 FlyCapture and others) as non-optional dependencies; all are excluded, and FFmpeg is re-added as an
@@ -3360,7 +3397,7 @@ is `ASK`; the full list with owners is in [§26.11](#2611-known-risks-and-limita
 | **Sequence** | A user-defined start (and optional end) pattern that folds a recurring region of the log into a collapsible group. |
 | **Capture launcher** | Session-only New capture tab that discovers tools/devices and lists retained interrupted sessions before a live capture starts. |
 | **Capture strip** | The live-tab toolbar showing device, elapsed time, storage, video status, Stop, Screenshot, Save snapshot, Settings, and diagnostics. |
-| **Capture snapshot** | A point-in-time v5 ZIP/IND export of a live session; it freezes log bytes, block checkpoints, and segment anchors together without stopping the recorder. |
+| **Capture snapshot** | A point-in-time v5 ZIP/Compact export of a live session; it freezes log bytes, block checkpoints, and segment anchors together without stopping the recorder. |
 | **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, capture timeline/session/launcher markers, and all AI conversations. |
 | **Splice fast path** | An optimisation that mutates a cached item list in place for a single stack-group expand/collapse instead of rebuilding it. |
 | **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format Indagium writes its own diagnostic log in. |

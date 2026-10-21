@@ -99,8 +99,8 @@ class VideoAttachmentTokenTest {
         val original = tabFixture(
             VideoAttachment(
                 path = "/videos/capture.mkv",
-                sourceLabel = "capture.ind/screen.mkv",
-                captureSourcePath = "/reports/capture.ind",
+                sourceLabel = "capture.ind.zip/screen.mkv",
+                captureSourcePath = "/reports/capture.ind.zip",
                 captureSegmentAnchors = anchors,
             ),
         )

@@ -825,8 +825,8 @@ private fun UnfinishedSessionRow(
                     enabled = !state.captureExportBusy,
                 )
                 AppButton(
-                    if (exportStatus.busy) "Saving…" else "Save IND",
-                    { state.saveRetainedCapture(session.id, format = CaptureExportFormat.IND_AV1) },
+                    if (exportStatus.busy) "Saving…" else "Save Compact",
+                    { state.saveRetainedCapture(session.id, format = CaptureExportFormat.COMPACT) },
                     ButtonVariant.Secondary,
                     enabled = !state.captureExportBusy,
                 )

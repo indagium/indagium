@@ -55,6 +55,24 @@ val bytedecoPlatform: String = run {
     }
 }
 
+// zstd-jni ships one classifier jar per OS/arch containing the Java classes plus only that
+// platform's native library (the unclassified jar carries every platform's natives, ~7 MB).
+// Same host-only resolution story as bytedecoPlatform above; the names follow zstd-jni's own
+// classifier scheme (darwin_aarch64, win_amd64, ...), not bytedeco's.
+val zstdJniPlatform: String = run {
+    val os = org.gradle.internal.os.OperatingSystem.current()
+    val arch = System.getProperty("os.arch")
+    val isArm = arch == "aarch64" || arch == "arm64"
+    when {
+        os.isMacOsX && isArm -> "darwin_aarch64"
+        os.isMacOsX -> "darwin_x86_64"
+        os.isWindows -> "win_amd64"
+        os.isLinux && isArm -> "linux_aarch64"
+        os.isLinux -> "linux_amd64"
+        else -> error("Unsupported OS/arch for zstd-jni natives: ${os.name}/$arch")
+    }
+}
+
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
 val licenseVersion = "2026-07-19"
@@ -372,6 +390,9 @@ kotlin {
                 implementation(compose.materialIconsExtended)
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
+                // Backs commons-compress' ZIP method 93 (zstd) reader/writer (compact capture archives).
+                // 1.5.7-4 is the version commons-compress 1.28.0 itself declares (as optional).
+                implementation("com.github.luben:zstd-jni:1.5.7-4:$zstdJniPlatform")
                 implementation("org.tukaani:xz:1.10")
                 // capture/WirelessAdb.kt: the Wi-Fi pairing dialog draws a QR code (ui/WirelessPairingDialogs.kt).
                 // Only the encoder in `core` is used; there is no camera or image-IO dependency.
