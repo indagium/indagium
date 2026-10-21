@@ -3,6 +3,7 @@ package com.indagium.ui
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureStorageVersion
 import com.indagium.capture.captureLogEntriesForOrdinals
 import com.indagium.capture.markerHeader
 import com.indagium.capture.markerHeadingLine
@@ -202,12 +203,12 @@ internal class CaptureMarkerWriter(
         val videoMs = videoStart?.let { start -> (boundary.elapsedMs - start + session.manualOffsetMs).takeIf { it >= 0L } }
         // The leading half [t-preMs, t] is already flushed (boundary.indexLength is exactly the bound this scan must not read past),
         // so it is resolved synchronously here rather than after the trailing wait.
-        val leadingRange = ordinalRangeForElapsedWindow(
-            session.indexFile,
-            boundary.indexLength,
-            (boundary.elapsedMs - settings.markerPreMs).coerceAtLeast(0L),
-            boundary.elapsedMs,
-        )
+        val leadingStartMs = (boundary.elapsedMs - settings.markerPreMs).coerceAtLeast(0L)
+        val leadingRange = if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+            ordinalRangeForElapsedWindow(session, leadingStartMs, boundary.elapsedMs)
+        } else {
+            ordinalRangeForElapsedWindow(session.indexFile, boundary.indexLength, leadingStartMs, boundary.elapsedMs)
+        }
         val marker = CaptureMarker(
             id = "m$ordinal",
             elapsedMs = boundary.elapsedMs,
@@ -257,20 +258,17 @@ internal class CaptureMarkerWriter(
     suspend fun finishWindow(context: MarkerPressContext, afterId: String) {
         delay(context.settings.markerPostMs)
         val live = liveBoundary()
-        val indexFile: File
-        val logFile: File
+        val session: CaptureSession
         val indexBytes: Long
         val actualEndMs: Long
         if (live != null) {
-            indexFile = live.session.indexFile
-            logFile = live.session.logFile
+            session = live.session
             indexBytes = live.indexLength
             actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, live.elapsedMs)
         } else {
             // The controller is gone (Stop won the race): the session's own files are already fully flushed by the finalization.
             val stopped = stoppedSession(context.session.id) ?: context.session
-            indexFile = stopped.indexFile
-            logFile = stopped.logFile
+            session = stopped
             indexBytes = stopped.indexFile.length()
             actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, stopped.elapsedMs)
         }
@@ -280,12 +278,12 @@ internal class CaptureMarkerWriter(
             val requestedSeconds = context.settings.markerPostMs / MARKER_MS_PER_SECOND
             status.report("+%.1f s of %.0f s — capture ended".format(Locale.US, collectedSeconds, requestedSeconds))
         }
-        val fullRange = ordinalRangeForElapsedWindow(
-            indexFile,
-            indexBytes,
-            (context.marker.elapsedMs - context.settings.markerPreMs).coerceAtLeast(0L),
-            actualEndMs,
-        ) ?: return
+        val startMs = (context.marker.elapsedMs - context.settings.markerPreMs).coerceAtLeast(0L)
+        val fullRange = if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+            ordinalRangeForElapsedWindow(session, startMs, actualEndMs)
+        } else {
+            ordinalRangeForElapsedWindow(session.indexFile, indexBytes, startMs, actualEndMs)
+        } ?: return
         if (!target.isOpen()) return
         // Deleted during the trailing wait: its LogRef would otherwise be appended at the end.
         if (!markerNoteExists(context.noteId)) return
@@ -296,7 +294,12 @@ internal class CaptureMarkerWriter(
         } else {
             // Tail lag (or no viewer at all): the notes hold no row for some of the window. Read those straight from the capture log by
             // byte offset and merge with what is held, so the LogRef shows the whole window regardless of tailing progress.
-            (fullRange.mapNotNull { held[it] } + captureLogEntriesForOrdinals(indexFile, indexBytes, logFile, missing)).sortedBy { it.id }
+            val entries = if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                captureLogEntriesForOrdinals(session, missing)
+            } else {
+                captureLogEntriesForOrdinals(session.indexFile, indexBytes, session.logFile, missing)
+            }
+            (fullRange.mapNotNull { held[it] } + entries).sortedBy { it.id }
         }
         val logRefId = target.addLogRef(fullRange.toList(), afterId, sourceEntries)
         if (logRefId != null) undo?.logRefAdded(context.noteId, logRefId)

@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.capture.CaptureClockReference
+import com.indagium.capture.CaptureSegmentManualAnchor
 import com.indagium.model.LogTab
 import com.indagium.model.VideoAnchor
 import com.indagium.model.VideoAttachment
@@ -86,6 +88,44 @@ class VideoAttachmentTokenTest {
         assertEquals("/reports/capture.zip", restored?.tab?.attachedVideo?.captureSourcePath)
         assertEquals(-275L, restored?.tab?.attachedVideo?.captureOffsetMs)
         assertNull(restored?.tab?.captureTimeline)
+    }
+
+    @Test
+    fun restoresSegmentCorrectionsIncludingReferenceBeforeChildVideo() {
+        val anchors = listOf(
+            CaptureSegmentManualAnchor(0, 42, CaptureClockReference(43_200_000, 59, 2024), -2_000, 5_000),
+            CaptureSegmentManualAnchor(2, 500, CaptureClockReference(43_210_000, 59, 2024), 8_000, 15_000),
+        )
+        val original = tabFixture(
+            VideoAttachment(
+                path = "/videos/capture.mkv",
+                sourceLabel = "capture.ind/screen.mkv",
+                captureSourcePath = "/reports/capture.ind",
+                captureSegmentAnchors = anchors,
+            ),
+        )
+
+        val restored = original.tabToken().tabShellFromToken()?.tab
+
+        assertEquals(anchors, restored?.attachedVideo?.captureSegmentAnchors)
+        assertNull(restored?.captureTimeline, "restore should reload timing from the capture instead of embedding row mappings")
+    }
+
+    @Test
+    fun attachmentBeforeSegmentCorrectionsKeepsExistingFields() {
+        val original = tabFixture(
+            VideoAttachment(
+                path = "/videos/capture.mkv",
+                sourceLabel = "capture.zip/screen.mkv",
+                captureSourcePath = "/reports/capture.zip",
+                captureOffsetMs = -275,
+                linkCleared = true,
+            ),
+        )
+        val fields = original.tabToken().split("|").toMutableList()
+        fields[11] = fields[11].unb64().split("|").take(13).joinToString("|").b64()
+
+        assertEquals(original.attachedVideo, fields.joinToString("|").tabShellFromToken()?.tab?.attachedVideo)
     }
 
     @Test

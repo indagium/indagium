@@ -315,9 +315,31 @@ data class CaptureSession(
      * under live recorder names (an imported archive). Null means the live recorder layout is scanned.
      */
     val screenshotsOverride: List<CaptureSessionScreenshot>? = null,
+    /** Missing on disk means the original per-row capture-index.jsonl layout. */
+    val storageVersion: CaptureStorageVersion = CaptureStorageVersion.LEGACY_DENSE,
+    /** Optional source block index for retained v2 sessions or imported v5 archives. */
+    val blockIndexFileOverride: File? = null,
+    /** Frozen/immutable timing metadata supplied by a live snapshot or imported v5 archive. */
+    val syncMetadataOverride: CaptureSyncMetadata? = null,
+    /** Segment-local manual calibrations persisted with a retained session or an autosaved link. */
+    val manualSegmentAnchors: List<CaptureSegmentManualAnchor> = emptyList(),
+    /** Immutable source bounds captured under the recorder lock; null for stopped/imported sources. */
+    val frozenLogBytes: Long? = null,
+    val frozenBlockIndexBytes: Long? = null,
+    /** Exclusive raw-log byte cursor for the last successfully published snapshot. */
+    val logCheckpointByteOffset: Long = -1L,
+    /** Inclusive parser-row cursor paired with [logCheckpointByteOffset]. */
+    val logCheckpointRowOrdinal: Int = 0,
 ) {
+    init {
+        require(logCheckpointByteOffset >= -1L) { "Invalid capture byte checkpoint" }
+        require(logCheckpointRowOrdinal >= 0) { "Invalid capture row checkpoint" }
+    }
+
     val logFile: File get() = logFileOverride ?: File(directory, "logs/logcat.log")
     val indexFile: File get() = indexFileOverride ?: File(directory, "mapping/capture-index.jsonl")
+    val blockIndexFile: File get() = blockIndexFileOverride ?: File(directory, "mapping/blocks.jsonl")
+    val syncFile: File get() = File(directory, "timeline/sync.json")
     val videoFile: File get() = videoFileOverride ?: File(directory, "video/screen.mkv")
 
     /** Effective cursor, including sessions loaded from the legacy logCheckpointMs format. */
@@ -395,6 +417,8 @@ data class CaptureExportRequest(
     val explicitEndElapsedMs: Long? = null,
     /** Appended to keep existing positional construction source-compatible. */
     val format: CaptureExportFormat = CaptureExportFormat.ZIP,
+    /** Link-local manual v5 anchors; merged into this export without mutating the source capture. */
+    val captureSegmentAnchors: List<CaptureSegmentManualAnchor> = emptyList(),
 )
 
 /** Bundled AV1 encoder used only by the optional Compact export path. */
@@ -420,6 +444,9 @@ data class CaptureExportResult(
     val videoCoveredEndMs: Long?,
     val videoActualStartMs: Long?,
     val message: String,
+    /** Exclusive byte and inclusive row endpoints covered in the source log by this export. */
+    val logCoveredEndByteOffset: Long? = null,
+    val logCoveredEndRowOrdinal: Int? = null,
 )
 
 /** Read-only coverage and overwrite information shown before a live snapshot is saved. */
@@ -454,6 +481,14 @@ data class CaptureTimeline(
     val availabilityFramesRendered: Boolean = false,
     /** Frozen capture preference; null is reserved for legacy attachments without this setting. */
     val showUnavailableFrames: Boolean? = null,
+    /** Compact v5 synchronization segments; rows remain empty and are resolved from the opened log. */
+    val syncSegments: List<CaptureSyncSegment> = emptyList(),
+    /** Duration of the clip in video PTS; null when it was not probed or no video exists. */
+    val videoDurationMs: Long? = null,
+    /** Distinguishes an empty new v5 sync map from legacy timing that should be inferred. */
+    val sparseTiming: Boolean = false,
+    /** Source recording's UTC start, used to choose the right year for manual row calibration. */
+    val sourceStartedEpochMs: Long? = null,
 ) {
     private val videoAnchors: List<CaptureMappingRow> by lazy(LazyThreadSafetyMode.PUBLICATION) {
         rows.asSequence().filter { it.videoMs != null }.sortedBy { it.videoMs }.toList()

@@ -22,15 +22,21 @@ import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureMirrorStartRoute
+import com.indagium.capture.CaptureSegmentManualAnchor
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSnapshotCheckpointLocks
+import com.indagium.capture.CaptureSyncReliability
+import com.indagium.capture.CaptureSyncSegment
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
+import com.indagium.capture.CaptureTimingResolver
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.ImportedCaptureSnapshot
 import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.adaptedToNativeMedia
+import com.indagium.capture.captureClockReference
+import com.indagium.capture.clockDeltaMs
 import com.indagium.capture.importedCaptureSnapshot
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
@@ -3850,6 +3856,8 @@ class AppState(
                     refreshed,
                     result.logCoveredEndMs,
                     result.videoCoveredEndMs,
+                    result.logCoveredEndByteOffset,
+                    result.logCoveredEndRowOrdinal,
                 )
                 importedCaptureSnapshots.compute(tabId) { _, current ->
                     if (current?.identity == imported.identity) updated else current
@@ -3920,7 +3928,7 @@ class AppState(
         val session = controller?.selectedSession?.value
             ?: captureSnapshotSessionFor(resolvedTabId)
             ?: error("$resolvedTabId is not a capture tab")
-        val storageBytesUsed = listOf(session.logFile, session.indexFile, session.videoFile)
+        val storageBytesUsed = listOf(session.logFile, session.indexFile, session.blockIndexFile, session.syncFile, session.videoFile)
             .filter { it.isFile }
             .sumOf { it.length() }
         val markers = tabNow.annotations.blocks.filterIsInstance<AnnBlock.Note>().mapNotNull { block ->
@@ -8974,6 +8982,22 @@ class AppState(
                 if (captureIndex != null) {
                     val ordinal = t.logData.indexOfEntryId(logId).takeIf { index -> index >= 0 }?.plus(1)
                         ?: return@let t
+                    val timeline = t.captureTimeline
+                    if (timeline != null && (timeline.sparseTiming || timeline.syncSegments.isNotEmpty())) {
+                        val manualAnchor = sparseCaptureManualAnchor(t, captureIndex, ordinal, videoMs) ?: return@let t
+                        val anchors = it.captureSegmentAnchors.filterNot { anchor -> anchor.segmentId == manualAnchor.segmentId } + manualAnchor
+                        it.captureSourcePath?.let { sourcePath ->
+                            captureService.applySegmentCalibration(sourcePath, manualAnchor, captureControllerFor(tabId))
+                        }
+                        return@let t.copy(
+                            attachedVideo = it.copy(
+                                anchor = null,
+                                captureSegmentAnchors = anchors,
+                                doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                                linkCleared = false,
+                            ),
+                        )
+                    }
                     val importedVideoMs = captureIndex.videoMsForOrdinal(ordinal) ?: return@let t
                     val calibratedOffsetMs = videoMs - importedVideoMs
                     it.captureSourcePath?.let { sourcePath ->
@@ -9002,6 +9026,52 @@ class AppState(
         autosaveNow()
     }
 
+    private fun sparseCaptureManualAnchor(
+        tab: LogTab,
+        captureIndex: CaptureTimelineIndex,
+        ordinal: Int,
+        videoMs: Long,
+    ): CaptureSegmentManualAnchor? {
+        val timeline = tab.captureTimeline ?: return null
+        val segmentId = captureIndex.segmentIdForOrdinal(ordinal) ?: return null
+        val entry = tab.logData.getOrNull(ordinal - 1) ?: return null
+        val segment = timeline.syncSegments.firstOrNull { it.id == segmentId } ?: return null
+        val automaticCaptureElapsed = if (segment.reliability == CaptureSyncReliability.RELIABLE) {
+            captureIndex.pointForOrdinal(ordinal)?.elapsedMs?.let { elapsed ->
+                runCatching { Math.addExact(timeline.timelineBaseElapsedMs, elapsed) }.getOrNull()
+            }
+        } else {
+            null
+        }
+        val captureElapsed = timeline.videoOriginElapsedMs?.let { origin ->
+            runCatching { Math.addExact(origin, videoMs) }.getOrNull()?.takeIf { elapsed -> elapsed >= 0L }
+        } ?: automaticCaptureElapsed
+        val epoch = captureManualAnchorEpoch(timeline, segment, entry, captureElapsed)
+        val reference = captureClockReference(entry, epoch) ?: return null
+        return CaptureSegmentManualAnchor(segmentId, ordinal, reference, videoMs, captureElapsed)
+    }
+
+    private fun captureManualAnchorEpoch(
+        timeline: CaptureTimeline,
+        segment: CaptureSyncSegment,
+        entry: LogEntry,
+        captureElapsed: Long?,
+    ): Long {
+        val automaticEpoch = if (segment.reliability == CaptureSyncReliability.RELIABLE) {
+            segment.clockReference?.let { clock ->
+                clockDeltaMs(clock, entry)?.let { delta ->
+                    segment.anchorLogTimeMs?.let { epoch -> runCatching { Math.addExact(epoch, delta) }.getOrNull() }
+                }
+            }
+        } else {
+            null
+        }
+        val sourceEpoch = timeline.sourceStartedEpochMs?.let { started ->
+            runCatching { Math.addExact(started, captureElapsed ?: 0L) }.getOrNull()
+        }
+        return automaticEpoch ?: sourceEpoch ?: System.currentTimeMillis()
+    }
+
     fun clearVideoAnchor(tabId: String) {
         upTab(tabId) { t ->
             t.attachedVideo?.let {
@@ -9012,6 +9082,7 @@ class AppState(
                             doubleClickSeekEnabled = false,
                             captureSourcePath = null,
                             captureOffsetMs = 0L,
+                            captureSegmentAnchors = emptyList(),
                             linkCleared = true,
                         ),
                         captureTimeline = null,
@@ -9027,6 +9098,7 @@ class AppState(
     private class CaptureIndexCache(
         val logDataRef: List<LogEntry>,
         val timelineRef: CaptureTimeline,
+        val anchorsRef: List<CaptureSegmentManualAnchor>,
         val index: CaptureTimelineIndex,
     )
 
@@ -9035,16 +9107,19 @@ class AppState(
     private fun captureTimelineIndex(tab: LogTab): CaptureTimelineIndex? {
         if (tab.attachedVideo?.captureSourcePath == null) return null
         val timeline = tab.captureTimeline ?: return null
+        val anchors = tab.attachedVideo.captureSegmentAnchors
         captureIndexByTab[tab.id]
-            ?.takeIf { it.logDataRef === tab.logData && it.timelineRef === timeline }
+            ?.takeIf { it.logDataRef === tab.logData && it.timelineRef === timeline && it.anchorsRef === anchors }
             ?.let { return it.index }
-        return CaptureTimelineIndex(timeline, tab.logData.size).also { index ->
-            captureIndexByTab[tab.id] = CaptureIndexCache(tab.logData, timeline, index)
+        val resolver = CaptureTimingResolver.forTimeline(tab.logData, timeline, anchors)
+        return CaptureTimelineIndex(timeline, tab.logData.size, resolver).also { index ->
+            captureIndexByTab[tab.id] = CaptureIndexCache(tab.logData, timeline, anchors, index)
         }
     }
 
     private class CaptureFollowFloorIndex(
         val logDataRef: List<LogEntry>,
+        val captureIndexRef: CaptureTimelineIndex?,
         val visibleIdsRef: IntArray,
         val summaryVersion: Int,
         val ids: IntArray,
@@ -9062,7 +9137,8 @@ class AppState(
         if (reported != null) {
             captureFollowFloorIndexByTab[tab.id]
                 ?.takeIf {
-                    it.logDataRef === tab.logData && it.visibleIdsRef === reported && it.summaryVersion == version
+                    it.logDataRef === tab.logData && it.captureIndexRef === captureIndex &&
+                        it.visibleIdsRef === reported && it.summaryVersion == version
                 }
                 ?.let { return it }
         }
@@ -9079,6 +9155,7 @@ class AppState(
         }
         return CaptureFollowFloorIndex(
             logDataRef = tab.logData,
+            captureIndexRef = captureIndex,
             visibleIdsRef = visibleIds,
             summaryVersion = version,
             ids = ids.copyOf(count),

@@ -12,6 +12,7 @@ import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureTimingResolver
 import com.indagium.capture.CaptureVideoClip
 import com.indagium.capture.CaptureVideoCoverageProbe
 import com.indagium.capture.CaptureVideoExporter
@@ -25,6 +26,7 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
+import com.indagium.utils.parseLogcat
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
@@ -69,12 +71,10 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertEquals(rows.last().text, imported.logFile.readText())
-        // Archive v4 keeps one sync anchor plus export-local elapsed row timing — the sole kept row (ordinal 1)
-        // is the only candidate, and its predicted video position matches what the old row-by-row
-        // mapping used to compute for it.
-        assertEquals(1, imported.syncAnchor?.row)
-        assertEquals(300_000L, imported.syncAnchor?.videoMs)
-        assertEquals(listOf(1), requireNotNull(imported.timeline).rows.map { it.ordinal })
+        // v5 stores one segment anchor and no dense timeline rows. The shared resolver reconstructs
+        // the selected row's same clip-relative video position transiently.
+        assertEquals(300_000L, resolvedTiming(imported).videoMsForOrdinal(1))
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
         assertEquals(100L, imported.descriptor.manualOffsetMs)
         assertEquals(destination, imported.source)
         assertTrue(imported.videoFile?.isFile == true)
@@ -179,7 +179,7 @@ class CaptureArchiveTest {
             imported.descriptor.availabilityIntervals,
         )
         assertEquals(imported.descriptor.availabilityIntervals, imported.timeline?.availabilityIntervals)
-        assertEquals(2, requireNotNull(imported.timeline).rows.size)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
         assertEquals("note-1", imported.descriptor.markers.single().noteBlockId)
         assertEquals(1, imported.descriptor.markers.single().firstOrdinal)
         assertEquals(2, imported.descriptor.markers.single().lastOrdinal)
@@ -345,7 +345,10 @@ class CaptureArchiveTest {
             logCheckpointMs = 300_000,
             videoCheckpointMs = 250_000,
         )
-        writeCaptureInput(session, listOf(RawRow("new since save\n", 400_000, 2)))
+        writeCaptureInput(session, listOf(
+            RawRow("already saved\n", 300_000, 1),
+            RawRow("new since save\n", 400_000, 2),
+        ))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
         val destination = File(root, "existing.ind").apply { writeBytes("previous archive".toByteArray()) }
@@ -463,17 +466,16 @@ class CaptureArchiveTest {
         assertEquals(listOf(CaptureAvailabilityInterval(0, 2_000, "old-boot", "new-boot", true)), imported.descriptor.availabilityIntervals)
         assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
         assertEquals(imported.descriptor.availabilityIntervals, imported.timeline?.availabilityIntervals)
-        val timelineText = imported.descriptor.timeline?.let { asset ->
-            ZipFile(destination).use { zip ->
-                zip.getInputStream(zip.getEntry(asset.path)).bufferedReader().readText()
-            }
+        assertNull(imported.descriptor.timeline)
+        val syncPath = requireNotNull(imported.descriptor.sparseSync).path
+        val syncText = ZipFile(destination).use { zip ->
+            zip.getInputStream(zip.getEntry(syncPath)).bufferedReader().readText()
         }
-        assertTrue(timelineText.orEmpty().contains("\"type\":\"captureTimeline\""))
-        assertTrue(timelineText.orEmpty().contains("\"type\":\"availability\""))
+        assertTrue(syncText.contains("\"timelineBaseElapsedMs\":3000"))
+        assertTrue(syncText.contains("\"timelineDurationMs\":2000"))
         val tampered = File(root, "offline-only-tampered.zip")
-        val timelinePath = requireNotNull(imported.descriptor.timeline).path
         rewriteZip(destination, tampered) { path, bytes ->
-            if (path == timelinePath) String(bytes, Charsets.UTF_8).replace("\"startMs\":0", "\"startMs\":1").toByteArray()
+            if (path == syncPath) String(bytes, Charsets.UTF_8).replace("\"logBytes\":0", "\"logBytes\":1").toByteArray()
             else bytes
         }
         assertFailsWith<IllegalArgumentException> {
@@ -528,7 +530,7 @@ class CaptureArchiveTest {
         // (derived straight from the selection's real elapsedMs bounds, not from row content) is what
         // still proves the temporal bounds this test's name is about.
         assertNull(imported.syncAnchor)
-        assertEquals(2, requireNotNull(imported.timeline).rows.size)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
         assertEquals(2_000L, imported.descriptor.logStartMs)
         assertEquals(3_000L, imported.descriptor.logEndMs)
         assertEquals(CaptureRange.SELECTION, imported.descriptor.range)
@@ -586,7 +588,7 @@ class CaptureArchiveTest {
         assertEquals("row-2\nrow-3\n", imported.logFile.readText())
         assertEquals(150_000L, imported.descriptor.timelineBaseElapsedMs)
         assertEquals(200_000L, imported.descriptor.timelineDurationMs)
-        assertEquals(listOf(50_000L, 150_000L), requireNotNull(imported.timeline).rows.map { it.elapsedMs })
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
         val gap = imported.timeline!!.availabilityIntervals.single()
         assertEquals(30_000L, gap.startElapsedMs)
         assertEquals(100_000L, gap.endElapsedMs)
@@ -806,11 +808,11 @@ class CaptureArchiveTest {
         )
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
-        assertEquals("Capture exported; video has no usable coverage for this range", result.message)
+        assertTrue(result.message.startsWith("Capture exported; video has no usable coverage for this range"))
         assertNull(imported.videoFile)
         assertNull(imported.descriptor.video)
         assertNull(imported.syncAnchor)
-        assertEquals(2, requireNotNull(imported.timeline).rows.size)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
     }
 
     // Archive v3: the anchor estimator must prefer a row whose PREDICTED video position actually
@@ -846,9 +848,8 @@ class CaptureArchiveTest {
         // Row 1 ("row-before-video") predicts a negative video position and is skipped; row 2 is
         // the first row whose predicted position actually lands inside the video (matches exactly
         // what the old mapping computed for that same row: videoMs = 1_000).
-        assertEquals(2, imported.syncAnchor?.row)
-        assertEquals(1_000L, imported.syncAnchor?.videoMs)
-        assertEquals(3, requireNotNull(imported.timeline).rows.size)
+        assertEquals(1_000L, resolvedTiming(imported).videoMsForOrdinal(2))
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
     }
 
     @Test
@@ -1097,7 +1098,7 @@ class CaptureArchiveTest {
         assertEquals(2_000L, imported.descriptor.logEndMs)
         // No video in this session, so there is nothing to anchor.
         assertNull(imported.syncAnchor)
-        assertEquals(1, requireNotNull(imported.timeline).rows.size)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
     }
 
     // Regression test for the "video checkpoint split" fix: before it, Since-last-save always
@@ -1257,15 +1258,21 @@ class CaptureArchiveTest {
     // openZip's allowlist — including captured_with_indagium.txt, which carries no descriptor asset
     // entry of its own (see CaptureArchive.kt's scanZipEntries/writeZip).
     @Test
-    fun v4ExportAddsTheStreamedTimelineToTheFlatLayout() {
-        val root = createTempDirectory("capture-archive-v4-layout").toFile()
+    fun v5ExportAddsSparseBlocksAndSyncMetadataToTheFlatLayout() {
+        val root = createTempDirectory("capture-archive-v5-layout").toFile()
         val zip = exportLogOnly(root)
 
         val names = ZipFile(zip).use { it.entries().asSequence().map { entry -> entry.name }.toSet() }
 
-        // Archive v4 keeps the single sync anchor and adds the checksummed export-local timing asset.
+        // Archive v5 stores a compact block index and checksummed sparse sync manifest.
         assertEquals(
-            setOf(CAPTURE_DESCRIPTOR_NAME, "captured_with_indagium.txt", "logcat.log", "timeline/rows.jsonl"),
+            setOf(
+                CAPTURE_DESCRIPTOR_NAME,
+                "captured_with_indagium.txt",
+                "logcat.log",
+                "mapping/blocks.jsonl",
+                "timeline/sync.json",
+            ),
             names,
         )
         val blurb = ZipFile(zip).use { zipFile ->
@@ -1274,20 +1281,21 @@ class CaptureArchiveTest {
         assertTrue(blurb.contains("Indagium"))
         assertTrue(blurb.contains("indagium.com"))
 
-        // The descriptor itself carries "version": 4 (not the old "formatVersion" key) and a flat
+        // The descriptor itself carries "version": 5 (not the old "formatVersion" key) and a flat
         // sha256 map instead of one {path,sizeBytes,sha256} object per asset.
         val descriptorJson = ZipFile(zip).use { zipFile ->
             zipFile.getInputStream(zipFile.getEntry(CAPTURE_DESCRIPTOR_NAME)).readBytes().toString(Charsets.UTF_8)
         }
-        assertTrue(descriptorJson.contains("\"version\":4"))
+        assertTrue(descriptorJson.contains("\"version\":5"))
         assertTrue(descriptorJson.contains("\"sha256\""))
 
         val imported = CaptureArchiveReader.open(zip, File(root, "cache"))
-        assertEquals(4, imported.descriptor.formatVersion)
+        assertEquals(5, imported.descriptor.formatVersion)
         assertEquals("logcat.log", imported.descriptor.log.path)
         assertNull(imported.descriptor.mapping)
         assertNull(imported.syncAnchor, "exportLogOnly has no video, so there is nothing to anchor")
-        assertEquals(1, requireNotNull(imported.timeline).rows.size)
+        assertEquals(emptyList(), requireNotNull(imported.timeline).rows)
+        assertEquals(1, requireNotNull(imported.sparseSyncMetadata).rowCount)
     }
 
     // Archive v3: the reader keeps parsing the old nested logs/video/mapping layout and
@@ -1532,6 +1540,12 @@ class CaptureArchiveTest {
             )
         }
     }
+
+    private fun resolvedTiming(imported: com.indagium.capture.ImportedCapture): CaptureTimingResolver =
+        CaptureTimingResolver.forTimeline(
+            parseLogcat(imported.logFile),
+            requireNotNull(imported.timeline),
+        )
 
     private fun session(root: File, recordVideo: Boolean = false, manualOffsetMs: Long = 0): CaptureSession = CaptureSession(
         id = "session-1",

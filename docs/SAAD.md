@@ -508,19 +508,34 @@ one adb process (there is no runner-level or capture-diagnostics logging of argv
 `QrPairingCredentials.toString` redacts the password. A wireless device is recognised purely from its
 serial (`CaptureDevice.wireless`), so no persisted format changed.
 
-The descriptor is the hand-off between capture and review. Portable archive v4 extends v3's ZIP
+The descriptor is the hand-off between capture and review. Portable archive v5 extends v3's ZIP
 layout: `capture.indagium.json`, `logcat.log`, optional `screen.mp4` (or MKV when needed to retain
 audio), optional notes/markers and screenshots, and `captured_with_indagium.txt`. The descriptor
-stores checksums, actual video coverage, a log-row/video-time synchronization anchor, and structured
-device-availability intervals. A bounded, checksummed JSONL timeline asset carries its time bounds,
-availability records, and export-local row ordinals with monotonic elapsed times. Import validates
-that the timeline's availability metadata agrees with the descriptor. Child exports rebase their timing and clip availability and
-note ranges to the selected window. Opening a ZIP verifies its assets and creates an ordinary log
-tab with linked video and the imported timeline. The reader still accepts v1/v2 archives with their
-legacy nested assets/mappings and v3 archives with their single estimated anchor.
+stores checksums, actual video coverage, and structured device-availability intervals.
+`timeline/sync.json` contains half-open clock-segment row bounds, reference log timestamps,
+capture-elapsed anchors, reliability, and timeline bounds. `mapping/blocks.jsonl` contains sparse
+byte/row checkpoints and capture-time bounds. Synchronization derives row time from the log
+timestamp and the matching reliable segment; missing or uncertain timestamps never inherit a
+neighbor's video time. New files contain no persisted per-row JSON timing map. Child exports
+rebase row/byte boundaries and timing while clipping availability and notes to the selection.
+Opening an archive verifies its assets and creates an ordinary log tab with linked video.
+Legacy adapters preserve v1/v2 mappings, v3 single-anchor behavior, and v4 per-row timelines.
+New v5 archives require the updated reader; no legacy-export mode is added.
+
+Automatic anchors use the existing estimator on at most 256 eligible observations or two seconds.
+Buffered history and synthetic availability markers do not establish device-clock anchors.
+Reconnection/reboot starts a new segment. An offset change of at least one second, sustained across
+five observations spanning at least one second, makes the transition uncertain until a stable
+anchor is available. Manual links correct the selected segment and persist through restore/export.
+Block writers close after 1,024 counted rows, 1 MiB, or one second, whichever occurs first, without
+empty blocks. Block clock context permits range scans to resume without parsing the whole prefix.
+Timing resolution is shared by playback, navigation, marker/range selection, and export; imported
+captures must not recreate a dense per-row JSON cache.
+The reproducible million-row fixture and size/navigation measurements are documented in
+[`CAPTURE_METADATA_BENCHMARK.md`](CAPTURE_METADATA_BENCHMARK.md).
 
 **Compact capture POC.** `CaptureExportRequest.format` defaults to `CaptureExportFormat.ZIP`;
-the opt-in `IND_AV1` format writes a `.ind` file using the same v4 ZIP layout and reader. Snapshot
+the opt-in `IND_AV1` format writes a `.ind` file using the same v5 ZIP layout and reader. Snapshot
 exports expose a format selector, while stopped/retained saves add Save IND beside Save ZIP.
 AI tools and issue attachments retain their default ZIP requests. Content-based archive detection
 also handles `.ind` in Open, drop, restore, and recents; the recent-file archive classification
@@ -548,19 +563,27 @@ messages cover the additional conversion and comparison work. The source recordi
 ZIP codec settings are unchanged. This experimental path targets macOS validation; other shipped
 platforms require separate native encoding/playback verification.
 
-A retained working session directory has a different layout: `logs/logcat.log`,
-`mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, session metadata, and the finalized
-portable descriptor. The append-only capture index supplies per-row elapsed-time data while recording
-and is used to build a portable snapshot's selected log range and synchronization anchor. A live
-snapshot freezes the current log/index byte boundary, exports all history, a time range, since the last
+A new retained working session directory contains `logs/logcat.log`, `mapping/blocks.jsonl`,
+`timeline/sync.json`, `video/screen.mkv`, screenshots, session metadata, and the finalized portable
+descriptor. Its storage version distinguishes this layout from legacy sessions with
+`mapping/capture-index.jsonl`: `session.json.storageVersion = 2`; an absent version selects the
+legacy layout. Existing source sessions and archives are never automatically rewritten.
+A live snapshot flushes the active block and freezes log bytes, block records, and timing metadata
+under the recorder lock, then exports all history, a time range, since the last
 successful save, or the contiguous interval between the first and last selected capture rows, and
-leaves the recorder running. Cancellation or failure leaves the capture active. Video export chooses
+leaves the recorder running. Exact byte/row save cursors advance monotonically only after successful
+publication. Uncertain time-range selection includes overlapping blocks with a boundary notice;
+explicit row selection remains exact, and the requested video interval does not expand. Recovery
+scans an unindexed complete-log tail as uncertain rather than inventing synchronization.
+Cancellation or failure leaves the capture active. Video export chooses
 a readable preceding keyframe where available; the descriptor reports actual coverage instead of
 implying video spans the full log interval. Screenshots are stored in the session and added to Notes
 with video-frame provenance when available.
-Since-last-save keeps **two independent cursors** on `CaptureSession`, not one:
-`snapshotCheckpointMs` (log coverage end, always advances on any successful export) and
-`videoCheckpointMs` (video coverage end, advances only when that export actually produced video). The
+Since-last-save keeps **independent log and video coverage** on `CaptureSession`:
+new sessions use exact byte/row log cursors alongside `snapshotCheckpointMs`, while
+`videoCheckpointMs` advances only when an export actually produced video. The
+log cursor consists of exclusive `logCheckpointByteOffset` and inclusive `logCheckpointRowOrdinal`.
+Both survive session restore and imported-capture checkpoint persistence. The
 video range's start is `min(logCheckpoint, videoCheckpoint)` when a video checkpoint exists, so a
 snapshot whose video still lags the log (StreamingMkvWriter's Matroska muxer only flushes a cluster
 when it closes — bounded to roughly a second now, see above, but still not instant) is recovered by
@@ -579,7 +602,7 @@ session's video to catch up to the requested end before snapshotting it, and its
 cheap copy+scan probe (`CaptureVideoCoverageProbe`, cached by source file length) instead of a full
 copy+remux so the snapshot popover's debounced polling stays lightweight.
 
-Stop drains tailing and finalizes the v4 descriptor in the retained session directory; the session
+Stop drains tailing and finalizes the v5 descriptor in the retained session directory; the session
 index remains beside the raw log and video. The ordinary player then lets log rows and video seek one
 another, while a later Save ZIP writes the separate flat portable layout. If the application exits before Stop, the recorder marks its directory interrupted; the
 next launcher lists it for recovery. Live recorder/launcher markers are not restored as active
@@ -597,7 +620,7 @@ a transport outage leaves the recorder `RECORDING`, retaining its device claim a
 Logcat and embedded-video reconnect work runs in the background with cancellable backoff capped at
 five seconds. Logcat resumes as soon as ADB is usable; completed Android boot is a separate AI-tool
 condition. `CaptureAvailabilityInterval` stores monotonic start/end times and best-effort boot
-identity evidence in session JSON and archive v4. Recovery stays on the original ADB serial;
+identity evidence in session JSON and archive v4/v5. Recovery stays on the original ADB serial;
 changed wireless endpoints are not automatically rebound because existing session metadata lacks a
 verified stable hardware identity. Optional indexed log transitions and video cards
 are controlled by keyed JSON settings; disabling their presentation does not remove interval data.
@@ -1339,10 +1362,11 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
-| `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
+| `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/block writing, synchronized snapshot boundaries, screenshots, watchdog, disk limits, and interruption recovery |
 | `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
 | `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `EmbeddedMirrorRuntime.kt` / `MirrorVideoPacket.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta parser, recording and mirror packet observers, CPU/native decoder fan-out, bounded feeds, and mirror-side Annex-B re-flattening |
-| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and index-assisted range/synchronization-anchor generation |
+| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP/IND snapshot export/finalization, asset validation, and block-assisted range selection with legacy timing adapters |
+| `capture/CaptureSparseMetadata.kt` | Checksummed segment metadata, sparse block writer/reader, bounded automatic anchor estimation, and the shared timing resolver |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
 | `voice/VoiceInputSessionCoordinator.kt` / `VoiceInputControllerFactory.kt` | One app-wide recording owner, stable editor leases, and shared engine construction for AI, notes and test prose |
@@ -1914,7 +1938,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
-| `captures/` | Retained session directories: `logs/logcat.log`, `mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Session data and portable-capture source; interrupted sessions are recoverable from the launcher. Exported v3 ZIPs use a separate flat layout and a single sync anchor, not the session index |
+| `captures/` | New retained sessions: `logs/logcat.log`, `mapping/blocks.jsonl`, `timeline/sync.json`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Sparse timing/storage metadata; interrupted sessions are recoverable from the launcher. Legacy sessions keep their original `mapping/capture-index.jsonl`; v5 ZIP/IND exports use the same compact timing/block metadata with export-local offsets |
 | `testing/` | **Legacy** home of the AI test data (library, suites, assets, `issues/`, `runs/`). Now only read once at startup: `migrateLegacyTestStorage` moves it into the three configurable folders (§26.3), and a bare `AppState` with no save root still uses it as its fallback | — |
 | `<save root>/test-suites/`, `<save root>/test-runs/<runId>/`, `<save root>/test-issues/<issueId>/` | The AI test data: the library (`library.json`, `suites/`, `assets/`), one folder per run (`run.json` (frozen suite + results), `lanes/<laneId>/{capture,screens,transcript.jsonl}`, `judge.jsonl`) and one folder per issue. **Not** under `appDataDir`: each is a user setting (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only) defaulting to a subfolder of the Default save folder | `indagium-test-library`, `indagium-test-suite`, `indagium-issue`, `indagium-test-run`, each a versioned JSON envelope, plus JSON lines (§26.3) |
 | `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
@@ -2907,7 +2931,7 @@ enough that a naive implementation does not merely run slowly, it exhausts heap.
 | Capped tail reads | `utils/FileTailer.kt:19` | 4 MiB per poll, with a widen-once fallback for an over-long line |
 | Heap return to the OS + JVM flags | `utils/HeapTrim.kt`, `build.gradle.kts` (`-XX:G1PeriodicGCInterval`, `-XX:+ExplicitGCInvokesConcurrent`, `-XX:MaxRAMPercentage`) | A coalesced concurrent `System.gc()` after a big tab, capture or export is released, so G1 uncommits freed gigabytes instead of holding them while idle |
 | `AppendOnlyLogList` (tail path) | `utils/AppendOnlyLogList.kt` | Tail/live-capture appends share one growable backing array: O(batch) per append instead of copying every row each second, which had inflated committed heap ~20x over live data |
-| Allocation-free capture-index parser | `capture/CaptureArchive.kt` `parseIndexRecord` | Canonical index lines are parsed without a JSON tree per line; any deviation falls back to `parseIndexRecordJson` |
+| Allocation-free legacy capture-index parser | `capture/CaptureArchive.kt` `parseIndexRecord` | Legacy canonical index lines are parsed without a JSON tree per line; any deviation falls back to `parseIndexRecordJson`. New sessions use sparse block records |
 | Heap-pressure watchdog | `utils/HeapPressure.kt` (`HeapPressureMonitor`), `ui/HeapBanner.kt`, `ui/TailCoordinator.kt` (`pauseTailing`/`resumeTailing`), `utils/LogMemoryEstimate.kt` | Turns "freeze then `OutOfMemoryError`" into a message: GC-notification occupancy after GC (NORMAL / WARNING at 70% / CRITICAL at 85%, CRITICAL confirmed by a full GC whose requests back off 60 s -> 15 min and need a young-GC reading above the last confirmed occupancy) drives a banner whose figures track every GC reading (level and reading callbacks are queued under the monitor lock and delivered in decision order by one draining thread, so concurrent collector beans cannot deliver a stale level last); CRITICAL pauses live capture log views (recording continues on disk; Resume once pressure drops; Stop while paused keeps the full log in the session files and archive, the tab stays a prefix); Resume is refused while the paused backlog would not fit in the free heap; a pre-open estimate (~3.5x file size vs. free heap) adds a memory line to the split prompt, and a memory-driven Split writes every part but opens only those that fit (the rest stay in the split folder). Exposed read-only via the `get_memory_status` tool |
 
 ### 19.2 CPU strategy
@@ -3336,7 +3360,7 @@ is `ASK`; the full list with owners is in [§26.11](#2611-known-risks-and-limita
 | **Sequence** | A user-defined start (and optional end) pattern that folds a recurring region of the log into a collapsible group. |
 | **Capture launcher** | Session-only New capture tab that discovers tools/devices and lists retained interrupted sessions before a live capture starts. |
 | **Capture strip** | The live-tab toolbar showing device, elapsed time, storage, video status, Stop, Screenshot, Save snapshot, Settings, and diagnostics. |
-| **Capture snapshot** | A point-in-time v3 flat ZIP export of a live session; it freezes the current log/index boundary, stores one sync anchor, and does not stop the recorder. |
+| **Capture snapshot** | A point-in-time v5 ZIP/IND export of a live session; it freezes log bytes, block checkpoints, and segment anchors together without stopping the recorder. |
 | **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, capture timeline/session/launcher markers, and all AI conversations. |
 | **Splice fast path** | An optimisation that mutates a cached item list in place for a single stack-group expand/collapse instead of rebuilding it. |
 | **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format Indagium writes its own diagnostic log in. |

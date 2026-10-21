@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import com.indagium.capture.CAPTURE_SESSION_FILE_NAME
 import com.indagium.capture.CaptureArchiveExporter
+import com.indagium.capture.CaptureBlockIndex
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
@@ -10,6 +11,8 @@ import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSessionBoundary
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.CaptureStorageVersion
+import com.indagium.capture.CaptureSyncMetadata
 import com.indagium.capture.DEFAULT_VIDEO_COVERAGE_WAIT_MS
 import com.indagium.capture.RecorderState
 import com.indagium.capture.mirror.MirrorGestureControl
@@ -203,7 +206,32 @@ internal class AppLaneCapture(
 
     private fun localBoundary(): CaptureSessionBoundary {
         val local = readCaptureSessionDirectory(handle.laneSession.directory) ?: handle.laneSession
-        return CaptureSessionBoundary(local, local.logFile.length(), local.indexFile.length(), local.elapsedMs)
+        return laneDiskBoundary(local)
+    }
+
+    /** A stopped/local sparse session may have an unindexed tail; only its coherent checkpoint is copied. */
+    private fun laneDiskBoundary(session: CaptureSession): CaptureSessionBoundary {
+        if (session.storageVersion == CaptureStorageVersion.LEGACY_DENSE) {
+            return CaptureSessionBoundary(session, session.logFile.length(), session.indexFile.length(), session.elapsedMs)
+        }
+        val metadata = session.syncMetadataOverride ?: CaptureSyncMetadata.parse(session.syncFile.readText())
+        val allBlocks = CaptureBlockIndex.read(
+            session.blockIndexFile,
+            session.logFile,
+            maxLogBytes = Long.MAX_VALUE,
+            verifyByteRange = LongRange.EMPTY,
+        )
+        val prefix = CaptureBlockIndex(allBlocks.blocks.takeWhile { it.byteEnd <= metadata.logBytes })
+        require(prefix.indexedLogBytes == metadata.logBytes && prefix.indexedRows == metadata.rowCount) {
+            "Borrowed capture checkpoint does not match its block index"
+        }
+        val blockBytes = session.frozenBlockIndexBytes ?: prefix.serializedBytes
+        val frozen = session.copy(
+            syncMetadataOverride = metadata,
+            frozenLogBytes = metadata.logBytes,
+            frozenBlockIndexBytes = blockBytes,
+        )
+        return CaptureSessionBoundary(frozen, metadata.logBytes, 0L, session.elapsedMs, blockIndexBytes = blockBytes)
     }
 
     override suspend fun addMarker(request: LaneMarkerRequest): LaneMarkerOutcome = withContext(Dispatchers.IO) {
@@ -324,7 +352,7 @@ internal class AppLaneCapture(
         if (!final && stopRequested.get()) return localBoundary()
         val boundary = runCatching { handle.controller.snapshotForExport() }.getOrElse {
             val disk = readCaptureSessionDirectory(handle.session.directory) ?: throw IOException("The borrowed source capture is no longer available", it)
-            CaptureSessionBoundary(disk, disk.logFile.length(), disk.indexFile.length(), disk.elapsedMs)
+            laneDiskBoundary(disk)
         }
         val source = boundary.session
         // Capture every source length at the same point-in-time boundary before doing any potentially slow file I/O.
@@ -332,7 +360,9 @@ internal class AppLaneCapture(
         val localRoot = handle.laneSession.directory.canonicalFile
         require(localRoot.toPath().startsWith(laneDir.canonicalFile.toPath())) { "Lane evidence escaped its run directory" }
         copyBorrowedPrefix(source.logFile, File(localRoot, "logs/logcat.log"), boundary.logLength, localRoot, required = true)
-        copyBorrowedPrefix(source.indexFile, File(localRoot, "mapping/capture-index.jsonl"), boundary.indexLength, localRoot, required = true)
+        val sparse = source.storageVersion == CaptureStorageVersion.BLOCKS_V2
+        val frozenMetadata = copyBorrowedTiming(boundary, localRoot)
+        val blockBytes = source.frozenBlockIndexBytes ?: boundary.blockIndexBytes
         copyBorrowedPrefix(source.videoFile, File(localRoot, "video/screen.mkv"), videoLength, localRoot)
         val sourceStopped = handle.controller.snapshot.value.state !in setOf(RecorderState.RECORDING, RecorderState.STOPPING)
         val stoppedWhileBorrowing = !sourceStopped && final
@@ -353,6 +383,13 @@ internal class AppLaneCapture(
             } else {
                 source.interruptions
             },
+            logFileOverride = File(localRoot, "logs/logcat.log"),
+            indexFileOverride = if (sparse) null else File(localRoot, "mapping/capture-index.jsonl"),
+            blockIndexFileOverride = if (sparse) File(localRoot, "mapping/blocks.jsonl") else null,
+            videoFileOverride = File(localRoot, "video/screen.mkv"),
+            syncMetadataOverride = frozenMetadata,
+            frozenLogBytes = if (sparse) boundary.logLength else null,
+            frozenBlockIndexBytes = if (sparse) blockBytes else null,
         )
         val destination = File(localRoot, CAPTURE_SESSION_FILE_NAME)
         val temporary = File(localRoot, "$CAPTURE_SESSION_FILE_NAME.tmp")
@@ -366,15 +403,40 @@ internal class AppLaneCapture(
         return localBoundary()
     }
 
-    private fun copyBorrowedPrefix(source: File, target: File, limit: Long, localRoot: File, required: Boolean = false) {
-        if (!source.isFile || limit < 0L) {
-            if (required) throw IOException("Required borrowed capture file is unavailable: $source")
-            return
+    private fun copyBorrowedTiming(boundary: CaptureSessionBoundary, localRoot: File): CaptureSyncMetadata? {
+        val source = boundary.session
+        if (source.storageVersion != CaptureStorageVersion.BLOCKS_V2) {
+            copyBorrowedPrefix(source.indexFile, File(localRoot, "mapping/capture-index.jsonl"), boundary.indexLength, localRoot, required = true)
+            return null
         }
+        val metadata = source.syncMetadataOverride ?: CaptureSyncMetadata.parse(source.syncFile.readText())
+        require(metadata.logBytes == boundary.logLength) { "Borrowed capture timing is not frozen with its log" }
+        val blockBytes = source.frozenBlockIndexBytes ?: boundary.blockIndexBytes
+        copyBorrowedPrefix(source.blockIndexFile, File(localRoot, "mapping/blocks.jsonl"), blockBytes, localRoot, required = true)
+        writeLaneMetadata(File(localRoot, "timeline/sync.json"), metadata.toJson())
+        return metadata
+    }
+
+    private fun writeLaneMetadata(destination: File, content: String) {
+        destination.parentFile?.mkdirs()
+        val temporary = File(destination.parentFile, ".${destination.name}.tmp")
+        try {
+            temporary.writeText(content, Charsets.UTF_8)
+            runCatching {
+                Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            }.getOrElse {
+                Files.move(temporary.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private fun copyBorrowedPrefix(source: File, target: File, limit: Long, localRoot: File, required: Boolean = false) {
+        val frozenLength = borrowedPrefixLength(source, limit, required) ?: return
         val safeTarget = target.canonicalFile
         require(safeTarget.toPath().startsWith(localRoot.toPath())) { "Lane evidence path escaped its run directory" }
         safeTarget.parentFile?.mkdirs()
-        val frozenLength = minOf(limit, source.length())
         RandomAccessFile(source, "r").use { input ->
             RandomAccessFile(safeTarget, "rw").use { output ->
                 if (output.length() > frozenLength) output.setLength(frozenLength)
@@ -392,6 +454,15 @@ internal class AppLaneCapture(
                 output.fd.sync()
             }
         }
+    }
+
+    private fun borrowedPrefixLength(source: File, limit: Long, required: Boolean): Long? {
+        if (!source.isFile || limit < 0L) {
+            if (required) throw IOException("Required borrowed capture file is unavailable: $source")
+            return null
+        }
+        if (required && source.length() < limit) throw IOException("Required borrowed capture file is shorter than its frozen boundary: $source")
+        return minOf(limit, source.length())
     }
 }
 

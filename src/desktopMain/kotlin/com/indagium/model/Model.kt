@@ -1,6 +1,7 @@
 package com.indagium.model
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.capture.CaptureSegmentManualAnchor
 import com.indagium.capture.CaptureTimeline
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.utils.ZipLogCandidate
@@ -793,6 +794,9 @@ data class VideoAttachment(
     // Restore must then not re-apply the archive's timeline or sync anchor to the attachment. Any
     // link action (setVideoAnchor) or a new attachment resets it.
     val linkCleared: Boolean = false,
+    // Segment-scoped user sync points for sparse v5 capture timelines, appended to preserve the
+    // positional source compatibility of previously persisted attachment state.
+    val captureSegmentAnchors: List<CaptureSegmentManualAnchor> = emptyList(),
 ) {
     constructor(
         path: String,
@@ -803,6 +807,7 @@ data class VideoAttachment(
         captureSourcePath: String? = null,
         captureOffsetMs: Long = 0,
         linkCleared: Boolean = false,
+        captureSegmentAnchors: List<CaptureSegmentManualAnchor> = emptyList(),
     ) : this(
         source = VideoSource.LocalFile(path),
         sourceLabel = sourceLabel,
@@ -812,6 +817,7 @@ data class VideoAttachment(
         captureSourcePath = captureSourcePath,
         captureOffsetMs = captureOffsetMs,
         linkCleared = linkCleared,
+        captureSegmentAnchors = captureSegmentAnchors,
     )
 
     /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */

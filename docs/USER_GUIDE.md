@@ -819,7 +819,10 @@ an attachment.
 
 **Anchor.** Play to the moment you care about, then right-click the log row that corresponds to it →
 **Video: Link to \<time\>**. That single anchor defines the offset between video time and log time
-for the whole recording.
+for the whole recording. A version-5 device capture can contain separate clock segments after
+reconnection, reboot, or a clock change. Linking a row in such a capture corrects its segment
+without shifting other segments. Rows with missing or unreliable timestamps remain visible but
+have no automatic video position.
 
 **Then:**
 
@@ -1323,18 +1326,31 @@ interval never moves it backward.
 
 ### What is saved
 
-The portable capture ZIP uses archive version 4: `capture.indagium.json`,
+The portable capture ZIP uses archive version 5: `capture.indagium.json`,
 `logcat.log`, optional `screen.mp4` (or `screen.mkv` when needed to preserve audio), and optional
 marker/note data and screenshots, plus a small `captured_with_indagium.txt` file. The descriptor
-contains checksums, capture/timing metadata, a synchronization anchor, and availability intervals.
-A checksummed timeline asset preserves each log row's elapsed time, including across reboots and
-further snapshot cuts. Archives from versions 1–3 still open using their saved mappings or estimated
-anchor timing. The retained working session directory has a separate layout with its raw log, growing video,
-session metadata and capture index; it is not the portable ZIP layout.
+contains checksums, capture/timing metadata, and availability intervals. `timeline/sync.json`
+stores one synchronization anchor per continuous clock segment. A row's timestamp and its segment's
+anchor determine its position; the archive does not store a JSON timing record for every row.
+`mapping/blocks.jsonl` provides small checkpoints for locating ranges in the log. New retained
+sessions use the same small timing/index files alongside their raw log, video, and session metadata.
+These files replace the large `timeline/rows.jsonl` and `mapping/capture-index.jsonl` in new captures.
+
+Versions 1–4 remain readable with their existing timing behavior. Original captures are not
+rewritten automatically; exporting one again produces version 5. New version-5 captures require
+an updated Indagium reader. This format change applies to both ZIP and IND exports.
+If an old per-row mapping cannot be represented reliably by clock anchors, its re-export reports
+uncertain synchronization and keeps the affected logs available without guessed video positions.
+
+When reliable timing is unavailable, the log remains available for analysis and explicit row
+selection. A time-range export includes overlapping capture-time blocks and reports that boundary
+logs may extend beyond the requested range. The requested video interval stays unchanged, and
+uncertain rows do not receive a guessed video position. **Since last save** tracks saved byte/row
+boundaries so uncertain timing does not cause rows to repeat or disappear.
 
 **Indagium Compact (`.ind`, experimental).** In the snapshot popup, choose **Indagium Compact (.ind)**
 instead of the default **ZIP**. Stopped captures and retained sessions also offer **Save IND** beside
-**Save ZIP**. Compact uses the same version-4 ZIP structure, with AV1 video in `screen.mkv` and copied
+**Save ZIP**. Compact uses the same version-5 ZIP structure, with AV1 video in `screen.mkv` and copied
 audio. It preserves the video dimensions and frame timing, but video compression is lossy and export
 takes longer. Logs, notes, markers, screenshots, and synchronization data remain part of the archive.
 This export option is separate from the **Compact** recording-quality preset below.

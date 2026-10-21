@@ -156,5 +156,6 @@ internal fun buildCaptureSnapshotExportRequest(
         explicitStartElapsedMs = explicitStartElapsedMs,
         explicitEndElapsedMs = explicitEndElapsedMs,
         format = format,
+        captureSegmentAnchors = tab.attachedVideo?.captureSegmentAnchors.orEmpty(),
     )
 }

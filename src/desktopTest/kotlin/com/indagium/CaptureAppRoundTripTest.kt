@@ -70,7 +70,7 @@ class CaptureAppRoundTripTest {
                 source.indexFile.bufferedWriter().use { index ->
                     for (ordinal in 1..20) {
                         val elapsed = ordinal * 60_000L
-                        val line = "09-19 12:00:${ordinal.toString().padStart(2, '0')}.000  100  101 I Tag: row $ordinal\n"
+                        val line = "09-19 12:${ordinal.toString().padStart(2, '0')}:00.000  100  101 I Tag: row $ordinal\n"
                         val bytes = line.toByteArray()
                         log.write(bytes)
                         index.appendLine(
@@ -214,12 +214,10 @@ class CaptureAppRoundTripTest {
                     restored.startPendingRestoredTabLoads()
                     waitLoaded(restored, id)
                     val reopened = assertNotNull(restored.tab(id))
-                    // Archive v4 restores row timing, but the calibrated VideoAnchor set above is
-                    // small enough to already be part of the restored tab token (see
-                    // AutosaveCodec's anchorVideoMs/anchorLogId fields), and restoreCaptureLink
-                    // must not clobber it with the archive's own (uncalibrated) estimate.
+                    // Archive v5 restores sparse row timing, while the segment-scoped calibration
+                    // stays in the appended attachment token fields and must survive relinking.
                     assertNotNull(reopened.captureTimeline)
-                    assertNotNull(reopened.attachedVideo?.anchor)
+                    assertEquals(CALIBRATED_VIDEO_MS, reopened.attachedVideo?.captureSegmentAnchors?.single()?.videoMs)
                     assertEquals(source.absolutePath, reopened.captureArchivePath)
                     assertEquals("test", reopened.captureSourceSessionId)
                     assertNotNull(restored.captureSnapshotSessionFor(id), "the stopped snapshot source survives restart")
