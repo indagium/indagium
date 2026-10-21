@@ -2,6 +2,8 @@ package com.indagium.ui
 
 import androidx.compose.ui.graphics.Color
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.capture.decodeCaptureSegmentManualAnchors
+import com.indagium.capture.encodeCaptureSegmentManualAnchors
 import com.indagium.model.*
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
@@ -1765,6 +1767,8 @@ private fun VideoAttachment.attachedVideoToken(): String {
         // Field 12 (append-only): the user explicitly unlinked this capture video. Absent on older
         // tokens, which restore as not-unlinked.
         linkCleared.toString(),
+        // Field 13 (append-only): segment-local manual sync anchors for sparse v5 captures.
+        encodeCaptureSegmentManualAnchors(captureSegmentAnchors),
     )
 }
 
@@ -1801,6 +1805,11 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         captureOffsetMs = p.getOrNull(11)?.toLongOrNull() ?: 0L,
         // Field 12 (append-only); absent or unparsable means the link was never explicitly cleared.
         linkCleared = p.getOrNull(12)?.toBooleanStrictOrNull() ?: false,
+        // Field 13 is optional and append-only; a corrupt override list does not discard the
+        // otherwise-restorable video attachment.
+        captureSegmentAnchors = p.getOrNull(13)?.let { raw ->
+            runCatching { decodeCaptureSegmentManualAnchors(raw) }.getOrDefault(emptyList())
+        }.orEmpty(),
     )
 }.getOrNull()
 

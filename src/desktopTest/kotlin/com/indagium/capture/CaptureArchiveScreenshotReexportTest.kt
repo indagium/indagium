@@ -21,16 +21,19 @@ class CaptureArchiveScreenshotReexportTest {
             assertEquals(listOf("screenshots/1-screenshot-3500.png"), screenshotEntries(a))
 
             val snapshot = importSnapshot(root, a, "a")
+            assertEquals(1_500L, snapshot.session.screenshotsOverride?.single()?.elapsedMs)
             val b = File(root, "b.zip")
             exportChild(snapshot, b, CaptureRange.ALL)
 
-            assertEquals(listOf("screenshots/1-screenshot-1500.png"), screenshotEntries(b))
-            assertContentEquals(shotBytes, entryBytes(b, "screenshots/1-screenshot-1500.png"))
+            assertEquals(listOf("screenshots/1-screenshot-3500.png"), screenshotEntries(b))
+            assertContentEquals(shotBytes, entryBytes(b, "screenshots/1-screenshot-3500.png"))
 
             // Re-exporting the child again keeps the name stable instead of growing prefixes.
+            val secondImport = importSnapshot(root, b, "b")
+            assertEquals(1_500L, secondImport.session.screenshotsOverride?.single()?.elapsedMs)
             val c = File(root, "c.zip")
-            exportChild(importSnapshot(root, b, "b"), c, CaptureRange.ALL)
-            assertEquals(listOf("screenshots/1-screenshot-1500.png"), screenshotEntries(c))
+            exportChild(secondImport, c, CaptureRange.ALL)
+            assertEquals(listOf("screenshots/1-screenshot-3500.png"), screenshotEntries(c))
         } finally {
             root.deleteRecursively()
         }
@@ -48,8 +51,8 @@ class CaptureArchiveScreenshotReexportTest {
 
             val around = File(root, "around.zip")
             exportChild(snapshot, around, CaptureRange.EXPLICIT, start = 1000, end = 2000)
-            assertEquals(listOf("screenshots/1-screenshot-1500.png"), screenshotEntries(around))
-            assertContentEquals(shotBytes, entryBytes(around, "screenshots/1-screenshot-1500.png"))
+            assertEquals(listOf("screenshots/1-screenshot-3500.png"), screenshotEntries(around))
+            assertContentEquals(shotBytes, entryBytes(around, "screenshots/1-screenshot-3500.png"))
         } finally {
             root.deleteRecursively()
         }

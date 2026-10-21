@@ -9,7 +9,11 @@ package com.indagium.capture
  * video position after an interruption repeats the previous segment's end, the later segment is
  * also treated as ambiguous for playhead queries; its exact rows remain available by ordinal.
  */
-class CaptureTimelineIndex(private val timeline: CaptureTimeline, private val logRowCount: Int) {
+class CaptureTimelineIndex(
+    private val timeline: CaptureTimeline,
+    private val logRowCount: Int,
+    private val timingResolver: CaptureTimingResolver? = null,
+) {
     data class Point(val ordinal: Int, val elapsedMs: Long, val videoMs: Long, val segmentFirstOrdinal: Int)
 
     enum class CapturePositionKind { MAPPED, BEFORE_FIRST, AFTER_LAST, GAP, EMPTY }
@@ -23,7 +27,12 @@ class CaptureTimelineIndex(private val timeline: CaptureTimeline, private val lo
         val lastVideoMs: Long,
     )
 
-    private val rows = timeline.rows
+    private val rows = timingResolver?.let { resolver ->
+        (1..logRowCount).map { ordinal ->
+            val point = resolver.pointForOrdinal(ordinal)
+            CaptureMappingRow(ordinal, point?.captureElapsedMs ?: 0L, point?.videoMs)
+        }
+    } ?: timeline.rows
     private val segments: List<Segment>
 
     /** A repeated boundary means the later segment cannot be ordered against the earlier one. */
@@ -37,6 +46,7 @@ class CaptureTimelineIndex(private val timeline: CaptureTimeline, private val lo
         var start = -1
         var previousOrdinal = -1
         var previousVideoMs = Long.MIN_VALUE
+        var previousClockSegmentId: Int? = null
 
         fun finish(endInclusive: Int) {
             if (start < 0 || endInclusive < start) return
@@ -51,16 +61,20 @@ class CaptureTimelineIndex(private val timeline: CaptureTimeline, private val lo
 
         rows.forEachIndexed { index, row ->
             val videoMs = row.videoMs
+            val clockSegmentId = timingResolver?.segmentIdForOrdinal(row.ordinal)
             val valid = row.ordinal in 1..logRowCount && videoMs != null
-            val continues = valid && start >= 0 && row.ordinal == previousOrdinal + 1 && videoMs!! >= previousVideoMs
+            val continues = valid && start >= 0 && row.ordinal == previousOrdinal + 1 && videoMs!! >= previousVideoMs &&
+                clockSegmentId == previousClockSegmentId
             if (!valid || (start >= 0 && !continues)) finish(index - 1)
             if (valid && start < 0) start = index
             if (valid) {
                 previousOrdinal = row.ordinal
                 previousVideoMs = videoMs!!
+                previousClockSegmentId = clockSegmentId
             } else {
                 previousOrdinal = -1
                 previousVideoMs = Long.MIN_VALUE
+                previousClockSegmentId = null
             }
         }
         finish(rows.lastIndex)
@@ -95,6 +109,10 @@ class CaptureTimelineIndex(private val timeline: CaptureTimeline, private val lo
     }
 
     fun videoMsForOrdinal(ordinal: Int, offsetMs: Long = 0L): Long? = pointForOrdinal(ordinal, offsetMs)?.videoMs
+
+    /** Sparse uncertain rows still belong to a segment even when they have no automatic mapping. */
+    fun segmentIdForOrdinal(ordinal: Int): Int? = timingResolver?.segmentIdForOrdinal(ordinal)
+        ?: timeline.syncSegments.firstOrNull { it.contains(ordinal) }?.id
 
     /** Closest captured row in the segment containing [videoMs], with earlier rows winning ties. */
     fun nearest(videoMs: Long, offsetMs: Long = 0L): Resolution = resolve(videoMs, offsetMs, nearest = true)

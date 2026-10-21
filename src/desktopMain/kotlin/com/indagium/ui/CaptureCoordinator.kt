@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.indagium.capture.AdbMdnsService
 import com.indagium.capture.AdbRootOutcome
+import com.indagium.capture.CAPTURE_DESCRIPTOR_NAME
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureCommandResult
@@ -14,9 +15,13 @@ import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureRecorder
 import com.indagium.capture.CaptureScreenshot
+import com.indagium.capture.CaptureSegmentManualAnchor
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSessionBoundary
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureSnapshotCheckpointLocks
+import com.indagium.capture.CaptureStatus
+import com.indagium.capture.CaptureStorageVersion
 import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
@@ -43,6 +48,7 @@ import com.indagium.capture.parseCompleteLogBufferConfiguration
 import com.indagium.capture.parseCompletePerTagLogOverrides
 import com.indagium.capture.parseLogcatBufferSizes
 import com.indagium.capture.perTagLogLevelOverrides
+import com.indagium.capture.readCaptureSessionDirectory
 import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
@@ -119,6 +125,7 @@ internal class CaptureService(
     private val discoveryLock = Mutex()
     private var tools: CaptureTools? = null
     private var resolvedSettings: CaptureSettings? = null
+    private val segmentCalibrationRevisions = ConcurrentHashMap<String, Long>()
 
     var devices by mutableStateOf(emptyList<CaptureDevice>())
         private set
@@ -849,6 +856,8 @@ internal class CaptureService(
                 sessionId = current.id,
                 logCheckpointMs = result.logCoveredEndMs,
                 videoCheckpointMs = result.videoCoveredEndMs,
+                logCheckpointByteOffset = result.logCoveredEndByteOffset,
+                logCheckpointRowOrdinal = result.logCoveredEndRowOrdinal,
             )
             sessions = sessions.map { if (it.id == updated.id) updated else it }
             result
@@ -909,6 +918,51 @@ internal class CaptureService(
         }
     }
 
+    /** Only an in-place retained session is mutable; portable captures keep corrections in their tab/export. */
+    internal fun applySegmentCalibration(
+        sourcePath: String,
+        anchor: CaptureSegmentManualAnchor,
+        controller: TabCaptureController? = null,
+    ) {
+        val revisionKey = "$sourcePath\u0000${anchor.segmentId}"
+        val revision = segmentCalibrationRevisions.compute(revisionKey) { _, old -> (old ?: 0L) + 1L }
+        scope.launch {
+            try {
+                runInterruptible {
+                    val source = File(sourcePath).canonicalFile
+                    val directory = when {
+                        source.isDirectory -> source
+                        source.name == CAPTURE_DESCRIPTOR_NAME -> source.parentFile
+                        else -> return@runInterruptible
+                    }
+                    val session = readCaptureSessionDirectory(directory) ?: return@runInterruptible
+                    if (session.storageVersion != CaptureStorageVersion.BLOCKS_V2) return@runInterruptible
+                    synchronized(CaptureSnapshotCheckpointLocks.forSession(session)) {
+                        if (segmentCalibrationRevisions[revisionKey] != revision) return@synchronized
+                        val current = readCaptureSessionDirectory(directory) ?: return@synchronized
+                        val merged = current.manualSegmentAnchors.filterNot { it.segmentId == anchor.segmentId } + anchor
+                        val active = controller?.takeIf {
+                            it.selectedSession.value?.id == current.id &&
+                                it.selectedSession.value?.directory?.canonicalFile == directory
+                        }
+                        if (active != null) {
+                            active.updateManualSegmentAnchors(current.id, merged)
+                        } else if (current.status != CaptureStatus.RECORDING) {
+                            CaptureRecorder(directory.parentFile).use { recorder ->
+                                recorder.updateManualSegmentAnchors(current.id, merged)
+                            }
+                        }
+                    }
+                    updateSessions()
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                error = "Alignment could not be saved: ${failure.message}"
+            }
+        }
+    }
+
     private fun browseTool(adb: Boolean) {
         val dialog = FileDialog(
             null as Frame?,
@@ -937,6 +991,7 @@ internal class CaptureService(
         // idempotent hook keeps that lifecycle explicit.
         videoEncoderProbeJobs.values.forEach(Job::cancel)
         videoEncoderProbeJobs.clear()
+        segmentCalibrationRevisions.clear()
     }
 }
 
@@ -970,6 +1025,9 @@ internal class TabCaptureController(
     val snapshot get() = recorder.snapshot
     val selectedSession get() = recorder.selectedSession
     val deviceLoggingRestoreEvents get() = recorder.deviceLoggingRestoreEvents
+
+    fun updateManualSegmentAnchors(sessionId: String, anchors: List<CaptureSegmentManualAnchor>): CaptureSession =
+        recorder.updateManualSegmentAnchors(sessionId, anchors)
 
     fun start(
         device: CaptureDevice,
@@ -1057,6 +1115,8 @@ internal class TabCaptureController(
             sessionId = boundary.session.id,
             logCheckpointMs = result.logCoveredEndMs,
             videoCheckpointMs = result.videoCoveredEndMs,
+            logCheckpointByteOffset = result.logCoveredEndByteOffset,
+            logCheckpointRowOrdinal = result.logCoveredEndRowOrdinal,
         )
         return result
     }

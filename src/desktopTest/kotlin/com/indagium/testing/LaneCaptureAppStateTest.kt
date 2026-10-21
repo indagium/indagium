@@ -1,9 +1,12 @@
 package com.indagium.testing
 
 import com.indagium.capture.CaptureArchiveReader
+import com.indagium.capture.CaptureBlockIndex
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.CaptureStorageVersion
+import com.indagium.capture.CaptureSyncMetadata
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.readCaptureSessionDirectory
 import com.indagium.capture.reanchorImportedCaptureNotes
@@ -117,6 +120,15 @@ class LaneCaptureAppStateTest {
         val localDescriptor = assertNotNull(readCaptureSessionDirectory(handle.laneSession.directory))
         assertNotEquals(manual.session.id, localDescriptor.id, "the lane has a distinct session identity")
         assertEquals(CaptureStatus.STOPPED, localDescriptor.status, "a completed borrow is represented as completed locally")
+        assertEquals(CaptureStorageVersion.BLOCKS_V2, localDescriptor.storageVersion)
+        assertTrue(localDescriptor.blockIndexFile.isFile)
+        assertTrue(localDescriptor.syncFile.isFile)
+        assertFalse(localDescriptor.indexFile.exists(), "new borrowed evidence never recreates the legacy per-row index")
+        val localSync = CaptureSyncMetadata.parse(localDescriptor.syncFile.readText())
+        val localBlocks = CaptureBlockIndex.read(localDescriptor.blockIndexFile, localDescriptor.logFile)
+        assertEquals(frozenLocalLength, localSync.logBytes)
+        assertEquals(frozenLocalLength, localBlocks.indexedLogBytes)
+        assertEquals(localSync.rowCount, localBlocks.indexedRows)
         val archive = File(h.dir, "borrowed-final.zip")
         assertTrue(capture.exportArchive(archive).file.isFile, "the frozen lane evidence remains archivable")
         val imported = CaptureArchiveReader.open(archive, File(h.dir, "borrowed-final-cache"))

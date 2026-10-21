@@ -19,6 +19,108 @@ import java.io.RandomAccessFile
 // since this path backs an optional UI action, not an export users depend on for data integrity.
 
 private const val MAX_MARKER_INDEX_LINE_BYTES = 64 * 1024
+private const val MAX_MARKER_SYNC_BYTES = 16L * 1024 * 1024
+
+/** Frozen-session variant; sparse captures scan candidate blocks without building a dense index. */
+fun ordinalRangeForElapsedWindow(session: CaptureSession, startMs: Long, endMs: Long): IntRange? {
+    if (session.storageVersion == CaptureStorageVersion.LEGACY_DENSE) {
+        return ordinalRangeForElapsedWindow(session.indexFile, session.indexFile.length(), startMs, endMs)
+    }
+    if (endMs < startMs || endMs < 0L) return null
+    return runCatching {
+        val source = sparseMarkerSource(session)
+        var first: Int? = null
+        var last: Int? = null
+        val correctedUncertain = source.metadata.segments.filter {
+            it.reliability == CaptureSyncReliability.UNCERTAIN && it.manualAnchor != null
+        }
+        val candidates = source.index.blocks.filter { block ->
+            block.overlapsElapsed(startMs.coerceAtLeast(0L), endMs) ||
+                correctedUncertain.any { block.overlapsRows(it.firstRow, it.lastRowExclusive) }
+        }
+        candidates.forEach { block ->
+            forEachSparseMarkerEntry(session.logFile, block) { ordinal, entry ->
+                val elapsed = CaptureTimingResolver.sparsePoint(entry, ordinal, source.metadata)?.captureElapsedMs
+                // A missing/uncertain timestamp cannot narrow a capture-time block further.
+                if (elapsed == null || elapsed in startMs..endMs) {
+                    first = minOf(first ?: ordinal, ordinal)
+                    last = maxOf(last ?: ordinal, ordinal)
+                }
+            }
+        }
+        first?.let { it..requireNotNull(last) }
+    }.getOrNull()
+}
+
+/** Reads exact source ordinals, including untimestamped rows, within the frozen log boundary. */
+fun captureLogEntriesForOrdinals(session: CaptureSession, wantedOrdinals: Set<Int>): List<LogEntry> {
+    if (session.storageVersion == CaptureStorageVersion.LEGACY_DENSE) {
+        return captureLogEntriesForOrdinals(session.indexFile, session.indexFile.length(), session.logFile, wantedOrdinals)
+    }
+    val wanted = wantedOrdinals.filterTo(java.util.TreeSet()) { it in 1 until Int.MAX_VALUE }
+    if (wanted.isEmpty()) return emptyList()
+    return runCatching {
+        val source = sparseMarkerSource(session)
+        val hits = ArrayList<LogEntry>(wanted.size)
+        source.index.candidateBlocksForRows(wanted.first(), wanted.last() + 1).forEach { block ->
+            if (wanted.ceiling(block.firstRow)?.let { it < block.lastRowExclusive } != true) return@forEach
+            forEachSparseMarkerEntry(session.logFile, block) { ordinal, entry ->
+                if (ordinal in wanted) hits += entry
+            }
+        }
+        hits
+    }.getOrDefault(emptyList())
+}
+
+private data class SparseMarkerSource(val metadata: CaptureSyncMetadata, val index: CaptureBlockIndex)
+
+private fun sparseMarkerSource(session: CaptureSession): SparseMarkerSource {
+    val metadata = session.syncMetadataOverride ?: run {
+        require(session.syncFile.length() in 1..MAX_MARKER_SYNC_BYTES) { "Capture timing metadata is missing or too large" }
+        CaptureSyncMetadata.parse(session.syncFile.readText())
+    }
+    val logBytes = session.frozenLogBytes ?: metadata.logBytes
+    require(logBytes == metadata.logBytes) { "Capture timing metadata does not match the frozen log" }
+    val anchors = session.manualSegmentAnchors.associateBy { it.segmentId }
+    val corrected = if (anchors.isEmpty()) metadata else metadata.copy(
+        segments = metadata.segments.map { segment ->
+            anchors[segment.id]?.let { segment.copy(manualAnchor = it) } ?: segment
+        },
+    )
+    val index = CaptureBlockIndex.read(
+        indexFile = session.blockIndexFile,
+        logFile = session.logFile,
+        maxIndexBytes = session.frozenBlockIndexBytes ?: session.blockIndexFile.length(),
+        maxLogBytes = logBytes,
+        verifyByteRange = LongRange.EMPTY,
+    )
+    require(index.indexedRows == metadata.rowCount) { "Capture block row bounds do not match timing metadata" }
+    return SparseMarkerSource(corrected, index)
+}
+
+private fun forEachSparseMarkerEntry(logFile: File, block: CaptureBlock, action: (Int, LogEntry) -> Unit) {
+    CaptureBlockIndex.verifyBlock(logFile, block)
+    RandomAccessFile(logFile, "r").use { input ->
+        input.seek(block.byteEnd - 1L)
+        require(input.read() == '\n'.code) { "Capture block ends inside a log row" }
+    }
+    logFile.inputStream().use { input ->
+        input.channel.position(block.byteStart)
+        val bounded = LimitedWindowInputStream(input, block.byteEnd - block.byteStart)
+        var ordinal = block.firstRow
+        bounded.bufferedReader(Charsets.UTF_8).forEachLine { raw ->
+            val text = raw.trim()
+            if (text.isNotEmpty() && !text.startsWith("-----")) {
+                require(ordinal < block.lastRowExclusive) { "Capture block contains too many log rows" }
+                val entry = parseLogcatLines(sequenceOf(raw), startId = ordinal).singleOrNull()
+                requireNotNull(entry) { "Capture block row could not be parsed" }
+                action(ordinal, entry)
+                ordinal++
+            }
+        }
+        require(ordinal == block.lastRowExclusive) { "Capture block row bounds do not match its log rows" }
+    }
+}
 
 /**
  * Read-only ordinal-range variant of the private `scanElapsedBounds` in CaptureArchive.kt: instead

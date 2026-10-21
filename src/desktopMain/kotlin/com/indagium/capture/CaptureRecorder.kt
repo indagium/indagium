@@ -35,6 +35,7 @@ import java.io.FilterInputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.time.Duration
@@ -68,6 +69,8 @@ data class CaptureSessionBoundary(
     val logLength: Long,
     val indexLength: Long,
     val elapsedMs: Long,
+    /** Frozen sparse-index prefix length; equals [indexLength] for legacy sessions. */
+    val blockIndexBytes: Long = indexLength,
 )
 
 /**
@@ -179,6 +182,8 @@ class CaptureRecorder internal constructor(
     private val loggingRestoreGeneration = AtomicLong(0)
     private var logFileOutput: FileOutputStream? = null
     private var indexFileOutput: FileOutputStream? = null
+    private var blockWriter: CaptureBlockWriter? = null
+    private var syncRecorder: CaptureSyncRecorder? = null
     private var logOutput: BufferedOutputStream? = null
     private var indexOutput: BufferedOutputStream? = null
     private var logBytes: Long = 0
@@ -310,7 +315,7 @@ class CaptureRecorder internal constructor(
         val startedEpochMs = epochMillis()
         val sessionId = sessionId(startedEpochMs)
         val directory = File(sessionsRoot, sessionId)
-        listOf("logs", "mapping", "video", "screenshots").forEach { File(directory, it).mkdirs() }
+        listOf("logs", "mapping", "timeline", "video", "screenshots").forEach { File(directory, it).mkdirs() }
         check(diskSpace.usableBytes(directory) >= settings.freeSpaceReserveBytes) {
             "Capture cannot start: less than the configured free-space reserve is available"
         }
@@ -321,16 +326,23 @@ class CaptureRecorder internal constructor(
             settings = settings,
             startedEpochMs = startedEpochMs,
             deviceLoggingConfiguration = deviceLoggingConfiguration,
+            storageVersion = CaptureStorageVersion.BLOCKS_V2,
         )
         persistSession(session)
         var openedLogFile: FileOutputStream? = null
         var openedIndexFile: FileOutputStream? = null
+        var openedBlockWriter: CaptureBlockWriter? = null
         try {
             openedLogFile = seams.openStorage(session.logFile)
-            openedIndexFile = seams.openStorage(session.indexFile)
+            if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                openedBlockWriter = CaptureBlockWriter(session.blockIndexFile, openStream = seams.openStorage)
+            } else {
+                openedIndexFile = seams.openStorage(session.indexFile)
+            }
         } catch (failure: IOException) {
             runCatching { openedLogFile?.close() }
             runCatching { openedIndexFile?.close() }
+            runCatching { openedBlockWriter?.close() }
             session = session.copy(
                 status = CaptureStatus.INTERRUPTED,
                 interruptions = listOf("Unable to open capture storage: ${failure.message ?: failure::class.simpleName}"),
@@ -354,9 +366,15 @@ class CaptureRecorder internal constructor(
                 lastMetadataPersistMs = Long.MIN_VALUE
                 stopLatch = CountDownLatch(1)
                 logFileOutput = requireNotNull(openedLogFile)
-                indexFileOutput = requireNotNull(openedIndexFile)
+                indexFileOutput = openedIndexFile
+                blockWriter = openedBlockWriter
+                syncRecorder = if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                    CaptureSyncRecorder(session.startedEpochMs)
+                } else {
+                    null
+                }
                 logOutput = BufferedOutputStream(requireNotNull(logFileOutput), CAPTURE_WRITE_BUFFER_BYTES)
-                indexOutput = BufferedOutputStream(requireNotNull(indexFileOutput), CAPTURE_WRITE_BUFFER_BYTES)
+                indexOutput = openedIndexFile?.let { BufferedOutputStream(it, CAPTURE_WRITE_BUFFER_BYTES) }
                 active.set(true)
                 LiveCaptureSessions.add(session.directory)
                 mutableSelectedSession.value = session
@@ -366,7 +384,8 @@ class CaptureRecorder internal constructor(
         }
         if (cancelledBeforeActivation) {
             runCatching { openedLogFile.close() }
-            runCatching { openedIndexFile.close() }
+            runCatching { openedIndexFile?.close() }
+            runCatching { openedBlockWriter?.close() }
             session = session.copy(
                 status = CaptureStatus.INTERRUPTED,
                 interruptions = listOf("Capture was interrupted while starting."),
@@ -636,6 +655,9 @@ class CaptureRecorder internal constructor(
 
     fun recoverSessions(): List<CaptureSession> = listSessions().map { session ->
         if (session.status != CaptureStatus.RECORDING || currentSession?.id == session.id && active.get()) return@map session
+        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+            return@map recoverSparseSession(session)
+        }
         val recoveredElapsed = maxOf(session.elapsedMs, lastIndexedElapsedMs(session.indexFile))
         val recovered = session.copy(
             elapsedMs = recoveredElapsed,
@@ -645,6 +667,194 @@ class CaptureRecorder internal constructor(
         persistSession(recovered)
         recovered
     }
+
+    private fun recoverSparseSession(session: CaptureSession): CaptureSession {
+        val originalLogLength = session.logFile.length()
+        val indexFile = session.blockIndexFile
+        val completeIndexBytes = lastCompleteLineBytes(indexFile)
+        val existingIndex = runCatching {
+            CaptureBlockIndex.read(
+                indexFile = indexFile,
+                logFile = session.logFile,
+                maxIndexBytes = completeIndexBytes,
+                maxLogBytes = Long.MAX_VALUE,
+            )
+        }.getOrNull()
+        val indexed = if (existingIndex != null && existingIndex.indexedLogBytes <= originalLogLength &&
+            (existingIndex.blocks.isNotEmpty() || originalLogLength == 0L)
+        ) {
+            existingIndex
+        } else {
+            null
+        }
+        val recoveredBaseElapsed = maxOf(
+            session.elapsedMs,
+            indexed?.blocks?.maxOfOrNull(CaptureBlock::lastElapsedMs) ?: 0L,
+        )
+        val recovery = if (indexed == null) {
+            rebuildSparseIndexFromCompleteLog(session, recoveredBaseElapsed)
+        } else {
+            if (completeIndexBytes < indexFile.length()) RandomAccessFile(indexFile, "rw").use { it.setLength(completeIndexBytes) }
+            appendSparseTail(session, indexed, recoveredBaseElapsed)
+        }
+        val recoveredLogBytes = recovery.logBytes
+        val recoveredRows = recovery.rowCount
+        val rebuilt = recovery.rebuilt
+        if (recoveredLogBytes < originalLogLength) {
+            RandomAccessFile(session.logFile, "rw").use { it.setLength(recoveredLogBytes) }
+        }
+        val previous = session.syncMetadataOverride
+        val usablePrevious = previous?.takeIf {
+            !rebuilt && it.logBytes <= recoveredLogBytes && it.rowCount <= recoveredRows
+        }
+        val baseRows = usablePrevious?.rowCount ?: 0
+        val segments = buildList {
+            usablePrevious?.segments?.let(::addAll)
+            if (recoveredRows > baseRows) {
+                add(
+                    CaptureSyncSegment(
+                        id = (usablePrevious?.segments?.lastOrNull()?.id ?: -1) + 1,
+                        firstRow = baseRows + 1,
+                        lastRowExclusive = recoveredRows + 1,
+                        anchorLogTimeMs = null,
+                        anchorCaptureElapsedMs = null,
+                        reliability = CaptureSyncReliability.UNCERTAIN,
+                    ),
+                )
+            }
+        }
+        val metadata = CaptureSyncMetadata(
+            logBytes = recoveredLogBytes,
+            rowCount = recoveredRows,
+            timelineBaseElapsedMs = usablePrevious?.timelineBaseElapsedMs ?: 0L,
+            timelineDurationMs = maxOf(
+                session.elapsedMs,
+                recoveredBaseElapsed,
+                usablePrevious?.timelineDurationMs ?: 0L,
+            ),
+            segments = segments,
+            uncertainBoundary = true,
+        )
+        writeFileAtomically(session.syncFile) { it.write(metadata.toJson()) }
+        val recoveredElapsed = maxOf(session.elapsedMs, recoveredBaseElapsed)
+        val recovered = session.copy(
+            elapsedMs = recoveredElapsed,
+            status = CaptureStatus.INTERRUPTED,
+            interruptions = (session.interruptions + "The app exited before this capture stopped.").takeLast(MAX_DIAGNOSTICS),
+            syncMetadataOverride = metadata,
+            frozenLogBytes = recoveredLogBytes,
+            frozenBlockIndexBytes = indexFile.length(),
+        )
+        persistSession(recovered)
+        return recovered
+    }
+
+    private fun appendSparseTail(
+        session: CaptureSession,
+        existing: CaptureBlockIndex,
+        recoveredElapsed: Long,
+    ): SparseRecoveryResult {
+        var byteOffset = existing.indexedLogBytes
+        var rowOrdinal = existing.indexedRows
+        var lastCompleteOffset = byteOffset
+        return CaptureBlockWriter(
+            indexFile = session.blockIndexFile,
+            openStream = seams.openStorage,
+            initialBlocks = existing.blocks,
+            recoveredBlocks = true,
+        ).use { writer ->
+            scanCompleteLogLines(session.logFile, byteOffset) { raw, endOffset ->
+                val row = if (isSeparator(raw)) null else ++rowOrdinal
+                writer.append(
+                    byteOffset = byteOffset,
+                    rawLine = raw,
+                    rowOrdinal = row,
+                    elapsedMs = recoveredElapsed,
+                    segmentId = null,
+                )
+                byteOffset = endOffset
+                lastCompleteOffset = endOffset
+            }
+            val frozen = writer.freeze()
+            SparseRecoveryResult(frozen.blocks, lastCompleteOffset, rowOrdinal, rebuilt = false)
+        }
+    }
+
+    private fun rebuildSparseIndexFromCompleteLog(session: CaptureSession, recoveredElapsed: Long): SparseRecoveryResult {
+        val temporaryIndex = File(session.directory, "mapping/blocks.recovery.jsonl")
+        temporaryIndex.delete()
+        var byteOffset = 0L
+        var rowOrdinal = 0
+        try {
+            CaptureBlockWriter(
+                indexFile = temporaryIndex,
+                openStream = { FileOutputStream(it, false) },
+                recoveredBlocks = true,
+            ).use { writer ->
+                scanCompleteLogLines(session.logFile, 0L) { raw, endOffset ->
+                    val row = if (isSeparator(raw)) null else ++rowOrdinal
+                    writer.append(byteOffset, raw, row, recoveredElapsed, segmentId = null)
+                    byteOffset = endOffset
+                }
+                writer.freeze()
+            }
+            try {
+                java.nio.file.Files.move(
+                    temporaryIndex.toPath(),
+                    session.blockIndexFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(
+                    temporaryIndex.toPath(),
+                    session.blockIndexFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
+            val recoveredBlocks = CaptureBlockIndex.read(
+                session.blockIndexFile,
+                session.logFile,
+                maxIndexBytes = session.blockIndexFile.length(),
+                maxLogBytes = byteOffset,
+            )
+            return SparseRecoveryResult(recoveredBlocks.blocks, byteOffset, rowOrdinal, rebuilt = true)
+        } finally {
+            temporaryIndex.delete()
+        }
+    }
+
+    private fun scanCompleteLogLines(file: File, startOffset: Long, consume: (ByteArray, Long) -> Unit) {
+        if (!file.isFile || startOffset >= file.length()) return
+        require(startOffset >= 0L)
+        RandomAccessFile(file, "r").use { input ->
+            input.seek(startOffset)
+            val line = java.io.ByteArrayOutputStream()
+            val byte = ByteArray(RECOVERY_SCAN_BUFFER_BYTES)
+            var absoluteOffset = startOffset
+            while (true) {
+                val read = input.read(byte)
+                if (read < 0) break
+                for (index in 0 until read) {
+                    val value = byte[index]
+                    line.write(value.toInt())
+                    absoluteOffset++
+                    if (value == '\n'.code.toByte()) {
+                        consume(line.toByteArray(), absoluteOffset)
+                        line.reset()
+                    }
+                    require(line.size() <= MAX_RECOVERED_CAPTURE_LINE_BYTES) { "Capture log contains an oversized row" }
+                }
+            }
+        }
+    }
+
+    private data class SparseRecoveryResult(
+        val blocks: List<CaptureBlock>,
+        val logBytes: Long,
+        val rowCount: Int,
+        val rebuilt: Boolean,
+    )
 
     fun selectSession(sessionId: String?): CaptureSession? {
         val selected = sessionId?.let { id -> listSessions().firstOrNull { it.id == id } }
@@ -665,6 +875,17 @@ class CaptureRecorder internal constructor(
         return updateSession(sessionId) { it.copy(manualOffsetMs = offsetMs) }
     }
 
+    /** Persists UI-selected per-segment timing corrections on the retained capture descriptor. */
+    fun updateManualSegmentAnchors(
+        sessionId: String,
+        anchors: List<CaptureSegmentManualAnchor>,
+    ): CaptureSession = updateSession(sessionId) { session ->
+        require(anchors.map(CaptureSegmentManualAnchor::segmentId).distinct().size == anchors.size) {
+            "A capture segment can have only one manual timing anchor"
+        }
+        session.copy(manualSegmentAnchors = anchors.toList())
+    }
+
     /**
      * Advances the Since-last-save cursors after one successful export. The log cursor always
      * advances to the export's log-covered end, whether or not that export included video — a
@@ -678,8 +899,13 @@ class CaptureRecorder internal constructor(
         sessionId: String,
         logCheckpointMs: Long,
         videoCheckpointMs: Long?,
+        logCheckpointByteOffset: Long? = null,
+        logCheckpointRowOrdinal: Int? = null,
     ): CaptureSession = updateSession(sessionId) { session ->
         val checkpoint = maxOf(session.effectiveSnapshotCheckpointMs, logCheckpointMs)
+        require(logCheckpointByteOffset == null || logCheckpointByteOffset >= 0L) { "Invalid capture byte checkpoint" }
+        require(logCheckpointRowOrdinal == null || logCheckpointRowOrdinal >= 0) { "Invalid capture row checkpoint" }
+        val advanceSparseCursor = logCheckpointByteOffset != null && logCheckpointByteOffset > session.logCheckpointByteOffset
         session.copy(
             snapshotCheckpointMs = checkpoint,
             // Keep the old constructor field meaningful for source compatibility with callers
@@ -687,25 +913,62 @@ class CaptureRecorder internal constructor(
             // selection.
             logCheckpointMs = maxOf(session.logCheckpointMs, logCheckpointMs),
             videoCheckpointMs = videoCheckpointMs?.let { maxOf(session.videoCheckpointMs, it) } ?: session.videoCheckpointMs,
+            logCheckpointByteOffset = if (advanceSparseCursor) requireNotNull(logCheckpointByteOffset) else session.logCheckpointByteOffset,
+            logCheckpointRowOrdinal = if (advanceSparseCursor) {
+                maxOf(session.logCheckpointRowOrdinal, logCheckpointRowOrdinal ?: session.logCheckpointRowOrdinal)
+            } else {
+                session.logCheckpointRowOrdinal
+            },
             exportCounter = session.exportCounter + 1,
         )
     }
 
     fun snapshotForExport(sessionId: String): CaptureSessionBoundary {
-        synchronized(lock) {
-            val session = if (currentSession?.id == sessionId) currentSession else readSession(File(sessionsRoot, sessionId))
-            val resolved = requireNotNull(session) { "Capture session not found: $sessionId" }
-            if (currentSession?.id == sessionId && active.get()) {
-                logOutput?.flush()
-                logFileOutput?.fd?.sync()
-                indexOutput?.flush()
-                indexFileOutput?.fd?.sync()
-            }
-            val elapsed = if (currentSession?.id == sessionId && active.get()) elapsedNow() else resolved.elapsedMs
-            val durable = resolved.copy(elapsedMs = maxOf(resolved.elapsedMs, elapsed))
-            return CaptureSessionBoundary(durable, durable.logFile.length(), durable.indexFile.length(), elapsed)
-        }
+        return synchronized(lock) { snapshotBoundaryLocked(sessionId) }
     }
+
+    private fun snapshotBoundaryLocked(sessionId: String): CaptureSessionBoundary {
+        val resolved = requireNotNull(
+            currentSession?.takeIf { it.id == sessionId } ?: readSession(File(sessionsRoot, sessionId)),
+        ) { "Capture session not found: $sessionId" }
+        val isActiveSession = currentSession?.id == sessionId && active.get()
+        val elapsed = if (isActiveSession) elapsedNow() else resolved.elapsedMs
+        val sparseMetadata = snapshotSparseMetadata(resolved, elapsed, isActiveSession)
+        if (isActiveSession) flushCaptureWriters()
+        val frozenLogBytes = if (isActiveSession) logBytes else resolved.frozenLogBytes ?: resolved.logFile.length()
+        val frozenIndexBytes = frozenIndexBytes(resolved, isActiveSession)
+        val durable = resolved.copy(
+            elapsedMs = maxOf(resolved.elapsedMs, elapsed),
+            syncMetadataOverride = sparseMetadata,
+            frozenLogBytes = frozenLogBytes,
+            frozenBlockIndexBytes = frozenIndexBytes,
+        )
+        return CaptureSessionBoundary(durable, frozenLogBytes, frozenIndexBytes, elapsed, frozenIndexBytes)
+    }
+
+    private fun snapshotSparseMetadata(session: CaptureSession, elapsed: Long, isActiveSession: Boolean): CaptureSyncMetadata? =
+        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2 && isActiveSession) {
+            persistSparseSnapshotLocked(session, elapsed, finalize = false)
+        } else {
+            session.syncMetadataOverride ?: readSparseMetadata(session)
+        }
+
+    private fun flushCaptureWriters() {
+        logOutput?.flush()
+        logFileOutput?.fd?.sync()
+        indexOutput?.flush()
+        indexFileOutput?.fd?.sync()
+    }
+
+    private fun frozenIndexBytes(session: CaptureSession, isActiveSession: Boolean): Long =
+        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+            if (isActiveSession) session.blockIndexFile.length()
+            else session.frozenBlockIndexBytes ?: session.blockIndexFile.length()
+        } else if (isActiveSession) {
+            session.indexFile.length()
+        } else {
+            session.frozenBlockIndexBytes ?: session.indexFile.length()
+        }
 
     override fun close() {
         if (active.get() || synchronized(lock) { starting }) {
@@ -1028,6 +1291,7 @@ class CaptureRecorder internal constructor(
         state: LogcatReaderState,
         lines: List<DeviceLogLine>,
         allowAfterStop: Boolean = false,
+        eligibleForAnchor: Boolean = true,
     ): Boolean {
         for (emitted in lines) {
             if (!allowAfterStop && !active.get()) return false
@@ -1035,7 +1299,7 @@ class CaptureRecorder internal constructor(
             var storageFailure: String? = null
             synchronized(lock) {
                 val session = currentSession ?: return@synchronized
-                if (logOutput == null || indexOutput == null) return@synchronized
+                if (logOutput == null || (indexOutput == null && blockWriter == null)) return@synchronized
                 storageFailure = runStorage("Capture storage failed", ::recordStopStorageFailureLocked) {
                     enforceStorageLimitsLocked(session, elapsed, emitted.raw.size)
                     val offset = logBytes
@@ -1043,8 +1307,29 @@ class CaptureRecorder internal constructor(
                     val ordinal = if (separator) null else ++rowOrdinal
                     requireNotNull(logOutput).write(emitted.raw)
                     logBytes += emitted.raw.size
-                    val record = CaptureLogIndexRecord(offset, emitted.raw.size, elapsed, ordinal)
-                    requireNotNull(indexOutput).write((indexRecordJson(record) + "\n").toByteArray(Charsets.UTF_8))
+                    if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                        val tracker = requireNotNull(syncRecorder)
+                        val synthetic = emitted.text.contains("IndagiumCapture:")
+                        val segmentId = ordinal?.let {
+                            tracker.observe(it, emitted.text, elapsed, eligibleForAnchor && !synthetic)
+                        } ?: rowOrdinal.takeIf { it > 0 }?.let(tracker::segmentIdForRow)
+                        val resolvedElapsed = if (ordinal != null && !synthetic) {
+                            tracker.resolvedCaptureElapsedMs(emitted.text, elapsed)
+                        } else {
+                            null
+                        }
+                        requireNotNull(blockWriter).append(
+                            byteOffset = offset,
+                            rawLine = emitted.raw,
+                            rowOrdinal = ordinal,
+                            elapsedMs = elapsed,
+                            segmentId = segmentId,
+                            resolvedCaptureElapsedMs = resolvedElapsed,
+                        )
+                    } else {
+                        val record = CaptureLogIndexRecord(offset, emitted.raw.size, elapsed, ordinal)
+                        requireNotNull(indexOutput).write((indexRecordJson(record) + "\n").toByteArray(Charsets.UTF_8))
+                    }
                     if (!separator) state.record(emitted.text)
                 }
             }
@@ -1102,7 +1387,7 @@ class CaptureRecorder internal constructor(
             ReplayOverlapResult(lines, null, null)
         }
         val appendLines = overlap.appendLines
-        if (!writeDeviceLogLines(readerState, appendLines)) return BufferedReconnectDrain(false)
+        if (!writeDeviceLogLines(readerState, appendLines, eligibleForAnchor = false)) return BufferedReconnectDrain(false)
         val sizeLimitDiagnostic = if (outputWasTruncated) {
             "The buffered device log drain reached its ${outputLimitBytes / BYTES_PER_MIB} MiB size limit; " +
                 "continuing capture without resizing buffers."
@@ -2028,6 +2313,9 @@ class CaptureRecorder internal constructor(
             currentSession = updated
             mutableSelectedSession.value = updated
             storageFailure = persistSessionOrRecordFailureLocked(updated)
+            if (old.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                syncRecorder?.startNewSegment(rowOrdinal + 1, elapsed)
+            }
             addDiagnosticLocked("Device unavailable; waiting for the original device ${device.serial}.")
             if (device.wireless) {
                 addDiagnosticLocked("Wireless reconnect stays on ${device.serial}; a changed endpoint needs verified pairing to follow safely.")
@@ -2065,6 +2353,9 @@ class CaptureRecorder internal constructor(
             currentSession = updated
             mutableSelectedSession.value = updated
             storageFailure = persistSessionOrRecordFailureLocked(updated)
+            if (old.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                syncRecorder?.startNewSegment(rowOrdinal + 1, elapsed)
+            }
             val duration = (elapsed - open.startElapsedMs).coerceAtLeast(0)
             val rebootText = when (reboot) {
                 true -> "; reboot confirmed"
@@ -2099,9 +2390,14 @@ class CaptureRecorder internal constructor(
         requireNotNull(logOutput).write(raw)
         logBytes += raw.size
         val ordinal = ++rowOrdinal
-        requireNotNull(indexOutput).write(
-            (indexRecordJson(CaptureLogIndexRecord(offset, raw.size, elapsed, ordinal)) + "\n").toByteArray(Charsets.UTF_8),
-        )
+        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+            val segmentId = requireNotNull(syncRecorder).observe(ordinal, raw.toString(Charsets.UTF_8), elapsed, eligibleForAnchor = false)
+            requireNotNull(blockWriter).append(offset, raw, ordinal, elapsed, segmentId)
+        } else {
+            requireNotNull(indexOutput).write(
+                (indexRecordJson(CaptureLogIndexRecord(offset, raw.size, elapsed, ordinal)) + "\n").toByteArray(Charsets.UTF_8),
+            )
+        }
     }
 
     private fun formatAvailabilityDuration(milliseconds: Long): String =
@@ -2257,13 +2553,22 @@ class CaptureRecorder internal constructor(
                 }
                 guarded { logOutput?.flush(); logFileOutput?.fd?.sync() }
                 guarded { indexOutput?.flush(); indexFileOutput?.fd?.sync() }
+                var finalSyncMetadata: CaptureSyncMetadata? = null
+                guarded {
+                    currentSession?.takeIf { it.storageVersion == CaptureStorageVersion.BLOCKS_V2 }?.let { sparse ->
+                        finalSyncMetadata = persistSparseSnapshotLocked(sparse, elapsedNow(), finalize = true)
+                    }
+                }
                 guarded { logOutput?.close() }
                 guarded { indexOutput?.close() }
+                guarded { blockWriter?.close() }
                 stopStorageFailure = null
                 logOutput = null
                 indexOutput = null
                 logFileOutput = null
                 indexFileOutput = null
+                blockWriter = null
+                syncRecorder = null
                 logProcess = null
                 mirrorProcess = null
                 embeddedSession = null
@@ -2277,6 +2582,9 @@ class CaptureRecorder internal constructor(
                     elapsedMs = maxOf(old.elapsedMs, elapsedNow()),
                     status = if (storageReason != null) CaptureStatus.INTERRUPTED else status,
                     interruptions = interruptionList,
+                    syncMetadataOverride = finalSyncMetadata ?: old.syncMetadataOverride,
+                    frozenLogBytes = logBytes,
+                    frozenBlockIndexBytes = if (old.storageVersion == CaptureStorageVersion.BLOCKS_V2) old.blockIndexFile.length() else old.indexFile.length(),
                 )
                 currentSession = finished
                 mutableSelectedSession.value = finished
@@ -2455,6 +2763,9 @@ class CaptureRecorder internal constructor(
                     if (lastMetadataPersistMs == Long.MIN_VALUE ||
                         elapsed - lastMetadataPersistMs >= metadataPersistIntervalMs
                     ) {
+                        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
+                            persistSparseSnapshotLocked(session, elapsed, finalize = false)
+                        }
                         val persisted = session.copy(elapsedMs = maxOf(session.elapsedMs, elapsed))
                         currentSession = persisted
                         if (mutableSelectedSession.value?.id == persisted.id) {
@@ -2510,6 +2821,35 @@ class CaptureRecorder internal constructor(
         writeFileAtomically(destination) { it.write(sessionJson(session)) }
     }
 
+    /** Called with [lock] held, so the raw log, sparse block prefix and sync manifest freeze together. */
+    private fun persistSparseSnapshotLocked(
+        session: CaptureSession,
+        elapsedMs: Long,
+        finalize: Boolean,
+    ): CaptureSyncMetadata {
+        require(session.storageVersion == CaptureStorageVersion.BLOCKS_V2)
+        logOutput?.flush()
+        logFileOutput?.fd?.sync()
+        val index = requireNotNull(blockWriter) { "Sparse capture block writer is unavailable" }.freeze()
+        require(index.indexedLogBytes == logBytes) { "Sparse capture blocks do not cover the frozen log prefix" }
+        require(index.indexedRows == rowOrdinal) { "Sparse capture blocks do not cover the frozen row prefix" }
+        val metadata = requireNotNull(syncRecorder) { "Sparse capture sync recorder is unavailable" }.snapshot(
+            logBytes = logBytes,
+            rowCount = rowOrdinal,
+            elapsedMs = elapsedMs,
+            availability = session.availabilityIntervals,
+            finalize = finalize,
+        )
+        writeFileAtomically(session.syncFile) { it.write(metadata.toJson()) }
+        syncRecorder?.markPersisted(elapsedMs)
+        return metadata
+    }
+
+    private fun readSparseMetadata(session: CaptureSession): CaptureSyncMetadata? {
+        if (session.storageVersion != CaptureStorageVersion.BLOCKS_V2 || !session.syncFile.isFile) return null
+        return CaptureSyncMetadata.parse(session.syncFile.readText())
+    }
+
     private fun readSession(directory: File): CaptureSession? {
         val file = File(directory, SESSION_FILE)
         return runCatching { sessionFromJson(file.readText(), directory) }.getOrNull()
@@ -2528,6 +2868,19 @@ private fun lastIndexedElapsedMs(indexFile: File): Long = runCatching {
         }
     }
     last
+}.getOrDefault(0L)
+
+private fun lastCompleteLineBytes(file: File): Long = runCatching {
+    if (!file.isFile) return@runCatching 0L
+    RandomAccessFile(file, "r").use { input ->
+        var position = input.length() - 1L
+        while (position >= 0L) {
+            input.seek(position)
+            if (input.read() == '\n'.code) return@use position + 1L
+            position--
+        }
+        0L
+    }
 }.getOrDefault(0L)
 
 private fun forEachRawLine(input: InputStream, consume: (ByteArray) -> Boolean) {
@@ -2580,6 +2933,7 @@ internal fun indexRecordJson(record: CaptureLogIndexRecord): String = buildJsonO
 
 internal fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("formatVersion", 1)
+    put("storageVersion", session.storageVersion.value)
     put("id", session.id)
     put("device", buildJsonObject {
         put("serial", session.device.serial)
@@ -2593,6 +2947,8 @@ internal fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("status", session.status.name)
     session.videoStartElapsedMs?.let { put("videoStartElapsedMs", it) }
     put("snapshotCheckpointMs", session.effectiveSnapshotCheckpointMs)
+    put("logCheckpointByteOffset", session.logCheckpointByteOffset)
+    put("logCheckpointRowOrdinal", session.logCheckpointRowOrdinal)
     // Was never written before the video/log cursor split (only read, always defaulting to -1 on
     // reload) even though updateSuccessfulExportCheckpoints already tracked it in memory — every
     // restart silently forgot which video range had already been saved. Persisted verbatim (not
@@ -2602,6 +2958,7 @@ internal fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("exportCounter", session.exportCounter)
     put("interruptions", buildJsonArray { session.interruptions.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
     put("manualOffsetMs", session.manualOffsetMs)
+    put("manualSegmentAnchors", Json.parseToJsonElement(encodeCaptureSegmentManualAnchors(session.manualSegmentAnchors)))
     put("availabilityIntervals", buildJsonArray {
         session.availabilityIntervals.forEach { interval ->
             add(buildJsonObject {
@@ -2642,6 +2999,12 @@ fun readCaptureSessionDirectory(directory: File): CaptureSession? = runCatching 
 private fun sessionFromJson(raw: String, directory: File): CaptureSession? = runCatching {
     val root = Json.parseToJsonElement(raw).jsonObject
     require(root["formatVersion"]?.jsonPrimitive?.intOrNull == 1)
+    val storageVersion = CaptureStorageVersion.from(root["storageVersion"]?.jsonPrimitive?.intOrNull)
+    val syncMetadata = if (storageVersion == CaptureStorageVersion.BLOCKS_V2 && File(directory, "timeline/sync.json").isFile) {
+        CaptureSyncMetadata.parse(File(directory, "timeline/sync.json").readText())
+    } else {
+        null
+    }
     val deviceJson = root.getValue("device").jsonObject
     val settingsJson = root.getValue("settings").toString()
     CaptureSession(
@@ -2666,6 +3029,8 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
         snapshotCheckpointMs = root["snapshotCheckpointMs"]?.jsonPrimitive?.longOrNull
             ?: root["logCheckpointMs"]?.jsonPrimitive?.longOrNull
             ?: -1,
+        logCheckpointByteOffset = root["logCheckpointByteOffset"]?.jsonPrimitive?.longOrNull?.coerceAtLeast(-1L) ?: -1L,
+        logCheckpointRowOrdinal = root["logCheckpointRowOrdinal"]?.jsonPrimitive?.intOrNull?.coerceAtLeast(0) ?: 0,
         logCheckpointMs = root["logCheckpointMs"]?.jsonPrimitive?.longOrNull ?: -1,
         videoCheckpointMs = root["videoCheckpointMs"]?.jsonPrimitive?.longOrNull ?: -1,
         exportCounter = root["exportCounter"]?.jsonPrimitive?.intOrNull ?: 0,
@@ -2673,6 +3038,9 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
         manualOffsetMs = root["manualOffsetMs"]?.jsonPrimitive?.longOrNull ?: 0,
         availabilityIntervals = root["availabilityIntervals"]?.jsonArray.orEmpty().mapNotNull(::availabilityIntervalFromJson),
         deviceLoggingConfiguration = root["deviceLoggingConfiguration"]?.let(::deviceLoggingConfigurationFromJson),
+        storageVersion = storageVersion,
+        syncMetadataOverride = syncMetadata,
+        manualSegmentAnchors = root["manualSegmentAnchors"]?.let { decodeCaptureSegmentManualAnchors(it.toString()) }.orEmpty(),
     )
 }.getOrNull()
 
@@ -2792,6 +3160,8 @@ private const val PREVIEW_PUBLISH_INTERVAL_MS = 250L
 private const val SPACE_CHECK_INTERVAL_MS = 1_000L
 private const val SESSION_METADATA_PERSIST_INTERVAL_MS = 5_000L
 private const val MAX_DIAGNOSTICS = 50
+private const val RECOVERY_SCAN_BUFFER_BYTES = 64 * 1024
+private const val MAX_RECOVERED_CAPTURE_LINE_BYTES = 16 * 1024 * 1024
 
 // Exact replay fingerprints are retained for the most recent 32 MiB of device rows. That covers
 // reconnect snapshots without retaining the session's potentially multi-gigabyte log in memory.

@@ -108,10 +108,12 @@ generated filename are shown before export. Cancellation or failure leaves a liv
 and does not advance its save boundary. Exporting an earlier interval does not move that boundary
 backward.
 
-Archive v4 retains the existing log/video/notes assets and adds a checksummed timeline so reboot
-gaps and selected ranges survive reopening and further cuts. Older v1–v3 archives remain readable.
-Opening a ZIP verifies its assets and automatically links the available video. The retained working
-session folder has separate raw recording and index files.
+Archive v5 retains the log/video/notes assets and stores compact synchronization anchors per clock
+segment with a small log-block index. New retained sessions use the same small metadata files.
+Older v1–v4 captures remain readable and are not automatically rewritten; re-exporting produces v5.
+Opening ZIP/IND verifies its assets and links reliably timestamped rows to the available video.
+Rows with uncertain timing stay visible; time-range exports may include extra boundary logs and
+report this without expanding the requested video interval.
 
 A reboot, power-off, or temporary connection loss leaves capture waiting for the original device.
 Logs and video reconnect automatically when it returns. Availability transitions are recorded in

@@ -1,8 +1,7 @@
 package com.indagium.capture
 
+import com.indagium.utils.parseLogcat
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -20,6 +19,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @Suppress("MagicNumber") // Fixture timings, counts and sizes, not tunable constants.
@@ -89,7 +89,7 @@ class CaptureRecorderTest {
     }
 
     @Test
-    fun recordsRawBytesAndOneBasedDurableIndexWithoutRetainingPreviewRows() {
+    fun recordsRawBytesAndSparseBlocksWithoutRetainingPreviewRows() {
         val root = Files.createTempDirectory("capture-recorder-test").toFile()
         val runner = FakeCaptureRunner()
         val logcat = StreamingFakeProcess()
@@ -104,22 +104,22 @@ class CaptureRecorderTest {
             val boundary = recorder.snapshotForExport(session.id)
             assertEquals(raw.toByteArray().size.toLong(), boundary.logLength)
             assertEquals(raw, session.logFile.readText())
-
-            val records = session.indexFile.readLines().map { Json.parseToJsonElement(it).jsonObject }
-            assertEquals(4, records.size)
-            assertFalse(records[0].containsKey("rowOrdinal"))
-            assertFalse(records[1].containsKey("rowOrdinal"))
-            assertEquals(1, records[2].getValue("rowOrdinal").jsonPrimitive.int)
-            assertEquals(2, records[3].getValue("rowOrdinal").jsonPrimitive.int)
-            assertEquals(0L, records[0].getValue("byteOffset").jsonPrimitive.long)
-            assertEquals(
-                records[0].getValue("byteLength").jsonPrimitive.long,
-                records[1].getValue("byteOffset").jsonPrimitive.long,
+            assertEquals(CaptureStorageVersion.BLOCKS_V2, session.storageVersion)
+            assertFalse(session.indexFile.exists(), "new recordings must not recreate the per-row index")
+            val blocks = CaptureBlockIndex.read(
+                session.blockIndexFile,
+                session.logFile,
+                maxIndexBytes = boundary.blockIndexBytes,
+                maxLogBytes = boundary.logLength,
             )
-            assertEquals(
-                listOf(1, 2),
-                records.mapNotNull { it["rowOrdinal"]?.jsonPrimitive?.intOrNull },
-            )
+            assertEquals(2, blocks.indexedRows)
+            assertEquals(boundary.logLength, blocks.indexedLogBytes)
+            assertTrue(blocks.blocks.isNotEmpty())
+            assertEquals(boundary.logLength, blocks.blocks.sumOf { it.byteEnd - it.byteStart })
+            val serialized = session.blockIndexFile.readText()
+            assertFalse(serialized.contains("\"rowOrdinal\""))
+            assertFalse(serialized.contains("\"videoMs\""))
+            assertFalse(serialized.contains("\"elapsedMs\""))
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -1177,7 +1177,8 @@ class CaptureRecorderTest {
             val stopped = requireNotNull(recorder.stop())
             assertEquals(CaptureStatus.STOPPED, stopped.status)
             assertEquals(1, session.logFile.readText().windowed("final tail".length).count { it == "final tail" })
-            assertEquals(1, session.indexFile.readLines().map(Json::parseToJsonElement).size)
+            val blocks = CaptureBlockIndex.read(session.blockIndexFile, session.logFile)
+            assertEquals(1, blocks.indexedRows)
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -1513,11 +1514,49 @@ class CaptureRecorderTest {
             val metadata = session.directory.resolve("session.json")
             metadata.writeText(metadata.readText().replace("\"status\":\"STOPPED\"", "\"status\":\"RECORDING\""))
 
-            val recovered = CaptureRecorder(root).recoverSessions().single()
+            val recovered = CaptureRecorder(root).use { it.recoverSessions().single() }
             assertEquals(CaptureStatus.INTERRUPTED, recovered.status)
             assertTrue(recovered.interruptions.isNotEmpty())
             assertTrue(recorder.deleteSession(recovered.id))
             assertFalse(recovered.directory.exists())
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recoveryIndexesCompleteUnindexedRowsAsUncertainAndDropsTruncatedTail() {
+        val root = Files.createTempDirectory("capture-sparse-recovery-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess()
+        runner.enqueue(logcat)
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            logcat.emit("01-02 03:04:05.006  100  101 I Tag: original\n")
+            awaitCapture { recorder.snapshot.value.indexedRows == 1 }
+            recorder.stop()
+            val indexedBytes = session.logFile.length()
+            val tail = "01-02 03:04:06.006  100  101 I Tag: recovered\npartial"
+            session.logFile.appendText(tail)
+            val completeLog = "01-02 03:04:05.006  100  101 I Tag: original\n" +
+                "01-02 03:04:06.006  100  101 I Tag: recovered\n"
+            val sessionJson = session.directory.resolve("session.json")
+            sessionJson.writeText(sessionJson.readText().replace("\"status\":\"STOPPED\"", "\"status\":\"RECORDING\""))
+
+            val recovered = CaptureRecorder(root).recoverSessions().single()
+            val metadata = requireNotNull(recovered.syncMetadataOverride)
+
+            assertEquals(CaptureStatus.INTERRUPTED, recovered.status)
+            assertEquals(completeLog, recovered.logFile.readText())
+            assertTrue(recovered.logFile.length() > indexedBytes)
+            assertEquals(2, metadata.rowCount)
+            assertTrue(metadata.uncertainBoundary)
+            assertEquals(CaptureSyncReliability.UNCERTAIN, metadata.segments.last().reliability)
+            assertEquals(2, CaptureBlockIndex.read(recovered.blockIndexFile, recovered.logFile).indexedRows)
+            val recoveredEntry = parseLogcat(recovered.logFile).last()
+            assertNull(sparseCaptureTimingPoint(recoveredEntry, 2, metadata))
         } finally {
             recorder.close()
             root.deleteRecursively()
