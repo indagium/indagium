@@ -168,7 +168,7 @@ private class SeekPreviewScan(
 
     fun resolve(): SeekPreviewFrame? {
         while (isCurrent()) {
-            if (attempt > 0 && runCatching { grabber.setTimestamp(scanStartUs) }.isFailure) return null
+            if (attempt > 0 && runCatching { grabber.seekToTimestampUs(scanStartUs) }.isFailure) return null
             olderVideoTimestampUs = null
             previousVideoTimestampUs = null
             when (val pass = scanPass()) {
@@ -204,7 +204,7 @@ private class SeekPreviewScan(
     }
 
     private fun imageAtOrBefore(timestampUs: Long): Frame? {
-        if (runCatching { grabber.setTimestamp(timestampUs) }.isFailure) return null
+        if (runCatching { grabber.seekToTimestampUs(timestampUs) }.isFailure) return null
         while (isCurrent()) {
             val image = grabber.grabImage() ?: return null
             if (image.timestamp >= timestampUs) return image.takeIf { it.timestamp < targetUs }
@@ -1441,7 +1441,7 @@ private class FfmpegVideoPlayerController(
             g.start()
             publishUiState { sourceRotationDegreesState = detectDisplayRotation(g) }
             val targetUs = (ms * MICROS_PER_MS).coerceAtLeast(0)
-            g.setTimestamp(targetUs)
+            g.seekToTimestampUs(targetUs)
             val preview = seekPreviewFrameAt(g, targetUs) ?: return@use null
             Java2DFrameConverter().use { c -> c.convert(preview.frame)?.let(::encodePng) }
         }
@@ -1911,7 +1911,7 @@ private class FfmpegVideoPlayerController(
         clockAnchorPending = true // the clock waits for the decoder to catch up; see the field
         deferredAudioFrame = null // it belongs to the grabber position being replaced below
         needsInitialFrame = false // this seek owns the first preview; don't let startup overwrite it
-        runCatching { grabber.setTimestamp(command.targetUs) }
+        runCatching { grabber.seekToTimestampUs(command.targetUs) }
             .onFailure { AppLogger.warn("video", "seek failed", it) }
         runCatching { audioLine?.flush() }
         // Unlike pause() — see invalidatesDecodedState(SEEK, *), both true — a seek genuinely is a
@@ -1997,7 +1997,7 @@ private class FfmpegVideoPlayerController(
     }
 
     private fun restoreGrabberToSeekTarget(targetUs: Long): Boolean =
-        runCatching { grabber.setTimestamp(targetUs) }
+        runCatching { grabber.seekToTimestampUs(targetUs) }
             .onFailure { AppLogger.warn("video", "could not restore grabber to seek target", it) }
             .isSuccess
 

@@ -1,6 +1,7 @@
 package com.indagium.capture
 
 import com.indagium.video.configureCaptureMkvOpusDecoder
+import com.indagium.video.seekToTimestampUs
 import org.bytedeco.ffmpeg.avcodec.AVPacket
 import org.bytedeco.ffmpeg.avformat.AVFormatContext
 import org.bytedeco.ffmpeg.avformat.AVIOContext
@@ -446,7 +447,7 @@ private fun startAvailabilityGrabber(input: FFmpegFrameGrabber, sourceDecoderPat
 }
 
 private fun seekAvailabilityGrabber(grabber: FFmpegFrameGrabber, timestampUs: Long, failureMessage: String) {
-    runCatching { grabber.setTimestamp(timestampUs) }
+    runCatching { grabber.seekToTimestampUs(timestampUs) }
         .onFailure { throw IOException(failureMessage, it) }
 }
 
@@ -1103,7 +1104,7 @@ private fun positionAtOrBeforeKeyframe(
     configureFreshGrabber: (FFmpegFrameGrabber) -> Unit = {},
 ): PositionedGrabber {
     val landed = runCatching {
-        grabber.setTimestamp(keyframeStartUs)
+        grabber.seekToTimestampUs(keyframeStartUs)
         grabber.grabImage()
     }.getOrNull()
     val verified = landed != null && landed.keyFrame && landed.timestamp <= keyframeStartUs + SEEK_VERIFY_TOLERANCE_US
