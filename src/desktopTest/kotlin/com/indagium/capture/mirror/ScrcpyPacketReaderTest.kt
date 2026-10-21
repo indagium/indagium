@@ -16,6 +16,25 @@ import kotlin.test.assertTrue
 
 class ScrcpyPacketReaderTest {
     @Test
+    fun av1ConfigStaysInContainerExtradataWhileH26xConfigPrefixesKeyFrames() {
+        val config = byteArrayOf(0x81.toByte(), 0x09, 0x0c, 0x00)
+        val keyFrame = byteArrayOf(0x12, 0x00, 0x0a, 0x0e)
+        val delta = byteArrayOf(0x32, 0x01, 0x00)
+
+        assertContentEquals(keyFrame, muxedVideoPacketPayload(ScrcpyCodecIds.AV1, config, true, keyFrame))
+        assertContentEquals(config + keyFrame, muxedVideoPacketPayload(ScrcpyCodecIds.H264, config, true, keyFrame))
+        assertContentEquals(delta, muxedVideoPacketPayload(ScrcpyCodecIds.H265, config, false, delta))
+        assertNull(decoderVideoConfigPayload(ScrcpyCodecIds.AV1, config))
+        assertContentEquals(
+            byteArrayOf(0x0a, 0x01, 0x00),
+            decoderVideoConfigPayload(ScrcpyCodecIds.AV1, config + byteArrayOf(0x0a, 0x01, 0x00)),
+        )
+        val rawObuConfig = byteArrayOf(0x0a, 0x01, 0x00)
+        assertContentEquals(rawObuConfig, decoderVideoConfigPayload(ScrcpyCodecIds.AV1, rawObuConfig))
+        assertContentEquals(config, decoderVideoConfigPayload(ScrcpyCodecIds.H264, config))
+    }
+
+    @Test
     fun readsVideoCodecHeaderThenSessionMetaThenPackets() {
         val bytes = ByteArrayOutputStream().also { out ->
             DataOutputStream(out).apply {

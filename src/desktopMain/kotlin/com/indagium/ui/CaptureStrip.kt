@@ -86,6 +86,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CAPTURE_NO_VIDEO_AFTER_MS
 import com.indagium.capture.CaptureAvailabilityInterval
+import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
@@ -612,11 +613,18 @@ internal fun selectedCaptureOrdinals(tab: LogTab): IntRange? {
 }
 
 /** Validates and normalizes the editable snapshot basename. */
-internal fun captureArchiveName(input: String): String? {
-    val stem = input.trim().removeSuffix(".zip")
+internal fun captureArchiveName(
+    input: String,
+    format: CaptureExportFormat = CaptureExportFormat.ZIP,
+): String? {
+    val trimmed = input.trim()
+    val stem = sequenceOf(".zip", ".ind")
+        .firstOrNull { trimmed.endsWith(it, ignoreCase = true) }
+        ?.let { trimmed.dropLast(it.length) }
+        ?: trimmed
     if (stem.isBlank() || stem == "." || stem == "..") return null
     if (stem.contains('/') || stem.contains('\\')) return null
-    return "$stem.zip"
+    return "$stem.${format.extension}"
 }
 
 internal fun parseCaptureSnapshotMinutes(input: String): Int =
@@ -1142,7 +1150,7 @@ private fun CaptureStoppedStrip(
                     label = "Save snapshot ▾",
                     icon = Icons.Outlined.Save,
                     active = true,
-                    tooltip = "Choose a time range and export a capture ZIP",
+                    tooltip = "Choose a time range and export ZIP or Indagium Compact (.ind)",
                     enabled = session != null,
                     modifier = Modifier.height(30.dp),
                     contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
@@ -1174,6 +1182,30 @@ private fun CaptureStoppedStrip(
                     )
                 }
             }
+            ToolbarBtn(
+                label = if (exportStatus.busy) "Saving…" else "Save ZIP",
+                icon = Icons.Outlined.Save,
+                tooltip = "Save the complete stopped capture as a ZIP archive",
+                enabled = session != null && !state.captureExportBusy,
+                modifier = Modifier.height(30.dp),
+                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                onClick = {
+                    state.saveRetainedCapture(sessionId, tab.id, CaptureExportFormat.ZIP)
+                    onReturnFocus()
+                },
+            )
+            ToolbarBtn(
+                label = if (exportStatus.busy) "Saving…" else "Save IND",
+                icon = Icons.Outlined.Save,
+                tooltip = "Save the complete capture as Indagium Compact (.ind, AV1)",
+                enabled = session != null && !state.captureExportBusy,
+                modifier = Modifier.height(30.dp),
+                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                onClick = {
+                    state.saveRetainedCapture(sessionId, tab.id, CaptureExportFormat.IND_AV1)
+                    onReturnFocus()
+                },
+            )
             if (!imported) ToolbarBtn(
                 label = "Open folder",
                 icon = Icons.Outlined.FolderOpen,
@@ -1535,6 +1567,7 @@ internal fun CaptureSnapshotPopover(
     var playheadBeforeMinutesText by remember(tab.id) { mutableStateOf("5") }
     var playheadAfterMinutesText by remember(tab.id) { mutableStateOf("5") }
     var includeVideo by remember(tab.id, recordVideoConfigured) { mutableStateOf(canIncludeVideo) }
+    var exportFormat by remember(tab.id) { mutableStateOf(CaptureExportFormat.ZIP) }
     var overwriteConfirmed by remember(tab.id) { mutableStateOf(false) }
     val customMinutes = parseCaptureSnapshotMinutes(customMinutesText)
     val range = when (rangeChoice) {
@@ -1578,8 +1611,9 @@ internal fun CaptureSnapshotPopover(
         mutableStateOf(defaultFilename.removeSuffix(".zip"))
     }
     val destinationDirectory = state.effectiveCaptureSnapshotsDir()
-    val filename = captureArchiveName(basename)
-    val destination = filename?.let { File(destinationDirectory, it) } ?: File(destinationDirectory, "capture.zip")
+    val filename = captureArchiveName(basename, exportFormat)
+    val destination = filename?.let { File(destinationDirectory, it) }
+        ?: File(destinationDirectory, "capture.${exportFormat.extension}")
     val sinceSaveCutoffMs = session?.let { current ->
         captureSnapshotCutoffForChoice(current, SnapshotRangeChoice.SINCE_SAVE, playheadElapsedMs)
     } ?: 0L
@@ -1604,6 +1638,7 @@ internal fun CaptureSnapshotPopover(
             overwriteExisting = overwriteConfirmed,
             explicitStartElapsedMs = explicitBounds?.first,
             explicitEndElapsedMs = explicitBounds?.second,
+            format = exportFormat,
         )
     }
     val latestRequest by rememberUpdatedState(request)
@@ -1631,7 +1666,7 @@ internal fun CaptureSnapshotPopover(
     val baseEnabled = rangeValid && !state.captureExportBusy && filename != null
     val enabled = baseEnabled && sinceSaveHasContent
     LaunchedEffect(
-        rangeChoice, customMinutes, previewRangeControls, includeVideo, selection, basename,
+        rangeChoice, customMinutes, previewRangeControls, includeVideo, selection, basename, exportFormat,
         rangeValid, state.captureExportBusy,
     ) {
         if (!rangeValid || filename == null || latestRequest == null) {
@@ -1798,6 +1833,39 @@ internal fun CaptureSnapshotPopover(
                     if (!explicitRangeEnabled) AppText("Enter a non-empty range inside the capture duration.", color = DANGER_RED, fontSize = 10.sp)
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Format", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    RadioRow(
+                        selected = exportFormat == CaptureExportFormat.ZIP,
+                        onSelect = { exportFormat = CaptureExportFormat.ZIP; overwriteConfirmed = false; onReturnFocus() },
+                    ) {
+                        AppText("ZIP · original video", color = colors.ts, fontSize = 11.sp)
+                    }
+                    RadioRow(
+                        selected = exportFormat == CaptureExportFormat.IND_AV1,
+                        onSelect = {
+                            exportFormat = CaptureExportFormat.IND_AV1
+                            if (canIncludeVideo) includeVideo = true
+                            overwriteConfirmed = false
+                            onReturnFocus()
+                        },
+                        enabled = canIncludeVideo,
+                    ) {
+                        AppText(
+                            "Indagium Compact (.ind) · AV1",
+                            color = if (canIncludeVideo) colors.ts else colors.td,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    if (exportFormat == CaptureExportFormat.IND_AV1) {
+                        AppText(
+                            "Keeps resolution, frame timing and audio. Other video is converted to lossy AV1; " +
+                                "existing AV1 is copied without conversion. Converted exports are saved only when smaller than ZIP.",
+                            color = colors.td,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AppText("Archive name", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                     InlineField(
                         value = basename,
@@ -1809,12 +1877,16 @@ internal fun CaptureSnapshotPopover(
                 CheckRow(
                     includeVideo,
                     {
-                        if (canIncludeVideo) includeVideo = !includeVideo
+                        if (canIncludeVideo && exportFormat == CaptureExportFormat.ZIP) includeVideo = !includeVideo
                         onReturnFocus()
                     },
-                    enabled = canIncludeVideo,
+                    enabled = canIncludeVideo && exportFormat == CaptureExportFormat.ZIP,
                 ) {
-                    AppText("Include video", color = if (canIncludeVideo) colors.ts else colors.td, fontSize = 11.sp)
+                    AppText(
+                        if (exportFormat == CaptureExportFormat.IND_AV1) "Include video (required for Compact)" else "Include video",
+                        color = if (canIncludeVideo && exportFormat == CaptureExportFormat.ZIP) colors.ts else colors.td,
+                        fontSize = 11.sp,
+                    )
                 }
                 if (recordVideoConfigured == false) {
                     AppText(
@@ -1921,7 +1993,11 @@ internal fun CaptureSnapshotPopover(
                     // "Save + open" is the secondary variant of the same action, matching
                     // DialogActionButton's active/inactive convention elsewhere (e.g.
                     // SplitPromptDialog's "Split"/"Do Not Split").
-                    DialogActionButton("Save ZIP", active = true, enabled = enabled) {
+                    DialogActionButton(
+                        if (exportFormat == CaptureExportFormat.IND_AV1) "Save IND" else "Save ZIP",
+                        active = true,
+                        enabled = enabled,
+                    ) {
                         request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = false) }
                         onReturnFocus()
                     }

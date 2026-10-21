@@ -30,6 +30,38 @@ internal object ScrcpyCodecIds {
     const val STREAM_ERROR = 0x00_00_00_01
 }
 
+/** scrcpy sends AV1 sequence configuration as av1C extradata, while each encoded packet already
+ * contains low-overhead OBUs. H.264/H.265 configuration is Annex-B parameter-set data and must be
+ * prepended to the first keyframe; AV1 configuration must stay in the Matroska stream header. */
+internal fun muxedVideoPacketPayload(
+    codecId: Int,
+    pendingConfig: ByteArray?,
+    keyFrame: Boolean,
+    packetData: ByteArray,
+): ByteArray = if (codecId != ScrcpyCodecIds.AV1 && keyFrame && pendingConfig != null) {
+    pendingConfig + packetData
+} else {
+    packetData
+}
+
+/**
+ * AV1's Matroska codec private data is an av1C record, while decoder feeds expect low-overhead
+ * OBUs. Some encoders provide only the four-byte record header (sequence headers arrive in the
+ * frame packets); others include config OBUs after that header. Keep those OBUs for decoders and
+ * discard the container-only prefix. Raw OBU config packets and H.26x Annex-B config pass through.
+ */
+internal fun decoderVideoConfigPayload(codecId: Int, config: ByteArray): ByteArray? {
+    if (config.isEmpty()) return null
+    val isAv1ConfigurationRecord = codecId == ScrcpyCodecIds.AV1 &&
+        config.size >= AV1_CODEC_CONFIGURATION_RECORD_SIZE &&
+        config[0] == AV1_CODEC_CONFIGURATION_RECORD_MARKER
+    if (!isAv1ConfigurationRecord) return config
+    return config.copyOfRange(AV1_CODEC_CONFIGURATION_RECORD_SIZE, config.size).takeIf { it.isNotEmpty() }
+}
+
+private const val AV1_CODEC_CONFIGURATION_RECORD_MARKER: Byte = 0x81.toByte()
+private const val AV1_CODEC_CONFIGURATION_RECORD_SIZE = 4
+
 internal sealed interface ScrcpyStreamHeader {
     data class Codec(val id: Int) : ScrcpyStreamHeader
 

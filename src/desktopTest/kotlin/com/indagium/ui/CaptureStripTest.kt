@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.MIRROR_AUDIO_FALLBACK_DIAGNOSTIC
@@ -17,6 +18,15 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CaptureStripTest {
+    @Test
+    fun captureArchiveNameUsesSelectedExtensionAndKeepsZipDefault() {
+        assertEquals("capture.zip", captureArchiveName("capture"))
+        assertEquals("capture.ind", captureArchiveName("capture.zip", CaptureExportFormat.IND_AV1))
+        assertEquals("capture.ind", captureArchiveName("capture.IND", CaptureExportFormat.IND_AV1))
+        assertEquals("capture.zip", captureArchiveName("capture.ind", CaptureExportFormat.ZIP))
+        assertNull(captureArchiveName("../capture", CaptureExportFormat.IND_AV1))
+    }
+
     @Test
     fun elapsedFormattingUsesCompactClockAndClampsNegativeValues() {
         assertEquals("00:00", formatCaptureElapsed(0))

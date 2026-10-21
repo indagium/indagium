@@ -287,6 +287,25 @@ class CaptureRecorder internal constructor(
         startupNotice: String?,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)?,
     ): CaptureSession {
+        val videoCapabilities = if (settings.recordVideo && settings.videoCodec != CaptureVideoCodec.H264) {
+            runCatching { tools.listEmbeddedVideoEncoders(device.serial) }
+                .onFailure { failure ->
+                    if (failure is InterruptedException || Thread.currentThread().isInterrupted) {
+                        Thread.currentThread().interrupt()
+                    }
+                }
+                .getOrNull()
+        } else {
+            null
+        }
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("Capture start was cancelled during codec discovery")
+        val encoderFallback = if (settings.recordVideo) {
+            advancedCodecFallbackReason(settings.videoCodec, videoCapabilities)
+        } else {
+            null
+        }
+        val selectedVideoEncoder = videoCapabilities?.preferredHardwareEncoder(settings.videoCodec)
+        val effectiveVideoCodec = if (encoderFallback == null) settings.videoCodec else CaptureVideoCodec.H264
         recoverSessions()
         val startedEpochMs = epochMillis()
         val sessionId = sessionId(startedEpochMs)
@@ -362,7 +381,7 @@ class CaptureRecorder internal constructor(
             }
             return session
         }
-        startupNotice?.let(::addDiagnostic)
+        listOfNotNull(startupNotice, encoderFallback).joinToString(" ").takeIf(String::isNotBlank)?.let(::addDiagnostic)
 
         try {
             beforeLogcatLaunch?.invoke(session)
@@ -463,6 +482,8 @@ class CaptureRecorder internal constructor(
                         bitrateMbps = settings.bitrateMbps,
                         audio = settings.audio,
                         audioServerArgs = audioPlan.serverArgs,
+                        videoCodec = effectiveVideoCodec,
+                        videoEncoder = selectedVideoEncoder?.name,
                     ),
                 )
             } catch (failure: IOException) {

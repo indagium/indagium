@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
@@ -140,6 +141,7 @@ internal fun buildCaptureSnapshotExportRequest(
     overwriteExisting: Boolean,
     explicitStartElapsedMs: Long? = null,
     explicitEndElapsedMs: Long? = null,
+    format: CaptureExportFormat = CaptureExportFormat.ZIP,
 ): CaptureExportRequest {
     val selection = selectedCaptureOrdinals(tab)
     return CaptureExportRequest(
@@ -153,5 +155,6 @@ internal fun buildCaptureSnapshotExportRequest(
         overwriteExisting = overwriteExisting,
         explicitStartElapsedMs = explicitStartElapsedMs,
         explicitEndElapsedMs = explicitEndElapsedMs,
+        format = format,
     )
 }

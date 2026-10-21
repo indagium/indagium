@@ -57,6 +57,7 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("hardwareMirror", settings.hardwareMirror)
     put("writeDeviceAvailabilityMarkers", settings.writeDeviceAvailabilityMarkers)
     put("showUnavailableFrames", settings.showUnavailableFrames)
+    put("videoCodec", settings.videoCodec.name)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -128,6 +129,9 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
             "writeDeviceAvailabilityMarkers", defaults.writeDeviceAvailabilityMarkers, ::booleanValue,
         ),
         showUnavailableFrames = root.optional("showUnavailableFrames", defaults.showUnavailableFrames, ::booleanValue),
+        // Video codec selection is additive. Older settings preserve the H.264 default, and a
+        // future codec value falls back without discarding unrelated capture preferences.
+        videoCodec = root.videoCodecOrDefault("videoCodec", defaults.videoCodec),
     )
 }.getOrNull()
 
@@ -152,6 +156,11 @@ private fun JsonObject.mirrorModeOrDefault(key: String, default: CaptureMirrorMo
 private fun JsonObject.videoContainerOrDefault(key: String, default: CaptureVideoContainer): CaptureVideoContainer {
     val raw = stringValue(this[key] ?: return default) ?: return default
     return runCatching { CaptureVideoContainer.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun JsonObject.videoCodecOrDefault(key: String, default: CaptureVideoCodec): CaptureVideoCodec {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureVideoCodec.valueOf(raw) }.getOrDefault(default)
 }
 
 private fun stringValue(value: JsonElement): String? =

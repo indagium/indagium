@@ -444,7 +444,7 @@ card (`ui/EmbeddedMirrorPanel.kt`, `capture/mirror/EmbeddedMirrorRuntime.kt`).
 `CaptureRecorder` owns `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the checksum-pinned
 scrcpy server over `adb forward` and parses its frame-meta stream. `ScrcpyPacketReader` preserves
 presentation timestamps, configuration packets, and key-frame boundaries; `StreamingMkvWriter`
-remuxes H.264 and optional Opus packets into the growing session MKV using FFmpeg. A cancellable reconnect
+remuxes H.264 (default), H.265, or AV1 and optional Opus packets into the growing session MKV using FFmpeg. A cancellable reconnect
 path maintains the video timeline across device interruptions, while resize/rotation parameter sets
 are inserted before the next key frame.
 
@@ -456,6 +456,33 @@ is only used for the separate external mirror window. The embedded preview uses 
 on macOS. On Windows and Linux, the optional D3D11 or VAAPI/EGL native mirror is behind the
 `hardwareMirror` preference (off by default); surface/decoder failures fall back to the Compose
 renderer. These display paths do not own the recording session.
+
+**Experimental device codec selection.** `CaptureSettings.videoCodec` is appended with a H.264
+default in the JSON settings/session codec. Encoder discovery deploys an isolated, checksum-verified
+bundled scrcpy server to a UUID path, runs `list_encoders=true` without opening a recording, and
+cleans the host/device copies. Bounded adb calls run off the UI thread. The launcher displays
+device-specific hardware/software/unknown acceleration and supports refreshing the result; capture
+startup probes again before resolving an advanced request. Only an explicit hardware encoder is
+accepted for H.265/AV1. Missing, software-only, or unconfirmed support falls back to H.264 with a
+diagnostic. Successful discovery is a candidate check, not a guarantee that the requested dimensions
+and profile can initialize. Advanced startup disables automatic downsizing and retries H.264 on
+initial failure while preserving configured size, frame-rate limit, and bitrate.
+
+The stream's actual codec selects the MKV codec ID and portable mirror decoder. H.265 uses HEVC
+elementary-stream demuxing; Android AV1 frames use the low-overhead OBU demuxer, not AV1 Annex B.
+AV1 configuration packets can contain an `av1C` record rather than OBUs: they configure container
+extradata and must not be prepended to video frames or passed intact into the raw OBU decoder.
+Decoder feeds extract any configuration OBUs after the four-byte record header; header-only
+records contribute no decoder payload. H.26x configuration retains its existing in-band key-frame
+concatenation behavior.
+Advanced recording uses the Compose/JavaCV preview because the existing native mirror surfaces
+accept H.264. Compressed packet observations carry the actual codec so authoring timeline segments
+retain the same encoding. H.264 keeps its existing native display path and remains the migration,
+recording, and external-tool default. Direct encoding does not lower bitrate automatically and
+therefore does not promise a smaller recording at identical bitrate. macOS/emulator checks cover
+software device AV1 fixtures and conservative fallback; physical hardware encoding remains to be
+validated per device.
+
 The `capture` package owns process adapters, session metadata and recovery, raw log/index writing,
 screenshots, disk guards, ZIP range export, timing records, and the versioned
 `capture.indagium.json` codec. It has no Compose rendering, viewer state, AI, or diagnostics UI
@@ -491,6 +518,35 @@ that the timeline's availability metadata agrees with the descriptor. Child expo
 note ranges to the selected window. Opening a ZIP verifies its assets and creates an ordinary log
 tab with linked video and the imported timeline. The reader still accepts v1/v2 archives with their
 legacy nested assets/mappings and v3 archives with their single estimated anchor.
+
+**Compact capture POC.** `CaptureExportRequest.format` defaults to `CaptureExportFormat.ZIP`;
+the opt-in `IND_AV1` format writes a `.ind` file using the same v4 ZIP layout and reader. Snapshot
+exports expose a format selector, while stopped/retained saves add Save IND beside Save ZIP.
+AI tools and issue attachments retain their default ZIP requests. Content-based archive detection
+also handles `.ind` in Open, drop, restore, and recents; the recent-file archive classification
+includes the new extension. Installer associations are outside the POC.
+
+`CaptureArchiveExporter` first stages the existing range export and measures the exact standard ZIP
+byte count from that frozen selection. `CaptureArchiveZipWriter` shares the real archive serialization
+with a counting output sink, avoiding a temporary comparison ZIP on disk. `FfmpegAv1CompactVideoTranscoder`
+then encodes the staged video through bundled `libsvtav1` (CRF 28, preset 10, adaptive concurrency capped
+at six logical processors) using millisecond presentation times, unchanged dimensions, and approximately
+two-second keyframes. Decoder concurrency stays at two; a single-processor machine uses one encoder worker.
+Video-only sources publish the encoded MKV directly, retaining source metadata and aspect/frame-rate
+rationals. A separate packet-mux pass runs only when audio or auxiliary streams need copying into
+`screen.mkv`. The exporter refreshes video/notes assets and checksums before
+packaging the Compact candidate, publishing converted video only when its total byte size is below the comparator.
+If the immutable staged clip is already AV1, the exporter instead remuxes/copies that stream into
+`screen.mkv` without invoking the AV1 encoder or running a size comparison. The result identifies
+this passthrough explicitly: ZIP and IND then contain the same compact stream, so no additional
+size saving is claimed. Exact-start rendering or availability cards can still produce H.264 staging
+and take the ordinary conversion/size-gate path.
+Missing video leaves no published Compact file. On the conversion path, an unavailable encoder,
+conversion failure, or no size reduction also prevents publication. Cancellation and failures clean conversion/archive staging; the existing callers
+advance checkpoints only after successful publication. Extra working-space preflight and phase
+messages cover the additional conversion and comparison work. The source recording and ordinary
+ZIP codec settings are unchanged. This experimental path targets macOS validation; other shipped
+platforms require separate native encoding/playback verification.
 
 A retained working session directory has a different layout: `logs/logcat.log`,
 `mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, session metadata, and the finalized

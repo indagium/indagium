@@ -3,6 +3,7 @@ package com.indagium
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -14,17 +15,24 @@ import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.CaptureVideoClip
+import com.indagium.capture.CaptureVideoContainer
+import com.indagium.capture.CaptureVideoExporter
 import com.indagium.ui.AppState
 import com.indagium.ui.FileView
 import com.indagium.ui.captureExportStatusFor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.bytedeco.javacv.FFmpegFrameRecorder
+import org.bytedeco.javacv.Frame
 import org.junit.Rule
 import java.io.File
 import java.io.IOException
+import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipFile
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -77,6 +85,42 @@ class CaptureSnapshotExportLifecycleTest {
             assertNull(state.captureExportError)
         } finally {
             release.countDown()
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun snapshotFormatSelectorSwitchesZipToIndAndKeepsVideoIncluded(): Unit = runBlocking {
+        val root = createTempDirectory("imported-range-menu-ind").toFile()
+        val (state, tabId) = openImportedSource(root, withVideo = true)
+        try {
+            composeRule.setContent {
+                state.tab(tabId)?.let { FileView(state, it) }
+            }
+            composeRule.onNodeWithText("Export ▾").performClick()
+            composeRule.onNodeWithText("Export capture range…").assertIsDisplayed().performClick()
+            composeRule.onNodeWithText("Save ZIP").assertIsDisplayed()
+            composeRule.onNodeWithText("Include video").assertIsDisplayed()
+            composeRule.onAllNodes(hasText(".zip", substring = true)).assertCountEquals(1)
+
+            composeRule.onNodeWithText("Indagium Compact (.ind) · AV1").performClick()
+            composeRule.onNodeWithText("Save IND").assertIsDisplayed()
+            composeRule.onNodeWithText("Include video (required for Compact)").assertIsDisplayed()
+            composeRule.onAllNodesWithText("Save ZIP").assertCountEquals(0)
+            composeRule.onAllNodes(hasText(".ind", substring = true)).assertCountEquals(2)
+
+            composeRule.onNodeWithText("Save IND").performClick()
+            composeRule.waitUntil(30_000) {
+                state.captureExportResult != null || state.captureExportError != null
+            }
+            assertNull(state.captureExportError)
+            val exported = assertNotNull(state.captureExportResult).file
+            assertTrue(exported.name.endsWith(".ind"), "the selected format should reach the exporter destination")
+            ZipFile(exported).use { archive ->
+                assertNotNull(archive.getEntry("screen.mkv"), "Compact export should contain its staged MKV video")
+            }
+        } finally {
             state.close()
             root.deleteRecursively()
         }
@@ -197,15 +241,24 @@ class CaptureSnapshotExportLifecycleTest {
         }
     }
 
-    private suspend fun openImportedSource(root: File, beforeExport: () -> Unit): Pair<AppState, String> {
+    private suspend fun openImportedSource(
+        root: File,
+        withVideo: Boolean = false,
+        beforeExport: () -> Unit = {},
+    ): Pair<AppState, String> {
         val sourceSession = CaptureSession(
             id = "snapshot-lifecycle",
             directory = File(root, "session"),
             device = CaptureDevice("emulator-5554", "device"),
-            settings = CaptureSettings(recordVideo = false, freeSpaceReserveBytes = 0),
+            settings = CaptureSettings(
+                recordVideo = withVideo,
+                videoContainer = CaptureVideoContainer.MKV,
+                freeSpaceReserveBytes = 0,
+            ),
             startedEpochMs = 1_700_000_000_000L,
             elapsedMs = 3_000L,
             status = CaptureStatus.STOPPED,
+            videoStartElapsedMs = if (withVideo) 0L else null,
         )
         sourceSession.logFile.parentFile.mkdirs()
         sourceSession.indexFile.parentFile.mkdirs()
@@ -227,12 +280,23 @@ class CaptureSnapshotExportLifecycleTest {
                 }
             }
         }
-        val sourceArchive = CaptureArchiveExporter().export(
+        val archiveExporter = if (withVideo) {
+            createVideoFixture(sourceSession.videoFile)
+            CaptureArchiveExporter(
+                videoExporter = CaptureVideoExporter { _, destination, start, end ->
+                    destination.writeBytes(sourceSession.videoFile.readBytes())
+                    CaptureVideoClip(start, end, end - start)
+                },
+            )
+        } else {
+            CaptureArchiveExporter()
+        }
+        val sourceArchive = archiveExporter.export(
             sourceSession,
             CaptureExportRequest(
                 destination = File(root, "source.zip"),
                 range = CaptureRange.ALL,
-                includeVideo = false,
+                includeVideo = withVideo,
                 cutoffElapsedMs = sourceSession.elapsedMs,
             ),
         ).file
@@ -264,5 +328,36 @@ class CaptureSnapshotExportLifecycleTest {
 
     private suspend fun awaitExport(state: AppState) {
         withTimeout(10_000) { while (state.captureExportBusy) delay(10) }
+    }
+
+    private fun createVideoFixture(file: File) {
+        file.parentFile.mkdirs()
+        val recorder = FFmpegFrameRecorder(file, 160, 90).apply {
+            format = "matroska"
+            videoCodecName = "mpeg4"
+            frameRate = 10.0
+            videoBitrate = 1_000_000
+        }
+        val frame = Frame(160, 90, Frame.DEPTH_UBYTE, 3)
+        try {
+            recorder.start()
+            repeat(30) { index ->
+                val pixels = frame.image[0] as ByteBuffer
+                for (y in 0 until frame.imageHeight) {
+                    for (x in 0 until frame.imageWidth) {
+                        val offset = y * frame.imageStride + x * 3
+                        pixels.put(offset, ((x * 7 + index * 23) and 0xff).toByte())
+                        pixels.put(offset + 1, ((y * 5 + index * 17) and 0xff).toByte())
+                        pixels.put(offset + 2, ((x + y + index * 31) and 0xff).toByte())
+                    }
+                }
+                recorder.timestamp = index * 100_000L
+                recorder.record(frame)
+            }
+            recorder.stop()
+        } finally {
+            runCatching { recorder.release() }
+            frame.close()
+        }
     }
 }

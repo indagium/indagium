@@ -14,4 +14,6 @@ internal data class MirrorVideoPacket(
     val receivedAtNanos: Long,
     val connectionEpoch: Long,
     val sequence: Long,
+    /** Codec FourCC from the stream header that owns this packet. */
+    val codecId: Int = ScrcpyCodecIds.H264,
 )

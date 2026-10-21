@@ -82,7 +82,7 @@ internal enum class RecentKind {
 }
 
 private val RECENT_ARCHIVE_EXTENSIONS = setOf(
-    "zip", "7z", "tar", "tgz", "gz", "bz2", "xz", "jar", "apk", "cbz",
+    "zip", "ind", "7z", "tar", "tgz", "gz", "bz2", "xz", "jar", "apk", "cbz",
 )
 private val RECENT_NOTES_EXTENSIONS = setOf("ann", "md")
 private val RECENT_LOG_EXTENSIONS = setOf("log", "txt")
@@ -953,7 +953,7 @@ private fun RecentTypeBadge(kind: RecentKind) {
     val tc = tc()
     val label = when (kind) {
         RecentKind.LOG -> "LOG"
-        RecentKind.ARCHIVE -> "ZIP"
+        RecentKind.ARCHIVE -> "ARCHIVE"
         RecentKind.NOTES -> "NOTES"
         RecentKind.OTHER -> "FILE"
     }

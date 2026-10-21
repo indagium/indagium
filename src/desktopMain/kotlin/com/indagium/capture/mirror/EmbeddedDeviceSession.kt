@@ -2,6 +2,7 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.capture.CaptureVideoCodec
 import com.indagium.capture.DesktopMicrophoneCapture
 import com.indagium.capture.DeviceAudioContinuityClock
 import com.indagium.capture.MICROPHONE_OFF_ID
@@ -12,12 +13,16 @@ import com.indagium.capture.captureNativeFailureDiagnostic
 import com.indagium.capture.hasNativeLinkageFailure
 import com.indagium.capture.microphoneFailureIndicatesPermissionDenied
 import com.indagium.debug.AppLogger
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HEVC
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.time.Duration
 import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
@@ -66,6 +71,13 @@ internal class EmbeddedDeviceSession(
     private var worker: Thread? = null
     private var stopping = false
     private var currentConnection: EmbeddedMirrorConnection? = null
+
+    @Volatile private var activeVideoCodecId = CaptureVideoCodec.H264.scrcpyId
+
+    @Volatile private var requestedAdvancedVideoCodec = false
+
+    @Volatile private var videoCodecHeaderReady = CountDownLatch(0)
+
     private var connectionSnapshotValue = EmbeddedMirrorSnapshot()
 
     // This session's own device-connection state (CONNECTING/LIVE/RECONNECTING/FAILED),
@@ -110,10 +122,7 @@ internal class EmbeddedDeviceSession(
     }
 
     // Video PTS bookkeeping — survives reconnects, protected by [lock].
-    // @Volatile so hasStartedVideo() can be read lock-free — see that function's doc. Every write
-    // still happens under [lock] alongside the muxer.start()/addAudio() calls it's paired with;
-    // @Volatile only adds a safe, un-synchronized *read* path, it doesn't remove the existing
-    // synchronized writers' mutual exclusion.
+    // @Volatile so connection/error paths can inspect whether the output stream was configured.
     @Volatile private var muxerStarted = false
     private var firstAnchorPtsUs: Long? = null
 
@@ -210,6 +219,9 @@ internal class EmbeddedDeviceSession(
         val (runId, retiredWorker, retiredConnection) = synchronized(lock) {
             stopping = false
             audioRequestedFlag = options.audio
+            activeVideoCodecId = options.videoCodec.scrcpyId
+            requestedAdvancedVideoCodec = options.videoCodec != CaptureVideoCodec.H264
+            videoCodecHeaderReady = CountDownLatch(1)
             isStopped = false
             val runId = generation.incrementAndGet()
             val retiredWorker = worker
@@ -243,6 +255,7 @@ internal class EmbeddedDeviceSession(
 
     fun stop() {
         isStopped = true
+        videoCodecHeaderReady.countDown()
         val threadToJoin: Thread?
         val connectionToClose: EmbeddedMirrorConnection?
         val stoppedGeneration = synchronized(lock) {
@@ -279,7 +292,7 @@ internal class EmbeddedDeviceSession(
      * the other's lock while holding their own is a deadlock, not just contention. A plain volatile
      * read needs no lock at all and closes that cycle from this side.
      */
-    fun hasStartedVideo(): Boolean = muxerStarted
+    fun hasStartedVideo(): Boolean = muxer.hasWrittenVideo()
 
     /**
      * True once the first video *frame* (non-config packet) has reached this session's pump and
@@ -366,17 +379,20 @@ internal class EmbeddedDeviceSession(
      * created is discarded rather than fed to a decoder with no reference picture yet.
      */
     fun attachDecoder(decoder: H264Decoder, onFrame: (MirrorFrame) -> Unit) {
-        detachDecoder()
+        detachDecoderInternal(releaseCodecWaiter = false)
         val feed = BoundedAnnexBFeed()
         val replayConfig = synchronized(lock) {
             decoderFeed = feed
             attachedDecoder = decoder
             lastConfigBytes
         }
-        replayConfig?.let { feed.offer(it, config = true, keyFrame = false) }
+        replayConfig?.let { decoderVideoConfigPayload(activeVideoCodecId, it) }
+            ?.let { feed.offer(it, config = true, keyFrame = false) }
         val decodeThread = thread(name = "embedded-recording-mirror-decode", isDaemon = true, start = false) {
             try {
-                decoder.decode(feed.input) { frame -> onFrame(frame) }
+                val codecReady = videoCodecHeaderReady
+                codecReady.await()
+                if (decoderFeed === feed) decoder.decode(feed.input, activeVideoCodecId) { frame -> onFrame(frame) }
             } catch (_: IOException) {
                 // Expected when detachDecoder()/stop() closes the feed.
             } catch (failure: Throwable) {
@@ -398,6 +414,9 @@ internal class EmbeddedDeviceSession(
         }
     }
 
+    /** Advanced recording uses the portable decoder: the direct native surfaces are H.264-only. */
+    fun requiresCodecAwareComposeMirror(): Boolean = requestedAdvancedVideoCodec
+
     /**
      * Attaches a direct native decoder to this recorder's existing packet pump. This keeps the
      * recorder as the sole owner of the adb/scrcpy connection while avoiding JavaCV's pixel copy
@@ -409,7 +428,7 @@ internal class EmbeddedDeviceSession(
         onFrame: (MirrorFrameInfo) -> Unit,
         onFailure: (Throwable) -> Unit = {},
     ) {
-        detachDecoder()
+        detachDecoderInternal(releaseCodecWaiter = false)
         val feed = BoundedScrcpyPacketFeed(
             rawInput = InputStream.nullInputStream(),
             startPump = false,
@@ -420,8 +439,16 @@ internal class EmbeddedDeviceSession(
             attachedDecoder = decoder
             lastConfigBytes
         }
-        replayConfig?.let { bytes ->
-            feed.offerPacket(BoundedScrcpyPacketFeed.Packet(ptsUs = 0L, config = true, keyFrame = false, data = bytes))
+        replayConfig?.let { decoderVideoConfigPayload(activeVideoCodecId, it) }?.let { bytes ->
+            feed.offerPacket(
+                BoundedScrcpyPacketFeed.Packet(
+                    ptsUs = 0L,
+                    config = true,
+                    keyFrame = false,
+                    data = bytes,
+                    codecId = activeVideoCodecId,
+                ),
+            )
         }
         val decodeThread = thread(name = "embedded-recording-mirror-direct-decode", isDaemon = true, start = false) {
             try {
@@ -451,7 +478,10 @@ internal class EmbeddedDeviceSession(
         }
     }
 
-    fun detachDecoder() {
+    fun detachDecoder() = detachDecoderInternal(releaseCodecWaiter = true)
+
+    private fun detachDecoderInternal(releaseCodecWaiter: Boolean) {
+        if (releaseCodecWaiter) videoCodecHeaderReady.countDown()
         val feed: BoundedAnnexBFeed?
         val directFeed: BoundedScrcpyPacketFeed?
         val decodeThread: Thread?
@@ -564,6 +594,8 @@ internal class EmbeddedDeviceSession(
     private fun runSession(runId: Long, serial: String, options: MirrorStreamOptions) {
         var attempt = 0
         var nativeFailure = false
+        var activeOptions = options
+        var advancedFallbackUsed = false
         while (isCurrent(runId) && !nativeFailure) {
             if (attempt > 0) {
                 onDiagnostic("Embedded recording: reconnecting (attempt $attempt)…")
@@ -571,7 +603,7 @@ internal class EmbeddedDeviceSession(
             }
             var connection: EmbeddedMirrorConnection? = null
             try {
-                val openedConnection = openAndAcceptConnection(runId, serial, options) ?: return
+                val openedConnection = openAndAcceptConnection(runId, serial, activeOptions) ?: return
                 connection = openedConnection
                 val streamEpoch = prepareLiveConnection(runId, openedConnection, serial, attempt) ?: return
                 // Only a reconnect *after* the muxer already has real video is a genuine
@@ -591,9 +623,9 @@ internal class EmbeddedDeviceSession(
                 // Not joined: it's a daemon thread blocked on a read of connection.audioInput, and
                 // that read only unblocks once this connection is closed below (or by stop()) —
                 // joining it here would just wait out that same close on every reconnect.
-                if (options.audio) {
+                if (activeOptions.audio) {
                     thread(name = "embedded-recording-audio-$serial", isDaemon = true) {
-                        runCatching { pumpAudioIfRequested(runId, streamEpoch, openedConnection, options) }
+                        runCatching { pumpAudioIfRequested(runId, streamEpoch, openedConnection, activeOptions) }
                             .onFailure { failure ->
                                 if (isCurrent(runId)) {
                                     onDiagnostic("Embedded recording: audio pump failed (${failure.message}); continuing video-only.")
@@ -601,13 +633,23 @@ internal class EmbeddedDeviceSession(
                             }
                     }
                 }
-                pumpVideo(runId, openedConnection, options.audio, streamEpoch)
+                pumpVideo(runId, openedConnection, activeOptions.audio, streamEpoch)
                 if (!isCurrent(runId)) return
                 // A clean EOF without stop() is a real drop — fall through and reconnect.
-                attempt++
+                if (!tryFallbackToH264(runId, activeOptions, advancedFallbackUsed, "the stream ended before its first key frame")) {
+                    attempt++
+                } else {
+                    advancedFallbackUsed = true
+                    activeOptions = activeOptions.copy(videoCodec = CaptureVideoCodec.H264, videoEncoder = null)
+                    attempt = 0
+                }
             } catch (failure: Throwable) {
                 if (!isCurrent(runId)) return
-                if (hasNativeLinkageFailure(failure)) {
+                if (tryFallbackToH264(runId, activeOptions, advancedFallbackUsed, failure.message ?: failure::class.simpleName.orEmpty())) {
+                    activeOptions = activeOptions.copy(videoCodec = CaptureVideoCodec.H264, videoEncoder = null)
+                    advancedFallbackUsed = true
+                    attempt = 0
+                } else if (hasNativeLinkageFailure(failure)) {
                     val diagnostic = captureNativeFailureDiagnostic(failure)
                     onDiagnostic(diagnostic)
                     publishConnectionSnapshotIfCurrent(
@@ -650,15 +692,75 @@ internal class EmbeddedDeviceSession(
         }
     }
 
+    private fun tryFallbackToH264(
+        runId: Long,
+        options: MirrorStreamOptions,
+        fallbackAlreadyUsed: Boolean,
+        reason: String,
+    ): Boolean {
+        if (fallbackAlreadyUsed || options.videoCodec == CaptureVideoCodec.H264 || muxer.hasWrittenVideo()) return false
+        muxer.abortBeforeFirstVideo()
+        activeVideoCodecId = CaptureVideoCodec.H264.scrcpyId
+        requestedAdvancedVideoCodec = false
+        var mixerToClose: TimelineOpusAudio? = null
+        var microphoneToClose: DesktopMicrophoneCapture? = null
+        var audioDecoderToClose: OpusPcmDecoder? = null
+        synchronized(audioEpochLock) {
+            synchronized(lock) {
+                muxerStarted = false
+                firstAnchorPtsUs = null
+                videoConnectionAnchorReady = false
+                ptsOffsetUs = 0L
+                lastOutputPtsUs = -1L
+                audioStarted = false
+                audioResolved = false
+                pendingAudioExtradata = null
+                lastAudioConfigBytes = null
+                lastConfigBytes = null
+                activeStreamEpoch = null
+                mixerToClose = mixedAudio
+                mixedAudio = null
+                microphoneToClose = microphoneCapture
+                microphoneCapture = null
+                audioDecoderToClose = deviceAudioDecoder
+                deviceAudioDecoder = null
+                videoAnchorElapsedMs.set(NO_VIDEO_ANCHOR)
+            }
+        }
+        runCatching { mixerToClose?.close() }
+        runCatching { microphoneToClose?.close() }
+        runCatching { audioDecoderToClose?.close() }
+        deviceAudioContinuity.reset()
+        clearRecentVideoPackets(runId)
+        videoCodecHeaderReady.countDown()
+        onDiagnostic(
+            "${options.videoCodec.label} encoder could not start at the requested capture settings " +
+                "($reason); retrying with H.264 without changing size, frame rate, or bitrate.",
+        )
+        if (mixerToClose != null && isCurrent(runId)) startMicrophoneIfRequested()
+        return true
+    }
+
     private fun pumpVideo(
         runId: Long,
         connection: EmbeddedMirrorConnection,
         audioRequested: Boolean,
         streamEpoch: Long,
     ) {
+        val advancedStartup = requestedAdvancedVideoCodec
+        if (advancedStartup) connection.setVideoReadTimeout(ADVANCED_CODEC_STARTUP_TIMEOUT_MS)
         val reader = ScrcpyPacketReader(CountingInputStream(connection.videoInput, pathStats.video))
         when (val header = reader.readHeader()) {
-            is ScrcpyStreamHeader.Codec -> pathStats.video.headerRead(header.id)
+            is ScrcpyStreamHeader.Codec -> {
+                require(header.id == activeVideoCodecId) {
+                    val requested = CaptureVideoCodec.entries.firstOrNull { it.scrcpyId == activeVideoCodecId }?.label
+                        ?: "the selected video codec"
+                    "scrcpy opened codec 0x${header.id.toUInt().toString(16)} but $requested was requested"
+                }
+                activeVideoCodecId = header.id
+                pathStats.video.headerRead(header.id)
+                if (!requestedAdvancedVideoCodec) videoCodecHeaderReady.countDown()
+            }
             ScrcpyStreamHeader.Disabled -> throw IOException("embedded video stream unexpectedly disabled")
             ScrcpyStreamHeader.Error -> throw ScrcpyStreamErrorException("embedded scrcpy server reported a configuration error")
         }
@@ -673,19 +775,53 @@ internal class EmbeddedDeviceSession(
                     pendingHeight = event.height
                 }
                 is ScrcpyStreamEvent.Packet -> {
-                    val receivedAtNanos = System.nanoTime()
-                    val receivedAtMs = System.currentTimeMillis()
-                    feedDecoder(event)
-                    if (event.config) {
-                        pendingConfig = handleConfigPacket(event.data, pendingConfig, audioRequested)
-                        publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
-                    } else {
-                        publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
-                        pendingConfig = writeVideoFrame(event, pendingConfig)
-                    }
+                    pendingConfig = handleVideoPacket(runId, connection, audioRequested, streamEpoch, event, pendingConfig)
                 }
             }
         }
+    }
+
+    private fun handleVideoPacket(
+        runId: Long,
+        connection: EmbeddedMirrorConnection,
+        audioRequested: Boolean,
+        streamEpoch: Long,
+        event: ScrcpyStreamEvent.Packet,
+        currentConfig: ByteArray?,
+    ): ByteArray? {
+        val receivedAtNanos = System.nanoTime()
+        val receivedAtMs = System.currentTimeMillis()
+        if (event.config) {
+            val nextConfig = handleConfigPacket(event.data, currentConfig, audioRequested)
+            if (!requestedAdvancedVideoCodec || muxer.hasWrittenVideo()) feedDecoder(event)
+            publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
+            return nextConfig
+        }
+
+        val awaitingAdvancedKeyFrame = requestedAdvancedVideoCodec && !muxer.hasWrittenVideo()
+        if (awaitingAdvancedKeyFrame && !event.keyFrame) return currentConfig
+        if (awaitingAdvancedKeyFrame) startMuxerCoordinatingWithAudio(currentConfig ?: ByteArray(0), audioRequested)
+        publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
+        val configForDecoder = currentConfig
+        val nextConfig = writeVideoFrame(event, currentConfig)
+        if (!muxer.hasWrittenVideo()) return nextConfig
+
+        if (awaitingAdvancedKeyFrame) {
+            configForDecoder?.let { config ->
+                feedDecoder(
+                    ScrcpyStreamEvent.Packet(
+                        event.ptsUs,
+                        config = true,
+                        keyFrame = false,
+                        data = config,
+                    ),
+                )
+            }
+            connection.setVideoReadTimeout(0)
+            videoCodecHeaderReady.countDown()
+        }
+        feedDecoder(event)
+        return nextConfig
     }
 
     /** Tee original compressed access units to an independent bounded observer; no decoder or device work runs here. */
@@ -713,6 +849,7 @@ internal class EmbeddedDeviceSession(
                 receivedAtNanos = receivedAtNanos,
                 connectionEpoch = epoch,
                 sequence = videoSequence.incrementAndGet(),
+                codecId = activeVideoCodecId,
             )
             when {
                 packet.config -> {
@@ -783,6 +920,9 @@ internal class EmbeddedDeviceSession(
     /** Returns the still-pending config to carry forward (null once consumed by [handleConfigPacket]
      * or merged into a key frame). */
     private fun handleConfigPacket(data: ByteArray, currentPending: ByteArray?, audioRequested: Boolean): ByteArray? {
+        if (requestedAdvancedVideoCodec && !muxerStarted) {
+            return currentPending?.plus(data) ?: data
+        }
         synchronized(lock) { lastConfigBytes = data }
         if (!muxerStarted) {
             startMuxerCoordinatingWithAudio(data, audioRequested)
@@ -824,8 +964,14 @@ internal class EmbeddedDeviceSession(
         var captureToClose: DesktopMicrophoneCapture? = null
         synchronized(lock) {
             if (muxerStarted) return
-            muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), videoExtradata)
+            muxer.start(
+                pendingWidth.coerceAtLeast(1),
+                pendingHeight.coerceAtLeast(1),
+                videoExtradata,
+                ffmpegVideoCodecId(activeVideoCodecId),
+            )
             muxerStarted = true
+            if (requestedAdvancedVideoCodec && videoExtradata.isNotEmpty()) lastConfigBytes = videoExtradata
             pathStats.muxerStarted()
             val mixed = mixedAudio
             if (mixed != null) {
@@ -866,6 +1012,7 @@ internal class EmbeddedDeviceSession(
         // into the other from inside their own lock deadlocks instead of just contending. Only set
         // the flag under the lock; fire the callback after releasing it.
         var shouldReportVideoStart = false
+        var videoStartNotification: Long? = null
         var outputPts = synchronized(lock) {
             val anchor = firstAnchorPtsUs ?: event.ptsUs.also {
                 firstAnchorPtsUs = it
@@ -881,7 +1028,7 @@ internal class EmbeddedDeviceSession(
                     videoConnectionAnchorReady = true
                     outputPts = (event.ptsUs - requireNotNull(firstAnchorPtsUs) + ptsOffsetUs).coerceAtLeast(0L)
                 }
-                onVideoStartElapsedMs(elapsed)
+                videoStartNotification = elapsed
             } else {
                 val gapMs = (elapsed - videoAnchorElapsedMs.get() -
                     synchronized(lock) { lastOutputPtsUs.coerceAtLeast(0L) / MICROS_PER_MILLI }).coerceAtLeast(0L)
@@ -900,7 +1047,7 @@ internal class EmbeddedDeviceSession(
                 onDiagnostic("Embedded recording: video gap ${gapMs}ms; elapsed time is preserved across reconnect.")
             }
         }
-        val payload = if (event.keyFrame && pendingConfig != null) pendingConfig + event.data else event.data
+        val payload = muxedVideoPacketPayload(activeVideoCodecId, pendingConfig, event.keyFrame, event.data)
         if (!muxerStarted) {
             // A device that never emits a leading config packet (shouldn't happen for H.264, but
             // don't silently drop video if it does) starts the muxer with empty extradata.
@@ -909,7 +1056,12 @@ internal class EmbeddedDeviceSession(
             var captureToClose: DesktopMicrophoneCapture? = null
             synchronized(lock) {
                 if (!muxerStarted) {
-                    muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), ByteArray(0))
+                    muxer.start(
+                        pendingWidth.coerceAtLeast(1),
+                        pendingHeight.coerceAtLeast(1),
+                        ByteArray(0),
+                        ffmpegVideoCodecId(activeVideoCodecId),
+                    )
                     muxerStarted = true
                     pathStats.muxerStarted()
                     mixedAudio?.let { mixed ->
@@ -933,6 +1085,7 @@ internal class EmbeddedDeviceSession(
         pathStats.muxedVideoPackets.incrementAndGet()
         synchronized(lock) { lastOutputPtsUs = maxOf(lastOutputPtsUs, outputPts) }
         onVideoPacketWrittenHook?.invoke(outputPts, event.keyFrame)
+        videoStartNotification?.let(onVideoStartElapsedMs)
         return if (event.keyFrame) null else pendingConfig
     }
 
@@ -1070,6 +1223,7 @@ internal class EmbeddedDeviceSession(
         alreadyAdded: Boolean,
         streamEpoch: Long,
     ): Boolean {
+        if (!muxer.hasWrittenVideo()) return alreadyAdded
         val (anchor, offset, mixed) = synchronized(lock) {
             if (activeStreamEpoch != streamEpoch || !videoConnectionAnchorReady) return alreadyAdded
             val currentAnchor = firstAnchorPtsUs ?: return alreadyAdded
@@ -1118,14 +1272,20 @@ internal class EmbeddedDeviceSession(
     }
 
     private fun feedDecoder(event: ScrcpyStreamEvent.Packet) {
+        val payload = if (event.config) {
+            decoderVideoConfigPayload(activeVideoCodecId, event.data) ?: return
+        } else {
+            event.data
+        }
         val (feed, directFeed) = synchronized(lock) { decoderFeed to directDecoderFeed }
-        feed?.offer(event.data, config = event.config, keyFrame = event.keyFrame)
+        feed?.offer(payload, config = event.config, keyFrame = event.keyFrame)
         directFeed?.offerPacket(
             BoundedScrcpyPacketFeed.Packet(
                 ptsUs = event.ptsUs,
                 config = event.config,
                 keyFrame = event.keyFrame,
-                data = event.data,
+                data = payload,
+                codecId = activeVideoCodecId,
             ),
         )
     }
@@ -1197,6 +1357,7 @@ internal class EmbeddedDeviceSession(
         const val NO_VIDEO_ANCHOR = Long.MIN_VALUE
         const val MAX_RECENT_VIDEO_BYTES = 8L * 1024 * 1024
         const val MAX_RECENT_VIDEO_PACKETS = 180
+        const val ADVANCED_CODEC_STARTUP_TIMEOUT_MS = 12_000
 
         // Android's audio MediaCodec setup (AudioEncoder.encode()) goes through an extra async
         // callback-registration round trip that video's SurfaceEncoder doesn't, so audio's config
@@ -1206,4 +1367,11 @@ internal class EmbeddedDeviceSession(
         const val AUDIO_CONFIG_POLL_MS = 20L
         const val NANOS_PER_MILLI = 1_000_000L
     }
+}
+
+private fun ffmpegVideoCodecId(scrcpyCodecId: Int): Int = when (scrcpyCodecId) {
+    CaptureVideoCodec.H264.scrcpyId -> AV_CODEC_ID_H264
+    CaptureVideoCodec.H265.scrcpyId -> AV_CODEC_ID_HEVC
+    CaptureVideoCodec.AV1.scrcpyId -> AV_CODEC_ID_AV1
+    else -> error("unsupported scrcpy codec id 0x${scrcpyCodecId.toUInt().toString(16)}")
 }

@@ -100,8 +100,8 @@ internal class BoundedScrcpyAnnexBFeed(
     private val pump = thread(name = "scrcpy-mirror-packet-feed", isDaemon = true) {
         try {
             val reader = ScrcpyPacketReader(rawInput)
-            when (reader.readHeader()) {
-                is ScrcpyStreamHeader.Codec -> Unit
+            val codecId = when (val header = reader.readHeader()) {
+                is ScrcpyStreamHeader.Codec -> header.id
                 ScrcpyStreamHeader.Disabled -> throw IOException("scrcpy video stream is disabled")
                 ScrcpyStreamHeader.Error -> throw ScrcpyStreamErrorException("scrcpy reported a server configuration error")
             }
@@ -131,6 +131,7 @@ internal class BoundedScrcpyAnnexBFeed(
                                     receivedAtNanos = receivedAtNanos,
                                     connectionEpoch = connectionEpoch,
                                     sequence = ++sequence,
+                                    codecId = codecId,
                                 ),
                             )
                         }
@@ -199,6 +200,7 @@ internal class BoundedScrcpyPacketFeed(
         val height: Int = 0,
         val receivedAtMs: Long = System.currentTimeMillis(),
         val connectionEpoch: Long = 0L,
+        val codecId: Int = ScrcpyCodecIds.H264,
     )
 
     private val lock = Object()
@@ -224,8 +226,8 @@ internal class BoundedScrcpyPacketFeed(
         thread(name = "scrcpy-mirror-packet-reader", isDaemon = true) {
             try {
                 val reader = ScrcpyPacketReader(rawInput)
-                when (reader.readHeader()) {
-                    is ScrcpyStreamHeader.Codec -> Unit
+                val codecId = when (val header = reader.readHeader()) {
+                    is ScrcpyStreamHeader.Codec -> header.id
                     else -> throw IOException("scrcpy video stream is unavailable")
                 }
                 var width = 0
@@ -248,6 +250,7 @@ internal class BoundedScrcpyPacketFeed(
                                 height,
                                 System.currentTimeMillis(),
                                 connectionEpoch,
+                                codecId,
                             )
                             runCatching { onPacket(packet) }
                             offer(packet)

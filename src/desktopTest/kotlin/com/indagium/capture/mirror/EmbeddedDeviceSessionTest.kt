@@ -2,6 +2,7 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.capture.CaptureVideoCodec
 import com.indagium.capture.MkvStructure
 import com.indagium.capture.StreamingMkvWriter
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
@@ -110,6 +111,62 @@ class EmbeddedDeviceSessionTest {
         } finally {
             subscription.close()
             session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun advancedStreamWithoutAnInitialKeyFrameFallsBackCleanlyToH264() {
+        val advancedWithoutKeyFrame = videoStream(
+            width = 64,
+            height = 96,
+            config = byteArrayOf(1, 2, 3),
+            packets = listOf(Packet(0, false, byteArrayOf(4, 5, 6))),
+            codecId = ScrcpyCodecIds.AV1,
+        )
+        val h264Stream = videoStream(64, 96, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key)))
+        val requestedOptions = CopyOnWriteArrayList<MirrorStreamOptions>()
+        val streams = ConcurrentLinkedQueue(listOf(advancedWithoutKeyFrame, h264Stream))
+        val transport = EmbeddedMirrorTransport { _, options ->
+            requestedOptions += options
+            fakeConnection(requireNotNull(streams.poll()))
+        }
+        val file = tempFile()
+        val diagnostics = CopyOnWriteArrayList<String>()
+        val decoderCodecs = CopyOnWriteArrayList<Int>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(file),
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 0,
+            reconnectDelay = Duration.ZERO,
+            onDiagnostic = diagnostics::add,
+        )
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                input.readBytes()
+            }
+
+            override fun decode(input: InputStream, codecId: Int, onFrame: (MirrorFrame) -> Unit) {
+                decoderCodecs += codecId
+                input.readBytes()
+            }
+        }
+        try {
+            session.start("serial", MirrorStreamOptions(videoCodec = CaptureVideoCodec.AV1, videoEncoder = "test.av1"))
+            session.attachDecoder(decoder) { }
+            awaitTrue {
+                session.hasReceivedFirstVideoPacket() && requestedOptions.size >= 2 && decoderCodecs.isNotEmpty()
+            }
+            assertEquals(listOf(CaptureVideoCodec.AV1, CaptureVideoCodec.H264), requestedOptions.map { it.videoCodec })
+            assertEquals(listOf(ScrcpyCodecIds.H264), decoderCodecs.distinct(), "the pending AV1 config must never enter the H.264 decoder")
+            assertTrue(diagnostics.any { it.contains("retrying with H.264") }, "fallback should be visible: $diagnostics")
+        } finally {
+            session.close()
+        }
+        org.bytedeco.javacv.FFmpegFrameGrabber(file).use { grabber ->
+            grabber.start()
+            assertEquals(AV_CODEC_ID_H264, grabber.videoCodec, "the finalized fallback file must contain H.264, not abandoned AV1 config")
+            assertTrue(grabber.grabImage() != null, "the fallback H.264 key frame must be decodable")
         }
     }
 
@@ -871,12 +928,17 @@ class EmbeddedDeviceSessionTest {
         }
     }.toByteArray()
 
-    private fun videoStream(width: Int, height: Int, config: ByteArray, packets: List<Packet>): ByteArray =
-        videoStreamHeader(width, height) + videoStreamPayload(config, packets)
+    private fun videoStream(
+        width: Int,
+        height: Int,
+        config: ByteArray,
+        packets: List<Packet>,
+        codecId: Int = ScrcpyCodecIds.H264,
+    ): ByteArray = videoStreamHeader(width, height, codecId) + videoStreamPayload(config, packets)
 
-    private fun videoStreamHeader(width: Int, height: Int): ByteArray = ByteArrayOutputStream().also { out ->
+    private fun videoStreamHeader(width: Int, height: Int, codecId: Int = ScrcpyCodecIds.H264): ByteArray = ByteArrayOutputStream().also { out ->
         DataOutputStream(out).apply {
-            writeInt(ScrcpyCodecIds.H264)
+            writeInt(codecId)
             writeInt(0x80000000.toInt())
             writeInt(width)
             writeInt(height)
