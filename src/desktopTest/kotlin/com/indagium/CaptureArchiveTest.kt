@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.github.luben.zstd.Zstd
+import com.github.luben.zstd.ZstdInputStream
 import com.indagium.capture.CAPTURE_DESCRIPTOR_NAME
 import com.indagium.capture.CaptureArchiveException
 import com.indagium.capture.CaptureArchiveExporter
@@ -31,8 +33,10 @@ import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.parseLogcat
 import org.apache.commons.compress.archivers.zip.ZipMethod
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.IOException
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -1167,6 +1171,102 @@ class CaptureArchiveTest {
     }
 
     @Test
+    fun readerReportsAZstdLogCorruptedMidStreamAsAFriendlyArchiveError() {
+        val root = createTempDirectory("capture-archive-zstd-mid").toFile()
+        val zstd = zstdArchiveOfBigLog(root)
+        patchZstdLogFrame(zstd) { frame -> frame.withDecodeErrorFlippedByteInTheMiddle() }
+
+        assertZstdLogCorruption(zstd, root)
+    }
+
+    @Test
+    fun readerReportsAZstdLogWithABadFrameHeaderAsAFriendlyArchiveError() {
+        val root = createTempDirectory("capture-archive-zstd-header").toFile()
+        val zstd = zstdArchiveOfBigLog(root)
+        patchZstdLogFrame(zstd) { frame -> frame.also { repeat(4) { i -> it[i] = 0 } } }
+
+        assertZstdLogCorruption(zstd, root)
+    }
+
+    @Test
+    fun zstdLogWithTheWrongChecksumKeepsTheExistingChecksumError() {
+        val root = createTempDirectory("capture-archive-zstd-checksum").toFile()
+        val original = exportBigLog(root)
+        val entries = LinkedHashMap<String, ByteArray>()
+        ZipFile(original).use { zip ->
+            zip.entries().asSequence().forEach { entry -> entries[entry.name] = zip.getInputStream(entry).use { it.readBytes() } }
+        }
+        entries["logcat.log"] = entries.getValue("logcat.log").copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val tampered = File(root, "zstd-tampered.zip")
+        ZstdZipFixture.write(tampered, entries, zstdEntries = setOf("logcat.log"))
+
+        // A well-formed zstd stream with the wrong content is a digest problem, not a decoding problem.
+        val failure = assertFailsWith<IllegalArgumentException> { CaptureArchiveReader.open(tampered, File(root, "cache")) }
+        assertTrue(failure.message.orEmpty().contains("checksum mismatch"), failure.message)
+        assertNull(CaptureArchiveReader.extractVerifiedLogForRestore(tampered, "logcat.log", File(root, "cache-restore")))
+    }
+
+    private fun assertZstdLogCorruption(archive: File, root: File) {
+        val failure = assertFailsWith<CaptureArchiveException> { CaptureArchiveReader.open(archive, File(root, "cache")) }
+        assertEquals("The capture log in this archive is corrupted (zstd data could not be decoded)", failure.message)
+        assertTrue(failure.cause is IOException, "the zstd decoding error stays attached as the cause: ${failure.cause}")
+        assertTrue(File(root, "cache").listFiles().orEmpty().isEmpty(), "a failed import must not leave a half-extracted capture behind")
+        assertNull(CaptureArchiveReader.extractVerifiedLogForRestore(archive, "logcat.log", File(root, "cache-restore")))
+        assertTrue(File(root, "cache-restore").listFiles().orEmpty().isEmpty())
+    }
+
+    /** A capture archive whose log is big enough for zstd to emit several compressed blocks, stored as method 93. */
+    private fun zstdArchiveOfBigLog(root: File): File {
+        val zstd = File(root, "zstd-big.zip")
+        ZstdZipFixture.rewrite(exportBigLog(root), zstd, zstdEntries = setOf("logcat.log"))
+        return zstd
+    }
+
+    private fun exportBigLog(root: File): File {
+        val session = session(root)
+        val rows = (0 until BIG_LOG_ROWS).map { i ->
+            RawRow("01-01 10:00:%02d.%03d  1  1 I Tag: row $i value ${(i * 7919L) % 1_009}\n".format(i / 1_000 % 60, i % 1_000), 1_000L + i, i + 1)
+        }
+        writeCaptureInput(session, rows)
+        return File(root, "capture-big.zip").also { destination ->
+            CaptureArchiveExporter(CaptureVideoExporter { _, _, _, _ -> error("unused") }).export(
+                session,
+                CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 1_000L + BIG_LOG_ROWS),
+            )
+        }
+    }
+
+    /** Rewrites the stored zstd frame of `logcat.log` inside [archive] in place (ZIP stores method 93 data verbatim). */
+    private fun patchZstdLogFrame(archive: File, patch: (ByteArray) -> ByteArray) {
+        val logBytes = org.apache.commons.compress.archivers.zip.ZipFile.builder().setFile(archive).get().use { zip ->
+            zip.getInputStream(zip.getEntry("logcat.log")).use { it.readBytes() }
+        }
+        val frame = Zstd.compress(logBytes)
+        val bytes = archive.readBytes()
+        val offset = (0..bytes.size - frame.size).first { start -> frame.indices.all { bytes[start + it] == frame[it] } }
+        val patched = patch(frame.copyOf())
+        assertEquals(frame.size, patched.size)
+        RandomAccessFile(archive, "rw").use { file ->
+            file.seek(offset.toLong())
+            file.write(patched)
+        }
+    }
+
+    /**
+     * Flips one byte somewhere in the middle of the frame, choosing the first position whose damage the
+     * zstd decoder itself detects (a flipped literal byte can decode "successfully" to wrong data, which
+     * is the checksum's business, not the decoder's).
+     */
+    private fun ByteArray.withDecodeErrorFlippedByteInTheMiddle(): ByteArray {
+        for (position in size / 4 until size * 3 / 4) {
+            val candidate = copyOf().also { it[position] = (it[position].toInt() xor 0xFF).toByte() }
+            val decodes = runCatching { ZstdInputStream(ByteArrayInputStream(candidate)).use { it.readBytes() } }.isSuccess
+            if (!decodes) return candidate
+        }
+        error("no mid-stream byte flip made the zstd frame undecodable")
+    }
+
+    @Test
     fun readerRejectsTraversalEvenWhenItIsAnUnreferencedEntry() {
         val root = createTempDirectory("capture-archive-traversal").toFile()
         val original = exportLogOnly(root)
@@ -1772,3 +1872,6 @@ class CaptureArchiveTest {
         }
     }
 }
+
+// Enough rows that zstd emits several compressed blocks, so a mid-stream flip lands in real block data.
+private const val BIG_LOG_ROWS = 3_000

@@ -1304,7 +1304,7 @@ object CaptureArchiveReader {
             ZipFile.builder().setFile(source).get().use { zip ->
                 val scan = scanZipEntries(zip)
                 val descriptorEntry = scan.descriptorEntry ?: error("Capture descriptor is missing")
-                val descriptorText = zip.getInputStream(descriptorEntry).use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
+                val descriptorText = zip.openEntryStream(descriptorEntry, "capture descriptor").use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
                 val descriptor = parseDescriptor(descriptorText)
                 require(expectedLogPath == null || descriptor.log.path == expectedLogPath) {
                     "Restored capture log entry no longer matches its descriptor"
@@ -1314,7 +1314,7 @@ object CaptureArchiveReader {
                 val entry = zip.getEntry(descriptor.log.path) ?: error("Capture log is missing")
                 val target = resolveSafe(output, descriptor.log.path)
                 target.parentFile?.mkdirs()
-                zip.getInputStream(entry).use { input ->
+                zip.openEntryStream(entry, "capture log").use { input ->
                     extractVerified(input, target, descriptor.log, assetLimit(descriptor, descriptor.log))
                 }
                 success = true
@@ -1343,7 +1343,7 @@ object CaptureArchiveReader {
                 val scan = scanZipEntries(zip)
                 val descriptorEntry = scan.descriptorEntry ?: throw CaptureArchiveException("Capture descriptor is missing")
                 require(!descriptorEntry.isDirectory) { "Capture descriptor is not a file" }
-                val descriptorText = zip.getInputStream(descriptorEntry).use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
+                val descriptorText = zip.openEntryStream(descriptorEntry, "capture descriptor").use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
                 descriptor = parseDescriptor(descriptorText)
                 val screenshotsBytes = descriptor.screenshots.sumOf { scan.entrySizes[it.path] ?: 0L }
                 require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
@@ -1369,7 +1369,8 @@ object CaptureArchiveReader {
                     if (entry.size >= 0) require(entry.size <= limit) { "Capture asset exceeds its size limit: ${asset.path}" }
                     val target = resolveSafe(output, asset.path)
                     target.parentFile?.mkdirs()
-                    zip.getInputStream(entry).use { input -> extractVerified(input, target, asset, limit) }
+                    val what = if (asset == descriptor.log) "capture log" else "capture asset ${asset.path}"
+                    zip.openEntryStream(entry, what).use { input -> extractVerified(input, target, asset, limit) }
                 }
                 require(remainingAssets.isEmpty()) {
                     "Capture asset is missing: ${remainingAssets.keys.first()}"
