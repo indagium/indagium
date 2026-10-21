@@ -5,7 +5,9 @@ import com.indagium.capture.CaptureArchiveException
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureAvailabilityInterval
+import com.indagium.capture.CaptureCompactVideoTranscoder
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
@@ -16,8 +18,15 @@ import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.captureFilenameTemplateError
 import com.indagium.capture.captureSettingsFromJson
 import com.indagium.capture.captureSettingsToJson
+import com.indagium.capture.markerHeader
+import com.indagium.capture.markerHeadingLine
 import com.indagium.capture.renderCaptureFilename
+import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
+import com.indagium.model.VideoFrameReference
+import com.indagium.model.VideoSource
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -74,6 +83,346 @@ class CaptureArchiveTest {
         // Archive v3 defaults the exported container to MP4 (CaptureVideoContainer.MP4) — see
         // CaptureModels.kt.
         assertEquals("screen.mp4", imported.descriptor.video?.path)
+    }
+
+    @Test
+    fun compactExportRoundTripsAsIndWithCompactVideoEntryAndCleansComparisonFiles() {
+        val root = createTempDirectory("capture-archive-ind").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+            availabilityIntervals = listOf(
+                CaptureAvailabilityInterval(150_000, 200_000, "old-boot", "new-boot", true),
+            ),
+        )
+        writeCaptureInput(
+            session,
+            listOf(
+                RawRow("01-01 10:00:01.000  1  1 I Tag: row one\n", 1_000, 1),
+                RawRow("01-01 10:06:40.000  1  1 I Tag: row two\n", 400_000, 2),
+            ),
+        )
+        session.videoFile.parentFile.mkdirs()
+        val originalVideo = byteArrayOf(1, 2, 3, 4)
+        session.videoFile.writeBytes(originalVideo)
+        val screenshotBytes = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 1, 2, 3, 4)
+        File(session.directory, "screenshots/screenshot-1000.png").apply {
+            parentFile.mkdirs()
+            writeBytes(screenshotBytes)
+        }
+        val marker = com.indagium.capture.CaptureMarker(
+            id = "m1",
+            elapsedMs = 1_000,
+            firstOrdinal = 1,
+            lastOrdinal = 2,
+            videoMs = 1_000,
+            label = "Compact marker",
+            preMs = 0,
+            postMs = 0,
+            screenshotPath = null,
+        )
+        val frame = VideoFrameReference(
+            source = VideoSource.LocalFile(session.videoFile.absolutePath),
+            sourceLabel = "screen.mkv",
+            positionMs = 1_000,
+        )
+        val notes = Annotations(
+            blocks = listOf(
+                AnnBlock.Note("note-1", "${markerHeader(marker)}\n${markerHeadingLine(1, marker.label)}\nDetails"),
+                AnnBlock.LogRef("ref-1", logIds = listOf(1, 2), caption = "Marked rows"),
+                AnnBlock.Image(
+                    "image-1",
+                    caption = "Captured video frame",
+                    provenance = frame.provenanceLabel,
+                    format = "png",
+                    bytes = byteArrayOf(9, 8, 7),
+                    videoFrame = frame,
+                ),
+            ),
+        )
+        val destination = File(root, "capture.ind")
+        val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
+            CaptureVideoClip(start.coerceAtMost(end - 1), end, end - start)
+        }
+        val fakeCompact = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = Unit
+
+            override fun transcode(source: File, destination: File) {
+                assertEquals(128 * 1024L, source.length())
+                destination.writeBytes(ByteArray(2 * 1024) { (it % 31).toByte() })
+            }
+        }
+
+        val result = CaptureArchiveExporter(
+            videoExporter = fakeVideo,
+            compactVideoTranscoder = fakeCompact,
+        ).export(
+            session,
+            CaptureExportRequest(
+                destination = destination,
+                cutoffElapsedMs = session.elapsedMs,
+                format = CaptureExportFormat.IND_AV1,
+            ),
+            notes = notes,
+        )
+
+        assertTrue(result.message.contains("lossy; audio copied"))
+        assertTrue(CaptureArchiveReader.isCaptureArchive(destination))
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        assertEquals("screen.mkv", imported.descriptor.video?.path)
+        assertTrue(imported.logFile.readText().contains("row one\n"))
+        assertTrue(imported.logFile.readText().contains("row two\n"))
+        assertEquals(originalVideo.toList(), session.videoFile.readBytes().toList())
+        assertEquals(
+            listOf(CaptureAvailabilityInterval(150_000, 200_000, "old-boot", "new-boot", true)),
+            imported.descriptor.availabilityIntervals,
+        )
+        assertEquals(imported.descriptor.availabilityIntervals, imported.timeline?.availabilityIntervals)
+        assertEquals(2, requireNotNull(imported.timeline).rows.size)
+        assertEquals("note-1", imported.descriptor.markers.single().noteBlockId)
+        assertEquals(1, imported.descriptor.markers.single().firstOrdinal)
+        assertEquals(2, imported.descriptor.markers.single().lastOrdinal)
+        val importedNotes = requireNotNull(imported.notes)
+        val importedMarker = importedNotes.blocks.filterIsInstance<AnnBlock.Note>().single()
+        assertTrue(importedMarker.text.contains("Compact marker"))
+        assertEquals(listOf(1, 2), importedNotes.blocks.filterIsInstance<AnnBlock.LogRef>().single().logIds)
+        val importedFrame = requireNotNull(importedNotes.blocks.filterIsInstance<AnnBlock.Image>().single().videoFrame)
+        assertEquals("screen.mkv", (importedFrame.source as VideoSource.ArchiveEntry).entryPath)
+        assertTrue(importedFrame.sourceLabel.endsWith("/screen.mkv"))
+        assertEquals("notes.ann", imported.descriptor.notes?.path)
+        assertTrue(requireNotNull(imported.descriptor.notes).sha256.isNotBlank())
+        assertEquals(1, imported.descriptor.screenshots.size)
+        assertTrue(imported.descriptor.screenshots.single().sha256.isNotBlank())
+        assertEquals(screenshotBytes.toList(), imported.screenshotFiles.single().readBytes().toList())
+        ZipFile(destination).use { zip ->
+            assertEquals(2 * 1024L, zip.getEntry("screen.mkv").size)
+            val courtesy = zip.getInputStream(zip.getEntry("captured_with_indagium.txt")).bufferedReader().readText()
+            assertTrue(courtesy.contains("Open this .ind"))
+        }
+        assertFalse(root.listFiles().orEmpty().any { it.name.contains("zip-compare") || it.name.contains(".tmp-") })
+    }
+
+    @Test
+    fun compactExportRejectsNoVideoAndNoSavingWithoutPublishingTemporaryFiles() {
+        val root = createTempDirectory("capture-archive-ind-reject").toFile()
+        val noVideoSession = session(root, recordVideo = false)
+        writeCaptureInput(noVideoSession, listOf(RawRow("row\n", 1_000, 1)))
+        val noVideoDestination = File(root, "no-video.ind")
+        val noVideoFailure = assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveExporter().export(
+                noVideoSession,
+                CaptureExportRequest(
+                    noVideoDestination,
+                    cutoffElapsedMs = noVideoSession.elapsedMs,
+                    includeVideo = false,
+                    format = CaptureExportFormat.IND_AV1,
+                ),
+            )
+        }
+        assertTrue(noVideoFailure.message.orEmpty().contains("requires usable video"))
+        assertFalse(noVideoDestination.exists())
+
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val destination = File(root, "not-smaller.ind")
+        val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(ByteArray(1024) { (it % 97).toByte() })
+            CaptureVideoClip(start.coerceAtMost(end - 1), end, end - start)
+        }
+        val fakeCompact = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = Unit
+
+            override fun transcode(source: File, destination: File) { destination.writeBytes(ByteArray(2048) { 1 }) }
+        }
+        val noSaving = assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveExporter(videoExporter = fakeVideo, compactVideoTranscoder = fakeCompact).export(
+                session,
+                CaptureExportRequest(destination, cutoffElapsedMs = session.elapsedMs, format = CaptureExportFormat.IND_AV1),
+            )
+        }
+        assertTrue(noSaving.message.orEmpty().contains("AV1 would not make this capture smaller"))
+        assertFalse(destination.exists())
+        assertFalse(root.listFiles().orEmpty().any { it.name.contains("zip-compare") || it.name.contains(".tmp-") })
+    }
+
+    @Test
+    fun compactExportCopiesAlreadyAv1WithoutEncoderOrZipComparison() {
+        val root = createTempDirectory("capture-archive-ind-av1-passthrough").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("row\n", 400_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val stagedBytes = ByteArray(512) { (it % 97).toByte() }
+        val destination = File(root, "existing-av1.ind")
+        val statuses = mutableListOf<String>()
+        val videoExporter = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(stagedBytes)
+            CaptureVideoClip(start, end, end - start)
+        }
+        val passthrough = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = error("an existing AV1 stream must not require an encoder")
+
+            override fun isAlreadyAv1(source: File): Boolean = true
+
+            override fun copyAlreadyAv1(source: File, destination: File) {
+                source.copyTo(destination, overwrite = true)
+            }
+
+            override fun transcode(source: File, destination: File) = error("an existing AV1 stream must not be re-encoded")
+        }
+
+        val result = CaptureArchiveExporter(videoExporter, compactVideoTranscoder = passthrough).export(
+            session,
+            CaptureExportRequest(destination, cutoffElapsedMs = session.elapsedMs, format = CaptureExportFormat.IND_AV1),
+            onStatus = { statuses += it },
+        )
+
+        assertTrue(result.message.contains("copied without conversion"))
+        assertFalse(statuses.any { it.contains("Comparing size with ZIP") })
+        assertTrue(CaptureArchiveReader.isCaptureArchive(destination))
+        ZipFile(destination).use { zip ->
+            assertEquals(stagedBytes.toList(), zip.getInputStream(zip.getEntry("screen.mkv")).use { it.readBytes().toList() })
+        }
+        assertTrue(root.listFiles().orEmpty().none { it.name.contains("zip-compare") || it.name.contains(".tmp-") })
+    }
+
+    @Test
+    fun compactExportReportsUnavailableEncoderAfterCheckingForAv1Passthrough() {
+        val root = createTempDirectory("capture-archive-ind-unavailable").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("row\n", 400_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        var videoStagingStarted = false
+        val transcoder = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() { throw IOException("bundled AV1 encoder unavailable") }
+
+            override fun transcode(source: File, destination: File) = error("unavailable encoder must not transcode")
+        }
+
+        val failure = assertFailsWith<IOException> {
+            CaptureArchiveExporter(
+                videoExporter = CaptureVideoExporter { _, staged, start, end ->
+                    videoStagingStarted = true
+                    staged.writeBytes(byteArrayOf(4, 5, 6))
+                    CaptureVideoClip(start, end, end - start)
+                },
+                compactVideoTranscoder = transcoder,
+            ).export(
+                session,
+                CaptureExportRequest(
+                    File(root, "unavailable.ind"),
+                    cutoffElapsedMs = session.elapsedMs,
+                    format = CaptureExportFormat.IND_AV1,
+                ),
+            )
+        }
+
+        assertTrue(failure.message.orEmpty().contains("unavailable"))
+        assertTrue(videoStagingStarted)
+        assertFalse(File(root, "unavailable.ind").exists())
+        assertTrue(root.listFiles().orEmpty().none { it.name.contains("zip-compare") || it.name.contains(".tmp-") })
+    }
+
+    @Test
+    fun compactEncodingFailurePreservesExistingDestinationAndSaveCheckpoints() {
+        val root = createTempDirectory("capture-archive-ind-overwrite-failure").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+            logCheckpointMs = 300_000,
+            videoCheckpointMs = 250_000,
+        )
+        writeCaptureInput(session, listOf(RawRow("new since save\n", 400_000, 2)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val destination = File(root, "existing.ind").apply { writeBytes("previous archive".toByteArray()) }
+        val priorBytes = destination.readBytes()
+        val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
+            CaptureVideoClip(start, end, end - start)
+        }
+        val failingCompact = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = Unit
+
+            override fun transcode(source: File, destination: File) {
+                destination.writeBytes(byteArrayOf(9, 9, 9))
+                throw IOException("synthetic AV1 failure")
+            }
+        }
+
+        assertFailsWith<IOException> {
+            CaptureArchiveExporter(fakeVideo, compactVideoTranscoder = failingCompact).export(
+                session,
+                CaptureExportRequest(
+                    destination,
+                    range = CaptureRange.SINCE_SAVE,
+                    cutoffElapsedMs = session.elapsedMs,
+                    overwriteExisting = true,
+                    format = CaptureExportFormat.IND_AV1,
+                ),
+            )
+        }
+
+        assertEquals(priorBytes.toList(), destination.readBytes().toList())
+        assertEquals(300_000L, session.logCheckpointMs)
+        assertEquals(250_000L, session.videoCheckpointMs)
+        assertTrue(root.listFiles().orEmpty().none { it.name.contains("zip-compare") || it.name.contains(".tmp-") || it.name.contains("-export-") })
+    }
+
+    @Test
+    fun compactCancellationCleansTemporaryFilesWithoutPublishing() {
+        val root = createTempDirectory("capture-archive-ind-cancel").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("row\n", 400_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val destination = File(root, "cancelled.ind")
+        val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
+            CaptureVideoClip(start, end, end - start)
+        }
+        val cancellingCompact = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = Unit
+
+            override fun transcode(source: File, destination: File) {
+                destination.writeBytes(ByteArray(2 * 1024) { (it % 31).toByte() })
+                Thread.currentThread().interrupt()
+            }
+        }
+
+        try {
+            assertFailsWith<InterruptedException> {
+                CaptureArchiveExporter(fakeVideo, compactVideoTranscoder = cancellingCompact).export(
+                    session,
+                    CaptureExportRequest(
+                        destination,
+                        cutoffElapsedMs = session.elapsedMs,
+                        format = CaptureExportFormat.IND_AV1,
+                    ),
+                )
+            }
+        } finally {
+            Thread.interrupted()
+        }
+
+        assertFalse(destination.exists())
+        assertTrue(root.listFiles().orEmpty().none { it.name.contains("zip-compare") || it.name.contains(".tmp-") || it.name.contains("-export-") })
     }
 
     @Test

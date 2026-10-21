@@ -260,7 +260,9 @@ internal fun FileView(
     // still exist in the retained-session store. Keep the prominent stopped-capture strip for a
     // finalized local recording, but route archive cuts through the ordinary Export menu.
     val archiveBackedCapture = state.isImportedCaptureSnapshot(tab.id) ||
-        tab.captureArchivePath?.endsWith(".zip", ignoreCase = true) == true
+        tab.captureArchivePath?.let { path ->
+            path.endsWith(".zip", ignoreCase = true) || path.endsWith(".ind", ignoreCase = true)
+        } == true
     val captureDeviceEvents = rememberCaptureDeviceEvents(state, tab)
     var importedRangeEditorOpen by remember(tab.id) { mutableStateOf(false) }
 

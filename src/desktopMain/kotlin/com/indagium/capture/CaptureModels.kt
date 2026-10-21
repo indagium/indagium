@@ -111,6 +111,8 @@ data class CaptureSettings(
     val writeDeviceAvailabilityMarkers: Boolean = true,
     /** Render the elapsed device-unavailable interval as a card in capture playback/exports. */
     val showUnavailableFrames: Boolean = true,
+    /** Requested embedded recording codec. H.264 preserves the pre-codec-selection behavior. */
+    val videoCodec: CaptureVideoCodec = CaptureVideoCodec.H264,
 )
 
 const val MICROPHONE_OFF_ID = "off"
@@ -374,6 +376,10 @@ data class CaptureSessionScreenshot(val file: File, val elapsedMs: Long)
 
 enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION, EXPLICIT }
 
+/** Container selected for a portable capture export. Compact archives retain the same v4 ZIP
+ *  layout and descriptor, but replace the staged video with AV1 when it makes the archive smaller. */
+enum class CaptureExportFormat(val extension: String) { ZIP("zip"), IND_AV1("ind") }
+
 data class CaptureExportRequest(
     val destination: File,
     val range: CaptureRange = CaptureRange.ALL,
@@ -387,7 +393,26 @@ data class CaptureExportRequest(
     /** Inclusive elapsed-time window for [CaptureRange.EXPLICIT], in session elapsed milliseconds. */
     val explicitStartElapsedMs: Long? = null,
     val explicitEndElapsedMs: Long? = null,
+    /** Appended to keep existing positional construction source-compatible. */
+    val format: CaptureExportFormat = CaptureExportFormat.ZIP,
 )
+
+/** Bundled AV1 encoder used only by the optional Compact export path. */
+interface CaptureCompactVideoTranscoder {
+    /** Throws an actionable error when the pinned JavaCPP FFmpeg build has no supported encoder. */
+    fun ensureAvailable()
+
+    /** Whether this staged video already uses AV1 and can be copied without another lossy encode. */
+    fun isAlreadyAv1(source: File): Boolean = false
+
+    /** Copies an existing AV1 stream into a Matroska container without decoding or re-encoding. */
+    fun copyAlreadyAv1(source: File, destination: File) {
+        source.copyTo(destination, overwrite = true)
+    }
+
+    /** Writes a new AV1 Matroska file while preserving the original audio packets; source is untouched. */
+    fun transcode(source: File, destination: File)
+}
 
 data class CaptureExportResult(
     val file: File,

@@ -1,7 +1,10 @@
 package com.indagium.capture
 
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -37,6 +40,121 @@ class CaptureToolsTest {
             listOf("/sdk/adb", "-s", "serial with spaces", "logcat", "-v", "threadtime"),
             tools.adbSpec("serial with spaces", "logcat", "-v", "threadtime").command,
         )
+    }
+
+    @Test
+    fun bundledEncoderProbeUsesUniqueJarAndAlwaysRemovesIt() {
+        val runner = FakeCaptureRunner().apply {
+            runHandler = { spec ->
+                when {
+                    spec.command.contains("push") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    spec.command.contains("app_process") -> CaptureCommandResult(
+                        0,
+                        """
+                            List of video encoders:
+                            --video-codec=h264 --video-encoder=c2.android.avc.encoder (sw) [Android]
+                            --video-codec=av1 --video-encoder=c2.vendor.av1.encoder (hw) [Vendor]
+                        """.trimIndent().toByteArray(),
+                        byteArrayOf(),
+                    )
+                    spec.command.contains("rm") ->
+                        CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    else -> null
+                }
+            }
+        }
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+
+        val capabilities = tools.listEmbeddedVideoEncoders("PHONE")
+
+        assertEquals(2, capabilities.encoders.size)
+        assertEquals(CaptureVideoCodec.AV1, capabilities.encoders.last().codec)
+        assertEquals(CaptureEncoderAcceleration.HARDWARE, capabilities.encoders.last().acceleration)
+        assertEquals(3, runner.runSpecs.size, "probe must push, list, then remove its temporary server jar")
+        val pushed = runner.runSpecs[0].command
+        val listed = runner.runSpecs[1].command
+        val removed = runner.runSpecs[2].command
+        assertEquals(listOf("/sdk/adb", "-s", "PHONE"), pushed.take(3))
+        assertTrue(listed.contains("list_encoders=true"))
+        assertTrue(listed.contains("cleanup=false"))
+        assertEquals(pushed.last(), removed.last())
+        assertTrue(pushed.last().startsWith("/data/local/tmp/indagium-scrcpy-probe-"))
+        assertFalse(File(pushed[pushed.lastIndex - 1]).exists(), "host-side temporary jar should be deleted")
+    }
+
+    @Test
+    fun bundledEncoderProbeCleansUpWhenServerListingFails() {
+        val runner = FakeCaptureRunner().apply {
+            runHandler = { spec ->
+                when {
+                    spec.command.contains("push") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    spec.command.contains("app_process") -> CaptureCommandResult(1, byteArrayOf(), "synthetic failure".toByteArray())
+                    spec.command.contains("rm") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    else -> null
+                }
+            }
+        }
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+
+        val failure = assertFailsWith<IllegalStateException> { tools.listEmbeddedVideoEncoders("PHONE") }
+
+        assertTrue(failure.message.orEmpty().contains("synthetic failure"))
+        assertEquals(3, runner.runSpecs.size, "the temporary server jar must be removed after a failed listing")
+        assertEquals(runner.runSpecs[0].command.last(), runner.runSpecs.last().command.last())
+        val localJar = File(runner.runSpecs[0].command[runner.runSpecs[0].command.lastIndex - 1])
+        assertFalse(localJar.exists())
+    }
+
+    @Test
+    fun bundledEncoderProbeAllowsAnEmptyRecognizedDeviceList() {
+        val runner = FakeCaptureRunner().apply {
+            runHandler = { spec ->
+                when {
+                    spec.command.contains("push") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    spec.command.contains("app_process") -> CaptureCommandResult(
+                        0,
+                        "List of video encoders:\n".toByteArray(),
+                        byteArrayOf(),
+                    )
+                    spec.command.contains("rm") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    else -> null
+                }
+            }
+        }
+
+        val capabilities = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner).listEmbeddedVideoEncoders("PHONE")
+
+        assertTrue(capabilities.encoders.isEmpty(), "a successful listing with no entries means unsupported, not probe failure")
+        assertEquals(3, runner.runSpecs.size)
+    }
+
+    @Test
+    fun bundledEncoderProbeRestoresInterruptionAfterBestEffortCleanup() {
+        val runner = FakeCaptureRunner().apply {
+            runHandler = { spec ->
+                when {
+                    spec.command.contains("push") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    spec.command.contains("app_process") -> {
+                        Thread.currentThread().interrupt()
+                        CaptureCommandResult(0, "List of video encoders:\n".toByteArray(), byteArrayOf())
+                    }
+                    spec.command.contains("rm") -> CaptureCommandResult(0, byteArrayOf(), byteArrayOf())
+                    else -> null
+                }
+            }
+        }
+        val interruptedAfterReturn = AtomicBoolean(false)
+        val worker = Thread {
+            CaptureTools(CaptureExecutable("/sdk/adb"), null, runner).listEmbeddedVideoEncoders("PHONE")
+            interruptedAfterReturn.set(Thread.currentThread().isInterrupted)
+        }
+
+        worker.start()
+        worker.join(5_000)
+
+        assertFalse(worker.isAlive, "the bounded encoder probe should return")
+        assertTrue(interruptedAfterReturn.get(), "cleanup must restore cancellation after removing temporary files")
+        assertEquals(3, runner.runSpecs.size, "cleanup should still run while the worker is interrupted")
     }
 
     @Test

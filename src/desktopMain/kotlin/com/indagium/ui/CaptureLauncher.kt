@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.AdbMdnsService
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
@@ -115,6 +116,9 @@ internal fun CaptureLauncherContent(
     val selectedDevice = liveSelectedDevice
         ?: lastKnownDeviceBySerial?.takeIf { isSelectedDeviceRooting && it.serial == selectedSerial }
         ?: service.devices.firstOrNull()
+    LaunchedEffect(service, selectedDevice?.serial) {
+        selectedDevice?.takeIf { it.available }?.let { service.refreshVideoEncoderCapabilities(it.serial) }
+    }
     LaunchedEffect(service) {
         service.refreshDevices(force = true)
         while (true) {
@@ -244,7 +248,13 @@ internal fun CaptureLauncherContent(
                 onReclaimFocus = onReclaimFocus,
             )
         }
-        CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft, onReclaimFocus = onReclaimFocus)
+        CaptureBeforeStartRow(
+            state = state,
+            launcherTabId = launcherTabId,
+            draft = draft,
+            onReclaimFocus = onReclaimFocus,
+            deviceSerial = selectedDevice?.serial,
+        )
         AppButton(
             "Start capture",
             { selectedDevice?.let { state.startCaptureTab(it) } },
@@ -364,6 +374,7 @@ private fun CaptureBeforeStartRow(
     launcherTabId: String,
     draft: CaptureSettings,
     onReclaimFocus: () -> Unit,
+    deviceSerial: String?,
 ) {
     val edit: CaptureSettingsEdit = { transform -> state.updateCaptureLaunchSettings(launcherTabId, transform) }
     LauncherPanel("Before start") {
@@ -372,6 +383,11 @@ private fun CaptureBeforeStartRow(
             onReclaimFocus = onReclaimFocus,
             nativeMediaSupport = state.captureNativeMediaSupport,
             scrcpyAvailable = state.captureToolResolution?.scrcpyPath != null,
+            videoEncoderProbeState = deviceSerial?.let { state.captureService.videoEncoderProbeStates[it] },
+            videoEncoderDeviceSerial = deviceSerial,
+            onRefreshVideoEncoderSupport = deviceSerial?.let { serial ->
+                { state.captureService.refreshVideoEncoderCapabilities(serial, force = true) }
+            },
             edit = edit,
         )
     }
@@ -804,7 +820,13 @@ private fun UnfinishedSessionRow(
                 AppButton("Open", { state.openRetainedCapture(session.id) }, ButtonVariant.Secondary)
                 AppButton(
                     if (exportStatus.busy) "Saving…" else "Save ZIP",
-                    { state.saveRetainedCapture(session.id) },
+                    { state.saveRetainedCapture(session.id, format = CaptureExportFormat.ZIP) },
+                    ButtonVariant.Secondary,
+                    enabled = !state.captureExportBusy,
+                )
+                AppButton(
+                    if (exportStatus.busy) "Saving…" else "Save IND",
+                    { state.saveRetainedCapture(session.id, format = CaptureExportFormat.IND_AV1) },
                     ButtonVariant.Secondary,
                     enabled = !state.captureExportBusy,
                 )

@@ -6,7 +6,9 @@ import org.bytedeco.ffmpeg.avformat.AVFormatContext
 import org.bytedeco.ffmpeg.avformat.AVIOContext
 import org.bytedeco.ffmpeg.avutil.AVDictionary
 import org.bytedeco.ffmpeg.avutil.AVRational
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HEVC
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_OPUS
 import org.bytedeco.ffmpeg.global.avcodec.AV_INPUT_BUFFER_PADDING_SIZE
 import org.bytedeco.ffmpeg.global.avcodec.AV_PKT_FLAG_KEY
@@ -88,8 +90,9 @@ internal class StreamingMkvWriter(
 
     /** Allocates the output context and its video stream. Must be called before anything else;
      * [addAudio] (if used) must follow immediately, before the first packet write. */
+    @Suppress("TooGenericExceptionCaught") // A partially initialized FFmpeg context must be freed on JNI Errors as well as exceptions.
     @Synchronized
-    fun start(width: Int, height: Int, extradata: ByteArray) {
+    fun start(width: Int, height: Int, extradata: ByteArray, videoCodecId: Int = AV_CODEC_ID_H264) {
         check(output == null) { "StreamingMkvWriter.start() already called" }
         require(width > 0 && height > 0) { "video dimensions must be positive" }
         destination.absoluteFile.parentFile?.mkdirs()
@@ -99,12 +102,29 @@ internal class StreamingMkvWriter(
             "allocate streaming Matroska output",
         )
         if (context.isNull) throw IOException("FFmpeg did not allocate a streaming output context")
-        output = context
-        context.flush_packets(1)
-        val stream = newStream(context, AVMEDIA_TYPE_VIDEO, AV_CODEC_ID_H264)
-        stream.codecpar().width(width).height(height)
-        setExtradata(stream, extradata)
-        videoStreamIndex = stream.index()
+        try {
+            output = context
+            context.flush_packets(1)
+            require(videoCodecId == AV_CODEC_ID_H264 || videoCodecId == AV_CODEC_ID_HEVC || videoCodecId == AV_CODEC_ID_AV1) {
+                "unsupported streaming video codec id $videoCodecId"
+            }
+            val stream = newStream(context, AVMEDIA_TYPE_VIDEO, videoCodecId)
+            stream.codecpar().width(width).height(height)
+            setExtradata(stream, extradata)
+            videoStreamIndex = stream.index()
+        } catch (failure: Throwable) {
+            output = null
+            releaseOutputContext(context)
+            videoStreamIndex = -1
+            audioStreamIndex = -1
+            headerWritten = false
+            trailerWritten = false
+            lastVideoPtsUs = -1L
+            lastAudioPtsUs = -1L
+            lastStreamTimestamp.clear()
+            destination.delete()
+            throw failure
+        }
     }
 
     /** Adds an Opus audio stream. Must be called after [start] and before the first packet write —
@@ -145,6 +165,25 @@ internal class StreamingMkvWriter(
     @Synchronized
     fun hasWrittenVideo(): Boolean = lastVideoPtsUs >= 0
 
+    /** Discards an uncommitted stream so an advanced device codec can retry as H.264. */
+    @Synchronized
+    fun abortBeforeFirstVideo(): Boolean {
+        if (lastVideoPtsUs >= 0) return false
+        val context = output
+        if (context != null) releaseOutputContext(context)
+        output = null
+        videoStreamIndex = -1
+        audioStreamIndex = -1
+        headerWritten = false
+        trailerWritten = false
+        closed = false
+        lastVideoPtsUs = -1L
+        lastAudioPtsUs = -1L
+        lastStreamTimestamp.clear()
+        destination.delete()
+        return true
+    }
+
     /** Writes the trailer (cues, durations) so the file is a normal, fully seekable Matroska
      * recording once capture stops. Safe to call even if no packet was ever written.
      *
@@ -182,17 +221,21 @@ internal class StreamingMkvWriter(
     private fun closeInternal() {
         closed = true
         val context = output
-        if (context != null) {
-            if (!context.isNull && (context.oformat().flags() and AVFMT_NOFILE) == 0) {
-                val io = context.pb()
-                if (io != null && !io.isNull) {
-                    avio_closep(io)
-                    context.pb(null)
-                }
-            }
-            if (!context.isNull) avformat_free_context(context)
-        }
+        if (context != null) releaseOutputContext(context)
         output = null
+    }
+
+    private fun releaseOutputContext(context: AVFormatContext) {
+        if (context.isNull) return
+        val format = context.oformat()
+        if (format != null && !format.isNull && (format.flags() and AVFMT_NOFILE) == 0) {
+            val io = context.pb()
+            if (io != null && !io.isNull) {
+                avio_closep(io)
+                context.pb(null)
+            }
+        }
+        avformat_free_context(context)
     }
 
     private fun ensureHeaderWritten() {
@@ -271,7 +314,7 @@ private fun ffmpegCheck(result: Int, operation: String) {
     val buffer = BytePointer(FFMPEG_ERROR_BUFFER_BYTES)
     try {
         av_strerror(result, buffer, FFMPEG_ERROR_BUFFER_BYTES)
-        throw IOException("Could not $operation: ${buffer.string}")
+        throw IOException("Could not $operation: ${buffer.string.substringBefore('\u0000')}")
     } finally {
         buffer.close()
     }

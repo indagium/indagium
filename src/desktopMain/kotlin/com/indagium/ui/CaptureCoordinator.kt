@@ -20,6 +20,7 @@ import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.CaptureVideoEncoderProbeState
 import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.DeviceLogActivity
 import com.indagium.capture.DeviceLogRetryableChange
@@ -46,6 +47,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -56,6 +58,7 @@ import java.awt.Frame
 import java.io.File
 import java.net.URI
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 
 internal enum class DeviceLogReadField { BUFFER_SIZES, GLOBAL_LEVEL, PER_TAG_OVERRIDES }
 
@@ -193,6 +196,12 @@ internal class CaptureService(
     var deviceLogStates by mutableStateOf(emptyMap<String, DeviceLogState>())
         private set
 
+    /** Last device-specific encoder discovery shown beside the codec selector. */
+    var videoEncoderProbeStates by mutableStateOf(emptyMap<String, CaptureVideoEncoderProbeState>())
+        private set
+    private val videoEncoderProbeJobs = ConcurrentHashMap<String, Job>()
+    private val videoEncoderProbeLock = Any()
+
     /** Reads buffer sizes, the global level and per-tag overrides for [serial] off the caller's
      *  thread. Safe to call repeatedly (device switch, the panel's Refresh action) — each call reads
      *  a fresh snapshot and replaces whatever was there, so a stale in-flight read never overwrites
@@ -211,6 +220,59 @@ internal class CaptureService(
                     deviceLogReadFailureState(it ?: DeviceLogState(serial), failure, "Could not read device logging state")
                 }
             }
+        }
+    }
+
+    /** Refreshes encoder support for one selected serial on the service scope. No capture session
+     * is started or modified. The probe uses the bundled server and its subprocesses are bounded;
+     * selecting another device cancels the previous probe. */
+    fun refreshVideoEncoderCapabilities(serial: String, force: Boolean = false) {
+        if (serial.isBlank()) return
+        synchronized(videoEncoderProbeLock) {
+            if (!force && videoEncoderProbeStates[serial] is CaptureVideoEncoderProbeState.Ready) return
+            videoEncoderProbeJobs.forEach { (activeSerial, job) ->
+                if (activeSerial != serial) {
+                    job.cancel()
+                    videoEncoderProbeJobs.remove(activeSerial, job)
+                }
+            }
+            videoEncoderProbeJobs.remove(serial)?.cancel()
+            videoEncoderProbeStates = videoEncoderProbeStates + (serial to CaptureVideoEncoderProbeState.Loading)
+            val probeJob = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val result = runInterruptible { toolsForStart(app.settings.captureSettings).listEmbeddedVideoEncoders(serial) }
+                    publishVideoEncoderProbeIfCurrent(
+                        serial,
+                        coroutineContext[Job],
+                        CaptureVideoEncoderProbeState.Ready(result),
+                    )
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (failure: Exception) {
+                    publishVideoEncoderProbeIfCurrent(
+                        serial,
+                        coroutineContext[Job],
+                        CaptureVideoEncoderProbeState.Failed(failure.message ?: "Encoder support check failed"),
+                    )
+                } finally {
+                    val currentJob = coroutineContext[Job]
+                    synchronized(videoEncoderProbeLock) {
+                        if (videoEncoderProbeJobs[serial] === currentJob) videoEncoderProbeJobs.remove(serial)
+                    }
+                }
+            }
+            videoEncoderProbeJobs[serial] = probeJob
+            probeJob.start()
+        }
+    }
+
+    private fun publishVideoEncoderProbeIfCurrent(
+        serial: String,
+        job: Job?,
+        state: CaptureVideoEncoderProbeState,
+    ) = synchronized(videoEncoderProbeLock) {
+        if (videoEncoderProbeJobs[serial] === job) {
+            videoEncoderProbeStates = videoEncoderProbeStates + (serial to state)
         }
     }
 
@@ -748,7 +810,13 @@ internal class CaptureService(
     fun finalizeStoppedSession(session: CaptureSession): com.indagium.capture.ImportedCapture =
         CaptureArchiveExporter().finalizeSessionInPlace(session)
 
-    fun exportRetainedSession(sessionId: String, destination: File, notes: Annotations? = null): CaptureExportResult {
+    fun exportRetainedSession(
+        sessionId: String,
+        destination: File,
+        notes: Annotations? = null,
+        format: com.indagium.capture.CaptureExportFormat = com.indagium.capture.CaptureExportFormat.ZIP,
+        onStatus: ((String) -> Unit)? = null,
+    ): CaptureExportResult {
         val session = requireNotNull(retainedSession(sessionId)) { "Capture session not found: $sessionId" }
         return exportRetainedSnapshot(
             session,
@@ -757,8 +825,10 @@ internal class CaptureService(
                 range = com.indagium.capture.CaptureRange.ALL,
                 includeVideo = session.settings.recordVideo,
                 cutoffElapsedMs = session.elapsedMs,
+                format = format,
             ),
             notes = notes,
+            onStatus = onStatus,
         )
     }
 
@@ -767,13 +837,14 @@ internal class CaptureService(
         session: CaptureSession,
         request: CaptureExportRequest,
         notes: Annotations? = null,
+        onStatus: ((String) -> Unit)? = null,
     ): CaptureExportResult = synchronized(com.indagium.capture.CaptureSnapshotCheckpointLocks.forSession(session)) {
         CaptureRecorder(session.directory.parentFile).use { recorder ->
             // A service can receive an older retained-session value while another AppState or AI
             // operation has already advanced its cursor. Reload inside the source lock so
             // Since-last-save selects from the newest durable checkpoint.
             val current = recorder.listSessions().firstOrNull { it.id == session.id } ?: session
-            val result = CaptureArchiveExporter().export(current, request, notes = notes)
+            val result = CaptureArchiveExporter().export(current, request, notes = notes, onStatus = onStatus)
             val updated = recorder.updateSuccessfulExportCheckpoints(
                 sessionId = current.id,
                 logCheckpointMs = result.logCoveredEndMs,
@@ -864,6 +935,8 @@ internal class CaptureService(
     override fun close() {
         // The service owns no active recorder. AppState stops controllers before shutdown; this
         // idempotent hook keeps that lifecycle explicit.
+        videoEncoderProbeJobs.values.forEach(Job::cancel)
+        videoEncoderProbeJobs.clear()
     }
 }
 
@@ -971,6 +1044,7 @@ internal class TabCaptureController(
         // CaptureArchiveExporter.export — see that parameter's own doc for why the tab's Notes must
         // arrive as a plain Annotations value rather than this controller reaching into AppState.
         notes: Annotations? = null,
+        onStatus: ((String) -> Unit)? = null,
     ): CaptureExportResult {
         val session = requireNotNull(selectedSession.value) { "Capture has no session to export" }
         val boundary = recorder.snapshotForExport(session.id)
@@ -978,7 +1052,7 @@ internal class TabCaptureController(
         // recorder boundary immediately before staging the archive. Selection bounds remain
         // ordinal-based; cutoff only bounds the non-selection ranges.
         val boundedRequest = request.copy(cutoffElapsedMs = boundary.elapsedMs)
-        val result = archiveExporter.export(boundary.session, boundedRequest, onWaitingForVideo, notes)
+        val result = archiveExporter.export(boundary.session, boundedRequest, onWaitingForVideo, notes, onStatus)
         recorder.updateSuccessfulExportCheckpoints(
             sessionId = boundary.session.id,
             logCheckpointMs = result.logCoveredEndMs,

@@ -3832,6 +3832,7 @@ class AppState(
         session: CaptureSession,
         request: CaptureExportRequest,
         notes: Annotations?,
+        onStatus: ((String) -> Unit)? = null,
     ): CaptureExportResult {
         val imported = importedCaptureSnapshots[tabId]
         return if (imported != null && imported.session.id == session.id) {
@@ -3839,7 +3840,12 @@ class AppState(
                 // Another tab or AI operation can export this same immutable source. Reload its
                 // sidecar cursor inside the shared source lock before resolving Since last save.
                 val refreshed = refreshImportedCaptureSnapshotCursors(imported)
-                val result = com.indagium.capture.CaptureArchiveExporter().export(refreshed.session, request, notes = notes)
+                val result = com.indagium.capture.CaptureArchiveExporter().export(
+                    refreshed.session,
+                    request,
+                    notes = notes,
+                    onStatus = onStatus,
+                )
                 val updated = persistImportedCaptureSnapshotCursors(
                     refreshed,
                     result.logCoveredEndMs,
@@ -3851,7 +3857,7 @@ class AppState(
                 result
             }
         } else {
-            captureService.exportRetainedSnapshot(session, request, notes)
+            captureService.exportRetainedSnapshot(session, request, notes, onStatus)
         }
     }
 
@@ -4878,13 +4884,20 @@ class AppState(
                             request,
                             onWaitingForVideo = { captureExportBusyMessage = "Waiting for the recording to catch up…" },
                             notes = preparedNotes,
+                            onStatus = { captureExportBusyMessage = it },
                         )
                     }
                 } else {
                     val session = requireNotNull(snapshotSession)
                     runInterruptible {
                         beforeCaptureSnapshotExport()
-                        exportStoppedSnapshotSession(tabId, session, request, preparedNotes)
+                        exportStoppedSnapshotSession(
+                            tabId,
+                            session,
+                            request,
+                            preparedNotes,
+                            onStatus = { captureExportBusyMessage = it },
+                        )
                     }
                 }
                 captureExportResult = result
@@ -5154,12 +5167,20 @@ class AppState(
     // snapshot path (exportCaptureSnapshot) does via preparedForSave, fixing markers silently
     // missing from a stopped capture's "Save ZIP" — see this function's own bug-fix history.
     @Suppress("TooGenericExceptionCaught")
-    internal fun saveRetainedCapture(sessionId: String, tabId: String? = null) {
+    internal fun saveRetainedCapture(
+        sessionId: String,
+        tabId: String? = null,
+        format: com.indagium.capture.CaptureExportFormat = com.indagium.capture.CaptureExportFormat.ZIP,
+    ) {
         // Both the strip and the launcher disable their buttons while busy; this guards a second
         // click that lands before the disabled state recomposes, and a live snapshot in flight.
         if (captureExportBusy) return
         captureExportBusy = true
-        captureExportBusyMessage = "Saving ZIP…"
+        captureExportBusyMessage = if (format == com.indagium.capture.CaptureExportFormat.IND_AV1) {
+            "Saving Compact capture…"
+        } else {
+            "Saving ZIP…"
+        }
         captureExportOwner = sessionId
         captureExportSessionId = sessionId
         captureExportResult = null
@@ -5185,7 +5206,12 @@ class AppState(
                         session.exportCounter,
                         session.settings.label,
                     )
-                    val destination = File(directory, filename)
+                    val outputFilename = if (format == com.indagium.capture.CaptureExportFormat.IND_AV1) {
+                        filename.removeSuffix(".zip") + ".ind"
+                    } else {
+                        filename
+                    }
+                    val destination = File(directory, outputFilename)
                     if (destination.exists()) {
                         // A retained session's filename is deterministic (the counter never advances),
                         // so a second Save ZIP would only fail with "destination already exists".
@@ -5195,7 +5221,13 @@ class AppState(
                         // runInterruptible so cancelCaptureSnapshot() interrupts the blocking export
                         // (the exporter checks for interruption and removes its temp archive).
                         captureExportResult = runInterruptible {
-                            captureService.exportRetainedSession(sessionId, destination, notes = preparedNotes)
+                            captureService.exportRetainedSession(
+                                sessionId,
+                                destination,
+                                notes = preparedNotes,
+                                format = format,
+                                onStatus = { captureExportBusyMessage = it },
+                            )
                         }
                     }
                 }

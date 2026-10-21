@@ -4,6 +4,7 @@ package com.indagium.capture.mirror
 
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.CaptureVideoCodec
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGRA
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
@@ -72,6 +73,10 @@ internal data class MirrorStreamOptions(
      *  once by the caller (which has the adb access this pure options holder deliberately does not)
      *  rather than here. Empty for the long-standing default behavior. */
     val audioServerArgs: List<String> = emptyList(),
+    /** Optional device stream codec. H.264 remains scrcpy's unchanged default. */
+    val videoCodec: CaptureVideoCodec = CaptureVideoCodec.H264,
+    /** Explicit encoder selected from the device's reported hardware encoders. */
+    val videoEncoder: String? = null,
 ) {
     init {
         require(maxSize >= 0)
@@ -101,6 +106,9 @@ internal interface EmbeddedMirrorConnection : Closeable {
      * (never a transport failure — see [ScrcpyCodecIds]). */
     val audioInput: InputStream?
 
+    /** Bounds advanced-codec startup through its first key frame; default keeps test transports source-compatible. */
+    fun setVideoReadTimeout(timeoutMs: Int) = Unit
+
     fun sendControl(bytes: ByteArray)
 }
 
@@ -115,6 +123,10 @@ internal fun interface EmbeddedMirrorTransport {
 internal fun interface H264Decoder : Closeable {
     /** Blocks until input EOF or a decoder error, delivering complete frames to [onFrame]. */
     fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit)
+
+    /** Codec-aware entry point. Existing test decoders remain source-compatible; JavaCV overrides
+     * this to select the correct raw elementary stream demuxer. */
+    fun decode(input: InputStream, codecId: Int, onFrame: (MirrorFrame) -> Unit) = decode(input, onFrame)
 
     override fun close() = Unit
 }
@@ -274,6 +286,7 @@ internal class EmbeddedMirrorRuntime(
             receivedAtNanos = packet.enqueuedNs,
             connectionEpoch = packet.connectionEpoch,
             sequence = 0,
+            codecId = packet.codecId,
         )
     )
 
@@ -421,7 +434,7 @@ internal class EmbeddedMirrorRuntime(
                     return
                 }
                 if (!publishLiveOrAbort(runId, openedConnection, attempt)) return
-                when (pumpVideo(runId, openedConnection, connectionEpoch)) {
+                when (pumpVideo(runId, openedConnection, connectionEpoch, options.videoCodec.scrcpyId)) {
                     VideoPumpOutcome.ABORTED -> return
                     VideoPumpOutcome.STREAM_ENDED -> throw IllegalStateException("mirror video stream ended")
                 }
@@ -493,7 +506,12 @@ internal class EmbeddedMirrorRuntime(
      * superseded. Split out of [runSession] to keep it under detekt's cyclomatic-complexity/
      * long-method/return-count thresholds; control flow and every branch are unchanged — this is
      * exactly the body that used to sit inline in [runSession]. */
-    private fun pumpVideo(runId: Long, opened: EmbeddedMirrorConnection, connectionEpoch: Long): VideoPumpOutcome {
+    private fun pumpVideo(
+        runId: Long,
+        opened: EmbeddedMirrorConnection,
+        connectionEpoch: Long,
+        codecId: Int,
+    ): VideoPumpOutcome {
         if (directDecoder != null) {
             val packetFeed = BoundedScrcpyPacketFeed(
                 opened.videoInput,
@@ -504,7 +522,7 @@ internal class EmbeddedMirrorRuntime(
                 if (directFallbackActive.get()) {
                     val fallback = directFallbackDecoder
                         ?: error("Direct mirror fallback is active without a Compose decoder")
-                    decodeComposeFallback(packetFeed, fallback, runId)
+                    decodeComposeFallback(packetFeed, fallback, runId, codecId)
                 } else {
                     val directSink = requireNotNull(onDirectFrame)
                     try {
@@ -542,7 +560,7 @@ internal class EmbeddedMirrorRuntime(
                         if (fallback == null) throw failure
                         directFallbackActive.set(true)
                         onDirectDecoderFailure?.invoke(failure)
-                        decodeComposeFallback(packetFeed, fallback, runId)
+                        decodeComposeFallback(packetFeed, fallback, runId, codecId)
                     }
                 }
             } finally {
@@ -558,7 +576,7 @@ internal class EmbeddedMirrorRuntime(
                 onPacket = { packet -> publishVideoPacket(runId, packet) },
             )
             try {
-                requireNotNull(decoder).decode(composeFeed.input) { frame ->
+                requireNotNull(decoder).decode(composeFeed.input, codecId) { frame ->
                     if (isCurrent(runId)) {
                         frameBuffer.offer(frame)
                         synchronized(lock) {
@@ -589,10 +607,10 @@ internal class EmbeddedMirrorRuntime(
     }
 
     /** Once native presentation fails, keep the handle on Compose across every transport retry. */
-    private fun decodeComposeFallback(feed: BoundedScrcpyPacketFeed, fallback: H264Decoder, runId: Long) {
+    private fun decodeComposeFallback(feed: BoundedScrcpyPacketFeed, fallback: H264Decoder, runId: Long, codecId: Int) {
         val composeFeed = feed.switchToCompose()
         try {
-            fallback.decode(composeFeed.input) { frame ->
+            fallback.decode(composeFeed.input, codecId) { frame ->
                 if (isCurrent(runId)) {
                     frameBuffer.offer(frame)
                     synchronized(lock) {
@@ -641,16 +659,26 @@ internal class EmbeddedMirrorRuntime(
     }
 }
 
-/** JavaCV/FFmpeg decoder for the raw H.264 stream exposed by the scrcpy server. */
+/** JavaCV/FFmpeg decoder for raw H.264, H.265 and AV1 streams exposed by scrcpy. */
 internal class JavaCvH264Decoder : H264Decoder {
-    override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+    override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) =
+        decode(input, CaptureVideoCodec.H264.scrcpyId, onFrame)
+
+    override fun decode(input: InputStream, codecId: Int, onFrame: (MirrorFrame) -> Unit) {
         // A live socket is never seekable or EOF-terminated. The default InputStream constructor
         // allocates a near-Integer.MAX_VALUE seek buffer; FFmpeg then tries to fill/seek it before
         // probing, so start() waits forever and the UI reports transport LIVE with no frame. A
         // zero maximum size disables that buffering, and start(false) avoids an EOF-dependent full
         // stream-info scan while still probing the H.264 codec.
         FFmpegFrameGrabber(input, 0).use { grabber ->
-            grabber.format = "h264"
+            grabber.format = when (codecId) {
+                CaptureVideoCodec.H264.scrcpyId -> "h264"
+                CaptureVideoCodec.H265.scrcpyId -> "hevc"
+                // scrcpy emits AV1 low-overhead OBUs; FFmpeg's `obu` demuxer reads that format,
+                // while `av1` expects Annex-B and can report no sequence header/dimensions.
+                CaptureVideoCodec.AV1.scrcpyId -> "obu"
+                else -> throw IOException("Unsupported scrcpy video codec id 0x${codecId.toUInt().toString(16)}")
+            }
             grabber.setOption("fflags", "nobuffer")
             // 32-bit output lets grabImage()'s Frame be bulk-copied straight into pixelsArgb below
             // (see Frame.toMirrorFrame()) instead of via Java2DFrameConverter's BufferedImage +
@@ -772,6 +800,14 @@ internal class AdbScrcpyTransport(
                 // Server options parse this as an integer bit count; the host scrcpy CLI's
                 // human-friendly `8M` suffix is not accepted by com.genymobile.scrcpy.Server.
                 add("video_bit_rate=${options.serverVideoBitRateBitsPerSecond}")
+                if (options.videoCodec != CaptureVideoCodec.H264) {
+                    add("video_codec=${options.videoCodec.scrcpyName}")
+                    options.videoEncoder?.let { add("video_encoder=$it") }
+                    // An advertised encoder may reject the requested dimensions/profile. Let the
+                    // server fail so capture falls back to H.264 at the same user settings rather
+                    // than silently shrinking the recorded video.
+                    add("downsize_on_error=false")
+                }
                 // A short keyframe interval keeps exact-start snapshot re-encodes cheap and bounds
                 // how much of a live recording a fresh connection must wait to resync on — see
                 // MirrorStreamOptions.keyFrameIntervalSeconds's doc. "float" matches the type
@@ -974,6 +1010,10 @@ private class AdbScrcpyConnection(
     private val control: OutputStream = controlSocket.getOutputStream()
     override val videoInput: InputStream = videoStream
     override val audioInput: InputStream? = audioStream
+
+    override fun setVideoReadTimeout(timeoutMs: Int) {
+        videoSocket.soTimeout = timeoutMs
+    }
 
     override fun sendControl(bytes: ByteArray) = synchronized(control) {
         control.write(bytes)

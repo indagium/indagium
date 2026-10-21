@@ -4,6 +4,11 @@ package com.indagium.testing.authoring
 
 import com.indagium.capture.StreamingMkvWriter
 import com.indagium.capture.mirror.MirrorVideoPacket
+import com.indagium.capture.mirror.ScrcpyCodecIds
+import com.indagium.capture.mirror.muxedVideoPacketPayload
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
+import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HEVC
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
 import org.bytedeco.javacv.Java2DFrameConverter
@@ -51,7 +56,7 @@ internal data class RecordedVideoStoryboard(
 )
 
 /**
- * Bounded remux of H.264 packets from the mirror's existing stream. It uses packet receipt as an
+ * Bounded remux of video packets from the mirror's existing stream. It uses packet receipt as an
  * approximate host-time anchor, stores source PTS separately, and starts each reconnect/config
  * epoch in a separate MKV segment so timestamps and dimensions are never silently mixed.
  */
@@ -175,6 +180,7 @@ internal class RecordedVideoTimeline private constructor(
     private var pendingConfig: ByteArray? = null
     private var pendingWidth = 0
     private var pendingHeight = 0
+    private var pendingCodecId = ScrcpyCodecIds.H264
     private var waitingForKeyFrame = true
     private var segmentNumber = 0
     private var writtenBytes = 0L
@@ -627,7 +633,7 @@ internal class RecordedVideoTimeline private constructor(
         } finally {
             finishSegment()
             if (segments.isEmpty() && warning == null) {
-                warning = "No usable initial H.264 configuration and key frame were captured; use available screen snapshots."
+                warning = "No usable initial video configuration and key frame were captured; use available screen snapshots."
             }
             finished.set(true)
             if (deleteRequested.get()) scheduleCleanup()
@@ -656,6 +662,7 @@ internal class RecordedVideoTimeline private constructor(
             pendingConfig = null
             pendingWidth = 0
             pendingHeight = 0
+            pendingCodecId = ScrcpyCodecIds.H264
             waitingForKeyFrame = true
         }
     }
@@ -673,6 +680,7 @@ internal class RecordedVideoTimeline private constructor(
         pendingConfig = packet.data
         pendingWidth = packet.width
         pendingHeight = packet.height
+        pendingCodecId = packet.codecId
         waitingForKeyFrame = true
     }
 
@@ -688,7 +696,9 @@ internal class RecordedVideoTimeline private constructor(
             return false
         }
         val file = File(storageDirectory, "timeline-${++segmentNumber}.mkv")
-        currentWriter = StreamingMkvWriter(file).also { it.start(pendingWidth, pendingHeight, config) }
+        currentWriter = StreamingMkvWriter(file).also {
+            it.start(pendingWidth, pendingHeight, config, ffmpegCodecId(pendingCodecId))
+        }
         currentIndex = FileWriter(indexFile, true).buffered()
         currentSegment = Segment(file, packet.connectionEpoch, elapsed, packet.receivedAtNanos, elapsed)
         segments += requireNotNull(currentSegment)
@@ -703,7 +713,7 @@ internal class RecordedVideoTimeline private constructor(
         val globalElapsed = sessionElapsedMs(packet.receivedAtNanos)
         val segmentPtsUs = ((packet.receivedAtNanos - segment.startAtNanos).coerceAtLeast(0L) / NANOS_PER_MILLI) * MICROS_PER_MILLI
         val safePtsUs = maxOf(segmentPtsUs, lastSegmentPtsUs + MICROS_PER_MILLI).coerceAtLeast(0L)
-        val payload = if (packet.keyFrame) pendingConfig?.plus(packet.data) ?: packet.data else packet.data
+        val payload = muxedVideoPacketPayload(packet.codecId, pendingConfig, packet.keyFrame, packet.data)
         if (exceedsTimelineLimits(globalElapsed, payload.size)) {
             stopAtLimit("Video timeline reached its duration, file-size, or packet-index limit; input recording continued.")
             return
@@ -847,6 +857,13 @@ internal class RecordedVideoTimeline private constructor(
         private const val SEGMENT_EDGE_TOLERANCE_MS = 120L
         private const val DRAIN_TIMEOUT_MS = 10_000L
     }
+}
+
+private fun ffmpegCodecId(scrcpyCodecId: Int): Int = when (scrcpyCodecId) {
+    ScrcpyCodecIds.H264 -> AV_CODEC_ID_H264
+    ScrcpyCodecIds.H265 -> AV_CODEC_ID_HEVC
+    ScrcpyCodecIds.AV1 -> AV_CODEC_ID_AV1
+    else -> error("Unsupported scrcpy video codec id 0x${scrcpyCodecId.toUInt().toString(16)}")
 }
 
 private fun releaseGrabber(grabber: FFmpegFrameGrabber) {

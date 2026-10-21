@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import java.io.File
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 data class CaptureExecutable(
@@ -230,7 +231,75 @@ class CaptureTools(
         return parseAdbDevices(result.stdoutText())
     }
 
+    /** Runs the pinned, bundled scrcpy server's encoder listing without starting a capture. The
+     * server asset is copied to an isolated UUID path and always removed from both host and device;
+     * no installed scrcpy binary or runtime download is involved. Callers should run this off the
+     * UI thread because it performs bounded adb push/shell/rm operations. */
+    internal fun listEmbeddedVideoEncoders(serial: String): CaptureVideoEncoderCapabilities {
+        require(serial.isNotBlank()) { "Device serial cannot be blank" }
+        val asset = com.indagium.capture.mirror.ScrcpyServerAssetResolver().resolve()
+        val token = UUID.randomUUID().toString().replace("-", "")
+        val localAsset = File.createTempFile("indagium-scrcpy-probe-$token-", ".jar")
+        val remoteAsset = "/data/local/tmp/indagium-scrcpy-probe-$token.jar"
+        try {
+            asset.materialize(localAsset)
+            val pushed = runner.run(
+                adbSpec(serial, "push", localAsset.absolutePath, remoteAsset),
+                timeout = VIDEO_ENCODER_PROBE_PUSH_TIMEOUT,
+                outputLimitBytes = VIDEO_ENCODER_PROBE_OUTPUT_LIMIT,
+            )
+            check(!pushed.timedOut && pushed.exitCode == 0) {
+                "Unable to deploy bundled scrcpy server for encoder check: ${boundedDiagnostic("adb push failed", pushed)}"
+            }
+            val listed = runner.run(
+                adbSpec(
+                    serial,
+                    listOf(
+                        "shell", "CLASSPATH=$remoteAsset", "app_process", "/",
+                        "com.genymobile.scrcpy.Server", asset.descriptor.version,
+                        "list_encoders=true", "cleanup=false",
+                    ),
+                ).copy(redirectErrorStream = true),
+                timeout = VIDEO_ENCODER_PROBE_TIMEOUT,
+                outputLimitBytes = VIDEO_ENCODER_PROBE_OUTPUT_LIMIT,
+            )
+            check(!listed.timedOut) { "Bundled scrcpy encoder check timed out" }
+            check(listed.exitCode == 0) { boundedDiagnostic("scrcpy encoder check failed", listed) }
+            val output = listed.stdoutText() + "\n" + listed.stderrText()
+            check(output.contains("List of video encoders:", ignoreCase = true)) {
+                "Bundled scrcpy returned an unexpected encoder listing; retry the check or use H.264."
+            }
+            val encoders = parseCaptureVideoEncoders(output)
+            return CaptureVideoEncoderCapabilities(encoders)
+        } finally {
+            // runInterruptible cancels probes by interrupting their worker. Clear that signal for
+            // bounded cleanup so adb can remove the uniquely named jar, then restore cancellation.
+            val interruptedBeforeCleanup = Thread.interrupted()
+            var interruptedDuringCleanup = false
+            try {
+                runCatching {
+                    runner.run(
+                        adbSpec(serial, "shell", "rm", "-f", remoteAsset),
+                        timeout = VIDEO_ENCODER_PROBE_CLEANUP_TIMEOUT,
+                        outputLimitBytes = VIDEO_ENCODER_PROBE_OUTPUT_LIMIT,
+                    )
+                }
+            } finally {
+                interruptedDuringCleanup = Thread.interrupted()
+                localAsset.delete()
+                if (interruptedBeforeCleanup || interruptedDuringCleanup) Thread.currentThread().interrupt()
+            }
+        }
+    }
+
     private val screenshotSupport = ConcurrentHashMap<String, Boolean>()
+
+    private companion object {
+        val VIDEO_ENCODER_PROBE_PUSH_TIMEOUT: Duration = Duration.ofSeconds(12)
+        val VIDEO_ENCODER_PROBE_TIMEOUT: Duration = Duration.ofSeconds(8)
+        val VIDEO_ENCODER_PROBE_CLEANUP_TIMEOUT: Duration = Duration.ofSeconds(3)
+        const val VIDEO_ENCODER_PROBE_OUTPUT_LIMIT = 64 * 1024
+    }
 }
 
 /** Numeric version tuple for the CLI behavior split at scrcpy 2.0 (audio/codec flags changed). */

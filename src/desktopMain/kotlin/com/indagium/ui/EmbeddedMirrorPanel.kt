@@ -486,6 +486,7 @@ internal class EmbeddedMirrorHandle private constructor(
                 // feed VideoToolbox/Metal directly too, without a second scrcpy encoder or the
                 // JavaCV -> BufferedImage -> Compose copy that made the shared path feel delayed.
                 when {
+                    sharedSession.requiresCodecAwareComposeMirror() -> createShared(sharedSession)
                     shouldUseMacNativeMirror() -> createSharedMacNativeOrCompose(sharedSession)
                     shouldUseDesktopGpuMirror(enabled = hardwareMirrorEnabled) -> createSharedGpuNativeOrCompose(sharedSession)
                     else -> createShared(sharedSession)

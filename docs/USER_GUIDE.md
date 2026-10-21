@@ -1300,7 +1300,7 @@ with enough time for the device to restart. The lane's capture continues recover
 ### Cut snapshots after Stop or reopening
 
 Use **Save snapshot** on a stopped capture to export the same range types as during recording.
-A reopened capture directory or ZIP opens for analysis without recording controls; to cut a new
+A reopened capture directory, ZIP, or Compact `.ind` opens for analysis without recording controls; to cut a new
 archive from it, choose **Export → Export capture range…** above the log. Relative ranges use the
 current video playhead; when there is no playhead, they use session end. **Around playhead** starts
 with five minutes before and five minutes
@@ -1309,7 +1309,7 @@ start/end times. Ranges are bounded by the capture duration.
 
 Closing the export popup with its close button, Escape, or a click outside it leaves an active
 export running. Progress moves to the capture or archive status area, and the editor can be reopened.
-Only **Cancel export** cancels the export. **Save + open** still opens the completed ZIP if you close
+Only **Cancel export** cancels the export. **Save + open** still opens the completed archive if you close
 the popup while it is saving. Cutting a range never rewrites the source archive.
 
 **Since last save** starts at the previous successful export's endpoint. On a stopped capture,
@@ -1331,6 +1331,34 @@ A checksummed timeline asset preserves each log row's elapsed time, including ac
 further snapshot cuts. Archives from versions 1–3 still open using their saved mappings or estimated
 anchor timing. The retained working session directory has a separate layout with its raw log, growing video,
 session metadata and capture index; it is not the portable ZIP layout.
+
+**Indagium Compact (`.ind`, experimental).** In the snapshot popup, choose **Indagium Compact (.ind)**
+instead of the default **ZIP**. Stopped captures and retained sessions also offer **Save IND** beside
+**Save ZIP**. Compact uses the same version-4 ZIP structure, with AV1 video in `screen.mkv` and copied
+audio. It preserves the video dimensions and frame timing, but video compression is lossy and export
+takes longer. Logs, notes, markers, screenshots, and synchronization data remain part of the archive.
+This export option is separate from the **Compact** recording-quality preset below.
+
+Indagium compares the complete Compact file with the exact ZIP size for the same selected capture range,
+without writing a temporary comparison ZIP. It uses a faster AV1 preset and up to six CPU workers,
+depending on the available processors, and avoids redundant processing for video-only recordings.
+This favors export speed over the original POC's tighter compression; output may
+be larger or show more compression artifacts than with the original settings.
+For video that needs conversion, it saves `.ind` only if it is smaller; otherwise, use **Save ZIP**.
+Video already encoded as AV1 is copied into `.ind` without another lossy conversion. In that case
+ZIP and `.ind` contain the same compact video and may be about the same size; the completed export
+explains that the original AV1 video was copied. Compact requires readable video, and conversion
+requires the bundled AV1 encoder. An unavailable encoder produces an explanation; ZIP remains available.
+Cancel or failure removes temporary export files without advancing the save boundary. Conversion
+needs additional free disk space and never rewrites the recording or source archive.
+
+Open `.ind` through the normal Open action, drag-and-drop, Recent files, or **Save + open**. It is
+still a ZIP container and can also be extracted with a ZIP utility. Indagium uses bundled software
+AV1 encoding and decoding; a GPU with AV1 hardware support is not required. Conversion speed depends
+on the CPU and recording content, and copying the existing video into ZIP is usually faster.
+The POC targets macOS validation; Windows and Linux playback/encoding compatibility have not been
+established. No installer file
+association is added by this POC.
 
 By default video recording is on and the log stream begins at capture start, so earlier Android
 ring-buffer messages are excluded. **Include earlier device logs** opts into those buffered messages.
@@ -1356,6 +1384,23 @@ These are estimates: the real size depends on screen activity (a static screen r
 scrolling or video-heavy one approaches the bitrate ceiling of twice the typical figure), and audio
 adds about 1 MB/min. Settings shows **Custom** when the Max size, Max FPS and Bitrate fields under
 Screen recording match no preset; a value saved before presets existed stays as it was.
+
+**Recording codec (experimental).** H.264 remains the default. H.265 and AV1 request encoding on
+the Android device while recording, so a supported device can produce compact video before export.
+The capture launcher checks the selected device's encoders using Indagium's bundled scrcpy server
+and distinguishes hardware, software, and unconfirmed acceleration. These advanced choices require
+an explicitly reported hardware encoder. A software-only or unavailable encoder uses H.264 with an
+explanation; advertising a codec does not prove it can start at the selected resolution and frame rate.
+If advanced encoding fails to start, Indagium falls back to H.264 rather than reducing the requested
+resolution. Capability checks run again for a new recording and do not change an active capture.
+
+The codec choice retains the configured size, FPS limit, and bitrate. A different codec at the same
+bitrate does not guarantee a smaller recording; actual size depends on device encoder behavior and
+screen activity. Lowering bitrate can reduce size, with a readability tradeoff. Direct AV1 avoids
+desktop AV1 conversion for exports whose selected clip remains AV1; exact-start cuts or generated
+device-unavailable cards may still require conversion. The embedded preview uses bundled software
+decoding for these advanced codecs, which may increase computer CPU use. Validation is currently
+limited to macOS and an Android emulator; physical hardware encoders need device-specific testing.
 
 A snapshot does not stop or restart the capture. **Stop** ends the current recording and finalizes the
 retained session. **Save ZIP** exports a portable archive from a stopped or recovered session. A

@@ -28,8 +28,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureBufferMode
+import com.indagium.capture.CaptureEncoderAcceleration
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureVideoCodec
+import com.indagium.capture.CaptureVideoEncoderProbeState
 import com.indagium.capture.CaptureVideoPreset
 import com.indagium.capture.DesktopMicrophone
 import com.indagium.capture.MICROPHONE_DEFAULT_ID
@@ -77,6 +80,9 @@ internal fun CaptureStartOptions(
     // for why "available" is the right default to assume meanwhile.
     nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
     scrcpyAvailable: Boolean = true,
+    videoEncoderProbeState: CaptureVideoEncoderProbeState? = null,
+    videoEncoderDeviceSerial: String? = null,
+    onRefreshVideoEncoderSupport: (() -> Unit)? = null,
     edit: CaptureSettingsEdit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -111,8 +117,93 @@ internal fun CaptureStartOptions(
         if (settings.recordVideo) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 CaptureVideoQualityControl(settings, edit, onReclaimFocus)
+                CaptureVideoCodecControl(
+                    settings = settings,
+                    edit = edit,
+                    probeState = videoEncoderProbeState,
+                    deviceSerial = videoEncoderDeviceSerial,
+                    onRefresh = onRefreshVideoEncoderSupport,
+                    onReclaimFocus = onReclaimFocus,
+                )
             }
         }
+    }
+}
+
+@Composable
+private fun CaptureVideoCodecControl(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    probeState: CaptureVideoEncoderProbeState?,
+    deviceSerial: String?,
+    onRefresh: (() -> Unit)?,
+    onReclaimFocus: () -> Unit,
+) {
+    val colors = tc()
+    AppText("Recording codec", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Recording codec"))
+    SegmentedControl(
+        options = CaptureVideoCodec.entries.map { it.label },
+        selectedIndices = setOf(CaptureVideoCodec.entries.indexOf(settings.videoCodec)),
+        onToggle = { index ->
+            edit { it.copy(videoCodec = CaptureVideoCodec.entries[index]) }
+            onReclaimFocus()
+        },
+        modifier = Modifier.fillMaxWidth(),
+        fillWidth = true,
+    )
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        AppText(
+            captureVideoCodecSupportText(settings.videoCodec, probeState, deviceSerial),
+            color = if (captureVideoCodecUsesFallback(settings.videoCodec, probeState)) DANGER_RED else colors.td,
+            fontSize = 10.sp,
+            maxLines = 3,
+            modifier = Modifier.weight(1f),
+        )
+        if (onRefresh != null && deviceSerial != null && settings.videoCodec != CaptureVideoCodec.H264) {
+            AppButton(
+                "Check",
+                { onRefresh(); onReclaimFocus() },
+                ButtonVariant.Ghost,
+                enabled = probeState !is CaptureVideoEncoderProbeState.Loading,
+            )
+        }
+    }
+}
+
+internal fun captureVideoCodecSupportText(
+    codec: CaptureVideoCodec,
+    state: CaptureVideoEncoderProbeState?,
+    serial: String?,
+): String {
+    if (codec == CaptureVideoCodec.H264) return "H.264 is the default and uses the device's automatic encoder choice."
+    return when (state) {
+        CaptureVideoEncoderProbeState.Loading -> "Checking ${serial ?: "device"} encoder support…"
+        is CaptureVideoEncoderProbeState.Failed -> "Support unknown; capture will use H.264. ${state.message}"
+        is CaptureVideoEncoderProbeState.Ready -> {
+            val entries = state.capabilities.encoders(codec)
+            val hardware = state.capabilities.preferredHardwareEncoder(codec)
+            when {
+                hardware != null -> "Hardware encoder listed: ${hardware.name}. Capture start verifies the requested size."
+                entries.isEmpty() -> "No ${codec.label} encoder listed; capture will use H.264."
+                entries.all { it.acceleration == CaptureEncoderAcceleration.SOFTWARE } ->
+                    "Software-only ${codec.label} support; capture will use H.264."
+                else -> "${codec.label} acceleration is unknown; capture will use H.264."
+            }
+        }
+        null -> if (serial == null) {
+            "Choose a device in New capture to check hardware support; H.264 is used when support is unknown."
+        } else {
+            "Encoder support has not been checked; capture will use H.264 until confirmed."
+        }
+    }
+}
+
+private fun captureVideoCodecUsesFallback(codec: CaptureVideoCodec, state: CaptureVideoEncoderProbeState?): Boolean {
+    if (codec == CaptureVideoCodec.H264) return false
+    return when (state) {
+        is CaptureVideoEncoderProbeState.Ready -> state.capabilities.preferredHardwareEncoder(codec) == null
+        is CaptureVideoEncoderProbeState.Failed -> true
+        CaptureVideoEncoderProbeState.Loading, null -> false
     }
 }
 
