@@ -21,11 +21,13 @@ import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorFrameInfo
 import com.indagium.capture.mirror.MirrorStreamOptions
+import com.indagium.capture.mirror.ScrcpyCodecIds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.awt.EventQueue
+import java.io.DataOutputStream
 import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
@@ -401,6 +403,16 @@ class EmbeddedMirrorLifecycleTest {
                 }
             }
         }
+        // A real device opens with scrcpy's codec/size header, and EmbeddedDeviceSession holds every
+        // attached decoder until it has read it (the decoder needs the codec to pick its demuxer).
+        // Without it the first attach never reaches decode() before the Disconnect releases it.
+        DataOutputStream(videoOutput).apply {
+            writeInt(ScrcpyCodecIds.H264)
+            writeInt(0x80000000.toInt())
+            writeInt(64)
+            writeInt(96)
+            flush()
+        }
         val mkvFile = Files.createTempFile("mirror-lifecycle-shared", ".mkv").toFile().apply { deleteOnExit() }
         val session = EmbeddedDeviceSession(transport, StreamingMkvWriter(mkvFile), elapsedMillis = { 0L })
         val activeDecodes = AtomicInteger()
@@ -433,6 +445,7 @@ class EmbeddedMirrorLifecycleTest {
             try {
                 handle.start("ignored", MirrorStreamOptions())
                 awaitCondition(5_000) { backend.snapshot().state == EmbeddedMirrorState.LIVE }
+                awaitCondition(5_000) { decodeStarts.get() == 1 }
 
                 val disconnect = handle.requestStop()
                 assertTrue(closeEntered.await(5, TimeUnit.SECONDS), "the Disconnect must be inside the slow detach")
