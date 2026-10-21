@@ -163,14 +163,14 @@ class EmbeddedAv1DeviceSmokeTest {
         val zip = File(root, "device-av1.zip")
         CaptureArchiveExporter().export(capture, CaptureExportRequest(zip, cutoffElapsedMs = capture.elapsedMs))
         val zipDurationMs = (System.nanoTime() - zipStarted) / NANOS_PER_MILLISECOND
-        val archive = File(root, "device-av1.ind")
+        val archive = File(root, "device-av1.ind.zip")
         val indStarted = System.nanoTime()
         val result = CaptureArchiveExporter().export(
             capture,
             CaptureExportRequest(
                 destination = archive,
                 cutoffElapsedMs = capture.elapsedMs,
-                format = CaptureExportFormat.IND_AV1,
+                format = CaptureExportFormat.COMPACT,
             ),
         )
         val indDurationMs = (System.nanoTime() - indStarted) / NANOS_PER_MILLISECOND

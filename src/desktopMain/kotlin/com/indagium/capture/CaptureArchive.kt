@@ -1,11 +1,13 @@
 package com.indagium.capture
 
+import com.github.luben.zstd.ZstdOutputStream
 import com.indagium.generated.BuildInfo
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.VideoSource
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
+import com.indagium.utils.CaptureZstd
 import com.indagium.utils.MAX_ARCHIVE_ENTRIES_SCANNED
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.openLogTextReader
@@ -22,7 +24,11 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import org.apache.commons.compress.archivers.zip.Zip64Mode
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.apache.commons.compress.archivers.zip.ZipFile
+import org.apache.commons.compress.archivers.zip.ZipMethod
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -41,9 +47,8 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.CRC32
 import java.util.zip.Deflater
-import java.util.zip.ZipEntry
-import java.util.zip.ZipOutputStream
 
 const val CAPTURE_DESCRIPTOR_NAME = "capture.indagium.json"
 
@@ -230,6 +235,15 @@ data class ImportedCapture(
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
+// zstd entries (ZIP method 93) are decoded by commons-compress through zstd-jni, so a missing or
+// unloadable native library surfaces as a LinkageError (UnsatisfiedLinkError / NoClassDefFoundError)
+// while opening OR reading an entry. AppState's import paths catch only Exception, so without this
+// mapping a Compact archive would take the thread down instead of showing an actionable message.
+private fun zstdLoadFailure(cause: LinkageError) = CaptureArchiveException(
+    "This capture archive uses zstd compression, which could not be loaded on this system",
+    cause,
+)
+
 /**
  * Serializes exports per exporter instance. Interrupting the export thread cancels FFmpeg/copying
  * and leaves no destination or temporary archive behind.
@@ -253,6 +267,8 @@ class CaptureArchiveExporter(
     private val videoStabilitySampleMs: Long = DEFAULT_VIDEO_STABILITY_SAMPLE_MS,
     private val clockMs: () -> Long = System::currentTimeMillis,
     private val compactVideoTranscoder: CaptureCompactVideoTranscoder = FfmpegAv1CompactVideoTranscoder(),
+    // Test seam: whether Compact may store the log with zstd (falls back to DEFLATE when the native library can't load).
+    private val zstdAvailable: () -> Boolean = { CaptureZstd.isAvailable },
 ) {
     /**
      * Cheap coverage-probe result cache keyed by source path+length so the popover's debounced
@@ -781,6 +797,51 @@ class CaptureArchiveExporter(
     }
 
     /**
+     * Picks the video that ships in a Compact archive. Errors from [CaptureCompactVideoTranscoder.transcode]
+     * and cancellation still fail the export; only an unavailable encoder or a result that is not
+     * smaller keeps the already-staged original instead.
+     */
+    private fun chooseCompactVideo(stagedVideo: File?, work: File, onStatus: ((String) -> Unit)?): CompactVideoChoice {
+        if (stagedVideo == null) return CompactVideoChoice(null, null, CompactVideoOutcome.NO_VIDEO)
+        val compactStaging = File(work, ".compact-screen.mkv")
+        val passthrough = compactVideoTranscoder.isAlreadyAv1(stagedVideo)
+        if (passthrough) {
+            runCatching { onStatus?.invoke("Copying existing AV1 video…") }
+            compactVideoTranscoder.copyAlreadyAv1(stagedVideo, compactStaging)
+        } else {
+            try {
+                compactVideoTranscoder.ensureAvailable()
+            } catch (_: IOException) {
+                return CompactVideoChoice(stagedVideo.name, stagedVideo, CompactVideoOutcome.KEPT_ORIGINAL_ENCODER_UNAVAILABLE)
+            }
+            runCatching { onStatus?.invoke("Encoding AV1 video…") }
+            compactVideoTranscoder.transcode(stagedVideo, compactStaging)
+        }
+        require(compactStaging.isFile && compactStaging.length() > 0L) { "Compact AV1 encoder produced no video" }
+        if (!passthrough && compactStaging.length() >= stagedVideo.length()) {
+            compactStaging.delete()
+            return CompactVideoChoice(stagedVideo.name, stagedVideo, CompactVideoOutcome.KEPT_ORIGINAL_NOT_SMALLER)
+        }
+        val compactVideo = File(work, COMPACT_VIDEO_ENTRY_NAME)
+        if (stagedVideo.name != COMPACT_VIDEO_ENTRY_NAME) stagedVideo.delete()
+        Files.move(compactStaging.toPath(), compactVideo.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        val outcome = if (passthrough) CompactVideoOutcome.PASSTHROUGH_AV1 else CompactVideoOutcome.ENCODED_AV1
+        return CompactVideoChoice(COMPACT_VIDEO_ENTRY_NAME, compactVideo, outcome)
+    }
+
+    private fun compactMessage(outcome: CompactVideoOutcome, videoUnavailableForRange: Boolean): String = when (outcome) {
+        CompactVideoOutcome.PASSTHROUGH_AV1 -> "Compact capture saved; existing AV1 video was copied without conversion"
+        CompactVideoOutcome.ENCODED_AV1 -> "Compact capture exported with AV1 video (lossy; audio copied)"
+        CompactVideoOutcome.KEPT_ORIGINAL_NOT_SMALLER ->
+            "Compact capture exported; AV1 would not make this video smaller, so the original video was kept"
+        CompactVideoOutcome.KEPT_ORIGINAL_ENCODER_UNAVAILABLE ->
+            "Compact capture exported; the AV1 encoder is unavailable in this build, so the original video was kept"
+        CompactVideoOutcome.NO_VIDEO ->
+            if (videoUnavailableForRange) "Compact capture exported; video has no usable coverage for this range"
+            else "Compact capture exported without video"
+    }
+
+    /**
      * [onWaitingForVideo] fires at most once, only if [waitForVideoCoverage] actually starts
      * polling (i.e. the requested end wasn't already covered) — the UI uses it to swap the export
      * popover's generic busy message for one that explains the pause instead of looking stuck.
@@ -896,9 +957,6 @@ class CaptureArchiveExporter(
                 hasAvailabilityMetadataInRange(session, availabilityStart, selectedEndMs)
             val hasOfflineMetadata = hasAvailabilityMetadataInRange(session, availabilityStart, selectedEndMs)
             val includeVideo = normalVideoRange || renderAvailability
-            if (request.format == CaptureExportFormat.IND_AV1) require(includeVideo) {
-                "Compact export requires usable video in the selected range. Include video and choose a range with readable video coverage."
-            }
             val screenshotStartMs = selectionBounds?.firstElapsedMs ?: requestedLogStartMs
             val screenshots = snapshotScreenshots(
                 session,
@@ -932,7 +990,9 @@ class CaptureArchiveExporter(
                 videoBytes = if (includeVideo) session.videoFile.length() else 0L,
                 screenshotsBytes = screenshots.sumOf { it.length },
                 timelineBytes = estimatedIndexBytes,
-                extraWorkingBytes = if (request.format == CaptureExportFormat.IND_AV1) {
+                // Compact reserve: a second copy of the log plus a transcoded video. It also covers the zstd
+                // temp file in `work` (zstd worst case is input + ~0.4%, and normally a small fraction of it).
+                extraWorkingBytes = if (request.format == CaptureExportFormat.COMPACT) {
                     saturatingAdd(
                         saturatingAdd(estimatedLogBytes, if (includeVideo) session.videoFile.length() else 0L),
                         if (includeVideo) session.videoFile.length() else 0L,
@@ -944,7 +1004,6 @@ class CaptureArchiveExporter(
             val work = Files.createTempDirectory(parent.toPath(), ".${safeStem(destination.name)}-export-").toFile()
             val archiveTemp = File(parent, ".${destination.name}.tmp-${UUID.randomUUID()}")
             var published = false
-            var zipByteCount: Long? = null
             try {
                 val markerRanges = if (session.settings.markerNotesInSnapshot && notes != null) {
                     notes.blocks.filterIsInstance<AnnBlock.Note>().mapNotNull { note ->
@@ -980,7 +1039,8 @@ class CaptureArchiveExporter(
                     videoBytes = if (includeVideo) session.videoFile.length() else 0L,
                     screenshotsBytes = screenshots.sumOf { it.length },
                     timelineBytes = staged.blockIndexFile.length() + staged.syncFile.length(),
-                    extraWorkingBytes = if (request.format == CaptureExportFormat.IND_AV1) {
+                    // Same Compact reserve as above, zstd log temp file included.
+                    extraWorkingBytes = if (request.format == CaptureExportFormat.COMPACT) {
                         saturatingAdd(
                             saturatingAdd(staged.logBytes, if (includeVideo) session.videoFile.length() else 0L),
                             if (includeVideo) session.videoFile.length() else 0L,
@@ -1039,18 +1099,19 @@ class CaptureArchiveExporter(
                 }
                 checkNotInterrupted()
                 val videoAvailable = stagedVideo?.let { it.isFile && it.length() > 0L } == true
-                val compactPassthrough = request.format == CaptureExportFormat.IND_AV1 && videoAvailable &&
-                    compactVideoTranscoder.isAlreadyAv1(requireNotNull(stagedVideo))
                 val effectiveClip = clip.takeIf { videoAvailable }
-                if (request.format == CaptureExportFormat.IND_AV1) require(videoAvailable) {
-                    "Compact export requires usable video in the selected range. Include video and choose a range with readable video coverage."
-                }
                 if (request.range == CaptureRange.SINCE_SAVE) {
                     val hasUsableVideo = effectiveClip?.durationMs?.let { it > 0L } == true
                     require(staged.rowCount > 0 || hasUsableVideo || hasOfflineMetadata) {
                         "Nothing new to save: this Since last save range has no complete log rows, usable video coverage, or device-availability records"
                     }
                 }
+                val isCompact = request.format == CaptureExportFormat.COMPACT
+                // Only the video can differ in size between ZIP and Compact (every other entry is
+                // identical), so the choice is made here, once, before any notes/descriptor are built.
+                val compactChoice = if (isCompact) chooseCompactVideo(stagedVideo?.takeIf { videoAvailable }, work, onStatus) else null
+                val shippedVideoFile = if (compactChoice != null) compactChoice.file else stagedVideo?.takeIf { videoAvailable }
+                val shippedVideoEntryName = if (compactChoice != null) compactChoice.entryName else videoEntryName.takeIf { videoAvailable }
                 val outputVideoOrigin = when {
                     !videoAvailable -> null
                     availabilityFramesRendered -> Math.addExact(sourceMetadata.timelineBaseElapsedMs, availabilityStart)
@@ -1086,15 +1147,14 @@ class CaptureArchiveExporter(
                     staged.syncFile.writeText(rebased.toJson(), Charsets.UTF_8)
                 }
                 val stagedScreenshots = stageScreenshots(screenshots, work)
-                var (notesAsset, markerAssets) = stageNotes(
-                    work, session, notes, null, effectiveClip, videoEntryName.takeIf { videoAvailable }, staged.markerClips,
-                )
-                writeCapturedWithIndagiumBlurb(work)
+                val (notesAsset, markerAssets) = stageNotes(work, session, notes, null, effectiveClip, shippedVideoEntryName, staged.markerClips)
+                val logCodec = if (isCompact && zstdAvailable()) CaptureArchiveLogCodec.ZSTD else CaptureArchiveLogCodec.DEFLATE
+                writeCapturedWithIndagiumBlurb(work, compact = isCompact, zstdLog = logCodec == CaptureArchiveLogCodec.ZSTD)
                 val logAsset = asset("logcat.log", staged.logFile)
-                var videoAsset = stagedVideo?.takeIf { videoAvailable }?.let { asset(videoEntryName, it) }
+                val videoAsset = shippedVideoFile?.let { asset(requireNotNull(shippedVideoEntryName), it) }
                 val screenshotAssets = stagedScreenshots.map { (path, file) -> asset(path, file) }
                 val descriptorBase = Math.addExact(sourceMetadata.timelineBaseElapsedMs, timelineBaseLocalMs)
-                var descriptor = CaptureArchiveDescriptor(
+                val descriptor = CaptureArchiveDescriptor(
                     formatVersion = CAPTURE_ARCHIVE_VERSION,
                     app = "Indagium ${BuildInfo.APP_VERSION}",
                     sessionId = session.id,
@@ -1128,41 +1188,9 @@ class CaptureArchiveExporter(
                     sparseSync = asset("timeline/sync.json", staged.syncFile),
                 )
                 File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
-                if (request.format == CaptureExportFormat.IND_AV1) {
-                    if (!compactPassthrough) {
-                        runCatching { onStatus?.invoke("Comparing size with ZIP…") }
-                        zipByteCount = CaptureArchiveZipWriter.countBytes(work, descriptor)
-                    }
-                    val compactStaging = File(work, ".compact-screen.mkv")
-                    if (compactPassthrough) {
-                        runCatching { onStatus?.invoke("Copying existing AV1 video…") }
-                        compactVideoTranscoder.copyAlreadyAv1(requireNotNull(stagedVideo), compactStaging)
-                    } else {
-                        compactVideoTranscoder.ensureAvailable()
-                        runCatching { onStatus?.invoke("Encoding AV1 video…") }
-                        compactVideoTranscoder.transcode(requireNotNull(stagedVideo), compactStaging)
-                    }
-                    require(compactStaging.isFile && compactStaging.length() > 0L) { "Compact AV1 encoder produced no video" }
-                    val compactVideo = File(work, "screen.mkv")
-                    Files.move(compactStaging.toPath(), compactVideo.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    val (compactNotes, compactMarkers) = stageNotes(work, session, notes, null, effectiveClip, "screen.mkv", staged.markerClips)
-                    notesAsset = compactNotes
-                    markerAssets = compactMarkers
-                    writeCapturedWithIndagiumBlurb(work, compact = true)
-                    videoAsset = asset("screen.mkv", compactVideo)
-                    descriptor = descriptor.copy(video = videoAsset, notes = notesAsset, markers = markerAssets)
-                    File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
-                }
-                writeZip(work, archiveTemp, descriptor)
+                writeZip(work, archiveTemp, descriptor, logCodec)
                 checkNotInterrupted()
-                if (request.format == CaptureExportFormat.IND_AV1 && !compactPassthrough) {
-                    val zipSize = requireNotNull(zipByteCount)
-                    require(archiveTemp.length() < zipSize) {
-                        "No Compact archive was saved: AV1 would not make this capture smaller " +
-                            "(${archiveTemp.length()} bytes Compact vs $zipSize bytes ZIP). Choose Save ZIP to keep the regular archive."
-                    }
-                }
-                runCatching { onStatus?.invoke(if (request.format == CaptureExportFormat.IND_AV1) "Publishing Compact archive…" else "Publishing ZIP…") }
+                runCatching { onStatus?.invoke(if (request.format == CaptureExportFormat.COMPACT) "Publishing Compact archive…" else "Publishing ZIP…") }
                 checkNotInterrupted()
                 if (request.overwriteExisting) publishReplacing(archiveTemp, destination) else publishWithoutOverwrite(archiveTemp, destination)
                 published = true
@@ -1172,16 +1200,23 @@ class CaptureArchiveExporter(
                     videoCoveredEndMs = descriptor.videoEndMs,
                     videoActualStartMs = descriptor.videoStartMs,
                     message = buildString {
-                        append(when {
-                            request.format == CaptureExportFormat.IND_AV1 && compactPassthrough ->
-                                "Compact capture saved; existing AV1 video was copied without conversion"
-                            request.format == CaptureExportFormat.IND_AV1 -> "Compact capture exported with AV1 video (lossy; audio copied)"
-                            videoAsset != null -> "Capture exported with video"
-                            videoUnavailableForRange -> "Capture exported; video has no usable coverage for this range"
-                            else -> "Capture exported"
-                        })
-                        if (request.format == CaptureExportFormat.ZIP && videoAsset != null && containerFellBackForAudio) {
+                        append(
+                            if (compactChoice != null) {
+                                compactMessage(compactChoice.outcome, videoUnavailableForRange)
+                            } else {
+                                when {
+                                    videoAsset != null -> "Capture exported with video"
+                                    videoUnavailableForRange -> "Capture exported; video has no usable coverage for this range"
+                                    else -> "Capture exported"
+                                }
+                            },
+                        )
+                        val originalVideoShips = videoAsset != null && (compactChoice == null || compactChoice.shipsOriginalVideo)
+                        if (originalVideoShips && containerFellBackForAudio) {
                             append(" (used .mkv: audio export to .mp4 is not supported)")
+                        }
+                        if (isCompact && logCodec == CaptureArchiveLogCodec.DEFLATE) {
+                            append(" (log stored with DEFLATE: zstd is unavailable on this system)")
                         }
                         if (staged.uncertainBoundary) {
                             append(". Some capture timing is uncertain; boundary log rows may extend beyond the requested time range.")
@@ -1198,6 +1233,23 @@ class CaptureArchiveExporter(
             adapter?.directory?.let(::deleteTree)
         }
     }
+}
+
+private const val COMPACT_VIDEO_ENTRY_NAME = "screen.mkv"
+
+private enum class CompactVideoOutcome {
+    NO_VIDEO,
+    PASSTHROUGH_AV1,
+    ENCODED_AV1,
+    KEPT_ORIGINAL_NOT_SMALLER,
+    KEPT_ORIGINAL_ENCODER_UNAVAILABLE,
+}
+
+/** The video a Compact export ships: [entryName]/[file] are null only for [CompactVideoOutcome.NO_VIDEO]. */
+private data class CompactVideoChoice(val entryName: String?, val file: File?, val outcome: CompactVideoOutcome) {
+    val shipsOriginalVideo: Boolean
+        get() = outcome == CompactVideoOutcome.KEPT_ORIGINAL_NOT_SMALLER ||
+            outcome == CompactVideoOutcome.KEPT_ORIGINAL_ENCODER_UNAVAILABLE
 }
 
 object CaptureArchiveReader {
@@ -1268,12 +1320,20 @@ object CaptureArchiveReader {
                 success = true
                 target
             }
+        } catch (e: LinkageError) {
+            throw zstdLoadFailure(e)
         } finally {
             if (!success) deleteTree(output)
         }
     }.getOrNull()
 
-    private fun openZip(source: File, cacheDirectory: File): ImportedCapture {
+    private fun openZip(source: File, cacheDirectory: File): ImportedCapture = try {
+        extractZip(source, cacheDirectory)
+    } catch (e: LinkageError) {
+        throw zstdLoadFailure(e)
+    }
+
+    private fun extractZip(source: File, cacheDirectory: File): ImportedCapture {
         val output = File(cacheDirectory, "capture-${UUID.randomUUID()}")
         require(output.mkdir()) { "Cannot create capture extraction directory: $output" }
         var success = false
@@ -3561,47 +3621,81 @@ private val ALREADY_COMPRESSED_EXTENSIONS = setOf("mkv", "mp4", "png", "jpg", "j
 private fun isAlreadyCompressedMedia(path: String): Boolean =
     path.substringAfterLast('.', "").lowercase() in ALREADY_COMPRESSED_EXTENSIONS
 
-private fun writeZip(work: File, destination: File, descriptor: CaptureArchiveDescriptor) =
-    CaptureArchiveZipWriter.write(work, destination, descriptor)
+private fun writeZip(work: File, destination: File, descriptor: CaptureArchiveDescriptor, logCodec: CaptureArchiveLogCodec) =
+    CaptureArchiveZipWriter.write(work, destination, descriptor, logCodec)
 
-/** Shared ZIP serialization path for real archives and the exact-size sink used by Compact. */
+/** ZIP serialization path for real archives. */
 internal object CaptureArchiveZipWriter {
-    fun write(work: File, destination: File, descriptor: CaptureArchiveDescriptor) {
-        ZipOutputStream(BufferedOutputStream(destination.outputStream())).use { zip -> writeEntries(work, descriptor, zip) }
-    }
-
-    fun countBytes(work: File, descriptor: CaptureArchiveDescriptor): Long {
-        val counter = CountingOutputStream()
-        ZipOutputStream(BufferedOutputStream(counter)).use { zip -> writeEntries(work, descriptor, zip) }
-        return counter.count
-    }
-
-    private fun writeEntries(work: File, descriptor: CaptureArchiveDescriptor, zip: ZipOutputStream) {
-        val paths = listOf(CAPTURE_DESCRIPTOR_NAME, CAPTURED_WITH_INDAGIUM_NAME) + descriptor.assets().map { it.path }
-        paths.forEach { path ->
-            checkNotInterrupted()
-            val source = resolveSafe(work, path)
-            // H.264/Opus video and PNG/JPEG/WebP screenshots are already compressed: DEFLATE only
-            // burns CPU for ~0% gain. Level is per entry and needs no CRC pre-pass (unlike STORED).
-            zip.setLevel(if (isAlreadyCompressedMedia(path)) Deflater.NO_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
-            zip.putNextEntry(ZipEntry(path).apply { time = 0 })
-            source.inputStream().use { input -> copyInterruptibly(input, zip) }
-            zip.closeEntry()
+    fun write(
+        work: File,
+        destination: File,
+        descriptor: CaptureArchiveDescriptor,
+        logCodec: CaptureArchiveLogCodec = CaptureArchiveLogCodec.DEFLATE,
+    ) {
+        // The Path constructor opens a seekable output: sizes and CRCs are patched into each local
+        // header after the data, so unknown-size DEFLATE entries (video can reach 20 GiB) still get
+        // ZIP64 when needed. A stream-backed output would downgrade those entries to Zip64Mode.Never.
+        ZipArchiveOutputStream(destination.toPath()).use { zip ->
+            zip.setUseZip64(Zip64Mode.AsNeeded)
+            val paths = listOf(CAPTURE_DESCRIPTOR_NAME, CAPTURED_WITH_INDAGIUM_NAME) + descriptor.assets().map { it.path }
+            paths.forEach { path ->
+                checkNotInterrupted()
+                val source = resolveSafe(work, path)
+                if (logCodec == CaptureArchiveLogCodec.ZSTD && path == descriptor.log.path) {
+                    writeZstdEntry(zip, work, path, source)
+                } else {
+                    // H.264/Opus video and PNG/JPEG/WebP screenshots are already compressed: DEFLATE only
+                    // burns CPU for ~0% gain. Level is per entry and needs no CRC pre-pass (unlike STORED).
+                    zip.setLevel(if (isAlreadyCompressedMedia(path)) Deflater.NO_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
+                    zip.putArchiveEntry(
+                        ZipArchiveEntry(path).apply {
+                            method = ZipMethod.DEFLATED.code
+                            time = 0
+                        },
+                    )
+                    source.inputStream().use { input -> copyInterruptibly(input, zip) }
+                    zip.closeArchiveEntry()
+                }
+            }
         }
     }
-}
 
-private class CountingOutputStream : OutputStream() {
-    var count: Long = 0L
-        private set
-
-    override fun write(value: Int) {
-        count++
-    }
-
-    override fun write(bytes: ByteArray, offset: Int, length: Int) {
-        require(offset >= 0 && length >= 0 && offset <= bytes.size - length)
-        count += length
+    /**
+     * commons-compress cannot zstd-compress a streamed entry itself: for method 93 `putArchiveEntry`
+     * would compute the entry CRC over the compressed bytes. So the log is compressed to a temp file
+     * first (CRC and size of the uncompressed bytes collected on the way) and then copied in as a
+     * raw, fully pre-described entry via `addRawArchiveEntry`.
+     */
+    private fun writeZstdEntry(zip: ZipArchiveOutputStream, work: File, path: String, source: File) {
+        val compressed = File.createTempFile(".zstd-", ".tmp", work)
+        try {
+            val crc = CRC32()
+            var uncompressedBytes = 0L
+            ZstdOutputStream(BufferedOutputStream(compressed.outputStream()), COMPACT_LOG_ZSTD_LEVEL).use { zstd ->
+                zstd.setWorkers(compactLogZstdWorkers(Runtime.getRuntime().availableProcessors()))
+                source.inputStream().use { input ->
+                    val buffer = ByteArray(COPY_BUFFER_BYTES)
+                    while (true) {
+                        checkNotInterrupted()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        crc.update(buffer, 0, count)
+                        uncompressedBytes += count
+                        zstd.write(buffer, 0, count)
+                    }
+                }
+            }
+            val entry = ZipArchiveEntry(path).apply {
+                method = ZipMethod.ZSTD.code
+                size = uncompressedBytes
+                compressedSize = compressed.length()
+                this.crc = crc.value
+                time = 0
+            }
+            compressed.inputStream().use { input -> zip.addRawArchiveEntry(entry, input) }
+        } finally {
+            compressed.delete()
+        }
     }
 }
 
@@ -3609,11 +3703,18 @@ private class CountingOutputStream : OutputStream() {
  *  (e.g. a bug tracker's inline zip preview). Not a tracked/hashed asset (see [scanZipEntries] and
  *  [CaptureArchiveDescriptor.assets] — it's deliberately absent from both), just a fixed courtesy
  *  file every export writes and [scanZipEntries]/`openZip` allow through unreferenced. */
-private fun writeCapturedWithIndagiumBlurb(work: File, compact: Boolean = false) {
-    val extension = if (compact) ".ind" else ".zip"
+private fun writeCapturedWithIndagiumBlurb(work: File, compact: Boolean = false, zstdLog: Boolean = false) {
+    val extension = if (compact) ".ind.zip" else ".zip"
+    val zstdNote = if (zstdLog) {
+        "logcat.log is compressed with zstd (ZIP method 93), so some unzip tools cannot extract it; " +
+            "open the archive in Indagium instead.\n"
+    } else {
+        ""
+    }
     File(work, CAPTURED_WITH_INDAGIUM_NAME).writeText(
         "Captured with Indagium ${BuildInfo.APP_VERSION} — https://indagium.com\n" +
-            "Open this $extension in Indagium to see the synced log, video and markers together.\n",
+            "Open this $extension in Indagium to see the synced log, video and markers together.\n" +
+            zstdNote,
         Charsets.UTF_8,
     )
 }

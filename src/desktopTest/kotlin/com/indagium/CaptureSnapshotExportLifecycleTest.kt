@@ -24,6 +24,7 @@ import com.indagium.ui.captureExportStatusFor
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.apache.commons.compress.archivers.zip.ZipFile
 import org.bytedeco.javacv.FFmpegFrameRecorder
 import org.bytedeco.javacv.Frame
 import org.junit.Rule
@@ -32,7 +33,6 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.zip.ZipFile
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -102,22 +102,24 @@ class CaptureSnapshotExportLifecycleTest {
             composeRule.onNodeWithText("Export capture range…").assertIsDisplayed().performClick()
             composeRule.onNodeWithText("Save ZIP").assertIsDisplayed()
             composeRule.onNodeWithText("Include video").assertIsDisplayed()
-            composeRule.onAllNodes(hasText(".zip", substring = true)).assertCountEquals(1)
+            // The Compact radio label ("(.ind.zip)") and the archive name field both contain ".zip".
+            composeRule.onAllNodes(hasText(".zip", substring = true)).assertCountEquals(2)
 
-            composeRule.onNodeWithText("Indagium Compact (.ind) · AV1").performClick()
-            composeRule.onNodeWithText("Save IND").assertIsDisplayed()
-            composeRule.onNodeWithText("Include video (required for Compact)").assertIsDisplayed()
+            composeRule.onNodeWithText("Indagium Compact (.ind.zip) · zstd log + AV1").performClick()
+            composeRule.onNodeWithText("Save Compact").assertIsDisplayed()
+            composeRule.onNodeWithText("Include video").assertIsDisplayed()
             composeRule.onAllNodesWithText("Save ZIP").assertCountEquals(0)
-            composeRule.onAllNodes(hasText(".ind", substring = true)).assertCountEquals(2)
+            composeRule.onAllNodes(hasText(".ind.zip", substring = true)).assertCountEquals(2)
 
-            composeRule.onNodeWithText("Save IND").performClick()
+            composeRule.onNodeWithText("Save Compact").performClick()
             composeRule.waitUntil(30_000) {
                 state.captureExportResult != null || state.captureExportError != null
             }
             assertNull(state.captureExportError)
             val exported = assertNotNull(state.captureExportResult).file
-            assertTrue(exported.name.endsWith(".ind"), "the selected format should reach the exporter destination")
-            ZipFile(exported).use { archive ->
+            assertTrue(exported.name.endsWith(".ind.zip"), "the selected format should reach the exporter destination")
+            // Compact stores the log as ZIP method 93, which the JDK's ZipFile cannot open.
+            ZipFile.builder().setFile(exported).get().use { archive ->
                 assertNotNull(archive.getEntry("screen.mkv"), "Compact export should contain its staged MKV video")
             }
         } finally {

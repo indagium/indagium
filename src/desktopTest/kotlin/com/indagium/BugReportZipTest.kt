@@ -278,6 +278,29 @@ class BugReportZipTest {
     }
 
     @Test
+    fun zstdMethod93EntriesAreListedExtractedAndStreamedLikeAnyOtherEntry() {
+        val dir = createTempDirectory("openlog-zip-zstd").toFile()
+        val text = "06-26 10:00:00.000  100  100 E App: boom\n".repeat(50)
+        val zip = File(dir, "capture.zip")
+        ZstdZipFixture.write(
+            zip,
+            mapOf("main_log.txt" to text.toByteArray(), "other_log.txt" to text.toByteArray()),
+            zstdEntries = setOf("main_log.txt"),
+        )
+
+        assertTrue(isZipFile(zip))
+        val candidates = listLogcatCandidates(zip)
+        assertEquals(setOf("main_log.txt", "other_log.txt"), candidates.map { it.entryPath }.toSet())
+        val zstdCandidate = candidates.first { it.entryPath == "main_log.txt" }
+
+        val entries = extractCandidate(zip, zstdCandidate)
+        assertEquals(50, entries.size)
+        assertEquals("boom", entries.first().msg)
+        val raw = openArchiveCandidateStream(zip, zstdCandidate)!!.bufferedReader().use { it.readText() }
+        assertEquals(text, raw)
+    }
+
+    @Test
     fun sevenZArchivesUseTheSameCandidateAndExtractionFlow() {
         val dir = createTempDirectory("openlog-7z").toFile()
         val archive = buildSevenZ(

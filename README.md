@@ -111,7 +111,7 @@ backward.
 Archive v5 retains the log/video/notes assets and stores compact synchronization anchors per clock
 segment with a small log-block index. New retained sessions use the same small metadata files.
 Older v1–v4 captures remain readable and are not automatically rewritten; re-exporting produces v5.
-Opening ZIP/IND verifies its assets and links reliably timestamped rows to the available video.
+Opening ZIP/Compact (`.ind.zip`, or legacy `.ind`) verifies its assets and links reliably timestamped rows to the available video.
 Rows with uncertain timing stay visible; time-range exports may include extra boundary logs and
 report this without expanding the requested video interval.
 

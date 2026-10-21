@@ -80,7 +80,12 @@ import kotlin.math.roundToLong
 
 private const val COMPACT_AV1_ENCODER = "libsvtav1"
 private const val COMPACT_AV1_CRF = "28"
-private const val COMPACT_AV1_PRESET = 10
+
+// SVT-AV1 disables its screen-content tools at preset 9 and above and warns that M10+ is meant for
+// automation tooling ("visual artifacts may occur"). Preset 8 keeps them. On a 180 s emulator clip,
+// preset 10 with 2 s keyframes produced 52.8% of the source size; preset 8 with 10 s keyframes
+// produced 15.0% with a higher SSIM, at roughly twice the encode time (about 35x realtime).
+internal const val COMPACT_AV1_PRESET = 8
 private const val COMPACT_AV1_MIN_PRESET = 0
 private const val COMPACT_AV1_MAX_PRESET = 13
 private const val COMPACT_AV1_MIN_THREADS = 2
@@ -89,7 +94,14 @@ private const val COMPACT_AV1_MAX_THREADS = 6
 private const val COMPACT_AV1_DECODE_THREADS = 2
 private const val COPY_BUFFER_BYTES = 64 * 1024
 private const val COMPACT_AV1_TIME_BASE_MS = 1_000
-private const val COMPACT_AV1_KEYFRAME_INTERVAL_MS = 2_000L
+internal const val COMPACT_AV1_KEYFRAME_INTERVAL_MS = 10_000L
+
+// JavaCV 1.5.13's FFmpegFrameGrabber.setTimestamp(long) gives up after 1000 grabs, counting audio and
+// video frames together (the same hazard is described in FfmpegCaptureVideoExporter). Opus adds about
+// 50 packets/s, so at most 300 video frames plus about 500 audio packets per 10 s keyframe gap is
+// roughly 800 grabs and keeps seeks under the cap. Sparse or static screens therefore get a keyframe
+// every 10 s, while 60 fps motion gets one about every 5 s.
+internal const val COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME = 300
 private const val COMPACT_AV1_FALLBACK_FPS = 30.0
 private const val COMPACT_AV1_MAX_NOMINAL_FPS = 120.0
 private const val FRAME_RATE_RATIONAL_MAX_DENOMINATOR = 100_000
@@ -107,8 +119,12 @@ private const val AVERROR_EAGAIN_MACOS = -35
 class FfmpegAv1CompactVideoTranscoder internal constructor(
     private val preset: Int = COMPACT_AV1_PRESET,
     private val logicalProcessors: Int = compactEncoderProcessorCount(Runtime.getRuntime().availableProcessors()),
+    private val keyframeIntervalMs: Long = COMPACT_AV1_KEYFRAME_INTERVAL_MS,
+    private val maxFramesPerKeyframe: Int = COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME,
 ) : CaptureCompactVideoTranscoder {
     init {
+        require(keyframeIntervalMs > 0L) { "Compact keyframe interval must be positive" }
+        require(maxFramesPerKeyframe > 0) { "Compact frames per keyframe must be positive" }
         require(preset in COMPACT_AV1_MIN_PRESET..COMPACT_AV1_MAX_PRESET) { "Unsupported SVT-AV1 preset: $preset" }
         require(logicalProcessors in COMPACT_AV1_MIN_LOGICAL_PROCESSORS..COMPACT_AV1_MAX_THREADS) {
             "Compact encoder concurrency must be between one and six"
@@ -302,6 +318,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
             var priorPtsMs: Long? = null
             var lastKeyframePtsMs: Long? = null
             var frameCount = 0L
+            var framesSinceKeyframe = 0
             var pendingFrame: Frame? = firstFrame
 
             while (true) {
@@ -318,9 +335,13 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
                     throw IOException("Compact AV1 source video timestamps are out of order")
                 }
                 priorPtsMs = ptsMs
-                val shouldForceKeyframe = lastKeyframePtsMs == null ||
-                    ptsMs - requireNotNull(lastKeyframePtsMs) >= COMPACT_AV1_KEYFRAME_INTERVAL_MS
-                if (shouldForceKeyframe) lastKeyframePtsMs = ptsMs
+                val shouldForceKeyframe = compactKeyframeDue(
+                    ptsMs, lastKeyframePtsMs, framesSinceKeyframe, keyframeIntervalMs, maxFramesPerKeyframe,
+                )
+                if (shouldForceKeyframe) {
+                    lastKeyframePtsMs = ptsMs
+                    framesSinceKeyframe = 0
+                }
 
                 scaler = scaler ?: sws_getContext(
                     inputFrame.width(), inputFrame.height(), inputFrame.format(),
@@ -348,6 +369,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
                 compactFfmpegCheck(avcodec_send_frame(codecContext, convertedFrame), "encode AV1 frame")
                 drainEncodedPackets(codecContext, outputContext, stream, encodedPacket)
                 frameCount++
+                framesSinceKeyframe++
             }
             if (frameCount == 0L) throw IOException("Compact export decoded no video frames")
             compactFfmpegCheck(avcodec_send_frame(codecContext, null), "flush AV1 encoder")
@@ -398,8 +420,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
             context.sample_aspect_ratio().num(1).den(1)
         }
         context.framerate().num(fps.first).den(fps.second)
-        val keyframeIntervalSeconds = COMPACT_AV1_KEYFRAME_INTERVAL_MS.toDouble() / COMPACT_AV1_TIME_BASE_MS
-        context.gop_size((fps.first.toDouble() / fps.second * keyframeIntervalSeconds).roundToInt().coerceAtLeast(1))
+        context.gop_size(compactGopSize(fps, keyframeIntervalMs, maxFramesPerKeyframe))
         context.thread_count(logicalProcessors)
         context.max_b_frames(0)
         context.bit_rate(0L)
@@ -407,8 +428,9 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
         try {
             av_dict_set(options, "crf", COMPACT_AV1_CRF, 0)
             av_dict_set(options, "preset", preset.toString(), 0)
-            // This SVT option enables explicit AV_PICTURE_TYPE_I requests, which the loop
-            // schedules from source PTS about every two seconds (rather than frame count).
+            // This SVT option enables explicit AV_PICTURE_TYPE_I requests, which the loop schedules
+            // from source PTS once the keyframe interval has elapsed, or sooner when the frame cap is
+            // reached (see compactKeyframeDue). gop_size is only the encoder's own backstop.
             av_dict_set(options, "svtav1-params", "lp=$logicalProcessors:enable-force-key-frames=true", 0)
             compactFfmpegCheck(avcodec_open2(context, encoder, options), "open bundled AV1 encoder")
             if (!options.isNull) {
@@ -704,6 +726,26 @@ private fun saneFrameRate(raw: Double): Pair<Int, Int> {
     val rational = org.bytedeco.ffmpeg.global.avutil.av_d2q(raw, FRAME_RATE_RATIONAL_MAX_DENOMINATOR)
     if (rational.isNull || rational.num() <= 0 || rational.den() <= 0) return COMPACT_AV1_FALLBACK_FPS.toInt() to 1
     return rational.num() to rational.den()
+}
+
+/** True when the frame at [ptsMs] must be a forced keyframe: the first frame, once [intervalMs] of source
+ *  time has passed since the last keyframe, or once [framesSinceKeyframe] reaches [maxFrames]. The count
+ *  includes the keyframe itself (it is 1 after the keyframe is encoded), so each GOP holds exactly
+ *  [maxFrames] frames and keyframes are at most [maxFrames] frames apart. */
+internal fun compactKeyframeDue(
+    ptsMs: Long,
+    lastKeyframePtsMs: Long?,
+    framesSinceKeyframe: Int,
+    intervalMs: Long,
+    maxFrames: Int,
+): Boolean = lastKeyframePtsMs == null ||
+    ptsMs - lastKeyframePtsMs >= intervalMs ||
+    framesSinceKeyframe >= maxFrames
+
+/** SVT-AV1 backstop GOP length in frames: the keyframe interval at the nominal frame rate, capped at [maxFrames]. */
+internal fun compactGopSize(fps: Pair<Int, Int>, intervalMs: Long, maxFrames: Int): Int {
+    val framesPerInterval = fps.first.toDouble() / fps.second * intervalMs / COMPACT_AV1_TIME_BASE_MS
+    return minOf(framesPerInterval.roundToInt(), maxFrames).coerceAtLeast(1)
 }
 
 internal fun compactEncoderProcessorCount(availableProcessors: Int): Int {

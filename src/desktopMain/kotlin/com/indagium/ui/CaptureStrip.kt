@@ -618,7 +618,8 @@ internal fun captureArchiveName(
     format: CaptureExportFormat = CaptureExportFormat.ZIP,
 ): String? {
     val trimmed = input.trim()
-    val stem = sequenceOf(".zip", ".ind")
+    // Longest suffix first so "x.ind.zip" loses both parts; ".ind" is the legacy Compact extension.
+    val stem = sequenceOf(".ind.zip", ".zip", ".ind")
         .firstOrNull { trimmed.endsWith(it, ignoreCase = true) }
         ?.let { trimmed.dropLast(it.length) }
         ?: trimmed
@@ -1150,7 +1151,7 @@ private fun CaptureStoppedStrip(
                     label = "Save snapshot ▾",
                     icon = Icons.Outlined.Save,
                     active = true,
-                    tooltip = "Choose a time range and export ZIP or Indagium Compact (.ind)",
+                    tooltip = "Choose a time range and export ZIP or Indagium Compact (.ind.zip)",
                     enabled = session != null,
                     modifier = Modifier.height(30.dp),
                     contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
@@ -1195,14 +1196,14 @@ private fun CaptureStoppedStrip(
                 },
             )
             ToolbarBtn(
-                label = if (exportStatus.busy) "Saving…" else "Save IND",
+                label = if (exportStatus.busy) "Saving…" else "Save Compact",
                 icon = Icons.Outlined.Save,
-                tooltip = "Save the complete capture as Indagium Compact (.ind, AV1)",
+                tooltip = "Save the complete capture as Indagium Compact (.ind.zip, zstd log + AV1)",
                 enabled = session != null && !state.captureExportBusy,
                 modifier = Modifier.height(30.dp),
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                 onClick = {
-                    state.saveRetainedCapture(sessionId, tab.id, CaptureExportFormat.IND_AV1)
+                    state.saveRetainedCapture(sessionId, tab.id, CaptureExportFormat.COMPACT)
                     onReturnFocus()
                 },
             )
@@ -1841,25 +1842,19 @@ internal fun CaptureSnapshotPopover(
                         AppText("ZIP · original video", color = colors.ts, fontSize = 11.sp)
                     }
                     RadioRow(
-                        selected = exportFormat == CaptureExportFormat.IND_AV1,
+                        selected = exportFormat == CaptureExportFormat.COMPACT,
                         onSelect = {
-                            exportFormat = CaptureExportFormat.IND_AV1
-                            if (canIncludeVideo) includeVideo = true
+                            exportFormat = CaptureExportFormat.COMPACT
                             overwriteConfirmed = false
                             onReturnFocus()
                         },
-                        enabled = canIncludeVideo,
                     ) {
-                        AppText(
-                            "Indagium Compact (.ind) · AV1",
-                            color = if (canIncludeVideo) colors.ts else colors.td,
-                            fontSize = 11.sp,
-                        )
+                        AppText("Indagium Compact (.ind.zip) · zstd log + AV1", color = colors.ts, fontSize = 11.sp)
                     }
-                    if (exportFormat == CaptureExportFormat.IND_AV1) {
+                    if (exportFormat == CaptureExportFormat.COMPACT) {
                         AppText(
-                            "Keeps resolution, frame timing and audio. Other video is converted to lossy AV1; " +
-                                "existing AV1 is copied without conversion. Converted exports are saved only when smaller than ZIP.",
+                            "Smaller log (zstd) and AV1 video when it is smaller; otherwise the original video is kept. " +
+                                "Existing AV1 is copied. Some unzip tools cannot extract the log; open it in Indagium.",
                             color = colors.td,
                             fontSize = 10.sp,
                         )
@@ -1877,14 +1872,14 @@ internal fun CaptureSnapshotPopover(
                 CheckRow(
                     includeVideo,
                     {
-                        if (canIncludeVideo && exportFormat == CaptureExportFormat.ZIP) includeVideo = !includeVideo
+                        if (canIncludeVideo) includeVideo = !includeVideo
                         onReturnFocus()
                     },
-                    enabled = canIncludeVideo && exportFormat == CaptureExportFormat.ZIP,
+                    enabled = canIncludeVideo,
                 ) {
                     AppText(
-                        if (exportFormat == CaptureExportFormat.IND_AV1) "Include video (required for Compact)" else "Include video",
-                        color = if (canIncludeVideo && exportFormat == CaptureExportFormat.ZIP) colors.ts else colors.td,
+                        "Include video",
+                        color = if (canIncludeVideo) colors.ts else colors.td,
                         fontSize = 11.sp,
                     )
                 }
@@ -1994,7 +1989,7 @@ internal fun CaptureSnapshotPopover(
                     // DialogActionButton's active/inactive convention elsewhere (e.g.
                     // SplitPromptDialog's "Split"/"Do Not Split").
                     DialogActionButton(
-                        if (exportFormat == CaptureExportFormat.IND_AV1) "Save IND" else "Save ZIP",
+                        if (exportFormat == CaptureExportFormat.COMPACT) "Save Compact" else "Save ZIP",
                         active = true,
                         enabled = enabled,
                     ) {

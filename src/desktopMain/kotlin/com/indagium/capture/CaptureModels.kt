@@ -398,9 +398,10 @@ data class CaptureSessionScreenshot(val file: File, val elapsedMs: Long)
 
 enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION, EXPLICIT }
 
-/** Container selected for a portable capture export. Compact archives retain the same v4 ZIP
- *  layout and descriptor, but replace the staged video with AV1 when it makes the archive smaller. */
-enum class CaptureExportFormat(val extension: String) { ZIP("zip"), IND_AV1("ind") }
+/** Container selected for a portable capture export. Compact (`.ind.zip`) archives use the same v5 ZIP
+ *  layout and descriptor, but store the log with zstd and replace the staged video with AV1 when that
+ *  makes the video smaller. */
+enum class CaptureExportFormat(val extension: String) { ZIP("zip"), COMPACT("ind.zip") }
 
 data class CaptureExportRequest(
     val destination: File,
