@@ -9148,7 +9148,7 @@ class AppState(
         for (id in visibleIds) {
             val sourceIndex = tab.logData.indexOfEntryId(id)
             if (sourceIndex < 0) continue
-            if (captureIndex?.pointForOrdinal(sourceIndex + 1) == null) continue
+            if (captureIndex?.isPlayheadSearchable(sourceIndex + 1) != true) continue
             ids[count] = id
             ordinals[count] = sourceIndex + 1
             count++

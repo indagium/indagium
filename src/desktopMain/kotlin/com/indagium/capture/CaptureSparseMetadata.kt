@@ -477,8 +477,27 @@ class CaptureTimingResolver private constructor(
 ) {
     private val points: Array<CaptureTimingPoint?> by lazy(LazyThreadSafetyMode.PUBLICATION) { buildPoints() }
 
+    /** Filled by [sparsePoints] in the same pass as [points]; only read after [points] is forced. */
+    @Volatile
+    private var sparsePlayheadKeys: LongArray? = null
+
     fun pointForOrdinal(rowOrdinal: Int): CaptureTimingPoint? =
         if (rowOrdinal in 1..entries.size) points[rowOrdinal - 1] else null
+
+    /**
+     * The video position the playhead search orders [rowOrdinal] by, or null when the row cannot be
+     * searched by playhead at all. For v5 clock segments this is the row's UNCLAMPED position: a row
+     * logged shortly before the video started has a negative one. [pointForOrdinal] reports no video
+     * position for it (nothing can seek there), but the playhead sitting at the first frame still
+     * is "after" that row, so Follow needs it. Rows past the video's end and rows with no usable
+     * clock have no key. Every other mapping returns the same position as [pointForOrdinal].
+     */
+    fun playheadKeyForOrdinal(rowOrdinal: Int): Long? {
+        if (rowOrdinal !in 1..entries.size) return null
+        val resolved = points
+        val keys = sparsePlayheadKeys ?: return resolved[rowOrdinal - 1]?.videoMs
+        return keys[rowOrdinal - 1].takeIf { it != NO_PLAYHEAD_KEY }
+    }
 
     fun elapsedMsForOrdinal(rowOrdinal: Int): Long? = pointForOrdinal(rowOrdinal)?.captureElapsedMs
 
@@ -499,9 +518,13 @@ class CaptureTimingResolver private constructor(
 
     private fun sparsePoints(): Array<CaptureTimingPoint?> {
         val result = arrayOfNulls<CaptureTimingPoint>(entries.size)
+        val keys = LongArray(entries.size) { NO_PLAYHEAD_KEY }
         for (index in entries.indices) {
-            result[index] = sparsePoint(entries[index], index + 1, sparse!!, timeline)
+            val timing = sparseTiming(entries[index], index + 1, sparse!!, timeline)
+            result[index] = timing.point
+            timing.playheadKeyMs?.let { keys[index] = it }
         }
+        sparsePlayheadKeys = keys
         return result
     }
 
@@ -593,8 +616,22 @@ fun sparseCaptureTimingPoint(
     rowOrdinal: Int,
     metadata: CaptureSyncMetadata,
     timeline: CaptureTimeline? = null,
-): CaptureTimingPoint? {
-    val segment = metadata.segments.firstOrNull { it.contains(rowOrdinal) } ?: return null
+): CaptureTimingPoint? = sparseTiming(entry, rowOrdinal, metadata, timeline).point
+
+/** [point] as [sparseCaptureTimingPoint] reports it, plus the position the playhead search orders the row by. */
+private class SparseTiming(val point: CaptureTimingPoint?, val playheadKeyMs: Long?)
+
+private val NO_SPARSE_TIMING = SparseTiming(null, null)
+
+private const val NO_PLAYHEAD_KEY = Long.MIN_VALUE
+
+private fun sparseTiming(
+    entry: LogEntry,
+    rowOrdinal: Int,
+    metadata: CaptureSyncMetadata,
+    timeline: CaptureTimeline?,
+): SparseTiming {
+    val segment = metadata.segments.firstOrNull { it.contains(rowOrdinal) } ?: return NO_SPARSE_TIMING
     val origin = timeline?.videoOriginElapsedMs
     val base = timeline?.timelineBaseElapsedMs ?: metadata.timelineBaseElapsedMs
     val automaticDelta = automaticClockDelta(segment, entry)
@@ -604,9 +641,18 @@ fun sparseCaptureTimingPoint(
     val absoluteElapsed = manualElapsed ?: automaticElapsed
     val localElapsed = absoluteElapsed?.let { safeSubtract(it, base) }
         ?.takeIf { it in 0L..metadata.timelineDurationMs }
-    val videoMs = resolveSparseVideoPosition(segment, manualDelta, absoluteElapsed, origin, timeline?.videoDurationMs)
-    if (absoluteElapsed == null && videoMs == null) return null
-    return CaptureTimingPoint(rowOrdinal, localElapsed, videoMs, segment.id, reliable = automaticDelta != null || manualDelta != null)
+    val rawVideoMs = rawSparseVideoPosition(segment, manualDelta, absoluteElapsed, origin)
+    val videoDurationMs = timeline?.videoDurationMs
+    val videoMs = rawVideoMs?.takeIf { it >= 0L && (videoDurationMs == null || it <= videoDurationMs) }
+    // Unlike videoMs this keeps rows logged before the video started (negative), so the first
+    // frame still has a log row at or before it; rows past the end of the video stay out.
+    val playheadKeyMs = rawVideoMs?.takeIf { videoDurationMs == null || it <= videoDurationMs }
+    val point = if (absoluteElapsed == null && videoMs == null) {
+        null
+    } else {
+        CaptureTimingPoint(rowOrdinal, localElapsed, videoMs, segment.id, reliable = automaticDelta != null || manualDelta != null)
+    }
+    return SparseTiming(point, playheadKeyMs)
 }
 
 private fun automaticClockDelta(segment: CaptureSyncSegment, entry: LogEntry): Long? =
@@ -626,21 +672,17 @@ private fun manualCaptureElapsed(
     return anchorElapsed?.let { safeAdd(it, deltaMs) }
 }
 
-private fun resolveSparseVideoPosition(
+private fun rawSparseVideoPosition(
     segment: CaptureSyncSegment,
     manualDeltaMs: Long?,
     absoluteElapsedMs: Long?,
     videoOriginElapsedMs: Long?,
-    videoDurationMs: Long?,
-): Long? {
-    val candidate = if (manualDeltaMs != null && segment.manualAnchor != null) {
-        safeAdd(segment.manualAnchor.videoMs, manualDeltaMs)
-    } else if (absoluteElapsedMs != null && videoOriginElapsedMs != null) {
-        safeAdd(safeSubtract(absoluteElapsedMs, videoOriginElapsedMs) ?: return null, segment.manualOffsetMs)
-    } else {
-        null
-    }
-    return candidate?.takeIf { it >= 0L && (videoDurationMs == null || it <= videoDurationMs) }
+): Long? = if (manualDeltaMs != null && segment.manualAnchor != null) {
+    safeAdd(segment.manualAnchor.videoMs, manualDeltaMs)
+} else if (absoluteElapsedMs != null && videoOriginElapsedMs != null) {
+    safeAdd(safeSubtract(absoluteElapsedMs, videoOriginElapsedMs) ?: return null, segment.manualOffsetMs)
+} else {
+    null
 }
 
 private fun safeAdd(left: Long, right: Long): Long? = runCatching { Math.addExact(left, right) }.getOrNull()
