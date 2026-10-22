@@ -531,7 +531,14 @@ anchor is available. Manual links correct the selected segment and persist throu
 Block writers close after 1,024 counted rows, 1 MiB, or one second, whichever occurs first, without
 empty blocks. Block clock context permits range scans to resume without parsing the whole prefix.
 Timing resolution is shared by playback, navigation, marker/range selection, and export; imported
-captures must not recreate a dense per-row JSON cache.
+captures must not recreate a dense per-row JSON cache. In memory, `CaptureTimingResolver` keeps
+primitive columns (playhead key, elapsed, presence/reliability bitsets) and `CaptureTimelineIndex`
+one search-key array, building `Point`s on demand (about 25 MiB per million rows). `AppState`
+builds a tab's index on `ioScope`, keyed by the identity of its log, timeline and manual anchors,
+never on the EDT or under `stateLock`: there `captureTimelineIndex` returns null and queues the
+build, Follow reports `FollowMappingStatus.INDEX_PENDING`, and a `captureIndexVersion` state bump
+recomposes the video panel when it publishes. Presence of a capture link is `hasCaptureTimeline`,
+never a non-null index; off-EDT callers (MCP tools) build inline or join the running build.
 The reproducible million-row fixture and size/navigation measurements are documented in
 [`CAPTURE_METADATA_BENCHMARK.md`](CAPTURE_METADATA_BENCHMARK.md).
 

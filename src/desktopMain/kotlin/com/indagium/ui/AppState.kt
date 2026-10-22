@@ -221,6 +221,7 @@ import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1439,6 +1440,11 @@ enum class FollowMappingStatus {
     /** The filter hides every timestamped row, so there is nothing Follow could select at all. */
     NO_VISIBLE_ROW,
     ON_VISIBLE_ROW,
+
+    /** A portable capture is linked but its navigation index is still being built in the
+     *  background. Nothing is mapped yet, so Follow and seek stay unavailable; the readout
+     *  recomposes by itself when the build publishes. */
+    INDEX_PENDING,
 }
 
 enum class VideoMappingKind { NONE, ANCHOR, CAPTURE }
@@ -5902,6 +5908,7 @@ class AppState(
                 timeline.showUnavailableFrames != false
         } == true
         if (tab(tabId)?.attachedVideo != null || timelineOnlyGap) videoPanelVisible = true
+        prefetchCaptureIndex(tabId)
     }
 
     private fun closeCaptureLauncherTabs() {
@@ -8751,6 +8758,7 @@ class AppState(
         // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
         // publishing replacement metadata so a recomposition cannot keep using the old decoder.
         videoControllers.remove(tabId)?.close()
+        bumpVideoAnchorRequest(tabId)
         // A fresh VideoAttachment defaults rotationDegrees to 0, so replacing the attachment
         // resets rotation implicitly — no separate clear needed now that rotation lives on it.
         upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
@@ -8767,6 +8775,7 @@ class AppState(
     fun removeVideo(tabId: String) {
         videoControllers.remove(tabId)?.close()
         videoFollowSuppressionByTab.remove(tabId)
+        bumpVideoAnchorRequest(tabId)
         upTab(tabId) { tab ->
             if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
         }
@@ -8943,7 +8952,7 @@ class AppState(
             // seek path also gate on anchor, but keeping the durable state coherent prevents it
             // reviving unexpectedly if a later operation supplies an anchor without going through
             // setVideoAnchor.
-            if (video.anchor == null && captureTimelineIndex(tab) == null) {
+            if (video.anchor == null && !hasCaptureTimeline(tab)) {
                 tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
             } else {
                 tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
@@ -8955,7 +8964,7 @@ class AppState(
     fun isVideoDoubleClickSeekEnabled(tabId: String): Boolean {
         val video = tab(tabId)?.attachedVideo
         val currentTab = tab(tabId)
-        return video != null && (video.anchor != null || currentTab?.let(::captureTimelineIndex) != null) && video.doubleClickSeekEnabled
+        return video != null && (video.anchor != null || currentTab?.let(::hasCaptureTimeline) == true) && video.doubleClickSeekEnabled
     }
 
     /**
@@ -9031,44 +9040,69 @@ class AppState(
         return startMs..endMs
     }
 
+    /**
+     * What an alignment requested while the capture index was still building was meant for. It lands
+     * only if, once the index is ready, the tab still carries that exact capture link of that video and
+     * no later link action ([videoAnchorRequestGeneration]) has superseded it.
+     */
+    private class DeferredVideoAnchor(
+        val generation: Long,
+        val videoSource: VideoSource,
+        val captureSourcePath: String?,
+        val timeline: CaptureTimeline?,
+    )
+
+    // Bumped by every link action on a tab (setVideoAnchor, clearVideoAnchor, a new or removed
+    // attachment, a closed tab), so an alignment deferred behind the index build can tell it was overtaken.
+    private val videoAnchorRequestGeneration = ConcurrentHashMap<String, AtomicLong>()
+
+    private fun bumpVideoAnchorRequest(tabId: String): Long =
+        videoAnchorRequestGeneration.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+
+    private fun DeferredVideoAnchor.stillAppliesTo(tabId: String, tab: LogTab): Boolean {
+        val video = tab.attachedVideo ?: return false
+        return videoAnchorRequestGeneration[tabId]?.get() == generation && !video.linkCleared &&
+            video.source == videoSource && video.captureSourcePath == captureSourcePath &&
+            tab.captureTimeline === timeline
+    }
+
     fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) {
+        val generation = bumpVideoAnchorRequest(tabId)
+        // A capture link needs the navigation index and this lambda runs under stateLock, where it
+        // must not be built. If it is still pending, finish the link off-thread once it is ready
+        // rather than dropping the user's click or misreading the tab as an unmapped one.
+        tab(tabId)?.takeIf { hasCaptureTimeline(it) && captureTimelineIndex(it) == null }?.let { pending ->
+            val video = pending.attachedVideo ?: return@let
+            val deferred = DeferredVideoAnchor(generation, video.source, video.captureSourcePath, pending.captureTimeline)
+            runWhenCaptureIndexReady(tabId) { applyVideoAnchor(tabId, videoMs, logId, deferred) }
+            return
+        }
+        applyVideoAnchor(tabId, videoMs, logId, deferred = null)
+    }
+
+    /**
+     * Writes the alignment. A [deferred] one is a capture-link alignment only: it re-checks that its
+     * request still stands (here and again under stateLock) and never falls back to a plain anchor.
+     */
+    private fun applyVideoAnchor(tabId: String, videoMs: Long, logId: Int, deferred: DeferredVideoAnchor?) {
+        if (deferred != null && tab(tabId)?.let { deferred.stillAppliesTo(tabId, it) } != true) return
         upTab(tabId) { t ->
+            if (deferred != null && !deferred.stillAppliesTo(tabId, t)) return@upTab t
             if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
             t.attachedVideo?.let {
-                val captureIndex = captureTimelineIndex(t)
+                // Null here means the tab's inputs changed since the check above and a new build is
+                // pending: leave the tab untouched instead of linking it as an unmapped one.
+                val captureIndex = if (hasCaptureTimeline(t)) captureTimelineIndex(t) ?: return@let t else null
                 if (captureIndex != null) {
                     val ordinal = t.logData.indexOfEntryId(logId).takeIf { index -> index >= 0 }?.plus(1)
                         ?: return@let t
                     val timeline = t.captureTimeline
                     if (timeline != null && (timeline.sparseTiming || timeline.syncSegments.isNotEmpty())) {
-                        val manualAnchor = sparseCaptureManualAnchor(t, captureIndex, ordinal, videoMs) ?: return@let t
-                        val anchors = it.captureSegmentAnchors.filterNot { anchor -> anchor.segmentId == manualAnchor.segmentId } + manualAnchor
-                        it.captureSourcePath?.let { sourcePath ->
-                            captureService.applySegmentCalibration(sourcePath, manualAnchor, captureControllerFor(tabId))
-                        }
-                        return@let t.copy(
-                            attachedVideo = it.copy(
-                                anchor = null,
-                                captureSegmentAnchors = anchors,
-                                doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
-                                linkCleared = false,
-                            ),
-                        )
+                        return@let linkSparseCaptureSegment(tabId, t, it, captureIndex, ordinal, videoMs)
                     }
-                    val importedVideoMs = captureIndex.videoMsForOrdinal(ordinal) ?: return@let t
-                    val calibratedOffsetMs = videoMs - importedVideoMs
-                    it.captureSourcePath?.let { sourcePath ->
-                        updateCaptureSessionCalibration(sourcePath, calibratedOffsetMs)
-                    }
-                    return@let t.copy(
-                        attachedVideo = it.copy(
-                            anchor = null,
-                            captureOffsetMs = calibratedOffsetMs,
-                            doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
-                            linkCleared = false,
-                        ),
-                    )
+                    return@let linkCaptureOffset(t, it, captureIndex, ordinal, videoMs)
                 }
+                if (deferred != null) return@let t
                 t.copy(
                     attachedVideo = it.copy(
                         anchor = VideoAnchor(videoMs, logId),
@@ -9080,7 +9114,56 @@ class AppState(
                 )
             } ?: t
         }
+        // The new anchors replaced the index's key; start rebuilding before the next Follow tick.
+        prefetchCaptureIndex(tabId)
         autosaveNow()
+    }
+
+    /** The sparse-timing branch of [applyVideoAnchor]: a per-segment manual anchor, or [tab] unchanged if none can be made. */
+    private fun linkSparseCaptureSegment(
+        tabId: String,
+        tab: LogTab,
+        video: VideoAttachment,
+        captureIndex: CaptureTimelineIndex,
+        ordinal: Int,
+        videoMs: Long,
+    ): LogTab {
+        val manualAnchor = sparseCaptureManualAnchor(tab, captureIndex, ordinal, videoMs) ?: return tab
+        val anchors = video.captureSegmentAnchors.filterNot { anchor -> anchor.segmentId == manualAnchor.segmentId } + manualAnchor
+        video.captureSourcePath?.let { sourcePath ->
+            captureService.applySegmentCalibration(sourcePath, manualAnchor, captureControllerFor(tabId))
+        }
+        return tab.copy(
+            attachedVideo = video.copy(
+                anchor = null,
+                captureSegmentAnchors = anchors,
+                doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                linkCleared = false,
+            ),
+        )
+    }
+
+    /** The dense-timing branch of [applyVideoAnchor]: a whole-recording capture offset, or [tab] unchanged if none can be made. */
+    private fun linkCaptureOffset(
+        tab: LogTab,
+        video: VideoAttachment,
+        captureIndex: CaptureTimelineIndex,
+        ordinal: Int,
+        videoMs: Long,
+    ): LogTab {
+        val importedVideoMs = captureIndex.videoMsForOrdinal(ordinal) ?: return tab
+        val calibratedOffsetMs = videoMs - importedVideoMs
+        video.captureSourcePath?.let { sourcePath ->
+            updateCaptureSessionCalibration(sourcePath, calibratedOffsetMs)
+        }
+        return tab.copy(
+            attachedVideo = video.copy(
+                anchor = null,
+                captureOffsetMs = calibratedOffsetMs,
+                doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                linkCleared = false,
+            ),
+        )
     }
 
     private fun sparseCaptureManualAnchor(
@@ -9130,9 +9213,12 @@ class AppState(
     }
 
     fun clearVideoAnchor(tabId: String) {
+        bumpVideoAnchorRequest(tabId)
         upTab(tabId) { t ->
             t.attachedVideo?.let {
-                if (captureTimelineIndex(t) != null) {
+                // Presence, not readiness: clearing never needs the index, so it must work while
+                // the background build is still pending (and must not mistake that for "no link").
+                if (hasCaptureTimeline(t)) {
                     t.copy(
                         attachedVideo = it.copy(
                             anchor = null,
@@ -9149,34 +9235,136 @@ class AppState(
                 }
             } ?: t
         }
+        if (tab(tabId)?.let(::hasCaptureTimeline) != true) captureIndexBuildsByTab.remove(tabId)
         autosaveNow()
     }
 
-    private class CaptureIndexCache(
+    /**
+     * One capture navigation index, keyed by the identity of the inputs it is built from. It doubles
+     * as the cache entry: [result] completes once, and a changed tab simply no longer [matches], so
+     * a build that finishes after its tab moved on is never read (and the entry is replaced).
+     */
+    private class CaptureIndexBuild(
         val logDataRef: List<LogEntry>,
         val timelineRef: CaptureTimeline,
         val anchorsRef: List<CaptureSegmentManualAnchor>,
-        val index: CaptureTimelineIndex,
-    )
+    ) {
+        /** Claimed by whoever computes it, so the work never runs twice. */
+        val started = AtomicBoolean(false)
 
-    private val captureIndexByTab = ConcurrentHashMap<String, CaptureIndexCache>()
+        /** Claimed by the first UI-side request, so repeated compositions queue one job, not many. */
+        val queued = AtomicBoolean(false)
+        val result = CompletableFuture<CaptureTimelineIndex>()
 
-    private fun captureTimelineIndex(tab: LogTab): CaptureTimelineIndex? {
-        if (tab.attachedVideo?.captureSourcePath == null) return null
+        fun matches(tab: LogTab, timeline: CaptureTimeline, anchors: List<CaptureSegmentManualAnchor>) =
+            logDataRef === tab.logData && timelineRef === timeline && anchorsRef === anchors
+
+        fun readyIndex(): CaptureTimelineIndex? =
+            if (result.isDone && !result.isCompletedExceptionally) result.getNow(null) else null
+    }
+
+    private val captureIndexBuildsByTab = ConcurrentHashMap<String, CaptureIndexBuild>()
+
+    /**
+     * Bumped when a background build publishes. Read by [captureTimelineIndex], so any composition
+     * that was told "pending" subscribes to it and recomposes once the index is ready.
+     */
+    private var captureIndexVersion by mutableStateOf(0)
+
+    /** Test seam: runs at the start of every build (inline or background), before any work. */
+    @Volatile
+    internal var captureIndexBuildGate: (() -> Unit)? = null
+
+    /** A capture link exists on this tab; its index may or may not be built yet. */
+    private fun hasCaptureTimeline(tab: LogTab): Boolean =
+        tab.attachedVideo?.captureSourcePath != null && tab.captureTimeline != null
+
+    /** Where waiting for the build would stall painting or every writer queued on [stateLock]. */
+    private fun mustNotWaitForCaptureIndex(): Boolean = EventQueue.isDispatchThread() || Thread.holdsLock(stateLock)
+
+    private fun captureIndexBuildFor(tab: LogTab): CaptureIndexBuild? {
         val timeline = tab.captureTimeline ?: return null
-        val anchors = tab.attachedVideo.captureSegmentAnchors
-        captureIndexByTab[tab.id]
-            ?.takeIf { it.logDataRef === tab.logData && it.timelineRef === timeline && it.anchorsRef === anchors }
-            ?.let { return it.index }
-        val resolver = CaptureTimingResolver.forTimeline(tab.logData, timeline, anchors)
-        return CaptureTimelineIndex(timeline, tab.logData.size, resolver).also { index ->
-            captureIndexByTab[tab.id] = CaptureIndexCache(tab.logData, timeline, anchors, index)
+        val anchors = tab.attachedVideo?.takeIf { it.captureSourcePath != null }?.captureSegmentAnchors ?: return null
+        captureIndexBuildsByTab[tab.id]?.takeIf { it.matches(tab, timeline, anchors) }?.let { return it }
+        return captureIndexBuildsByTab.compute(tab.id) { _, current ->
+            current?.takeIf { it.matches(tab, timeline, anchors) } ?: CaptureIndexBuild(tab.logData, timeline, anchors)
+        }
+    }
+
+    /**
+     * The capture navigation index for [tab], or null when it has no capture link or the link's
+     * index is not available right now. Use [hasCaptureTimeline] for the first question: a null here
+     * must never be read as "no capture link".
+     *
+     * On the UI thread or under [stateLock] this never waits: it queues the background build (once)
+     * and returns null until it has published. Anywhere else (MCP handlers, tests, IO coroutines) it
+     * builds on the calling thread, or joins the build already running, and so returns the index.
+     * Both paths run the same [runCaptureIndexBuild]. A build that failed returns null on the
+     * non-blocking path (it is not retried for the same inputs) and rethrows on the blocking one.
+     */
+    private fun captureTimelineIndex(tab: LogTab): CaptureTimelineIndex? {
+        // Reading the version (never negative) is what subscribes a composition caller to a publish.
+        if (captureIndexVersion < 0 || !hasCaptureTimeline(tab)) return null
+        val build = captureIndexBuildFor(tab) ?: return null
+        build.readyIndex()?.let { return it }
+        if (!mustNotWaitForCaptureIndex()) return awaitCaptureIndex(tab.id, build)
+        queueCaptureIndexBuild(tab.id, build)
+        return null
+    }
+
+    private fun awaitCaptureIndex(tabId: String, build: CaptureIndexBuild): CaptureTimelineIndex {
+        runCaptureIndexBuild(tabId, build)
+        try {
+            return build.result.get()
+        } catch (failure: java.util.concurrent.ExecutionException) {
+            throw failure.cause ?: failure
+        }
+    }
+
+    private fun queueCaptureIndexBuild(tabId: String, build: CaptureIndexBuild) {
+        if (!build.queued.compareAndSet(false, true)) return
+        ioScope.launch {
+            // Superseded (the tab changed again or closed) before it got to run: nothing can read it.
+            if (captureIndexBuildsByTab[tabId] === build) runCaptureIndexBuild(tabId, build)
+        }
+    }
+
+    /** Builds off [stateLock] and publishes into [build] only; a stale [build] is never read. */
+    @Suppress("TooGenericExceptionCaught")
+    private fun runCaptureIndexBuild(tabId: String, build: CaptureIndexBuild) {
+        if (!build.started.compareAndSet(false, true)) return
+        try {
+            captureIndexBuildGate?.invoke()
+            val resolver = CaptureTimingResolver.forTimeline(build.logDataRef, build.timelineRef, build.anchorsRef)
+            build.result.complete(CaptureTimelineIndex(build.timelineRef, build.logDataRef.size, resolver))
+        } catch (error: Exception) {
+            build.result.completeExceptionally(error)
+            AppLogger.warn("capture", "Capture navigation index could not be built for $tabId", error)
+        } finally {
+            // An Error leaves the build failed rather than leaving a blocking caller waiting forever.
+            if (!build.result.isDone) build.result.completeExceptionally(IllegalStateException("Capture index build aborted"))
+            captureIndexVersion += 1
+        }
+    }
+
+    /** Starts the background build for [tabId]'s current inputs so Follow is ready by the time it is needed. */
+    private fun prefetchCaptureIndex(tabId: String) {
+        val tab = tab(tabId)?.takeIf(::hasCaptureTimeline) ?: return
+        captureIndexBuildFor(tab)?.let { queueCaptureIndexBuild(tabId, it) }
+    }
+
+    /** Runs [action] on the IO scope once [tabId]'s capture index exists; dropped if the link or tab is gone. */
+    private fun runWhenCaptureIndexReady(tabId: String, action: () -> Unit) {
+        ioScope.launch {
+            val current = tab(tabId)?.takeIf(::hasCaptureTimeline) ?: return@launch
+            // Blocking path: this coroutine is neither the UI thread nor holding stateLock.
+            if (runCatching { captureTimelineIndex(current) }.getOrNull() != null) action()
         }
     }
 
     private class CaptureFollowFloorIndex(
         val logDataRef: List<LogEntry>,
-        val captureIndexRef: CaptureTimelineIndex?,
+        val captureIndexRef: CaptureTimelineIndex,
         val visibleIdsRef: IntArray,
         val summaryVersion: Int,
         val ids: IntArray,
@@ -9186,8 +9374,7 @@ class AppState(
     private val captureFollowFloorIndexByTab = ConcurrentHashMap<String, CaptureFollowFloorIndex>()
 
     /** Visible-row floor by parser ordinal; unlike clock mapping this also supports timestamp-less rows. */
-    private fun captureFollowFloorIndex(tab: LogTab): CaptureFollowFloorIndex {
-        val captureIndex = captureTimelineIndex(tab)
+    private fun captureFollowFloorIndex(tab: LogTab, captureIndex: CaptureTimelineIndex): CaptureFollowFloorIndex {
         val version = visibleItemsVersion
         val reported = visibleItemsByTab[tab.id]?.allIds
         val visibleIds = reported ?: computeItems(tab, applyFilter = true).map(::logItemEntryId).toIntArray()
@@ -9205,7 +9392,7 @@ class AppState(
         for (id in visibleIds) {
             val sourceIndex = tab.logData.indexOfEntryId(id)
             if (sourceIndex < 0) continue
-            if (captureIndex?.isPlayheadSearchable(sourceIndex + 1) != true) continue
+            if (!captureIndex.isPlayheadSearchable(sourceIndex + 1)) continue
             ids[count] = id
             ordinals[count] = sourceIndex + 1
             count++
@@ -9220,8 +9407,13 @@ class AppState(
         ).also { if (reported != null) captureFollowFloorIndexByTab[tab.id] = it }
     }
 
-    private fun captureVisibleLogIdAtOrBefore(tab: LogTab, ordinal: Int, segmentFirstOrdinal: Int): Int? {
-        val index = captureFollowFloorIndex(tab)
+    private fun captureVisibleLogIdAtOrBefore(
+        tab: LogTab,
+        captureIndex: CaptureTimelineIndex,
+        ordinal: Int,
+        segmentFirstOrdinal: Int,
+    ): Int? {
+        val index = captureFollowFloorIndex(tab, captureIndex)
         if (index.ids.isEmpty()) return null
         var lo = 0
         var hi = index.ordinals.lastIndex
@@ -9240,9 +9432,11 @@ class AppState(
 
     /** Video-time (ms) for [logId], relative to [tab]'s single anchor. */
     fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
-        captureTimelineIndex(tab)?.let { index ->
-            val ordinal = tab.logData.indexOfEntryId(logId).takeIf { it >= 0 }?.plus(1) ?: return null
-            return index.videoMsForOrdinal(ordinal, tab.attachedVideo?.captureOffsetMs ?: 0L)
+        if (hasCaptureTimeline(tab)) {
+            // Index still building: no mapping yet, and never the anchor path below for a capture link.
+            val index = captureTimelineIndex(tab) ?: return null
+            val ordinal = tab.logData.indexOfEntryId(logId).takeIf { it >= 0 }?.plus(1)
+            return ordinal?.let { index.videoMsForOrdinal(it, tab.attachedVideo?.captureOffsetMs ?: 0L) }
         }
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
@@ -9253,7 +9447,8 @@ class AppState(
 
     /** Inverse of [logIdToVideoMs]: the entry whose mapped video-time is closest to [videoMs]. */
     fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
-        captureTimelineIndex(tab)?.let { index ->
+        if (hasCaptureTimeline(tab)) {
+            val index = captureTimelineIndex(tab) ?: return null
             val point = index.nearest(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point ?: return null
             return tab.logData.getOrNull(point.ordinal - 1)?.id
         }
@@ -9395,10 +9590,11 @@ class AppState(
      */
     fun followTargetVisibleLogId(tabId: String, videoMs: Long): Int? =
         tab(tabId)?.let tabLookup@{ tab ->
-            captureTimelineIndex(tab)?.let { index ->
+            if (hasCaptureTimeline(tab)) {
+                val index = captureTimelineIndex(tab) ?: return@tabLookup null
                 val point = index.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point
                     ?: return@tabLookup null
-                return@tabLookup captureVisibleLogIdAtOrBefore(tab, point.ordinal, point.segmentFirstOrdinal)
+                return@tabLookup captureVisibleLogIdAtOrBefore(tab, index, point.ordinal, point.segmentFirstOrdinal)
             }
             val anchor = tab.attachedVideo?.anchor ?: return@tabLookup null
             val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@tabLookup null
@@ -9415,10 +9611,11 @@ class AppState(
      * is returned rather than jumping to the end.
      */
     private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
-        if (captureTimelineIndex(tab) != null) {
+        if (hasCaptureTimeline(tab)) {
+            val index = captureTimelineIndex(tab) ?: return null
             val ordinal = tab.logData.indexOfEntryId(mappedLogId).takeIf { it >= 0 }?.plus(1) ?: return null
-            val point = captureTimelineIndex(tab)?.pointForOrdinal(ordinal) ?: return null
-            return captureVisibleLogIdAtOrBefore(tab, ordinal, point.segmentFirstOrdinal)
+            val point = index.pointForOrdinal(ordinal) ?: return null
+            return captureVisibleLogIdAtOrBefore(tab, index, ordinal, point.segmentFirstOrdinal)
         }
         val mappedElapsed = logElapsedIndex(tab).byId[mappedLogId] ?: return null
         return lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
@@ -9567,13 +9764,23 @@ class AppState(
     @Suppress("CyclomaticComplexMethod")
     fun videoFollowMapping(tabId: String, videoMs: Long): VideoFollowMapping {
         val tab = tab(tabId)
-        val captureIndex = tab?.let(::captureTimelineIndex)
-        if (tab != null && captureIndex != null) {
+        if (tab != null && hasCaptureTimeline(tab)) {
             val timeline = tab.captureTimeline!!
+            val captureIndex = captureTimelineIndex(tab) ?: return VideoFollowMapping(
+                anchorLogTs = null,
+                anchorVideoMs = null,
+                mappedNearestLogId = null,
+                mappedNearestLogTs = null,
+                status = FollowMappingStatus.INDEX_PENDING,
+                mappedElapsedMs = null,
+                mappingKind = VideoMappingKind.CAPTURE,
+                captureQuality = timeline.quality,
+                captureUncertaintyMs = timeline.uncertaintyMs,
+            )
             val resolved = captureIndex.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L)
             val point = resolved.point
             val fullFloorId = point?.let { tab.logData.getOrNull(it.ordinal - 1)?.id }
-            val visibleFloorId = point?.let { captureVisibleLogIdAtOrBefore(tab, it.ordinal, it.segmentFirstOrdinal) }
+            val visibleFloorId = point?.let { captureVisibleLogIdAtOrBefore(tab, captureIndex, it.ordinal, it.segmentFirstOrdinal) }
             val status = when (resolved.kind) {
                 CapturePositionKind.BEFORE_FIRST -> FollowMappingStatus.BEFORE_FIRST
                 CapturePositionKind.AFTER_LAST -> FollowMappingStatus.AFTER_LAST
@@ -9689,10 +9896,39 @@ class AppState(
         val elapsedIndex = tab?.let(::logElapsedIndex)
         val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
         val summary = visibleItemsByTab[tabId]
-        val captureIndex = tab?.let(::captureTimelineIndex)
-        if (tab != null && captureIndex != null) {
+        if (tab != null && hasCaptureTimeline(tab)) {
+            val captureIndex = captureTimelineIndex(tab)
             val mapping = videoFollowMapping(tabId, videoMs)
-            val visibleIndex = captureFollowFloorIndex(tab)
+            if (captureIndex == null) {
+                return FollowDiagnostics(
+                    tabId = tabId,
+                    hasAnchor = false,
+                    anchor = null,
+                    anchorVideoMs = null,
+                    playheadVideoMs = videoMs,
+                    mappedElapsedMs = null,
+                    mappedElapsedClock = null,
+                    chosenVisibleFloor = null,
+                    nextVisibleCandidatesAfterFloor = emptyList(),
+                    visibleCandidateCount = 0,
+                    candidatesFromSummaryFallback = summary == null,
+                    fullLogFloor = null,
+                    status = mapping.status,
+                    rolloverAppliedCount = 0,
+                    rolloverAppliedSamples = emptyList(),
+                    rolloverSuppressedCount = 0,
+                    rolloverSuppressedSamples = emptyList(),
+                    dayOffsetModelValid = true,
+                    showUnfiltered = tab.showUnfiltered,
+                    filterActive = isFilterConfigured(tab.filter),
+                    totalLogDataSize = tab.logData.size,
+                    displayedItemCount = summary?.allIds?.size ?: 0,
+                    mappingKind = VideoMappingKind.CAPTURE,
+                    captureQuality = tab.captureTimeline?.quality,
+                    captureUncertaintyMs = tab.captureTimeline?.uncertaintyMs,
+                )
+            }
+            val visibleIndex = captureFollowFloorIndex(tab, captureIndex)
 
             fun diagnosticRow(id: Int): FollowDiagnosticRow {
                 val ordinal = tab.logData.indexOfEntryId(id).takeIf { it >= 0 }?.plus(1)
@@ -10828,6 +11064,9 @@ class AppState(
         loadsToFinishAfterClose: Set<String> = emptySet(),
     ) {
         if (tabIds.isEmpty()) return
+        // Dropping the generation invalidates any alignment still deferred for these tabs, like a bump,
+        // without leaving an entry behind for every closed tab.
+        tabIds.forEach(videoAnchorRequestGeneration::remove)
         // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
         // captured under stateLock, but stopped before entering the tab-removal lock below so a
         // close action never performs process/file IO while stateLock is held. Controllers are taken
@@ -10904,11 +11143,11 @@ class AppState(
                 embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
                 detachedEmbeddedMirrorTabs.remove(tabId)
                 embeddedMirrorVersion++
-                // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
+                // B7: CaptureIndexBuild/CaptureFollowFloorIndex both hold a strong reference to
                 // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
                 // above) and were never removed here — every closed capture tab leaked its entire
                 // log for the lifetime of the app.
-                captureIndexByTab.remove(tabId)
+                captureIndexBuildsByTab.remove(tabId)
                 captureFollowFloorIndexByTab.remove(tabId)
                 importedCaptureSnapshots.remove(tabId)
                 captureScreenshotCapabilities.remove(tabId)
@@ -11624,6 +11863,7 @@ class AppState(
                     if (snapshotSource != null) importedCaptureSnapshots[tabId] = snapshotSource
                     if (video != null) videoPanelVisible = true
                 }
+                prefetchCaptureIndex(tabId)
                 rememberRecentFile(file)
                 markActiveLoadFinished(tabId)
                 published = true
@@ -11760,6 +12000,7 @@ class AppState(
                     attachedVideo = currentVideo?.copy(anchor = anchor),
                 )
             }
+            prefetchCaptureIndex(tabId)
         } catch (error: Exception) {
             upTab(tabId) { current -> current.copy(captureTimeline = null,
                 attachedVideo = current.attachedVideo?.copy(doubleClickSeekEnabled = false)) }
