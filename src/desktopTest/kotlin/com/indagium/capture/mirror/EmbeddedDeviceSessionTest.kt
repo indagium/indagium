@@ -25,6 +25,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -490,6 +491,71 @@ class EmbeddedDeviceSessionTest {
 
             assertEquals(1, attempts.get(), "a cached native-library initialization failure must not retry")
             assertTrue(diagnostics.any { it.contains("GLIBC_2.35") })
+        } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun h264MirrorDecoderReceivesAFrameBeforeThePacketIsMuxed() {
+        val stream = videoStream(64, 64, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key)))
+        val transport = EmbeddedMirrorTransport { _, _ -> fakeConnection(stream) }
+        val keyFrameBytes = H264_FIXTURE.config.size + H264_FIXTURE.key.size
+        val decoderHasKeyFrame = CountDownLatch(1)
+        val fedBeforeWrite = AtomicBoolean(false)
+        // The hook fires right after the muxer wrote the key frame, on the pump thread, so waiting for
+        // the decoder in it only succeeds when the decoder was fed BEFORE that write.
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 0,
+            onVideoPacketWrittenHook = { _, keyFrame ->
+                if (keyFrame) fedBeforeWrite.set(decoderHasKeyFrame.await(2, TimeUnit.SECONDS))
+            },
+        )
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                var total = 0
+                val buffer = ByteArray(4_096)
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) return
+                    total += count
+                    if (total >= keyFrameBytes) decoderHasKeyFrame.countDown()
+                }
+            }
+        }
+        try {
+            session.attachDecoder(decoder) { }
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue(timeoutMs = 5_000) { session.hasStartedVideo() }
+            assertTrue(fedBeforeWrite.get(), "the mirror decoder must see the key frame before the muxer writes it")
+        } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun hasStartedVideoDoesNotWaitOnTheMuxerMonitor() {
+        val muxer = StreamingMkvWriter(tempFile())
+        val session = EmbeddedDeviceSession(
+            EmbeddedMirrorTransport { _, _ -> fakeConnection(ByteArray(0)) },
+            muxer,
+            elapsedMillis = { 0 },
+            maxReconnectAttempts = 0,
+        )
+        try {
+            val answered = CountDownLatch(1)
+            // CaptureRecorder's watchdog calls hasStartedVideo() while holding its own lock; a slow muxer
+            // write holds the writer's monitor, so the read must complete even then.
+            synchronized(muxer) {
+                thread(isDaemon = true) {
+                    session.hasStartedVideo()
+                    answered.countDown()
+                }
+                assertTrue(answered.await(2, TimeUnit.SECONDS), "hasStartedVideo() must be lock-free")
+            }
         } finally {
             session.close()
         }

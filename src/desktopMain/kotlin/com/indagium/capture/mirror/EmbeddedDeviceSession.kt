@@ -285,12 +285,13 @@ internal class EmbeddedDeviceSession(
      * True once at least one video packet has actually reached the muxer — the point at which
      * [onVideoStartElapsedMs] has already fired with the capture-clock anchor.
      *
-     * Deliberately reads the `@Volatile` field directly rather than `synchronized(lock) { ... }`:
-     * `CaptureRecorder`'s watchdog thread calls this from inside its OWN lock
+     * Deliberately reads the muxer's `@Volatile` written-video flag rather than taking `lock` or the
+     * writer's monitor: `CaptureRecorder`'s watchdog thread calls this from inside its OWN lock
      * (`publishLocked`/`runWatchdog`), and this session's worker thread separately calls back into
      * `CaptureRecorder` (via `elapsedMillis`) from inside *this* lock — two objects each acquiring
      * the other's lock while holding their own is a deadlock, not just contention. A plain volatile
-     * read needs no lock at all and closes that cycle from this side.
+     * read needs no lock at all and closes that cycle from this side (and a slow disk write holding
+     * the writer's monitor cannot stall the watchdog either).
      */
     fun hasStartedVideo(): Boolean = muxer.hasWrittenVideo()
 
@@ -791,20 +792,25 @@ internal class EmbeddedDeviceSession(
     ): ByteArray? {
         val receivedAtNanos = System.nanoTime()
         val receivedAtMs = System.currentTimeMillis()
+        val advancedCodec = requestedAdvancedVideoCodec
+        // Default H.264 keeps the original order: the mirror decoder is fed before the packet is
+        // published or muxed, so mirror latency never includes the MKV write (muxer start, file I/O).
+        if (!advancedCodec) feedDecoder(event)
         if (event.config) {
             val nextConfig = handleConfigPacket(event.data, currentConfig, audioRequested)
-            if (!requestedAdvancedVideoCodec || muxer.hasWrittenVideo()) feedDecoder(event)
+            if (advancedCodec && muxer.hasWrittenVideo()) feedDecoder(event)
             publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
             return nextConfig
         }
 
-        val awaitingAdvancedKeyFrame = requestedAdvancedVideoCodec && !muxer.hasWrittenVideo()
+        val awaitingAdvancedKeyFrame = advancedCodec && !muxer.hasWrittenVideo()
         if (awaitingAdvancedKeyFrame && !event.keyFrame) return currentConfig
         if (awaitingAdvancedKeyFrame) startMuxerCoordinatingWithAudio(currentConfig ?: ByteArray(0), audioRequested)
         publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
         val configForDecoder = currentConfig
         val nextConfig = writeVideoFrame(event, currentConfig)
-        if (!muxer.hasWrittenVideo()) return nextConfig
+        // Advanced codecs feed the decoder only once the first key frame is safely in the file.
+        if (!advancedCodec || !muxer.hasWrittenVideo()) return nextConfig
 
         if (awaitingAdvancedKeyFrame) {
             configForDecoder?.let { config ->

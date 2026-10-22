@@ -80,6 +80,11 @@ internal class StreamingMkvWriter(
     private var lastVideoPtsUs = -1L
     private var lastAudioPtsUs = -1L
 
+    // Mirrors lastVideoPtsUs >= 0 for hasWrittenVideo(): a plain volatile read, so a caller holding
+    // its own lock (CaptureRecorder's watchdog) never waits on this writer's monitor, which a slow
+    // disk write can hold.
+    @Volatile private var videoWritten = false
+
     // Last timestamp actually handed to the muxer per stream, in that stream's own time base (the
     // Matroska muxer rewrites it to 1/1000 in avformat_write_header). Strict monotonicity has to be
     // enforced HERE, after the rescale: two packets 300 us apart are distinct in the microsecond
@@ -120,6 +125,7 @@ internal class StreamingMkvWriter(
             headerWritten = false
             trailerWritten = false
             lastVideoPtsUs = -1L
+            videoWritten = false
             lastAudioPtsUs = -1L
             lastStreamTimestamp.clear()
             destination.delete()
@@ -148,6 +154,7 @@ internal class StreamingMkvWriter(
         val safePts = maxOf(ptsUs, lastVideoPtsUs + 1).coerceAtLeast(0)
         writePacket(videoStreamIndex, safePts, keyFrame, data)
         lastVideoPtsUs = safePts
+        videoWritten = true
     }
 
     @Synchronized
@@ -161,9 +168,9 @@ internal class StreamingMkvWriter(
     }
 
     /** True once at least one video packet has actually been written to disk — i.e. the video
-     * track's PTS-0 anchor is now meaningful (see [EmbeddedDeviceSession]'s `videoStartElapsedMs`). */
-    @Synchronized
-    fun hasWrittenVideo(): Boolean = lastVideoPtsUs >= 0
+     * track's PTS-0 anchor is now meaningful (see [EmbeddedDeviceSession]'s `videoStartElapsedMs`).
+     * Lock-free on purpose (a volatile flag, not `@Synchronized`): see [videoWritten]. */
+    fun hasWrittenVideo(): Boolean = videoWritten
 
     /** Discards an uncommitted stream so an advanced device codec can retry as H.264. */
     @Synchronized
@@ -178,6 +185,7 @@ internal class StreamingMkvWriter(
         trailerWritten = false
         closed = false
         lastVideoPtsUs = -1L
+        videoWritten = false
         lastAudioPtsUs = -1L
         lastStreamTimestamp.clear()
         destination.delete()
