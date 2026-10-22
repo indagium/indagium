@@ -59,6 +59,46 @@ class CaptureSparseRecoveryTest {
     }
 
     @Test
+    fun damagedSyncMetadataDoesNotHideARecordingSessionAndIsRebuiltOnRecovery() = withFixture { root ->
+        val session = fixture(root, CaptureStatus.RECORDING, rows = 3)
+        val log = session.logFile.readBytes()
+        val index = session.blockIndexFile.readBytes()
+        session.syncFile.writeText(session.syncFile.readText().take(20)) // truncated JSON
+
+        val listed = CaptureRecorder(root).use { it.listSessions() }.single()
+        assertNull(listed.syncMetadataOverride)
+
+        val recovered = CaptureRecorder(root).use { it.recoverSessions().single() }
+        val metadata = requireNotNull(recovered.syncMetadataOverride)
+
+        assertEquals(CaptureStatus.INTERRUPTED, recovered.status)
+        assertEquals(3, metadata.rowCount)
+        assertEquals(log.size.toLong(), metadata.logBytes)
+        assertEquals(listOf(CaptureSyncReliability.UNCERTAIN), metadata.segments.map { it.reliability })
+        assertTrue(log.contentEquals(recovered.logFile.readBytes()))
+        assertTrue(index.contentEquals(recovered.blockIndexFile.readBytes()))
+        assertEquals(metadata, CaptureSyncMetadata.parse(recovered.syncFile.readText()))
+        assertEquals(3, CaptureBlockIndex.read(recovered.blockIndexFile, recovered.logFile).indexedRows)
+    }
+
+    @Test
+    fun corruptedSyncMetadataBytesDoNotHideAStoppedSession() = withFixture { root ->
+        val session = fixture(root, CaptureStatus.STOPPED, rows = 3)
+        val log = session.logFile.readBytes()
+        session.syncFile.writeBytes(ByteArray(64) { 0xFF.toByte() })
+
+        val listed = CaptureRecorder(root).use { it.listSessions() }.single()
+        val recovered = CaptureRecorder(root).use { it.recoverSessions().single() }
+
+        assertEquals(CaptureStatus.STOPPED, listed.status)
+        assertNull(listed.syncMetadataOverride)
+        assertEquals(CaptureStatus.STOPPED, recovered.status)
+        assertTrue(log.contentEquals(recovered.logFile.readBytes()))
+        assertEquals(3, CaptureBlockIndex.read(recovered.blockIndexFile, recovered.logFile).indexedRows)
+        assertEquals(3, parseLogcat(recovered.logFile).size)
+    }
+
+    @Test
     fun manualSegmentCorrectionSurvivesRetainedReloadAndExportWithoutRewritingAssets() = withFixture { root ->
         val session = fixture(root, CaptureStatus.STOPPED, rows = 3)
         CaptureArchiveExporter().finalizeSessionInPlace(session)
