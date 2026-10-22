@@ -249,7 +249,7 @@ internal class AppLaneCapture(
             } catch (stop: CancellationException) {
                 throw stop
             } catch (_: Exception) {
-                Unit
+                // Ignored: see the suppression above.
             }
         }
         LaneMarkerOutcome.Added(context.marker.id, context.noteId, screenshotAttached = afterId != context.noteId)

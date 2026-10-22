@@ -1037,7 +1037,7 @@ class CaptureArchiveExporter(
             val estimatedLogBytes = preflightCandidates.fold(0L) { total, block ->
                 saturatingAdd(total, block.byteEnd - block.byteStart)
             }
-            val estimatedIndexBytes = preflightCandidates.fold(metadata.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong()) { total, block ->
+            val estimatedIndexBytes = preflightCandidates.fold(metadata.toJson().toByteArray(Charsets.UTF_8).size.toLong()) { total, block ->
                 saturatingAdd(
                     total,
                     block.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong() + SPARSE_INDEX_RECORD_OVERHEAD_BYTES,
@@ -2348,7 +2348,7 @@ private fun sparseCandidateMatchesRange(
     if (candidate.rowOrdinal == null) return false
     val elapsed = candidate.point?.captureElapsedMs
     if (filter.sourceCursorByteOffset != null) return true
-    if (elapsed != null && candidate.point?.reliable == true) {
+    if (elapsed != null && candidate.point.reliable) {
         val afterStart = if (excludeStart) elapsed > filter.selectedStartMs else elapsed >= filter.selectedStartMs
         return afterStart && elapsed <= filter.selectedEndMs
     }
@@ -2467,7 +2467,7 @@ private class SparseCandidateBlockScanner(
         val text = raw.toString(Charsets.UTF_8)
         val currentOrdinal = nextRowOrdinal(text)
         val entry = currentOrdinal?.let { parseLogcatLines(sequenceOf(text)).singleOrNull() }
-        val point = if (entry != null && currentOrdinal != null) {
+        val point = if (entry != null) {
             sparseCaptureTimingPoint(entry, currentOrdinal, scan.metadata, scan.timing)
         } else {
             null

@@ -208,6 +208,7 @@ class CaptureRecorder internal constructor(
     private var stopLatch = CountDownLatch(0)
 
     /** Wakes the reconnect backoff promptly on Stop without interrupting the active logcat reader. */
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN") // A java.lang.Object monitor: waited on and notified below.
     private val reconnectWaitMonitor = Object()
 
     /** First storage failure seen while stopping (guarded by [lock]); turns the final status INTERRUPTED. */
@@ -974,7 +975,7 @@ class CaptureRecorder internal constructor(
             // Keep the old constructor field meaningful for source compatibility with callers
             // compiled against the pre-canonical model. It is no longer persisted or used for range
             // selection.
-            logCheckpointMs = maxOf(session.logCheckpointMs, logCheckpointMs),
+            logCheckpointMs = @Suppress("DEPRECATION") maxOf(session.logCheckpointMs, logCheckpointMs),
             videoCheckpointMs = videoCheckpointMs?.let { maxOf(session.videoCheckpointMs, it) } ?: session.videoCheckpointMs,
             logCheckpointByteOffset = if (advanceSparseCursor) requireNotNull(logCheckpointByteOffset) else session.logCheckpointByteOffset,
             logCheckpointRowOrdinal = if (advanceSparseCursor) {
@@ -1839,7 +1840,7 @@ class CaptureRecorder internal constructor(
             if (!needGlobal) return true
             if (!expectedIsCurrent(expected)) return false
             val value = expected.globalLogTag
-            if (value != null && value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
+            if (value.length <= MAX_SAVED_LOG_PROPERTY_VALUE_CHARS) {
                 attempted = true
                 val script = "setprop ${shellQuoteCapture("log.tag")} ${shellQuoteCapture(value)}"
                 applyWithRetry(listOf("shell", script), deadlineNanos)
@@ -1914,8 +1915,8 @@ class CaptureRecorder internal constructor(
                     "Only device logging settings that were readable at capture start could be restored and verified; " +
                         "unknown values were left unchanged.",
                 )
-                attempted || configuration != null -> addDiagnostic("Device logging settings were restored and verified after restart.")
-                else -> addDiagnostic("No complete device logging settings were available to restore; device settings were left unchanged.")
+                // A complete, verified snapshot (an absent configuration is reported before this restore runs).
+                else -> addDiagnostic("Device logging settings were restored and verified after restart.")
             }
         }
     }
