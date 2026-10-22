@@ -515,7 +515,13 @@ audio), optional notes/markers and screenshots, and `captured_with_indagium.txt`
 stores checksums, actual video coverage, and structured device-availability intervals.
 `timeline/sync.json` contains half-open clock-segment row bounds, reference log timestamps,
 capture-elapsed anchors, reliability, and timeline bounds. `mapping/blocks.jsonl` contains sparse
-byte/row checkpoints and capture-time bounds. Synchronization derives row time from the log
+byte/row checkpoints and capture-time bounds; each block also records `settled` (appended, optional): true only when
+every row was resolved through its segment's final anchor when written. A row logged before the anchor existed (startup
+window, after a reconnect or clock jump), during an unconfirmed clock jump, a synthetic row or a recovered row only
+contributes its arrival time, so the settled anchor can resolve it outside that block's envelope. Window queries (time-range
+export and preview, the marker ordinal window) therefore always scan blocks that are not settled (and, as before, blocks
+under a manual anchor), filtering per row; the preview envelope shortcut skips them too; a block with no `settled` field
+(unknown) counts as not settled. Synchronization derives row time from the log
 timestamp and the matching reliable segment; missing or uncertain timestamps never inherit a
 neighbor's video time. New files contain no persisted per-row JSON timing map. Child exports
 rebase row/byte boundaries and timing while clipping availability and notes to the selection.
@@ -2495,11 +2501,19 @@ touched on every reuse) and, above a soft 5 GB budget, least-recently-used direc
 directories in use, directories active within the last hour and directories another instance still leases,
 and the stale `capture-log-restore` leftovers. The lease exists because macOS skips the single-instance guard,
 so two JVMs (a dev build and the installed app) can share one cache: a directory a process uses holds a shared
-`FileChannel` lock on `.indagium-lease` inside it (`markInUse`, taken before the reuse is validated), and the sweep
+`FileChannel` lock on `.indagium-lease` inside it (`acquireUse`, taken before the reuse is validated), and the sweep
 takes that lock exclusively with `tryLock` before deleting, skipping the directory when it cannot (it never waits).
-The lock is released when the process dies, on `deleteDirectory` of that directory and from `AppState.close` via
-`releaseLeases`; because the in-use set never shrinks while the app runs, a lease otherwise lasts for the process.
-A sweep removes the directory's other files while it holds the lease and drops the lease file last, which also keeps
+Ownership is reference-counted: `CaptureArchiveReader.open` returns the claim as `ImportedCapture.extractionUse`
+(a `CaptureExtractionUse`); `AppState` closes the opener's claim when it is done, keeps one per tab inside the
+`ImportedCaptureSnapshot` (taken with `retain()`, closed when the tab closes, the snapshot is replaced or the app closes,
+and retained again around a running snapshot export), and the lease channel and in-use entry go with the directory's
+last open claim. The lock is also released when the process dies, on `deleteDirectory` of that directory and from
+`AppState.close` via `releaseLeases`. Replacing a damaged directory needs exclusive ownership too (`clearForReplacement`:
+drop this process's shared lease, `tryLock` exclusively, never wait): when another process still holds a shared lease
+nothing is deleted and the archive is extracted into a separate `capture-<uuid>` directory (the sweep's legacy junk
+name), when it holds an exclusive one (its sweep) the open waits and retries. All lease and in-use registries key on
+canonical paths, so a symlinked or aliased path cannot split one directory (or one `.recording.lock`) into two
+entries and close a channel that drops the first one's POSIX lock. A sweep removes the directory's other files while it holds the lease and drops the lease file last, which also keeps
 Windows' mandatory locks from blocking the removal. A directory without a lease file (older build, filesystem
 without locks) falls back to the in-use set and the grace period. The lease file is not an asset: reuse checks the
 marker's asset list, never the directory listing.

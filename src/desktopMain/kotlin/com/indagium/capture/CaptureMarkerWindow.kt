@@ -32,18 +32,18 @@ fun ordinalRangeForElapsedWindow(session: CaptureSession, startMs: Long, endMs: 
         val source = sparseMarkerSource(session)
         var first: Int? = null
         var last: Int? = null
-        val correctedUncertain = source.metadata.segments.filter {
-            it.reliability == CaptureSyncReliability.UNCERTAIN && it.manualAnchor != null
-        }
-        val candidates = source.index.blocks.filter { block ->
-            block.overlapsElapsed(startMs.coerceAtLeast(0L), endMs) ||
-                correctedUncertain.any { block.overlapsRows(it.firstRow, it.lastRowExclusive) }
-        }
+        val windowStart = startMs.coerceAtLeast(0L)
+        // Blocks whose recorded envelope cannot be trusted for the final anchors (rows logged before the anchor existed,
+        // manual corrections) are scanned too: their rows can resolve inside the window from outside the envelope.
+        val candidates = source.index.candidateBlocksForResolvedElapsed(source.metadata, windowStart, endMs)
         candidates.forEach { block ->
+            val envelopeInWindow = block.overlapsElapsed(windowStart, endMs)
             forEachSparseMarkerEntry(session.logFile, block) { ordinal, entry ->
                 val elapsed = CaptureTimingResolver.sparsePoint(entry, ordinal, source.metadata)?.captureElapsedMs
-                // A missing/uncertain timestamp cannot narrow a capture-time block further.
-                if (elapsed == null || elapsed in startMs..endMs) {
+                // A missing/uncertain timestamp cannot narrow a capture-time block further, so it counts only where the
+                // block's own envelope overlaps the window.
+                val inWindow = if (elapsed == null) envelopeInWindow else elapsed in startMs..endMs
+                if (inWindow) {
                     first = minOf(first ?: ordinal, ordinal)
                     last = maxOf(last ?: ordinal, ordinal)
                 }

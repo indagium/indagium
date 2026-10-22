@@ -40,6 +40,15 @@ import kotlin.io.path.name
  * so one instance's sweep cannot delete what another instance's open tab still reads. The lock dies
  * with its process, so a crashed instance leaves no stale lease. A directory with no lease file (made
  * by an older build, or where locking is unsupported) falls back to the in-use set and the grace period.
+ *
+ * Ownership: every consumer of a directory ([CaptureArchiveReader.open] hands one out inside
+ * [ImportedCapture.extractionUse]) holds a [CaptureExtractionUse]; the lease and the in-use entry live exactly as
+ * long as at least one use is open, so a closed tab no longer pins its directory (or a file descriptor) until exit.
+ * Replacing a damaged directory needs EXCLUSIVE ownership ([clearForReplacement]): a reader in another process
+ * keeps its files, and the caller extracts into a separate directory instead.
+ *
+ * Every registry here is keyed by canonical path ([canonicalRegistryKey]) so a path alias cannot split one
+ * directory into two entries, which would also let a second channel on one lease file drop the first one's lock.
  */
 internal object CaptureExtractionCache {
     const val MARKER_NAME = ".indagium-extracted"
@@ -88,7 +97,7 @@ internal object CaptureExtractionCache {
         File(cacheDirectory, "$TEMP_PREFIX$key-${java.util.UUID.randomUUID()}")
 
     fun <T> withLock(directory: File, block: () -> T): T {
-        val lock = locks.computeIfAbsent(directory.absolutePath) { ReentrantLock() }
+        val lock = locks.computeIfAbsent(keyOf(directory)) { ReentrantLock() }
         lock.lockInterruptibly()
         try {
             return block()
@@ -97,36 +106,98 @@ internal object CaptureExtractionCache {
         }
     }
 
-    // Shared lease locks (see the class KDoc), keyed like [inUse]. Nothing removes a directory from [inUse]
-    // while the process runs (tabs do not track which extraction they read), so a lease is held until the
-    // directory is deleted by this process ([deleteDirectory]), [releaseLeases] (AppState.close) or process
-    // exit, when the OS drops the lock. Closing a channel drops every lock this process holds on that file
-    // (POSIX), so nothing outside this object may open a lease file of a directory it holds a lease on.
+    private fun keyOf(directory: File): String = canonicalRegistryKey(directory)
+
+    // Shared lease locks (see the class KDoc), keyed like [inUse] and guarded by their own monitor, which also guards
+    // [uses]. A lease channel lives while its directory has an open [CaptureExtractionUse] (or until the directory is
+    // deleted by this process, [releaseLeases] at AppState.close, or process exit, when the OS drops the lock).
+    // Closing a channel drops every lock this process holds on that file (POSIX), so nothing outside this object may
+    // open a lease file of a directory it holds a lease on.
     private val leases = HashMap<String, FileChannel>()
 
+    // The open uses of each directory (identity sets); the last one to close releases the lease and the in-use entry.
+    private val uses = HashMap<String, MutableSet<CaptureExtractionUse>>()
+
     /**
-     * Marks [directory] as used by this process and takes its cross-process lease. Returns false only when
-     * another process holds the lease exclusively, i.e. its sweep is deleting the directory right now: the
-     * caller must not use it. Never waits, and fails open (true) when the lease file cannot be created or
-     * the filesystem has no file locks, which leaves the in-use set and the sweep grace period as protection.
+     * Marks [directory] as used by this process, takes its cross-process lease and returns the use that keeps both
+     * alive until it is closed. Null only when another process holds the lease exclusively, i.e. its sweep is
+     * deleting the directory right now: the caller must not use it. Never waits, and fails open (a use) when the
+     * lease file cannot be created or the filesystem has no file locks, which leaves the in-use set and the sweep
+     * grace period as protection.
      */
-    fun markInUse(directory: File): Boolean {
-        val path = directory.absolutePath
-        if (!acquireLease(directory, path)) return false
-        inUse += path
-        return true
+    fun acquireUse(directory: File): CaptureExtractionUse? = synchronized(leases) {
+        val key = keyOf(directory)
+        if (!acquireLease(directory, key)) return null
+        val use = CaptureExtractionUse(key)
+        uses.getOrPut(key) { java.util.Collections.newSetFromMap(java.util.IdentityHashMap()) } += use
+        inUse += key
+        use
+    }
+
+    /** Test/legacy form of [acquireUse] whose use is never closed (only [deleteDirectory] or [releaseLeases] end it). */
+    fun markInUse(directory: File): Boolean = acquireUse(directory) != null
+
+    /** A second, independent use of the same directory as the still-open [use], or null once [use] was closed. */
+    internal fun retain(use: CaptureExtractionUse): CaptureExtractionUse? = synchronized(leases) {
+        val open = uses[use.key] ?: return null
+        if (use !in open) return null
+        CaptureExtractionUse(use.key).also { open += it }
+    }
+
+    /** Ends [use]; the lease and the in-use entry go with the directory's last open use. Idempotent. */
+    internal fun release(use: CaptureExtractionUse) {
+        // The close stays under the monitor: a lease re-taken on the same file between leaving it and closing would
+        // have its POSIX lock dropped by this channel's close (closing any channel drops all of the process's locks).
+        synchronized(leases) {
+            val open = uses[use.key] ?: return
+            if (!open.remove(use) || open.isNotEmpty()) return
+            uses.remove(use.key)
+            inUse -= use.key
+            runCatching { leases.remove(use.key)?.close() }
+        }
+    }
+
+    /** What [clearForReplacement] decided. */
+    enum class Replacement {
+        /** The directory is gone (this process owned it exclusively): extract into it. */
+        CLEARED,
+
+        /** Another process holds the lease exclusively, i.e. its sweep is deleting it right now: wait and look again. */
+        BUSY,
+
+        /** Another process still reads the directory (a shared lease): nothing was touched, extract elsewhere. */
+        HELD_BY_OTHERS,
     }
 
     /**
-     * Clears [directory] (absent, stale or damaged) so a fresh extraction can take its place, but only when
-     * no other process holds its lease exclusively. False means another instance's sweep is deleting it
-     * right now: nothing was touched, and the caller must wait and look again instead of deleting or writing.
+     * Clears [directory] (absent, stale or damaged) so a fresh extraction can take its place, but only with
+     * EXCLUSIVE ownership: a shared lease does not exclude another process's readers, so deleting under it could
+     * remove files an open tab in that process still reads. This process's own shared lease is dropped first (a
+     * same-JVM upgrade is impossible, and a second channel's close would drop the first's lock anyway), then the
+     * lease is taken exclusively without waiting, exactly like the sweep. When that fails nothing is deleted:
+     * [Replacement.BUSY] when the holder is exclusive (a sweep), [Replacement.HELD_BY_OTHERS] when it only reads, in
+     * which case this process's own lease is restored if any of its uses remain.
      */
-    fun clearForReplacement(directory: File): Boolean {
-        if (directory.exists() && !acquireLease(directory, directory.absolutePath)) return false
-        deleteDirectory(directory)
-        return true
+    fun clearForReplacement(directory: File): Replacement {
+        if (!directory.exists()) {
+            deleteDirectory(directory)
+            return Replacement.CLEARED
+        }
+        val key = keyOf(directory)
+        releaseLease(directory)
+        val lease = acquireForDeletion(directory)
+        if (lease != null) {
+            deleteLeased(directory, lease)
+            forget(key)
+            return Replacement.CLEARED
+        }
+        val shared = acquireLease(directory, key)
+        if (shared && synchronized(leases) { uses[key].isNullOrEmpty() }) releaseLease(directory)
+        return if (shared) Replacement.HELD_BY_OTHERS else Replacement.BUSY
     }
+
+    /** A directory name no key maps to, for an extraction that must not reuse or replace [directoryFor]'s. */
+    fun separateDirectoryFor(cacheDirectory: File): File = File(cacheDirectory, "capture-${java.util.UUID.randomUUID()}")
 
     /** Sleeps one growing backoff step (50, 100, 200, 400 ms, ...) of [attempt]; false once [deadlineNanos] has passed. */
     fun pauseBeforeRetry(attempt: Int, deadlineNanos: Long): Boolean {
@@ -136,8 +207,8 @@ internal object CaptureExtractionCache {
         return true
     }
 
-    private fun acquireLease(directory: File, path: String): Boolean = synchronized(leases) {
-        if (path in leases) return true
+    private fun acquireLease(directory: File, key: String): Boolean = synchronized(leases) {
+        if (key in leases) return true
         try {
             // Read access is what a shared lock requires, write what the sweep's exclusive one does.
             val channel = FileChannel.open(
@@ -158,37 +229,53 @@ internal object CaptureExtractionCache {
                 channel.close()
                 return false
             }
-            leases[path] = channel
+            leases[key] = channel
         } catch (failure: IOException) {
             runCatching { AppLogger.warn("capture", "Capture extraction lease unavailable: ${failure.message}") }
         }
         true
     }
 
-    /** Drops this process's lease on [directory], if any, so the directory (lease file included) can be deleted. */
+    /** Drops this process's lease channel on [directory], if any, so the directory (lease file included) can be deleted. */
     private fun releaseLease(directory: File) {
-        val channel = synchronized(leases) { leases.remove(directory.absolutePath) }
-        runCatching { channel?.close() }
+        // Closed under the monitor for the same reason as in [release].
+        synchronized(leases) { runCatching { leases.remove(keyOf(directory))?.close() } }
     }
 
-    /** Releases every lease this process holds (the in-use set is kept); `AppState.close` calls it. */
+    /** Forgets every use and in-use entry of [key]; the uses' later close is a no-op. */
+    private fun forget(key: String) {
+        synchronized(leases) {
+            uses.remove(key)
+            inUse -= key
+        }
+    }
+
+    /**
+     * Releases every lease channel this process holds (the in-use set and the open uses are kept); `AppState.close`
+     * calls it. A use closed afterwards has no channel left to close.
+     */
     fun releaseLeases() {
-        val held = synchronized(leases) { leases.values.toList().also { leases.clear() } }
-        held.forEach { runCatching { it.close() } }
+        synchronized(leases) {
+            leases.values.forEach { runCatching { it.close() } }
+            leases.clear()
+        }
     }
 
     /** True when this process holds a lease on [directory] (test hook). */
-    internal fun holdsLease(directory: File): Boolean = synchronized(leases) { directory.absolutePath in leases }
+    internal fun holdsLease(directory: File): Boolean = synchronized(leases) { keyOf(directory) in leases }
 
-    fun isInUse(directory: File): Boolean = directory.absolutePath in inUse
+    /** How many uses of [directory] are open in this process (test hook). */
+    internal fun openUseCount(directory: File): Int = synchronized(leases) { uses[keyOf(directory)]?.size ?: 0 }
+
+    fun isInUse(directory: File): Boolean = keyOf(directory) in inUse
 
     /** An extraction in progress is "in use" too, so a concurrent [sweep] cannot delete it mid-write. */
     fun beginTemporary(directory: File) {
-        inUse += directory.absolutePath
+        inUse += keyOf(directory)
     }
 
     fun endTemporary(directory: File) {
-        inUse -= directory.absolutePath
+        inUse -= keyOf(directory)
     }
 
     /** Writes the marker that makes [directory] reusable; call after every asset has been extracted and verified. */
@@ -256,7 +343,7 @@ internal object CaptureExtractionCache {
 
     fun deleteDirectory(directory: File) {
         // A deleted directory is no longer in use, and on Windows an open lease file would block its removal.
-        inUse -= directory.absolutePath
+        forget(keyOf(directory))
         releaseLease(directory)
         if (!directory.exists()) return
         runCatching { directory.walkBottomUp().forEach { it.delete() } }
@@ -276,7 +363,7 @@ internal object CaptureExtractionCache {
      * set and grace period remain the protection. Only call for a directory this process does not use.
      */
     private fun acquireForDeletion(directory: File): DeletionLease? {
-        if (synchronized(leases) { directory.absolutePath in leases }) return null
+        if (synchronized(leases) { keyOf(directory) in leases }) return null
         val leaseFile = File(directory, LEASE_NAME)
         if (!leaseFile.isFile) return DeletionLease(null)
         val channel = try {
@@ -373,7 +460,7 @@ internal object CaptureExtractionCache {
 
         /** Deletes [dir] under its own lock when [stillEligible] holds; false if it was skipped. */
         private fun deleteIfIdle(dir: File, removal: Removal, stillEligible: () -> Boolean): Boolean {
-            val lock = locks.computeIfAbsent(dir.absolutePath) { ReentrantLock() }
+            val lock = locks.computeIfAbsent(keyOf(dir)) { ReentrantLock() }
             if (!lock.tryLock()) return false
             try {
                 if (!stillEligible()) return false
@@ -456,4 +543,16 @@ internal object CaptureExtractionCache {
         if (!target.startsWith(root) || target == root) return null
         return File(cacheDirectory, root.relativize(target).first().name)
     }
+}
+
+/**
+ * One consumer's claim on an extraction directory ([CaptureExtractionCache] keeps its lease and in-use entry alive
+ * while any claim is open). Close it when the consumer (a tab, its imported snapshot, a transient probe) is done;
+ * closing is idempotent. A directory that was deleted or replaced meanwhile makes the close a no-op.
+ */
+class CaptureExtractionUse internal constructor(internal val key: String) : AutoCloseable {
+    /** An independent claim on the same directory (for work that may outlive this one), or null if already closed. */
+    fun retain(): CaptureExtractionUse? = CaptureExtractionCache.retain(this)
+
+    override fun close() = CaptureExtractionCache.release(this)
 }

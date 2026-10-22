@@ -911,11 +911,13 @@ internal class CaptureService(
         scope.launch {
             try {
                 runInterruptible {
-                    val imported = CaptureArchiveReader.open(File(sourcePath), File(sessionsRoot(), "calibration-cache"))
-                    val session = listSessions().firstOrNull { it.id == imported.descriptor.sessionId }
+                    // Only the descriptor is read, so the extraction claim goes right back.
+                    val descriptor = CaptureArchiveReader.open(File(sourcePath), File(sessionsRoot(), "calibration-cache"))
+                        .use { it.descriptor }
+                    val session = listSessions().firstOrNull { it.id == descriptor.sessionId }
                         ?: return@runInterruptible
                     CaptureRecorder(session.directory.parentFile).use { recorder ->
-                        recorder.setManualOffset(session.id, imported.descriptor.manualOffsetMs + additionalOffsetMs)
+                        recorder.setManualOffset(session.id, descriptor.manualOffsetMs + additionalOffsetMs)
                     }
                     updateSessions()
                 }

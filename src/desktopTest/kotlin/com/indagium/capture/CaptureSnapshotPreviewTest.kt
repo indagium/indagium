@@ -169,7 +169,7 @@ class CaptureSnapshotPreviewTest {
                 repeat(rows) { index ->
                     val raw = (line(index) + "\n").toByteArray()
                     output.write(raw)
-                    writer.append(offset, raw, index + 1, index * 1_000L, 0)
+                    writer.append(offset, raw, index + 1, index * 1_000L, 0, resolvedCaptureElapsedMs = index * 1_000L)
                     offset += raw.size
                 }
             }

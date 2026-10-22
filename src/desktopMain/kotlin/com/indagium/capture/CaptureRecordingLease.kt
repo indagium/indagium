@@ -10,6 +10,15 @@ import java.nio.file.StandardOpenOption
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * The key an in-process registry of file-lock owners uses for [file]: its canonical path, so an alias (a symlinked
+ * save folder, macOS `/tmp` vs `/private/tmp`) can never miss the registry and open a second channel on a file this
+ * JVM holds a POSIX lock on, which would drop that lock on close. Falls back to the absolute normalized path when the
+ * filesystem cannot canonicalize it. Compute it the same way at add, check and remove.
+ */
+internal fun canonicalRegistryKey(file: File): String =
+    runCatching { file.canonicalPath }.getOrElse { file.absoluteFile.normalize().path }
+
+/**
  * An exclusive OS file lock on [LEASE_NAME] inside a capture session directory, held by the recorder for as long as
  * the session is recording.
  *
@@ -52,10 +61,10 @@ internal class CaptureRecordingLease private constructor(
     companion object {
         const val LEASE_NAME = ".recording.lock"
 
-        // Canonical-ish keys of the leases this JVM holds or is probing right now.
+        // Canonical keys of the leases this JVM holds or is probing right now.
         private val held = ConcurrentHashMap.newKeySet<String>()
 
-        private fun keyOf(directory: File): String = directory.absoluteFile.normalize().path
+        private fun keyOf(directory: File): String = canonicalRegistryKey(directory)
 
         private fun leaseFile(directory: File): File = File(directory, LEASE_NAME)
 

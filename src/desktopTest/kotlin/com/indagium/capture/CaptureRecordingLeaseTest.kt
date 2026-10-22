@@ -5,7 +5,11 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.nio.channels.FileChannel
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -13,6 +17,39 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+private const val LOCK_PROBE_TIMEOUT_SECONDS = 60L
+
+/**
+ * Child JVM for [CaptureRecordingLeaseTest]: tries to take the lock of the file named by `args[0]` and prints
+ * `HELD` when another process (the test JVM) owns it, `FREE` when it could take it.
+ */
+internal object CaptureLockProbe {
+    @JvmStatic
+    fun main(args: Array<String>) {
+        FileChannel.open(File(args[0]).toPath(), StandardOpenOption.READ, StandardOpenOption.WRITE).use { channel ->
+            val lock = channel.tryLock()
+            println(if (lock == null) "HELD" else "FREE")
+            lock?.release()
+        }
+    }
+}
+
+/** True when a different JVM cannot lock [file] because the test JVM holds a lock on it. */
+internal fun lockIsHeldByAnotherProcess(file: File): Boolean {
+    val java = File(System.getProperty("java.home"), "bin/java").path
+    val process = ProcessBuilder(
+        java, "-Djava.awt.headless=true", "-cp", System.getProperty("java.class.path"),
+        CaptureLockProbe::class.java.name, file.absolutePath,
+    ).redirectErrorStream(true).start()
+    val output = process.inputStream.bufferedReader().readText()
+    check(process.waitFor(LOCK_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS)) { "lock probe did not exit" }
+    return when (output.trim().lines().last()) {
+        "HELD" -> true
+        "FREE" -> false
+        else -> error("unexpected lock probe output: $output")
+    }
+}
 
 /**
  * A RECORDING session whose [CaptureRecordingLease] is held is live (another recorder or app instance owns it):
@@ -94,6 +131,52 @@ class CaptureRecordingLeaseTest {
         assertFalse(CaptureRecordingLease.isHeldByThisProcess(directory))
         val again = CaptureRecordingLease.tryTakeOver(directory)
         assertNotNull((again as? CaptureRecordingLease.Attempt.Acquired)?.also { it.lease.close() })
+    }
+
+    @Test
+    fun aSymlinkAliasProbeNeverReleasesTheRecordersOsLock() = withFixture { root ->
+        val real = File(root, "real").apply { mkdirs() }
+        val alias = File(root, "alias")
+        try {
+            Files.createSymbolicLink(alias.toPath(), real.toPath())
+        } catch (_: Exception) {
+            return@withFixture // no symlinks here (Windows without privilege): nothing to alias
+        }
+        val owner = requireNotNull(CaptureRecordingLease.create(real))
+        try {
+            assertTrue(lockIsHeldByAnotherProcess(File(real, CaptureRecordingLease.LEASE_NAME)), "the owner holds the OS lock")
+
+            assertEquals(CaptureRecordingLease.Attempt.Held, CaptureRecordingLease.tryTakeOver(alias))
+            assertNull(CaptureRecordingLease.create(alias))
+
+            assertTrue(
+                lockIsHeldByAnotherProcess(File(real, CaptureRecordingLease.LEASE_NAME)),
+                "probing through an alias must not close a channel that drops the recorder's lock",
+            )
+            assertTrue(CaptureRecordingLease.isHeldByThisProcess(alias), "the alias names the same lease")
+        } finally {
+            owner.close()
+        }
+        assertFalse(CaptureRecordingLease.isHeldByThisProcess(alias))
+        assertFalse(CaptureRecordingLease.isHeldByThisProcess(real))
+    }
+
+    @Test
+    fun aLiveSessionIsRecognisedThroughAPathAlias() = withFixture { root ->
+        val real = File(root, "real").apply { mkdirs() }
+        val alias = File(root, "alias")
+        try {
+            Files.createSymbolicLink(alias.toPath(), real.toPath())
+        } catch (_: Exception) {
+            return@withFixture
+        }
+        LiveCaptureSessions.add(real)
+        try {
+            assertTrue(LiveCaptureSessions.isLive(alias))
+        } finally {
+            LiveCaptureSessions.remove(alias)
+        }
+        assertFalse(LiveCaptureSessions.isLive(real), "removal through the alias removes the one entry")
     }
 
     @Test

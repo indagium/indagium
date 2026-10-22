@@ -158,6 +158,18 @@ data class CaptureSyncMetadata(
         return null
     }
 
+    /** True when a manual anchor corrects a segment that [block] holds rows of, which moves them off any recorded time. */
+    internal fun hasManualAnchorOver(block: CaptureBlock): Boolean =
+        segments.any { it.manualAnchor != null && block.overlapsRows(it.firstRow, it.lastRowExclusive) }
+
+    /**
+     * Whether [block]'s recorded elapsed envelope can stand for the times its rows resolve to under these segments: it
+     * was settled when written ([CaptureBlock.envelopeSettled]) and no manual anchor re-times any of its rows. When it
+     * cannot, a time-window query must scan the block and decide per row instead of trusting the envelope.
+     */
+    internal fun blockEnvelopeBracketsRows(block: CaptureBlock): Boolean =
+        block.envelopeSettled == true && !hasManualAnchorOver(block)
+
     fun toJson(): String {
         val payload = payloadJson()
         val digest = sha256(payload.toString().toByteArray(Charsets.UTF_8))
@@ -209,6 +221,15 @@ data class CaptureBlock(
     val clockSegmentId: Int?,
     val sha256: String,
     val recovered: Boolean = false,
+    /**
+     * Whether [firstElapsedMs]..[lastElapsedMs] still brackets the time every row of this block resolves to through its
+     * segment's final anchor: true only when each row was resolved against that anchor (and no clock jump was pending)
+     * when the block was written. A row logged while its segment's anchor was not yet established (the startup window,
+     * after a reconnect or clock jump), a synthetic row, or a recovered row only contributes its ARRIVAL time to the
+     * envelope, so the settled anchor can later move it outside. Appended last; null (unknown) for blocks written by
+     * builds that did not record it, which is treated like false: never trusted, always scanned.
+     */
+    val envelopeSettled: Boolean? = null,
 ) {
     init {
         require(byteStart >= 0L && byteEnd > byteStart) { "Invalid capture block byte bounds" }
@@ -234,6 +255,7 @@ data class CaptureBlock(
         if (clockSegmentId == null) put("clockSegmentId", JsonNull) else put("clockSegmentId", clockSegmentId)
         put("sha256", sha256)
         put("recovered", recovered)
+        envelopeSettled?.let { put("settled", it) }
     }
 }
 
@@ -260,6 +282,27 @@ data class CaptureBlockIndex(
     fun candidateBlocksForElapsed(startInclusive: Long, endInclusive: Long): List<CaptureBlock> {
         if (startInclusive < 0L || endInclusive < startInclusive) return emptyList()
         return blocks.filter { it.overlapsElapsed(startInclusive, endInclusive) }
+    }
+
+    /**
+     * Every block that can hold a row whose RESOLVED time falls in [startInclusive]..[endInclusive]: the blocks whose
+     * recorded envelope overlaps it, plus every block whose envelope cannot be trusted for [metadata]'s final anchors
+     * (see [blockEnvelopeBracketsRows]), which are scanned and filtered per row. A row that resolves inside the
+     * window while its block's envelope lies outside would otherwise be skipped silently.
+     */
+    fun candidateBlocksForResolvedElapsed(
+        metadata: CaptureSyncMetadata,
+        startInclusive: Long,
+        endInclusive: Long,
+    ): List<CaptureBlock> {
+        val windowValid = startInclusive >= 0L && endInclusive >= startInclusive
+        return blocks.filter { block ->
+            if (windowValid) {
+                block.overlapsElapsed(startInclusive, endInclusive) || !metadata.blockEnvelopeBracketsRows(block)
+            } else {
+                metadata.hasManualAnchorOver(block)
+            }
+        }
     }
 
     companion object {
@@ -359,6 +402,7 @@ class CaptureBlockWriter(
     private var firstObservedElapsedMs = -1L
     private var lastObservedElapsedMs = -1L
     private var clockSegmentId: Int? = null
+    private var unsettledRows = false
     private var nextRowOrdinal = initialBlocks.lastOrNull()?.lastRowExclusive ?: 1
     private var closed = false
 
@@ -376,6 +420,9 @@ class CaptureBlockWriter(
         elapsedMs: Long,
         segmentId: Int?,
         resolvedCaptureElapsedMs: Long? = null,
+        // Whether [resolvedCaptureElapsedMs] is the row's FINAL time (its segment's established anchor, no pending clock
+        // jump). Defaults to "a time was resolved"; a row that is not settled leaves its block's envelope untrusted.
+        envelopeSettled: Boolean? = null,
     ) {
         check(!closed) { "Capture block writer is closed" }
         require(byteOffset >= 0L && elapsedMs >= 0L) { "Invalid capture block append bounds" }
@@ -410,6 +457,7 @@ class CaptureBlockWriter(
             require(rowOrdinal == nextRowOrdinal) {
                 "Capture block row ordinals are not contiguous"
             }
+            noteRowSettled(envelopeSettled, resolvedElapsed)
             lastRowExclusive = rowOrdinal + 1
             nextRowOrdinal++
             if (clockSegmentId != segmentId) clockSegmentId = null
@@ -433,6 +481,7 @@ class CaptureBlockWriter(
                 clockSegmentId = clockSegmentId,
                 sha256 = digest.digest().toHex(),
                 recovered = recoveredBlocks,
+                envelopeSettled = !unsettledRows,
             )
             output.write(block.toJson().toString().toByteArray(Charsets.UTF_8))
             output.write('\n'.code)
@@ -466,6 +515,10 @@ class CaptureBlockWriter(
         closed = true
     }
 
+    private fun noteRowSettled(settled: Boolean?, resolvedElapsed: Long?) {
+        if (!(settled ?: (resolvedElapsed != null))) unsettledRows = true
+    }
+
     private fun resetCurrent() {
         byteStart = -1L
         byteEnd = -1L
@@ -476,6 +529,7 @@ class CaptureBlockWriter(
         firstObservedElapsedMs = -1L
         lastObservedElapsedMs = -1L
         clockSegmentId = null
+        unsettledRows = false
         digest.reset()
     }
 }
@@ -884,6 +938,22 @@ class CaptureSyncRecorder(
         return runCatching { Math.addExact(anchor.elapsed, delta) }.getOrNull()
     }
 
+    /** What a block writer records for one row just passed to [observe]; see [rowTiming]. */
+    internal class RowTiming(val resolvedElapsedMs: Long?, val settled: Boolean)
+
+    /**
+     * The time [text] resolves to through the current anchor, and whether that time is FINAL for the row. It is not
+     * while no anchor is established, nor while a clock jump is being confirmed: the row may still be moved into the
+     * next segment, which re-times it. Call right after [observe] for the same row. A row that is not [resolvable]
+     * (a separator, a synthetic marker row) has no time at all and is never settled.
+     */
+    @Synchronized
+    internal fun rowTiming(text: String, captureElapsedMs: Long, resolvable: Boolean = true): RowTiming {
+        if (!resolvable) return RowTiming(null, settled = false)
+        val resolved = resolvedCaptureElapsedMs(text, captureElapsedMs)
+        return RowTiming(resolved, settled = resolved != null && clockJumpCandidateCount == 0)
+    }
+
     @Synchronized
     fun snapshot(
         logBytes: Long,
@@ -1167,6 +1237,7 @@ private fun JsonObject.toBlock() = CaptureBlock(
     clockSegmentId = intValueOrNull("clockSegmentId"),
     sha256 = stringValue("sha256"),
     recovered = booleanValue("recovered") ?: false,
+    envelopeSettled = booleanValue("settled"),
 )
 
 private fun JsonObject.longValue(name: String): Long = getValue(name).jsonPrimitive.longOrNull

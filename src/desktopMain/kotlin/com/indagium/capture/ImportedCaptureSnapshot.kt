@@ -21,7 +21,16 @@ internal data class ImportedCaptureSnapshot(
     val identity: String,
     val session: CaptureSession,
     val checkpointFile: File,
-)
+    /**
+     * Its own claim on the archive's extraction directory (the session reads the log, video, screenshots and block
+     * index from there): whoever stores the snapshot owns it and closes it when the snapshot is dropped. Appended last.
+     */
+    val extractionUse: CaptureExtractionUse? = null,
+) : AutoCloseable {
+    override fun close() {
+        extractionUse?.close()
+    }
+}
 
 private data class ImportedSnapshotCursors(
     val logMs: Long = -1L,
@@ -115,7 +124,7 @@ internal fun importedCaptureSnapshot(
         logCheckpointByteOffset = savedCursors.byteOffset,
         logCheckpointRowOrdinal = savedCursors.rowOrdinal,
     )
-    return ImportedCaptureSnapshot(identity, session, checkpointFile)
+    return ImportedCaptureSnapshot(identity, session, checkpointFile, imported.extractionUse?.retain())
 }
 
 /**
