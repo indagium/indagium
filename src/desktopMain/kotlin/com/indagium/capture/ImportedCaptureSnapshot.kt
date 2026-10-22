@@ -118,7 +118,7 @@ internal fun importedCaptureSnapshot(
         storageVersion = CaptureStorageVersion.BLOCKS_V2,
         blockIndexFileOverride = blockIndexFile,
         syncMetadataOverride = sparseMetadata,
-        manualSegmentAnchors = sparseMetadata?.segments?.mapNotNull(CaptureSyncSegment::manualAnchor).orEmpty(),
+        manualSegmentAnchors = sparseMetadata.segments.mapNotNull(CaptureSyncSegment::manualAnchor),
         frozenLogBytes = sparseMetadata.logBytes,
         frozenBlockIndexBytes = blockIndexFile.length(),
         logCheckpointByteOffset = savedCursors.byteOffset,
@@ -179,7 +179,8 @@ internal fun refreshImportedCaptureSnapshotCursors(source: ImportedCaptureSnapsh
         source.copy(
             session = old.copy(
                 snapshotCheckpointMs = maxOf(old.effectiveSnapshotCheckpointMs, cursors.logMs),
-                logCheckpointMs = maxOf(old.logCheckpointMs, cursors.logMs),
+                // Legacy mirror of snapshotCheckpointMs, kept for source compatibility.
+                logCheckpointMs = @Suppress("DEPRECATION") maxOf(old.logCheckpointMs, cursors.logMs),
                 videoCheckpointMs = maxOf(old.videoCheckpointMs, cursors.videoMs),
                 exportCounter = maxOf(old.exportCounter, cursors.exportCount),
                 logCheckpointByteOffset = if (sparseCursorAdvanced) cursors.byteOffset else old.logCheckpointByteOffset,
@@ -206,7 +207,8 @@ internal fun persistImportedCaptureSnapshotCursors(
     }
     val updated = old.copy(
         snapshotCheckpointMs = maxOf(old.effectiveSnapshotCheckpointMs, disk.logMs, logCheckpointMs),
-        logCheckpointMs = maxOf(old.logCheckpointMs, disk.logMs, logCheckpointMs),
+        // Legacy mirror of snapshotCheckpointMs, kept for source compatibility.
+        logCheckpointMs = @Suppress("DEPRECATION") maxOf(old.logCheckpointMs, disk.logMs, logCheckpointMs),
         videoCheckpointMs = maxOf(old.videoCheckpointMs, disk.videoMs, videoCheckpointMs ?: -1L),
         exportCounter = maxOf(old.exportCounter, disk.exportCount) + 1,
         logCheckpointByteOffset = nextByteOffset,
@@ -384,7 +386,7 @@ private fun appendImportedBlockLine(
     val trimmed = raw.toString(Charsets.UTF_8).trim()
     val rowOrdinal = if (trimmed.isNotEmpty() && !trimmed.startsWith("-----")) ++state.rowOrdinal else null
     val entry = rowOrdinal?.let { parsedLog.getOrNull(it - 1) }
-    val point = if (entry != null && rowOrdinal != null) sparseCaptureTimingPoint(entry, rowOrdinal, metadata) else null
+    val point = if (entry != null) sparseCaptureTimingPoint(entry, rowOrdinal, metadata) else null
     val resolvedElapsed = point?.captureElapsedMs
     val elapsed = when {
         resolvedElapsed != null -> resolvedElapsed.also { state.fallbackElapsed = it }

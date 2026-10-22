@@ -203,6 +203,7 @@ internal class BoundedScrcpyPacketFeed(
         val codecId: Int = ScrcpyCodecIds.H264,
     )
 
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN") // A java.lang.Object monitor: waited on and notified.
     private val lock = Object()
     private val queue = ArrayDeque<Packet>()
     private var queuedBytes = 0L
@@ -454,6 +455,7 @@ internal class BoundedAnnexBFeed(
 ) : Closeable {
     private data class Packet(val data: ByteArray, val enqueuedAtNs: Long)
 
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN") // A java.lang.Object monitor: waited on and notified.
     private val lock = Object()
     private val queue = ArrayDeque<Packet>()
     private var queuedBytes = 0L

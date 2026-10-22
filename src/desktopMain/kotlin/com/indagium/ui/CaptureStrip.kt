@@ -290,7 +290,7 @@ internal fun captureNoVideoWarning(
 internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
     snapshot.videoRecording -> "Video REC"
     snapshot.state == RecorderState.RECORDING && snapshot.session?.settings?.recordVideo == true &&
-        snapshot.session?.availabilityIntervals?.lastOrNull()?.let { it.endElapsedMs == null } == true -> "Video retrying"
+        snapshot.session.availabilityIntervals.lastOrNull()?.let { it.endElapsedMs == null } == true -> "Video retrying"
     snapshot.session?.settings?.recordVideo == true -> "Video idle"
     else -> "Video off"
 }
@@ -1628,7 +1628,7 @@ internal fun CaptureSnapshotPopover(
     val sinceSaveEnabled = captureSinceSaveEnabled(session, sinceSaveCutoffMs, includeVideo)
     val sinceSaveHint = captureSinceSaveHint(session, sinceSaveCutoffMs, includeVideo)
     val explicitRangeEnabled = explicitBounds?.let { (start, end) ->
-        start >= 0L && end > start && start < (session?.elapsedMs ?: 0L)
+        start >= 0L && end > start && start < session.elapsedMs
     } ?: true
     val rangeValid = session != null &&
         (rangeChoice != SnapshotRangeChoice.LAST_MINUTES || customMinutes > 0) &&

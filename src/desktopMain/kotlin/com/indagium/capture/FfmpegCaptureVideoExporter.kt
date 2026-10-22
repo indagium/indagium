@@ -157,7 +157,7 @@ class FfmpegCaptureVideoExporter(
     ): CaptureVideoClip {
         require(timelineStartElapsedMs >= 0L) { "Availability export start must be non-negative" }
         require(timelineEndElapsedMs > timelineStartElapsedMs) { "Availability export end must be after its start" }
-        require(source?.canonicalFile != destination.canonicalFile || source == null) {
+        require(source?.canonicalFile != destination.canonicalFile) {
             "Video destination must differ from its capture source"
         }
         val gaps = availabilityIntervals.mapNotNull { interval ->
@@ -466,11 +466,11 @@ private fun availabilityMediaInfo(input: FFmpegFrameGrabber?): AvailabilityMedia
     val audioPresent = input != null && input.audioStream >= 0 && input.audioChannels > 0 && input.sampleRate > 0
     return AvailabilityMediaInfo(
         videoPresent = videoPresent,
-        width = (if (videoPresent) input!!.imageWidth else GAP_CARD_FALLBACK_WIDTH).coerceAtLeast(2),
-        height = (if (videoPresent) input!!.imageHeight else GAP_CARD_FALLBACK_HEIGHT).coerceAtLeast(2),
+        width = (if (videoPresent) input.imageWidth else GAP_CARD_FALLBACK_WIDTH).coerceAtLeast(2),
+        height = (if (videoPresent) input.imageHeight else GAP_CARD_FALLBACK_HEIGHT).coerceAtLeast(2),
         audioPresent = audioPresent,
-        audioChannels = if (audioPresent) input!!.audioChannels else 0,
-        sampleRate = if (audioPresent) input!!.sampleRate else 0,
+        audioChannels = if (audioPresent) input.audioChannels else 0,
+        sampleRate = if (audioPresent) input.sampleRate else 0,
     )
 }
 

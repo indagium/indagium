@@ -344,6 +344,7 @@ data class CaptureSession(
 
     /** Effective cursor, including sessions loaded from the legacy logCheckpointMs format. */
     val effectiveSnapshotCheckpointMs: Long
+        @Suppress("DEPRECATION") // Reading the legacy field is this accessor's whole purpose.
         get() = snapshotCheckpointMs.takeIf { it >= 0 } ?: logCheckpointMs
 
     /**

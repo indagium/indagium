@@ -542,7 +542,7 @@ private fun DeviceLoggingPanelContent(
             onReclaimFocus = onReclaimFocus,
             modifier = Modifier.weight(1f),
         ) { close ->
-            DeviceLogDropdownItem("Default (device)", active = globalLevelKnown && logState?.globalLevel == null) {
+            DeviceLogDropdownItem("Default (device)", active = globalLevelKnown && logState.globalLevel == null) {
                 service.setDeviceGlobalLogLevel(device.serial, null)
                 close()
             }
@@ -550,7 +550,7 @@ private fun DeviceLoggingPanelContent(
             // ASSERT is excluded here even though it can still show up read-only under Per-tag
             // overrides below).
             LogTagLevel.selectable.forEach { level ->
-                DeviceLogDropdownItem(level.label, active = globalLevelKnown && logState?.globalLevel == level) {
+                DeviceLogDropdownItem(level.label, active = globalLevelKnown && logState.globalLevel == level) {
                     service.setDeviceGlobalLogLevel(device.serial, level)
                     close()
                 }
