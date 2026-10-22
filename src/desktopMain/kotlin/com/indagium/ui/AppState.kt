@@ -11765,6 +11765,57 @@ class AppState(
         }
     }
 
+    /**
+     * Startup housekeeping for `archive-cache/captures` (legacy per-open directories, abandoned temp
+     * extractions, directories unused for 14 days, a soft 5 GB budget) and stale
+     * `capture-log-restore` leftovers. Off the UI thread, no [stateLock]. Directories this process
+     * opened are never touched, and neither is any directory a tab's persisted/open state points into:
+     * today no autosaved field does (archive sources persist the ARCHIVE path and re-resolve through
+     * [com.indagium.capture.CaptureArchiveReader.open]; videos play from `archive-cache/videos`), so
+     * the check is defence in depth, including for the restored tab shells before their loads run.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun sweepCaptureExtractionCache(
+        nowMs: Long = System.currentTimeMillis(),
+        maxUnusedMs: Long = com.indagium.capture.CaptureExtractionCache.DEFAULT_MAX_UNUSED_MS,
+        budgetBytes: Long = com.indagium.capture.CaptureExtractionCache.DEFAULT_BUDGET_BYTES,
+        graceMs: Long = com.indagium.capture.CaptureExtractionCache.DEFAULT_GRACE_MS,
+    ): com.indagium.capture.CaptureExtractionCache.SweepResult = try {
+        val capturesDir = File(archiveCacheDir, "captures")
+        val result = com.indagium.capture.CaptureExtractionCache.sweep(
+            capturesDir, nowMs, maxUnusedMs, budgetBytes, graceMs, isReferenced = ::capturePathsReferenceDirectory,
+        )
+        val leftovers = com.indagium.capture.CaptureExtractionCache.sweepRestoreLogLeftovers(
+            File(archiveCacheDir, "capture-log-restore"), nowMs, graceMs,
+        )
+        if (result.deletedTotal > 0 || leftovers > 0) {
+            AppLogger.info(
+                "capture",
+                "Swept capture extraction cache: removed ${result.deletedTotal} directories " +
+                    "(legacy ${result.deletedLegacy}, temporary ${result.deletedTemporary}, " +
+                    "expired ${result.deletedExpired}, over budget ${result.deletedForBudget}) " +
+                    "and $leftovers restore leftovers, freed ${result.bytesFreed} bytes, ${result.remainingBytes} bytes remain",
+            )
+        }
+        result
+    } catch (error: Exception) {
+        AppLogger.warn("capture", "Could not sweep the capture extraction cache: ${error.message}")
+        com.indagium.capture.CaptureExtractionCache.SweepResult()
+    }
+
+    /** True when an open or restored tab (or imported snapshot session) refers to a path inside [directory]. */
+    private fun capturePathsReferenceDirectory(directory: File): Boolean {
+        val prefix = directory.absolutePath + File.separator
+        val paths = tabs.flatMap { tab ->
+            listOfNotNull(
+                tab.sourcePath,
+                tab.captureArchivePath,
+                (tab.attachedVideo?.source as? VideoSource.LocalFile)?.path,
+            )
+        } + importedCaptureSnapshots.values.map { it.session.directory.absolutePath }
+        return paths.any { it.startsWith(prefix) || it == directory.absolutePath }
+    }
+
     private fun captureArchivePathForTab(tab: LogTab): String? {
         val candidates = listOfNotNull(tab.captureArchivePath, tab.attachedVideo?.captureSourcePath)
         candidates.firstOrNull { path -> runCatching {
@@ -15719,13 +15770,20 @@ class AppState(
 
     /** Restores a capture whose descriptor no longer opens from the archive's checksum-verified log alone. */
     private fun loadVerifiedRestoreLog(archiveFile: File, entryPath: String?, missingEntryPath: String): RestoredTabLoadResult {
+        val restoreCache = File(archiveCacheDir, "capture-log-restore")
         val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
             archiveFile,
             entryPath,
-            File(archiveCacheDir, "capture-log-restore"),
+            restoreCache,
         ) ?: return RestoredTabLoadResult.MissingArchiveEntry(archiveFile, missingEntryPath)
-        val parsed = runCatching { parser(verifiedLog) }
-            .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+        val parsed = try {
+            runCatching { parser(verifiedLog) }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+        } finally {
+            // The extracted copy exists only to be parsed once; an in-place capture's own log is not
+            // under the restore cache and is left alone.
+            com.indagium.capture.CaptureExtractionCache.owningDirectory(restoreCache, verifiedLog)
+                ?.let(com.indagium.capture.CaptureExtractionCache::deleteDirectory)
+        }
         return RestoredTabLoadResult.Loaded(
             logData = parsed.entries,
             archiveCandidate = null,
@@ -15785,6 +15843,7 @@ class AppState(
         // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
         // synchronous — that one is already user-initiated from an explicit click, not startup.
         ioScope.launch { refreshStorageSizeInfo() }
+        if (restoreOnCreate) ioScope.launch { sweepCaptureExtractionCache() }
         loadPersistedSourceIndex()
     }
 }

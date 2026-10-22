@@ -1334,54 +1334,121 @@ object CaptureArchiveReader {
         throw zstdLoadFailure(e)
     }
 
+    /**
+     * Opens [source] through the reuse cache ([CaptureExtractionCache]): the first open of an archive
+     * state extracts and verifies it into `capture-<key>`; later opens (the next launch, a second
+     * tab on the same file) validate the marker and reuse that directory. Everything before the
+     * cache check (entry scan, descriptor parse, size limits) runs on every open, so a malformed
+     * archive fails with the same exceptions as before and never gets a marker.
+     */
     private fun extractZip(source: File, cacheDirectory: File): ImportedCapture {
-        val output = File(cacheDirectory, "capture-${UUID.randomUUID()}")
-        require(output.mkdir()) { "Cannot create capture extraction directory: $output" }
-        var success = false
-        try {
-            val descriptor: CaptureArchiveDescriptor
+        val key = CaptureExtractionCache.keyFor(source)
+        val finalDirectory = CaptureExtractionCache.directoryFor(cacheDirectory, key)
+        return CaptureExtractionCache.withLock(finalDirectory) {
             ZipFile.builder().setFile(source).get().use { zip ->
                 val scan = scanZipEntries(zip)
                 val descriptorEntry = scan.descriptorEntry ?: throw CaptureArchiveException("Capture descriptor is missing")
                 require(!descriptorEntry.isDirectory) { "Capture descriptor is not a file" }
                 val descriptorText = zip.openEntryStream(descriptorEntry, "capture descriptor").use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
-                descriptor = parseDescriptor(descriptorText)
+                val descriptor = parseDescriptor(descriptorText)
                 val screenshotsBytes = descriptor.screenshots.sumOf { scan.entrySizes[it.path] ?: 0L }
                 require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
                     "Capture screenshots exceed the combined size limit"
                 }
+                reuseExtraction(finalDirectory, key, descriptor, scan, source)?.let { return@use it }
+                CaptureExtractionCache.deleteDirectory(finalDirectory)
                 requireExtractionSpace(cacheDirectory, scan.entrySizes.values.fold(0L, ::saturatingAdd))
-                val remainingAssets = descriptor.assets().associateBy { it.path }.toMutableMap()
-                val entries = zip.entries
-                var entryCount = 0
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    entryCount++
-                    require(entryCount <= MAX_ARCHIVE_ENTRIES_SCANNED) { "Capture archive has too many entries" }
-                    if (entry.isDirectory) continue
-                    val name = normalizedEntryName(entry.name)
-                    if (name == CAPTURE_DESCRIPTOR_NAME || name == CAPTURED_WITH_INDAGIUM_NAME) continue
-                    val asset = remainingAssets.remove(name)
-                        ?: throw CaptureArchiveException("Capture archive contains an unreferenced file: $name")
-                    val limit = assetLimit(descriptor, asset)
-                    // A size the zip's own central directory declares is a cheap fail-fast bound;
-                    // [extractVerified] re-enforces the same limit while actually streaming, which is
-                    // what an inconsistent/lying declared size can't get past.
-                    if (entry.size >= 0) require(entry.size <= limit) { "Capture asset exceeds its size limit: ${asset.path}" }
-                    val target = resolveSafe(output, asset.path)
-                    target.parentFile?.mkdirs()
-                    val what = if (asset == descriptor.log) "capture log" else "capture asset ${asset.path}"
-                    zip.openEntryStream(entry, what).use { input -> extractVerified(input, target, asset, limit) }
+                CaptureExtractionCache.extractionObserver?.invoke(finalDirectory)
+                val temporary = CaptureExtractionCache.temporaryDirectoryFor(cacheDirectory, key)
+                require(temporary.mkdir()) { "Cannot create capture extraction directory: $temporary" }
+                CaptureExtractionCache.beginTemporary(temporary)
+                var published = false
+                try {
+                    extractAssets(zip, temporary, descriptor)
+                    CaptureExtractionCache.writeMarker(temporary, key, descriptor.assets())
+                    publishExtraction(temporary, finalDirectory, key, descriptor, scan)
+                    published = true
+                } finally {
+                    CaptureExtractionCache.endTemporary(temporary)
+                    if (!published) deleteTree(temporary)
                 }
-                require(remainingAssets.isEmpty()) {
-                    "Capture asset is missing: ${remainingAssets.keys.first()}"
+                CaptureExtractionCache.markInUse(finalDirectory)
+                var valid = false
+                try {
+                    validateImported(finalDirectory, descriptor, source).also { valid = true }
+                } finally {
+                    // A directory that does not validate must not be offered to the next open.
+                    if (!valid) deleteTree(finalDirectory)
                 }
             }
-            val imported = validateImported(output, descriptor, source)
-            success = true
-            return imported
-        } finally {
-            if (!success) deleteTree(output)
+        }
+    }
+
+    /** The reused extraction, or null when [finalDirectory] is absent, stale, damaged or no longer validates. */
+    @Suppress("TooGenericExceptionCaught")
+    private fun reuseExtraction(
+        finalDirectory: File,
+        key: String,
+        descriptor: CaptureArchiveDescriptor,
+        scan: ZipEntryScan,
+        source: File,
+    ): ImportedCapture? {
+        if (!CaptureExtractionCache.isReusable(finalDirectory, key, descriptor.assets(), scan.entrySizes.keys)) return null
+        return try {
+            validateImported(finalDirectory, descriptor, source).also {
+                CaptureExtractionCache.markInUse(finalDirectory)
+                CaptureExtractionCache.touch(finalDirectory)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Atomically renames [temporary] to [finalDirectory]; if another process won the race, uses its directory. */
+    private fun publishExtraction(
+        temporary: File,
+        finalDirectory: File,
+        key: String,
+        descriptor: CaptureArchiveDescriptor,
+        scan: ZipEntryScan,
+    ) {
+        try {
+            try {
+                Files.move(temporary.toPath(), finalDirectory.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(temporary.toPath(), finalDirectory.toPath())
+            }
+        } catch (failure: IOException) {
+            if (!CaptureExtractionCache.isReusable(finalDirectory, key, descriptor.assets(), scan.entrySizes.keys)) throw failure
+            deleteTree(temporary)
+        }
+    }
+
+    private fun extractAssets(zip: ZipFile, output: File, descriptor: CaptureArchiveDescriptor) {
+        val remainingAssets = descriptor.assets().associateBy { it.path }.toMutableMap()
+        val entries = zip.entries
+        var entryCount = 0
+        while (entries.hasMoreElements()) {
+            val entry = entries.nextElement()
+            entryCount++
+            require(entryCount <= MAX_ARCHIVE_ENTRIES_SCANNED) { "Capture archive has too many entries" }
+            if (entry.isDirectory) continue
+            val name = normalizedEntryName(entry.name)
+            if (name == CAPTURE_DESCRIPTOR_NAME || name == CAPTURED_WITH_INDAGIUM_NAME) continue
+            val asset = remainingAssets.remove(name)
+                ?: throw CaptureArchiveException("Capture archive contains an unreferenced file: $name")
+            val limit = assetLimit(descriptor, asset)
+            // A size the zip's own central directory declares is a cheap fail-fast bound;
+            // [extractVerified] re-enforces the same limit while actually streaming, which is
+            // what an inconsistent/lying declared size can't get past.
+            if (entry.size >= 0) require(entry.size <= limit) { "Capture asset exceeds its size limit: ${asset.path}" }
+            val target = resolveSafe(output, asset.path)
+            target.parentFile?.mkdirs()
+            val what = if (asset == descriptor.log) "capture log" else "capture asset ${asset.path}"
+            zip.openEntryStream(entry, what).use { input -> extractVerified(input, target, asset, limit) }
+        }
+        require(remainingAssets.isEmpty()) {
+            "Capture asset is missing: ${remainingAssets.keys.first()}"
         }
     }
 
