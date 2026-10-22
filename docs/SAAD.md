@@ -2518,6 +2518,28 @@ Windows' mandatory locks from blocking the removal. A directory without a lease 
 without locks) falls back to the in-use set and the grace period. The lease file is not an asset: reuse checks the
 marker's asset list, never the directory listing.
 
+**Extract from this archive** (`capture/CaptureArchiveExtract.kt`). The range popover of a tab opened from an archive
+(`Export -> Export capture range...`; it is the same `CaptureSnapshotPopover` as Save snapshot) has an "Extract from this
+archive" group next to its two archive formats, shown only when the tab's `ImportedCaptureSnapshot.extractSource` (the
+extraction directory, the parsed descriptor and the opened file, appended last to the snapshot) is present. The choice is the
+UI-only `SnapshotOutput` (`Archive(format)` or `Extract(kind)`); `CaptureExportFormat` is unchanged because it is part of the
+exporter request and the AI tool. `CaptureArchiveExtractor` copies, it never decodes: the cache already holds each asset
+decoded (zstd undone) and hash-verified, so `ALL_FILES` (a folder), `LOG_ONLY` (`<name>.log`) and `VIDEO_ONLY` (the video's own
+extension) re-hash every file against the descriptor while copying (a cache file changed after the open fails with a checksum
+error and publishes nothing). Output is staged beside the destination (`.<name>.extracting-<uuid>`, same volume) and renamed in
+one step; an existing folder is refused (never merged or replaced), an existing file is replaced with
+`moveReplacingAtomically` only after the popover's overwrite confirmation. Paths go through `resolveSafe`, symlinks are
+refused, free space is checked first, and cancel is thread interruption (`AppState.extractImportedCapture` runs the copy in
+`runInterruptible` on `ioScope`; the copy loop checks `Thread.isInterrupted`), which removes the staging. The copy holds its own
+`extractionUse.retain()` for its whole run, so closing the tab mid-copy cannot let a sweep or replacement pull the files away.
+The folder's descriptor is written with the exporter's own writer for v3+ and verbatim from the source for v1/v2 (whose nested
+shape that writer cannot produce), so the folder re-opens through the in-place folder import; its notes are the archive's as
+shipped, not the recipient's edits in the tab. Status reuses the export busy/result/error state (`CaptureExportResult.extracted`
+makes the strip say "Extracted to ..."); the range controls, Include video and the sparse preview are off in Extract mode.
+Separately, `AppState.saveRetainedCapture` (the stopped strip's Save ZIP / Save Compact) now exports an opened archive's own
+imported snapshot instead of looking its descriptor's session id up in the local capture roots, which failed on a recipient's
+machine and exported the local original on the sender's.
+
 ### 14.7 Single instance
 
 `singleinstance/SingleInstance.kt` takes a `FileLock` on `single-instance.lock`. The primary instance

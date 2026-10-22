@@ -16,10 +16,14 @@ import com.indagium.ai.acceptsImagesUpFront
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.ai.recoveredBundledCodexPath
 import com.indagium.ai.validateAiProviderProfile
+import com.indagium.capture.CaptureArchiveExtractor
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureExtractKind
+import com.indagium.capture.CaptureExtractPlan
+import com.indagium.capture.CaptureExtractSource
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSegmentManualAnchor
@@ -264,6 +268,7 @@ private const val MAX_NOTE_TARGET_SUFFIX = 1000
 // Used to normalize a clockwise rotation (manual adjustment + source display rotation) into
 // [0, 360) — see videoRotationDegrees below.
 private const val FULL_CIRCLE_DEGREES = 360
+private const val PERCENT_SCALE = 100L
 
 internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
 
@@ -5310,6 +5315,113 @@ class AppState(
                 captureExportBusyMessage = null
                 captureExportJob = null
                 requestHeapTrim("retained capture export")
+            }
+        }
+    }
+
+    /** The opened archive's decoded files "Extract from this archive" copies from; null for a tab not opened from one. */
+    internal fun captureExtractSourceFor(tabId: String): CaptureExtractSource? = importedCaptureSnapshots[tabId]?.extractSource
+
+    /** What extracting [kind] would write, from the files on disk. File stats: call off the UI thread. */
+    internal fun captureExtractPlanFor(tabId: String, kind: CaptureExtractKind): CaptureExtractPlan? =
+        captureExtractSourceFor(tabId)?.let { CaptureArchiveExtractor.plan(it, kind) }
+
+    private val extractAv1Probes = ConcurrentHashMap<String, Boolean>()
+
+    /** Whether the opened archive's video is AV1 (QuickTime may not play it). Opens the file: call off the UI thread. */
+    internal fun captureExtractVideoIsAv1(tabId: String): Boolean {
+        val source = captureExtractSourceFor(tabId) ?: return false
+        val video = source.descriptor.video ?: return false
+        val file = com.indagium.capture.resolveSafe(source.root, video.path)
+        return extractAv1Probes.getOrPut(file.absolutePath) {
+            runCatching { com.indagium.capture.FfmpegAv1CompactVideoTranscoder().isAlreadyAv1(file) }.getOrDefault(false)
+        }
+    }
+
+    /**
+     * Copies an opened archive's contents out as plain files to [destination] (a new folder for ALL_FILES, a file for the
+     * other kinds; [overwrite] replaces an existing file but never a folder). Same busy/result/error/cancel state as the
+     * range exports, so the strip and the popover show it unchanged. The archive's extraction stays leased for the whole copy
+     * even if the tab is closed meanwhile.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun extractImportedCapture(
+        tabId: String,
+        kind: CaptureExtractKind,
+        destination: File,
+        overwrite: Boolean = false,
+    ) {
+        cancelCapturePreview(tabId)
+        val snapshot = importedCaptureSnapshots[tabId]
+        val source = snapshot?.extractSource
+        if (snapshot == null || source == null) {
+            if (!captureExportBusy) {
+                captureExportOwner = null
+                captureExportSessionId = null
+                captureExportResult = null
+                captureExportWarning = null
+                captureExportCancelled = false
+            }
+            captureExportError = "The capture source is no longer available"
+            return
+        }
+        if (captureExportBusy) return
+        captureExportOwner = snapshot.session.id
+        captureExportSessionId = snapshot.session.id
+        captureExportBusy = true
+        captureExportBusyMessage = "Extracting…"
+        captureExportResult = null
+        captureExportPreview = null
+        captureExportPreviewKey = null
+        captureExportPreviewError = null
+        captureExportError = null
+        captureExportCancelled = false
+        captureExportWarning = null
+        captureExportJob = ioScope.launch {
+            try {
+                val result = runInterruptible {
+                    // The tab's own claim ends when the tab closes; this one keeps the extraction protected until the copy is done.
+                    val use = snapshot.extractionUse
+                    val hold = use?.retain()
+                    check(use == null || hold != null) { "The capture was closed" }
+                    try {
+                        beforeCaptureSnapshotExport()
+                        CaptureArchiveExtractor.extract(source, kind, destination, overwrite) { done, total ->
+                            captureExportBusyMessage = "Extracting… ${if (total > 0L) done * PERCENT_SCALE / total else PERCENT_SCALE}%"
+                        }
+                    } finally {
+                        hold?.close()
+                    }
+                }
+                captureExportResult = CaptureExportResult(
+                    file = result.output,
+                    logCoveredEndMs = 0L,
+                    videoCoveredEndMs = null,
+                    videoActualStartMs = null,
+                    message = when (kind) {
+                        CaptureExtractKind.ALL_FILES -> "${result.fileCount} files, ${formatCaptureBytes(result.bytes)}"
+                        else -> formatCaptureBytes(result.bytes)
+                    },
+                    extracted = true,
+                )
+            } catch (cancelled: CancellationException) {
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                }
+                throw cancelled
+            } catch (failure: Throwable) {
+                if (captureExportCancelled) {
+                    captureExportError = null
+                    captureExportResult = null
+                } else {
+                    captureExportError = failure.message ?: failure::class.simpleName ?: "Extraction failed"
+                }
+            } finally {
+                captureExportBusy = false
+                captureExportBusyMessage = null
+                captureExportJob = null
+                requestHeapTrim("capture extraction")
             }
         }
     }

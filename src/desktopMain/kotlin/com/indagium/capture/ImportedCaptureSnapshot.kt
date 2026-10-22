@@ -26,6 +26,8 @@ internal data class ImportedCaptureSnapshot(
      * index from there): whoever stores the snapshot owns it and closes it when the snapshot is dropped. Appended last.
      */
     val extractionUse: CaptureExtractionUse? = null,
+    /** Where "Extract from this archive" reads the archive's decoded assets; null when the opener gave no root. Appended last. */
+    val extractSource: CaptureExtractSource? = null,
 ) : AutoCloseable {
     override fun close() {
         extractionUse?.close()
@@ -124,7 +126,8 @@ internal fun importedCaptureSnapshot(
         logCheckpointByteOffset = savedCursors.byteOffset,
         logCheckpointRowOrdinal = savedCursors.rowOrdinal,
     )
-    return ImportedCaptureSnapshot(identity, session, checkpointFile, imported.extractionUse?.retain())
+    val extractSource = imported.root?.let { CaptureExtractSource(it, imported.descriptor, source) }
+    return ImportedCaptureSnapshot(identity, session, checkpointFile, imported.extractionUse?.retain(), extractSource)
 }
 
 /**

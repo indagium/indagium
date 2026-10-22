@@ -1334,6 +1334,19 @@ object CaptureArchiveReader {
         }
     }.getOrDefault(false)
 
+    /**
+     * The descriptor JSON exactly as [source] ships it (a ZIP/`.ind`, an extracted folder, or its descriptor file). Extract uses
+     * it for a v1/v2 archive, whose nested shape [toJson] (the v3+ writer) cannot reproduce.
+     */
+    internal fun readDescriptorText(source: File): String = when {
+        source.isDirectory -> readSmallFile(descriptorFile(source))
+        source.isFile && source.name == CAPTURE_DESCRIPTOR_NAME -> readSmallFile(source)
+        else -> ZipFile.builder().setFile(source).get().use { zip ->
+            val entry = findDescriptorEntry(zip) ?: throw CaptureArchiveException("Capture descriptor is missing")
+            zip.getInputStream(entry).use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
+        }
+    }
+
     fun open(file: File, cacheDirectory: File): ImportedCapture {
         require(cacheDirectory.mkdirs() || cacheDirectory.isDirectory) { "Cannot create capture cache: $cacheDirectory" }
         return when {
@@ -3474,7 +3487,7 @@ private fun readTimelineRows(
  * own doc). `manualOffsetMs` moved out to its own top-level `offsetMs` key since it is no longer
  * part of the same object as a "sync" pointer.
  */
-private fun CaptureArchiveDescriptor.toJson(): String = buildJsonObject {
+internal fun CaptureArchiveDescriptor.toJson(): String = buildJsonObject {
     put("format", "indagium-capture")
     put("version", formatVersion)
     put("app", app)
@@ -3565,7 +3578,7 @@ private fun parseIsoInstant(text: String): Long = Instant.parse(text).toEpochMil
 /** Top-level entry: reads the descriptor's version, then dispatches to the v3 or legacy (v1/v2)
  *  shape — see [CaptureArchiveDescriptor]'s own doc for what each version writes/omits. */
 @Suppress("TooGenericExceptionCaught")
-private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
+internal fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
     try {
         val root = Json.parseToJsonElement(raw).jsonObject
         require(root.string("format") == "indagium-capture") { "Not an Indagium capture descriptor" }
@@ -3796,7 +3809,7 @@ private fun validateParsedDescriptor(descriptor: CaptureArchiveDescriptor) {
     }
 }
 
-private fun CaptureArchiveDescriptor.assets(): List<CaptureArchiveAsset> =
+internal fun CaptureArchiveDescriptor.assets(): List<CaptureArchiveAsset> =
     buildList {
         add(log)
         mapping?.let(::add)
@@ -4108,7 +4121,7 @@ private fun isSafeRelativePath(raw: String): Boolean {
     return parts.none { it.isBlank() || it == "." || it == ".." }
 }
 
-private fun resolveSafe(root: File, relative: String): File {
+internal fun resolveSafe(root: File, relative: String): File {
     require(isSafeRelativePath(relative)) { "Unsafe capture asset path: $relative" }
     val normalizedRoot = root.toPath().toAbsolutePath().normalize()
     val resolved = normalizedRoot.resolve(normalizedEntryName(relative)).normalize()
@@ -4116,7 +4129,7 @@ private fun resolveSafe(root: File, relative: String): File {
     return resolved.toFile()
 }
 
-private fun hasSymbolicLink(root: File, target: File): Boolean {
+internal fun hasSymbolicLink(root: File, target: File): Boolean {
     val rootPath = root.toPath().toAbsolutePath().normalize()
     var current = target.toPath().toAbsolutePath().normalize()
     while (current.startsWith(rootPath) && current != rootPath) {

@@ -458,6 +458,8 @@ data class CaptureExportResult(
     /** Exclusive byte and inclusive row endpoints covered in the source log by this export. */
     val logCoveredEndByteOffset: Long? = null,
     val logCoveredEndRowOrdinal: Int? = null,
+    /** Appended last. True for an "Extract from this archive" copy: [file] is the extracted folder or file, not an archive. */
+    val extracted: Boolean = false,
 )
 
 /** Read-only coverage and overwrite information shown before a live snapshot is saved. */
