@@ -1,5 +1,6 @@
 package com.indagium.capture
 
+import com.indagium.utils.moveReplacingAtomically
 import org.bytedeco.ffmpeg.avcodec.AVCodec
 import org.bytedeco.ffmpeg.avcodec.AVCodecContext
 import org.bytedeco.ffmpeg.avcodec.AVPacket
@@ -74,7 +75,6 @@ import java.io.File
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -201,12 +201,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
                 encodedVideo
             }
             checkCompactInterrupted()
-            Files.move(
-                completedVideo.toPath(),
-                destination.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-                StandardCopyOption.ATOMIC_MOVE,
-            )
+            moveReplacingAtomically(completedVideo.toPath(), destination.toPath())
         } catch (interrupted: InterruptedIOException) {
             throw interrupted
         } catch (failure: LinkageError) {
