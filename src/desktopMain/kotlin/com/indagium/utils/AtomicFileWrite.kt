@@ -72,16 +72,44 @@ internal fun moveReplacingAtomically(
         } catch (_: AtomicMoveNotSupportedException) {
             check(atomic) { "A plain replacing move reported that atomic moves are unsupported" }
             atomic = false
-        } catch (failure: AccessDeniedException) {
-            if (++attempt >= REPLACE_RETRY_ATTEMPTS) throw failure
-            sleep(REPLACE_RETRY_BACKOFF_MS * attempt)
         } catch (failure: FileSystemException) {
-            // Only a bare FileSystemException is a sharing violation; NoSuchFile, FileAlreadyExists and the like are not.
-            if (failure.javaClass != FileSystemException::class.java || ++attempt >= REPLACE_RETRY_ATTEMPTS) throw failure
+            if (!isRetriableSharingViolation(failure, ++attempt)) throw failure
             sleep(REPLACE_RETRY_BACKOFF_MS * attempt)
         }
     }
 }
+
+/**
+ * Moves [source] (a file or a whole directory) to [destination] without ever replacing anything: an existing
+ * [destination] fails with [java.nio.file.FileAlreadyExistsException], which is not retried. The same Windows
+ * sharing violations as [moveReplacingAtomically] are retried: an antivirus scanner or the indexer briefly holding
+ * a file just written under [source] fails the rename for a few milliseconds. [move] is the `Files.move` seam for tests.
+ */
+internal fun moveWithoutReplacing(
+    source: Path,
+    destination: Path,
+    sleep: (Long) -> Unit = { Thread.sleep(it) },
+    move: (Path, Path) -> Unit = { from, to -> Files.move(from, to) },
+) {
+    var attempt = 0
+    while (true) {
+        try {
+            move(source, destination)
+            return
+        } catch (failure: FileSystemException) {
+            if (!isRetriableSharingViolation(failure, ++attempt)) throw failure
+            sleep(REPLACE_RETRY_BACKOFF_MS * attempt)
+        }
+    }
+}
+
+/**
+ * Whether [failure] on the [attempt]th try (1-based) is a sharing violation worth another try: an [AccessDeniedException]
+ * or a bare [FileSystemException], never NoSuchFile, FileAlreadyExists and the like, and only while attempts remain.
+ */
+private fun isRetriableSharingViolation(failure: FileSystemException, attempt: Int): Boolean =
+    attempt < REPLACE_RETRY_ATTEMPTS &&
+        (failure is AccessDeniedException || failure.javaClass == FileSystemException::class.java)
 
 /**
  * Reads [file] through NIO. On Windows NIO opens with FILE_SHARE_DELETE, so a reader of a file that a recorder

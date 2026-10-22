@@ -5,6 +5,7 @@ import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureExportRequest
+import com.indagium.capture.CaptureExtractKind
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
@@ -21,6 +22,7 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -84,6 +86,44 @@ class CaptureSaveOpenedArchiveTest {
                 val saved = assertNotNull(app.captureExportResult).file
                 assertEquals(2, logLines(saved, root, "saved").size, "the archive's rows, not the original session's")
                 assertEquals(logLines(archive, root, "orig"), logLines(saved, root, "saved2"))
+            } finally {
+                app.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theAiStatusLastSnapshotPathIgnoresExtractionsAndKeepsTheLastSavedArchive() = runBlocking {
+        val root = createTempDirectory("save-opened-ai-status").toFile()
+        try {
+            val archive = exportArchive(root, "status-session", rows = 2)
+            val app = appState(root)
+            try {
+                val tabId = app.openCaptureFile(archive)
+                waitLoaded(app, tabId)
+
+                // An extracted folder is not a saved snapshot.
+                app.extractImportedCapture(tabId, CaptureExtractKind.ALL_FILES, File(root, "out/all"))
+                awaitIdle(app)
+                assertTrue(assertNotNull(app.captureExportResult, app.captureExportError).extracted)
+                val afterExtract = app.deviceCaptureStatusForAi(tabId)
+                assertNull(afterExtract["error"], afterExtract["error"]?.toString())
+                assertTrue("lastSnapshotPath" in afterExtract)
+                assertNull(afterExtract["lastSnapshotPath"])
+
+                app.saveRetainedCapture(assertNotNull(app.tab(tabId)?.captureSourceSessionId), tabId, CaptureExportFormat.ZIP)
+                awaitIdle(app)
+                val saved = assertNotNull(app.captureExportResult, app.captureExportError)
+                assertFalse(saved.extracted)
+
+                // A later extraction, and closing its notice, do not hide the archive saved before it.
+                app.extractImportedCapture(tabId, CaptureExtractKind.LOG_ONLY, File(root, "out/only.log"))
+                awaitIdle(app)
+                assertNull(app.captureExportError)
+                app.clearCaptureExportStatus()
+                assertEquals(saved.file.absolutePath, app.deviceCaptureStatusForAi(tabId)["lastSnapshotPath"])
             } finally {
                 app.close()
             }

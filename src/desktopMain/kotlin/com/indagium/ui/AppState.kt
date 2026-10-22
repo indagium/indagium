@@ -3452,8 +3452,18 @@ class AppState(
      * stuck; cleared alongside [captureExportBusy]. */
     internal var captureExportBusyMessage by mutableStateOf<String?>(null)
         private set
-    internal var captureExportResult by mutableStateOf<CaptureExportResult?>(null)
-        private set
+    private var captureExportResultState by mutableStateOf<CaptureExportResult?>(null)
+    internal var captureExportResult: CaptureExportResult?
+        get() = captureExportResultState
+        private set(value) {
+            captureExportResultState = value
+            // An "Extract from this archive" copy is not a saved snapshot; clearing the notice must not forget one either.
+            if (value != null && !value.extracted) lastSavedCaptureSnapshot = value.file
+        }
+
+    /** The last archive this process saved for any tab (never an extraction): the AI status's `lastSnapshotPath`. */
+    @Volatile
+    private var lastSavedCaptureSnapshot: File? = null
     internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
         private set
 
@@ -4003,7 +4013,7 @@ class AppState(
             "markers" to markers,
             // Best-effort only: the last export this process itself saved for ANY tab, since a
             // per-tab record isn't kept. Null when nothing has been exported yet this launch.
-            "lastSnapshotPath" to captureExportResult?.file?.absolutePath,
+            "lastSnapshotPath" to lastSavedCaptureSnapshot?.absolutePath,
         )
     }.getOrElse { mapOf("error" to (it.message ?: "Could not read capture status")) }
 
