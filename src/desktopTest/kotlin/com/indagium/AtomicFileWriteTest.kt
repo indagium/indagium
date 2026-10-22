@@ -1,8 +1,12 @@
 package com.indagium
 
+import com.indagium.utils.moveReplacingAtomically
 import com.indagium.utils.writeFileAtomically
 import java.io.File
 import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -68,5 +72,34 @@ class AtomicFileWriteTest {
 
         assertTrue(!dest.exists())
         assertTrue(dir.listFiles().orEmpty().isEmpty(), "expected no leftover temp files")
+    }
+
+    @Test
+    fun moveReplacingAtomicallyReplacesTheDestination() {
+        val dir = createTempDirectory("openlog-atomic-move").toFile()
+        val source = File(dir, "source.txt").apply { writeText("new") }
+        val dest = File(dir, "dest.txt").apply { writeText("old") }
+
+        moveReplacingAtomically(source.toPath(), dest.toPath())
+
+        assertEquals("new", dest.readText())
+        assertTrue(!source.exists())
+    }
+
+    @Test
+    fun moveReplacingAtomicallyFallsBackToAPlainReplacingMoveWhenAtomicIsUnsupported() {
+        val dir = createTempDirectory("openlog-atomic-move-fallback").toFile()
+        val source = File(dir, "source.txt").apply { writeText("new") }
+        val dest = File(dir, "dest.txt").apply { writeText("old") }
+        val attempts = mutableListOf<Boolean>()
+
+        moveReplacingAtomically(source.toPath(), dest.toPath()) { from, to, atomic ->
+            attempts += atomic
+            if (atomic) throw AtomicMoveNotSupportedException(from.toString(), to.toString(), "test")
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING)
+        }
+
+        assertEquals(listOf(true, false), attempts)
+        assertEquals("new", dest.readText())
     }
 }

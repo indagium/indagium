@@ -4,6 +4,7 @@ import java.io.File
 import java.io.Writer
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
 // Shared by every export/persistence write that must never leave a partial/corrupt file at
@@ -35,5 +36,28 @@ private fun moveAtomicallyIfPossible(tmp: File, destination: File) {
         Files.move(tmp.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     } catch (_: AtomicMoveNotSupportedException) {
         Files.move(tmp.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+/**
+ * Moves [source] over [destination], atomically where the filesystem supports it and as a plain
+ * replacing move otherwise (certain network/cross-volume mounts throw [AtomicMoveNotSupportedException]).
+ * [move] is the `Files.move` seam for tests; its flag says whether the move must be atomic.
+ */
+internal fun moveReplacingAtomically(
+    source: Path,
+    destination: Path,
+    move: (Path, Path, Boolean) -> Unit = { from, to, atomic ->
+        if (atomic) {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } else {
+            Files.move(from, to, StandardCopyOption.REPLACE_EXISTING)
+        }
+    },
+) {
+    try {
+        move(source, destination, true)
+    } catch (_: AtomicMoveNotSupportedException) {
+        move(source, destination, false)
     }
 }
