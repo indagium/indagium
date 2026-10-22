@@ -536,10 +536,12 @@ The reproducible million-row fixture and size/navigation measurements are docume
 [`CAPTURE_METADATA_BENCHMARK.md`](CAPTURE_METADATA_BENCHMARK.md).
 
 **Compact capture archives.** `CaptureExportRequest.format` defaults to `CaptureExportFormat.ZIP`
-(`"zip"`); the opt-in `COMPACT` format (`"ind.zip"`) writes `<name>.ind.zip` using the same v5 ZIP
-layout and reader. The extension ends in `.zip` so ordinary tools still recognise the container;
-legacy `.ind` files still open because archive detection is by content, and recents keep the `ind`
-classification. Snapshot exports expose a format selector, while stopped/retained saves add Save
+(`"zip"`); the opt-in `COMPACT` format (`"ind"`) writes `<name>.ind` using the same v5 ZIP
+layout and reader. Compact is an Indagium format (zstd log, AV1-in-MKV video that standard tools
+cannot extract or play), so it does not use a `.zip` name; GitHub issue attachments do not accept
+`.ind`, so zip it first or use the ZIP export. `.ind.zip` files from an earlier build of this branch
+still open because archive detection is by content; recents classify both `zip` and `ind` as archives,
+and `captureArchiveTitle` strips `.ind.zip`, `.zip` and `.ind` for the tab title. Snapshot exports expose a format selector, while stopped/retained saves add Save
 Compact beside Save ZIP. Compact does not require video: an archive without video is valid. AI tools
 and issue attachments retain their default ZIP requests.
 
@@ -1411,7 +1413,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/block writing, synchronized snapshot boundaries, screenshots, watchdog, disk limits, and interruption recovery |
 | `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
 | `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `EmbeddedMirrorRuntime.kt` / `MirrorVideoPacket.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta parser, recording and mirror packet observers, CPU/native decoder fan-out, bounded feeds, and mirror-side Annex-B re-flattening |
-| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP/Compact (`.ind.zip`) snapshot export/finalization, asset validation, and block-assisted range selection with legacy timing adapters |
+| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP/Compact (`.ind`) snapshot export/finalization, asset validation, and block-assisted range selection with legacy timing adapters |
 | `capture/CaptureSparseMetadata.kt` | Checksummed segment metadata, sparse block writer/reader, bounded automatic anchor estimation, and the shared timing resolver |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |

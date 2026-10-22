@@ -102,14 +102,14 @@ class CaptureSnapshotExportLifecycleTest {
             composeRule.onNodeWithText("Export capture range…").assertIsDisplayed().performClick()
             composeRule.onNodeWithText("Save ZIP").assertIsDisplayed()
             composeRule.onNodeWithText("Include video").assertIsDisplayed()
-            // The Compact radio label ("(.ind.zip)") and the archive name field both contain ".zip".
-            composeRule.onAllNodes(hasText(".zip", substring = true)).assertCountEquals(2)
+            // Only the archive name field contains ".zip"; the Compact radio label says "(.ind)".
+            composeRule.onAllNodes(hasText(".zip", substring = true)).assertCountEquals(1)
 
-            composeRule.onNodeWithText("Indagium Compact (.ind.zip) · zstd log + AV1").performClick()
+            composeRule.onNodeWithText("Indagium Compact (.ind) · zstd log + AV1").performClick()
             composeRule.onNodeWithText("Save Compact").assertIsDisplayed()
             composeRule.onNodeWithText("Include video").assertIsDisplayed()
             composeRule.onAllNodesWithText("Save ZIP").assertCountEquals(0)
-            composeRule.onAllNodes(hasText(".ind.zip", substring = true)).assertCountEquals(2)
+            composeRule.onAllNodes(hasText(".ind", substring = true)).assertCountEquals(2)
 
             composeRule.onNodeWithText("Save Compact").performClick()
             composeRule.waitUntil(30_000) {
@@ -117,7 +117,7 @@ class CaptureSnapshotExportLifecycleTest {
             }
             assertNull(state.captureExportError)
             val exported = assertNotNull(state.captureExportResult).file
-            assertTrue(exported.name.endsWith(".ind.zip"), "the selected format should reach the exporter destination")
+            assertTrue(exported.name.endsWith(".ind"), "the selected format should reach the exporter destination")
             // Compact stores the log as ZIP method 93, which the JDK's ZipFile cannot open.
             ZipFile.builder().setFile(exported).get().use { archive ->
                 assertNotNull(archive.getEntry("screen.mkv"), "Compact export should contain its staged MKV video")

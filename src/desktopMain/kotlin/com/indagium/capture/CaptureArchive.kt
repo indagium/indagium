@@ -3701,12 +3701,12 @@ internal object CaptureArchiveZipWriter {
     }
 }
 
-/** `captured_with_indagium.txt` — a plain-text hint for anyone who opens the .zip outside Indagium
+/** `captured_with_indagium.txt` — a plain-text hint for anyone who opens the archive outside Indagium
  *  (e.g. a bug tracker's inline zip preview). Not a tracked/hashed asset (see [scanZipEntries] and
  *  [CaptureArchiveDescriptor.assets] — it's deliberately absent from both), just a fixed courtesy
  *  file every export writes and [scanZipEntries]/`openZip` allow through unreferenced. */
 private fun writeCapturedWithIndagiumBlurb(work: File, compact: Boolean = false, zstdLog: Boolean = false) {
-    val extension = if (compact) ".ind.zip" else ".zip"
+    val extension = if (compact) ".ind" else ".zip"
     val zstdNote = if (zstdLog) {
         "logcat.log is compressed with zstd (ZIP method 93), so some unzip tools cannot extract it; " +
             "open the archive in Indagium instead.\n"

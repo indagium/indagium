@@ -21,13 +21,21 @@ class CaptureStripTest {
     @Test
     fun captureArchiveNameUsesSelectedExtensionAndKeepsZipDefault() {
         assertEquals("capture.zip", captureArchiveName("capture"))
-        assertEquals("capture.ind.zip", captureArchiveName("capture.zip", CaptureExportFormat.COMPACT))
-        assertEquals("capture.ind.zip", captureArchiveName("capture.IND", CaptureExportFormat.COMPACT))
-        assertEquals("capture.ind.zip", captureArchiveName("capture.ind.zip", CaptureExportFormat.COMPACT))
-        assertEquals("capture.ind.zip", captureArchiveName("capture.IND.ZIP", CaptureExportFormat.COMPACT))
+        assertEquals("capture.ind", captureArchiveName("capture.zip", CaptureExportFormat.COMPACT))
+        assertEquals("capture.ind", captureArchiveName("capture.IND", CaptureExportFormat.COMPACT))
+        assertEquals("capture.ind", captureArchiveName("capture.ind.zip", CaptureExportFormat.COMPACT))
+        assertEquals("capture.ind", captureArchiveName("capture.IND.ZIP", CaptureExportFormat.COMPACT))
         assertEquals("capture.zip", captureArchiveName("capture.ind.zip", CaptureExportFormat.ZIP))
         assertEquals("capture.zip", captureArchiveName("capture.ind", CaptureExportFormat.ZIP))
         assertNull(captureArchiveName("../capture", CaptureExportFormat.COMPACT))
+    }
+
+    @Test
+    fun captureArchiveTitleStripsEveryArchiveSuffix() {
+        assertEquals("smoke_a", captureArchiveTitle(java.io.File("/x/smoke_a.ind.zip")))
+        assertEquals("smoke_a", captureArchiveTitle(java.io.File("/x/smoke_a.IND")))
+        assertEquals("smoke_a", captureArchiveTitle(java.io.File("/x/smoke_a.zip")))
+        assertEquals("smoke_a", captureArchiveTitle(java.io.File("/x/smoke_a")))
     }
 
     @Test

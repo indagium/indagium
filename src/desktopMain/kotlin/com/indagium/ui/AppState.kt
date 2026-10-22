@@ -11543,7 +11543,7 @@ class AppState(
                     val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(notes, imported.descriptor.markers, logData)
                     com.indagium.capture.repointPortableVideoFrames(reanchored, video?.source)
                 }
-                var captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
+                var captureTab = mkTab(tabId, captureArchiveTitle(file), logData,
                     analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
                     .copy(sourcePath = sourcePath, attachedVideo = video, captureTimeline = imported.timeline,
                         captureSourceSessionId = imported.descriptor.sessionId,

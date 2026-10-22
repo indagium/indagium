@@ -1303,7 +1303,7 @@ with enough time for the device to restart. The lane's capture continues recover
 ### Cut snapshots after Stop or reopening
 
 Use **Save snapshot** on a stopped capture to export the same range types as during recording.
-A reopened capture directory, ZIP, or Compact `.ind.zip` (or legacy `.ind`) opens for analysis without recording controls; to cut a new
+A reopened capture directory, ZIP, or Compact `.ind` (or a legacy `.ind.zip` from an earlier build) opens for analysis without recording controls; to cut a new
 archive from it, choose **Export → Export capture range…** above the log. Relative ranges use the
 current video playhead; when there is no playhead, they use session end. **Around playhead** starts
 with five minutes before and five minutes
@@ -1348,10 +1348,11 @@ logs may extend beyond the requested range. The requested video interval stays u
 uncertain rows do not receive a guessed video position. **Since last save** tracks saved byte/row
 boundaries so uncertain timing does not cause rows to repeat or disappear.
 
-**Indagium Compact (`.ind.zip`, experimental).** In the snapshot popup, choose **Indagium Compact
-(.ind.zip) · zstd log + AV1** instead of the default **ZIP**. Stopped captures and retained sessions
-also offer **Save Compact** beside **Save ZIP**. Compact uses the same version-5 ZIP structure, so
-the file is named `<name>.ind.zip`. Logs, notes, markers, screenshots, and synchronization data
+**Indagium Compact (`.ind`, experimental).** In the snapshot popup, choose **Indagium Compact
+(.ind) · zstd log + AV1** instead of the default **ZIP**. Stopped captures and retained sessions
+also offer **Save Compact** beside **Save ZIP**. Compact uses the same version-5 ZIP structure but
+is an Indagium format, so the file is named `<name>.ind` (a `.zip` name would suggest that ordinary
+unzip tools can open it). Use the ZIP export when you need a file for other tools. Logs, notes, markers, screenshots, and synchronization data
 remain part of the archive. This export option is separate from the **Compact** recording-quality
 preset below.
 
@@ -1368,10 +1369,12 @@ stored with ordinary ZIP compression instead and the result message says so. Can
 removes temporary export files without advancing the save boundary. Conversion and the compressed log
 need additional free disk space and never rewrite the recording or source archive.
 
-Open `.ind.zip` through the normal Open action, drag-and-drop, Recent files, or **Save + open**.
-Older `.ind` files still open. Because the log uses zstd, some standard unzip tools (macOS Archive
-Utility, Windows Explorer, and `unzip`) cannot extract it; open the archive in Indagium, or use a
-zstd-aware tool such as 7-Zip-zstd. Cutting a new archive from an imported Compact capture that has
+Open `.ind` through the normal Open action, drag-and-drop, Recent files, or **Save + open**.
+Compact files named `.ind.zip` by an earlier build still open. Because the log uses zstd, standard
+unzip tools (macOS Archive Utility, Windows Explorer, and `unzip`) cannot extract it, and the AV1
+video does not play in standard players; open the archive in Indagium, or use a zstd-aware tool such
+as 7-Zip-zstd. Issue trackers such as GitHub do not accept `.ind` attachments: use the ZIP export, or
+zip the `.ind` file first. Cutting a new archive from an imported Compact capture that has
 audio can start up to about ten seconds before the requested start. Indagium uses bundled software
 AV1 encoding and decoding; a GPU with AV1 hardware support is not required. Conversion speed depends
 on the CPU and recording content. The feature targets macOS validation; Windows and Linux
