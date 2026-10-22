@@ -2485,8 +2485,17 @@ process-wide in-use set keeps those directories out of the sweep. `AppState` run
 `sweepCaptureExtractionCache` once at startup on `ioScope`: it deletes legacy per-open `capture-<uuid>`
 directories, abandoned `capture-tmp-*`, keyed directories unused for 14 days (the marker's mtime is
 touched on every reuse) and, above a soft 5 GB budget, least-recently-used directories, always skipping
-directories in use or active within the last hour (another instance on macOS, where the single-instance
-guard is skipped) and the stale `capture-log-restore` leftovers.
+directories in use, directories active within the last hour and directories another instance still leases,
+and the stale `capture-log-restore` leftovers. The lease exists because macOS skips the single-instance guard,
+so two JVMs (a dev build and the installed app) can share one cache: a directory a process uses holds a shared
+`FileChannel` lock on `.indagium-lease` inside it (`markInUse`, taken before the reuse is validated), and the sweep
+takes that lock exclusively with `tryLock` before deleting, skipping the directory when it cannot (it never waits).
+The lock is released when the process dies, on `deleteDirectory` of that directory and from `AppState.close` via
+`releaseLeases`; because the in-use set never shrinks while the app runs, a lease otherwise lasts for the process.
+A sweep removes the directory's other files while it holds the lease and drops the lease file last, which also keeps
+Windows' mandatory locks from blocking the removal. A directory without a lease file (older build, filesystem
+without locks) falls back to the in-use set and the grace period. The lease file is not an asset: reuse checks the
+marker's asset list, never the directory listing.
 
 ### 14.7 Single instance
 

@@ -6269,6 +6269,9 @@ class AppState(
         if (captureServiceDelegate.isInitialized()) captureService.close()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
+        // Lets other instances sweep the capture extractions this one was reading, and frees the lease files
+        // for deletion (Windows) when the app data is reset.
+        com.indagium.capture.CaptureExtractionCache.releaseLeases()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
         // every decoder/audio line explicitly rather than relying on daemon-thread teardown.
         videoControllers.values.forEach { controller -> controller.close() }
