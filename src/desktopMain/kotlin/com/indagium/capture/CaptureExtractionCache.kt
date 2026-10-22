@@ -1,9 +1,15 @@
 package com.indagium.capture
 
+import com.indagium.debug.AppLogger
 import java.io.File
+import java.io.IOException
+import java.nio.channels.FileChannel
+import java.nio.channels.OverlappingFileLockException
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.io.path.name
 
@@ -26,9 +32,18 @@ import kotlin.io.path.name
  * was verified. A deleted or truncated asset therefore falls back to a full re-extraction; a same-size
  * in-place bit flip on the local disk is not detected, which is the price of not re-reading ~200 MB of
  * video per restored tab on every launch.
+ *
+ * Cross-process lease: on macOS the single-instance guard is skipped, so two Indagium JVMs (a dev
+ * build and the installed app) can share one cache. A directory this process uses therefore also
+ * holds a shared OS file lock on [LEASE_NAME] inside it ([markInUse]); [sweep] takes the lock
+ * exclusively with `tryLock` (never waiting) before deleting and skips every directory it cannot get,
+ * so one instance's sweep cannot delete what another instance's open tab still reads. The lock dies
+ * with its process, so a crashed instance leaves no stale lease. A directory with no lease file (made
+ * by an older build, or where locking is unsupported) falls back to the in-use set and the grace period.
  */
 internal object CaptureExtractionCache {
     const val MARKER_NAME = ".indagium-extracted"
+    const val LEASE_NAME = ".indagium-lease"
     private const val MARKER_MAGIC = "indagium-capture-extract-v1"
     private const val TEMP_PREFIX = "capture-tmp-"
     private const val KEY_HEX_CHARS = 32
@@ -38,9 +53,18 @@ internal object CaptureExtractionCache {
     const val DEFAULT_MAX_UNUSED_MS = 14L * 24 * 60 * 60 * 1000
     const val DEFAULT_BUDGET_BYTES = 5L * 1024 * 1024 * 1024
     const val DEFAULT_GRACE_MS = 60L * 60 * 1000
+    const val DEFAULT_LEASE_WAIT_MS = 5_000L
+    private const val LEASE_POLL_BASE_MS = 50L
+    private const val LEASE_POLL_MAX_SHIFT = 3
 
     /** Test hook: called with the final directory each time a real extraction (not a reuse) starts. */
     @Volatile var extractionObserver: ((File) -> Unit)? = null
+
+    /**
+     * How long an open waits for another process's sweep to give up a directory's exclusive lease before
+     * failing (test hook). Only IO threads wait; every caller of [CaptureArchiveReader.open] is off the UI thread.
+     */
+    @Volatile var leaseWaitMs: Long = DEFAULT_LEASE_WAIT_MS
 
     // One lock per final directory path: concurrent opens of the same archive (two restored tabs on
     // one file) serialize and the second reuses the first's result. Only IO threads take these
@@ -73,9 +97,88 @@ internal object CaptureExtractionCache {
         }
     }
 
-    fun markInUse(directory: File) {
-        inUse += directory.absolutePath
+    // Shared lease locks (see the class KDoc), keyed like [inUse]. Nothing removes a directory from [inUse]
+    // while the process runs (tabs do not track which extraction they read), so a lease is held until the
+    // directory is deleted by this process ([deleteDirectory]), [releaseLeases] (AppState.close) or process
+    // exit, when the OS drops the lock. Closing a channel drops every lock this process holds on that file
+    // (POSIX), so nothing outside this object may open a lease file of a directory it holds a lease on.
+    private val leases = HashMap<String, FileChannel>()
+
+    /**
+     * Marks [directory] as used by this process and takes its cross-process lease. Returns false only when
+     * another process holds the lease exclusively, i.e. its sweep is deleting the directory right now: the
+     * caller must not use it. Never waits, and fails open (true) when the lease file cannot be created or
+     * the filesystem has no file locks, which leaves the in-use set and the sweep grace period as protection.
+     */
+    fun markInUse(directory: File): Boolean {
+        val path = directory.absolutePath
+        if (!acquireLease(directory, path)) return false
+        inUse += path
+        return true
     }
+
+    /**
+     * Clears [directory] (absent, stale or damaged) so a fresh extraction can take its place, but only when
+     * no other process holds its lease exclusively. False means another instance's sweep is deleting it
+     * right now: nothing was touched, and the caller must wait and look again instead of deleting or writing.
+     */
+    fun clearForReplacement(directory: File): Boolean {
+        if (directory.exists() && !acquireLease(directory, directory.absolutePath)) return false
+        deleteDirectory(directory)
+        return true
+    }
+
+    /** Sleeps one growing backoff step (50, 100, 200, 400 ms, ...) of [attempt]; false once [deadlineNanos] has passed. */
+    fun pauseBeforeRetry(attempt: Int, deadlineNanos: Long): Boolean {
+        val remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime())
+        if (remainingMs <= 0) return false
+        Thread.sleep(minOf(remainingMs, LEASE_POLL_BASE_MS shl minOf(attempt, LEASE_POLL_MAX_SHIFT)))
+        return true
+    }
+
+    private fun acquireLease(directory: File, path: String): Boolean = synchronized(leases) {
+        if (path in leases) return true
+        try {
+            // Read access is what a shared lock requires, write what the sweep's exclusive one does.
+            val channel = FileChannel.open(
+                File(directory, LEASE_NAME).toPath(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.READ,
+                StandardOpenOption.WRITE,
+            )
+            val lock = try {
+                channel.tryLock(0L, Long.MAX_VALUE, true)
+            } catch (_: OverlappingFileLockException) {
+                null
+            } catch (failure: IOException) {
+                channel.close()
+                throw failure
+            }
+            if (lock == null) {
+                channel.close()
+                return false
+            }
+            leases[path] = channel
+        } catch (failure: IOException) {
+            runCatching { AppLogger.warn("capture", "Capture extraction lease unavailable: ${failure.message}") }
+        }
+        true
+    }
+
+    /** Drops this process's lease on [directory], if any, so the directory (lease file included) can be deleted. */
+    private fun releaseLease(directory: File) {
+        val channel = synchronized(leases) { leases.remove(directory.absolutePath) }
+        runCatching { channel?.close() }
+    }
+
+    /** Releases every lease this process holds (the in-use set is kept); `AppState.close` calls it. */
+    fun releaseLeases() {
+        val held = synchronized(leases) { leases.values.toList().also { leases.clear() } }
+        held.forEach { runCatching { it.close() } }
+    }
+
+    /** True when this process holds a lease on [directory] (test hook). */
+    internal fun holdsLease(directory: File): Boolean = synchronized(leases) { directory.absolutePath in leases }
 
     fun isInUse(directory: File): Boolean = directory.absolutePath in inUse
 
@@ -152,8 +255,64 @@ internal object CaptureExtractionCache {
     }
 
     fun deleteDirectory(directory: File) {
+        // A deleted directory is no longer in use, and on Windows an open lease file would block its removal.
+        inUse -= directory.absolutePath
+        releaseLease(directory)
         if (!directory.exists()) return
         runCatching { directory.walkBottomUp().forEach { it.delete() } }
+    }
+
+    /** An exclusive lease on a directory a sweep is about to delete; [channel] is null when it has no lease file. */
+    private class DeletionLease(val channel: FileChannel?) {
+        fun close() {
+            runCatching { channel?.close() }
+        }
+    }
+
+    /**
+     * Takes [directory]'s lease exclusively without waiting. Null when another process (or this JVM,
+     * which [OverlappingFileLockException] reports) still holds it, so the sweep must leave the directory
+     * alone. A missing lease file, or any other IO failure, means no holder can be detected and the in-use
+     * set and grace period remain the protection. Only call for a directory this process does not use.
+     */
+    private fun acquireForDeletion(directory: File): DeletionLease? {
+        if (synchronized(leases) { directory.absolutePath in leases }) return null
+        val leaseFile = File(directory, LEASE_NAME)
+        if (!leaseFile.isFile) return DeletionLease(null)
+        val channel = try {
+            FileChannel.open(leaseFile.toPath(), StandardOpenOption.READ, StandardOpenOption.WRITE)
+        } catch (_: IOException) {
+            return DeletionLease(null)
+        }
+        val lock = try {
+            channel.tryLock()
+        } catch (_: OverlappingFileLockException) {
+            null
+        } catch (_: IOException) {
+            runCatching { channel.close() }
+            return DeletionLease(null)
+        }
+        if (lock == null) {
+            runCatching { channel.close() }
+            return null
+        }
+        return DeletionLease(channel)
+    }
+
+    /**
+     * Deletes the contents, lease file last, while the exclusive lease is still held (another instance
+     * cannot start using the directory halfway through), then closes the lease and removes the directory
+     * only if it is empty: once the lease is gone another instance may already have published a fresh
+     * extraction under the same name, and a recursive delete here would remove it.
+     */
+    private fun deleteLeased(directory: File, lease: DeletionLease) {
+        val leaseFile = File(directory, LEASE_NAME)
+        runCatching { directory.walkBottomUp().filter { it != leaseFile && it != directory }.forEach { it.delete() } }
+        // Deleting an open file is allowed on POSIX and, because Java opens it with FILE_SHARE_DELETE, on
+        // Windows too (there the name goes away when the channel closes).
+        runCatching { leaseFile.delete() }
+        lease.close()
+        runCatching { directory.delete() }
     }
 
     data class SweepResult(
@@ -170,7 +329,8 @@ internal object CaptureExtractionCache {
     /**
      * Housekeeping for the extraction cache; never touches a directory that is in use (this process
      * opened it, or [isReferenced] says persisted/open state points into it), is held by an open in
-     * progress, or was active within [graceMs] (another Indagium instance on macOS may be using it).
+     * progress, was active within [graceMs] (another Indagium instance on macOS may be using it), or
+     * whose cross-process lease another instance still holds (see the class KDoc).
      *  - legacy `capture-<uuid>` and abandoned `capture-tmp-*` directories are removed;
      *  - keyed directories unused for [maxUnusedMs] are removed;
      *  - if what remains exceeds [budgetBytes], least recently used go first until it fits.
@@ -218,7 +378,9 @@ internal object CaptureExtractionCache {
             try {
                 if (!stillEligible()) return false
                 val size = directorySize(dir)
-                deleteDirectory(dir)
+                // Eligibility (including "not in use by this process") is settled before the lease is probed.
+                val lease = acquireForDeletion(dir) ?: return false
+                deleteLeased(dir, lease)
                 if (dir.exists()) return false
                 result = result.record(removal, size)
                 return true

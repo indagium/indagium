@@ -47,6 +47,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import java.util.zip.CRC32
 import java.util.zip.Deflater
 
@@ -1358,8 +1359,7 @@ object CaptureArchiveReader {
                 require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
                     "Capture screenshots exceed the combined size limit"
                 }
-                reuseExtraction(finalDirectory, key, descriptor, scan, source)?.let { return@use it }
-                CaptureExtractionCache.deleteDirectory(finalDirectory)
+                reuseOrClear(finalDirectory, key, descriptor, scan, source)?.let { return@use it }
                 requireExtractionSpace(cacheDirectory, scan.entrySizes.values.fold(0L, ::saturatingAdd))
                 CaptureExtractionCache.extractionObserver?.invoke(finalDirectory)
                 val temporary = CaptureExtractionCache.temporaryDirectoryFor(cacheDirectory, key)
@@ -1375,19 +1375,57 @@ object CaptureArchiveReader {
                     CaptureExtractionCache.endTemporary(temporary)
                     if (!published) deleteTree(temporary)
                 }
-                CaptureExtractionCache.markInUse(finalDirectory)
+                // Our own fresh directory; a refusal here means another instance's sweep claimed it first.
+                if (!CaptureExtractionCache.markInUse(finalDirectory)) throw captureCacheBusy()
                 var valid = false
                 try {
                     validateImported(finalDirectory, descriptor, source).also { valid = true }
                 } finally {
                     // A directory that does not validate must not be offered to the next open.
-                    if (!valid) deleteTree(finalDirectory)
+                    if (!valid) CaptureExtractionCache.deleteDirectory(finalDirectory)
                 }
             }
         }
     }
 
-    /** The reused extraction, or null when [finalDirectory] is absent, stale, damaged or no longer validates. */
+    private sealed interface Reuse {
+        class Reused(val capture: ImportedCapture) : Reuse
+
+        /** Absent, stale, damaged or no longer validating: extract again. */
+        data object Miss : Reuse
+
+        /** Another process holds the directory's lease exclusively (its sweep is deleting it): touch nothing. */
+        data object Busy : Reuse
+    }
+
+    private fun captureCacheBusy() = CaptureArchiveException(
+        "The capture archive cache is being cleaned by another Indagium window; try opening it again",
+    )
+
+    /**
+     * The reused extraction, or null once [finalDirectory] has been cleared for a fresh extraction. While
+     * another process's sweep holds its lease, polls (bounded by [CaptureExtractionCache.leaseWaitMs]) until
+     * that sweep is done: the directory is then reusable or gone. Never deletes or writes a busy directory.
+     */
+    private fun reuseOrClear(
+        finalDirectory: File,
+        key: String,
+        descriptor: CaptureArchiveDescriptor,
+        scan: ZipEntryScan,
+        source: File,
+    ): ImportedCapture? {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CaptureExtractionCache.leaseWaitMs)
+        var attempt = 0
+        while (true) {
+            when (val outcome = reuseExtraction(finalDirectory, key, descriptor, scan, source)) {
+                is Reuse.Reused -> return outcome.capture
+                Reuse.Busy -> Unit
+                Reuse.Miss -> if (CaptureExtractionCache.clearForReplacement(finalDirectory)) return null
+            }
+            if (!CaptureExtractionCache.pauseBeforeRetry(attempt++, deadline)) throw captureCacheBusy()
+        }
+    }
+
     @Suppress("TooGenericExceptionCaught")
     private fun reuseExtraction(
         finalDirectory: File,
@@ -1395,15 +1433,16 @@ object CaptureArchiveReader {
         descriptor: CaptureArchiveDescriptor,
         scan: ZipEntryScan,
         source: File,
-    ): ImportedCapture? {
-        if (!CaptureExtractionCache.isReusable(finalDirectory, key, descriptor.assets(), scan.entrySizes.keys)) return null
+    ): Reuse {
+        if (!CaptureExtractionCache.isReusable(finalDirectory, key, descriptor.assets(), scan.entrySizes.keys)) return Reuse.Miss
+        // Lease and touch before validating: another instance's sweep may be deleting an idle directory right now,
+        // and once we hold the lease it cannot. A refused lease means that sweep got there first.
+        if (!CaptureExtractionCache.markInUse(finalDirectory)) return Reuse.Busy
+        CaptureExtractionCache.touch(finalDirectory)
         return try {
-            validateImported(finalDirectory, descriptor, source).also {
-                CaptureExtractionCache.markInUse(finalDirectory)
-                CaptureExtractionCache.touch(finalDirectory)
-            }
+            Reuse.Reused(validateImported(finalDirectory, descriptor, source))
         } catch (_: Exception) {
-            null
+            Reuse.Miss
         }
     }
 
