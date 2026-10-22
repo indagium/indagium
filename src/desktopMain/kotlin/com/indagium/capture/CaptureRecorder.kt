@@ -3000,8 +3000,16 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
     val root = Json.parseToJsonElement(raw).jsonObject
     require(root["formatVersion"]?.jsonPrimitive?.intOrNull == 1)
     val storageVersion = CaptureStorageVersion.from(root["storageVersion"]?.jsonPrimitive?.intOrNull)
-    val syncMetadata = if (storageVersion == CaptureStorageVersion.BLOCKS_V2 && File(directory, "timeline/sync.json").isFile) {
-        CaptureSyncMetadata.parse(File(directory, "timeline/sync.json").readText())
+    val syncFile = File(directory, "timeline/sync.json")
+    // A damaged sync.json must not hide an otherwise intact session: treat it as absent so the session is still
+    // listed and a RECORDING one is rebuilt from its log + block index by recoverSparseSession. A stopped one stays
+    // listed with its log openable; only operations that need the timing fail (they parse the file themselves).
+    val syncMetadata = if (storageVersion == CaptureStorageVersion.BLOCKS_V2 && syncFile.isFile) {
+        runCatching { CaptureSyncMetadata.parse(syncFile.readText()) }
+            .onFailure { failure ->
+                runCatching { AppLogger.warn("capture", "Ignoring unreadable capture sync metadata: ${failure.message}") }
+            }
+            .getOrNull()
     } else {
         null
     }
