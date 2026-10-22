@@ -2539,7 +2539,10 @@ shape that writer cannot produce), so the folder re-opens through the in-place f
 the opened file to still be readable, and says so (Log only / Video only never do); its notes are the archive's as
 shipped, not the recipient's edits in the tab. Status reuses the export busy/result/error state (`CaptureExportResult.extracted`
 makes the strip say "Extracted to ...", and keeps the AI status's `lastSnapshotPath` on the last saved archive); the range
-controls, Include video and the sparse preview are off in Extract mode.
+controls, Include video and the sparse preview are off in Extract mode. The popover reads the extract source on every
+composition, and every store or drop of an imported snapshot bumps an observable revision that `captureSnapshotSessionFor`,
+`isImportedCaptureSnapshot` and `captureExtractSourceFor` read, so a restored archive tab (rows first, snapshot linked a
+moment later) shows its Extract group, and its range editor, as soon as the link lands.
 Separately, `AppState.saveRetainedCapture` (the stopped strip's Save ZIP / Save Compact) now exports an opened archive's own
 imported snapshot instead of looking its descriptor's session id up in the local capture roots, which failed on a recipient's
 machine and exported the local original on the sender's.
