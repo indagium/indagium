@@ -1837,6 +1837,8 @@ class AppState(
     // constructor launches runs inline at its launch site, turning a construction-order race into a
     // deterministic check. Production always uses Dispatchers.IO.
     ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    // Test seam: thresholds for the diagnostics-only loading watchdog (LoadingWatchdog).
+    loadingWatchdogConfig: LoadingWatchdogConfig = LoadingWatchdogConfig(),
     // Where confirmed v3 sequence diagrams are persisted across restarts (DiagramLibraryStore),
     // threaded into Seq3Session below. Injectable for the same reason as autosaveFile/
     // controlTokenFile/sourceIndexFile — tests shouldn't touch the real appDataDir() store.
@@ -3225,6 +3227,10 @@ class AppState(
 
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + ioDispatcher)
+
+    // Diagnostics for a global loading cover that stays up (see LoadingWatchdog). Declared before
+    // anything can call beginLoading; it only launches/cancels a timer coroutine on ioScope.
+    private val loadingWatchdog = LoadingWatchdog(ioScope, loadingWatchdogConfig, ::loadingSnapshot)
     private val retraceService = RetraceService()
     private val closed = AtomicBoolean(false)
 
@@ -3251,7 +3257,10 @@ class AppState(
     // internal, not private: TailCoordinator (Task 12 slice 2) synchronizes on this exact monitor
     // object so its tabs-list writes stay atomic with AppState's own — see upTab's doc comment.
     internal val stateLock = Any()
-    private var pendingLoads = 0
+
+    // @Volatile because LoadingWatchdog reads it without stateLock (its job is to explain a stuck
+    // lock, so it must not need that lock); every write still happens under stateLock.
+    @Volatile private var pendingLoads = 0
 
     // See ControlServerManager's own doc comment for what it owns and why it still takes `this`.
     private val controlServerManager = ControlServerManager(this, ioScope, controlTokenFile, controlServerFactory)
@@ -5904,7 +5913,12 @@ class AppState(
         tailCoordinator.startTailing(tabId, startOffset = 0L, pollIntervalMs = CAPTURE_TAIL_POLL_INTERVAL_MS)
     }
 
-    private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
+    private data class ActiveLoad(
+        val job: Job,
+        val countsAsLoading: AtomicBoolean = AtomicBoolean(true),
+        // Diagnostics only (LoadingWatchdog): "restore" for a session-restore tab load, else "open".
+        val kind: String = "open",
+    )
 
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
@@ -6433,18 +6447,58 @@ class AppState(
         pendingLoads += 1
         isLoading = true
         loadingStatus = status
+        if (pendingLoads == 1) loadingWatchdog.episodeStarted()
     }
 
     private fun finishLoading() = synchronized(stateLock) {
         if (pendingLoads > 0) pendingLoads -= 1
         isLoading = pendingLoads > 0
-        if (!isLoading) loadingStatus = null
+        if (!isLoading) {
+            loadingStatus = null
+            loadingWatchdog.episodeEnded()
+        }
     }
 
     private fun clearLoadingState() = synchronized(stateLock) {
         pendingLoads = 0
         isLoading = false
         loadingStatus = null
+        loadingWatchdog.episodeEnded()
+    }
+
+    /**
+     * Lock-free on purpose: the watchdog exists to explain a loading state that does not clear, and
+     * the likeliest cause is another thread holding [stateLock]. [tabs] is an immutable list and
+     * [activeLoads] a ConcurrentHashMap, so a slightly stale read is the worst case. Reports only
+     * ids, tab titles and coarse kinds, never paths or log content.
+     */
+    private fun loadingSnapshot(): LoadingSnapshot {
+        val currentTabs = tabs
+        val loads = activeLoads.entries.toList().map { (tabId, load) ->
+            val tab = currentTabs.firstOrNull { it.id == tabId }
+            LoadingLoadInfo(
+                tabId = tabId,
+                title = tab?.filename,
+                kind = if (load.kind == "restore") "restore" else "open",
+                source = loadingSourceKind(tab),
+                jobState = when {
+                    load.job.isCancelled -> "cancelled"
+                    load.job.isCompleted -> "completed"
+                    load.job.isActive -> "active"
+                    else -> "new"
+                },
+                countsAsLoading = load.countsAsLoading.get(),
+            )
+        }
+        return LoadingSnapshot(pendingLoads, loadingStatus, pendingRestoredLoads.size, loads)
+    }
+
+    private fun loadingSourceKind(tab: LogTab?): String = when {
+        tab == null -> "unpublished"
+        tab.captureArchivePath != null || tab.attachedVideo?.captureSourcePath != null -> "capture"
+        tab.sourcePath?.contains('!') == true -> "archive"
+        tab.sourcePath != null -> "file"
+        else -> "other"
     }
 
     private fun finishActiveLoad(load: ActiveLoad?) {
@@ -15562,7 +15616,7 @@ class AppState(
                 if (!published) finishActiveLoad(load)
             }
         }
-        activeLoads[tabId] = ActiveLoad(job)
+        activeLoads[tabId] = ActiveLoad(job, kind = "restore")
         job.start()
     }
 

@@ -2809,6 +2809,15 @@ chosen by how much it should interrupt the user:
 | Stop/finalization failed | `captureFinalizationStatusByTab` | Same tab's finalization banner; raw log remains visible as a stopped ordinary log |
 | Load appears hung | `isLoading` + `loadingStatus` | `StuckLoadingDialog` after a delay, offering Cancel loading / Close all tabs / Clear cache / Keep waiting |
 
+`ui/LoadingWatchdog.kt` is a diagnostics-only companion to that dialog: when the global loading state
+(`AppState.beginLoading` 0 to 1 transition) lasts more than 10 s it writes one warning per episode to the
+diagnostic log (elapsed time, `pendingLoads`, `loadingStatus`, every `activeLoads` entry with tab id, title,
+open/restore kind, capture/archive/file source, job state and `countsAsLoading`, queued restore loads, and a
+full `ThreadMXBean` dump including monitor owners such as `stateLock`), short follow-ups at 30 s (with a second
+dump) and 60 s, and an INFO line with the total duration when an episode that long ends. It runs on `ioScope`,
+reads loading state without `stateLock` so a lock held by a stuck thread cannot silence it, and changes no
+behaviour. Thresholds are injectable (`LoadingWatchdogConfig`).
+
 The stuck-loading watchdog (`ui/App.kt:281-307`) deserves note: it is the escape hatch for the case
 the architecture cannot otherwise recover from — a parse of a pathological file that is technically
 progressing but will not finish in useful time.
