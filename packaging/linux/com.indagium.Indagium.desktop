@@ -8,5 +8,5 @@ Exec=com.indagium.Indagium %F
 Icon=com.indagium.Indagium
 Terminal=false
 Categories=Development;Utility;
-MimeType=text/x-log;text/plain;
+MimeType=text/x-log;text/plain;application/x-indagium-capture;
 StartupWMClass=Indagium

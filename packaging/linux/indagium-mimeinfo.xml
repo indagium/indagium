@@ -7,11 +7,19 @@
   system's own description of text/plain. text/x-log is a real shared-mime-info type already
   declared system-wide (that's what associates *.log), so it must NOT be re-declared here either
   — only extensions the system doesn't already type (via a text/plain glob) need a glob added.
+  The one exception is application/x-indagium-capture: Indagium's own type, which no system
+  database knows, so it is declared in full. It is a ZIP container (sub-class-of), but deliberately
+  has no <magic> — content sniffing would claim every ordinary zip.
 -->
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
   <mime-type type="text/plain">
     <glob pattern="*.logcat"/>
     <glob pattern="*.trace"/>
     <glob pattern="*.out"/>
+  </mime-type>
+  <mime-type type="application/x-indagium-capture">
+    <comment>Indagium capture</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.ind" weight="60"/>
   </mime-type>
 </mime-info>

@@ -1370,6 +1370,10 @@ removes temporary export files without advancing the save boundary. Conversion a
 need additional free disk space and never rewrite the recording or source archive.
 
 Open `.ind` through the normal Open action, drag-and-drop, Recent files, or **Save + open**.
+Once Indagium is installed, double-clicking an `.ind` file opens it in Indagium (Open With on Linux).
+On macOS, launch the installed app once so Launch Services learns the file type; on Windows, the
+system may ask once which app to use if another program already claims `.ind`; on Linux, an AppImage
+needs desktop integration (for example AppImageLauncher) before the file manager offers it.
 Compact files named `.ind.zip` by an earlier build still open. Because the log uses zstd, standard
 unzip tools (macOS Archive Utility, Windows Explorer, and `unzip`) cannot extract it, and the AV1
 video does not play in standard players; open the archive in Indagium, or use a zstd-aware tool such
