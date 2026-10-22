@@ -1985,7 +1985,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `custom-ai-commands/` | User-defined AI slash commands | One `.md` per command |
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
-| `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
+| `archive-cache/` | `videos/`: videos extracted from bug-report archives (budget-enforced). `captures/`: one reusable `capture-<key>` extraction per capture `.zip`/`.ind` state (§14.6). `capture-log-restore/`: transient verified-log copies | Raw media; derived, safe to delete |
 | `captures/` | New retained sessions: `logs/logcat.log`, `mapping/blocks.jsonl`, `timeline/sync.json`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Sparse timing/storage metadata; interrupted sessions are recoverable from the launcher. Legacy sessions keep their original `mapping/capture-index.jsonl`; v5 ZIP/Compact exports use the same compact timing/block metadata with export-local offsets |
 | `testing/` | **Legacy** home of the AI test data (library, suites, assets, `issues/`, `runs/`). Now only read once at startup: `migrateLegacyTestStorage` moves it into the three configurable folders (§26.3), and a bare `AppState` with no save root still uses it as its fallback | — |
 | `<save root>/test-suites/`, `<save root>/test-runs/<runId>/`, `<save root>/test-issues/<issueId>/` | The AI test data: the library (`library.json`, `suites/`, `assets/`), one folder per run (`run.json` (frozen suite + results), `lanes/<laneId>/{capture,screens,transcript.jsonl}`, `judge.jsonl`) and one folder per issue. **Not** under `appDataDir`: each is a user setting (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only) defaulting to a subfolder of the Default save folder | `indagium-test-library`, `indagium-test-suite`, `indagium-issue`, `indagium-test-run`, each a versioned JSON envelope, plus JSON lines (§26.3) |
@@ -2467,6 +2467,26 @@ error.
 budgets against decompression bombs: 500 MB per entry and 20,000 entries scanned, enforced by a
 `BoundedInputStream` that raises `ArchiveBudgetExceededException`. Videos found inside an archive are
 extracted to `archive-cache/` under a cache budget with unreferenced-file pruning.
+
+Capture archives (`.zip`/`.ind`, `CaptureArchiveReader.open`) extract into
+`archive-cache/captures/capture-<key>` where `<key>` is the first 128 bits of SHA-256 over the archive's
+canonical path, size and mtime (`capture/CaptureExtractionCache.kt`). The first open extracts into a
+`capture-tmp-<key>-<uuid>` sibling, verifies every asset's SHA-256 while streaming, writes a
+`.indagium-extracted` marker (key plus per-asset length and checksum) and atomically renames it into
+place. Every later open (each restart, each restored tab, `restoreCaptureLink`'s re-open) re-reads only
+the zip's central directory and descriptor, then reuses the directory when the marker key, the checksum
+list and the on-disk asset lengths all still match; a missing or truncated asset, or a changed archive
+(new size/mtime, hence a new key), re-extracts. Reuse deliberately skips re-hashing (a ~200 MB video per
+tab per launch otherwise); a same-length in-place bit flip on the local disk is not detected. A per-key
+`ReentrantLock` makes concurrent opens of one archive extract once; only IO threads take it. Persisted
+state never points into this cache (archive sources persist the archive path, videos play from
+`archive-cache/videos`); the live references are the in-memory imported snapshot sessions, and the
+process-wide in-use set keeps those directories out of the sweep. `AppState` runs
+`sweepCaptureExtractionCache` once at startup on `ioScope`: it deletes legacy per-open `capture-<uuid>`
+directories, abandoned `capture-tmp-*`, keyed directories unused for 14 days (the marker's mtime is
+touched on every reuse) and, above a soft 5 GB budget, least-recently-used directories, always skipping
+directories in use or active within the last hour (another instance on macOS, where the single-instance
+guard is skipped) and the stale `capture-log-restore` leftovers.
 
 ### 14.7 Single instance
 
