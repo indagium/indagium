@@ -29,6 +29,7 @@ import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.util.BitSet
 import java.util.Locale
 
 /** Persistent layout version used by newly-created captures. Missing in old session.json means v1. */
@@ -136,6 +137,25 @@ data class CaptureSyncMetadata(
         require((rowCount == 0 && segments.isEmpty()) || previousEnd == rowCount + 1) {
             "Capture sync segments do not cover the frozen row bounds"
         }
+    }
+
+    /**
+     * The segment holding [rowOrdinal]. Binary search: the init above guarantees [segments] are
+     * sorted and contiguous, and callers resolve every row of a log through here.
+     */
+    fun segmentContaining(rowOrdinal: Int): CaptureSyncSegment? {
+        var lo = 0
+        var hi = segments.lastIndex
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            val segment = segments[mid]
+            when {
+                rowOrdinal < segment.firstRow -> hi = mid - 1
+                rowOrdinal >= segment.lastRowExclusive -> lo = mid + 1
+                else -> return segment
+            }
+        }
+        return null
     }
 
     fun toJson(): String {
@@ -475,14 +495,48 @@ class CaptureTimingResolver private constructor(
     private val sparse: CaptureSyncMetadata?,
     private val singleAnchor: CaptureSyncAnchor?,
 ) {
-    private val points: Array<CaptureTimingPoint?> by lazy(LazyThreadSafetyMode.PUBLICATION) { buildPoints() }
+    /**
+     * One primitive column per field instead of a [CaptureTimingPoint] per row (an object plus a
+     * reference slot each, retained for the life of the tab): a 5M-row log costs ~80 MB here and
+     * cost several hundred before. [pointForOrdinal] materializes a point on demand.
+     *
+     * [keys] is the playhead key for v5 clock segments (see [playheadKeyForOrdinal]) and the plain
+     * video position for the legacy and single-anchor mappings; [NO_PLAYHEAD_KEY] marks none. The
+     * row's [CaptureTimingPoint.videoMs] is that key when it is not negative: for a v5 row the only
+     * difference between the two is that the key keeps the negative positions.
+     */
+    private class TimingColumns(size: Int) {
+        val keys = LongArray(size) { NO_PLAYHEAD_KEY }
+        val elapsed = LongArray(size)
+        val present = BitSet(size)
+        val hasElapsed = BitSet(size)
+        val reliable = BitSet(size)
 
-    /** Filled by [sparsePoints] in the same pass as [points]; only read after [points] is forced. */
-    @Volatile
-    private var sparsePlayheadKeys: LongArray? = null
+        fun set(index: Int, point: CaptureTimingPoint) {
+            present.set(index)
+            point.captureElapsedMs?.let {
+                elapsed[index] = it
+                hasElapsed.set(index)
+            }
+            if (point.reliable) reliable.set(index)
+        }
+    }
 
-    fun pointForOrdinal(rowOrdinal: Int): CaptureTimingPoint? =
-        if (rowOrdinal in 1..entries.size) points[rowOrdinal - 1] else null
+    private val columns: TimingColumns by lazy(LazyThreadSafetyMode.PUBLICATION) { buildColumns() }
+
+    fun pointForOrdinal(rowOrdinal: Int): CaptureTimingPoint? {
+        if (rowOrdinal !in 1..entries.size) return null
+        val index = rowOrdinal - 1
+        val resolved = columns
+        if (!resolved.present[index]) return null
+        return CaptureTimingPoint(
+            rowOrdinal = rowOrdinal,
+            captureElapsedMs = resolved.elapsed[index].takeIf { resolved.hasElapsed[index] },
+            videoMs = videoMsAt(resolved, index),
+            segmentId = sparse?.segmentContaining(rowOrdinal)?.id,
+            reliable = resolved.reliable[index],
+        )
+    }
 
     /**
      * The video position the playhead search orders [rowOrdinal] by, or null when the row cannot be
@@ -494,64 +548,71 @@ class CaptureTimingResolver private constructor(
      */
     fun playheadKeyForOrdinal(rowOrdinal: Int): Long? {
         if (rowOrdinal !in 1..entries.size) return null
-        val resolved = points
-        val keys = sparsePlayheadKeys ?: return resolved[rowOrdinal - 1]?.videoMs
-        return keys[rowOrdinal - 1].takeIf { it != NO_PLAYHEAD_KEY }
+        return columns.keys[rowOrdinal - 1].takeIf { it != NO_PLAYHEAD_KEY }
     }
 
-    fun elapsedMsForOrdinal(rowOrdinal: Int): Long? = pointForOrdinal(rowOrdinal)?.captureElapsedMs
+    fun elapsedMsForOrdinal(rowOrdinal: Int): Long? {
+        if (rowOrdinal !in 1..entries.size) return null
+        val resolved = columns
+        val index = rowOrdinal - 1
+        return resolved.elapsed[index].takeIf { resolved.present[index] && resolved.hasElapsed[index] }
+    }
 
-    fun videoMsForOrdinal(rowOrdinal: Int): Long? = pointForOrdinal(rowOrdinal)?.videoMs
+    fun videoMsForOrdinal(rowOrdinal: Int): Long? {
+        if (rowOrdinal !in 1..entries.size) return null
+        val resolved = columns
+        val index = rowOrdinal - 1
+        return if (resolved.present[index]) videoMsAt(resolved, index) else null
+    }
 
-    fun segmentIdForOrdinal(rowOrdinal: Int): Int? =
-        sparse?.segments?.firstOrNull { it.contains(rowOrdinal) }?.id ?: pointForOrdinal(rowOrdinal)?.segmentId
+    fun segmentIdForOrdinal(rowOrdinal: Int): Int? = sparse?.segmentContaining(rowOrdinal)?.id
 
     /** Computed rows are a transient compatibility view; callers must not persist them. */
-    fun allPoints(): List<CaptureTimingPoint> = points.mapNotNull { it }
+    fun allPoints(): List<CaptureTimingPoint> = (1..entries.size).mapNotNull(::pointForOrdinal)
 
-    private fun buildPoints(): Array<CaptureTimingPoint?> {
-        if (sparse != null) return sparsePoints()
-        if (timeline != null) return legacyTimelinePoints()
-        if (singleAnchor != null) return singleAnchorPoints()
-        return arrayOfNulls(entries.size)
+    private fun videoMsAt(resolved: TimingColumns, index: Int): Long? =
+        resolved.keys[index].takeIf { it != NO_PLAYHEAD_KEY && it >= 0L }
+
+    private fun buildColumns(): TimingColumns {
+        if (sparse != null) return sparseColumns(sparse)
+        if (timeline != null) return legacyTimelineColumns(timeline)
+        if (singleAnchor != null) return singleAnchorColumns(singleAnchor)
+        return TimingColumns(entries.size)
     }
 
-    private fun sparsePoints(): Array<CaptureTimingPoint?> {
-        val result = arrayOfNulls<CaptureTimingPoint>(entries.size)
-        val keys = LongArray(entries.size) { NO_PLAYHEAD_KEY }
+    private fun sparseColumns(metadata: CaptureSyncMetadata): TimingColumns {
+        val result = TimingColumns(entries.size)
         for (index in entries.indices) {
-            val timing = sparseTiming(entries[index], index + 1, sparse!!, timeline)
-            result[index] = timing.point
-            timing.playheadKeyMs?.let { keys[index] = it }
+            val timing = sparseTiming(entries[index], index + 1, metadata, timeline)
+            timing.point?.let { result.set(index, it) }
+            timing.playheadKeyMs?.let { result.keys[index] = it }
         }
-        sparsePlayheadKeys = keys
         return result
     }
 
-    private fun legacyTimelinePoints(): Array<CaptureTimingPoint?> {
-        val result = arrayOfNulls<CaptureTimingPoint>(entries.size)
-        val rows = timeline!!.rows
-        val currentTimeline = requireNotNull(timeline)
+    private fun legacyTimelineColumns(currentTimeline: CaptureTimeline): TimingColumns {
+        val result = TimingColumns(entries.size)
         val videoDuration = currentTimeline.videoDurationMs
-        rows.forEach { row ->
+        currentTimeline.rows.forEach { row ->
             if (row.ordinal !in 1..entries.size) return@forEach
             val index = row.ordinal - 1
             // Legacy exported row positions already include the descriptor's manual offset.
             val video = row.videoMs?.takeIf { it >= 0L && (videoDuration == null || it <= videoDuration) }
-            result[index] = CaptureTimingPoint(row.ordinal, row.elapsedMs, video, null, reliable = true)
+            result.set(index, CaptureTimingPoint(row.ordinal, row.elapsedMs, video, null, reliable = true))
+            result.keys[index] = video ?: NO_PLAYHEAD_KEY
         }
         return result
     }
 
-    private fun singleAnchorPoints(): Array<CaptureTimingPoint?> {
-        val result = arrayOfNulls<CaptureTimingPoint>(entries.size)
-        val anchor = singleAnchor ?: return result
+    private fun singleAnchorColumns(anchor: CaptureSyncAnchor): TimingColumns {
+        val result = TimingColumns(entries.size)
         val anchorEntry = entries.getOrNull(anchor.row - 1) ?: return result
         val anchorClock = captureClockReference(anchorEntry, LEGACY_ANCHOR_CONTEXT_EPOCH_MS) ?: return result
         entries.forEachIndexed { index, entry ->
             val delta = clockDeltaMs(anchorClock, entry) ?: return@forEachIndexed
             val video = runCatching { Math.addExact(anchor.videoMs, delta) }.getOrNull()?.takeIf { it >= 0L }
-            result[index] = CaptureTimingPoint(index + 1, delta, video, null, reliable = true)
+            result.set(index, CaptureTimingPoint(index + 1, delta, video, null, reliable = true))
+            result.keys[index] = video ?: NO_PLAYHEAD_KEY
         }
         return result
     }
@@ -631,7 +692,7 @@ private fun sparseTiming(
     metadata: CaptureSyncMetadata,
     timeline: CaptureTimeline?,
 ): SparseTiming {
-    val segment = metadata.segments.firstOrNull { it.contains(rowOrdinal) } ?: return NO_SPARSE_TIMING
+    val segment = metadata.segmentContaining(rowOrdinal) ?: return NO_SPARSE_TIMING
     val origin = timeline?.videoOriginElapsedMs
     val base = timeline?.timelineBaseElapsedMs ?: metadata.timelineBaseElapsedMs
     val automaticDelta = automaticClockDelta(segment, entry)

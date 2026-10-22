@@ -967,6 +967,7 @@ private fun VideoFollowReadout(state: AppState, tab: LogTab, mapping: VideoFollo
         FollowMappingStatus.HIDDEN_BY_FILTER -> "${captureSync}video $videoArrow → holding at $target (matching line hidden by filter)"
         FollowMappingStatus.HIDDEN_BY_COLLAPSE -> "${captureSync}video $videoArrow → holding at $target (matching line folded inside a collapsed group)"
         FollowMappingStatus.ON_VISIBLE_ROW -> "${captureSync}video $videoArrow → $target"
+        FollowMappingStatus.INDEX_PENDING -> "${captureSync}preparing the capture timing index…"
     }
     // pointerInput below is keyed on tab.id alone (so right-clicking doesn't restart a coroutine on
     // every decoded frame) — which means its awaitPointerEventScope loop, once launched, keeps

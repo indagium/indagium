@@ -27,16 +27,24 @@ class CaptureTimelineIndex(
         val lastVideoMs: Long,
     )
 
-    private val rows: List<CaptureMappingRow>
+    /**
+     * The retained rows, by row index. Nothing is copied per row: with a resolver the row's values
+     * are read through it ([ordinals] only exists when some rows were dropped, see below), and
+     * without one they are read straight from [CaptureTimeline.rows].
+     */
+    private val legacyRows: List<CaptureMappingRow>? = if (timingResolver == null) timeline.rows else null
+    private val rowCount: Int
+
+    /** Null while row index `i` is ordinal `i + 1`, which is every row unless a hole was dropped. */
+    private val ordinals: IntArray?
 
     /**
-     * Each row's own video position as the playhead search sees it (null = not searchable). For a
-     * v5 clock segment this is the unclamped position, so rows logged just before the video started
-     * (negative) still precede the first frame; see [CaptureTimingResolver.playheadKeyForOrdinal].
+     * Each row's video position as the playhead search orders it (the playhead key, null = not
+     * searchable), made non-decreasing inside each clock segment; the binary searches run over this.
+     * The raw, unrepaired key is read through [rowKeyAt]. For a v5 clock segment the raw key is the
+     * unclamped position, so rows logged just before the video started (negative) still precede the
+     * first frame; see [CaptureTimingResolver.playheadKeyForOrdinal].
      */
-    private val rowKeys: LongArray
-
-    /** [rowKeys] made non-decreasing inside each segment; the binary searches run over this. */
     private val searchKeys: LongArray
     private val segments: List<Segment>
 
@@ -47,30 +55,10 @@ class CaptureTimelineIndex(
     private val maxVideoMs: Long
 
     init {
-        val builtRows = ArrayList<CaptureMappingRow>()
-        val builtKeys = ArrayList<Long>()
-        if (timingResolver != null) {
-            for (ordinal in 1..logRowCount) {
-                val key = timingResolver.playheadKeyForOrdinal(ordinal)
-                // A hole inside a v5 clock segment (a row with no timestamp, one outside the video)
-                // is not an interruption: the clock keeps running across it. Dropping the row keeps
-                // it from splitting the segment into pieces whose in-between playhead positions
-                // would read as unmapped.
-                if (key == null && timingResolver.segmentIdForOrdinal(ordinal) != null) continue
-                val point = timingResolver.pointForOrdinal(ordinal)
-                builtRows += CaptureMappingRow(ordinal, point?.captureElapsedMs ?: 0L, point?.videoMs)
-                builtKeys += key ?: NOT_SEARCHABLE
-            }
-        } else {
-            timeline.rows.forEach { row ->
-                builtRows += row
-                builtKeys += row.videoMs ?: NOT_SEARCHABLE
-            }
-        }
-        rows = builtRows
-        rowKeys = builtKeys.toLongArray()
-        searchKeys = rowKeys.copyOf()
-
+        val capacity = timingResolver?.let { logRowCount } ?: timeline.rows.size
+        val keys = LongArray(capacity)
+        var retainedOrdinals: IntArray? = null
+        var count = 0
         val built = ArrayList<Segment>()
         var start = -1
         var previousOrdinal = -1
@@ -82,27 +70,53 @@ class CaptureTimelineIndex(
             built += Segment(
                 firstIndex = start,
                 lastIndex = endInclusive,
-                firstVideoMs = searchKeys[start],
-                lastVideoMs = searchKeys[endInclusive],
+                firstVideoMs = keys[start],
+                lastVideoMs = keys[endInclusive],
             )
             start = -1
         }
 
-        rows.forEachIndexed { index, row ->
-            val key = rowKeys[index]
-            val clockSegmentId = timingResolver?.segmentIdForOrdinal(row.ordinal)
-            val valid = row.ordinal in 1..logRowCount && key != NOT_SEARCHABLE
+        for (position in 0 until capacity) {
+            val ordinal: Int
+            val key: Long
+            val clockSegmentId: Int?
+            if (timingResolver != null) {
+                ordinal = position + 1
+                key = timingResolver.playheadKeyForOrdinal(ordinal) ?: NOT_SEARCHABLE
+                clockSegmentId = timingResolver.segmentIdForOrdinal(ordinal)
+                // A hole inside a v5 clock segment (a row with no timestamp, one outside the video)
+                // is not an interruption: the clock keeps running across it. Dropping the row keeps
+                // it from splitting the segment into pieces whose in-between playhead positions
+                // would read as unmapped.
+                if (key == NOT_SEARCHABLE && clockSegmentId != null) {
+                    if (retainedOrdinals == null) {
+                        retainedOrdinals = IntArray(capacity)
+                        for (retained in 0 until count) retainedOrdinals[retained] = retained + 1
+                    }
+                    continue
+                }
+            } else {
+                val row = timeline.rows[position]
+                ordinal = row.ordinal
+                key = row.videoMs ?: NOT_SEARCHABLE
+                clockSegmentId = null
+            }
+            val index = count++
+            keys[index] = key
+            retainedOrdinals?.set(index, ordinal)
+
+            val valid = ordinal in 1..logRowCount && key != NOT_SEARCHABLE
             // Inside one v5 clock segment, rows are logged by several processes and buffers, so a
             // row stamped a few milliseconds before its predecessor is routine and says nothing
             // about the recording: the segment goes on and the search order is repaired below. For
             // legacy arrival-time rows a backwards step is the only sign of an interruption.
             val continues = valid && start >= 0 && clockSegmentId == previousClockSegmentId &&
-                (clockSegmentId != null || (row.ordinal == previousOrdinal + 1 && key >= previousKey))
+                (clockSegmentId != null || (ordinal == previousOrdinal + 1 && key >= previousKey))
             if (!valid || (start >= 0 && !continues)) finish(index - 1)
             if (valid && start < 0) start = index
             if (valid) {
-                if (continues && clockSegmentId != null) searchKeys[index] = maxOf(key, searchKeys[index - 1])
-                previousOrdinal = row.ordinal
+                if (continues && clockSegmentId != null) keys[index] = maxOf(key, keys[index - 1])
+                previousOrdinal = ordinal
                 previousKey = key
                 previousClockSegmentId = clockSegmentId
             } else {
@@ -111,7 +125,11 @@ class CaptureTimelineIndex(
                 previousClockSegmentId = null
             }
         }
-        finish(rows.lastIndex)
+        finish(count - 1)
+        rowCount = count
+        // Only a log with dropped rows pays for a trimmed copy; the common case keeps the one array.
+        ordinals = if (count < capacity) retainedOrdinals?.copyOf(count) else retainedOrdinals
+        searchKeys = if (count < capacity) keys.copyOf(count) else keys
         segments = built
         ambiguousSegments = BooleanArray(segments.size) { index ->
             index > 0 && segments[index - 1].lastVideoMs >= segments[index].firstVideoMs
@@ -123,18 +141,32 @@ class CaptureTimelineIndex(
         maxVideoMs = segments.maxOfOrNull(Segment::lastVideoMs) ?: 0L
     }
 
+    private fun ordinalAt(index: Int): Int =
+        legacyRows?.get(index)?.ordinal ?: ordinals?.get(index) ?: (index + 1)
+
+    /** The row's own video position for the playhead search, before the in-segment order repair. */
+    private fun rowKeyAt(index: Int): Long = legacyRows?.get(index)?.let { it.videoMs ?: NOT_SEARCHABLE }
+        ?: (timingResolver?.playheadKeyForOrdinal(ordinalAt(index)) ?: NOT_SEARCHABLE)
+
+    private fun elapsedAt(index: Int): Long =
+        legacyRows?.get(index)?.elapsedMs ?: (timingResolver?.elapsedMsForOrdinal(ordinalAt(index)) ?: 0L)
+
+    private fun videoAt(index: Int): Long? =
+        if (legacyRows != null) legacyRows[index].videoMs else timingResolver?.videoMsForOrdinal(ordinalAt(index))
+
     /** True when the playhead search can land on [ordinal]'s row (it has a video position in some segment). */
     fun isPlayheadSearchable(ordinal: Int): Boolean {
         val index = rowIndexForOrdinal(ordinal)
-        return index >= 0 && rowKeys[index] != NOT_SEARCHABLE
+        return index >= 0 && rowKeyAt(index) != NOT_SEARCHABLE
     }
 
     private fun rowIndexForOrdinal(ordinal: Int): Int {
+        if (legacyRows == null && ordinals == null) return if (ordinal in 1..rowCount) ordinal - 1 else -1
         var lo = 0
-        var hi = rows.lastIndex
+        var hi = rowCount - 1
         while (lo <= hi) {
             val mid = (lo + hi) ushr 1
-            val rowOrdinal = rows[mid].ordinal
+            val rowOrdinal = ordinalAt(mid)
             when {
                 rowOrdinal < ordinal -> lo = mid + 1
                 rowOrdinal > ordinal -> hi = mid - 1
@@ -147,10 +179,9 @@ class CaptureTimelineIndex(
     /** Exact row mapping. No neighboring-row interpolation is performed. */
     fun pointForOrdinal(ordinal: Int, offsetMs: Long = 0L): Point? {
         val index = rowIndexForOrdinal(ordinal).takeIf { it >= 0 } ?: return null
-        val row = rows[index]
-        return row.videoMs?.let {
+        return videoAt(index)?.let {
             val segment = segmentContainingRowIndex(index) ?: return null
-            Point(row.ordinal, row.elapsedMs, it + offsetMs, rows[segment.firstIndex].ordinal)
+            Point(ordinal, elapsedAt(index), it + offsetMs, ordinalAt(segment.firstIndex))
         }
     }
 
@@ -193,10 +224,9 @@ class CaptureTimelineIndex(
             val after = searchKeys[floor + 1]
             if (target - before <= after - target) floor else floor + 1
         }
-        val row = rows[chosen]
         return Resolution(
             CapturePositionKind.MAPPED,
-            Point(row.ordinal, row.elapsedMs, rowKeys[chosen] + offsetMs, rows[segment.firstIndex].ordinal),
+            Point(ordinalAt(chosen), elapsedAt(chosen), rowKeyAt(chosen) + offsetMs, ordinalAt(segment.firstIndex)),
         )
     }
 
