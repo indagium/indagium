@@ -35,6 +35,8 @@ import com.indagium.ui.captureExtractSuffix
 import com.indagium.ui.mkTab
 import org.junit.Rule
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -233,6 +235,79 @@ class CaptureExtractPopoverTest {
     }
 
     @Test
+    fun theExtractGroupAppearsOnceARestoredArchiveTabLinksItsSnapshot() {
+        val root = createTempDirectory("extract-popover-restore").toFile()
+        val autosave = File(root, "autosave")
+        val archive = exportWithoutVideo(root)
+        val linking = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        var restored: AppState? = null
+        try {
+            val (first, tabId) = openArchive(root, archive)
+            first.autosaveNow()
+            first.close()
+
+            // After a restart the rows come back first; the imported snapshot is linked a moment later.
+            val app = AppState(
+                autosaveFile = autosave,
+                restoreOnCreate = true,
+                notesDir = File(root, "notes"),
+                archiveCacheDir = File(root, "cache-after-restart"),
+                autoExportNotes = false,
+                platformDefaultSaveRootDir = File(root, "save-root"),
+                beforeImportedSnapshotStored = {
+                    linking.countDown()
+                    check(release.await(15, TimeUnit.SECONDS))
+                },
+            ).also { restored = it }
+            app.startPendingRestoredTabLoads()
+            assertTrue(linking.await(15, TimeUnit.SECONDS), "the restore never reached the snapshot link")
+            assertNotNull(app.tab(tabId))
+            assertNull(app.captureExtractSourceFor(tabId))
+
+            // A popover opened inside that window: nothing to extract from yet.
+            val linkingSession = CaptureSession(
+                id = "linking",
+                directory = File(root, "linking"),
+                device = CaptureDevice("emulator-5554", "device"),
+                settings = CaptureSettings(recordVideo = false),
+                startedEpochMs = 1_700_000_000_000L,
+                elapsedMs = 3_000L,
+                status = CaptureStatus.STOPPED,
+            )
+            composeRule.setContent {
+                app.tab(tabId)?.let { tab ->
+                    CaptureSnapshotPopover(
+                        state = app,
+                        tab = tab,
+                        snapshot = RecorderSnapshot(
+                            state = RecorderState.STOPPED,
+                            session = app.captureSnapshotSessionFor(tab.id) ?: linkingSession,
+                        ),
+                        triggerBounds = null,
+                        onDismiss = {},
+                        onReturnFocus = {},
+                    )
+                }
+            }
+            composeRule.onNodeWithText("Save ZIP").assertIsDisplayed()
+            composeRule.onAllNodesWithText("Extract from this archive").assertCountEquals(0)
+
+            // Once linked, the open popover offers extraction without being reopened, with its default name filled in.
+            release.countDown()
+            composeRule.waitUntil(UI_TIMEOUT_MS) {
+                composeRule.onAllNodesWithText("Extract from this archive").fetchSemanticsNodes().isNotEmpty()
+            }
+            composeRule.onNodeWithText("All files · folder").performClick()
+            composeRule.onNodeWithText("Extract").assertIsEnabled()
+        } finally {
+            release.countDown()
+            restored?.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun theStripNoticeNamesAnExtractionAsExtractedNotSaved() {
         val result = CaptureExportResult(
             file = File("/tmp/opened-archive"),
@@ -299,8 +374,10 @@ class CaptureExtractPopoverTest {
         composeRule.onNodeWithText("Export capture range").assertIsDisplayed()
     }
 
-    private fun openArchive(root: File, withVideo: Boolean = true): Pair<AppState, String> {
-        val archive = if (withVideo) CaptureArchiveFixtures.exportWithVideo(root) else exportWithoutVideo(root)
+    private fun openArchive(root: File, withVideo: Boolean = true): Pair<AppState, String> =
+        openArchive(root, if (withVideo) CaptureArchiveFixtures.exportWithVideo(root) else exportWithoutVideo(root))
+
+    private fun openArchive(root: File, archive: File): Pair<AppState, String> {
         val state = AppState(
             autosaveFile = File(root, "autosave"),
             notesDir = File(root, "notes"),

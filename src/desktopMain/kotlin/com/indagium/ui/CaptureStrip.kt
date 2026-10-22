@@ -1585,7 +1585,8 @@ internal fun CaptureSnapshotPopover(
     // The Format section's choice: an archive format, or (only for a tab opened from an archive) a plain-file extraction.
     var output by remember(tab.id) { mutableStateOf<SnapshotOutput>(SnapshotOutput.Archive(CaptureExportFormat.ZIP)) }
     val exportFormat = (output as? SnapshotOutput.Archive)?.format ?: CaptureExportFormat.ZIP
-    val extractSource = remember(state, tab.id) { state.captureExtractSourceFor(tab.id) }
+    // Not remembered: a restored archive tab links its source after its rows, and the read recomposes when it does.
+    val extractSource = state.captureExtractSourceFor(tab.id)
     val extractKind = (output as? SnapshotOutput.Extract)?.kind?.takeIf { extractSource != null }
     val extracting = extractKind != null
     var overwriteConfirmed by remember(tab.id) { mutableStateOf(false) }
@@ -1632,7 +1633,9 @@ internal fun CaptureSnapshotPopover(
     }
     val extractVideoExtension = captureExtractVideoExtension(extractSource)
     val extractSuffix = extractKind?.let { captureExtractSuffix(it, extractVideoExtension) }.orEmpty()
-    var extractName by remember(tab.id) { mutableStateOf(extractSource?.let { captureExtractDefaultName(it.archive) }.orEmpty()) }
+    var extractName by remember(tab.id, extractSource?.archive) {
+        mutableStateOf(extractSource?.let { captureExtractDefaultName(it.archive) }.orEmpty())
+    }
     val destinationDirectory = state.effectiveCaptureSnapshotsDir()
     val filename = if (extracting) captureExtractTargetName(extractName, extractSuffix) else captureArchiveName(basename, exportFormat)
     val destination = filename?.let { File(destinationDirectory, it) }

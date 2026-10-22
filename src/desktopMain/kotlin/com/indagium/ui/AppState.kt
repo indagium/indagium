@@ -1911,6 +1911,9 @@ class AppState(
     // Blocks immediately before archive generation in deterministic export-lifecycle tests. Runs on
     // the interruptible IO lane and defaults to an allocation-free no-op in production.
     internal val beforeCaptureSnapshotExport: () -> Unit = {},
+    // Blocks a restored archive tab between its rows appearing and its imported snapshot being linked (the tab id is
+    // passed), so tests can open the range popover inside that window. A no-op in production.
+    internal val beforeImportedSnapshotStored: (String) -> Unit = {},
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -3322,6 +3325,22 @@ class AppState(
     /** Imported archives keep their immutable extracted assets and source-local cursor per tab. */
     private val importedCaptureSnapshots = ConcurrentHashMap<String, ImportedCaptureSnapshot>()
 
+    // The map above is not observable: every store or drop bumps this, and the readers below read it, so a composition
+    // (FileView's archive popover, the popover's Extract group) recomposes when a restored tab's snapshot is linked later
+    // than its rows. Unique values from the counter, so concurrent bumps never collapse into one unchanged write.
+    private val importedSnapshotsRevisionCounter = AtomicInteger()
+    private val importedSnapshotsRevision = mutableIntStateOf(0)
+
+    private fun importedSnapshotsChanged() {
+        importedSnapshotsRevision.intValue = importedSnapshotsRevisionCounter.incrementAndGet()
+    }
+
+    /** [tabId]'s imported snapshot, read so that a composition calling this recomposes when snapshots change. */
+    private fun observedImportedSnapshot(tabId: String): ImportedCaptureSnapshot? {
+        importedSnapshotsRevision.intValue
+        return importedCaptureSnapshots[tabId]
+    }
+
     /** Test-lane captures (see beginLaneCapture). The devices AI test lanes record right now, by serial, and which lane. Guarded by [stateLock]. */
     private val laneCaptureSerials = HashMap<String, TestLaneTabRef>()
 
@@ -3911,6 +3930,7 @@ class AppState(
         importedCaptureSnapshots.compute(tabId) { _, current ->
             if (current?.identity == imported.identity) updated else current
         }
+        importedSnapshotsChanged()
         result
     }
 
@@ -5075,13 +5095,13 @@ class AppState(
     /** Session backing the same snapshot range editor for live, retained, and imported captures. */
     internal fun captureSnapshotSessionFor(tabId: String): CaptureSession? {
         captureControllerFor(tabId)?.snapshot?.value?.session?.let { return it }
-        importedCaptureSnapshots[tabId]?.session?.let { return it }
+        observedImportedSnapshot(tabId)?.session?.let { return it }
         val tabNow = tab(tabId) ?: return null
         val sessionId = tabNow.captureSessionId ?: tabNow.captureSourceSessionId ?: return null
         return captureService.sessionById(sessionId)
     }
 
-    internal fun isImportedCaptureSnapshot(tabId: String): Boolean = importedCaptureSnapshots.containsKey(tabId)
+    internal fun isImportedCaptureSnapshot(tabId: String): Boolean = observedImportedSnapshot(tabId) != null
 
     /** Timeline passed to playback, including the active recorder's current outage tail. */
     internal fun captureTimelineFor(tabId: String): CaptureTimeline? {
@@ -5330,7 +5350,7 @@ class AppState(
     }
 
     /** The opened archive's decoded files "Extract from this archive" copies from; null for a tab not opened from one. */
-    internal fun captureExtractSourceFor(tabId: String): CaptureExtractSource? = importedCaptureSnapshots[tabId]?.extractSource
+    internal fun captureExtractSourceFor(tabId: String): CaptureExtractSource? = observedImportedSnapshot(tabId)?.extractSource
 
     /** What extracting [kind] would write, from the files on disk. File stats: call off the UI thread. */
     internal fun captureExtractPlanFor(tabId: String, kind: CaptureExtractKind): CaptureExtractPlan? =
@@ -12030,7 +12050,10 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     publishOpenedTab(captureTab, originLauncherId)
-                    if (snapshotSource != null) importedCaptureSnapshots[tabId] = snapshotSource
+                    if (snapshotSource != null) {
+                        importedCaptureSnapshots[tabId] = snapshotSource
+                        importedSnapshotsChanged()
+                    }
                     unstoredSnapshot = null
                     if (video != null) videoPanelVisible = true
                 }
@@ -12198,15 +12221,17 @@ class AppState(
 
     /** Removes the imported snapshots of [tabIds] from the map; the caller closes them (their claims) outside stateLock. */
     private fun detachImportedSnapshots(tabIds: Set<String>): List<ImportedCaptureSnapshot> =
-        tabIds.mapNotNull { importedCaptureSnapshots.remove(it) }
+        tabIds.mapNotNull { importedCaptureSnapshots.remove(it) }.also { if (it.isNotEmpty()) importedSnapshotsChanged() }
 
     /**
      * Stores [snapshot] as [tabId]'s imported capture snapshot and closes the extraction claim of whatever it replaces.
      * A tab that was closed while the snapshot was being built gets none: nobody would ever release its claim.
      */
     private fun storeImportedSnapshot(tabId: String, snapshot: ImportedCaptureSnapshot) {
+        beforeImportedSnapshotStored(tabId)
         importedCaptureSnapshots.put(tabId, snapshot)?.close()
         if (tab(tabId) == null && importedCaptureSnapshots.remove(tabId, snapshot)) snapshot.close()
+        importedSnapshotsChanged()
     }
 
     /**
