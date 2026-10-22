@@ -219,6 +219,20 @@ jobs:
           --tests 'com.indagium.capture.TimelinePcmMixerTest'
           --tests 'com.indagium.capture.OpusPcmEncoderTest'
 
+      # Compact archives rely on per-OS natives and file semantics: zstd-jni's unpacked library (and the
+      # app-owned folder it now loads from), zip writing, the cross-process extraction lease/cache (file
+      # locks and deletes behave differently on Windows) and the bundled SVT-AV1 encoder. The transcoder
+      # test skips itself when a platform's bytedeco FFmpeg build lacks the encoder.
+      - name: Verify Compact archive natives and file semantics
+        run: >-
+          ./gradlew desktopTest
+          --tests 'com.indagium.CaptureZstdTest'
+          --tests 'com.indagium.capture.CaptureArchiveZipWriterTest'
+          --tests 'com.indagium.capture.CaptureExtractionLeaseTest'
+          --tests 'com.indagium.CaptureExtractionCacheTest'
+          --tests 'com.indagium.capture.FfmpegAv1CompactVideoTranscoderTest'
+          --tests 'com.indagium.ui.ZstdNativeFolderTest'
+
       - name: Smoke-test native mirror library load and Canvas handle
         if: matrix.linux || startsWith(matrix.os, 'windows')
         run: ./gradlew desktopTest --tests 'com.indagium.capture.mirror.NativeMirrorBridgeSmokeTest'
