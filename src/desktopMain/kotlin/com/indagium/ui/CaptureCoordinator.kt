@@ -25,6 +25,7 @@ import com.indagium.capture.CaptureStorageVersion
 import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.CaptureVideoEncoderCapabilities
 import com.indagium.capture.CaptureVideoEncoderProbeState
 import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.DeviceLogActivity
@@ -49,6 +50,7 @@ import com.indagium.capture.parseCompletePerTagLogOverrides
 import com.indagium.capture.parseLogcatBufferSizes
 import com.indagium.capture.perTagLogLevelOverrides
 import com.indagium.capture.readCaptureSessionDirectory
+import com.indagium.capture.readyCapabilities
 import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
@@ -272,6 +274,10 @@ internal class CaptureService(
             probeJob.start()
         }
     }
+
+    /** A finished encoder probe for [serial] from this app session, so a capture start reuses it instead of probing the device again. */
+    fun knownVideoEncoderCapabilities(serial: String): CaptureVideoEncoderCapabilities? =
+        videoEncoderProbeStates[serial].readyCapabilities()
 
     private fun publishVideoEncoderProbeIfCurrent(
         serial: String,
@@ -772,6 +778,9 @@ internal class CaptureService(
         // independently — an INTERRUPTED session under one root must not stop the other root's
         // sessions from being read.
         val recovered = mergeCaptureSessions(existingRoots().map { CaptureRecorder(it).use { r -> r.recoverSessions() } })
+        // Earlier builds (and a crashed legacy export) left `.sparse-source-*` conversions beside the sessions; the
+        // sweep only looks at direct children of the root older than an hour, never inside a session.
+        existingRoots().forEach { root -> runCatching { com.indagium.capture.sweepStaleLegacySparseSources(root) } }
         sessions = recovered
         return recovered
     }
@@ -1037,8 +1046,9 @@ internal class TabCaptureController(
         // the recorder's own live-session channel (CaptureStrip's Diagnostics drawer) when
         // AppState.startCaptureTab adapted this launch's settings. Null on every other system.
         startupNotice: String? = null,
+        videoEncoderCapabilities: CaptureVideoEncoderCapabilities? = null,
         beforeLogcatLaunch: (CaptureSession) -> Unit,
-    ): CaptureSession = recorder.start(device, settings, tools, startupNotice, beforeLogcatLaunch)
+    ): CaptureSession = recorder.start(device, settings, tools, startupNotice, videoEncoderCapabilities, beforeLogcatLaunch)
 
     fun startWithDeviceLoggingConfiguration(
         device: CaptureDevice,
@@ -1046,6 +1056,7 @@ internal class TabCaptureController(
         tools: CaptureTools,
         deviceLoggingConfiguration: DeviceLoggingConfiguration?,
         startupNotice: String? = null,
+        videoEncoderCapabilities: CaptureVideoEncoderCapabilities? = null,
         beforeLogcatLaunch: (CaptureSession) -> Unit,
     ): CaptureSession = recorder.startWithDeviceLoggingConfiguration(
         device,
@@ -1053,6 +1064,7 @@ internal class TabCaptureController(
         tools,
         deviceLoggingConfiguration,
         startupNotice,
+        videoEncoderCapabilities,
         beforeLogcatLaunch,
     )
 

@@ -155,6 +155,19 @@ class CaptureArchiveZipWriterTest {
         assertEquals(6, compactEncoderProcessorCount(64))
     }
 
+    @Test
+    fun liveCaptureEncoderConcurrencyLeavesMostCoresToTheRecording() {
+        assertEquals(1, liveCompactEncoderProcessorCount(0))
+        assertEquals(1, liveCompactEncoderProcessorCount(4))
+        assertEquals(1, liveCompactEncoderProcessorCount(7))
+        assertEquals(2, liveCompactEncoderProcessorCount(8))
+        assertEquals(2, liveCompactEncoderProcessorCount(64))
+        // Never above what a stopped export would use on the same host.
+        for (cores in listOf(1, 2, 4, 8, 16, 64)) {
+            assertTrue(liveCompactEncoderProcessorCount(cores) <= compactEncoderProcessorCount(cores))
+        }
+    }
+
     private fun asset(path: String, bytes: ByteArray) = CaptureArchiveAsset(path, bytes.size.toLong(), sha256(bytes))
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")

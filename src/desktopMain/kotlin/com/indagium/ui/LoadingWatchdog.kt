@@ -30,7 +30,6 @@ private const val DEFAULT_LAST_FOLLOW_UP_MS = 60_000L
 /** One [AppState] active load as the watchdog reports it; deliberately free of paths and log content. */
 internal data class LoadingLoadInfo(
     val tabId: String,
-    val title: String?,
     val kind: String,
     val source: String,
     val jobState: String,
@@ -103,7 +102,7 @@ internal class LoadingWatchdog(
         append("Global loading still active after ${seconds(elapsedMs)}: ").append(summary(snap)).append('\n')
         if (snap.loads.isEmpty()) append("  (no active load entries)\n")
         snap.loads.forEach { load ->
-            append("  load tab=${load.tabId} title=${load.title ?: "(none)"} kind=${load.kind} source=${load.source}")
+            append("  load tab=${load.tabId} kind=${load.kind} source=${load.source}")
             append(" job=${load.jobState} countsAsLoading=${load.countsAsLoading}\n")
         }
         dump.forEach { append(it).append('\n') }

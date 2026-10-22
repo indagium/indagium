@@ -2,7 +2,7 @@ package com.indagium.capture
 
 import com.indagium.model.LogEntry
 import com.indagium.model.VideoSource
-import java.io.BufferedInputStream
+import com.indagium.utils.readTextShared
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
@@ -14,6 +14,7 @@ import java.util.Properties
 import java.util.UUID
 
 private const val BYTE_MASK = 0xFF
+private const val NEWLINE_BYTE = '\n'.code.toByte()
 
 /** A range-exportable view over immutable archive assets plus its app-local, source-keyed cursor. */
 internal data class ImportedCaptureSnapshot(
@@ -58,17 +59,8 @@ internal fun importedCaptureSnapshot(
         )
         else -> maxOf(imported.descriptor.logEndMs, imported.descriptor.videoEndMs ?: 0L)
     }.coerceAtLeast(0L)
-    val sparseMetadata = imported.sparseSyncMetadata ?: buildImportedSparseCache(
-        imported,
-        cacheDirectory,
-        parsedLog,
-        duration,
-    )
-    val blockIndexFile = if (imported.sparseSyncMetadata != null) {
-        File(imported.logFile.parentFile ?: File("."), requireNotNull(imported.descriptor.blocks).path)
-    } else {
-        File(cacheDirectory, "mapping/blocks.jsonl")
-    }
+    val sparseMetadata = imported.sparseSyncMetadata ?: legacySparseCache(imported, cacheDirectory, parsedLog, duration)
+    val blockIndexFile = importedBlockIndexFile(imported, cacheDirectory)
 
     val savedCursors = readImportedSnapshotCursors(checkpointFile)
     val localVideoOrigin = timeline?.videoOriginElapsedMs?.let { it - baseElapsed }
@@ -125,6 +117,33 @@ internal fun importedCaptureSnapshot(
     )
     return ImportedCaptureSnapshot(identity, session, checkpointFile)
 }
+
+/**
+ * Deletes the flat `<identity>.jsonl` files that older builds kept directly in [indexDirectory] (rebuilt on every open and
+ * never reused). The current cache is one directory per identity, so only plain files are removed. Returns the count.
+ */
+internal fun sweepLegacyImportedIndexFiles(indexDirectory: File): Int =
+    indexDirectory.listFiles().orEmpty().count { file ->
+        file.isFile && !Files.isSymbolicLink(file.toPath()) && file.delete()
+    }
+
+/** The reusable sparse cache of a v1-v4 archive's earlier open, else a freshly built one. */
+private fun legacySparseCache(
+    imported: ImportedCapture,
+    cacheDirectory: File,
+    parsedLog: List<LogEntry>,
+    durationMs: Long,
+): CaptureSyncMetadata = reuseImportedSparseCache(imported, cacheDirectory, parsedLog.size, durationMs)
+    ?: buildImportedSparseCache(imported, cacheDirectory, parsedLog, durationMs)
+
+private fun importedBlockIndexFile(imported: ImportedCapture, cacheDirectory: File): File =
+    if (imported.sparseSyncMetadata != null) {
+        // Descriptor paths are relative to the archive root, not to the log's folder: an in-place capture folder
+        // keeps its log in logs/, so logFile.parentFile/mapping/blocks.jsonl would be logs/mapping/blocks.jsonl.
+        File(imported.root ?: imported.logFile.parentFile ?: File("."), requireNotNull(imported.descriptor.blocks).path)
+    } else {
+        File(cacheDirectory, "mapping/blocks.jsonl")
+    }
 
 private val EXPORTED_SCREENSHOT_NAME = Regex("(?:\\d+-)?screenshot-(\\d+)\\.[A-Za-z0-9]{1,8}")
 
@@ -243,6 +262,38 @@ private fun readImportedSnapshotCursors(file: File): ImportedSnapshotCursors {
     }.getOrDefault(ImportedSnapshotCursors())
 }
 
+/**
+ * The sparse cache of an earlier open of this same archive, when it is still whole. [cacheDirectory] is named by the
+ * archive's identity (path plus every descriptor asset checksum), so its contents can only have been derived from these
+ * very inputs; this just rejects a half-written or damaged pair. The sync manifest must parse (its checksum covers the
+ * payload) and agree with the log's byte length, the parsed row count and the timeline bounds, and the block index must
+ * read cleanly over exactly that log. Block hashes are not re-verified: that would read the whole log again, which is
+ * the cost this reuse exists to avoid. Null means rebuild.
+ */
+private fun reuseImportedSparseCache(
+    imported: ImportedCapture,
+    cacheDirectory: File,
+    rowCount: Int,
+    durationMs: Long,
+): CaptureSyncMetadata? = runCatching {
+    val indexFile = File(cacheDirectory, "mapping/blocks.jsonl")
+    val syncFile = File(cacheDirectory, "timeline/sync.json")
+    if (!indexFile.isFile || !syncFile.isFile) return@runCatching null
+    val logBytes = imported.logFile.length()
+    val metadata = CaptureSyncMetadata.parse(readTextShared(syncFile))
+    val matches = metadata.logBytes == logBytes && metadata.rowCount == rowCount &&
+        metadata.timelineBaseElapsedMs == imported.descriptor.timelineBaseElapsedMs && metadata.timelineDurationMs == durationMs
+    if (!matches) return@runCatching null
+    val index = CaptureBlockIndex.read(
+        indexFile,
+        imported.logFile,
+        maxIndexBytes = indexFile.length(),
+        maxLogBytes = logBytes,
+        verifyByteRange = LongRange.EMPTY,
+    )
+    metadata.takeIf { index.indexedLogBytes == logBytes && index.indexedRows == rowCount }
+}.getOrNull()
+
 private fun buildImportedSparseCache(
     imported: ImportedCapture,
     cacheDirectory: File,
@@ -283,22 +334,34 @@ private fun writeImportedBlockIndex(
 ): ImportedIndexWriteResult {
     val state = ImportedIndexWriteState()
     CaptureBlockWriter(target).use { writer ->
-        BufferedInputStream(logFile.inputStream()).use { input ->
-            val line = ByteArrayOutputStream()
-            while (true) {
-                val byte = input.read()
-                if (byte < 0) break
-                line.write(byte)
-                if (byte == '\n'.code) {
-                    appendImportedBlockLine(line.toByteArray(), parsedLog, metadata, durationMs, state, writer)
-                    line.reset()
-                }
-            }
-            if (line.size() > 0) appendImportedBlockLine(line.toByteArray(), parsedLog, metadata, durationMs, state, writer)
-        }
+        forEachRawLine(logFile) { raw -> appendImportedBlockLine(raw, parsedLog, metadata, durationMs, state, writer) }
         writer.freeze()
     }
     return ImportedIndexWriteResult(state.rowOrdinal, state.byteOffset)
+}
+
+private const val IMPORTED_READ_CHUNK_BYTES = 64 * 1024
+
+/** Calls [onLine] with each raw line of [file], terminator included; a final unterminated line is delivered too. */
+private fun forEachRawLine(file: File, onLine: (ByteArray) -> Unit) {
+    file.inputStream().use { input ->
+        val chunk = ByteArray(IMPORTED_READ_CHUNK_BYTES)
+        val line = ByteArrayOutputStream()
+        while (true) {
+            val read = input.read(chunk)
+            if (read < 0) break
+            var lineStart = 0
+            for (index in 0 until read) {
+                if (chunk[index] != NEWLINE_BYTE) continue
+                line.write(chunk, lineStart, index + 1 - lineStart)
+                onLine(line.toByteArray())
+                line.reset()
+                lineStart = index + 1
+            }
+            if (lineStart < read) line.write(chunk, lineStart, read - lineStart)
+        }
+        if (line.size() > 0) onLine(line.toByteArray())
+    }
 }
 
 private fun appendImportedBlockLine(
@@ -319,7 +382,7 @@ private fun appendImportedBlockLine(
         rowOrdinal == null -> state.fallbackElapsed
         else -> 0L
     }
-    val segmentId = rowOrdinal?.let { row -> metadata.segments.firstOrNull { it.contains(row) }?.id }
+    val segmentId = rowOrdinal?.let { row -> metadata.segmentContaining(row)?.id }
     writer.append(
         state.byteOffset,
         raw,
@@ -407,7 +470,7 @@ private fun legacyTimingDriftedSegments(
 ): Set<Int> = buildSet {
     parsedLog.forEachIndexed { index, entry ->
         val ordinal = index + 1
-        val segment = tracked.segments.firstOrNull { it.contains(ordinal) } ?: return@forEachIndexed
+        val segment = tracked.segmentContaining(ordinal) ?: return@forEachIndexed
         if (segment.reliability != CaptureSyncReliability.RELIABLE) return@forEachIndexed
         val delta = segment.clockReference?.let { clockDeltaMs(it, entry) } ?: return@forEachIndexed
         val anchorElapsed = segment.anchorCaptureElapsedMs ?: return@forEachIndexed

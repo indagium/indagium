@@ -5,6 +5,7 @@ import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.debug.AppLogger
+import com.indagium.utils.readTextShared
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -192,6 +193,9 @@ class CaptureRecorder internal constructor(
     private var lastSpaceCheckMs: Long = Long.MIN_VALUE
     private var lastMetadataPersistMs: Long = Long.MIN_VALUE
 
+    /** Cross-process lease of the active session's directory (guarded by [lock]); see [CaptureRecordingLease]. */
+    private var recordingLease: CaptureRecordingLease? = null
+
     @Volatile private var lastKnownBootId: String? = null
 
     @Volatile private var lastKnownBootUptimeMs: Long? = null
@@ -232,8 +236,10 @@ class CaptureRecorder internal constructor(
         // the session activates below, the same live-session channel every other capture-start
         // diagnostic (audio plan, video-start failure) already uses. Null on every other system.
         startupNotice: String? = null,
+        // Encoder support the caller already probed for this device in this app session; null probes here.
+        videoEncoderCapabilities: CaptureVideoEncoderCapabilities? = null,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)? = null,
-    ): CaptureSession = startInternal(device, settings, tools, null, startupNotice, beforeLogcatLaunch)
+    ): CaptureSession = startInternal(device, settings, tools, null, startupNotice, videoEncoderCapabilities, beforeLogcatLaunch)
 
     /** Starts with an off-thread device logging snapshot. Kept separate from [start] so existing
      * trailing-lambda call sites remain source-compatible. */
@@ -243,8 +249,11 @@ class CaptureRecorder internal constructor(
         tools: CaptureTools,
         deviceLoggingConfiguration: DeviceLoggingConfiguration?,
         startupNotice: String? = null,
+        videoEncoderCapabilities: CaptureVideoEncoderCapabilities? = null,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)? = null,
-    ): CaptureSession = startInternal(device, settings, tools, deviceLoggingConfiguration, startupNotice, beforeLogcatLaunch)
+    ): CaptureSession = startInternal(
+        device, settings, tools, deviceLoggingConfiguration, startupNotice, videoEncoderCapabilities, beforeLogcatLaunch,
+    )
 
     private fun startInternal(
         device: CaptureDevice,
@@ -252,6 +261,7 @@ class CaptureRecorder internal constructor(
         tools: CaptureTools,
         deviceLoggingConfiguration: DeviceLoggingConfiguration?,
         startupNotice: String?,
+        knownVideoCapabilities: CaptureVideoEncoderCapabilities?,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)?,
     ): CaptureSession {
         synchronized(lock) {
@@ -270,7 +280,7 @@ class CaptureRecorder internal constructor(
             startLatch = CountDownLatch(1)
         }
         return try {
-            startCapture(device, settings, tools, deviceLoggingConfiguration, startupNotice, beforeLogcatLaunch)
+            startCapture(device, settings, tools, deviceLoggingConfiguration, startupNotice, knownVideoCapabilities, beforeLogcatLaunch)
         } finally {
             synchronized(lock) {
                 starting = false
@@ -290,9 +300,10 @@ class CaptureRecorder internal constructor(
         tools: CaptureTools,
         deviceLoggingConfiguration: DeviceLoggingConfiguration?,
         startupNotice: String?,
+        knownVideoCapabilities: CaptureVideoEncoderCapabilities?,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)?,
     ): CaptureSession {
-        val videoCapabilities = if (settings.recordVideo && settings.videoCodec != CaptureVideoCodec.H264) {
+        val videoCapabilities = resolveVideoEncoderCapabilities(settings, knownVideoCapabilities) {
             runCatching { tools.listEmbeddedVideoEncoders(device.serial) }
                 .onFailure { failure ->
                     if (failure is InterruptedException || Thread.currentThread().isInterrupted) {
@@ -300,8 +311,6 @@ class CaptureRecorder internal constructor(
                     }
                 }
                 .getOrNull()
-        } else {
-            null
         }
         if (Thread.currentThread().isInterrupted) throw InterruptedException("Capture start was cancelled during codec discovery")
         val encoderFallback = if (settings.recordVideo) {
@@ -328,7 +337,15 @@ class CaptureRecorder internal constructor(
             deviceLoggingConfiguration = deviceLoggingConfiguration,
             storageVersion = CaptureStorageVersion.BLOCKS_V2,
         )
-        persistSession(session)
+        // Taken before session.json first says RECORDING, so no recovery in another process can ever see this
+        // session as an orphan. Null (no file locks, read-only folder) just leaves it unprotected like an old build's.
+        val lease = CaptureRecordingLease.create(directory)
+        try {
+            persistSession(session)
+        } catch (failure: Exception) {
+            lease?.close()
+            throw failure
+        }
         var openedLogFile: FileOutputStream? = null
         var openedIndexFile: FileOutputStream? = null
         var openedBlockWriter: CaptureBlockWriter? = null
@@ -340,14 +357,21 @@ class CaptureRecorder internal constructor(
                 openedIndexFile = seams.openStorage(session.indexFile)
             }
         } catch (failure: IOException) {
-            runCatching { openedLogFile?.close() }
-            runCatching { openedIndexFile?.close() }
-            runCatching { openedBlockWriter?.close() }
-            session = session.copy(
-                status = CaptureStatus.INTERRUPTED,
-                interruptions = listOf("Unable to open capture storage: ${failure.message ?: failure::class.simpleName}"),
-            )
-            persistSession(session)
+            closeOpenedStorage(openedLogFile, openedIndexFile, openedBlockWriter)
+            try {
+                session = session.copy(
+                    status = CaptureStatus.INTERRUPTED,
+                    interruptions = listOf("Unable to open capture storage: ${failure.message ?: failure::class.simpleName}"),
+                )
+                persistSession(session)
+            } finally {
+                // After the final status is on disk: from here another process may recover this directory.
+                lease?.close()
+            }
+            throw failure
+        } catch (failure: RuntimeException) {
+            closeOpenedStorage(openedLogFile, openedIndexFile, openedBlockWriter)
+            lease?.close()
             throw failure
         }
         val cancelledBeforeActivation = synchronized(lock) {
@@ -376,6 +400,7 @@ class CaptureRecorder internal constructor(
                 logOutput = BufferedOutputStream(requireNotNull(logFileOutput), CAPTURE_WRITE_BUFFER_BYTES)
                 indexOutput = openedIndexFile?.let { BufferedOutputStream(it, CAPTURE_WRITE_BUFFER_BYTES) }
                 active.set(true)
+                recordingLease = lease
                 LiveCaptureSessions.add(session.directory)
                 mutableSelectedSession.value = session
                 publishLocked(RecorderState.RECORDING, force = true)
@@ -390,7 +415,11 @@ class CaptureRecorder internal constructor(
                 status = CaptureStatus.INTERRUPTED,
                 interruptions = listOf("Capture was interrupted while starting."),
             )
-            persistSession(session)
+            try {
+                persistSession(session)
+            } finally {
+                lease?.close()
+            }
             synchronized(lock) {
                 currentSession = session
                 currentTools = null
@@ -512,6 +541,12 @@ class CaptureRecorder internal constructor(
             }
         }
         return synchronized(lock) { requireNotNull(currentSession) }
+    }
+
+    private fun closeOpenedStorage(log: FileOutputStream?, index: FileOutputStream?, blocks: CaptureBlockWriter?) {
+        runCatching { log?.close() }
+        runCatching { index?.close() }
+        runCatching { blocks?.close() }
     }
 
     fun stop(): CaptureSession? = stopInternal(CaptureStatus.STOPPED, null)
@@ -653,11 +688,30 @@ class CaptureRecorder internal constructor(
             .toList()
     }
 
+    /**
+     * Marks every RECORDING session this recorder does not own as INTERRUPTED and repairs its files. A session whose
+     * [CaptureRecordingLease] another recorder (this JVM or another process) still holds is live: it is returned
+     * exactly as read and nothing in it is touched.
+     */
     fun recoverSessions(): List<CaptureSession> = listSessions().map { session ->
         if (session.status != CaptureStatus.RECORDING || currentSession?.id == session.id && active.get()) return@map session
-        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
-            return@map recoverSparseSession(session)
+        if (LiveCaptureSessions.isLive(session.directory)) return@map session
+        when (val attempt = CaptureRecordingLease.tryTakeOver(session.directory)) {
+            CaptureRecordingLease.Attempt.Held -> session
+            CaptureRecordingLease.Attempt.Absent -> recoverOrphan(session)
+            // Liveness unknown: the destructive log/index surgery is skipped, the status flip is all that is safe.
+            CaptureRecordingLease.Attempt.Unavailable ->
+                if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) markInterruptedOnly(session) else recoverOrphan(session)
+            is CaptureRecordingLease.Attempt.Acquired -> attempt.lease.use {
+                // The listing is stale by now: the owner may have stopped (and released the lease) since it was read.
+                val fresh = readSession(session.directory)
+                if (fresh == null || fresh.status != CaptureStatus.RECORDING) fresh ?: session else recoverOrphan(fresh)
+            }
         }
+    }
+
+    private fun recoverOrphan(session: CaptureSession): CaptureSession {
+        if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) return recoverSparseSession(session)
         val recoveredElapsed = maxOf(session.elapsedMs, lastIndexedElapsedMs(session.indexFile))
         val recovered = session.copy(
             elapsedMs = recoveredElapsed,
@@ -665,7 +719,16 @@ class CaptureRecorder internal constructor(
             interruptions = (session.interruptions + "The app exited before this capture stopped.").takeLast(MAX_DIAGNOSTICS),
         )
         persistSession(recovered)
-        recovered
+        return recovered
+    }
+
+    private fun markInterruptedOnly(session: CaptureSession): CaptureSession {
+        val interrupted = session.copy(
+            status = CaptureStatus.INTERRUPTED,
+            interruptions = (session.interruptions + "The app exited before this capture stopped.").takeLast(MAX_DIAGNOSTICS),
+        )
+        persistSession(interrupted)
+        return interrupted
     }
 
     private fun recoverSparseSession(session: CaptureSession): CaptureSession {
@@ -2608,6 +2671,8 @@ class CaptureRecorder internal constructor(
         } finally {
             // After the MKV is closed and the final status persisted: until now the file may still grow.
             liveDirectory?.let(LiveCaptureSessions::remove)
+            // Last: from here a recovery in another process may take this (now STOPPED/INTERRUPTED) session over.
+            synchronized(lock) { recordingLease.also { recordingLease = null } }?.close()
             completion.countDown()
         }
     }
@@ -2847,12 +2912,12 @@ class CaptureRecorder internal constructor(
 
     private fun readSparseMetadata(session: CaptureSession): CaptureSyncMetadata? {
         if (session.storageVersion != CaptureStorageVersion.BLOCKS_V2 || !session.syncFile.isFile) return null
-        return CaptureSyncMetadata.parse(session.syncFile.readText())
+        return CaptureSyncMetadata.parse(readTextShared(session.syncFile))
     }
 
     private fun readSession(directory: File): CaptureSession? {
         val file = File(directory, SESSION_FILE)
-        return runCatching { sessionFromJson(file.readText(), directory) }.getOrNull()
+        return runCatching { sessionFromJson(readTextShared(file), directory) }.getOrNull()
     }
 }
 
@@ -2993,7 +3058,7 @@ internal fun sessionJson(session: CaptureSession): String = buildJsonObject {
  * it). Null when the file is missing or not a recognised session.
  */
 fun readCaptureSessionDirectory(directory: File): CaptureSession? = runCatching {
-    sessionFromJson(File(directory, SESSION_FILE).readText(), directory)
+    sessionFromJson(readTextShared(File(directory, SESSION_FILE)), directory)
 }.getOrNull()
 
 private fun sessionFromJson(raw: String, directory: File): CaptureSession? = runCatching {
@@ -3005,7 +3070,7 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
     // listed and a RECORDING one is rebuilt from its log + block index by recoverSparseSession. A stopped one stays
     // listed with its log openable; only operations that need the timing fail (they parse the file themselves).
     val syncMetadata = if (storageVersion == CaptureStorageVersion.BLOCKS_V2 && syncFile.isFile) {
-        runCatching { CaptureSyncMetadata.parse(syncFile.readText()) }
+        runCatching { CaptureSyncMetadata.parse(readTextShared(syncFile)) }
             .onFailure { failure ->
                 runCatching { AppLogger.warn("capture", "Ignoring unreadable capture sync metadata: ${failure.message}") }
             }

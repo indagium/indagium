@@ -44,6 +44,7 @@ import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.CaptureVideoCodec
 import com.indagium.capture.DeviceLogActivity
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
@@ -116,8 +117,11 @@ internal fun CaptureLauncherContent(
     val selectedDevice = liveSelectedDevice
         ?: lastKnownDeviceBySerial?.takeIf { isSelectedDeviceRooting && it.serial == selectedSerial }
         ?: service.devices.firstOrNull()
-    LaunchedEffect(service, selectedDevice?.serial) {
-        selectedDevice?.takeIf { it.available }?.let { service.refreshVideoEncoderCapabilities(it.serial) }
+    // The probe pushes the bundled server to the device and runs it, so only an advanced codec (or the
+    // explicit "Check" button) triggers it; switching the codec to H.265/AV1 re-keys this effect.
+    LaunchedEffect(service, selectedDevice?.serial, draft.videoCodec) {
+        selectedDevice?.takeIf { shouldAutoProbeVideoEncoders(draft.videoCodec, it) }
+            ?.let { service.refreshVideoEncoderCapabilities(it.serial) }
     }
     LaunchedEffect(service) {
         service.refreshDevices(force = true)
@@ -392,6 +396,10 @@ private fun CaptureBeforeStartRow(
         )
     }
 }
+
+/** Whether selecting [device] with [codec] should probe its video encoders on its own (H.264 never does). */
+internal fun shouldAutoProbeVideoEncoders(codec: CaptureVideoCodec, device: CaptureDevice): Boolean =
+    device.available && codec != CaptureVideoCodec.H264
 
 /** Fixes the inverted custom-buffer toggle (was: ticking an unticked buffer removed it, a no-op,
  * and unticking a ticked one re-added it — `kernel`/`radio`/`events` could never be selected and

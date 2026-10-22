@@ -1,7 +1,13 @@
 package com.indagium.ui
 
 import androidx.compose.runtime.snapshots.Snapshot
+import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureEncoderAcceleration
 import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.CaptureVideoCodec
+import com.indagium.capture.CaptureVideoEncoder
+import com.indagium.capture.CaptureVideoEncoderCapabilities
+import com.indagium.capture.CaptureVideoEncoderProbeState
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.withMirrorMode
 import java.nio.file.Files
@@ -12,6 +18,31 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CaptureLauncherTest {
+    @Test
+    fun advancedCodecSupportTextNamesThePortableDecoderOnlyWhenTheCodecIsInEffect() {
+        fun ready(codec: CaptureVideoCodec, acceleration: CaptureEncoderAcceleration) = CaptureVideoEncoderProbeState.Ready(
+            CaptureVideoEncoderCapabilities(listOf(CaptureVideoEncoder(codec, "enc.${codec.scrcpyName}", acceleration))),
+        )
+        val h265 = captureVideoCodecSupportText(CaptureVideoCodec.H265, ready(CaptureVideoCodec.H265, CaptureEncoderAcceleration.HARDWARE), "PHONE")
+        val av1 = captureVideoCodecSupportText(CaptureVideoCodec.AV1, ready(CaptureVideoCodec.AV1, CaptureEncoderAcceleration.HARDWARE), "PHONE")
+        assertTrue("portable decoder" in h265 && "software-only" !in h265, h265)
+        assertTrue("portable decoder" in av1 && "AV1 decoding is software-only" in av1, av1)
+
+        val fallback = captureVideoCodecSupportText(CaptureVideoCodec.AV1, ready(CaptureVideoCodec.AV1, CaptureEncoderAcceleration.SOFTWARE), "PHONE")
+        assertFalse("portable decoder" in fallback, "an H.264 fallback keeps the native mirror: $fallback")
+        assertFalse("portable decoder" in captureVideoCodecSupportText(CaptureVideoCodec.H264, null, "PHONE"))
+    }
+
+    @Test
+    fun selectingADeviceProbesEncodersOnlyForAnAdvancedCodec() {
+        val online = CaptureDevice("PHONE", "device")
+        val offline = CaptureDevice("PHONE", "offline")
+        assertFalse(shouldAutoProbeVideoEncoders(CaptureVideoCodec.H264, online), "H.264 never touches the device")
+        assertTrue(shouldAutoProbeVideoEncoders(CaptureVideoCodec.H265, online))
+        assertTrue(shouldAutoProbeVideoEncoders(CaptureVideoCodec.AV1, online))
+        assertFalse(shouldAutoProbeVideoEncoders(CaptureVideoCodec.AV1, offline), "an unavailable device is not probed")
+    }
+
     @Test
     fun launcherMarkerIsSessionOnlyAndNotSerialized() {
         val launcher = mkTab("launcher", "New capture", emptyList()).copy(isCaptureLauncher = true)

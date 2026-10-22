@@ -31,7 +31,7 @@ class LoadingWatchdogTest {
         status = "Restoring session...",
         restoreLoadsQueued = 0,
         loads = listOf(
-            LoadingLoadInfo("t7", "capture.ind", "restore", "capture", "active", countsAsLoading = true),
+            LoadingLoadInfo("t7", "restore", "capture", "active", countsAsLoading = true),
         ),
     )
 
@@ -56,7 +56,7 @@ class LoadingWatchdogTest {
         assertEquals(1, warnings.size)
         val report = warnings.single()
         assertTrue("Restoring session..." in report)
-        assertTrue("t7" in report && "capture.ind" in report && "job=active" in report)
+        assertTrue("t7" in report && "source=capture" in report && "job=active" in report)
         assertTrue("pendingLoads=1" in report)
         assertTrue(LoadingWatchdog.THREAD_DUMP_MARKER in report)
         advanceTimeBy(120_000)
@@ -182,6 +182,12 @@ class LoadingWatchdogTest {
             assertTrue("load tab=" in text)
             assertTrue(LoadingWatchdog.THREAD_DUMP_MARKER in text)
             assertTrue("job=active" in text)
+            // Other components may log the opened file; only the watchdog's own lines must not name it.
+            val watchdogLines = text.lineSequence().filter {
+                "Global loading" in it || "load tab=" in it || LoadingWatchdog.THREAD_DUMP_MARKER in it
+            }.toList()
+            assertTrue(watchdogLines.isNotEmpty())
+            assertTrue(watchdogLines.none { "slow.log" in it }, "the watchdog report must not contain the opened file name")
         } finally {
             release.countDown()
             state.close()

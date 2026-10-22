@@ -67,8 +67,10 @@ class CaptureRecorderTest {
         }
     }
 
+    // The recording lease makes a recorder's session untouchable for another recorder's start-time recovery
+    // (this JVM's service helper, or a second app instance): it is live, not an orphan.
     @Test
-    fun aSecondRecorderCannotLeaveTwoSessionsRecording() {
+    fun aSecondRecordersStartDoesNotInterruptTheLiveSessionOfAnotherRecorder() {
         val root = Files.createTempDirectory("capture-single-live-test").toFile()
         val runner = FakeCaptureRunner()
         runner.enqueue(StreamingFakeProcess())
@@ -79,11 +81,34 @@ class CaptureRecorderTest {
             first.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
             second.start(DEVICE.copy(serial = "SECOND"), testSettings(), CaptureTools(ADB, null, runner))
             val statuses = second.listSessions().associateBy { it.device.serial }
-            assertEquals(CaptureStatus.INTERRUPTED, statuses.getValue(DEVICE.serial).status)
+            assertEquals(CaptureStatus.RECORDING, statuses.getValue(DEVICE.serial).status)
             assertEquals(CaptureStatus.RECORDING, statuses.getValue("SECOND").status)
         } finally {
             second.close()
             first.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aRecordingHoldsItsLeaseUntilItsStopFinished() {
+        val root = Files.createTempDirectory("capture-lease-lifecycle-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val started = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            assertTrue(File(started.directory, CaptureRecordingLease.LEASE_NAME).isFile)
+            assertTrue(CaptureRecordingLease.isHeldByThisProcess(started.directory))
+            assertEquals(CaptureRecordingLease.Attempt.Held, CaptureRecordingLease.tryTakeOver(started.directory))
+
+            val stopped = requireNotNull(recorder.stop())
+            assertFalse(CaptureRecordingLease.isHeldByThisProcess(stopped.directory))
+            val after = CaptureRecordingLease.tryTakeOver(stopped.directory)
+            assertTrue(after is CaptureRecordingLease.Attempt.Acquired, "the lease is free once the stop finished")
+            (after as CaptureRecordingLease.Attempt.Acquired).lease.close()
+        } finally {
+            recorder.close()
             root.deleteRecursively()
         }
     }

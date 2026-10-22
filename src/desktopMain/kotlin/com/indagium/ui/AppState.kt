@@ -5464,6 +5464,7 @@ class AppState(
                 tools,
                 loggingSnapshot.configuration,
                 startupNotices.joinToString(" ").ifBlank { null },
+                captureService.knownVideoEncoderCapabilities(plan.device.serial),
             ) { started ->
                 val tabId = plan.tabId
                 if (tabId != null) {
@@ -6480,7 +6481,7 @@ class AppState(
      * Lock-free on purpose: the watchdog exists to explain a loading state that does not clear, and
      * the likeliest cause is another thread holding [stateLock]. [tabs] is an immutable list and
      * [activeLoads] a ConcurrentHashMap, so a slightly stale read is the worst case. Reports only
-     * ids, tab titles and coarse kinds, never paths or log content.
+     * ids and coarse kinds, never file names, titles, paths or log content.
      */
     private fun loadingSnapshot(): LoadingSnapshot {
         val currentTabs = tabs
@@ -6488,7 +6489,6 @@ class AppState(
             val tab = currentTabs.firstOrNull { it.id == tabId }
             LoadingLoadInfo(
                 tabId = tabId,
-                title = tab?.filename,
                 kind = if (load.kind == "restore") "restore" else "open",
                 source = loadingSourceKind(tab),
                 jobState = when {
@@ -12031,14 +12031,14 @@ class AppState(
         )
         val leftovers = com.indagium.capture.CaptureExtractionCache.sweepRestoreLogLeftovers(
             File(archiveCacheDir, "capture-log-restore"), nowMs, graceMs,
-        )
+        ) + com.indagium.capture.sweepLegacyImportedIndexFiles(File(archiveCacheDir, "imported-snapshot-index"))
         if (result.deletedTotal > 0 || leftovers > 0) {
             AppLogger.info(
                 "capture",
                 "Swept capture extraction cache: removed ${result.deletedTotal} directories " +
                     "(legacy ${result.deletedLegacy}, temporary ${result.deletedTemporary}, " +
                     "expired ${result.deletedExpired}, over budget ${result.deletedForBudget}) " +
-                    "and $leftovers restore leftovers, freed ${result.bytesFreed} bytes, ${result.remainingBytes} bytes remain",
+                    "and $leftovers leftover restore or index files, freed ${result.bytesFreed} bytes, ${result.remainingBytes} bytes remain",
             )
         }
         result
@@ -16020,6 +16020,8 @@ class AppState(
             entryPath,
             restoreCache,
         ) ?: return RestoredTabLoadResult.MissingArchiveEntry(archiveFile, missingEntryPath)
+        // Read before the finally below deletes the extracted copy (a deleted file reports length 0).
+        val logBytes = verifiedLog.length()
         val parsed = try {
             runCatching { parser(verifiedLog) }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
         } finally {
@@ -16031,7 +16033,7 @@ class AppState(
         return RestoredTabLoadResult.Loaded(
             logData = parsed.entries,
             archiveCandidate = null,
-            largeFileMode = verifiedLog.length() >= LARGE_FILE_MODE_BYTES,
+            largeFileMode = logBytes >= restoredArchiveLargeFileModeBytes,
             logFormat = parsed.format,
         )
     }
