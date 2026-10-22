@@ -13,6 +13,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -155,6 +156,42 @@ class CaptureExtractionLeaseTest {
         assertTrue(requireNotNull(second.videoFile).isFile)
         assertEquals(directory, second.logFile.parentFile)
         assertTrue(CaptureExtractionCache.holdsLease(directory), "the replacement is leased again")
+    }
+
+    @Test
+    fun aDamagedDirectoryAnotherProcessStillReadsIsLeftIntactAndTheArchiveIsExtractedElsewhere() {
+        val archive = CaptureArchiveFixtures.exportWithVideo(root)
+        val first = CaptureArchiveReader.open(archive, cache)
+        val directory = first.logFile.parentFile
+        val video = requireNotNull(first.videoFile)
+        CaptureExtractionCache.releaseLeases()
+        val child = startLeaseHolder(directory)
+        try {
+            // Damage that makes this process re-extract, while the other process's tab still reads the rest.
+            assertTrue(video.delete())
+            val filesBefore = directory.walkTopDown().filter { it.isFile }.toSet()
+            val extractions = AtomicInteger()
+            CaptureExtractionCache.extractionObserver = { extractions.incrementAndGet() }
+
+            val reopened = CaptureArchiveReader.open(archive, cache)
+
+            assertEquals(1, extractions.get(), "the archive is extracted again")
+            assertNotEquals(directory, reopened.logFile.parentFile, "a shared lease is no right to delete: extract elsewhere")
+            assertTrue(requireNotNull(reopened.videoFile).isFile)
+            assertTrue(reopened.logFile.isFile)
+            assertEquals(
+                filesBefore,
+                directory.walkTopDown().filter { it.isFile }.toSet(),
+                "every file the other process's reader depends on is untouched",
+            )
+            assertTrue(File(directory, CaptureExtractionCache.MARKER_NAME).isFile)
+            assertTrue(
+                Regex("capture-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}").matches(reopened.logFile.parentFile.name),
+                "the separate directory is named so the sweep treats it as junk once nothing uses it",
+            )
+        } finally {
+            stop(child)
+        }
     }
 
     @Test

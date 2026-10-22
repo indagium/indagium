@@ -239,7 +239,18 @@ data class ImportedCapture(
      * a ZIP. Appended last; null only for a value built outside [CaptureArchiveReader].
      */
     val root: File? = null,
-)
+    /**
+     * Keeps a ZIP's extraction directory leased and in use for as long as a consumer reads its files; null for an
+     * in-place folder or a value built outside [CaptureArchiveReader]. Appended last. Whoever opened the capture owns
+     * it: a consumer that outlives the opener (a tab's imported snapshot) takes its own [CaptureExtractionUse.retain].
+     */
+    val extractionUse: CaptureExtractionUse? = null,
+) : AutoCloseable {
+    /** Releases [extractionUse]; safe to call more than once. */
+    override fun close() {
+        extractionUse?.close()
+    }
+}
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -1411,9 +1422,12 @@ object CaptureArchiveReader {
                 require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
                     "Capture screenshots exceed the combined size limit"
                 }
-                reuseOrClear(finalDirectory, key, descriptor, scan, source)?.let { return@use it }
+                val target = when (val opening = reuseOrClear(cacheDirectory, finalDirectory, key, descriptor, scan, source)) {
+                    is Opening.Reused -> return@use opening.capture
+                    is Opening.Extract -> opening.directory
+                }
                 requireExtractionSpace(cacheDirectory, scan.entrySizes.values.fold(0L, ::saturatingAdd))
-                CaptureExtractionCache.extractionObserver?.invoke(finalDirectory)
+                CaptureExtractionCache.extractionObserver?.invoke(target)
                 val temporary = CaptureExtractionCache.temporaryDirectoryFor(cacheDirectory, key)
                 require(temporary.mkdir()) { "Cannot create capture extraction directory: $temporary" }
                 CaptureExtractionCache.beginTemporary(temporary)
@@ -1421,20 +1435,20 @@ object CaptureArchiveReader {
                 try {
                     extractAssets(zip, temporary, descriptor)
                     CaptureExtractionCache.writeMarker(temporary, key, descriptor.assets())
-                    publishExtraction(temporary, finalDirectory, key, descriptor, scan)
+                    publishExtraction(temporary, target, key, descriptor, scan)
                     published = true
                 } finally {
                     CaptureExtractionCache.endTemporary(temporary)
                     if (!published) deleteTree(temporary)
                 }
                 // Our own fresh directory; a refusal here means another instance's sweep claimed it first.
-                if (!CaptureExtractionCache.markInUse(finalDirectory)) throw captureCacheBusy()
+                val use = CaptureExtractionCache.acquireUse(target) ?: throw captureCacheBusy()
                 var valid = false
                 try {
-                    validateImported(finalDirectory, descriptor, source).also { valid = true }
+                    validateImported(target, descriptor, source).copy(extractionUse = use).also { valid = true }
                 } finally {
                     // A directory that does not validate must not be offered to the next open.
-                    if (!valid) CaptureExtractionCache.deleteDirectory(finalDirectory)
+                    if (!valid) CaptureExtractionCache.deleteDirectory(target)
                 }
             }
         }
@@ -1450,29 +1464,45 @@ object CaptureArchiveReader {
         data object Busy : Reuse
     }
 
+    /** What [reuseOrClear] settled: an open that reused a directory, or the empty directory to extract into. */
+    private sealed interface Opening {
+        class Reused(val capture: ImportedCapture) : Opening
+
+        class Extract(val directory: File) : Opening
+    }
+
     private fun captureCacheBusy() = CaptureArchiveException(
         "The capture archive cache is being cleaned by another Indagium window; try opening it again",
     )
 
     /**
-     * The reused extraction, or null once [finalDirectory] has been cleared for a fresh extraction. While
+     * The reused extraction, or the directory to extract into once [finalDirectory] has been cleared. While
      * another process's sweep holds its lease, polls (bounded by [CaptureExtractionCache.leaseWaitMs]) until
-     * that sweep is done: the directory is then reusable or gone. Never deletes or writes a busy directory.
+     * that sweep is done: the directory is then reusable or gone. Never deletes or writes a busy directory, and
+     * never deletes one another process still reads: replacing needs exclusive ownership, and when only a shared
+     * lease is on offer the archive is extracted into a separate directory (named like the legacy per-open ones,
+     * so the sweep removes it as junk once nothing uses it) and the damaged one is left to its readers.
      */
     private fun reuseOrClear(
+        cacheDirectory: File,
         finalDirectory: File,
         key: String,
         descriptor: CaptureArchiveDescriptor,
         scan: ZipEntryScan,
         source: File,
-    ): ImportedCapture? {
+    ): Opening {
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CaptureExtractionCache.leaseWaitMs)
         var attempt = 0
         while (true) {
             when (val outcome = reuseExtraction(finalDirectory, key, descriptor, scan, source)) {
-                is Reuse.Reused -> return outcome.capture
+                is Reuse.Reused -> return Opening.Reused(outcome.capture)
                 Reuse.Busy -> Unit
-                Reuse.Miss -> if (CaptureExtractionCache.clearForReplacement(finalDirectory)) return null
+                Reuse.Miss -> when (CaptureExtractionCache.clearForReplacement(finalDirectory)) {
+                    CaptureExtractionCache.Replacement.CLEARED -> return Opening.Extract(finalDirectory)
+                    CaptureExtractionCache.Replacement.HELD_BY_OTHERS ->
+                        return Opening.Extract(CaptureExtractionCache.separateDirectoryFor(cacheDirectory))
+                    CaptureExtractionCache.Replacement.BUSY -> Unit
+                }
             }
             if (!CaptureExtractionCache.pauseBeforeRetry(attempt++, deadline)) throw captureCacheBusy()
         }
@@ -1489,11 +1519,13 @@ object CaptureArchiveReader {
         if (!CaptureExtractionCache.isReusable(finalDirectory, key, descriptor.assets(), scan.entrySizes.keys)) return Reuse.Miss
         // Lease and touch before validating: another instance's sweep may be deleting an idle directory right now,
         // and once we hold the lease it cannot. A refused lease means that sweep got there first.
-        if (!CaptureExtractionCache.markInUse(finalDirectory)) return Reuse.Busy
+        val use = CaptureExtractionCache.acquireUse(finalDirectory) ?: return Reuse.Busy
         CaptureExtractionCache.touch(finalDirectory)
         return try {
-            Reuse.Reused(validateImported(finalDirectory, descriptor, source))
+            Reuse.Reused(validateImported(finalDirectory, descriptor, source).copy(extractionUse = use))
         } catch (_: Exception) {
+            // Not usable: give the claim back so replacing the directory can take it exclusively.
+            use.close()
             Reuse.Miss
         }
     }
@@ -2100,15 +2132,12 @@ private class LegacySparseConversionState(
         } else {
             (nextRow - 1).takeIf { it > 0 }?.let(tracker::segmentIdForRow)
         }
-        val resolved = if (row != null && parsed != null && !synthetic) {
-            tracker.resolvedCaptureElapsedMs(text, record.elapsedMs)
-        } else {
-            null
-        }
+        val timing = tracker.rowTiming(text, record.elapsedMs, resolvable = row != null && parsed != null && !synthetic)
+        val resolved = timing.resolvedElapsedMs
         if (resolved != null && segmentId != null && captureTimingsDiffer(resolved, record.elapsedMs)) {
             driftedSegments += segmentId
         }
-        writer.append(record.byteOffset, raw, row, record.elapsedMs, segmentId, resolved)
+        writer.append(record.byteOffset, raw, row, record.elapsedMs, segmentId, resolved, envelopeSettled = timing.settled)
         if (row != null) nextRow++
     }
 
@@ -2478,14 +2507,10 @@ private fun sparseCandidateBlocks(
     // original time envelope. The shared cursor-prefix state stops at the first future row.
     sourceCursorByteOffset != null -> blockIndex.blocks.filter { it.byteEnd > sourceCursorByteOffset }
     selectedStartMs == Long.MIN_VALUE -> blockIndex.blocks
-    else -> {
-        val result = LinkedHashMap<Long, CaptureBlock>()
-        blockIndex.candidateBlocksForElapsed(selectedStartMs, selectedEndMs).forEach { result[it.byteStart] = it }
-        metadata.segments.filter { it.manualAnchor != null }.forEach { segment ->
-            blockIndex.candidateBlocksForRows(segment.firstRow, segment.lastRowExclusive).forEach { result[it.byteStart] = it }
-        }
-        result.values.sortedBy(CaptureBlock::byteStart)
-    }
+    // A block's recorded envelope only brackets its rows when they were resolved through their segment's final anchor
+    // (a row logged before the anchor existed, or re-timed by a manual correction, can resolve outside it), so blocks
+    // whose envelope cannot be trusted are always scanned and the per-row filter decides.
+    else -> blockIndex.candidateBlocksForResolvedElapsed(metadata, selectedStartMs, selectedEndMs)
 }
 
 private fun stageSparseSelection(request: SparseStageRequest): SparseExportStage {

@@ -260,9 +260,10 @@ internal object LegacySparseAdapterCache {
 }
 
 /**
- * Whether [block] can stand for all of its rows in a preview: it holds rows, they all belong to one reliable segment
- * with no manual correction (so every row resolves through the same anchor), and its whole recorded time envelope
- * lies inside the requested window, so every row is selected.
+ * Whether [block] can stand for all of its rows in a preview: it holds rows, they were all resolved through their
+ * segment's final anchor when written ([CaptureBlock.envelopeSettled]), they all belong to one reliable segment with no
+ * manual correction (so every row resolves through that anchor), and its whole recorded time envelope lies inside the
+ * requested window, so every row is selected.
  */
 internal fun sparseBlockUsesEnvelope(
     metadata: CaptureSyncMetadata,
@@ -272,6 +273,8 @@ internal fun sparseBlockUsesEnvelope(
     excludeStart: Boolean,
 ): Boolean {
     if (block.lastRowExclusive <= block.firstRow) return false
+    // An unsettled envelope holds arrival times of rows the final anchor places elsewhere: it proves nothing about them.
+    if (block.envelopeSettled != true) return false
     val segment = metadata.segmentContaining(block.firstRow) ?: return false
     if (segment.reliability != CaptureSyncReliability.RELIABLE || segment.manualAnchor != null) return false
     if (!segment.contains(block.lastRowExclusive - 1)) return false

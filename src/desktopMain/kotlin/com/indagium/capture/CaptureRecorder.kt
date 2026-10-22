@@ -1376,18 +1376,15 @@ class CaptureRecorder internal constructor(
                         val segmentId = ordinal?.let {
                             tracker.observe(it, emitted.text, elapsed, eligibleForAnchor && !synthetic)
                         } ?: rowOrdinal.takeIf { it > 0 }?.let(tracker::segmentIdForRow)
-                        val resolvedElapsed = if (ordinal != null && !synthetic) {
-                            tracker.resolvedCaptureElapsedMs(emitted.text, elapsed)
-                        } else {
-                            null
-                        }
+                        val timing = tracker.rowTiming(emitted.text, elapsed, resolvable = ordinal != null && !synthetic)
                         requireNotNull(blockWriter).append(
                             byteOffset = offset,
                             rawLine = emitted.raw,
                             rowOrdinal = ordinal,
                             elapsedMs = elapsed,
                             segmentId = segmentId,
-                            resolvedCaptureElapsedMs = resolvedElapsed,
+                            resolvedCaptureElapsedMs = timing.resolvedElapsedMs,
+                            envelopeSettled = timing.settled,
                         )
                     } else {
                         val record = CaptureLogIndexRecord(offset, emitted.raw.size, elapsed, ordinal)
@@ -3347,7 +3344,7 @@ internal fun shouldRetryMirrorWithoutAudio(
 internal object LiveCaptureSessions {
     private val directories = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
-    private fun key(directory: File): String = directory.absoluteFile.normalize().path
+    private fun key(directory: File): String = canonicalRegistryKey(directory)
 
     fun add(directory: File) {
         directories.add(key(directory))

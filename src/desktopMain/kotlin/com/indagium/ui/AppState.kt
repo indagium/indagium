@@ -3857,31 +3857,46 @@ class AppState(
     ): CaptureExportResult {
         val imported = importedCaptureSnapshots[tabId]
         return if (imported != null && imported.session.id == session.id) {
-            synchronized(CaptureSnapshotCheckpointLocks.forSession(session)) {
-                // Another tab or AI operation can export this same immutable source. Reload its
-                // sidecar cursor inside the shared source lock before resolving Since last save.
-                val refreshed = refreshImportedCaptureSnapshotCursors(imported)
-                val result = com.indagium.capture.CaptureArchiveExporter().export(
-                    refreshed.session,
-                    request,
-                    notes = notes,
-                    onStatus = onStatus,
-                )
-                val updated = persistImportedCaptureSnapshotCursors(
-                    refreshed,
-                    result.logCoveredEndMs,
-                    result.videoCoveredEndMs,
-                    result.logCoveredEndByteOffset,
-                    result.logCoveredEndRowOrdinal,
-                )
-                importedCaptureSnapshots.compute(tabId) { _, current ->
-                    if (current?.identity == imported.identity) updated else current
-                }
-                result
+            // Closing the tab mid-export drops the snapshot's claim; this one keeps the extraction protected until done.
+            val exportHold = imported.extractionUse?.retain()
+            try {
+                exportImportedSnapshot(tabId, imported, session, request, notes, onStatus)
+            } finally {
+                exportHold?.close()
             }
         } else {
             captureService.exportRetainedSnapshot(session, request, notes, onStatus)
         }
+    }
+
+    private fun exportImportedSnapshot(
+        tabId: String,
+        imported: ImportedCaptureSnapshot,
+        session: CaptureSession,
+        request: CaptureExportRequest,
+        notes: Annotations?,
+        onStatus: ((String) -> Unit)?,
+    ): CaptureExportResult = synchronized(CaptureSnapshotCheckpointLocks.forSession(session)) {
+        // Another tab or AI operation can export this same immutable source. Reload its
+        // sidecar cursor inside the shared source lock before resolving Since last save.
+        val refreshed = refreshImportedCaptureSnapshotCursors(imported)
+        val result = com.indagium.capture.CaptureArchiveExporter().export(
+            refreshed.session,
+            request,
+            notes = notes,
+            onStatus = onStatus,
+        )
+        val updated = persistImportedCaptureSnapshotCursors(
+            refreshed,
+            result.logCoveredEndMs,
+            result.videoCoveredEndMs,
+            result.logCoveredEndByteOffset,
+            result.logCoveredEndRowOrdinal,
+        )
+        importedCaptureSnapshots.compute(tabId) { _, current ->
+            if (current?.identity == imported.identity) updated else current
+        }
+        result
     }
 
     private suspend fun exportLiveCaptureSnapshotForAi(
@@ -6279,6 +6294,7 @@ class AppState(
         tailCoordinator.clear()
         // Lets other instances sweep the capture extractions this one was reading, and frees the lease files
         // for deletion (Windows) when the app data is reset.
+        importedCaptureSnapshots.values.toList().also { importedCaptureSnapshots.clear() }.forEach { it.close() }
         com.indagium.capture.CaptureExtractionCache.releaseLeases()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
         // every decoder/audio line explicitly rather than relying on daemon-thread teardown.
@@ -11120,6 +11136,8 @@ class AppState(
         var trimHeapAfterClose = false
         var rowsToRelease: List<AppendOnlyLogList> = emptyList()
         var exitCompare = false
+        // Closing a snapshot ends its extraction claim (file IO), so it happens after stateLock is released.
+        val closedSnapshots = mutableListOf<ImportedCaptureSnapshot>()
         synchronized(stateLock) {
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
@@ -11149,7 +11167,6 @@ class AppState(
                 // log for the lifetime of the app.
                 captureIndexBuildsByTab.remove(tabId)
                 captureFollowFloorIndexByTab.remove(tabId)
-                importedCaptureSnapshots.remove(tabId)
                 captureScreenshotCapabilities.remove(tabId)
                 capturePreviewGenerationByTab.remove(tabId)
                 capturePreviewJobsByTab.remove(tabId)?.cancel()
@@ -11161,6 +11178,7 @@ class AppState(
                 invalidateComputeCache(tabId)
                 logViewerScrollStateStore.removeTab(tabId)
             }
+            closedSnapshots += detachImportedSnapshots(tabIds)
             pendingRestoredLoads.removeAll { it.tab.id in tabIds }
             val next = tabs.filter { it.id !in tabIds }
             if (activeTabId in tabIds) activeTabId = preferredActiveId?.takeIf { id -> next.any { it.id == id } } ?: next.lastOrNull()?.id ?: ""
@@ -11173,6 +11191,7 @@ class AppState(
         }
         // Outside stateLock: updateCompareMode takes it again through upTab and autosaves.
         if (exitCompare) updateCompareMode(false)
+        closeSnapshotsOffThread(closedSnapshots)
         stragglerMirrors.forEach { mirror -> mirror.requestClose() }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
@@ -11787,8 +11806,13 @@ class AppState(
         beginLoading("Opening capture session...")
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
+            // This coroutine owns the opener's claim on the archive's extraction and, until a tab stores it, the
+            // snapshot's own one; both are closed in the finally below (the tab's snapshot then keeps its claim).
+            var openedImported: com.indagium.capture.ImportedCapture? = null
+            var unstoredSnapshot: ImportedCaptureSnapshot? = null
             try {
                 val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
+                openedImported = imported
                 val logData = parseLogcat(imported.logFile)
                 ensureActive()
                 val retained = retainedCaptureSessionForArchive(imported, file)
@@ -11799,6 +11823,7 @@ class AppState(
                     indexDirectory = File(archiveCacheDir, "imported-snapshot-index"),
                     checkpointDirectory = File(notesDir, "capture-snapshot-cursors"),
                 ) else null
+                unstoredSnapshot = snapshotSource
                 val sourcePath = if (file.name == "capture.indagium.json") {
                     imported.logFile.absolutePath
                 } else {
@@ -11861,6 +11886,7 @@ class AppState(
                     ensureActive()
                     publishOpenedTab(captureTab, originLauncherId)
                     if (snapshotSource != null) importedCaptureSnapshots[tabId] = snapshotSource
+                    unstoredSnapshot = null
                     if (video != null) videoPanelVisible = true
                 }
                 prefetchCaptureIndex(tabId)
@@ -11877,6 +11903,8 @@ class AppState(
                     "${error.message}. You can open the log and video separately without automatic synchronization.")
                 if (file.name != "capture.indagium.json") openZipFile(file, ignoreCaptureDescriptor = true)
             } finally {
+                unstoredSnapshot?.close()
+                openedImported?.close()
                 val load = activeLoads.remove(tabId)
                 if (!published) finishActiveLoad(load)
             }
@@ -11903,7 +11931,8 @@ class AppState(
             val imported = runCatching {
                 com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
             }.getOrNull() ?: return@launch
-            val notes = imported.notes ?: return@launch
+            // Only the notes are read; the extraction claim is not needed past this point.
+            val notes = imported.notes.also { imported.close() } ?: return@launch
             val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(
                 notes,
                 imported.descriptor.markers,
@@ -11939,19 +11968,25 @@ class AppState(
     private fun restoreCaptureLink(tabId: String, alreadyOpened: com.indagium.capture.ImportedCapture? = null) {
         val initial = tab(tabId) ?: return
         val path = captureArchivePathForTab(initial) ?: return
+        // A capture opened here is closed here; the caller keeps ownership of [alreadyOpened].
+        var openedHere: com.indagium.capture.ImportedCapture? = null
         try {
             val imported = alreadyOpened ?: com.indagium.capture.CaptureArchiveReader.open(File(path), File(archiveCacheDir, "captures"))
+                .also { openedHere = it }
             val loaded = tab(tabId) ?: return
             // The restored source could have been replaced separately from its descriptor.
             require(parseLogcat(imported.logFile) == loaded.logData) { "Restored logs no longer match the capture" }
             val retained = retainedCaptureSessionForArchive(imported, File(path))
             if (retained == null) {
-                importedCaptureSnapshots[tabId] = importedCaptureSnapshot(
-                    imported = imported,
-                    source = File(path),
-                    parsedLog = loaded.logData,
-                    indexDirectory = File(archiveCacheDir, "imported-snapshot-index"),
-                    checkpointDirectory = File(notesDir, "capture-snapshot-cursors"),
+                storeImportedSnapshot(
+                    tabId,
+                    importedCaptureSnapshot(
+                        imported = imported,
+                        source = File(path),
+                        parsedLog = loaded.logData,
+                        indexDirectory = File(archiveCacheDir, "imported-snapshot-index"),
+                        checkpointDirectory = File(notesDir, "capture-snapshot-cursors"),
+                    ),
                 )
             }
             upTab(tabId) { current ->
@@ -12006,7 +12041,27 @@ class AppState(
                 attachedVideo = current.attachedVideo?.copy(doubleClickSeekEnabled = false)) }
             showOpenError("Capture synchronization unavailable", path,
                 "${error.message}. The log remains open; automatic video linking is disabled.")
+        } finally {
+            openedHere?.close()
         }
+    }
+
+    /** Ends the snapshots' extraction claims on an IO thread: closing is file IO, and callers may be on the UI thread. */
+    private fun closeSnapshotsOffThread(snapshots: List<ImportedCaptureSnapshot>) {
+        if (snapshots.isNotEmpty()) ioScope.launch { snapshots.forEach { it.close() } }
+    }
+
+    /** Removes the imported snapshots of [tabIds] from the map; the caller closes them (their claims) outside stateLock. */
+    private fun detachImportedSnapshots(tabIds: Set<String>): List<ImportedCaptureSnapshot> =
+        tabIds.mapNotNull { importedCaptureSnapshots.remove(it) }
+
+    /**
+     * Stores [snapshot] as [tabId]'s imported capture snapshot and closes the extraction claim of whatever it replaces.
+     * A tab that was closed while the snapshot was being built gets none: nobody would ever release its claim.
+     */
+    private fun storeImportedSnapshot(tabId: String, snapshot: ImportedCaptureSnapshot) {
+        importedCaptureSnapshots.put(tabId, snapshot)?.close()
+        if (tab(tabId) == null && importedCaptureSnapshots.remove(tabId, snapshot)) snapshot.close()
     }
 
     /**
@@ -12078,6 +12133,8 @@ class AppState(
         val imported = runCatching {
             com.indagium.capture.CaptureArchiveReader.open(archive, File(archiveCacheDir, "captures"))
         }.getOrNull()
+        // A probe: only the descriptor is compared, so the extraction claim goes right back.
+        imported?.close()
         return archive.absolutePath.takeIf { imported?.descriptor?.log?.path == entryPath }
     }
 
@@ -12093,6 +12150,7 @@ class AppState(
             val imported = runCatching {
                 com.indagium.capture.CaptureArchiveReader.open(descriptor, File(archiveCacheDir, "captures"))
             }.getOrNull()
+            imported?.close()
             if (imported != null && runCatching {
                     imported.logFile.canonicalFile == sourceFile.canonicalFile
                 }.getOrDefault(false)
@@ -15844,8 +15902,11 @@ class AppState(
         beginLoading("Restoring session...")
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
+            // The restored capture's opener claim is released once the tab has taken its own (restoreCaptureLink).
+            var restoredCapture: com.indagium.capture.ImportedCapture? = null
             try {
                 val result = loadRestoredTab(source)
+                restoredCapture = (result as? RestoredTabLoadResult.Loaded)?.captureArchive
                 if (result is RestoredTabLoadResult.MissingArchiveEntry) {
                     ensureActive()
                     // Keep the load visible as in flight until the unavailable shell has been
@@ -15907,6 +15968,7 @@ class AppState(
                     }
                 }
             } finally {
+                restoredCapture?.close()
                 val load = activeLoads.remove(tabId)
                 if (!published) finishActiveLoad(load)
             }
@@ -15995,6 +16057,7 @@ class AppState(
                 )
             }.getOrNull()
             if (imported == null || imported.descriptor.log.path != source.entryPath) {
+                imported?.close()
                 return loadVerifiedRestoreLog(source.archiveFile, source.entryPath, source.entryPath)
             }
             return loadedImportedCapture(imported)
@@ -16038,13 +16101,18 @@ class AppState(
         )
     }
 
-    private fun loadedImportedCapture(imported: com.indagium.capture.ImportedCapture): RestoredTabLoadResult.Loaded =
+    /** The result owns [imported]'s extraction claim (its consumer closes it); a failed parse gives it back here. */
+    private fun loadedImportedCapture(imported: com.indagium.capture.ImportedCapture): RestoredTabLoadResult.Loaded = try {
         RestoredTabLoadResult.Loaded(
             logData = parseLogcat(imported.logFile),
             archiveCandidate = null,
             largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
             captureArchive = imported,
         )
+    } catch (failure: Throwable) {
+        imported.close()
+        throw failure
+    }
 
     private fun serializeAutosave(): String = buildString {
         appendLine(AUTOSAVE_MAGIC_CURRENT)

@@ -152,6 +152,37 @@ class CaptureRecorderTest {
     }
 
     @Test
+    fun blocksRecordedBeforeTheClockAnchorExistsAreUnsettledAndLaterBlocksAreSettled() {
+        val root = Files.createTempDirectory("capture-recorder-settled-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess()
+        runner.enqueue(logcat)
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            // 300 quick rows: the 256-sample startup limit establishes the anchor part-way through the first block.
+            logcat.emit((0 until 300).joinToString("") { "01-02 03:04:05.%03d  100  101 I Tag: early $it\n".format(it) })
+            awaitCapture { recorder.snapshot.value.indexedRows == 300 }
+            Thread.sleep(1_100) // the next row opens a new block (a block spans at most one second of arrival time)
+            logcat.emit("01-02 03:04:06.200  100  101 I Tag: late\n")
+            awaitCapture { recorder.snapshot.value.indexedRows == 301 }
+
+            val boundary = recorder.snapshotForExport(session.id)
+            val blocks = CaptureBlockIndex.read(
+                session.blockIndexFile,
+                session.logFile,
+                maxIndexBytes = boundary.blockIndexBytes,
+                maxLogBytes = boundary.logLength,
+            )
+
+            assertEquals(listOf(false, true), blocks.blocks.map { it.envelopeSettled })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun healthyLogcatEofRetriesWithTimestampCursorWithoutRecordingDeviceDowntime() {
         val root = Files.createTempDirectory("capture-logcat-reconnect-test").toFile()
         val runner = FakeCaptureRunner()
