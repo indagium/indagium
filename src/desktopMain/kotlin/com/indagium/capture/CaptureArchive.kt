@@ -814,8 +814,9 @@ class CaptureArchiveExporter(
             } catch (_: IOException) {
                 return CompactVideoChoice(stagedVideo.name, stagedVideo, CompactVideoOutcome.KEPT_ORIGINAL_ENCODER_UNAVAILABLE)
             }
-            runCatching { onStatus?.invoke("Encoding AV1 video…") }
-            compactVideoTranscoder.transcode(stagedVideo, compactStaging)
+            runCatching { onStatus?.invoke(COMPACT_ENCODING_STATUS) }
+            val reporter = CompactEncodingStatusReporter(onStatus)
+            compactVideoTranscoder.transcode(stagedVideo, compactStaging, reporter::onProgress)
         }
         require(compactStaging.isFile && compactStaging.length() > 0L) { "Compact AV1 encoder produced no video" }
         if (!passthrough && compactStaging.length() >= stagedVideo.length()) {
@@ -3968,5 +3969,32 @@ private val WINDOWS_RESERVED_NAMES = buildSet {
     for (index in 1..9) {
         add("COM$index")
         add("LPT$index")
+    }
+}
+
+internal const val COMPACT_ENCODING_STATUS = "Encoding AV1 video…"
+private const val COMPACT_STATUS_MIN_INTERVAL_NANOS = 250_000_000L
+private const val COMPACT_STATUS_PERCENT_SCALE = 100
+
+/** Turns the transcoder's progress fractions into "Encoding AV1 video… 42%" status updates: only when the
+ *  whole percent changes, and at most four times per second (the final 100% always goes through). A throwing
+ *  status listener never fails the export. */
+internal class CompactEncodingStatusReporter(
+    private val onStatus: ((String) -> Unit)?,
+    private val nanoTime: () -> Long = System::nanoTime,
+) {
+    private var lastPercent = -1
+    private var lastEmitNanos = 0L
+
+    fun onProgress(fraction: Double) {
+        if (onStatus == null || !fraction.isFinite()) return
+        val percent = (fraction * COMPACT_STATUS_PERCENT_SCALE).toInt().coerceIn(0, COMPACT_STATUS_PERCENT_SCALE)
+        if (percent == lastPercent) return
+        val now = nanoTime()
+        val complete = percent == COMPACT_STATUS_PERCENT_SCALE
+        if (lastPercent >= 0 && !complete && now - lastEmitNanos < COMPACT_STATUS_MIN_INTERVAL_NANOS) return
+        lastPercent = percent
+        lastEmitNanos = now
+        runCatching { onStatus?.invoke("$COMPACT_ENCODING_STATUS $percent%") }
     }
 }

@@ -294,6 +294,67 @@ class CaptureArchiveTest {
     }
 
     @Test
+    fun compactExportReportsEncodingProgressInTheStatus() {
+        val root = createTempDirectory("capture-archive-ind-progress").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 0,
+        )
+        writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val statuses = mutableListOf<String>()
+        val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
+            staged.writeBytes(ByteArray(4096) { (it % 97).toByte() })
+            CaptureVideoClip(start.coerceAtMost(end - 1), end, end - start)
+        }
+        val progressing = object : CaptureCompactVideoTranscoder {
+            override fun ensureAvailable() = Unit
+
+            override fun transcode(source: File, destination: File) = error("the progress overload must be used")
+
+            override fun transcode(source: File, destination: File, onProgress: (Double) -> Unit) {
+                onProgress(0.0)
+                onProgress(0.42)
+                onProgress(1.0)
+                destination.writeBytes(ByteArray(256) { 1 })
+            }
+        }
+
+        CaptureArchiveExporter(fakeVideo, compactVideoTranscoder = progressing).export(
+            session,
+            CaptureExportRequest(File(root, "progress.ind.zip"), cutoffElapsedMs = session.elapsedMs, format = CaptureExportFormat.COMPACT),
+            onStatus = { statuses += it },
+        )
+
+        val encoding = statuses.filter { it.startsWith("Encoding AV1 video…") }
+        assertEquals("Encoding AV1 video…", encoding.first(), "The plain status still announces the start")
+        assertTrue(encoding.contains("Encoding AV1 video… 0%"))
+        assertTrue(encoding.last() == "Encoding AV1 video… 100%", "The final progress update must reach 100%: $encoding")
+    }
+
+    @Test
+    fun compactStatusReporterEmitsOnPercentChangeAtMostFourTimesPerSecond() {
+        var now = 0L
+        val statuses = mutableListOf<String>()
+        val reporter = com.indagium.capture.CompactEncodingStatusReporter({ statuses += it }, nanoTime = { now })
+        reporter.onProgress(0.0)
+        now += 10_000_000L
+        reporter.onProgress(0.004) // same whole percent: skipped
+        reporter.onProgress(0.01) // new percent but only 10 ms later: throttled
+        now += 300_000_000L
+        reporter.onProgress(0.02)
+        reporter.onProgress(0.02) // duplicate
+        now += 1_000_000L
+        reporter.onProgress(1.0) // completion bypasses the throttle
+        reporter.onProgress(Double.NaN)
+        assertEquals(
+            listOf("Encoding AV1 video… 0%", "Encoding AV1 video… 2%", "Encoding AV1 video… 100%"),
+            statuses,
+        )
+    }
+
+    @Test
     fun compactExportCopiesAlreadyAv1WithoutEncoder() {
         val root = createTempDirectory("capture-archive-ind-av1-passthrough").toFile()
         val session = session(root, recordVideo = true).copy(

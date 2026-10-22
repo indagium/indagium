@@ -437,6 +437,10 @@ interface CaptureCompactVideoTranscoder {
 
     /** Writes a new AV1 Matroska file while preserving the original audio packets; source is untouched. */
     fun transcode(source: File, destination: File)
+
+    /** Same as [transcode], reporting the fraction of the source duration encoded so far through [onProgress]
+     *  (monotonic, 0.0..1.0, ending at 1.0 on success). Implementations without progress ignore it. */
+    fun transcode(source: File, destination: File, onProgress: (Double) -> Unit) = transcode(source, destination)
 }
 
 data class CaptureExportResult(

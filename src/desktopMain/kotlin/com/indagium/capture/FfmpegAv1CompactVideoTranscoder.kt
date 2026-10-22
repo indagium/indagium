@@ -81,15 +81,22 @@ import kotlin.math.roundToLong
 private const val COMPACT_AV1_ENCODER = "libsvtav1"
 private const val COMPACT_AV1_CRF = "28"
 
-// SVT-AV1 disables its screen-content tools at preset 9 and above and warns that M10+ is meant for
-// automation tooling ("visual artifacts may occur"). Preset 8 keeps them. On a 180 s emulator clip,
-// preset 10 with 2 s keyframes produced 52.8% of the source size; preset 8 with 10 s keyframes
-// produced 15.0% with a higher SSIM, at roughly twice the encode time (about 35x realtime).
-internal const val COMPACT_AV1_PRESET = 8
+// The bundled bytedeco SVT-AV1 3.1.2 is a C-only build (its log says "asm level selected : up to c", no
+// NEON), about five times slower than a Homebrew build, so the preset is the one lever that matters.
+// Preset 10 is SVT's ceiling for the non-real-time mode (11-13 are mapped to 10 with a warning). It
+// disables the screen-content tools and warns that M10+ is meant for automation tooling, but on
+// synthetic emulator-style captures (720x1600 and 1080x2400, mostly static UI with scroll bursts,
+// 10 s keyframes, CRF 28) it encoded 3.3x (720x1600) to 2.7x (1080x2400) faster than preset 8
+// (about 8x and 3.5x realtime) for 10-14% more bytes and a mean SSIM of 0.997-0.998 (0.998-0.999 at
+// preset 8). A 2 s keyframe interval, not the preset, is what inflated an earlier 52.8% result.
+internal const val COMPACT_AV1_PRESET = 10
 private const val COMPACT_AV1_MIN_PRESET = 0
-private const val COMPACT_AV1_MAX_PRESET = 13
+private const val COMPACT_AV1_MAX_PRESET = 10
 private const val COMPACT_AV1_MIN_THREADS = 2
 private const val COMPACT_AV1_MIN_LOGICAL_PROCESSORS = 1
+
+// SVT's "lp" is a level of parallelism (0-6, higher values warn and clamp to 6), not a thread count.
+// Level 6 already keeps about nine of ten cores busy, so raising the cap cannot help.
 private const val COMPACT_AV1_MAX_THREADS = 6
 private const val COMPACT_AV1_DECODE_THREADS = 2
 private const val COPY_BUFFER_BYTES = 64 * 1024
@@ -173,9 +180,11 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
         }
     }
 
+    override fun transcode(source: File, destination: File) = transcode(source, destination) { _ -> }
+
     // This boundary translates JavaCV/JNI failures into the export UI's actionable IOException.
     @Suppress("TooGenericExceptionCaught")
-    override fun transcode(source: File, destination: File) {
+    override fun transcode(source: File, destination: File, onProgress: (Double) -> Unit) {
         ensureAvailable()
         require(source.isFile && source.length() > 0L) { "Compact export has no readable staged video" }
         require(source.canonicalFile != destination.canonicalFile) { "Compact video destination must differ from its source" }
@@ -184,7 +193,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
         val encodedVideo = Files.createTempFile(parent.toPath(), ".ind-av1-video-", ".mkv").toFile()
         val muxedVideo = Files.createTempFile(parent.toPath(), ".ind-av1-mux-", ".mkv").toFile()
         try {
-            val needsPacketCopyMux = encodeVideo(source, encodedVideo)
+            val needsPacketCopyMux = encodeVideo(source, encodedVideo, onProgress)
             val completedVideo = if (needsPacketCopyMux) {
                 muxOriginalAudio(source, encodedVideo, muxedVideo)
                 muxedVideo
@@ -213,7 +222,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
     // Keep native allocation, use and conditional teardown together so every partial-init failure
     // releases its resources. The explicit ownership checks account for most of this complexity.
     @Suppress("LongMethod", "CyclomaticComplexMethod", "ThrowsCount")
-    private fun encodeVideo(source: File, destination: File): Boolean {
+    private fun encodeVideo(source: File, destination: File, onProgress: (Double) -> Unit): Boolean {
         val grabber = FFmpegFrameGrabber(source).apply {
             setVideoOption("threads", COMPACT_AV1_DECODE_THREADS.toString())
             imageMode = FrameGrabber.ImageMode.RAW
@@ -320,6 +329,8 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
             var frameCount = 0L
             var framesSinceKeyframe = 0
             var pendingFrame: Frame? = firstFrame
+            val progress = CompactProgress(compactSourceDurationMs(grabber, sourceVideoStream), onProgress)
+            progress.update(0L)
 
             while (true) {
                 checkCompactInterrupted()
@@ -335,6 +346,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
                     throw IOException("Compact AV1 source video timestamps are out of order")
                 }
                 priorPtsMs = ptsMs
+                progress.update(ptsMs)
                 val shouldForceKeyframe = compactKeyframeDue(
                     ptsMs, lastKeyframePtsMs, framesSinceKeyframe, keyframeIntervalMs, maxFramesPerKeyframe,
                 )
@@ -377,6 +389,7 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
             checkCompactInterrupted()
             compactFfmpegCheck(av_write_trailer(outputContext), "finalize Compact video")
             headerWritten = false
+            progress.finish()
             return needsPacketCopyMux
         } finally {
             if (headerWritten && output != null && !output.isNull) runCatching { av_write_trailer(output) }
@@ -746,6 +759,41 @@ internal fun compactKeyframeDue(
 internal fun compactGopSize(fps: Pair<Int, Int>, intervalMs: Long, maxFrames: Int): Int {
     val framesPerInterval = fps.first.toDouble() / fps.second * intervalMs / COMPACT_AV1_TIME_BASE_MS
     return minOf(framesPerInterval.roundToInt(), maxFrames).coerceAtLeast(1)
+}
+
+/** Throttled, monotonic progress for the encode loop: [update] maps a source timestamp to a fraction of
+ *  [durationMs] (never 1.0 before [finish]); [finish] reports exactly 1.0. Without a known duration only
+ *  [finish] reports. [sink] sees at most one call per [COMPACT_PROGRESS_STEP] of progress. */
+internal class CompactProgress(private val durationMs: Long, private val sink: (Double) -> Unit) {
+    private var last = -1.0
+
+    fun update(ptsMs: Long) {
+        if (durationMs <= 0L) return
+        val fraction = (ptsMs.toDouble() / durationMs).coerceIn(0.0, COMPACT_PROGRESS_BEFORE_FINISH_MAX)
+        if (last < 0.0 || fraction - last >= COMPACT_PROGRESS_STEP) emit(fraction)
+    }
+
+    fun finish() {
+        if (last < 1.0) emit(1.0)
+    }
+
+    private fun emit(fraction: Double) {
+        last = fraction
+        sink(fraction)
+    }
+}
+
+private const val COMPACT_PROGRESS_STEP = 0.005
+private const val COMPACT_PROGRESS_BEFORE_FINISH_MAX = 0.999
+
+/** Container duration in milliseconds, else the video stream's own duration, else 0 (unknown). */
+private fun compactSourceDurationMs(grabber: FFmpegFrameGrabber, videoStream: AVStream): Long {
+    val containerUs = grabber.lengthInTime
+    if (containerUs > 0L) return containerUs / MICROS_PER_MILLISECOND.toLong()
+    val streamDuration = videoStream.duration()
+    val timeBase = videoStream.time_base()
+    if (streamDuration <= 0L || streamDuration == AV_NOPTS_VALUE || timeBase.num() <= 0 || timeBase.den() <= 0) return 0L
+    return av_rescale_q(streamDuration, timeBase, AVRational().num(1).den(COMPACT_AV1_TIME_BASE_MS))
 }
 
 internal fun compactEncoderProcessorCount(availableProcessors: Int): Int {

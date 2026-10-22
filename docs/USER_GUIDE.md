@@ -1358,8 +1358,8 @@ preset below.
 Compact makes the archive smaller in two ways. The log is compressed with zstd, which is typically
 about three times smaller than the ordinary ZIP compression on logcat text. The video is converted to
 AV1 only when that makes it smaller. Video compression is lossy and conversion takes longer, but
-dimensions and frame timing are preserved and audio is copied. Video is optional; you can also save a
-Compact archive without it.
+dimensions and frame timing are preserved and audio is copied. The status line shows the encoding
+percentage while it runs. Video is optional; you can also save a Compact archive without it.
 
 If AV1 would not make the video smaller, or the AV1 encoder is unavailable in this build, Indagium
 keeps the original video and the completed export says so. Video that is already AV1 is copied
