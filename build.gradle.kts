@@ -528,6 +528,12 @@ compose.desktop {
             fileAssociation("text/plain", "trace", "Trace log file")
             fileAssociation("text/plain", "out", "Output log file")
             fileAssociation("application/vnd.dlt", "dlt", "Diagnostic Log and Trace file")
+            // Indagium Compact capture archive (a v5 capture ZIP, content-detected on open): lets a
+            // double-click on a `.ind` file launch Indagium. Declared once on every OS (a single
+            // WiX Extension for the MSI). Documents default to the app icon; do not pass the app's
+            // own icons/indagium.icns as an association icon — Compose copies it into the bundle by
+            // file name and createDistributable then fails ("destination file already exists").
+            fileAssociation("application/x-indagium-capture", "ind", "Indagium capture")
             // shared-mime-info (the freedesktop.org MIME database Linux distros ship) types
             // *.log as text/x-log, not text/plain — without this, .log (the app's primary
             // format) never matches on Linux even after the Exec %F / MimeType .deb fixes.

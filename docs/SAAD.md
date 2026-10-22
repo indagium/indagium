@@ -3054,6 +3054,14 @@ heap-pressure watchdog, §19.1). `jdeps` cannot see either usage, and without th
 fails at first use (`NoClassDefFoundError`) even though `desktopRun` works on the full local JDK.
 Windows additionally adds `jdk.crypto.mscapi`.
 
+**File associations.** `nativeDistributions` declares `fileAssociation(...)` for the log extensions and
+for `application/x-indagium-capture` / `.ind` (Compact capture archives; one declaration on every OS so
+the MSI gets a single WiX Extension). On Linux the `.deb`, AppImage and Flatpak all ship the
+hand-written `packaging/linux/indagium-mimeinfo.xml`, which declares that type in full (a `*.ind` glob,
+`sub-class-of application/zip`, deliberately no `<magic>` so ordinary zips are not claimed); the desktop
+entry's `MimeType=` and the metainfo `<provides>` list name it too. Opening is content-based:
+`openPaths` routes through `CaptureArchiveReader.isCaptureArchive`, not the extension.
+
 ### 20.3 Dependency locking
 
 Locking is applied to the four desktop configurations only. Two module patterns are excluded:

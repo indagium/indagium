@@ -9,6 +9,7 @@
   <provides>
     <mediatype>text/plain</mediatype>
     <mediatype>text/x-log</mediatype>
+    <mediatype>application/x-indagium-capture</mediatype>
   </provides>
   <description>
     <p>Indagium is a desktop application for viewing, searching, and analyzing Android logcat files.</p>
