@@ -1688,11 +1688,15 @@ internal fun CaptureSnapshotPopover(
     }
     val baseEnabled = rangeValid && !state.captureExportBusy && filename != null
     val enabled = baseEnabled && sinceSaveHasContent
+    // What is already at the target, named for what it is: a folder, or a file (only a file may be overwritten).
+    val extractConflict = extractKind?.let { kind ->
+        captureExtractConflict(kind, exists = filename != null && destination.exists(), isDirectory = destination.isDirectory)
+    }
     val extractEnabled = extractKind != null && captureExtractEnabled(
         kind = extractKind,
         targetNameValid = filename != null,
         videoAvailable = captureExtractVideoAvailable(extractSource),
-        destinationExists = destination.exists(),
+        conflict = extractConflict ?: CaptureExtractConflict.NONE,
         overwriteConfirmed = overwriteConfirmed,
         busy = state.captureExportBusy,
     )
@@ -2059,14 +2063,18 @@ internal fun CaptureSnapshotPopover(
                 if (!extracting && preview == null && previewError != null) {
                     AppText("Preview unavailable: $previewError", color = DANGER_RED, fontSize = 10.sp, maxLines = 2)
                 }
-                if (extractKind == CaptureExtractKind.ALL_FILES) {
-                    // A folder is never replaced or merged: the name has to change.
-                    if (destination.exists()) {
-                        AppText("A folder with this name already exists. Choose another name.", color = DANGER_RED, fontSize = 10.sp)
+                if (extracting) {
+                    // A folder is never replaced or merged, and nothing replaces a folder: only a file offers overwrite.
+                    val conflict = extractConflict ?: CaptureExtractConflict.NONE
+                    if (!(conflict == CaptureExtractConflict.NEEDS_OVERWRITE && overwriteConfirmed)) {
+                        captureExtractConflictMessage(conflict)?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp) }
+                    }
+                    if (conflict == CaptureExtractConflict.NEEDS_OVERWRITE && !overwriteConfirmed) {
+                        AppButton("Confirm overwrite", { overwriteConfirmed = true; onReturnFocus() }, ButtonVariant.Secondary)
                     }
                 } else if (filename != null && destination.exists() && !overwriteConfirmed) {
                     AppText(
-                        "${if (extracting) "A file" else "An archive"} with this name already exists. Confirm overwrite to continue.",
+                        "An archive with this name already exists. Confirm overwrite to continue.",
                         color = DANGER_RED,
                         fontSize = 10.sp,
                     )

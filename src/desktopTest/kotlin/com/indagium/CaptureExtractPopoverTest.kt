@@ -23,8 +23,11 @@ import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.ui.AppState
 import com.indagium.ui.CaptureExportNotice
+import com.indagium.ui.CaptureExtractConflict
 import com.indagium.ui.CaptureSnapshotPopover
 import com.indagium.ui.FileView
+import com.indagium.ui.captureExtractConflict
+import com.indagium.ui.captureExtractConflictMessage
 import com.indagium.ui.captureExtractDefaultName
 import com.indagium.ui.captureExtractEnabled
 import com.indagium.ui.captureExtractShowsAv1Note
@@ -201,6 +204,35 @@ class CaptureExtractPopoverTest {
     }
 
     @Test
+    fun theConflictLineNamesWhatIsInTheWayAndOnlyOffersOverwriteForAFile() {
+        val root = createTempDirectory("extract-popover-conflict").toFile()
+        val (state, tabId) = openArchive(root)
+        try {
+            val stem = captureExtractDefaultName(assertNotNull(state.captureExtractSourceFor(tabId)).archive)
+            val snapshots = state.effectiveCaptureSnapshotsDir().apply { mkdirs() }
+            File(snapshots, stem).writeText("a file, not a folder")
+            File(snapshots, "$stem.log").mkdirs()
+            composeRule.setContent { state.tab(tabId)?.let { FileView(state, it) } }
+            openPopover()
+
+            // All files onto an existing FILE: the line says what is there, and a folder never replaces it.
+            composeRule.onNodeWithText("All files · folder").performClick()
+            composeRule.onNodeWithText("A file with this name already exists. Choose another name.").assertIsDisplayed()
+            composeRule.onAllNodesWithText("Confirm overwrite").assertCountEquals(0)
+            composeRule.onNodeWithText("Extract").assertIsNotEnabled()
+
+            // Log only onto an existing FOLDER: overwriting cannot help, so no confirmation is offered.
+            composeRule.onNodeWithText("Log only · .log (plain text)").performClick()
+            composeRule.onNodeWithText("A folder with this name already exists. Choose another name.").assertIsDisplayed()
+            composeRule.onAllNodesWithText("Confirm overwrite").assertCountEquals(0)
+            composeRule.onNodeWithText("Extract").assertIsNotEnabled()
+        } finally {
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun theStripNoticeNamesAnExtractionAsExtractedNotSaved() {
         val result = CaptureExportResult(
             file = File("/tmp/opened-archive"),
@@ -234,18 +266,31 @@ class CaptureExtractPopoverTest {
         assertFalse(captureExtractShowsAv1Note(CaptureExtractKind.LOG_ONLY, hasVideo = true, compactSource = true, probedAv1 = true))
         assertFalse(captureExtractShowsAv1Note(CaptureExtractKind.ALL_FILES, hasVideo = false, compactSource = true, probedAv1 = true))
 
-        fun enabled(kind: CaptureExtractKind, exists: Boolean, confirmed: Boolean = false, video: Boolean = true) =
+        fun enabled(kind: CaptureExtractKind, conflict: CaptureExtractConflict, confirmed: Boolean = false, video: Boolean = true) =
             captureExtractEnabled(
-                kind, targetNameValid = true, videoAvailable = video, destinationExists = exists,
+                kind, targetNameValid = true, videoAvailable = video, conflict = conflict,
                 overwriteConfirmed = confirmed, busy = false,
             )
-        assertTrue(enabled(CaptureExtractKind.ALL_FILES, exists = false))
-        assertFalse(enabled(CaptureExtractKind.ALL_FILES, exists = true, confirmed = true), "a folder is never replaced")
-        assertFalse(enabled(CaptureExtractKind.LOG_ONLY, exists = true))
-        assertTrue(enabled(CaptureExtractKind.LOG_ONLY, exists = true, confirmed = true))
-        assertFalse(enabled(CaptureExtractKind.VIDEO_ONLY, exists = false, video = false))
-        assertFalse(captureExtractEnabled(CaptureExtractKind.LOG_ONLY, false, true, false, false, false))
-        assertFalse(captureExtractEnabled(CaptureExtractKind.LOG_ONLY, true, true, false, false, busy = true))
+        assertTrue(enabled(CaptureExtractKind.ALL_FILES, CaptureExtractConflict.NONE))
+        assertFalse(enabled(CaptureExtractKind.ALL_FILES, CaptureExtractConflict.BLOCKED_BY_FOLDER, confirmed = true), "a folder is never replaced")
+        assertFalse(enabled(CaptureExtractKind.ALL_FILES, CaptureExtractConflict.BLOCKED_BY_FILE, confirmed = true), "nor is a file, by a folder")
+        assertFalse(enabled(CaptureExtractKind.LOG_ONLY, CaptureExtractConflict.NEEDS_OVERWRITE))
+        assertTrue(enabled(CaptureExtractKind.LOG_ONLY, CaptureExtractConflict.NEEDS_OVERWRITE, confirmed = true))
+        assertFalse(enabled(CaptureExtractKind.LOG_ONLY, CaptureExtractConflict.BLOCKED_BY_FOLDER, confirmed = true), "no file replaces a folder")
+        assertFalse(enabled(CaptureExtractKind.VIDEO_ONLY, CaptureExtractConflict.NONE, video = false))
+        assertFalse(captureExtractEnabled(CaptureExtractKind.LOG_ONLY, false, true, CaptureExtractConflict.NONE, false, false))
+        assertFalse(captureExtractEnabled(CaptureExtractKind.LOG_ONLY, true, true, CaptureExtractConflict.NONE, false, busy = true))
+
+        assertEquals(CaptureExtractConflict.NONE, captureExtractConflict(CaptureExtractKind.LOG_ONLY, exists = false, isDirectory = false))
+        assertEquals(CaptureExtractConflict.BLOCKED_BY_FOLDER, captureExtractConflict(CaptureExtractKind.LOG_ONLY, exists = true, isDirectory = true))
+        assertEquals(CaptureExtractConflict.BLOCKED_BY_FOLDER, captureExtractConflict(CaptureExtractKind.ALL_FILES, exists = true, isDirectory = true))
+        assertEquals(CaptureExtractConflict.BLOCKED_BY_FILE, captureExtractConflict(CaptureExtractKind.ALL_FILES, exists = true, isDirectory = false))
+        assertEquals(CaptureExtractConflict.NEEDS_OVERWRITE, captureExtractConflict(CaptureExtractKind.VIDEO_ONLY, exists = true, isDirectory = false))
+        assertNull(captureExtractConflictMessage(CaptureExtractConflict.NONE))
+        assertEquals(
+            "A file with this name already exists. Choose another name.",
+            captureExtractConflictMessage(CaptureExtractConflict.BLOCKED_BY_FILE),
+        )
     }
 
     private fun openPopover() {

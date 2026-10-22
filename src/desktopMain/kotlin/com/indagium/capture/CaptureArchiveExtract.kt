@@ -2,12 +2,15 @@ package com.indagium.capture
 
 import com.indagium.generated.BuildInfo
 import com.indagium.utils.moveReplacingAtomically
+import com.indagium.utils.moveWithoutReplacing
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.LinkOption
+import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
@@ -84,13 +87,15 @@ internal object CaptureArchiveExtractor {
     /**
      * Writes [kind] to [destination]: a new folder for ALL_FILES (an existing one is refused, never merged or replaced),
      * a single file for the other two (an existing one is replaced atomically only when [overwrite]). [onProgress] gets
-     * (bytes copied, bytes total) whenever the whole percent changes.
+     * (bytes copied, bytes total) whenever the whole percent changes. [publish] is the non-replacing `Files.move` seam
+     * for tests; its Windows sharing violations are retried ([moveWithoutReplacing]).
      */
     fun extract(
         source: CaptureExtractSource,
         kind: CaptureExtractKind,
         destination: File,
         overwrite: Boolean = false,
+        publish: (Path, Path) -> Unit = { from, to -> Files.move(from, to) },
         onProgress: (Long, Long) -> Unit = { _, _ -> },
     ): CaptureExtractResult {
         val plan = plan(source, kind)
@@ -102,9 +107,9 @@ internal object CaptureArchiveExtractor {
         }
         val progress = Progress(plan.totalBytes, onProgress)
         return if (kind == CaptureExtractKind.ALL_FILES) {
-            extractFolder(source, plan, destination, parent, progress)
+            extractFolder(source, plan, destination, parent, progress, publish)
         } else {
-            extractFile(plan.items.single(), destination, parent, overwrite, progress)
+            extractFile(plan.items.single(), destination, parent, overwrite, progress, publish)
             CaptureExtractResult(destination, 1, plan.totalBytes)
         }
     }
@@ -115,10 +120,9 @@ internal object CaptureArchiveExtractor {
         destination: File,
         parent: File,
         progress: Progress,
+        publish: (Path, Path) -> Unit,
     ): CaptureExtractResult {
-        require(!Files.exists(destination.toPath(), LinkOption.NOFOLLOW_LINKS)) {
-            "A folder with this name already exists: ${destination.name}"
-        }
+        require(!Files.exists(destination.toPath(), LinkOption.NOFOLLOW_LINKS)) { existingTargetMessage(destination) }
         val staging = File(parent, ".${destination.name}.extracting-${UUID.randomUUID()}")
         var published = false
         try {
@@ -135,9 +139,9 @@ internal object CaptureArchiveExtractor {
             checkNotInterrupted()
             try {
                 // A plain move (no REPLACE_EXISTING) refuses a destination that appeared meanwhile.
-                Files.move(staging.toPath(), destination.toPath())
+                moveWithoutReplacing(staging.toPath(), destination.toPath(), move = publish)
             } catch (_: FileAlreadyExistsException) {
-                throw IllegalArgumentException("A folder with this name already exists: ${destination.name}")
+                throw IllegalArgumentException(existingTargetMessage(destination))
             }
             published = true
         } finally {
@@ -146,7 +150,14 @@ internal object CaptureArchiveExtractor {
         return CaptureExtractResult(destination, plan.fileCount, plan.totalBytes)
     }
 
-    private fun extractFile(item: CaptureExtractItem, destination: File, parent: File, overwrite: Boolean, progress: Progress) {
+    private fun extractFile(
+        item: CaptureExtractItem,
+        destination: File,
+        parent: File,
+        overwrite: Boolean,
+        progress: Progress,
+        publish: (Path, Path) -> Unit,
+    ) {
         require(!destination.isDirectory) { "A folder with this name already exists: ${destination.name}" }
         require(overwrite || !destination.exists()) { "A file with this name already exists: ${destination.name}" }
         val staging = File(parent, ".${destination.name}.extracting-${UUID.randomUUID()}")
@@ -158,9 +169,9 @@ internal object CaptureArchiveExtractor {
                 moveReplacingAtomically(staging.toPath(), destination.toPath())
             } else {
                 try {
-                    Files.move(staging.toPath(), destination.toPath())
+                    moveWithoutReplacing(staging.toPath(), destination.toPath(), move = publish)
                 } catch (_: FileAlreadyExistsException) {
-                    throw IllegalArgumentException("A file with this name already exists: ${destination.name}")
+                    throw IllegalArgumentException(existingTargetMessage(destination))
                 }
             }
             published = true
@@ -173,10 +184,27 @@ internal object CaptureArchiveExtractor {
     private fun descriptorText(source: CaptureExtractSource): String {
         val descriptor = source.descriptor
         if (descriptor.formatVersion >= FIRST_FLAT_DESCRIPTOR_VERSION) return descriptor.toJson()
-        val original = CaptureArchiveReader.readDescriptorText(source.archive)
+        // The cache holds no descriptor, so this reads the opened file again: the recipient may have moved or deleted it since.
+        val original = try {
+            CaptureArchiveReader.readDescriptorText(source.archive)
+        } catch (failure: IOException) {
+            throw IllegalArgumentException(
+                "Extracting all files from this older archive needs the opened file, which can no longer be read: " +
+                    "${source.archive.absolutePath}. Put it back, or open it again. Log only and Video only still work.",
+                failure,
+            )
+        }
         require(parseDescriptor(original) == descriptor) { "The archive changed since it was opened; open it again to extract" }
         return original
     }
+
+    /** Names what is already at [destination], so a file is never reported as a folder (or the other way round). */
+    private fun existingTargetMessage(destination: File): String =
+        if (Files.isDirectory(destination.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+            "A folder with this name already exists: ${destination.name}"
+        } else {
+            "A file with this name already exists: ${destination.name}"
+        }
 
     /** Copies [item] to [target] while hashing it; a mismatch with the descriptor (a cache file changed since open) fails. */
     private fun copyVerified(item: CaptureExtractItem, target: File, progress: Progress) {

@@ -83,17 +83,41 @@ internal fun captureExtractShowsAv1Note(
 internal fun captureExtractIsCompactArchive(archive: File): Boolean =
     archive.name.endsWith(".ind", ignoreCase = true) || archive.name.endsWith(".ind.zip", ignoreCase = true)
 
-/** Whether the primary Extract button can be pressed. A folder is never replaced or merged, so an existing one blocks it. */
+/** What is already at an extraction's target. Only a file in the way of a single-file extraction can be overwritten. */
+internal enum class CaptureExtractConflict { NONE, NEEDS_OVERWRITE, BLOCKED_BY_FOLDER, BLOCKED_BY_FILE }
+
+/**
+ * Classifies the target: a folder there blocks every kind (a folder is never replaced or merged, and no file replaces one),
+ * a file there blocks All files and asks for overwrite confirmation for Log only / Video only.
+ */
+internal fun captureExtractConflict(kind: CaptureExtractKind, exists: Boolean, isDirectory: Boolean): CaptureExtractConflict =
+    when {
+        !exists -> CaptureExtractConflict.NONE
+        isDirectory -> CaptureExtractConflict.BLOCKED_BY_FOLDER
+        kind == CaptureExtractKind.ALL_FILES -> CaptureExtractConflict.BLOCKED_BY_FILE
+        else -> CaptureExtractConflict.NEEDS_OVERWRITE
+    }
+
+/** The popover's line for [conflict], naming what is in the way; null when nothing is. */
+internal fun captureExtractConflictMessage(conflict: CaptureExtractConflict): String? = when (conflict) {
+    CaptureExtractConflict.NONE -> null
+    CaptureExtractConflict.NEEDS_OVERWRITE -> "A file with this name already exists. Confirm overwrite to continue."
+    CaptureExtractConflict.BLOCKED_BY_FOLDER -> "A folder with this name already exists. Choose another name."
+    CaptureExtractConflict.BLOCKED_BY_FILE -> "A file with this name already exists. Choose another name."
+}
+
+/** Whether the primary Extract button can be pressed: only a file in the way can be overwritten, once confirmed. */
 internal fun captureExtractEnabled(
     kind: CaptureExtractKind,
     targetNameValid: Boolean,
     videoAvailable: Boolean,
-    destinationExists: Boolean,
+    conflict: CaptureExtractConflict,
     overwriteConfirmed: Boolean,
     busy: Boolean,
 ): Boolean = !busy && targetNameValid &&
     (kind != CaptureExtractKind.VIDEO_ONLY || videoAvailable) &&
-    when (kind) {
-        CaptureExtractKind.ALL_FILES -> !destinationExists
-        else -> !destinationExists || overwriteConfirmed
+    when (conflict) {
+        CaptureExtractConflict.NONE -> true
+        CaptureExtractConflict.NEEDS_OVERWRITE -> overwriteConfirmed
+        CaptureExtractConflict.BLOCKED_BY_FOLDER, CaptureExtractConflict.BLOCKED_BY_FILE -> false
     }

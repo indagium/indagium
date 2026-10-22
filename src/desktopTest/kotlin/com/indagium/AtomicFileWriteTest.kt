@@ -1,11 +1,13 @@
 package com.indagium
 
 import com.indagium.utils.moveReplacingAtomically
+import com.indagium.utils.moveWithoutReplacing
 import com.indagium.utils.writeFileAtomically
 import java.io.File
 import java.io.IOException
 import java.nio.file.AccessDeniedException
 import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.FileSystemException
 import java.nio.file.Files
 import java.nio.file.NoSuchFileException
@@ -183,5 +185,63 @@ class AtomicFileWriteTest {
         }, sleep = {})
         assertEquals(listOf(true, false, false), modes)
         assertEquals("new", dest.readText())
+    }
+
+    @Test
+    fun moveWithoutReplacingRetriesATransientSharingViolationThenMovesAFolder() {
+        val dir = createTempDirectory("openlog-move-noreplace-retry").toFile()
+        val source = File(dir, "staging").apply { mkdirs() }
+        File(source, "inner.txt").writeText("new")
+        val dest = File(dir, "published")
+        var attempts = 0
+        val sleeps = mutableListOf<Long>()
+
+        moveWithoutReplacing(
+            source.toPath(),
+            dest.toPath(),
+            sleep = { sleeps += it },
+            move = { from, to ->
+                if (++attempts < 3) {
+                    throw if (attempts == 1) AccessDeniedException(to.toString()) else FileSystemException(to.toString())
+                }
+                Files.move(from, to)
+            },
+        )
+
+        assertEquals(3, attempts)
+        assertEquals(2, sleeps.size)
+        assertEquals("new", File(dest, "inner.txt").readText())
+        assertTrue(!source.exists())
+    }
+
+    @Test
+    fun moveWithoutReplacingNeverReplacesAnExistingTargetAndDoesNotRetryIt() {
+        val dir = createTempDirectory("openlog-move-noreplace-exists").toFile()
+        val source = File(dir, "source.txt").apply { writeText("new") }
+        val dest = File(dir, "dest.txt").apply { writeText("old") }
+
+        assertFailsWith<FileAlreadyExistsException> {
+            moveWithoutReplacing(source.toPath(), dest.toPath(), sleep = { error("must not sleep") })
+        }
+
+        assertEquals("old", dest.readText())
+        assertEquals("new", source.readText())
+    }
+
+    @Test
+    fun moveWithoutReplacingGivesUpAfterABoundedNumberOfRetries() {
+        val dir = createTempDirectory("openlog-move-noreplace-giveup").toFile()
+        val source = File(dir, "source.txt").apply { writeText("new") }
+        var attempts = 0
+
+        assertFailsWith<AccessDeniedException> {
+            moveWithoutReplacing(source.toPath(), File(dir, "dest.txt").toPath(), sleep = {}, move = { _, to ->
+                attempts++
+                throw AccessDeniedException(to.toString())
+            })
+        }
+
+        assertEquals(5, attempts)
+        assertEquals("new", source.readText())
     }
 }

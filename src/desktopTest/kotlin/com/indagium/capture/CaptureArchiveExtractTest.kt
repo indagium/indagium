@@ -44,37 +44,9 @@ class CaptureArchiveExtractTest {
     @Test
     fun allFilesFromLegacyV1AndV2ZipsKeepTheirNestedLayoutAndReopen() = withRoot { root ->
         listOf(1, 2).forEach { version ->
-            val log = "01-01 10:00:00.000  1  1 I Tag: legacy row\n".toByteArray()
-            val mapping = "{\"ordinal\":1,\"elapsedMs\":1000,\"videoMs\":null}\n".toByteArray()
-            val notes = "n1|Plain legacy note".toByteArray()
-            val extras = if (version == 2) {
-                ",\"notes\":{\"path\":\"notes/capture.ann\",\"sizeBytes\":${notes.size},\"sha256\":\"${sha256(notes)}\"}," +
-                    "\"markers\":[{\"noteBlockId\":\"n1\",\"firstOrdinal\":1,\"lastOrdinal\":1}]"
-            } else {
-                ""
-            }
-            val descriptor = """
-                {"format":"indagium-capture","formatVersion":$version,"sessionId":"legacy-v$version",
-                 "device":{"serial":"serial","state":"device","model":"Pixel","emulator":false},
-                 "settings":{"formatVersion":1},
-                 "sessionStartedEpochMs":1700000000000,"exportedEpochMs":1700000001000,"range":"ALL",
-                 "coverage":{"logStartMs":1000,"logEndMs":1000,"videoRequestedStartMs":null,"videoActualStartMs":null,"videoEndMs":null},
-                 "mappingMetadata":{"quality":"estimated","uncertaintyMs":null,"manualOffsetMs":0},
-                 "interruptions":[],
-                 "log":{"path":"logs/logcat.log","sizeBytes":${log.size},"sha256":"${sha256(log)}"},
-                 "mapping":{"path":"mapping/log-video.jsonl","sizeBytes":${mapping.size},"sha256":"${sha256(mapping)}"},
-                 "video":null,"screenshots":[]$extras}
-            """.trimIndent()
-            val zip = File(root, "legacy-v$version.zip")
-            ZipOutputStream(zip.outputStream()).use { out ->
-                out.putNextEntry(ZipEntry(CAPTURE_DESCRIPTOR_NAME)); out.write(descriptor.toByteArray()); out.closeEntry()
-                out.putNextEntry(ZipEntry("logs/logcat.log")); out.write(log); out.closeEntry()
-                out.putNextEntry(ZipEntry("mapping/log-video.jsonl")); out.write(mapping); out.closeEntry()
-                if (version == 2) {
-                    out.putNextEntry(ZipEntry("notes/capture.ann")); out.write(notes); out.closeEntry()
-                }
-            }
-            val (imported, source) = open(zip, File(root, "cache-v$version"))
+            val legacy = legacyZip(root, version)
+            val (log, mapping, descriptor) = Triple(legacy.log, legacy.mapping, legacy.descriptor)
+            val (imported, source) = open(legacy.zip, File(root, "cache-v$version"))
             val folder = File(root, "extracted-v$version")
 
             CaptureArchiveExtractor.extract(source, CaptureExtractKind.ALL_FILES, folder)
@@ -89,6 +61,71 @@ class CaptureArchiveExtractTest {
             reopened.close()
             imported.close()
         }
+    }
+
+    @Test
+    fun allFilesFromALegacyArchiveWhoseFileIsGoneSaysToOpenItAgain() = withRoot { root ->
+        val legacy = legacyZip(root, 1)
+        val (imported, source) = open(legacy.zip, File(root, "cache"))
+        // The recipient moved or deleted the download after opening it: a v1/v2 folder needs its descriptor as shipped.
+        assertTrue(legacy.zip.delete())
+        val folder = File(root, "out/all")
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveExtractor.extract(source, CaptureExtractKind.ALL_FILES, folder)
+        }
+
+        assertTrue(failure.message.orEmpty().contains("open it again"), failure.message)
+        assertTrue(failure.message.orEmpty().contains(legacy.zip.name), failure.message)
+        assertFalse(folder.exists())
+        assertNoStaging(root)
+        // Only the folder needs the original: the log alone still comes straight from the opened files.
+        val log = File(root, "out/legacy.log")
+        CaptureArchiveExtractor.extract(source, CaptureExtractKind.LOG_ONLY, log)
+        assertContentEquals(legacy.log, log.readBytes())
+        imported.close()
+    }
+
+    @Test
+    fun aTransientSharingViolationWhilePublishingIsRetried() = withRoot { root ->
+        val fixture = fixture(root)
+        val archive = fixture.export(File(root, "capture.zip"), CaptureExportFormat.ZIP)
+        val (imported, source) = open(archive, File(root, "cache"))
+        // Windows: a scanner holding a just-written file makes the first rename fail with a sharing violation.
+        val attempts = mutableListOf<String>()
+        val flaky: (java.nio.file.Path, java.nio.file.Path) -> Unit = { from, to ->
+            attempts += to.fileName.toString()
+            if (attempts.count { it == to.fileName.toString() } == 1) throw java.nio.file.AccessDeniedException(to.toString())
+            java.nio.file.Files.move(from, to)
+        }
+
+        val folder = File(root, "out/all")
+        CaptureArchiveExtractor.extract(source, CaptureExtractKind.ALL_FILES, folder, publish = flaky)
+        assertContentEquals(fixture.logBytes, File(folder, "logcat.log").readBytes())
+        val log = File(root, "out/only.log")
+        CaptureArchiveExtractor.extract(source, CaptureExtractKind.LOG_ONLY, log, publish = flaky)
+        assertContentEquals(fixture.logBytes, log.readBytes())
+
+        assertEquals(listOf("all", "all", "only.log", "only.log"), attempts)
+        assertNoStaging(root)
+        imported.close()
+    }
+
+    @Test
+    fun allFilesOntoAnExistingFileNamesItAFileAndLeavesItAlone() = withRoot { root ->
+        val fixture = fixture(root)
+        val archive = fixture.export(File(root, "capture.zip"), CaptureExportFormat.ZIP)
+        val (imported, source) = open(archive, File(root, "cache"))
+        val existing = File(root, "taken").apply { writeText("keep me") }
+
+        val failure = assertFailsWith<IllegalArgumentException> {
+            CaptureArchiveExtractor.extract(source, CaptureExtractKind.ALL_FILES, existing)
+        }
+
+        assertEquals("A file with this name already exists: taken", failure.message)
+        assertEquals("keep me", existing.readText())
+        assertNoStaging(root)
+        imported.close()
     }
 
     @Test
@@ -279,6 +316,43 @@ class CaptureArchiveExtractTest {
         assertEquals(folder.canonicalFile, reopened.root?.canonicalFile)
         reopened.close()
         imported.close()
+    }
+
+    private class LegacyZip(val zip: File, val descriptor: String, val log: ByteArray, val mapping: ByteArray)
+
+    /** A hand-built v1 or v2 archive (nested descriptor shape, `logs/logcat.log`), as builds before v3 wrote them. */
+    private fun legacyZip(root: File, version: Int): LegacyZip {
+        val log = "01-01 10:00:00.000  1  1 I Tag: legacy row\n".toByteArray()
+        val mapping = "{\"ordinal\":1,\"elapsedMs\":1000,\"videoMs\":null}\n".toByteArray()
+        val notes = "n1|Plain legacy note".toByteArray()
+        val extras = if (version == 2) {
+            ",\"notes\":{\"path\":\"notes/capture.ann\",\"sizeBytes\":${notes.size},\"sha256\":\"${sha256(notes)}\"}," +
+                "\"markers\":[{\"noteBlockId\":\"n1\",\"firstOrdinal\":1,\"lastOrdinal\":1}]"
+        } else {
+            ""
+        }
+        val descriptor = """
+            {"format":"indagium-capture","formatVersion":$version,"sessionId":"legacy-v$version",
+             "device":{"serial":"serial","state":"device","model":"Pixel","emulator":false},
+             "settings":{"formatVersion":1},
+             "sessionStartedEpochMs":1700000000000,"exportedEpochMs":1700000001000,"range":"ALL",
+             "coverage":{"logStartMs":1000,"logEndMs":1000,"videoRequestedStartMs":null,"videoActualStartMs":null,"videoEndMs":null},
+             "mappingMetadata":{"quality":"estimated","uncertaintyMs":null,"manualOffsetMs":0},
+             "interruptions":[],
+             "log":{"path":"logs/logcat.log","sizeBytes":${log.size},"sha256":"${sha256(log)}"},
+             "mapping":{"path":"mapping/log-video.jsonl","sizeBytes":${mapping.size},"sha256":"${sha256(mapping)}"},
+             "video":null,"screenshots":[]$extras}
+        """.trimIndent()
+        val zip = File(root, "legacy-v$version.zip")
+        ZipOutputStream(zip.outputStream()).use { out ->
+            out.putNextEntry(ZipEntry(CAPTURE_DESCRIPTOR_NAME)); out.write(descriptor.toByteArray()); out.closeEntry()
+            out.putNextEntry(ZipEntry("logs/logcat.log")); out.write(log); out.closeEntry()
+            out.putNextEntry(ZipEntry("mapping/log-video.jsonl")); out.write(mapping); out.closeEntry()
+            if (version == 2) {
+                out.putNextEntry(ZipEntry("notes/capture.ann")); out.write(notes); out.closeEntry()
+            }
+        }
+        return LegacyZip(zip, descriptor, log, mapping)
     }
 
     private fun assertNoStaging(directory: File) {
