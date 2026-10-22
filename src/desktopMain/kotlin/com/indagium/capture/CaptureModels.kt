@@ -442,6 +442,10 @@ interface CaptureCompactVideoTranscoder {
     /** Same as [transcode], reporting the fraction of the source duration encoded so far through [onProgress]
      *  (monotonic, 0.0..1.0, ending at 1.0 on success). Implementations without progress ignore it. */
     fun transcode(source: File, destination: File, onProgress: (Double) -> Unit) = transcode(source, destination)
+
+    /** The encoder to use while the exported capture is still recording on this machine: it must leave CPU for
+     *  the live capture (log reader, MKV muxer, mirror). Implementations that cannot tell keep the default. */
+    fun forLiveCapture(): CaptureCompactVideoTranscoder = this
 }
 
 data class CaptureExportResult(

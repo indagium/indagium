@@ -138,6 +138,13 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
         }
     }
 
+    override fun forLiveCapture(): CaptureCompactVideoTranscoder = FfmpegAv1CompactVideoTranscoder(
+        preset = preset,
+        logicalProcessors = minOf(logicalProcessors, liveCompactEncoderProcessorCount(Runtime.getRuntime().availableProcessors())),
+        keyframeIntervalMs = keyframeIntervalMs,
+        maxFramesPerKeyframe = maxFramesPerKeyframe,
+    )
+
     override fun ensureAvailable() {
         try {
             val encoder = avcodec_find_encoder_by_name(COMPACT_AV1_ENCODER)
@@ -462,9 +469,12 @@ class FfmpegAv1CompactVideoTranscoder internal constructor(
         while (true) {
             checkCompactInterrupted()
             val result = org.bytedeco.ffmpeg.global.avcodec.avcodec_receive_packet(codec, packet)
-            if (result == AVERROR_EOF || isAgain(result)) {
-                if (flushing && result != AVERROR_EOF && !isAgain(result)) compactFfmpegCheck(result, "drain AV1 encoder")
-                break
+            when (compactDrainStep(result, flushing)) {
+                CompactDrainStep.DONE -> break
+                CompactDrainStep.TRUNCATED -> throw IOException(
+                    "Bundled AV1 encoder asked for more input while flushing; the Compact video would be truncated",
+                )
+                CompactDrainStep.PACKET -> Unit
             }
             compactFfmpegCheck(result, "receive AV1 packet")
             av_packet_rescale_ts(packet, codec.time_base(), stream.time_base())
@@ -791,6 +801,17 @@ private fun compactSourceDurationMs(grabber: FFmpegFrameGrabber, videoStream: AV
     return av_rescale_q(streamDuration, timeBase, AVRational().num(1).den(COMPACT_AV1_TIME_BASE_MS))
 }
 
+private const val COMPACT_AV1_LIVE_CORES_PER_THREAD = 4
+private const val COMPACT_AV1_LIVE_MAX_THREADS = 2
+
+/**
+ * Encoder concurrency while the exported capture is still recording: a quarter of the cores, one or two. The
+ * regular [compactEncoderProcessorCount] keeps about nine of ten cores busy, which would starve the live
+ * capture's own log reader, MKV muxer and mirror for the whole encode.
+ */
+internal fun liveCompactEncoderProcessorCount(availableProcessors: Int): Int =
+    (availableProcessors / COMPACT_AV1_LIVE_CORES_PER_THREAD).coerceIn(COMPACT_AV1_MIN_LOGICAL_PROCESSORS, COMPACT_AV1_LIVE_MAX_THREADS)
+
 internal fun compactEncoderProcessorCount(availableProcessors: Int): Int {
     if (availableProcessors <= COMPACT_AV1_MIN_LOGICAL_PROCESSORS) return COMPACT_AV1_MIN_LOGICAL_PROCESSORS
     return (availableProcessors - COMPACT_AV1_MIN_THREADS).coerceAtLeast(COMPACT_AV1_MIN_THREADS)
@@ -805,6 +826,21 @@ private fun copyRational(source: AVRational, destination: AVRational) {
 private fun Long.roundToNearestMillisecond(): Long = (this.toDouble() / MICROS_PER_MILLISECOND).roundToLong()
 
 private fun isAgain(result: Int): Boolean = result == AVERROR_EAGAIN_LINUX || result == AVERROR_EAGAIN_MACOS
+
+/** What one `avcodec_receive_packet` result means for the encoder drain loop. */
+internal enum class CompactDrainStep { PACKET, DONE, TRUNCATED }
+
+/**
+ * While encoding, EAGAIN just means "send more input" and EOF means the encoder is finished. After
+ * the flush request ([flushing]) only EOF ends the stream: EAGAIN there would silently drop whatever
+ * the encoder still holds, so it is reported as [CompactDrainStep.TRUNCATED]. Any other value is
+ * handed to the caller as a packet/error result for `compactFfmpegCheck`.
+ */
+internal fun compactDrainStep(result: Int, flushing: Boolean): CompactDrainStep = when {
+    result == AVERROR_EOF -> CompactDrainStep.DONE
+    isAgain(result) -> if (flushing) CompactDrainStep.TRUNCATED else CompactDrainStep.DONE
+    else -> CompactDrainStep.PACKET
+}
 
 private fun checkCompactInterrupted() {
     if (Thread.currentThread().isInterrupted) throw InterruptedIOException("Compact AV1 export interrupted")

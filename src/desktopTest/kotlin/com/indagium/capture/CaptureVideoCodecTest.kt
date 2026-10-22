@@ -56,4 +56,33 @@ class CaptureVideoCodecTest {
         assertTrue(advancedCodecFallbackReason(CaptureVideoCodec.AV1, null).orEmpty().contains("unknown"))
         assertFalse(softwareOnly.encoders(CaptureVideoCodec.AV1).isEmpty())
     }
+
+    @Test
+    fun capabilitiesAreProbedOnlyForARecordedAdvancedCodecAndKnownResultsAreReused() {
+        val known = CaptureVideoEncoderCapabilities(
+            listOf(CaptureVideoEncoder(CaptureVideoCodec.AV1, "vendor.av1", CaptureEncoderAcceleration.HARDWARE)),
+        )
+        val fresh = CaptureVideoEncoderCapabilities(emptyList())
+        var probes = 0
+        val probe = { probes++; fresh }
+
+        assertNull(resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.H264), null, probe))
+        assertNull(resolveVideoEncoderCapabilities(CaptureSettings(recordVideo = false, videoCodec = CaptureVideoCodec.AV1), null, probe))
+        assertEquals(0, probes, "H.264 and video-less captures never probe")
+
+        assertEquals(known, resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.AV1), known, probe))
+        assertEquals(0, probes, "an already-known result is reused")
+
+        assertEquals(fresh, resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.H265), null, probe))
+        assertEquals(1, probes, "without a known result the recorder probes once")
+    }
+
+    @Test
+    fun onlyAFinishedProbeIsReusable() {
+        val ready = CaptureVideoEncoderCapabilities(emptyList())
+        assertEquals(ready, CaptureVideoEncoderProbeState.Ready(ready).readyCapabilities())
+        assertNull(CaptureVideoEncoderProbeState.Loading.readyCapabilities())
+        assertNull(CaptureVideoEncoderProbeState.Failed("x").readyCapabilities())
+        assertNull((null as CaptureVideoEncoderProbeState?).readyCapabilities())
+    }
 }

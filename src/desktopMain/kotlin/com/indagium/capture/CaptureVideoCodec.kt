@@ -76,3 +76,22 @@ internal fun advancedCodecFallbackReason(
         else -> "${codec.label} hardware acceleration could not be confirmed; using H.264."
     }
 }
+
+/**
+ * The encoder support [CaptureRecorder] decides an advanced-codec capture with: nothing for H.264 or
+ * a video-less capture (no probe, no adb traffic), the caller's [known] result when it already has
+ * one for this device (the launcher's Check / auto-probe in this app session), otherwise a fresh
+ * [probe] (its failures are the caller's: a null result means "unknown", which falls back to H.264).
+ */
+internal fun resolveVideoEncoderCapabilities(
+    settings: CaptureSettings,
+    known: CaptureVideoEncoderCapabilities?,
+    probe: () -> CaptureVideoEncoderCapabilities?,
+): CaptureVideoEncoderCapabilities? {
+    if (!settings.recordVideo || settings.videoCodec == CaptureVideoCodec.H264) return null
+    return known ?: probe()
+}
+
+/** The capabilities of a finished probe, or null while loading/failed/never run: only `Ready` is reusable. */
+internal fun CaptureVideoEncoderProbeState?.readyCapabilities(): CaptureVideoEncoderCapabilities? =
+    (this as? CaptureVideoEncoderProbeState.Ready)?.capabilities

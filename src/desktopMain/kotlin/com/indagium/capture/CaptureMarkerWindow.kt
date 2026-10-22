@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import com.indagium.model.LogEntry
 import com.indagium.utils.parseLogcatLines
+import com.indagium.utils.readTextShared
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -77,7 +78,7 @@ private data class SparseMarkerSource(val metadata: CaptureSyncMetadata, val ind
 private fun sparseMarkerSource(session: CaptureSession): SparseMarkerSource {
     val metadata = session.syncMetadataOverride ?: run {
         require(session.syncFile.length() in 1..MAX_MARKER_SYNC_BYTES) { "Capture timing metadata is missing or too large" }
-        CaptureSyncMetadata.parse(session.syncFile.readText())
+        CaptureSyncMetadata.parse(readTextShared(session.syncFile))
     }
     val logBytes = session.frozenLogBytes ?: metadata.logBytes
     require(logBytes == metadata.logBytes) { "Capture timing metadata does not match the frozen log" }

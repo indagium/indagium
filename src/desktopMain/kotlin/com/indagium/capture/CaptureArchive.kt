@@ -13,6 +13,7 @@ import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.openLogTextReader
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseLogcatLines
+import com.indagium.utils.readTextShared
 import com.indagium.utils.unrollLogTimeline
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -232,6 +233,12 @@ data class ImportedCapture(
     val screenshotFiles: List<File> = emptyList(),
     /** Parsed v5 segment manifest; null for all older archive versions. */
     val sparseSyncMetadata: CaptureSyncMetadata? = null,
+    /**
+     * The directory every descriptor asset path is relative to: the folder that holds `capture.indagium.json`
+     * (an in-place capture folder, where [logFile] lives in `logs/`, not here) or the extraction directory of
+     * a ZIP. Appended last; null only for a value built outside [CaptureArchiveReader].
+     */
+    val root: File? = null,
 )
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -282,6 +289,9 @@ class CaptureArchiveExporter(
      * those two entry points, and adding a second, separate lock would just be redundant.
      */
     private var coverageProbeCache: Pair<CoverageProbeKey, Long?>? = null
+
+    /** Serializes [finalizeSessionInPlace] with itself only; see its doc for why it must not share the export monitor. */
+    private val finalizeLock = Any()
 
     private data class CoverageProbeKey(
         val sourcePath: String,
@@ -339,10 +349,22 @@ class CaptureArchiveExporter(
      * recorder's files are already the canonical extracted capture; finalization only derives
      * the portable log-to-video mapping and descriptor, then re-opens that directory through the
      * normal reader so callers receive exactly the same validation as imported archives.
+     *
+     * Serialized on [finalizeLock], NOT on this exporter's monitor ([export]/[preview] hold that one for the
+     * whole of a Compact encode, which can take minutes, and Stop must not wait for it). That is safe because
+     * the two never write the same file: an export only reads the session's frozen log/index prefix, sync
+     * metadata, video and screenshots and writes into its own temp/work directories next to the destination
+     * (plus [coverageProbeCache], which finalization never touches), while finalization only reads those same
+     * files and writes the session's own descriptor (`capture.indagium.json`, and for a legacy session
+     * `timeline/rows.jsonl`, which no export reads) from a `.finalize-` staging directory of its own.
      */
-    @Synchronized
     @Suppress("ThrowsCount", "TooGenericExceptionCaught")
-    fun finalizeSessionInPlace(session: CaptureSession): ImportedCapture {
+    fun finalizeSessionInPlace(session: CaptureSession): ImportedCapture = synchronized(finalizeLock) {
+        finalizeSessionInPlaceLocked(session)
+    }
+
+    @Suppress("ThrowsCount", "TooGenericExceptionCaught")
+    private fun finalizeSessionInPlaceLocked(session: CaptureSession): ImportedCapture {
         val videoFile = requireFinalizableSession(session)
 
         if (session.storageVersion == CaptureStorageVersion.BLOCKS_V2) {
@@ -466,7 +488,7 @@ class CaptureArchiveExporter(
         val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
         try {
             val input = validateFinalizationInput(session)
-            val metadata = session.syncMetadataOverride ?: CaptureSyncMetadata.parse(session.syncFile.readText(Charsets.UTF_8))
+            val metadata = session.syncMetadataOverride ?: CaptureSyncMetadata.parse(readTextShared(session.syncFile))
             require(metadata.logBytes == session.logFile.length() && metadata.rowCount == input.rowCount) {
                 "Capture sync metadata does not match the frozen recorder files"
             }
@@ -544,21 +566,31 @@ class CaptureArchiveExporter(
         return previewSparseV5(session, request)
     }
 
+    /**
+     * Cheap by construction, because the popover asks again every second: block checksums are not verified here (export
+     * still verifies them), blocks wholly inside the window and inside one reliable clock segment contribute their
+     * recorded time envelope without being read, and the answer is memoized process-wide by everything it depends on
+     * ([CaptureExportPreviewCache]) so a stopped session is only ever scanned once.
+     */
     @Suppress("CyclomaticComplexMethod") // Coordinates the frozen log prefix with an independent video-coverage preview.
     private fun previewSparseV5(originalSession: CaptureSession, request: CaptureExportRequest): CaptureExportPreview {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
-        val adapter = if (originalSession.storageVersion == CaptureStorageVersion.BLOCKS_V2) null
-        else buildLegacySparseAdapter(originalSession, originalSession.directory.parentFile ?: File("."))
-        val session = adapter?.session ?: originalSession
+        val key = CaptureExportPreviewKey.of(originalSession, request, videoExporter)
+        val destinationExists = request.destination.absoluteFile.exists()
+        CaptureExportPreviewCache.get(key)?.let { return it.copy(destinationExists = destinationExists) }
+        val lease = if (originalSession.storageVersion == CaptureStorageVersion.BLOCKS_V2) null
+        else LegacySparseAdapterCache.acquire(originalSession)
         try {
+            CapturePreviewDiagnostics.computations.incrementAndGet()
+            val session = lease?.adapter?.session ?: originalSession
             val checkpoint = requireSnapshotCheckpoint(session, request)
             require(session.logFile.isFile && session.blockIndexFile.isFile) { "Capture log or block index is missing" }
             val frozenLogBytes = session.frozenLogBytes ?: session.logFile.length()
             val frozenBlockBytes = session.frozenBlockIndexBytes ?: session.blockIndexFile.length()
             require(frozenLogBytes in 0..session.logFile.length()) { "Capture log is shorter than its frozen boundary" }
             val metadata = mergeManualAnchors(
-                session.syncMetadataOverride ?: CaptureSyncMetadata.parse(session.syncFile.readText(Charsets.UTF_8)),
+                session.syncMetadataOverride ?: CaptureSyncMetadata.parse(readTextShared(session.syncFile)),
                 session.manualSegmentAnchors + request.captureSegmentAnchors,
             )
             require(metadata.logBytes == frozenLogBytes) { "Capture sync metadata does not match the frozen log boundary" }
@@ -579,7 +611,7 @@ class CaptureArchiveExporter(
                 require(first > 0 && first <= last && last <= metadata.rowCount) {
                     "Selection export row bounds must be positive, ordered, and inside the frozen capture"
                 }
-                findSparseSelectionBounds(session, metadata, timing, index, frozenBlockBytes, frozenLogBytes, first, last)
+                findSparseSelectionBounds(session, metadata, timing, index, frozenBlockBytes, frozenLogBytes, first, last, verifyBlocks = false)
             } else {
                 null
             }
@@ -593,9 +625,12 @@ class CaptureArchiveExporter(
                 "Saved row cursor is beyond the frozen capture"
             }
             val logBounds = selection ?: findSparseRangeBounds(
-                session, metadata, timing, index, frozenBlockBytes, frozenLogBytes,
-                start, end, request.range == CaptureRange.SINCE_SAVE && checkpoint >= 0L,
-                cursorByte, session.logCheckpointRowOrdinal.takeIf { cursorByte != null },
+                SparseScanContext(session, metadata, timing, index, frozenBlockBytes, frozenLogBytes, verifyBlocks = false),
+                SparseRangeQuery(
+                    start, end, request.range == CaptureRange.SINCE_SAVE && checkpoint >= 0L,
+                    cursorByte, session.logCheckpointRowOrdinal.takeIf { cursorByte != null },
+                ),
+                previewEnvelope = CapturePreviewDiagnostics.envelopeEnabled,
             )
             val videoStart = selection?.firstElapsedMs ?: requestedRangeStartMs(
                 request,
@@ -614,18 +649,20 @@ class CaptureArchiveExporter(
             } else {
                 previewVideoCoverage(session, videoStart, videoEnd)
             }
-            return CaptureExportPreview(
+            val preview = CaptureExportPreview(
                 logStartMs = logBounds?.firstElapsedMs,
                 logEndMs = logBounds?.lastElapsedMs,
                 videoCoveredEndMs = coverage?.coveredEndMs,
                 videoShortfallMs = coverage?.shortfallMs,
                 selectedFirstRowOrdinal = request.selectedFirstRowOrdinal,
                 selectedLastRowOrdinal = request.selectedLastRowOrdinal,
-                destinationExists = request.destination.absoluteFile.exists(),
+                destinationExists = destinationExists,
                 includeVideo = includeVideo,
             )
+            CaptureExportPreviewCache.put(key, preview)
+            return preview
         } finally {
-            adapter?.directory?.let(::deleteTree)
+            lease?.close()
         }
     }
 
@@ -802,9 +839,17 @@ class CaptureArchiveExporter(
      * and cancellation still fail the export; only an unavailable encoder or a result that is not
      * smaller keeps the already-staged original instead.
      */
-    private fun chooseCompactVideo(stagedVideo: File?, work: File, onStatus: ((String) -> Unit)?): CompactVideoChoice {
+    private fun chooseCompactVideo(
+        stagedVideo: File?,
+        work: File,
+        onStatus: ((String) -> Unit)?,
+        liveSource: Boolean = false,
+    ): CompactVideoChoice {
         if (stagedVideo == null) return CompactVideoChoice(null, null, CompactVideoOutcome.NO_VIDEO)
         val compactStaging = File(work, ".compact-screen.mkv")
+        // Compact is offered from the live snapshot popover: while the capture is still recording the encode must
+        // not take the cores the recording itself needs.
+        val compactVideoTranscoder = if (liveSource) this.compactVideoTranscoder.forLiveCapture() else this.compactVideoTranscoder
         val passthrough = compactVideoTranscoder.isAlreadyAv1(stagedVideo)
         if (passthrough) {
             runCatching { onStatus?.invoke("Copying existing AV1 video…") }
@@ -881,7 +926,7 @@ class CaptureArchiveExporter(
             val frozenLogBytes = session.frozenLogBytes ?: session.logFile.length()
             val frozenBlockBytes = session.frozenBlockIndexBytes ?: session.blockIndexFile.length()
             require(frozenLogBytes in 0..session.logFile.length()) { "Capture log is shorter than its frozen boundary" }
-            val sourceMetadata = (session.syncMetadataOverride ?: CaptureSyncMetadata.parse(session.syncFile.readText(Charsets.UTF_8)))
+            val sourceMetadata = (session.syncMetadataOverride ?: CaptureSyncMetadata.parse(readTextShared(session.syncFile)))
             val metadata = mergeManualAnchors(sourceMetadata, session.manualSegmentAnchors + request.captureSegmentAnchors)
             require(metadata.logBytes == frozenLogBytes) { "Capture sync metadata does not match the frozen log boundary" }
             val blockIndex = CaptureBlockIndex.read(
@@ -918,9 +963,11 @@ class CaptureArchiveExporter(
                 "Saved row cursor is beyond the frozen capture"
             }
             val logBounds = selectionBounds ?: findSparseRangeBounds(
-                session, metadata, timing, blockIndex, frozenBlockBytes, frozenLogBytes,
-                requestedLogStartMs, selectedEndMs, request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0L,
-                sourceCursorByteOffset, sourceCursorRowOrdinal,
+                SparseScanContext(session, metadata, timing, blockIndex, frozenBlockBytes, frozenLogBytes),
+                SparseRangeQuery(
+                    requestedLogStartMs, selectedEndMs, request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0L,
+                    sourceCursorByteOffset, sourceCursorRowOrdinal,
+                ),
             )
             val logStartMs = logBounds?.firstElapsedMs ?: requestedLogStartMs
             val videoRangeStartMs = selectionBounds?.firstElapsedMs
@@ -1111,7 +1158,12 @@ class CaptureArchiveExporter(
                 val isCompact = request.format == CaptureExportFormat.COMPACT
                 // Only the video can differ in size between ZIP and Compact (every other entry is
                 // identical), so the choice is made here, once, before any notes/descriptor are built.
-                val compactChoice = if (isCompact) chooseCompactVideo(stagedVideo?.takeIf { videoAvailable }, work, onStatus) else null
+                val liveSource = originalSession.status == CaptureStatus.RECORDING || LiveCaptureSessions.isLive(originalSession.directory)
+                val compactChoice = if (isCompact) {
+                    chooseCompactVideo(stagedVideo?.takeIf { videoAvailable }, work, onStatus, liveSource)
+                } else {
+                    null
+                }
                 val shippedVideoFile = if (compactChoice != null) compactChoice.file else stagedVideo?.takeIf { videoAvailable }
                 val shippedVideoEntryName = if (compactChoice != null) compactChoice.entryName else videoEntryName.takeIf { videoAvailable }
                 val outputVideoOrigin = when {
@@ -1235,7 +1287,7 @@ class CaptureArchiveExporter(
                 if (!published) archiveTemp.delete()
             }
         } finally {
-            adapter?.directory?.let(::deleteTree)
+            adapter?.directory?.let(::releaseLegacyAdapterDirectory)
         }
     }
 }
@@ -1582,7 +1634,7 @@ object CaptureArchiveReader {
         val syncAsset = requireNotNull(descriptor.sparseSync)
         val blocksFile = resolveSafe(root, blockAsset.path)
         val syncFile = resolveSafe(root, syncAsset.path)
-        val rawMetadata = CaptureSyncMetadata.parse(syncFile.readText(Charsets.UTF_8))
+        val rawMetadata = CaptureSyncMetadata.parse(readTextShared(syncFile))
         val retainedAnchors = if (descriptor.log.path == IN_PLACE_LOG_PATH) {
             readCaptureSessionDirectory(root)?.manualSegmentAnchors.orEmpty()
         } else {
@@ -1691,6 +1743,7 @@ object CaptureArchiveReader {
             staleSyncAnchor = correctedAnchor?.let { descriptor.syncAnchor },
             screenshotFiles = descriptor.screenshots.map { resolveSafe(root, it.path) },
             sparseSyncMetadata = sparseTimeline?.second,
+            root = root,
         )
     }
 }
@@ -1878,7 +1931,7 @@ private fun stageNotes(
     return asset("notes.ann", target) to clipped
 }
 
-private data class LegacySparseAdapter(val session: CaptureSession, val directory: File)
+internal data class LegacySparseAdapter(val session: CaptureSession, val directory: File)
 
 private data class SparseExportStage(
     val logFile: File,
@@ -1912,6 +1965,8 @@ private data class SparseScanContext(
     val blockIndex: CaptureBlockIndex,
     val frozenBlockBytes: Long,
     val frozenLogBytes: Long,
+    /** Export always verifies each block's SHA-256 before trusting its bytes; the preview skips it (it never publishes them). */
+    val verifyBlocks: Boolean = true,
 )
 
 private data class SparseLineFilter(
@@ -1948,9 +2003,10 @@ private class SparseCursorPrefix(private val endElapsedMs: Long) {
 /** Converts an old retained per-row index into a temporary sparse index without creating another
  *  per-row cache. The old per-row elapsed values are used only as transient estimator input; the
  *  resulting portable metadata keeps one compact anchor per continuous clock segment. */
-private fun buildLegacySparseAdapter(session: CaptureSession, parent: File): LegacySparseAdapter {
+internal fun buildLegacySparseAdapter(session: CaptureSession, parent: File): LegacySparseAdapter {
     require(session.logFile.isFile && session.indexFile.isFile) { "Legacy capture log or index is missing" }
-    val directory = Files.createTempDirectory(parent.toPath(), ".sparse-source-").toFile()
+    val directory = Files.createTempDirectory(parent.toPath(), LEGACY_ADAPTER_DIRECTORY_PREFIX).toFile()
+    registerLegacyAdapterDirectory(directory)
     val blockFile = File(directory, "mapping/blocks.jsonl")
     val syncFile = File(directory, "timeline/sync.json")
     val tracker = CaptureSyncRecorder(session.startedEpochMs)
@@ -1993,7 +2049,7 @@ private fun buildLegacySparseAdapter(session: CaptureSession, parent: File): Leg
         completed = true
         return adapter
     } finally {
-        if (!completed) deleteTree(directory)
+        if (!completed) releaseLegacyAdapterDirectory(directory)
     }
 }
 
@@ -2160,13 +2216,14 @@ private fun findSparseSelectionBounds(
     frozenLogBytes: Long,
     firstOrdinal: Int,
     lastOrdinal: Int,
+    verifyBlocks: Boolean = true,
 ): SelectionBounds {
     var first: Long? = null
     var last: Long? = null
     var firstVideo: Long? = null
     var lastVideo: Long? = null
     forEachSparseCandidateLine(
-        SparseScanContext(session, metadata, timing, blockIndex, frozenBlockBytes, frozenLogBytes),
+        SparseScanContext(session, metadata, timing, blockIndex, frozenBlockBytes, frozenLogBytes, verifyBlocks),
         SparseLineFilter(Long.MIN_VALUE, Long.MAX_VALUE, firstOrdinal, lastOrdinal),
     ) { candidate ->
         val ordinal = candidate.rowOrdinal ?: return@forEachSparseCandidateLine
@@ -2187,47 +2244,71 @@ private fun findSparseSelectionBounds(
     )
 }
 
-private fun findSparseRangeBounds(
-    session: CaptureSession,
-    metadata: CaptureSyncMetadata,
-    timing: CaptureTimeline,
-    blockIndex: CaptureBlockIndex,
-    frozenBlockBytes: Long,
-    frozenLogBytes: Long,
-    selectedStartMs: Long,
-    selectedEndMs: Long,
-    excludeStart: Boolean,
-    sourceCursorByteOffset: Long?,
-    sourceCursorRowOrdinal: Int?,
-): SelectionBounds? {
-    var first: Long? = null
-    var last: Long? = null
-    var firstVideo: Long? = null
-    var lastVideo: Long? = null
+/** The range part of a bounds query: what [findSparseRangeBounds] selects from the scanned blocks. */
+private data class SparseRangeQuery(
+    val selectedStartMs: Long,
+    val selectedEndMs: Long,
+    val excludeStart: Boolean,
+    val sourceCursorByteOffset: Long?,
+    val sourceCursorRowOrdinal: Int?,
+)
+
+private fun findSparseRangeBounds(scan: SparseScanContext, query: SparseRangeQuery, previewEnvelope: Boolean = false): SelectionBounds? {
+    val bounds = SparseBoundsAccumulator()
     val filter = SparseLineFilter(
-        selectedStartMs,
-        selectedEndMs,
-        sourceCursorByteOffset = sourceCursorByteOffset,
-        sourceCursorRowOrdinal = sourceCursorRowOrdinal,
+        query.selectedStartMs,
+        query.selectedEndMs,
+        sourceCursorByteOffset = query.sourceCursorByteOffset,
+        sourceCursorRowOrdinal = query.sourceCursorRowOrdinal,
     )
-    val cursorPrefix = sourceCursorByteOffset?.let { SparseCursorPrefix(selectedEndMs) }
+    val cursorPrefix = query.sourceCursorByteOffset?.let { SparseCursorPrefix(query.selectedEndMs) }
+    // Preview only: an interior block of one reliable clock segment adds its recorded envelope instead of being read.
+    // Its rows' resolved times sit within milliseconds of it (the rows' own log clock, mapped through the segment anchor),
+    // and the first and last candidate blocks, where buffered or boundary rows can differ more, are always read.
+    val envelope: ((CaptureBlock, Boolean) -> Boolean)? = if (previewEnvelope && cursorPrefix == null) {
+        { block, isEdge ->
+            val interior = !isEdge && sparseBlockUsesEnvelope(
+                scan.metadata, block, query.selectedStartMs, query.selectedEndMs, query.excludeStart,
+            )
+            if (interior) bounds.addElapsed(block.firstElapsedMs, block.lastElapsedMs)
+            interior
+        }
+    } else {
+        null
+    }
     forEachSparseCandidateLine(
-        SparseScanContext(session, metadata, timing, blockIndex, frozenBlockBytes, frozenLogBytes),
+        scan,
         filter,
         stopAfterCurrentBlock = { cursorPrefix?.isEnded == true },
+        envelope = envelope,
     ) { candidate ->
         if (cursorPrefix?.includes(candidate) == false) return@forEachSparseCandidateLine
-        if (!sparseCandidateMatchesRange(candidate, filter, excludeStart)) return@forEachSparseCandidateLine
+        if (!sparseCandidateMatchesRange(candidate, filter, query.excludeStart)) return@forEachSparseCandidateLine
         val resolved = candidate.point?.captureElapsedMs ?: candidate.block.firstElapsedMs
-        first = first?.let { minOf(it, resolved) } ?: resolved
-        last = last?.let { maxOf(it, resolved) } ?: resolved
-        candidate.point?.videoMs?.let { videoMs ->
-            firstVideo = firstVideo?.let { minOf(it, videoMs) } ?: videoMs
-            lastVideo = lastVideo?.let { maxOf(it, videoMs) } ?: videoMs
-        }
+        bounds.addElapsed(resolved, resolved)
+        candidate.point?.videoMs?.let(bounds::addVideo)
     }
-    val start = first ?: return null
-    return SelectionBounds(start, requireNotNull(last), firstVideo, lastVideo)
+    return bounds.toBounds()
+}
+
+/** Running minimum and maximum of the elapsed (and video) times of the selected rows. */
+private class SparseBoundsAccumulator {
+    private var first: Long? = null
+    private var last: Long? = null
+    private var firstVideo: Long? = null
+    private var lastVideo: Long? = null
+
+    fun addElapsed(low: Long, high: Long) {
+        first = first?.let { minOf(it, low) } ?: low
+        last = last?.let { maxOf(it, high) } ?: high
+    }
+
+    fun addVideo(videoMs: Long) {
+        firstVideo = firstVideo?.let { minOf(it, videoMs) } ?: videoMs
+        lastVideo = lastVideo?.let { maxOf(it, videoMs) } ?: videoMs
+    }
+
+    fun toBounds(): SelectionBounds? = first?.let { SelectionBounds(it, requireNotNull(last), firstVideo, lastVideo) }
 }
 
 private fun sparseCandidateMatchesRange(
@@ -2261,6 +2342,8 @@ private fun forEachSparseCandidateLine(
     scan: SparseScanContext,
     filter: SparseLineFilter,
     stopAfterCurrentBlock: () -> Boolean = { false },
+    // Preview only: (block, isFirstOrLastCandidate) -> true when the block was accounted for without being read.
+    envelope: ((CaptureBlock, Boolean) -> Boolean)? = null,
     block: (SparseCandidateLine) -> Unit,
 ) {
     val candidates = sparseCandidateBlocks(
@@ -2274,9 +2357,13 @@ private fun forEachSparseCandidateLine(
     )
     requireSparseCandidates(scan.metadata, filter, candidates)
     var expectedBlockStart: Long? = null
-    for (candidateBlock in candidates) {
+    for ((position, candidateBlock) in candidates.withIndex()) {
         if (stopAfterCurrentBlock()) break
         checkNotInterrupted()
+        if (envelope?.invoke(candidateBlock, position == 0 || position == candidates.lastIndex) == true) {
+            expectedBlockStart = candidateBlock.byteEnd
+            continue
+        }
         val bytes = readSparseCandidateBlock(scan, candidateBlock, expectedBlockStart)
         SparseCandidateBlockScanner(scan, filter, candidateBlock, bytes, block).scan()
         expectedBlockStart = candidateBlock.byteEnd
@@ -2301,7 +2388,8 @@ private fun readSparseCandidateBlock(
     require(candidateBlock.byteEnd <= scan.frozenLogBytes && candidateBlock.byteEnd > candidateBlock.byteStart) {
         "Capture block exceeds the frozen log boundary"
     }
-    CaptureBlockIndex.verifyBlock(scan.session.logFile, candidateBlock)
+    CapturePreviewDiagnostics.blockReads.incrementAndGet()
+    if (scan.verifyBlocks) CaptureBlockIndex.verifyBlock(scan.session.logFile, candidateBlock)
     require(expectedStart == null || candidateBlock.byteStart >= expectedStart) {
         "Capture candidate blocks are out of order"
     }
@@ -2498,7 +2586,7 @@ private class SparseStageAccumulator(
             rawLine = candidate.raw,
             rowOrdinal = candidate.rowOrdinal?.let { outputRows },
             elapsedMs = outputBlockFirstElapsed,
-            segmentId = candidate.rowOrdinal?.let { row -> metadata.segments.firstOrNull { it.contains(row) }?.id },
+            segmentId = candidate.rowOrdinal?.let { row -> metadata.segmentContaining(row)?.id },
             resolvedCaptureElapsedMs = outputBlockLastElapsed,
         )
         outputBytes += candidate.raw.size
@@ -2550,7 +2638,7 @@ private class SparseStageAccumulator(
     private fun recordSelectedRow(row: Int, candidate: SparseCandidateLine) {
         require(outputRows < MAX_MAPPING_ROWS) { "Selected capture has too many rows" }
         outputRows++
-        val sourceSegment = metadata.segments.firstOrNull { it.contains(row) }
+        val sourceSegment = metadata.segmentContaining(row)
         if (sourceSegment == null) {
             uncertainBoundary = true
         } else {
@@ -2722,7 +2810,7 @@ private fun validateFinalizationInput(session: CaptureSession): FinalizationInpu
     }
 
 private fun validateSparseFinalizationInput(session: CaptureSession): FinalizationInput {
-    val metadata = session.syncMetadataOverride ?: CaptureSyncMetadata.parse(session.syncFile.readText(Charsets.UTF_8))
+    val metadata = session.syncMetadataOverride ?: CaptureSyncMetadata.parse(readTextShared(session.syncFile))
     val blocks = CaptureBlockIndex.read(
         session.blockIndexFile,
         session.logFile,

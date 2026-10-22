@@ -199,6 +199,20 @@ class FfmpegAv1CompactVideoTranscoderTest {
     }
 
     @Test
+    fun encoderDrainEndsOnEofAndTreatsEagainWhileFlushingAsTruncation() {
+        val eof = org.bytedeco.ffmpeg.global.avutil.AVERROR_EOF
+        val eagain = -11
+        assertEquals(CompactDrainStep.PACKET, compactDrainStep(0, flushing = false))
+        assertEquals(CompactDrainStep.PACKET, compactDrainStep(-22, flushing = true), "other errors reach compactFfmpegCheck")
+        assertEquals(CompactDrainStep.DONE, compactDrainStep(eof, flushing = false))
+        assertEquals(CompactDrainStep.DONE, compactDrainStep(eof, flushing = true))
+        assertEquals(CompactDrainStep.DONE, compactDrainStep(eagain, flushing = false), "mid-stream EAGAIN means send more input")
+        assertEquals(CompactDrainStep.DONE, compactDrainStep(-35, flushing = false))
+        assertEquals(CompactDrainStep.TRUNCATED, compactDrainStep(eagain, flushing = true))
+        assertEquals(CompactDrainStep.TRUNCATED, compactDrainStep(-35, flushing = true))
+    }
+
+    @Test
     fun progressTrackerThrottlesCapsAtOneBeforeFinishAndIgnoresUnknownDuration() {
         val reported = mutableListOf<Double>()
         val progress = CompactProgress(10_000L) { reported += it }
