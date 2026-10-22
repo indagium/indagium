@@ -566,15 +566,26 @@ exist. Transcoder errors and cancellation still fail the export. Each outcome ha
 message, and the `.mkv` audio note is added whenever the original video ships. Exact-start rendering
 or availability cards can still produce H.264 staging, which then takes the encode-and-compare path.
 
-`FfmpegAv1CompactVideoTranscoder` encodes through bundled `libsvtav1` at CRF 28, preset 8 (presets 9
-and above disable the screen-content tools), adaptive concurrency capped at six logical processors,
-millisecond presentation times and unchanged dimensions; decoder concurrency stays at two and a
-single-processor machine uses one encoder worker. A keyframe is forced at 10 s of source time or after
+`FfmpegAv1CompactVideoTranscoder` encodes through bundled `libsvtav1` at CRF 28, preset 10 (SVT-AV1
+3.1.2 maps presets 11-13 to 10, so 10 is the ceiling; presets 9 and above disable the screen-content
+tools), with millisecond presentation times and unchanged dimensions. SVT's `lp` is a level of
+parallelism (0-6; larger values warn and clamp to 6), so the encoder worker count is capped at six
+and a single-processor machine uses one; level 6 already keeps about nine of ten cores busy. Decoder
+concurrency stays at two. A keyframe is forced at 10 s of source time or after
 300 video frames since the previous keyframe, whichever comes first; the frame cap keeps JavaCV
 `setTimestamp`'s 1000-grab window (audio plus video) safe, and `gop_size = min(fps x 10 s, 300)`.
-On a 180 s emulator clip, preset 10 with 2 s keyframes produced 52.8% of the source size; preset 8
-with 10 s keyframes produced 15.0% with higher SSIM, at roughly twice the encode time (about 35x
-realtime). Video-only sources publish the encoded MKV directly, retaining source metadata and
+The bytedeco macOS arm64 SVT-AV1 is a C-only build (its log reports "asm level selected : up to c"),
+roughly five times slower than a Homebrew NEON build, so the preset is the only effective speed
+lever: on synthetic emulator-style clips (mostly static UI with scroll bursts, 10 s keyframes) preset 10
+ran 3.3x faster than preset 8 at 720x1600 (about 8x realtime versus 2.5x) and 2.7x faster at
+1080x2400 (3.5x versus 1.3x), for 10-14% more bytes and mean SSIM 0.997-0.998 versus 0.998-0.999.
+Skipping the same-format `sws_scale` copy, four decoder threads and other SVT knobs (`enable-tf`,
+`enable-tpl-la`, tiles, `lookahead`, `fast-decode`, ...) made no measurable difference. A 2 s
+keyframe interval, not the preset, is what once produced 52.8% of the source size. `transcode`
+reports the fraction of source duration encoded (frame PTS over container duration, monotonic,
+ending at exactly 1.0) through an optional callback; `chooseCompactVideo` turns it into the status
+"Encoding AV1 video… NN%", emitted only when the whole percent changes and at most four times a
+second. Video-only sources publish the encoded MKV directly, retaining source metadata and
 aspect/frame-rate rationals; a separate packet-mux pass runs only when audio or auxiliary streams
 need copying into `screen.mkv`. Working-space preflight reserves a second copy of the log (zstd temp
 file included) plus the transcoded video. Cancellation and failures clean conversion/archive staging;

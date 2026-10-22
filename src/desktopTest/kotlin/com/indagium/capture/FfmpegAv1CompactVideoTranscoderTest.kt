@@ -163,14 +163,61 @@ class FfmpegAv1CompactVideoTranscoderTest {
     }
 
     @Test
-    fun defaultsTargetPreset8WithTenSecondKeyframesAndTheGrabCap() {
-        assertEquals(8, COMPACT_AV1_PRESET)
+    fun defaultsTargetPreset10WithTenSecondKeyframesAndTheGrabCap() {
+        assertEquals(10, COMPACT_AV1_PRESET)
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(preset = 11) }
+        assertFailsWith<IllegalArgumentException> { FfmpegAv1CompactVideoTranscoder(preset = -1) }
         assertEquals(10_000L, COMPACT_AV1_KEYFRAME_INTERVAL_MS)
         assertEquals(300, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME)
         // 60 fps over ten seconds is 600 frames, so the frame cap (not the interval) sets the GOP.
         assertEquals(300, compactGopSize(60 to 1, COMPACT_AV1_KEYFRAME_INTERVAL_MS, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME))
         assertEquals(100, compactGopSize(10 to 1, COMPACT_AV1_KEYFRAME_INTERVAL_MS, COMPACT_AV1_MAX_FRAMES_PER_KEYFRAME))
         assertEquals(1, compactGopSize(1 to 100, 10L, 300))
+    }
+
+    @Test
+    fun reportsMonotonicProgressThatEndsAtOne() {
+        val transcoder = FfmpegAv1CompactVideoTranscoder()
+        val available = runCatching { transcoder.ensureAvailable() }.isSuccess
+        assumeTrue("The bundled FFmpeg build does not provide libsvtav1", available)
+
+        val root = createTempDirectory("compact-av1-progress").toFile()
+        val source = File(root, "source.mkv")
+        val compact = File(root, "compact.mkv")
+        createSource(source)
+        val reported = mutableListOf<Double>()
+
+        transcoder.transcode(source, compact) { reported += it }
+
+        assertTrue(reported.size >= 2, "Progress should be reported more than once: $reported")
+        assertTrue(reported.all { it in 0.0..1.0 }, "Progress must stay within 0..1: $reported")
+        assertEquals(reported.sorted(), reported, "Progress must never go backwards")
+        assertTrue(reported.first() < 0.1, "Progress should start near zero: $reported")
+        assertEquals(1.0, reported.last(), "Progress must finish at exactly 1.0")
+        assertTrue(reported.dropLast(1).all { it < 1.0 }, "Only the final report may be 1.0: $reported")
+        assertTrue(compact.length() > 0L)
+    }
+
+    @Test
+    fun progressTrackerThrottlesCapsAtOneBeforeFinishAndIgnoresUnknownDuration() {
+        val reported = mutableListOf<Double>()
+        val progress = CompactProgress(10_000L) { reported += it }
+        progress.update(0L)
+        progress.update(10L) // 0.1%: below the 0.5% step
+        progress.update(100L) // 1%
+        progress.update(50L) // earlier timestamp: never goes backwards
+        progress.update(25_000L) // beyond the end: capped below 1.0 until finish()
+        assertEquals(listOf(0.0, 0.01, 0.999), reported)
+        progress.finish()
+        progress.finish()
+        assertEquals(listOf(0.0, 0.01, 0.999, 1.0), reported)
+
+        val unknown = mutableListOf<Double>()
+        val noDuration = CompactProgress(0L) { unknown += it }
+        noDuration.update(5_000L)
+        assertTrue(unknown.isEmpty(), "Without a duration only finish() reports")
+        noDuration.finish()
+        assertEquals(listOf(1.0), unknown)
     }
 
     @Test
