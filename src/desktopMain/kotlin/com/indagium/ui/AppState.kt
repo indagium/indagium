@@ -5219,8 +5219,13 @@ class AppState(
         } else {
             "Saving ZIP…"
         }
-        captureExportOwner = sessionId
-        captureExportSessionId = sessionId
+        // A tab opened from an archive exports THAT archive (its own extraction), like the range popover does. Looking its
+        // descriptor's session id up in the local capture roots fails on a recipient's machine, and on the sender's it would
+        // export the local original instead of what is open.
+        val importedSnapshot = tabId?.let { importedCaptureSnapshots[it] }
+        val ownerId = importedSnapshot?.session?.id ?: sessionId
+        captureExportOwner = ownerId
+        captureExportSessionId = ownerId
         captureExportResult = null
         captureExportError = null
         captureExportCancelled = false
@@ -5231,11 +5236,13 @@ class AppState(
                 // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
                 // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
                 // CaptureStrip.kt), not just the launcher's retained-sessions list.
-                val session = captureService.retainedSession(sessionId)
+                val session = importedSnapshot?.session ?: captureService.retainedSession(sessionId)
                 if (session == null) {
                     captureExportError = "This capture session is no longer on disk"
                 } else {
-                    val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
+                    val directory = effectiveCaptureZipDir(
+                        fallback = if (importedSnapshot != null) effectiveCaptureSnapshotsDir() else session.directory.parentFile,
+                    )
                     val filename = com.indagium.capture.renderCaptureFilename(
                         session.settings.filenameTemplate,
                         session.device,
@@ -5259,13 +5266,29 @@ class AppState(
                         // runInterruptible so cancelCaptureSnapshot() interrupts the blocking export
                         // (the exporter checks for interruption and removes its temp archive).
                         captureExportResult = runInterruptible {
-                            captureService.exportRetainedSession(
-                                sessionId,
-                                destination,
-                                notes = preparedNotes,
-                                format = format,
-                                onStatus = { captureExportBusyMessage = it },
-                            )
+                            if (importedSnapshot != null) {
+                                exportStoppedSnapshotSession(
+                                    tabId,
+                                    session,
+                                    CaptureExportRequest(
+                                        destination = destination,
+                                        range = com.indagium.capture.CaptureRange.ALL,
+                                        includeVideo = session.settings.recordVideo,
+                                        cutoffElapsedMs = session.elapsedMs,
+                                        format = format,
+                                    ),
+                                    preparedNotes,
+                                    onStatus = { captureExportBusyMessage = it },
+                                )
+                            } else {
+                                captureService.exportRetainedSession(
+                                    sessionId,
+                                    destination,
+                                    notes = preparedNotes,
+                                    format = format,
+                                    onStatus = { captureExportBusyMessage = it },
+                                )
+                            }
                         }
                     }
                 }
