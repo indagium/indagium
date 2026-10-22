@@ -81,7 +81,7 @@ internal enum class RecentKind {
     OTHER,
 }
 
-// "ind" is the legacy Compact extension (before .ind.zip, which already matches "zip").
+// "ind" is the Compact extension; the legacy ".ind.zip" name from an earlier build already matches "zip".
 private val RECENT_ARCHIVE_EXTENSIONS = setOf(
     "zip", "ind", "7z", "tar", "tgz", "gz", "bz2", "xz", "jar", "apk", "cbz",
 )

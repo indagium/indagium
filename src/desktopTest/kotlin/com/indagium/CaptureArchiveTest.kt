@@ -148,7 +148,7 @@ class CaptureArchiveTest {
                 ),
             ),
         )
-        val destination = File(root, "capture.ind.zip")
+        val destination = File(root, "capture.ind")
         val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
             staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
             CaptureVideoClip(start.coerceAtMost(end - 1), end, end - start)
@@ -214,7 +214,7 @@ class CaptureArchiveTest {
             assertEquals(storedLog.size.toLong(), log.size)
             assertEquals(ZipMethod.DEFLATED.code, zip.getEntry(CAPTURE_DESCRIPTOR_NAME).method)
             val courtesy = zip.getInputStream(zip.getEntry("captured_with_indagium.txt")).bufferedReader().readText()
-            assertTrue(courtesy.contains("Open this .ind.zip"))
+            assertTrue(courtesy.contains("Open this .ind"))
             assertTrue(courtesy.contains("zstd (ZIP method 93)"))
         }
         assertFalse(root.listFiles().orEmpty().any { it.name.contains("zip-compare") || it.name.contains(".tmp-") })
@@ -225,7 +225,7 @@ class CaptureArchiveTest {
         val root = createTempDirectory("capture-archive-ind-no-video").toFile()
         val session = session(root, recordVideo = false)
         writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
-        val destination = File(root, "no-video.ind.zip")
+        val destination = File(root, "no-video.ind")
         val transcoder = object : CaptureCompactVideoTranscoder {
             override fun ensureAvailable() = error("no video must not require an encoder")
 
@@ -264,7 +264,7 @@ class CaptureArchiveTest {
         writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
-        val destination = File(root, "not-smaller.ind.zip")
+        val destination = File(root, "not-smaller.ind")
         val stagedBytes = ByteArray(1024) { (it % 97).toByte() }
         val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
             staged.writeBytes(stagedBytes)
@@ -323,7 +323,7 @@ class CaptureArchiveTest {
 
         CaptureArchiveExporter(fakeVideo, compactVideoTranscoder = progressing).export(
             session,
-            CaptureExportRequest(File(root, "progress.ind.zip"), cutoffElapsedMs = session.elapsedMs, format = CaptureExportFormat.COMPACT),
+            CaptureExportRequest(File(root, "progress.ind"), cutoffElapsedMs = session.elapsedMs, format = CaptureExportFormat.COMPACT),
             onStatus = { statuses += it },
         )
 
@@ -365,7 +365,7 @@ class CaptureArchiveTest {
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
         val stagedBytes = ByteArray(512) { (it % 97).toByte() }
-        val destination = File(root, "existing-av1.ind.zip")
+        val destination = File(root, "existing-av1.ind")
         val statuses = mutableListOf<String>()
         val videoExporter = CaptureVideoExporter { _, staged, start, end ->
             staged.writeBytes(stagedBytes)
@@ -415,7 +415,7 @@ class CaptureArchiveTest {
 
             override fun transcode(source: File, destination: File) = error("unavailable encoder must not transcode")
         }
-        val destination = File(root, "unavailable.ind.zip")
+        val destination = File(root, "unavailable.ind")
 
         val result = CaptureArchiveExporter(
             videoExporter = CaptureVideoExporter { _, staged, start, end ->
@@ -446,7 +446,7 @@ class CaptureArchiveTest {
         val root = createTempDirectory("capture-archive-ind-no-zstd").toFile()
         val session = session(root)
         writeCaptureInput(session, List(200) { RawRow("01-01 10:00:00.000  1  1 I Tag: repeated row\n", 1_000L + it, it + 1) })
-        val destination = File(root, "no-zstd.ind.zip")
+        val destination = File(root, "no-zstd.ind")
 
         val result = CaptureArchiveExporter(zstdAvailable = { false }).export(
             session,
@@ -490,7 +490,7 @@ class CaptureArchiveTest {
             session,
             List(50) { RawRow("01-01 10:00:%02d.000  1  1 I Tag: repeated row $it\n".format(it), 1_000L * (it + 1), it + 1) },
         )
-        val compact = File(root, "source.ind.zip")
+        val compact = File(root, "source.ind")
         CaptureArchiveExporter().export(
             session,
             CaptureExportRequest(compact, cutoffElapsedMs = session.elapsedMs, includeVideo = false, format = CaptureExportFormat.COMPACT),
@@ -514,16 +514,16 @@ class CaptureArchiveTest {
     }
 
     @Test
-    fun legacyIndNamedCompactArchiveStillOpens() {
-        val root = createTempDirectory("capture-archive-legacy-ind").toFile()
+    fun legacyIndZipNamedCompactArchiveStillOpens() {
+        val root = createTempDirectory("capture-archive-legacy-ind-zip").toFile()
         val session = session(root)
         writeCaptureInput(session, listOf(RawRow("legacy row\n", 1_000, 1)))
-        val compact = File(root, "capture.ind.zip")
+        val compact = File(root, "capture.ind")
         CaptureArchiveExporter().export(
             session,
             CaptureExportRequest(compact, cutoffElapsedMs = session.elapsedMs, includeVideo = false, format = CaptureExportFormat.COMPACT),
         )
-        val legacy = File(root, "capture.ind")
+        val legacy = File(root, "capture.ind.zip")
         assertTrue(compact.renameTo(legacy))
 
         assertTrue(CaptureArchiveReader.isCaptureArchive(legacy))
@@ -546,7 +546,7 @@ class CaptureArchiveTest {
         ))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
-        val destination = File(root, "existing.ind.zip").apply { writeBytes("previous archive".toByteArray()) }
+        val destination = File(root, "existing.ind").apply { writeBytes("previous archive".toByteArray()) }
         val priorBytes = destination.readBytes()
         val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
             staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
@@ -590,7 +590,7 @@ class CaptureArchiveTest {
         writeCaptureInput(session, listOf(RawRow("row\n", 400_000, 1)))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
-        val destination = File(root, "cancelled.ind.zip")
+        val destination = File(root, "cancelled.ind")
         val fakeVideo = CaptureVideoExporter { _, staged, start, end ->
             staged.writeBytes(ByteArray(128 * 1024) { (it % 127).toByte() })
             CaptureVideoClip(start, end, end - start)

@@ -259,7 +259,7 @@ internal fun FileView(
     // A ZIP opened as a log view is an immutable archive surface even if its source happens to
     // still exist in the retained-session store. Keep the prominent stopped-capture strip for a
     // finalized local recording, but route archive cuts through the ordinary Export menu.
-    // ".ind" is the legacy Compact extension; current Compact files are ".ind.zip" and match ".zip".
+    // ".ind" is the Compact extension; ".ind.zip" is a legacy Compact name from an earlier build and matches ".zip".
     val archiveBackedCapture = state.isImportedCaptureSnapshot(tab.id) ||
         tab.captureArchivePath?.let { path ->
             path.endsWith(".zip", ignoreCase = true) || path.endsWith(".ind", ignoreCase = true)

@@ -618,7 +618,7 @@ internal fun captureArchiveName(
     format: CaptureExportFormat = CaptureExportFormat.ZIP,
 ): String? {
     val trimmed = input.trim()
-    // Longest suffix first so "x.ind.zip" loses both parts; ".ind" is the legacy Compact extension.
+    // Longest suffix first so "x.ind.zip" (a legacy Compact name) loses both parts; ".ind" is the current Compact extension.
     val stem = sequenceOf(".ind.zip", ".zip", ".ind")
         .firstOrNull { trimmed.endsWith(it, ignoreCase = true) }
         ?.let { trimmed.dropLast(it.length) }
@@ -626,6 +626,13 @@ internal fun captureArchiveName(
     if (stem.isBlank() || stem == "." || stem == "..") return null
     if (stem.contains('/') || stem.contains('\\')) return null
     return "$stem.${format.extension}"
+}
+
+/** Tab title for an opened capture archive: the file name without `.ind`, `.zip` or the legacy `.ind.zip`. */
+internal fun captureArchiveTitle(file: File): String {
+    val name = file.name
+    val suffix = sequenceOf(".ind.zip", ".zip", ".ind").firstOrNull { name.endsWith(it, ignoreCase = true) }
+    return suffix?.let { name.dropLast(it.length) }?.takeIf { it.isNotBlank() } ?: file.nameWithoutExtension
 }
 
 internal fun parseCaptureSnapshotMinutes(input: String): Int =
@@ -1151,7 +1158,7 @@ private fun CaptureStoppedStrip(
                     label = "Save snapshot ▾",
                     icon = Icons.Outlined.Save,
                     active = true,
-                    tooltip = "Choose a time range and export ZIP or Indagium Compact (.ind.zip)",
+                    tooltip = "Choose a time range and export ZIP or Indagium Compact (.ind)",
                     enabled = session != null,
                     modifier = Modifier.height(30.dp),
                     contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
@@ -1198,7 +1205,7 @@ private fun CaptureStoppedStrip(
             ToolbarBtn(
                 label = if (exportStatus.busy) "Saving…" else "Save Compact",
                 icon = Icons.Outlined.Save,
-                tooltip = "Save the complete capture as Indagium Compact (.ind.zip, zstd log + AV1)",
+                tooltip = "Save the complete capture as Indagium Compact (.ind, zstd log + AV1)",
                 enabled = session != null && !state.captureExportBusy,
                 modifier = Modifier.height(30.dp),
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
@@ -1849,12 +1856,12 @@ internal fun CaptureSnapshotPopover(
                             onReturnFocus()
                         },
                     ) {
-                        AppText("Indagium Compact (.ind.zip) · zstd log + AV1", color = colors.ts, fontSize = 11.sp)
+                        AppText("Indagium Compact (.ind) · zstd log + AV1", color = colors.ts, fontSize = 11.sp)
                     }
                     if (exportFormat == CaptureExportFormat.COMPACT) {
                         AppText(
                             "Smaller log (zstd) and AV1 video when it is smaller; otherwise the original video is kept. " +
-                                "Existing AV1 is copied. Some unzip tools cannot extract the log; open it in Indagium.",
+                                "Existing AV1 is copied. Opens in Indagium; use ZIP for other tools.",
                             color = colors.td,
                             fontSize = 10.sp,
                         )
