@@ -19,6 +19,7 @@ import com.indagium.ui.App
 import com.indagium.ui.AppState
 import com.indagium.ui.DesktopStorage
 import com.indagium.ui.applyLinuxFilePickerMode
+import com.indagium.ui.configureZstdTempFolder
 import com.indagium.ui.horizontalScrollDelta
 import com.indagium.ui.isLinuxOs
 import com.indagium.ui.isMacOs
@@ -130,6 +131,11 @@ fun main(args: Array<String>) {
     // files through Desktop.setOpenFileHandler below, so there is nothing for this to do there.
     val singleInstance: SingleInstanceHandle? =
         if (isMacOs) null else (SingleInstance.acquire(DesktopStorage.appDataDir(), args) ?: return)
+
+    // zstd-jni unpacks its native library on first use (reading Compact/ZIP captures). Give it an
+    // app-owned folder: on Windows the loaded DLL can never be deleted from a shared temp dir, and a
+    // noexec /tmp on Linux blocks the load. Must precede anything that can touch zstd, i.e. AppState.
+    configureZstdTempFolder(File(DesktopStorage.appDataDir(), "native-cache/zstd"))
 
     // Packaged releases default to Free; development runs to Unlimited. Property/env overrides
     // select an explicit edition. Resolve once, outside application{}.
