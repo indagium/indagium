@@ -1324,6 +1324,16 @@ boundaries are tracked separately. To cut an earlier part again, choose **Around
 rewritten. Cancelled or failed exports do not advance the boundary, and exporting an earlier
 interval never moves it backward.
 
+### Extract an opened archive
+
+To get the contents of a `.zip` or `.ind` out as plain files, choose **Export → Export capture range…** and pick an option under
+**Extract from this archive**: **All files** (the whole archive as a folder that Indagium can open again), **Log only** (a
+`.log` text file) or **Video only** (the video, as stored; disabled when the archive has none). Extract always copies the whole
+archive, so the range controls are off. The name defaults to the archive's file name. An existing file is replaced only after you
+confirm; an existing folder is never replaced, so choose another name. The notes in the folder are the archive's own, not edits
+made in your tab; use **Save ZIP** to share edited notes. A `.ind` stores its video as AV1, which plays in VLC and browsers but
+may not in QuickTime.
+
 ### What is saved
 
 The portable capture ZIP uses archive version 5: `capture.indagium.json`,

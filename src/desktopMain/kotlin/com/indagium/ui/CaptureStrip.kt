@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -90,6 +91,8 @@ import com.indagium.capture.CaptureExportFormat
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureExtractKind
+import com.indagium.capture.CaptureExtractPlan
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
@@ -98,6 +101,7 @@ import com.indagium.capture.CaptureStatus
 import com.indagium.capture.MIRROR_AUDIO_FALLBACK_DIAGNOSTIC
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
+import com.indagium.capture.captureExtractTargetName
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.renderCaptureFilename
@@ -107,7 +111,9 @@ import com.indagium.model.LogTab
 import com.indagium.update.revealInFileManager
 import com.indagium.utils.HeapPressure
 import com.indagium.utils.MemoryShortfall
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -1353,7 +1359,8 @@ internal fun CaptureExportNotice(
             )
         } else if (result != null) {
             AppText(
-                "Saved ${result.file.name}", color = colors.ac, fontSize = 10.sp,
+                if (result.extracted) "Extracted to ${result.file.name}" else "Saved ${result.file.name}",
+                color = colors.ac, fontSize = 10.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
             )
             AccentLink("Open folder", { revealInFileManager(result.file); onReclaimFocus() })
@@ -1575,7 +1582,12 @@ internal fun CaptureSnapshotPopover(
     var playheadBeforeMinutesText by remember(tab.id) { mutableStateOf("5") }
     var playheadAfterMinutesText by remember(tab.id) { mutableStateOf("5") }
     var includeVideo by remember(tab.id, recordVideoConfigured) { mutableStateOf(canIncludeVideo) }
-    var exportFormat by remember(tab.id) { mutableStateOf(CaptureExportFormat.ZIP) }
+    // The Format section's choice: an archive format, or (only for a tab opened from an archive) a plain-file extraction.
+    var output by remember(tab.id) { mutableStateOf<SnapshotOutput>(SnapshotOutput.Archive(CaptureExportFormat.ZIP)) }
+    val exportFormat = (output as? SnapshotOutput.Archive)?.format ?: CaptureExportFormat.ZIP
+    val extractSource = remember(state, tab.id) { state.captureExtractSourceFor(tab.id) }
+    val extractKind = (output as? SnapshotOutput.Extract)?.kind?.takeIf { extractSource != null }
+    val extracting = extractKind != null
     var overwriteConfirmed by remember(tab.id) { mutableStateOf(false) }
     val customMinutes = parseCaptureSnapshotMinutes(customMinutesText)
     val range = when (rangeChoice) {
@@ -1618,10 +1630,13 @@ internal fun CaptureSnapshotPopover(
     var basename by remember(tab.id, defaultFilename) {
         mutableStateOf(defaultFilename.removeSuffix(".zip"))
     }
+    val extractVideoExtension = captureExtractVideoExtension(extractSource)
+    val extractSuffix = extractKind?.let { captureExtractSuffix(it, extractVideoExtension) }.orEmpty()
+    var extractName by remember(tab.id) { mutableStateOf(extractSource?.let { captureExtractDefaultName(it.archive) }.orEmpty()) }
     val destinationDirectory = state.effectiveCaptureSnapshotsDir()
-    val filename = captureArchiveName(basename, exportFormat)
+    val filename = if (extracting) captureExtractTargetName(extractName, extractSuffix) else captureArchiveName(basename, exportFormat)
     val destination = filename?.let { File(destinationDirectory, it) }
-        ?: File(destinationDirectory, "capture.${exportFormat.extension}")
+        ?: File(destinationDirectory, if (extracting) "extracted" else "capture.${exportFormat.extension}")
     val sinceSaveCutoffMs = session?.let { current ->
         captureSnapshotCutoffForChoice(current, SnapshotRangeChoice.SINCE_SAVE, playheadElapsedMs)
     } ?: 0L
@@ -1673,11 +1688,36 @@ internal fun CaptureSnapshotPopover(
     }
     val baseEnabled = rangeValid && !state.captureExportBusy && filename != null
     val enabled = baseEnabled && sinceSaveHasContent
+    val extractEnabled = extractKind != null && captureExtractEnabled(
+        kind = extractKind,
+        targetNameValid = filename != null,
+        videoAvailable = captureExtractVideoAvailable(extractSource),
+        destinationExists = destination.exists(),
+        overwriteConfirmed = overwriteConfirmed,
+        busy = state.captureExportBusy,
+    )
+    // Off the EDT: file sizes of the cache files and the codec probe of the video. Neither runs the sparse preview scan.
+    val extractPlan by produceState<Pair<CaptureExtractPlan?, String?>?>(null, tab.id, extractKind) {
+        value = null
+        val kind = extractKind ?: return@produceState
+        value = withContext(Dispatchers.IO) {
+            runCatching { state.captureExtractPlanFor(tab.id, kind) }
+                .fold({ it to null }, { null to (it.message ?: "Cannot read the opened archive") })
+        }
+    }
+    val extractAv1 by produceState<Boolean?>(null, tab.id, extractKind) {
+        value = null
+        if (extractKind == null || extractKind == CaptureExtractKind.LOG_ONLY || !captureExtractVideoAvailable(extractSource)) {
+            return@produceState
+        }
+        value = withContext(Dispatchers.IO) { state.captureExtractVideoIsAv1(tab.id) }
+    }
     LaunchedEffect(
         rangeChoice, customMinutes, previewRangeControls, includeVideo, selection, basename, exportFormat,
-        rangeValid, state.captureExportBusy,
+        rangeValid, state.captureExportBusy, extracting,
     ) {
-        if (!rangeValid || filename == null || latestRequest == null) {
+        // Extract copies the whole archive from the files on disk: no sparse preview scan runs for it.
+        if (extracting || !rangeValid || filename == null || latestRequest == null) {
             state.invalidateCaptureSnapshotPreview(tab.id)
             return@LaunchedEffect
         }
@@ -1734,13 +1774,14 @@ internal fun CaptureSnapshotPopover(
                     // which was the semantic bug here even though it happened to render one selection
                     // at a time.
                     SnapshotRangeChoice.entries.forEach { choice ->
-                        val choiceEnabled = when (choice) {
+                        val choiceEnabled = !extracting && when (choice) {
                             SnapshotRangeChoice.SELECTION -> selection != null
                             SnapshotRangeChoice.SINCE_SAVE -> sinceSaveEnabled
                             else -> true
                         }
                         RadioRow(
-                            selected = rangeChoice == choice,
+                            // Extract always copies everything: show All, greyed out, whatever was picked before.
+                            selected = if (extracting) choice == SnapshotRangeChoice.ALL else rangeChoice == choice,
                             onSelect = {
                                 rangeChoice = choice
                                 if (choice == SnapshotRangeChoice.EXPLICIT) {
@@ -1763,12 +1804,12 @@ internal fun CaptureSnapshotPopover(
                             "after ${formatCaptureElapsed(session?.effectiveSnapshotCheckpointMs ?: 0L)}."
                     }
                     AppText(
-                        displayedSinceSaveHint,
-                        color = if (sinceSaveEnabled) colors.td else colors.ts,
+                        if (extracting) CAPTURE_EXTRACT_RANGE_HINT else displayedSinceSaveHint,
+                        color = if (sinceSaveEnabled || extracting) colors.td else colors.ts,
                         fontSize = 10.sp,
                     )
                 }
-                if (rangeChoice == SnapshotRangeChoice.LAST_MINUTES) {
+                if (!extracting && rangeChoice == SnapshotRangeChoice.LAST_MINUTES) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         AppText("Minutes", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                         InlineField(
@@ -1779,7 +1820,7 @@ internal fun CaptureSnapshotPopover(
                         if (customMinutes == 0) AppText("Enter a positive number", color = DANGER_RED, fontSize = 10.sp)
                     }
                 }
-                if (rangeChoice in setOf(
+                if (!extracting && rangeChoice in setOf(
                         SnapshotRangeChoice.AROUND_PLAYHEAD,
                         SnapshotRangeChoice.START_TO_PLAYHEAD,
                         SnapshotRangeChoice.EXPLICIT,
@@ -1843,22 +1884,26 @@ internal fun CaptureSnapshotPopover(
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     AppText("Format", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                     RadioRow(
-                        selected = exportFormat == CaptureExportFormat.ZIP,
-                        onSelect = { exportFormat = CaptureExportFormat.ZIP; overwriteConfirmed = false; onReturnFocus() },
+                        selected = !extracting && exportFormat == CaptureExportFormat.ZIP,
+                        onSelect = {
+                            output = SnapshotOutput.Archive(CaptureExportFormat.ZIP)
+                            overwriteConfirmed = false
+                            onReturnFocus()
+                        },
                     ) {
                         AppText("ZIP · original video", color = colors.ts, fontSize = 11.sp)
                     }
                     RadioRow(
-                        selected = exportFormat == CaptureExportFormat.COMPACT,
+                        selected = !extracting && exportFormat == CaptureExportFormat.COMPACT,
                         onSelect = {
-                            exportFormat = CaptureExportFormat.COMPACT
+                            output = SnapshotOutput.Archive(CaptureExportFormat.COMPACT)
                             overwriteConfirmed = false
                             onReturnFocus()
                         },
                     ) {
                         AppText("Indagium Compact (.ind) · zstd log + AV1", color = colors.ts, fontSize = 11.sp)
                     }
-                    if (exportFormat == CaptureExportFormat.COMPACT) {
+                    if (!extracting && exportFormat == CaptureExportFormat.COMPACT) {
                         AppText(
                             "Smaller log (zstd) and AV1 video when it is smaller; otherwise the original video is kept. " +
                                 "Existing AV1 is copied. AV1 playback uses software decoding. " +
@@ -1867,17 +1912,74 @@ internal fun CaptureSnapshotPopover(
                             fontSize = 10.sp,
                         )
                     }
+                    if (extractSource != null) {
+                        val videoAvailable = captureExtractVideoAvailable(extractSource)
+                        AppText(
+                            "Extract from this archive",
+                            color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 6.dp),
+                        )
+                        listOf(
+                            CaptureExtractKind.ALL_FILES to "All files · folder",
+                            CaptureExtractKind.LOG_ONLY to "Log only · .log (plain text)",
+                            CaptureExtractKind.VIDEO_ONLY to "Video only · .${extractVideoExtension ?: "mkv"}",
+                        ).forEach { (kind, label) ->
+                            val kindEnabled = kind != CaptureExtractKind.VIDEO_ONLY || videoAvailable
+                            RadioRow(
+                                selected = extractKind == kind,
+                                onSelect = {
+                                    output = SnapshotOutput.Extract(kind)
+                                    overwriteConfirmed = false
+                                    onReturnFocus()
+                                },
+                                enabled = kindEnabled,
+                            ) {
+                                AppText(label, color = if (kindEnabled) colors.ts else colors.td, fontSize = 11.sp)
+                            }
+                        }
+                        if (!videoAvailable) AppText(CAPTURE_EXTRACT_NO_VIDEO_HINT, color = colors.td, fontSize = 10.sp)
+                        if (extractKind == CaptureExtractKind.ALL_FILES) {
+                            AppText(CAPTURE_EXTRACT_NOTES_HINT, color = colors.td, fontSize = 10.sp)
+                        }
+                        if (extractKind != null && captureExtractShowsAv1Note(
+                                extractKind, videoAvailable, captureExtractIsCompactArchive(extractSource.archive), extractAv1,
+                            )
+                        ) {
+                            AppText(CAPTURE_EXTRACT_AV1_NOTE, color = colors.td, fontSize = 10.sp)
+                        }
+                    }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppText("Archive name", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    InlineField(
-                        value = basename,
-                        onValue = { basename = it.take(180) },
-                        modifier = Modifier.fillMaxWidth(),
+                    AppText(
+                        if (extractKind != null) captureExtractNameLabel(extractKind) else "Archive name",
+                        color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
                     )
-                    if (filename == null) AppText("Enter a valid archive basename", color = DANGER_RED, fontSize = 10.sp)
+                    if (extractKind != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            InlineField(
+                                value = extractName,
+                                onValue = { extractName = it.take(180); overwriteConfirmed = false },
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (extractSuffix.isNotEmpty()) AppText(extractSuffix, color = colors.td, fontSize = 11.sp)
+                        }
+                    } else {
+                        InlineField(
+                            value = basename,
+                            onValue = { basename = it.take(180) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    if (filename == null) {
+                        AppText(
+                            if (extractKind == CaptureExtractKind.ALL_FILES) "Enter a valid folder name"
+                            else if (extractKind != null) "Enter a valid file name"
+                            else "Enter a valid archive basename",
+                            color = DANGER_RED, fontSize = 10.sp,
+                        )
+                    }
                 }
-                CheckRow(
+                if (!extracting) CheckRow(
                     includeVideo,
                     {
                         if (canIncludeVideo) includeVideo = !includeVideo
@@ -1891,14 +1993,14 @@ internal fun CaptureSnapshotPopover(
                         fontSize = 11.sp,
                     )
                 }
-                if (recordVideoConfigured == false) {
+                if (!extracting && recordVideoConfigured == false) {
                     AppText(
                         "Video recording was disabled for this capture. This archive will contain logs only.",
                         color = colors.td,
                         fontSize = 10.sp,
                     )
                 }
-                if (includeVideo && canIncludeVideo && captureVideoUnavailableForRange(session)) {
+                if (!extracting && includeVideo && canIncludeVideo && captureVideoUnavailableForRange(session)) {
                     AppText(
                         "Video is unavailable for the current range; only new log rows or device-availability records can be saved.",
                         color = colors.ts,
@@ -1922,19 +2024,31 @@ internal fun CaptureSnapshotPopover(
                         enabled = !state.captureExportBusy,
                     )
                 }
-                if (rangeChoice == SnapshotRangeChoice.SELECTION && selection != null) {
+                if (!extracting && rangeChoice == SnapshotRangeChoice.SELECTION && selection != null) {
                     AppText("Rows ${selection.first}–${selection.last}; separators between those rows are included.", color = colors.td, fontSize = 10.sp)
                 }
                 // Coverage lines are always laid out (placeholder until the async preview lands), so the
                 // content-sized popover doesn't grow right after opening; the video line exists exactly
                 // when video is included, whatever its outcome.
-                AppText(
-                    "Preview · ${captureLogCoverageLine(preview)}",
-                    color = if (preview == null) colors.td else colors.ts,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-                if (includeVideo) {
+                if (extracting) {
+                    val (plan, planError) = extractPlan ?: (null to null)
+                    when {
+                        plan != null -> AppText(
+                            "Preview · ${captureExtractSizeLine(plan)}",
+                            color = colors.ts, fontSize = 10.sp, fontFamily = FontFamily.Monospace, maxLines = 2,
+                        )
+                        planError != null -> AppText("Cannot extract: $planError", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
+                        else -> AppText("Preview · measuring…", color = colors.td, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                    }
+                } else {
+                    AppText(
+                        "Preview · ${captureLogCoverageLine(preview)}",
+                        color = if (preview == null) colors.td else colors.ts,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+                if (!extracting && includeVideo) {
                     AppText(
                         "Preview · ${captureVideoCoverageLine(preview)}",
                         color = if (preview == null) colors.td else colors.ts,
@@ -1942,12 +2056,17 @@ internal fun CaptureSnapshotPopover(
                         maxLines = 2,
                     )
                 }
-                if (preview == null && previewError != null) {
+                if (!extracting && preview == null && previewError != null) {
                     AppText("Preview unavailable: $previewError", color = DANGER_RED, fontSize = 10.sp, maxLines = 2)
                 }
-                if (destination.exists() && !overwriteConfirmed) {
+                if (extractKind == CaptureExtractKind.ALL_FILES) {
+                    // A folder is never replaced or merged: the name has to change.
+                    if (destination.exists()) {
+                        AppText("A folder with this name already exists. Choose another name.", color = DANGER_RED, fontSize = 10.sp)
+                    }
+                } else if (filename != null && destination.exists() && !overwriteConfirmed) {
                     AppText(
-                        "An archive with this name already exists. Confirm overwrite to continue.",
+                        "${if (extracting) "A file" else "An archive"} with this name already exists. Confirm overwrite to continue.",
                         color = DANGER_RED,
                         fontSize = 10.sp,
                     )
@@ -1992,23 +2111,30 @@ internal fun CaptureSnapshotPopover(
                     DialogActionButton("Cancel", active = false) {
                         onDismiss()
                     }
-                    // "Save ZIP" is the primary action (active = true, the accent-filled style);
-                    // "Save + open" is the secondary variant of the same action, matching
-                    // DialogActionButton's active/inactive convention elsewhere (e.g.
-                    // SplitPromptDialog's "Split"/"Do Not Split").
-                    DialogActionButton(
-                        if (exportFormat == CaptureExportFormat.COMPACT) "Save Compact" else "Save ZIP",
-                        active = true,
-                        enabled = enabled,
-                    ) {
-                        request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = false) }
-                        onReturnFocus()
-                    }
-                    DialogActionButton("Save + open", active = false, enabled = enabled) {
-                        request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = true) }
-                        // Close the editor after starting the job; the source-matched status
-                        // remains visible outside it and AppState owns the open-on-success intent.
-                        onDismiss()
+                    if (extractKind != null) {
+                        DialogActionButton("Extract", active = true, enabled = extractEnabled) {
+                            state.extractImportedCapture(tab.id, extractKind, destination, overwrite = overwriteConfirmed)
+                            onReturnFocus()
+                        }
+                    } else {
+                        // "Save ZIP" is the primary action (active = true, the accent-filled style);
+                        // "Save + open" is the secondary variant of the same action, matching
+                        // DialogActionButton's active/inactive convention elsewhere (e.g.
+                        // SplitPromptDialog's "Split"/"Do Not Split").
+                        DialogActionButton(
+                            if (exportFormat == CaptureExportFormat.COMPACT) "Save Compact" else "Save ZIP",
+                            active = true,
+                            enabled = enabled,
+                        ) {
+                            request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = false) }
+                            onReturnFocus()
+                        }
+                        DialogActionButton("Save + open", active = false, enabled = enabled) {
+                            request?.let { state.exportCaptureSnapshot(tab.id, it, openAfterSuccess = true) }
+                            // Close the editor after starting the job; the source-matched status
+                            // remains visible outside it and AppState owns the open-on-success intent.
+                            onDismiss()
+                        }
                     }
                 }
             }

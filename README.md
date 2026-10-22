@@ -102,6 +102,8 @@ The same range editor is available while recording, after Stop, and through **Ex
 capture range…** after reopening a capture. Opened archives show analysis controls rather than a
 recording's Save snapshot button. Closing the editor leaves an export running; **Cancel export**
 stops it, and **Save + open** still opens the completed ZIP if the editor was dismissed.
+For an opened archive, the same editor can also **extract** its contents without Indagium: the whole
+archive as a folder, only the log as plain text, or only the video.
 Choose all history, the last N minutes, rows since the previous successful save, the current
 selection, a window around the video playhead, or explicit start/end times. The destination and
 generated filename are shown before export. Cancellation or failure leaves a live capture running
