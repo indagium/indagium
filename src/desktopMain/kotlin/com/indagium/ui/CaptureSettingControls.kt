@@ -156,7 +156,7 @@ private fun CaptureVideoCodecControl(
             captureVideoCodecSupportText(settings.videoCodec, probeState, deviceSerial),
             color = if (captureVideoCodecUsesFallback(settings.videoCodec, probeState)) DANGER_RED else colors.td,
             fontSize = 10.sp,
-            maxLines = 3,
+            maxLines = 4,
             modifier = Modifier.weight(1f),
         )
         if (onRefresh != null && deviceSerial != null && settings.videoCodec != CaptureVideoCodec.H264) {
@@ -168,6 +168,17 @@ private fun CaptureVideoCodecControl(
             )
         }
     }
+}
+
+/**
+ * What recording in [codec] costs on the host once the device really uses it (null for H.264, which
+ * keeps the native/GPU mirror): H.265/AV1 go through the portable decoder, and AV1 decoding is
+ * software-only. Only shown where the codec is in effect, never for an H.264 fallback.
+ */
+internal fun captureVideoCodecHostNote(codec: CaptureVideoCodec): String? = when (codec) {
+    CaptureVideoCodec.H264 -> null
+    CaptureVideoCodec.H265 -> "The mirror uses the portable decoder, not the native GPU mirror."
+    CaptureVideoCodec.AV1 -> "The mirror uses the portable decoder, not the native GPU mirror; AV1 decoding is software-only."
 }
 
 internal fun captureVideoCodecSupportText(
@@ -183,7 +194,10 @@ internal fun captureVideoCodecSupportText(
             val entries = state.capabilities.encoders(codec)
             val hardware = state.capabilities.preferredHardwareEncoder(codec)
             when {
-                hardware != null -> "Hardware encoder listed: ${hardware.name}. Capture start verifies the requested size."
+                hardware != null -> listOfNotNull(
+                    "Hardware encoder listed: ${hardware.name}. Capture start verifies the requested size.",
+                    captureVideoCodecHostNote(codec),
+                ).joinToString(" ")
                 entries.isEmpty() -> "No ${codec.label} encoder listed; capture will use H.264."
                 entries.all { it.acceleration == CaptureEncoderAcceleration.SOFTWARE } ->
                     "Software-only ${codec.label} support; capture will use H.264."

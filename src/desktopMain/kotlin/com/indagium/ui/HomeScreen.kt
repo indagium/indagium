@@ -843,7 +843,7 @@ private fun RecentGridCard(
         },
     ) {
         Column(Modifier.fillMaxSize().padding(padding)) {
-            RecentTypeBadge(entry.kind)
+            RecentTypeBadge(entry)
             // Fills the space between the badge and the name/meta block below with a centered
             // pictogram (item 2) instead of leaving it empty.
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -919,7 +919,7 @@ private fun RecentListRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            RecentTypeBadge(entry.kind)
+            RecentTypeBadge(entry)
             Icon(
                 recentKindIcon(entry.kind),
                 contentDescription = null,
@@ -949,15 +949,18 @@ private fun RecentListRow(
     }
 }
 
+/** The badge text of a Recent-files entry: every archive keeps "ZIP" as before; only a Compact `.ind` file says "IND". */
+internal fun recentBadgeLabel(entry: RecentEntry): String = when (entry.kind) {
+    RecentKind.LOG -> "LOG"
+    RecentKind.ARCHIVE -> if (entry.name.endsWith(".ind", ignoreCase = true)) "IND" else "ZIP"
+    RecentKind.NOTES -> "NOTES"
+    RecentKind.OTHER -> "FILE"
+}
+
 @Composable
-private fun RecentTypeBadge(kind: RecentKind) {
+private fun RecentTypeBadge(entry: RecentEntry) {
     val tc = tc()
-    val label = when (kind) {
-        RecentKind.LOG -> "LOG"
-        RecentKind.ARCHIVE -> "ARCHIVE"
-        RecentKind.NOTES -> "NOTES"
-        RecentKind.OTHER -> "FILE"
-    }
+    val label = recentBadgeLabel(entry)
     Box(Modifier.background(tc.hv, RoundedCornerShape(50)).padding(horizontal = 6.dp, vertical = 2.dp)) {
         AppText(label, color = tc.ts, fontSize = 9.sp, fontWeight = FontWeight.Medium)
     }

@@ -28,6 +28,19 @@ class HomeScreenTest {
         assertEquals(RecentKind.OTHER, recentKindForName("capture.indagium.json"))
     }
 
+    @Test
+    fun recentBadgeKeepsZipForEveryArchiveAndSaysIndOnlyForCompactFiles() {
+        fun label(name: String) = recentBadgeLabel(entry("/x/$name", kind = recentKindForName(name)))
+        assertEquals("ZIP", label("bugreport.zip"))
+        assertEquals("ZIP", label("logs.tar.gz"))
+        assertEquals("ZIP", label("legacy.ind.zip"))
+        assertEquals("IND", label("capture.ind"))
+        assertEquals("IND", label("capture.IND"))
+        assertEquals("LOG", label("logcat.log"))
+        assertEquals("NOTES", label("analysis.ann"))
+        assertEquals("FILE", label("readme"))
+    }
+
     private fun entry(
         path: String,
         name: String = File(path).name,

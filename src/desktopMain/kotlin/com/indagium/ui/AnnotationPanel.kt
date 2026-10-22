@@ -2513,20 +2513,32 @@ private fun rememberAnnotationLogLineContext(
 internal fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
     if (text.isBlank() && numberPrefix == null) return
     val content: @Composable () -> Unit = {
-        // immediate = true: parse during composition. A tab switch disposes this panel, so every
+        // Parse during composition (immediate = true). A tab switch disposes this panel, so every
         // visit is a first composition; the async default rendered zero-height text on frame one,
         // and the real height arriving a frame later made every following block card glide down.
-        val markdownState = rememberMarkdownState(
-            content = annotationMarkdownRenderSource(text).ifBlank { " " },
-            immediate = true,
-        )
-        Markdown(
-            markdownState,
-            colors = annotationMarkdownColors(tc),
-            typography = annotationMarkdownTypography(tc),
-            annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        // The parse result is cached per render source, so a revisit with unchanged text renders the
+        // cached tree synchronously (same first-frame height) without parsing it again.
+        val renderSource = annotationMarkdownRenderSource(text).ifBlank { " " }
+        val cached = remember(renderSource) { ANNOTATION_MARKDOWN_CACHE.get(renderSource) }
+        if (cached != null) {
+            Markdown(
+                cached,
+                colors = annotationMarkdownColors(tc),
+                typography = annotationMarkdownTypography(tc),
+                annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else {
+            val markdownState = rememberMarkdownState(content = renderSource, immediate = true)
+            remember(renderSource) { ANNOTATION_MARKDOWN_CACHE.put(renderSource, markdownState.state.value) }
+            Markdown(
+                markdownState,
+                colors = annotationMarkdownColors(tc),
+                typography = annotationMarkdownTypography(tc),
+                annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
     if (numberPrefix == null) {
         content()

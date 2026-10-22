@@ -1861,7 +1861,8 @@ internal fun CaptureSnapshotPopover(
                     if (exportFormat == CaptureExportFormat.COMPACT) {
                         AppText(
                             "Smaller log (zstd) and AV1 video when it is smaller; otherwise the original video is kept. " +
-                                "Existing AV1 is copied. Opens in Indagium; use ZIP for other tools.",
+                                "Existing AV1 is copied. AV1 playback uses software decoding. " +
+                                "Opens in Indagium; use ZIP for other tools.",
                             color = colors.td,
                             fontSize = 10.sp,
                         )
