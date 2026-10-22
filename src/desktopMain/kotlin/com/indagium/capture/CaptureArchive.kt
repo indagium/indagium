@@ -1198,8 +1198,11 @@ class CaptureArchiveExporter(
                 return CaptureExportResult(
                     file = destination,
                     logCoveredEndMs = staged.lastElapsedMs ?: selectedEndMs,
-                    videoCoveredEndMs = descriptor.videoEndMs,
-                    videoActualStartMs = descriptor.videoStartMs,
+                    // The descriptor's video times sit on the archive's absolute time base (they include the
+                    // source session's timelineBaseElapsedMs), but the result feeds the source session's
+                    // local Since-last-save cursors, like logCoveredEndMs: report them session-local.
+                    videoCoveredEndMs = descriptor.videoEndMs?.let { Math.subtractExact(it, sourceMetadata.timelineBaseElapsedMs) },
+                    videoActualStartMs = descriptor.videoStartMs?.let { Math.subtractExact(it, sourceMetadata.timelineBaseElapsedMs) },
                     message = buildString {
                         append(
                             if (compactChoice != null) {
