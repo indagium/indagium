@@ -580,6 +580,17 @@ internal fun suiteLastRun(loaded: Boolean, latestFinished: TestRun?): SuiteLastR
     )
 }
 
+/**
+ * Run number by run id for display ("#3"): the oldest run is 1, ordered by creation time then id. Display only: it is not stored, so
+ * numbers shift when an older run is deleted, and the same run can have another number in a list that holds a different set of runs.
+ */
+internal fun runOrdinals(summaries: List<RunSummary>): Map<String, Int> {
+    val ordinals = LinkedHashMap<String, Int>()
+    summaries.distinctBy { it.id }.sortedWith(compareBy<RunSummary> { it.createdAt }.thenBy { it.id })
+        .forEachIndexed { index, summary -> ordinals[summary.id] = index + 1 }
+    return ordinals
+}
+
 /** "3 cases · 1 lane · 12 of 12 steps passed". */
 internal fun SuiteLastRun.Ran.detail(): String =
     "$caseCount case${if (caseCount == 1) "" else "s"} · $laneCount lane${if (laneCount == 1) "" else "s"} · $passedSteps of $totalSteps steps passed"
