@@ -16,6 +16,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import java.io.File
 import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
@@ -62,13 +63,13 @@ class CaptureExtractionCacheTest {
         val first = CaptureArchiveReader.open(archive, cache)
         val video = requireNotNull(first.videoFile)
         val videoModified = video.lastModified()
-        val videoKey = Files.readAttributes(video.toPath(), "unix:ino")["ino"]
+        val videoKey = fileIdentity(video)
         val second = CaptureArchiveReader.open(archive, cache)
 
         assertEquals(1, extractions.get())
         assertEquals(first.logFile.parentFile, second.logFile.parentFile)
         assertEquals(videoModified, requireNotNull(second.videoFile).lastModified())
-        assertEquals(videoKey, Files.readAttributes(second.videoFile!!.toPath(), "unix:ino")["ino"])
+        assertEquals(videoKey, fileIdentity(second.videoFile!!))
         assertEquals(first.logFile.readText(), second.logFile.readText())
         assertEquals(first.descriptor, second.descriptor)
         assertEquals(listOf(first.logFile.parentFile.name), cache.list()!!.toList())
@@ -323,9 +324,15 @@ class CaptureExtractionCacheTest {
     }
 
     private suspend fun awaitLoaded(app: AppState, id: String) {
-        withTimeout(10_000) { while (app.isLoadInFlight(id) || app.tab(id) == null) delay(20) }
+        // Wait for the load to settle, not for the tab: a failed open leaves no tab and no load in
+        // flight, and the assertion below then reports openError instead of a bare timeout.
+        withTimeout(10_000) { while (app.isLoadInFlight(id)) delay(20) }
         assertNotNull(app.tab(id), app.openError?.message)
     }
+
+    /** The inode where the file system has one (POSIX), else the creation time (Windows has no `unix` view). */
+    private fun fileIdentity(file: File): Any? =
+        Files.readAttributes(file.toPath(), BasicFileAttributes::class.java).let { it.fileKey() ?: it.creationTime() }
 
     private fun fakeDirectory(parent: File, name: String, bytes: Int, modified: Long): File =
         File(parent, name).also { dir ->
