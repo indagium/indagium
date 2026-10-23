@@ -16,9 +16,11 @@ import com.indagium.ui.LIBRARY_READ_ONLY_MESSAGE
 import com.indagium.ui.SUITE_READ_ONLY_MESSAGE
 import com.indagium.ui.TESTS_NAV_WIDTH_MAX_DP
 import com.indagium.ui.TESTS_NAV_WIDTH_MIN_DP
+import com.indagium.ui.TestsEditionUsage
 import com.indagium.ui.caseEditAccess
 import com.indagium.ui.checkKindLabel
 import com.indagium.ui.clampTestsNavWidth
+import com.indagium.ui.editionUsageLine
 import com.indagium.ui.filterSuites
 import com.indagium.ui.formatKeyValueLines
 import com.indagium.ui.libraryEditAccess
@@ -30,6 +32,7 @@ import com.indagium.ui.sharedStepUsageCount
 import com.indagium.ui.stepCheckBadges
 import com.indagium.ui.suiteEditAccess
 import com.indagium.ui.suiteExportFileName
+import com.indagium.ui.testsEditionUsage
 import com.indagium.ui.testsLimitsUiState
 import com.indagium.ui.uniqueIdentifier
 import com.indagium.ui.uniqueName
@@ -61,6 +64,26 @@ class TestsLimitsUiStateTest {
         assertTrue(ui.lockedSuiteIds.isEmpty() && ui.lockedCaseIds.isEmpty())
         assertFalse(ui.hasLockedItems)
         assertNull(ui.banner)
+    }
+
+    @Test
+    fun editionUsageIsNullForAnUnlimitedEditionAndCountsTheFreeAllowance() {
+        assertNull(testsEditionUsage(library(suiteWithCases("A", 8)), unlimited))
+
+        val usage = assertNotNull(testsEditionUsage(library(suiteWithCases("First", 7), suiteWithCases("Second", 2)), free))
+
+        assertEquals(TestsEditionUsage(suitesUsed = 1, suiteCap = 1, activeCases = 5, caseCapacity = 5, totalCases = 9, lockedCases = 4), usage)
+        assertEquals("Free · 1 of 1 suite · 5 of 5 cases", editionUsageLine("Free", assertNotNull(testsEditionUsage(library(suiteWithCases("A", 5)), free))))
+    }
+
+    @Test
+    fun editionUsageLineUsesSingularAndPluralAndSkipsAnUnlimitedAllowance() {
+        assertEquals("Free · 0 of 1 suite · 0 of 5 cases", editionUsageLine("Free", assertNotNull(testsEditionUsage(library(), free))))
+        assertEquals(
+            "Starter · 1 of 3 suites · 1 of 6 cases",
+            editionUsageLine("Starter", assertNotNull(testsEditionUsage(library(suiteWithCases("A", 1)), EditionLimits(3, 2)))),
+        )
+        assertEquals("Capped · 3 of 5 cases", editionUsageLine("Capped", TestsEditionUsage(1, null, 3, 5, 3, 0)))
     }
 
     @Test

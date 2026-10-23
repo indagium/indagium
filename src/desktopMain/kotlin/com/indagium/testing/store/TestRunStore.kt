@@ -32,6 +32,15 @@ private const val RECENT_SUITE_RECORDS = 5
 
 data class StoredSuiteRunHistory(val recentRecords: List<TestRun>, val summaries: List<RunSummary>)
 
+/**
+ * The newest finished run of each requested suite ([bySuite]; a suite with none is absent) and the newest finished run of any
+ * suite ([latestOverall]), as found by [TestRunStore.latestSummariesBySuite].
+ */
+data class StoredLatestRuns(val bySuite: Map<String, RunSummary>, val latestOverall: RunSummary?)
+
+private fun RunSummary.isNewerThan(other: RunSummary): Boolean =
+    createdAt > other.createdAt || (createdAt == other.createdAt && id > other.id)
+
 class TestRunStore(private val baseDir: () -> File) {
     @Volatile
     var lastError: String? = null
@@ -115,6 +124,33 @@ class TestRunStore(private val baseDir: () -> File) {
         val summaryOrder = compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id }
         val records = (recent + listOfNotNull(latestTerminal)).distinctBy { it.id }.sortedWith(recordOrder)
         return StoredSuiteRunHistory(records, summaries.sortedWith(summaryOrder))
+    }
+
+    /**
+     * The newest FINISHED run of each of [suiteIds] and of any suite, for the New tab's Tests section. Walks the run folders newest-first
+     * (by `run.json` modification time) and stops as soon as every requested suite has a finished run and an overall latest is known, so
+     * it decodes no more run files than needed (a run file can be up to 64 MB). At most [scanLimit] folders are read; an unfinished run
+     * (queued or running) never counts, and a missing base folder gives an empty result.
+     */
+    fun latestSummariesBySuite(suiteIds: Set<String>, scanLimit: Int = MAX_LISTED_RUNS): StoredLatestRuns {
+        val wanted = suiteIds.filterTo(HashSet()) { isSafeId(it) }
+        val found = HashMap<String, RunSummary>()
+        var overall: RunSummary? = null
+        val folders = baseDir().listFiles { file -> file.isDirectory && isSafeId(file.name) }.orEmpty()
+            .sortedByDescending { File(it, TEST_RUN_FILE_NAME).lastModified() }
+            .take(scanLimit.coerceAtLeast(0))
+        for (folder in folders) {
+            val run = load(folder.name)?.takeIf { it.isFinished } ?: continue
+            val summary = run.summary()
+            if (overall == null || summary.isNewerThan(overall)) overall = summary
+            val suiteId = run.config.suiteId
+            if (suiteId in wanted) {
+                val previous = found[suiteId]
+                if (previous == null || summary.isNewerThan(previous)) found[suiteId] = summary
+            }
+            if (found.size == wanted.size) break
+        }
+        return StoredLatestRuns(found, overall)
     }
 
     // ── Deleting and sizes ───────────────────────────────────────────

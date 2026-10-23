@@ -517,9 +517,12 @@ private fun NavItem(title: String, count: String?, selected: Boolean, onClick: (
 
 // ── Actions shared by the nav pane and the suite screen ──────────────
 
+/** Creates a suite named "New suite" (or "New suite 2", ...) in [AppState]'s library; shared by the Tests workspace and the New tab. */
+internal fun AppState.createNewTestSuite(): StoreResult<TestSuite> =
+    createTestSuite(uniqueName(NEW_SUITE_NAME, testLibrary.suites.map { it.name }))
+
 internal fun createSuiteAndSelect(ui: TestsUi) {
-    val name = uniqueName(NEW_SUITE_NAME, ui.library.suites.map { it.name })
-    val result = ui.report(ui.state.createTestSuite(name))
+    val result = ui.report(ui.state.createNewTestSuite())
     if (result is StoreResult.Ok) {
         ui.view.selectedSuiteId = result.value.id
         ui.view.selectedCaseId = null

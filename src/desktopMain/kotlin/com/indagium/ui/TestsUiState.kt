@@ -146,6 +146,15 @@ internal fun TestsViewState.expandSuite(suiteId: String) {
     if (suiteId !in expandedSuiteIds) expandedSuiteIds = expandedSuiteIds + suiteId
 }
 
+/** Shows [suiteId]'s Cases tab on the Suites screen: no case open, the suite selected and expanded in the navigation tree. */
+internal fun TestsViewState.showSuite(suiteId: String) {
+    nav = TestsNav.Suites
+    selectedSuiteId = suiteId
+    selectedCaseId = null
+    selectedSuiteTab = SuiteTab.Cases
+    expandSuite(suiteId)
+}
+
 /** Collapses an expanded suite and expands a collapsed one. */
 internal fun TestsViewState.toggleSuiteExpanded(suiteId: String) {
     expandedSuiteIds = if (suiteId in expandedSuiteIds) expandedSuiteIds - suiteId else expandedSuiteIds + suiteId
@@ -300,6 +309,46 @@ internal fun testsLimitsUiState(library: TestLibrary, limits: EditionLimits): Te
         }.toSet(),
     )
 }
+
+// ── Edition usage ────────────────────────────────────────────────────
+
+/**
+ * How much of a limited edition's allowance the library uses: [suitesUsed] unlocked suites against [suiteCap] (null: no suite limit), and
+ * [activeCases] unlocked cases against [caseCapacity] (the per-suite case limit times the suites it applies to; null: no case limit).
+ * [totalCases] counts every case, [lockedCases] the ones past the limits.
+ */
+internal data class TestsEditionUsage(
+    val suitesUsed: Int,
+    val suiteCap: Int?,
+    val activeCases: Int,
+    val caseCapacity: Int?,
+    val totalCases: Int,
+    val lockedCases: Int,
+)
+
+/** The usage of [library] under [limits], or null for an unlimited edition (nothing to meter). Pure. */
+internal fun testsEditionUsage(library: TestLibrary, limits: EditionLimits): TestsEditionUsage? {
+    if (limits.maxSuites == null && limits.maxCasesPerSuite == null) return null
+    val activeCases = activeCaseIds(library, limits).size
+    val totalCases = library.suites.sumOf { it.cases.size }
+    val casePerSuite = limits.maxCasesPerSuite
+    val capacity = casePerSuite?.let { perSuite -> perSuite * (limits.maxSuites ?: library.suites.size) }
+    return TestsEditionUsage(
+        suitesUsed = activeSuiteIds(library, limits).size,
+        suiteCap = limits.maxSuites,
+        activeCases = activeCases,
+        caseCapacity = capacity,
+        totalCases = totalCases,
+        lockedCases = totalCases - activeCases,
+    )
+}
+
+/** "Free · 1 of 1 suite · 5 of 5 cases": the edition label and what is used of each limited allowance. */
+internal fun editionUsageLine(editionLabel: String, usage: TestsEditionUsage): String = listOfNotNull(
+    editionLabel,
+    usage.suiteCap?.let { "${usage.suitesUsed} of $it ${if (it == 1) "suite" else "suites"}" },
+    usage.caseCapacity?.let { "${usage.activeCases} of $it ${if (it == 1) "case" else "cases"}" },
+).joinToString(" · ")
 
 // ── Edit access ──────────────────────────────────────────────────────
 

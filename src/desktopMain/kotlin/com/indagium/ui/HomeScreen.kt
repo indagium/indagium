@@ -406,21 +406,14 @@ internal fun HomeScreen(
                     modifier = Modifier.testTag("home-open-tests"),
                 )
             },
-            body = { HomeTestsPlaceholder() },
+            body = { HomeTestsSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.fillMaxSize()) },
         ),
     )
     HomeTilingHost(state = state, slots = slots, onReclaimFocus = onReclaimFocus, modifier = modifier)
 }
 
 // Inside a section card (which already has its own header) the bodies need far less breathing room than the old full-height halves.
-private val HOME_SECTION_BODY_PADDING = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
-
-@Composable
-private fun HomeTestsPlaceholder() {
-    Box(Modifier.fillMaxSize().padding(HOME_SECTION_BODY_PADDING), contentAlignment = Alignment.Center) {
-        AppText("Test suites will appear here.", color = tc().td, fontSize = 12.sp)
-    }
-}
+internal val HOME_SECTION_BODY_PADDING = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
 
 private const val HOME_ACTION_HEIGHT_DP = 44
 private const val HOME_ACTION_GAP_DP = 8

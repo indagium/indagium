@@ -19,7 +19,6 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.outlined.Science
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -168,15 +167,6 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.activeTab()?.id?.let(state::openCaseLibrary) }
-        ToolbarBtn(
-            "Tests",
-            icon = Icons.Outlined.Science,
-            showLabel = showToolbarText,
-            tooltip = "Open AI test suites",
-            active = state.testsSurfaceActive,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.openTestsTab() }
         ToolbarBtn(
             "Open",
             icon = Icons.Outlined.FolderOpen,
