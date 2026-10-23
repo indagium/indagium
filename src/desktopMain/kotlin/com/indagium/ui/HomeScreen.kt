@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -34,6 +35,8 @@ import androidx.compose.material.icons.automirrored.outlined.Subject
 import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.FolderZip
+import androidx.compose.material.icons.outlined.PhoneAndroid
+import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -48,6 +51,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -56,6 +60,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.HomeRecentsLayout
+import com.indagium.model.HomeSectionId
 import com.indagium.model.LogTab
 import com.indagium.model.MAX_HOME_RECENT_GRID_COLUMNS
 import com.indagium.model.MIN_HOME_RECENT_GRID_COLUMNS
@@ -354,10 +359,10 @@ private fun pickNoteFileAndOpen(state: AppState) {
     fd.file?.let { state.openNoteFileInNewTab(File(fd.directory, it)) }
 }
 
-/** The home tab: `+` in the tab strip opens this (see [AppState.openHomeTab]/[AppState.ensureHomeTab]),
- *  a fixed 50/50 split of "Open a log" (left) and the device-capture launcher (right, unchanged
- *  behaviour — see [CaptureLauncherContent]). A static [Box] rule divides them, not [VDivider]:
- *  the split is fixed, [VDivider] is a drag handle for something meant to be resizable.
+/** The home tab: `+` in the tab strip opens this (see [AppState.openHomeTab]/[AppState.ensureHomeTab]).
+ *  A tiling launcher ([HomeTilingHost]) of three sections the user can drag, resize, hide and restore: "Open a log"
+ *  ([HomeOpenZone]), the device-capture launcher ([CaptureLauncherContent]) and a Tests entry point. The arrangement is
+ *  stored in settings (`AppSettings.homeLayout`).
  *
  *  Routed directly from App.kt's surface `when` (never through [FileView]) so filter/notes/AI/
  *  capture-strip chrome — all of which assume a real log tab — never mounts for this tab at all. */
@@ -368,16 +373,50 @@ internal fun HomeScreen(
     modifier: Modifier = Modifier,
     onReclaimFocus: () -> Unit,
 ) {
-    val tc = tc()
-    Row(modifier.fillMaxSize()) {
-        HomeOpenZone(state = state, tab = tab, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxHeight())
-        Box(Modifier.fillMaxHeight().width(1.dp).background(tc.br))
-        CaptureLauncherContent(
-            state = state,
-            launcherTabId = tab.id,
-            modifier = Modifier.weight(1f).fillMaxHeight(),
-            onReclaimFocus = onReclaimFocus,
-        )
+    val slots = mapOf(
+        HomeSectionId.OPEN to HomeSectionSlot(
+            icon = Icons.Outlined.FolderOpen,
+            title = homeSectionTitle(HomeSectionId.OPEN),
+            body = { HomeOpenZone(state = state, tab = tab, onReclaimFocus = onReclaimFocus, modifier = Modifier.fillMaxSize()) },
+        ),
+        HomeSectionId.CAPTURE to HomeSectionSlot(
+            icon = Icons.Outlined.PhoneAndroid,
+            title = homeSectionTitle(HomeSectionId.CAPTURE),
+            body = {
+                CaptureLauncherContent(
+                    state = state,
+                    launcherTabId = tab.id,
+                    modifier = Modifier.fillMaxSize(),
+                    onReclaimFocus = onReclaimFocus,
+                    showTitle = false,
+                    contentPadding = HOME_SECTION_BODY_PADDING,
+                )
+            },
+        ),
+        HomeSectionId.TESTS to HomeSectionSlot(
+            icon = Icons.Outlined.Science,
+            title = homeSectionTitle(HomeSectionId.TESTS),
+            action = {
+                AppButton(
+                    "Open Tests →",
+                    { state.openTestsTab(); onReclaimFocus() },
+                    ButtonVariant.Primary,
+                    modifier = Modifier.testTag("home-open-tests"),
+                )
+            },
+            body = { HomeTestsPlaceholder() },
+        ),
+    )
+    HomeTilingHost(state = state, slots = slots, onReclaimFocus = onReclaimFocus, modifier = modifier)
+}
+
+// Inside a section card (which already has its own header) the bodies need far less breathing room than the old full-height halves.
+private val HOME_SECTION_BODY_PADDING = PaddingValues(horizontal = 16.dp, vertical = 12.dp)
+
+@Composable
+private fun HomeTestsPlaceholder() {
+    Box(Modifier.fillMaxSize().padding(HOME_SECTION_BODY_PADDING), contentAlignment = Alignment.Center) {
+        AppText("Test suites will appear here.", color = tc().td, fontSize = 12.sp)
     }
 }
 
@@ -392,17 +431,15 @@ private fun HomeOpenZone(
 ) {
     val tc = tc()
     Column(
-        modifier.padding(horizontal = 24.dp, vertical = 40.dp),
+        modifier.padding(HOME_SECTION_BODY_PADDING),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AppText("Open a log", fontSize = 20.sp, color = tc.tx)
-            AppText(
-                "Start from a file, a bug report or archive, saved notes, or a past case.",
-                color = tc.td,
-                fontSize = 12.sp,
-            )
-        }
+        // The section card's header already says "Open a log"; only the hint stays.
+        AppText(
+            "Start from a file, a bug report or archive, saved notes, or a past case.",
+            color = tc.td,
+            fontSize = 12.sp,
+        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             HomeTile(
                 label = "Open file…",

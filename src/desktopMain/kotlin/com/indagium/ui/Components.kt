@@ -193,7 +193,7 @@ private fun activeWindow() = KeyboardFocusManager.getCurrentKeyboardFocusManager
 internal val dragCursorOverride = mutableStateOf<AwtCursor?>(null)
 
 @Composable
-fun HDivider(onDelta: (Float) -> Unit) {
+fun HDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
@@ -208,6 +208,8 @@ fun HDivider(onDelta: (Float) -> Unit) {
     // launch. rememberUpdatedState keeps `currentOnDelta` pointing at the latest lambda without
     // needing to relaunch the gesture detector.
     val currentOnDelta by rememberUpdatedState(onDelta)
+    // [onDragEnd] fires once when a drag is released (not per pixel), like VDivider's — for persisting the final size.
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
     // 10dp hit area keeps the pointer inside during normal drags.
     // For fast drags the AWT window cursor is locked for the entire drag so no
     // flicker occurs when the pointer briefly exits the visual stripe.
@@ -219,7 +221,10 @@ fun HDivider(onDelta: (Float) -> Unit) {
             .pointerInput(density) {
                 detectDragGestures(
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
-                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragEnd    = {
+                        dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor()
+                        currentOnDragEnd()
+                    },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.x / density) },
                 )

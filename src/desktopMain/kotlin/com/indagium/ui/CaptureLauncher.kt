@@ -91,6 +91,9 @@ internal fun CaptureLauncherContent(
     launcherTabId: String,
     modifier: Modifier = Modifier,
     onReclaimFocus: () -> Unit = {},
+    // False when a host (the tiling New tab's section card) already shows the "Capture" title in its own header.
+    showTitle: Boolean = true,
+    contentPadding: PaddingValues = PaddingValues(horizontal = 24.dp, vertical = 40.dp),
 ) {
     val service = state.captureService
     val draft = state.captureLaunchSettings(launcherTabId)
@@ -137,12 +140,12 @@ internal fun CaptureLauncherContent(
     val toolsFoldedIntoDevicesHeader = service.toolStatus != null && service.adbAvailable && service.error == null
     ScrollColumnWithBar(
         modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 24.dp, vertical = 40.dp),
+        contentPadding = contentPadding,
         endGutter = 0.dp,
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
+            if (showTitle) AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
             AppText(
                 "Choose an Android device. The capture opens as a normal streaming log tab.",
                 color = tc().td,
