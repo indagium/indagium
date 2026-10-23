@@ -695,6 +695,10 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("tracker", trackerSettingsJson(tracker))
     put("testing", testingSettingsJson(testing))
     put("workflowAiSelections", workflowAiSelectionsJson(workflowAiSelections))
+    // New tab tiling layout, JSON form only (see HomeLayoutSettingsJson.kt).
+    put("homeLayout", homeLayoutJson(homeLayout))
+    put("homeHiddenSections", homeHiddenSectionsJson(homeHiddenSections))
+    put("homeLayoutTipDismissed", homeLayoutTipDismissed)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -898,6 +902,7 @@ private fun JsonObject.customIssueRulesFromJson(key: String): List<CustomIssueRu
 internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     val o = Json.parseToJsonElement(raw).jsonObject
     val editorCommandValue = o.stringOrNull("editorCommand").orEmpty()
+    val home = o.homeLayoutSettingsFromJson()
     AppSettings(
         captureSettings = o["capture"]?.let { com.indagium.capture.captureSettingsFromJson(it.toString()) }
             ?: com.indagium.capture.CaptureSettings(),
@@ -1045,6 +1050,9 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         tracker = trackerSettingsFromJson(o["tracker"]),
         testing = testingSettingsFromJson(o["testing"]),
         workflowAiSelections = o.workflowAiSelectionsFromJson(),
+        homeLayout = home.layout,
+        homeHiddenSections = home.hidden,
+        homeLayoutTipDismissed = home.tipDismissed,
     )
 }.getOrNull()
 
