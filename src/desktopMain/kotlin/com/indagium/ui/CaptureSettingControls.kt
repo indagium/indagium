@@ -130,6 +130,34 @@ internal fun CaptureStartOptions(
     }
 }
 
+/** One line describing the recording options for the New tab's Capture card, e.g.
+ *  "Smooth · In-app mirror · H.264 · device audio": the video preset (or "Custom", or "No video" when recording is off),
+ *  the device-display mode, the codec (only while video is recorded), the audio sources, and the earlier-logs / buffer
+ *  choices only when they differ from the defaults. */
+internal fun captureSettingsSummary(settings: CaptureSettings): String {
+    val parts = mutableListOf<String>()
+    parts += if (settings.recordVideo) settings.videoPreset()?.label ?: "Custom" else "No video"
+    parts += when (settings.effectiveMirrorMode) {
+        CaptureMirrorMode.EMBEDDED -> "In-app mirror"
+        CaptureMirrorMode.EXTERNAL -> "scrcpy window"
+        CaptureMirrorMode.DISABLED -> "Mirror off"
+    }
+    if (settings.recordVideo) parts += settings.videoCodec.label
+    val hasMic = settings.microphoneDeviceId != MICROPHONE_OFF_ID
+    when {
+        settings.audio -> parts += if (settings.keepDeviceAudio) "device audio + kept on device" else "device audio"
+        !hasMic -> parts += "no audio"
+    }
+    if (hasMic) parts += "mic"
+    if (settings.includeBufferedLogs) parts += "earlier logs"
+    when (settings.bufferMode) {
+        CaptureBufferMode.DEFAULT -> Unit
+        CaptureBufferMode.ALL -> parts += "all buffers"
+        CaptureBufferMode.CUSTOM -> parts += if (settings.buffers.isEmpty()) "no buffers" else "buffers: ${settings.buffers.joinToString(", ")}"
+    }
+    return parts.joinToString(" · ")
+}
+
 @Composable
 private fun CaptureVideoCodecControl(
     settings: CaptureSettings,

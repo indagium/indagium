@@ -1,15 +1,20 @@
 package com.indagium.ui
 
 import androidx.compose.runtime.snapshots.Snapshot
+import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureEncoderAcceleration
 import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureVideoCodec
 import com.indagium.capture.CaptureVideoEncoder
 import com.indagium.capture.CaptureVideoEncoderCapabilities
 import com.indagium.capture.CaptureVideoEncoderProbeState
+import com.indagium.capture.CaptureVideoPreset
+import com.indagium.capture.MICROPHONE_DEFAULT_ID
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.withMirrorMode
+import com.indagium.capture.withVideoPreset
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -167,5 +172,110 @@ class CaptureLauncherTest {
         assertNull(adbShortStatusLabel(null))
         assertNull(adbShortStatusLabel(""))
         assertNull(adbShortStatusLabel("\n"))
+    }
+
+    // captureSettingsSummary: the Capture card's one-line recap of the (now dialog-hosted) recording options.
+
+    @Test
+    fun summaryNamesPresetMirrorCodecAndDeviceAudio() {
+        val settings = CaptureSettings(audio = true).withVideoPreset(CaptureVideoPreset.SMOOTH)
+        assertEquals("Smooth · In-app mirror · H.264 · device audio", captureSettingsSummary(settings))
+    }
+
+    @Test
+    fun summaryDefaultsReadAsBalancedWithNoAudioAndNoBufferNoise() {
+        assertEquals("Balanced · In-app mirror · H.264 · no audio", captureSettingsSummary(CaptureSettings()))
+    }
+
+    @Test
+    fun summaryShowsCustomWhenTheNumbersMatchNoPreset() {
+        assertTrue(captureSettingsSummary(CaptureSettings(maxSize = 999)).startsWith("Custom · "))
+    }
+
+    @Test
+    fun summaryDropsCodecAndSaysNoVideoWhenRecordingIsOff() {
+        val summary = captureSettingsSummary(
+            CaptureSettings(recordVideo = false, videoCodec = CaptureVideoCodec.AV1).withMirrorMode(CaptureMirrorMode.EXTERNAL),
+        )
+        assertEquals("No video · scrcpy window · no audio", summary)
+    }
+
+    @Test
+    fun summaryListsAudioPiecesKeptOnDeviceAndMic() {
+        val kept = CaptureSettings(audio = true, keepDeviceAudio = true, microphoneDeviceId = MICROPHONE_DEFAULT_ID)
+        assertEquals(
+            "Balanced · In-app mirror · H.264 · device audio + kept on device · mic",
+            captureSettingsSummary(kept),
+        )
+        assertEquals(
+            "Balanced · In-app mirror · H.264 · mic",
+            captureSettingsSummary(CaptureSettings(microphoneDeviceId = MICROPHONE_DEFAULT_ID)),
+        )
+    }
+
+    @Test
+    fun summaryMentionsMirrorOffEarlierLogsAndNonDefaultBuffers() {
+        val settings = CaptureSettings(
+            includeBufferedLogs = true,
+            bufferMode = CaptureBufferMode.CUSTOM,
+            buffers = listOf("main", "events"),
+            videoCodec = CaptureVideoCodec.H265,
+        ).withMirrorMode(CaptureMirrorMode.DISABLED)
+        assertEquals(
+            "Balanced · Mirror off · H.265 · no audio · earlier logs · buffers: main, events",
+            captureSettingsSummary(settings),
+        )
+        assertTrue(captureSettingsSummary(CaptureSettings(bufferMode = CaptureBufferMode.ALL)).endsWith("· all buffers"))
+    }
+
+    // captureStartBlockedHint: why Start capture is disabled; null exactly when the old enable rule allows it.
+
+    @Test
+    fun startHintIsNullOnlyForAReadyDeviceWithNothingRunningOrStarting() {
+        assertNull(captureStartBlockedHint(CaptureDevice("PHONE", "device"), null, false))
+    }
+
+    @Test
+    fun startHintExplainsEachBlockedState() {
+        val ready = CaptureDevice("PHONE", "device")
+        assertEquals("Connect a device to start", captureStartBlockedHint(null, null, false))
+        assertEquals(
+            "Device is unauthorized — allow USB debugging on the phone",
+            captureStartBlockedHint(CaptureDevice("PHONE", "unauthorized"), null, false),
+        )
+        assertEquals("Device is offline — reconnect it", captureStartBlockedHint(CaptureDevice("PHONE", "offline"), null, false))
+        assertEquals("Device is recovery — not ready for capture", captureStartBlockedHint(CaptureDevice("PHONE", "recovery"), null, false))
+        assertEquals("A capture is already running", captureStartBlockedHint(ready, "tab-1", false))
+        assertEquals("Starting…", captureStartBlockedHint(ready, null, true))
+    }
+
+    @Test
+    fun startHintMatchesTheOldEnableRuleForEveryCombination() {
+        val devices = listOf(null, CaptureDevice("A", "device"), CaptureDevice("A", "offline"))
+        for (device in devices) for (live in listOf<String?>(null, "tab")) for (starting in listOf(false, true)) {
+            val oldRule = device?.available == true && live == null && !starting
+            assertEquals(oldRule, captureStartBlockedHint(device, live, starting) == null, "$device $live $starting")
+        }
+    }
+
+    // resolveSelectedCaptureDevice: the selection logic that used to sit inline in the launcher.
+
+    @Test
+    fun resolveSelectionPrefersTheLiveSelectedDeviceThenTheFirst() {
+        val a = CaptureDevice("A", "device")
+        val b = CaptureDevice("B", "device")
+        assertEquals(b, resolveSelectedCaptureDevice(listOf(a, b), "B", null, false))
+        assertEquals(a, resolveSelectedCaptureDevice(listOf(a, b), null, null, false))
+        assertEquals(a, resolveSelectedCaptureDevice(listOf(a, b), "GONE", null, false))
+        assertNull(resolveSelectedCaptureDevice(emptyList(), "B", null, false))
+    }
+
+    @Test
+    fun resolveSelectionKeepsTheLastKnownDeviceOnlyWhileItIsBeingRooted() {
+        val a = CaptureDevice("A", "device")
+        val b = CaptureDevice("B", "device")
+        assertEquals(b, resolveSelectedCaptureDevice(listOf(a), "B", b, isSelectedDeviceRooting = true))
+        assertEquals(a, resolveSelectedCaptureDevice(listOf(a), "B", b, isSelectedDeviceRooting = false))
+        assertEquals(a, resolveSelectedCaptureDevice(listOf(a), "B", a, isSelectedDeviceRooting = true), "last-known must match the selected serial")
     }
 }

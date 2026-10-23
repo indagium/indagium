@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 
 package com.indagium.ui
 
@@ -10,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,6 +21,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -31,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -77,23 +83,53 @@ internal fun adbShortStatusLabel(toolStatus: String?): String? {
     return if (version != null) "adb $version" else firstLine
 }
 
-/** The device-capture launcher's content, embeddable in any surface that already knows which tab
- *  it belongs to. Split out of the old standalone `CaptureLauncher` composable so ui/HomeScreen.kt
- *  can host it as the right half of the home tab, side by side with the "Open a log" zone, instead
- *  of centered alone in its own tab — the launcher's tab (`launcherTabId`) IS the home tab (see
- *  [LogTab.isCaptureLauncher]'s KDoc), so this takes that id as a parameter rather than re-deriving
- *  it from `state.activeTab()`, which only worked when the launcher was the sole content of the
- *  active tab. One `verticalScroll` here (not a max-width-clamped centered column): the caller
- *  decides layout, this only decides content. */
+/** Which device "Start capture" acts on: the live entry for [selectedSerial] if it is still attached, else — only while
+ *  that serial is being rooted ([isSelectedDeviceRooting]; restarting adbd briefly drops it off `adb devices`) — the
+ *  [lastKnown] snapshot of it, else the first listed device. Pure so the 3 s poll can never silently swap the selection. */
+internal fun resolveSelectedCaptureDevice(
+    devices: List<CaptureDevice>,
+    selectedSerial: String?,
+    lastKnown: CaptureDevice?,
+    isSelectedDeviceRooting: Boolean,
+): CaptureDevice? =
+    devices.firstOrNull { it.serial == selectedSerial }
+        ?: lastKnown?.takeIf { isSelectedDeviceRooting && it.serial == selectedSerial }
+        ?: devices.firstOrNull()
+
+/** Why "Start capture" is disabled, or null when it is enabled. The enable rule is exactly the old one:
+ *  a ready device, no live capture, and no start already in flight. */
+internal fun captureStartBlockedHint(
+    device: CaptureDevice?,
+    liveCaptureTabId: String?,
+    startInProgress: Boolean,
+): String? = when {
+    startInProgress -> "Starting…"
+    liveCaptureTabId != null -> "A capture is already running"
+    device == null -> "Connect a device to start"
+    !device.available -> when (device.state.lowercase()) {
+        "unauthorized" -> "Device is unauthorized — allow USB debugging on the phone"
+        "offline" -> "Device is offline — reconnect it"
+        else -> "Device is ${device.state} — not ready for capture"
+    }
+    else -> null
+}
+
+private const val DEVICE_PICKER_WIDTH_DP = 320
+private const val STATUS_DOT_SIZE_DP = 8
+
+/** The condensed device-capture launcher embedded in the New tab's Capture card: a one-line device row (with a picker
+ *  when several are attached), the recording-options summary with "Change…", Start capture, device logging and a
+ *  compact list of unfinished sessions. [launcherTabId] is the home tab's id (the launcher's tab IS the home tab, see
+ *  [LogTab.isCaptureLauncher]'s KDoc). One `verticalScroll` here: the caller decides layout, this only decides content.
+ *  [pollDevices] is false only in tests, so no real adb runs. */
 @Composable
-internal fun CaptureLauncherContent(
+internal fun HomeCaptureSection(
     state: AppState,
     launcherTabId: String,
+    onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
-    onReclaimFocus: () -> Unit = {},
-    // False when a host (the tiling New tab's section card) already shows the "Capture" title in its own header.
-    showTitle: Boolean = true,
-    contentPadding: PaddingValues = PaddingValues(horizontal = 24.dp, vertical = 40.dp),
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+    pollDevices: Boolean = true,
 ) {
     val service = state.captureService
     val draft = state.captureLaunchSettings(launcherTabId)
@@ -106,9 +142,10 @@ internal fun CaptureLauncherContent(
     // otherwise prefilled from a "Ready to pair" row). Presentation-only, like selectedSerial.
     var qrPairingOpen by remember { mutableStateOf(false) }
     var codePairingAddress by remember { mutableStateOf<String?>(null) }
+    var optionsOpen by remember { mutableStateOf(false) }
     // "Restart adb as root" (DeviceLoggingPanelContent below) restarts adbd, which briefly drops the
     // device off `adb devices` while it reconnects. Without this, the plain `?: service.devices.
-    // firstOrNull()` fallback below would silently swap the Device logging panel to a different
+    // firstOrNull()` fallback would silently swap the Device logging panel to a different
     // device (or hide it) for that window. Remembered only while this serial is actually rooting —
     // the instant that clears, the live list is authoritative again.
     var lastKnownDeviceBySerial by remember { mutableStateOf<CaptureDevice?>(null) }
@@ -117,42 +154,41 @@ internal fun CaptureLauncherContent(
     }
     val isSelectedDeviceRooting = selectedSerial != null &&
         service.deviceLogStates[selectedSerial]?.activity == DeviceLogActivity.ROOTING
-    val selectedDevice = liveSelectedDevice
-        ?: lastKnownDeviceBySerial?.takeIf { isSelectedDeviceRooting && it.serial == selectedSerial }
-        ?: service.devices.firstOrNull()
+    val selectedDevice = resolveSelectedCaptureDevice(
+        service.devices, selectedSerial, lastKnownDeviceBySerial, isSelectedDeviceRooting,
+    )
     // The probe pushes the bundled server to the device and runs it, so only an advanced codec (or the
     // explicit "Check" button) triggers it; switching the codec to H.265/AV1 re-keys this effect.
     LaunchedEffect(service, selectedDevice?.serial, draft.videoCodec) {
         selectedDevice?.takeIf { shouldAutoProbeVideoEncoders(draft.videoCodec, it) }
             ?.let { service.refreshVideoEncoderCapabilities(it.serial) }
     }
-    LaunchedEffect(service) {
+    // Polls only while this section is composed (a hidden Capture section is not composed, so it never polls).
+    LaunchedEffect(service, pollDevices) {
+        if (!pollDevices) return@LaunchedEffect
         service.refreshDevices(force = true)
         while (true) {
             delay(DEVICE_REFRESH_INTERVAL_MS)
             service.refreshDevices()
         }
     }
-    // Tools folds into the Devices panel header as one muted line once adb is found and valid (item
-    // 2 of the "make it compact" pass) — a whole extra bordered panel just to say "adb 1.0.41" ate
-    // vertical space the New tab can't spare. An invalid/missing adb, or any error, keeps the full
-    // panel below exactly as before: that's the one state where this needs its old prominence.
-    val toolsFoldedIntoDevicesHeader = service.toolStatus != null && service.adbAvailable && service.error == null
+    // Tools folds into the device row's action line as one muted line once adb is found and valid. An
+    // invalid/missing adb, or any error, keeps the full panel below exactly as before: that's the one
+    // state where this needs its old prominence.
+    val toolsFoldedIntoDeviceRow = service.toolStatus != null && service.adbAvailable && service.error == null
     ScrollColumnWithBar(
         modifier.fillMaxSize(),
         contentPadding = contentPadding,
         endGutter = 0.dp,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (showTitle) AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
-            AppText(
-                "Choose an Android device. The capture opens as a normal streaming log tab.",
-                color = tc().td,
-                fontSize = 12.sp,
-            )
-        }
-        if (!toolsFoldedIntoDevicesHeader) {
+        AppText(
+            "Choose an Android device. The capture opens as a normal streaming log tab.",
+            color = tc().td,
+            fontSize = 12.sp,
+            maxLines = 2,
+        )
+        if (!toolsFoldedIntoDeviceRow) {
             service.toolStatus?.let { status ->
                 LauncherPanel("Capture tools") {
                     AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
@@ -164,63 +200,15 @@ internal fun CaptureLauncherContent(
                 }
             }
         }
-        LauncherPanel(header = {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                AppText("Devices", color = tc().ts, fontSize = 11.sp)
-                if (toolsFoldedIntoDevicesHeader) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        adbShortStatusLabel(service.toolStatus)?.let {
-                            AppText(
-                                it, color = tc().td, fontFamily = FontFamily.Monospace, fontSize = 10.sp,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        AppButton("Recheck tools", { service.recheckToolsFromSettings() }, ButtonVariant.Ghost, enabled = !service.discovering)
-                        AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
-                    }
-                }
-            }
-        }) {
-            when {
-                service.devices.isNotEmpty() -> service.devices.forEach { device ->
-                    CaptureDeviceRow(
-                        device = device,
-                        selected = device.serial == selectedDevice?.serial,
-                        onSelect = { selectedSerial = device.serial },
-                    )
-                }
-                // Phones on a pairing screen are listed below the (empty) device rows, so say so
-                // instead of the more discouraging "No devices discovered".
-                service.pairingCandidates.isNotEmpty() -> AppText("No connected devices", color = tc().td)
-                // Never discovered yet (the launcher's own first refresh hasn't landed): a same-
-                // height placeholder instead of "No devices discovered", so a device that shows up a
-                // moment later doesn't read as if the panel first claimed there was nothing there —
-                // see CaptureCoordinator.kt's `hasCheckedDevicesOnce` doc (item 2 of the flicker fix).
-                !service.hasCheckedDevicesOnce -> AppText(
-                    "Looking for devices…",
-                    color = tc().td,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                )
-                else -> {
-                    AppText("No devices discovered", color = tc().td)
-                    AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost, enabled = !service.discovering)
-                }
-            }
-            service.pairingCandidates.forEach { candidate ->
-                PairingCandidateRow(candidate, onPair = { codePairingAddress = candidate.address })
-            }
-            if (service.adbAvailable) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppButton("Pair over Wi-Fi…", { qrPairingOpen = true }, ButtonVariant.Ghost)
-                    if (service.mdnsAvailable == false) {
-                        AppButton("Pair with code…", { codePairingAddress = "" }, ButtonVariant.Ghost)
-                    }
-                }
-                if (service.mdnsAvailable == false) {
-                    AppText("Wi-Fi discovery unavailable (network may block mDNS)", color = tc().td, fontSize = 10.sp)
-                }
-            }
-        }
+        CaptureDeviceSummaryPanel(
+            service = service,
+            selected = selectedDevice,
+            toolsFolded = toolsFoldedIntoDeviceRow,
+            onSelect = { selectedSerial = it },
+            onPairWifi = { qrPairingOpen = true },
+            onPairCode = { codePairingAddress = it },
+            onReclaimFocus = onReclaimFocus,
+        )
         if (qrPairingOpen) {
             QrPairingDialog(
                 service = service,
@@ -246,6 +234,18 @@ internal fun CaptureLauncherContent(
                 },
             )
         }
+        CaptureSettingsSummaryRow(draft, onChange = { optionsOpen = true })
+        if (optionsOpen) {
+            CaptureOptionsDialog(
+                state = state,
+                launcherTabId = launcherTabId,
+                deviceSerial = selectedDevice?.serial,
+                onDismiss = {
+                    optionsOpen = false
+                    onReclaimFocus()
+                },
+            )
+        }
         selectedDevice?.let { device ->
             DeviceLoggingPanel(
                 state = state,
@@ -255,27 +255,171 @@ internal fun CaptureLauncherContent(
                 onReclaimFocus = onReclaimFocus,
             )
         }
-        CaptureBeforeStartRow(
-            state = state,
-            launcherTabId = launcherTabId,
-            draft = draft,
-            onReclaimFocus = onReclaimFocus,
-            deviceSerial = selectedDevice?.serial,
-        )
+        val startBlockedHint = captureStartBlockedHint(selectedDevice, state.liveCaptureTabId, state.captureStartInProgress)
         AppButton(
             "Start capture",
-            { selectedDevice?.let { state.startCaptureTab(it) } },
+            { selectedDevice?.let { state.startCaptureTab(it) }; onReclaimFocus() },
             ButtonVariant.Primary,
-            enabled = selectedDevice?.available == true && state.liveCaptureTabId == null && !state.captureStartInProgress,
-            modifier = Modifier.fillMaxWidth(),
+            enabled = startBlockedHint == null,
+            modifier = Modifier.fillMaxWidth().testTag("capture-start"),
         )
-        // The header and its deferred content lambda must close over the same snapshot. If only the
-        // header observes service.sessions, Compose can recompose the count while skipping the
-        // stable content lambda and leave an empty-state body on screen.
-        val unfinishedSessions = service.sessions.filter { it.status != CaptureStatus.RECORDING }
-        UnfinishedCaptureSessionsPanel(unfinishedSessions) { retained ->
-            UnfinishedSessionsSection(state = state, retained = retained)
+        startBlockedHint?.let { AppText(it, color = tc().td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.testTag("capture-start-hint")) }
+        // The count and the rows must close over the same snapshot of service.sessions (see UnfinishedSessionsCompact).
+        UnfinishedSessionsCompact(state, service.sessions.filter { it.status != CaptureStatus.RECORDING }, onReclaimFocus)
+    }
+}
+
+/** The one-line device status + actions card: status dot, selected model, serial, the ▾ picker when several devices are
+ *  attached, then adb status, Refresh and the Wi-Fi pairing entry points. Phones on a pairing screen are listed as
+ *  inline "Ready to pair" rows below it. */
+@Composable
+private fun CaptureDeviceSummaryPanel(
+    service: CaptureService,
+    selected: CaptureDevice?,
+    toolsFolded: Boolean,
+    onSelect: (String) -> Unit,
+    onPairWifi: () -> Unit,
+    onPairCode: (String) -> Unit,
+    onReclaimFocus: () -> Unit,
+) {
+    val colors = tc()
+    Column(
+        Modifier.fillMaxWidth().border(BorderStroke(1.dp, colors.br), CORNER_MD).padding(10.dp).testTag("capture-device-panel"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val dotColor = when {
+                selected == null -> colors.td
+                selected.available -> colors.ok
+                else -> DANGER_RED
+            }
+            Box(Modifier.size(STATUS_DOT_SIZE_DP.dp).background(dotColor, CircleShape))
+            CaptureDevicePicker(service.devices, selected, service, onSelect, onReclaimFocus, Modifier.weight(1f))
+            if (selected != null) {
+                if (selected.wireless) WifiTag()
+                if (!selected.available) CaptureDeviceStatePill(selected)
+            }
         }
+        selected?.let { device ->
+            deviceStateGuidance(device.state, device.wireless)?.let { hint ->
+                AppText(hint, color = DANGER_RED, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (toolsFolded) {
+                adbShortStatusLabel(service.toolStatus)?.let {
+                    AppText(it, color = colors.td, fontFamily = FontFamily.Monospace, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+            AppButton("Refresh", { service.refreshDevices(force = true); onReclaimFocus() }, ButtonVariant.Ghost, enabled = !service.discovering)
+            if (service.adbAvailable) {
+                AppButton("Pair over Wi-Fi…", { onPairWifi(); onReclaimFocus() }, ButtonVariant.Ghost)
+                if (service.mdnsAvailable == false) {
+                    AppButton("Pair with code…", { onPairCode(""); onReclaimFocus() }, ButtonVariant.Ghost)
+                }
+            }
+            if (toolsFolded) {
+                AppButton("Recheck tools", { service.recheckToolsFromSettings() }, ButtonVariant.Ghost, enabled = !service.discovering)
+                AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+            }
+        }
+        if (service.adbAvailable && service.mdnsAvailable == false) {
+            AppText("Wi-Fi discovery unavailable (network may block mDNS)", color = colors.td, fontSize = 10.sp)
+        }
+        service.pairingCandidates.forEach { candidate ->
+            PairingCandidateRow(candidate, onPair = { onPairCode(candidate.address) })
+        }
+    }
+}
+
+/** The selected device's model + serial, as a ▾ picker (a [Popup] of [CaptureDeviceRow]s) when more than one device is
+ *  attached; plain text otherwise. Falls back to the discovery state ("Looking for devices…" / "No devices found"). */
+@Composable
+private fun CaptureDevicePicker(
+    devices: List<CaptureDevice>,
+    selected: CaptureDevice?,
+    service: CaptureService,
+    onSelect: (String) -> Unit,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val colors = tc()
+    var expanded by remember { mutableStateOf(false) }
+    val multiple = devices.size > 1
+    Box(modifier) {
+        Row(
+            Modifier.fillMaxWidth().clip(CORNER_MD)
+                .let { base -> if (multiple) base.clickable { expanded = !expanded }.testTag("capture-device-picker") else base }
+                .padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            if (selected != null) {
+                AppText(
+                    selected.model, color = colors.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+                AppText(
+                    selected.serial, color = colors.td, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                )
+            } else {
+                // Phones on a pairing screen are listed below, so say so instead of the more discouraging "No devices found".
+                val message = when {
+                    service.pairingCandidates.isNotEmpty() -> "No connected devices"
+                    !service.hasCheckedDevicesOnce -> "Looking for devices…"
+                    else -> "No devices found"
+                }
+                AppText(message, color = colors.td, fontSize = 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+            }
+            if (multiple) AppText(if (expanded) "▾" else "▸", color = colors.ts, fontSize = 10.sp)
+        }
+        if (expanded && multiple) {
+            val density = LocalDensity.current.density
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, (28 * density).roundToInt()),
+                onDismissRequest = { expanded = false; onReclaimFocus() },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(DEVICE_PICKER_WIDTH_DP.dp)
+                        .background(colors.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, colors.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    devices.forEach { device ->
+                        CaptureDeviceRow(
+                            device = device,
+                            selected = device.serial == selected?.serial,
+                            onSelect = { onSelect(device.serial); expanded = false; onReclaimFocus() },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** "Smooth · In-app mirror · H.264 · device audio" in a tinted box, with the "Change…" link that opens [CaptureOptionsDialog]. */
+@Composable
+private fun CaptureSettingsSummaryRow(settings: CaptureSettings, onChange: () -> Unit) {
+    val colors = tc()
+    Row(
+        Modifier.fillMaxWidth().background(colors.p2, CORNER_MD).padding(start = 10.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        AppText(
+            captureSettingsSummary(settings), color = colors.ts, fontSize = 11.sp, maxLines = 2,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).testTag("capture-summary"),
+        )
+        AccentLink("Change…", onChange, Modifier.testTag("capture-change-options"))
     }
 }
 
@@ -367,36 +511,6 @@ private fun CaptureDeviceStatePill(device: CaptureDevice) {
             .padding(horizontal = 8.dp, vertical = 2.dp),
     ) {
         AppText(label, color = tone, fontSize = 10.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
-/** The pre-start toggles as one compact row instead of a stacked list — each [CheckRow] gets an
- * equal share of the row's width via [Modifier.weight] so three fixed-width-hungry rows sit side
- * by side instead of each claiming the full row (which is what [CheckRow]'s own `fillMaxWidth`
- * would otherwise do if placed directly in a [Row]). Buffer mode and its custom-buffer picker stay
- * stacked below, since they don't fit the same one-line treatment. */
-@Composable
-private fun CaptureBeforeStartRow(
-    state: AppState,
-    launcherTabId: String,
-    draft: CaptureSettings,
-    onReclaimFocus: () -> Unit,
-    deviceSerial: String?,
-) {
-    val edit: CaptureSettingsEdit = { transform -> state.updateCaptureLaunchSettings(launcherTabId, transform) }
-    LauncherPanel("Before start") {
-        CaptureStartOptions(
-            settings = draft,
-            onReclaimFocus = onReclaimFocus,
-            nativeMediaSupport = state.captureNativeMediaSupport,
-            scrcpyAvailable = state.captureToolResolution?.scrcpyPath != null,
-            videoEncoderProbeState = deviceSerial?.let { state.captureService.videoEncoderProbeStates[it] },
-            videoEncoderDeviceSerial = deviceSerial,
-            onRefreshVideoEncoderSupport = deviceSerial?.let { serial ->
-                { state.captureService.refreshVideoEncoderCapabilities(serial, force = true) }
-            },
-            edit = edit,
-        )
     }
 }
 
@@ -718,16 +832,7 @@ internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSe
     var deleteSelectedError by remember { mutableStateOf<String?>(null) }
 
     val retainedIds = retained.map { it.id }.toSet()
-    // A failure for a session that has no row any more (it was discarded, or is gone from disk) has
-    // nowhere else to show; every other save status renders under its own row.
-    state.captureExportOwner?.takeIf { it !in retainedIds }?.let { owner ->
-        val orphan = captureExportStatusFor(
-            owner, owner, false, null, state.captureExportError,
-            cancelled = state.captureExportCancelled,
-        )
-        orphan.error?.let { AppText("Export failed: $it", color = DANGER_RED, fontSize = 10.sp) }
-        if (orphan.cancelled) AppText("Export cancelled", color = tc().ts, fontSize = 10.sp)
-    }
+    UnfinishedOrphanExportStatus(state, retainedIds)
     LaunchedEffect(retainedIds) { selectedIds = selectedIds.intersect(retainedIds) }
 
     if (retained.isEmpty()) {
@@ -774,6 +879,20 @@ internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSe
             },
             onDismiss = { confirmDeleteSelected = false },
         )
+    }
+}
+
+/** A failure for a session that has no row any more (it was discarded, or is gone from disk) has nowhere else to show;
+ *  every other save status renders under its own row. */
+@Composable
+internal fun UnfinishedOrphanExportStatus(state: AppState, retainedIds: Set<String>) {
+    state.captureExportOwner?.takeIf { it !in retainedIds }?.let { owner ->
+        val orphan = captureExportStatusFor(
+            owner, owner, false, null, state.captureExportError,
+            cancelled = state.captureExportCancelled,
+        )
+        orphan.error?.let { AppText("Export failed: $it", color = DANGER_RED, fontSize = 10.sp) }
+        if (orphan.cancelled) AppText("Export cancelled", color = tc().ts, fontSize = 10.sp)
     }
 }
 
@@ -878,7 +997,7 @@ internal fun requiresTypedDeleteConfirmation(selectedCount: Int, totalCount: Int
  * card, centered Cancel/Delete). When [requiresTyped] is set, Delete stays disabled until the
  * typed text trims to "delete" (case-insensitive). */
 @Composable
-private fun ConfirmDeleteSessionsDialog(
+internal fun ConfirmDeleteSessionsDialog(
     selectedCount: Int,
     requiresTyped: Boolean,
     onConfirm: () -> Unit,

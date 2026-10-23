@@ -1106,7 +1106,7 @@ private fun CaptureMarkIssueButton(enabled: Boolean, onClick: () -> Unit) {
  * already kept fresh by [AppState.stopCaptureTab]'s `updateSessions()` call) instead of collecting
  * a [RecorderSnapshot]. Save ZIP and Open folder deliberately reuse the exact same
  * [AppState.saveRetainedCapture] / [AppState.openRetainedCaptureFolder] calls the "Retained
- * sessions" list in [CaptureLauncherContent] already uses for a session with no open tab — the
+ * sessions" list in [HomeCaptureSection] already uses for a session with no open tab — the
  * underlying export has never needed a live recorder (CaptureArchiveExporter.export takes a
  * CaptureSession, not a controller), only the previous wiring did.
  */
