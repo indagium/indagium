@@ -1,5 +1,6 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.ImageBitmap
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.audioFrameTooFarAhead
 import com.indagium.video.defaultVideoPlayerController
@@ -19,6 +20,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /** Regression coverage for held images and the transport clock across sparse video PTS intervals. */
 @Suppress("MagicNumber")
@@ -57,7 +59,7 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 800L..1_300L, "the clock should advance through the first sparse interval")
             assertTrue(isGreen(controller.grabCurrentFrame()), "the 1.5s frame must not display before its PTS")
-            await("first resumed frame", timeoutMs = 30_000L, controller = controller) { isBlue(controller.grabCurrentFrame()) }
+            awaitPicture("first resumed frame", controller, 30_000L) { dominantChannel(it, 2) }
             assertTrue(controller.positionMs >= 1_500L)
 
             controller.pause()
@@ -248,8 +250,9 @@ class VideoSparseSeekTest {
 
     private fun isMagenta(png: ByteArray?): Boolean = png?.let { pixel(it)?.let { rgb -> red(rgb) > 180 && blue(rgb) > 180 && green(rgb) < 100 } } == true
 
-    private fun dominantChannel(png: ByteArray, channel: Int): Boolean {
-        val rgb = pixel(png) ?: return false
+    private fun dominantChannel(png: ByteArray, channel: Int): Boolean = pixel(png)?.let { dominantChannel(it, channel) } == true
+
+    private fun dominantChannel(rgb: Int, channel: Int): Boolean {
         val selected = when (channel) {
             0 -> red(rgb)
             1 -> green(rgb)
@@ -300,6 +303,38 @@ class VideoSparseSeekTest {
         assertTrue(condition(), "timed out waiting for $label$detail")
     }
 
+    /**
+     * Waits for a picture whose centre pixel satisfies [matches], looking at every picture the
+     * player publishes. A sparse-interval frame can be on screen for only ~100 ms (the 1.5 s one
+     * is replaced at 1.6 s), and polling through [VideoPlayerController.grabCurrentFrame] — a PNG
+     * encode plus decode per probe — takes tens of ms on the CI macOS runner, so that poll could
+     * step over the whole window. Reading the published bitmap's reference is cheap, and each new
+     * picture is inspected exactly once.
+     */
+    private fun awaitPicture(label: String, controller: VideoPlayerController, timeoutMs: Long, matches: (Int) -> Boolean) {
+        val start = System.currentTimeMillis()
+        val deadline = start + timeoutMs
+        val seen = mutableListOf<String>()
+        var last: ImageBitmap? = null
+        while (System.currentTimeMillis() < deadline) {
+            val bitmap = controller.currentFrame
+            if (bitmap != null && bitmap !== last) {
+                last = bitmap
+                val rgb = centreRgb(bitmap)
+                seen += "+${System.currentTimeMillis() - start}ms pos=${controller.positionMs} rgb=%06x".format(rgb and 0xFFFFFF)
+                if (matches(rgb)) return
+            }
+            Thread.sleep(PICTURE_POLL_MS)
+        }
+        fail("timed out waiting for $label; ${describe(controller, System.currentTimeMillis() - start)}; pictures seen: $seen")
+    }
+
+    private fun centreRgb(bitmap: ImageBitmap): Int {
+        val pixels = IntArray(1)
+        bitmap.readPixels(pixels, startX = bitmap.width / 2, startY = bitmap.height / 2, width = 1, height = 1)
+        return pixels[0]
+    }
+
     private fun describe(controller: VideoPlayerController, elapsedMs: Long): String {
         val rgb = controller.grabCurrentFrame()?.let(::pixel)
         val colour = rgb?.let { "%02x%02x%02x".format(red(it), green(it), blue(it)) } ?: "none"
@@ -308,6 +343,7 @@ class VideoSparseSeekTest {
 
     private companion object {
         const val TRACE_INTERVAL_MS = 500L
+        const val PICTURE_POLL_MS = 2L
         const val LONG_GOP_DURATION_MS = 45_000L
         const val LONG_GOP_CHANGE_MS = 40_000L
         const val LONG_GOP_SEEK_MS = 38_000L
