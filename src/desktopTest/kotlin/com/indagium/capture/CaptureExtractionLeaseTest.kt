@@ -318,11 +318,14 @@ class CaptureExtractionLeaseTest {
 
     private fun startLeaseHolder(directory: File, exclusive: Boolean = false): Process {
         val java = File(System.getProperty("java.home"), "bin/java").path
+        // The test classpath alone exceeds Windows' 32k command-line limit (CreateProcess error=206),
+        // so it travels in a java launcher @argfile, where a quoted value needs its backslashes doubled.
+        val argFile = File.createTempFile("lease-holder", ".args").apply { deleteOnExit() }
+        argFile.writeText("-cp\n\"${System.getProperty("java.class.path").replace("\\", "\\\\")}\"\n")
         val process = ProcessBuilder(
             java,
             "-Djava.awt.headless=true",
-            "-cp",
-            System.getProperty("java.class.path"),
+            "@${argFile.absolutePath}",
             CaptureExtractionLeaseHolder::class.java.name,
             directory.absolutePath,
             if (exclusive) "exclusive" else "shared",
