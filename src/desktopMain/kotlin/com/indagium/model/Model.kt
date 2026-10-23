@@ -981,7 +981,7 @@ data class LogTab(
     // Session-only marker for the home tab (ui/HomeScreen.kt), opened by the tab strip's `+`
     // button or automatically by AppState.ensureHomeTab when nothing else is open. Doubles as the
     // device-capture launcher's tab — the left half is "Open a log", the right half is
-    // ui/CaptureLauncher.kt's CaptureLauncherContent — so starting a capture from it still closes
+    // ui/CaptureLauncher.kt's HomeCaptureSection — so starting a capture from it still closes
     // it via closeCaptureLauncherTabs(), same as the old standalone "New capture" tab. Appended
     // after the capture-session field and deliberately omitted from AutosaveCodec so an empty home
     // tab never reappears after relaunch — a fresh one opens on demand instead (ensureHomeTab).

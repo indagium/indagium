@@ -7288,6 +7288,12 @@ class AppState(
         settingsOpen = true
     }
 
+    /** Opens Settings on its Capture section (the New tab's "Recording options" dialog links here). */
+    fun openCaptureSettings() {
+        requestedSettingsSection = SettingsSection.Capture
+        settingsOpen = true
+    }
+
     fun updateFilterPanelUiState(update: FilterPanelUiState.() -> Unit) {
         fpState.update()
         autosaveNow()

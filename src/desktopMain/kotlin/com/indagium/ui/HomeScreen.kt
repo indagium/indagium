@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+)
 
 package com.indagium.ui
 
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,7 +26,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -361,7 +364,7 @@ private fun pickNoteFileAndOpen(state: AppState) {
 
 /** The home tab: `+` in the tab strip opens this (see [AppState.openHomeTab]/[AppState.ensureHomeTab]).
  *  A tiling launcher ([HomeTilingHost]) of three sections the user can drag, resize, hide and restore: "Open a log"
- *  ([HomeOpenZone]), the device-capture launcher ([CaptureLauncherContent]) and a Tests entry point. The arrangement is
+ *  ([HomeOpenZone]), the device-capture launcher ([HomeCaptureSection]) and a Tests entry point. The arrangement is
  *  stored in settings (`AppSettings.homeLayout`).
  *
  *  Routed directly from App.kt's surface `when` (never through [FileView]) so filter/notes/AI/
@@ -383,12 +386,11 @@ internal fun HomeScreen(
             icon = Icons.Outlined.PhoneAndroid,
             title = homeSectionTitle(HomeSectionId.CAPTURE),
             body = {
-                CaptureLauncherContent(
+                HomeCaptureSection(
                     state = state,
                     launcherTabId = tab.id,
-                    modifier = Modifier.fillMaxSize(),
                     onReclaimFocus = onReclaimFocus,
-                    showTitle = false,
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = HOME_SECTION_BODY_PADDING,
                 )
             },
@@ -420,7 +422,8 @@ private fun HomeTestsPlaceholder() {
     }
 }
 
-private const val HOME_TILE_MAX_SIZE_DP = 128
+private const val HOME_ACTION_HEIGHT_DP = 44
+private const val HOME_ACTION_GAP_DP = 8
 
 @Composable
 private fun HomeOpenZone(
@@ -440,41 +443,41 @@ private fun HomeOpenZone(
             color = tc.td,
             fontSize = 12.sp,
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            HomeTile(
+        FlowRow(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+            verticalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+        ) {
+            HomeActionButton(
                 label = "Open file…",
                 icon = Icons.Outlined.FolderOpen,
                 onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
             ) { pickLogFileAndOpen(state, "Open Log File") }
-            HomeTile(
+            HomeActionButton(
                 label = "Bug report / archive",
                 icon = Icons.Outlined.FolderZip,
                 onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
             ) { pickLogFileAndOpen(state, "Open Bug Report or Archive") }
-            HomeTile(
+            HomeActionButton(
                 label = "Open notes (.ann)",
                 icon = Icons.AutoMirrored.Outlined.StickyNote2,
                 onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
             ) { pickNoteFileAndOpen(state) }
-            HomeTile(
+            HomeActionButton(
                 label = "Past cases",
                 icon = Icons.AutoMirrored.Outlined.ManageSearch,
                 onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
             ) { state.openCaseLibrary(tab.id) }
         }
         HomeRecentSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxWidth())
     }
 }
 
-/** One of the four square "Open a log" buttons. Reclaims root keyboard focus on click (see
- *  CLAUDE.md's clickable-steals-focus gotcha) — never around [InlineField], which is why this
- *  wiring lives here rather than uniformly across every clickable in the home tab. */
+/** One of the four compact "Open a log" action buttons (icon + label, [HOME_ACTION_HEIGHT_DP] tall). Reclaims root
+ *  keyboard focus on click (see CLAUDE.md's clickable-steals-focus gotcha) — never around [InlineField], which is why
+ *  this wiring lives here rather than uniformly across every clickable in the home tab. */
 @Composable
-private fun HomeTile(
+private fun HomeActionButton(
     label: String,
     icon: ImageVector,
     onReclaimFocus: () -> Unit,
@@ -484,8 +487,7 @@ private fun HomeTile(
     val tc = tc()
     HoverBox(
         modifier = modifier
-            .aspectRatio(1f)
-            .widthIn(max = HOME_TILE_MAX_SIZE_DP.dp)
+            .height(HOME_ACTION_HEIGHT_DP.dp)
             .border(1.dp, tc.br, CORNER_MD)
             .clip(CORNER_MD),
         onClick = {
@@ -493,14 +495,13 @@ private fun HomeTile(
             onReclaimFocus()
         },
     ) {
-        Column(
-            Modifier.fillMaxSize().padding(12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+        Row(
+            Modifier.fillMaxHeight().padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Icon(icon, contentDescription = null, tint = tc.ts, modifier = Modifier.size(28.dp))
-            Spacer(Modifier.height(8.dp))
-            AppText(label, color = tc.tx, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Icon(icon, contentDescription = null, tint = tc.ts, modifier = Modifier.size(18.dp))
+            AppText(label, color = tc.tx, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
@@ -613,7 +614,12 @@ private fun HomeRecentFilterRow(
     onReclaimFocus: () -> Unit,
 ) {
     val defaults = remember { RecentFilters() }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
         RecentFilterPill(
             label = "Type",
             values = RecentTypeFilter.entries,
@@ -659,7 +665,7 @@ private fun HomeRecentFilterRow(
 /** One "Label: value" pill. Click toggles a small menu (the package-local [Popup] from
  *  ui/MirrorOccludingLayers.kt, per this screen's own convention) listing every value in
  *  [values]; picking one closes the menu and reclaims root focus, same as every other clickable on
- *  this screen (see [HomeTile]'s KDoc on why that matters). Highlighted with an accent border/tint
+ *  this screen (see [HomeActionButton]'s KDoc on why that matters). Highlighted with an accent border/tint
  *  whenever [isDefault] is false. */
 @Composable
 private fun <T> RecentFilterPill(
