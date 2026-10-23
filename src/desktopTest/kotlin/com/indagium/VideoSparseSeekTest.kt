@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.video.VideoPlayerController
 import com.indagium.video.audioFrameTooFarAhead
 import com.indagium.video.defaultVideoPlayerController
 import com.indagium.video.playbackClockUs
@@ -56,7 +57,7 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 800L..1_300L, "the clock should advance through the first sparse interval")
             assertTrue(isGreen(controller.grabCurrentFrame()), "the 1.5s frame must not display before its PTS")
-            await("first resumed frame", timeoutMs = 30_000L) { isBlue(controller.grabCurrentFrame()) }
+            await("first resumed frame", timeoutMs = 30_000L, controller = controller) { isBlue(controller.grabCurrentFrame()) }
             assertTrue(controller.positionMs >= 1_500L)
 
             controller.pause()
@@ -68,7 +69,7 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 2_000L..2_500L)
             assertTrue(isCyan(controller.grabCurrentFrame()), "the 3.0s frame must not display early")
-            await("second resumed frame", timeoutMs = 30_000L) { isMagenta(controller.grabCurrentFrame()) }
+            await("second resumed frame", timeoutMs = 30_000L, controller = controller) { isMagenta(controller.grabCurrentFrame()) }
             assertTrue(controller.positionMs >= 3_000L)
         } finally {
             controller.close()
@@ -272,13 +273,41 @@ class VideoSparseSeekTest {
 
     private fun blue(rgb: Int) = rgb and 0xFF
 
-    private fun await(label: String, timeoutMs: Long = 15_000L, condition: () -> Boolean) {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (!condition() && System.currentTimeMillis() < deadline) Thread.sleep(20L)
-        assertTrue(condition(), "timed out waiting for $label")
+    private fun await(
+        label: String,
+        timeoutMs: Long = 15_000L,
+        controller: VideoPlayerController? = null,
+        condition: () -> Boolean,
+    ) {
+        val start = System.currentTimeMillis()
+        val deadline = start + timeoutMs
+        val trace = mutableListOf<String>()
+        var nextSampleAt = start
+        while (!condition() && System.currentTimeMillis() < deadline) {
+            val now = System.currentTimeMillis()
+            if (controller != null && now >= nextSampleAt) {
+                trace += describe(controller, now - start)
+                nextSampleAt = now + TRACE_INTERVAL_MS
+            }
+            Thread.sleep(20L)
+        }
+        // A timeout here is intermittent on the CI macOS runner and never reproduces locally, so the
+        // failure carries what the player was doing: position, play state, error and the picture's
+        // centre pixel over time (the 1.5 s frame is blue, the 1.6 s one cyan, the held one green).
+        val detail = controller?.let {
+            "; final ${describe(it, System.currentTimeMillis() - start)}; trace: ${trace.take(4) + trace.takeLast(4)}"
+        }.orEmpty()
+        assertTrue(condition(), "timed out waiting for $label$detail")
+    }
+
+    private fun describe(controller: VideoPlayerController, elapsedMs: Long): String {
+        val rgb = controller.grabCurrentFrame()?.let(::pixel)
+        val colour = rgb?.let { "%02x%02x%02x".format(red(it), green(it), blue(it)) } ?: "none"
+        return "+${elapsedMs}ms pos=${controller.positionMs} playing=${controller.isPlaying} rgb=$colour error=${controller.error}"
     }
 
     private companion object {
+        const val TRACE_INTERVAL_MS = 500L
         const val LONG_GOP_DURATION_MS = 45_000L
         const val LONG_GOP_CHANGE_MS = 40_000L
         const val LONG_GOP_SEEK_MS = 38_000L
