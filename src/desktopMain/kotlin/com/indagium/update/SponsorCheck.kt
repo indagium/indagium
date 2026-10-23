@@ -50,14 +50,24 @@ private fun stripYamlInlineComment(value: String): String {
  * so tests can substitute a MockEngine; any failure — network, non-2xx, missing key — returns null
  * rather than throwing (cancellation is rethrown, same contract as [UpdateChecker.fetchLatest]).
  */
-class SponsorChecker(
-    private val httpClient: HttpClient = HttpClient(CIO) {
-        expectSuccess = false
-        engine {
-            requestTimeout = 0
-        }
-    },
-) {
+class SponsorChecker private constructor(private val client: Lazy<HttpClient>) {
+    constructor(httpClient: HttpClient) : this(lazyOf(httpClient))
+
+    // Built on first use: HttpClient(CIO) opens an NIO selector (a kqueue plus pipes) eagerly, and
+    // every AppState owns one of these, so an eager default leaked descriptors per AppState.
+    constructor() : this(
+        lazy {
+            HttpClient(CIO) {
+                expectSuccess = false
+                engine {
+                    requestTimeout = 0
+                }
+            }
+        },
+    )
+
+    private val httpClient: HttpClient get() = client.value
+
     suspend fun fetchSponsorUrl(): String? = try {
         val response = httpClient.get(FUNDING_YAML_URL)
         if (!response.status.isSuccess()) null else parseGithubSponsor(response.bodyAsText())

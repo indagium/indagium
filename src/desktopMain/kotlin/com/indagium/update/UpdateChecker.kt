@@ -83,14 +83,24 @@ sealed interface UpdateCheckResult {
  * tests can substitute a MockEngine) and a contract that never throws for a failed check, only for
  * cancellation.
  */
-class UpdateChecker(
-    private val httpClient: HttpClient = HttpClient(CIO) {
-        expectSuccess = false
-        engine {
-            requestTimeout = 0
-        }
-    },
-) {
+class UpdateChecker private constructor(private val client: Lazy<HttpClient>) {
+    constructor(httpClient: HttpClient) : this(lazyOf(httpClient))
+
+    // Built on first use: HttpClient(CIO) opens an NIO selector (a kqueue plus pipes) eagerly, and
+    // every AppState owns one of these, so an eager default leaked descriptors per AppState.
+    constructor() : this(
+        lazy {
+            HttpClient(CIO) {
+                expectSuccess = false
+                engine {
+                    requestTimeout = 0
+                }
+            }
+        },
+    )
+
+    private val httpClient: HttpClient get() = client.value
+
     suspend fun fetchLatest(currentVersion: String = BuildInfo.APP_VERSION): UpdateCheckResult = try {
         val response = httpClient.get("https://api.github.com/repos/$UPDATE_REPO/releases/latest") {
             header(HttpHeaders.Accept, "application/vnd.github+json")
