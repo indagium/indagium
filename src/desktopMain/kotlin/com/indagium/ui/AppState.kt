@@ -6219,6 +6219,24 @@ class AppState(
         activeSurface = ActiveSurface.Tests
     }
 
+    /**
+     * Opens the Tests workspace on [suiteId]'s Cases tab, with its run dialog open when [openRunDialog]. The workspace's view state is
+     * set BEFORE [openTestsTab], because Tests is a singleton surface that composes from that state the moment it becomes active.
+     */
+    internal fun openTestsSuite(suiteId: String, openRunDialog: Boolean) {
+        testsView.showSuite(suiteId)
+        testsView.runDialog = if (openRunDialog) RunDialogTarget(suiteId) else null
+        openTestsTab()
+    }
+
+    /**
+     * The future entry point for upgrading the edition (a purchase / license page). Intentionally empty and not called from anywhere:
+     * no "Upgrade" links are shown yet, and the Tests UI will call this once there is somewhere to send people.
+     */
+    @Suppress("EmptyFunctionBlock")
+    fun openEditionUpgrade() {
+    }
+
     /** Closes the Tests workspace tab and returns to the surface it was opened from, when that still exists. */
     fun closeTestsTab() {
         if (!testsTabOpen) return

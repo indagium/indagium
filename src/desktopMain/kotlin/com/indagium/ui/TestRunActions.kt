@@ -1,7 +1,9 @@
 package com.indagium.ui
 
 import com.indagium.testing.limits.LimitDecision
+import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepFix
+import com.indagium.testing.model.summary
 import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.TestRunReportExportProgress
 import com.indagium.testing.run.TestRunReportExportResult
@@ -14,6 +16,8 @@ import com.indagium.testing.run.withAgentError
 import com.indagium.testing.run.withFix
 import com.indagium.testing.run.withFixApplied
 import com.indagium.testing.store.StoreResult
+import com.indagium.testing.store.StoredLatestRuns
+import com.indagium.testing.store.TestRunStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -110,4 +114,32 @@ internal suspend fun AppState.exportTestRunReport(
         run, testRunCoordinator.runDir(runId), java.io.File(destination), format, evidencePaths,
         overwrite = overwrite, progress = progress,
     )
+}
+
+// ── Latest runs for the New tab ──────────────────────────────────────
+
+/**
+ * The newest finished run of each of [suiteIds] and of any suite: read from the stored runs (a [TestRunStore] over the active test
+ * runs folder, newest-first with an early stop) and merged with the finished runs of this launch ([AppState.testRuns]), where the
+ * live copy wins. Runs on the IO dispatcher and never starts the test run coordinator, so it is cheap to call from the home tab.
+ * A missing runs folder just gives an empty result.
+ */
+internal suspend fun AppState.latestTestRunSummaries(suiteIds: Set<String>): StoredLatestRuns {
+    val liveFinished = testRuns.filter { it.isFinished }.map { it.summary() }
+    val runsDir = activeTestFolders().second
+    val stored = withContext(Dispatchers.IO) { runCatching { TestRunStore { runsDir }.latestSummariesBySuite(suiteIds) }.getOrNull() }
+    return mergeLatestRuns(stored ?: StoredLatestRuns(emptyMap(), null), liveFinished, suiteIds)
+}
+
+/** [stored] with [liveFinished] folded in: per suite and overall the newest run wins, and a live summary beats a stored one on a tie. */
+internal fun mergeLatestRuns(stored: StoredLatestRuns, liveFinished: List<RunSummary>, suiteIds: Set<String>): StoredLatestRuns {
+    fun newer(candidate: RunSummary, current: RunSummary?): RunSummary =
+        if (current == null || candidate.createdAt >= current.createdAt) candidate else current
+    val bySuite = HashMap(stored.bySuite)
+    var overall = stored.latestOverall
+    for (live in liveFinished) {
+        if (live.suiteId in suiteIds) bySuite[live.suiteId] = newer(live, bySuite[live.suiteId])
+        overall = newer(live, overall)
+    }
+    return StoredLatestRuns(bySuite, overall)
 }

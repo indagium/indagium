@@ -402,6 +402,71 @@ class TestRunStoreTest {
         assertEquals(targetRuns.asReversed().map { it.id }, reloadedStore.listSummariesForSuite(targetSuiteId).map { it.id })
     }
 
+    // ── Latest finished run per suite ───────────────────────────────
+
+    private fun savedRunFor(suiteId: String, runId: String, status: RunStatus, createdAt: Long): TestRun {
+        val sample = sampleRun(status, createdAt)
+        val run = sample.copy(id = runId, suite = sample.suite.copy(id = suiteId), config = sample.config.copy(suiteId = suiteId))
+        assertTrue(store.save(run).isSuccess)
+        File(store.runDir(run.id), TEST_RUN_FILE_NAME).setLastModified(createdAt)
+        return run
+    }
+
+    @Test
+    fun latestSummariesStopReadingOnceEverySuiteHasAFinishedRun() {
+        val baseDirCalls = AtomicInteger()
+        val counting = TestRunStore {
+            baseDirCalls.incrementAndGet()
+            File(dir, "test-runs")
+        }
+        val runs = (1..10).map { savedRunFor("suite-a", "run-a-$it", RunStatus.PASSED, createdAt = it * 1_000L) }
+        baseDirCalls.set(0)
+
+        val latest = counting.latestSummariesBySuite(setOf("suite-a"))
+
+        assertEquals(runs.last().id, latest.bySuite.getValue("suite-a").id)
+        assertEquals(runs.last().id, latest.latestOverall?.id)
+        // One folder listing plus one run.json read: the nine older runs were never opened.
+        assertEquals(2, baseDirCalls.get())
+    }
+
+    @Test
+    fun latestSummariesIgnoreUnfinishedRuns() {
+        val finished = savedRunFor("suite-a", "run-a-old", RunStatus.PASSED, createdAt = 1_000L)
+        savedRunFor("suite-a", "run-a-running", RunStatus.RUNNING, createdAt = 5_000L)
+        savedRunFor("suite-b", "run-b-queued", RunStatus.QUEUED, createdAt = 6_000L)
+
+        val latest = store.latestSummariesBySuite(setOf("suite-a", "suite-b"))
+
+        assertEquals(finished.id, latest.bySuite.getValue("suite-a").id)
+        assertNull(latest.bySuite["suite-b"], "a suite whose only run is unfinished has no latest run")
+        assertEquals(finished.id, latest.latestOverall?.id)
+    }
+
+    @Test
+    fun latestSummariesGiveTheNewestFinishedRunOverallEvenForAnUnrequestedSuite() {
+        val older = savedRunFor("suite-a", "run-a", RunStatus.FAILED, createdAt = 2_000L)
+        val newest = savedRunFor("suite-other", "run-other", RunStatus.PASSED, createdAt = 8_000L)
+
+        val latest = store.latestSummariesBySuite(setOf("suite-a"))
+
+        assertEquals(setOf("suite-a"), latest.bySuite.keys)
+        assertEquals(older.id, latest.bySuite.getValue("suite-a").id)
+        assertEquals(newest.id, latest.latestOverall?.id)
+    }
+
+    @Test
+    fun latestSummariesAreBoundedByTheScanLimitAndEmptyWithoutAFolder() {
+        assertEquals(emptyMap(), store.latestSummariesBySuite(setOf("suite-a")).bySuite)
+        assertNull(store.latestSummariesBySuite(setOf("suite-a")).latestOverall)
+
+        savedRunFor("suite-a", "run-a", RunStatus.PASSED, createdAt = 1_000L)
+        for (index in 1..3) savedRunFor("suite-x", "run-x-$index", RunStatus.PASSED, createdAt = 2_000L + index)
+
+        assertNull(store.latestSummariesBySuite(setOf("suite-a"), scanLimit = 3).bySuite["suite-a"])
+        assertEquals("run-a", store.latestSummariesBySuite(setOf("suite-a"), scanLimit = 4).bySuite["suite-a"]?.id)
+    }
+
     // ── Transcript ──────────────────────────────────────────────────
 
     @Test
