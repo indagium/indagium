@@ -1574,6 +1574,55 @@ data class AppSettings(
     // Local English spelling/grammar suggestions; JSON-only so the legacy positional settings
     // decoder remains frozen. Decorations are transient UI state and are never serialized.
     val proofreading: ProofreadingSettings = ProofreadingSettings(),
+    // The New tab's tiling layout: the arrangement of the visible sections (homeLayout, see ui/HomeLayout.kt), the sections
+    // the user hid (homeHiddenSections: kept out of homeLayout until restored) and whether the layout tip was dismissed.
+    // JSON-only (ui/HomeLayoutSettingsJson.kt), same rule as above: the frozen positional settings decoder must not gain a field.
+    val homeLayout: HomeLayoutNode = DEFAULT_HOME_LAYOUT,
+    val homeHiddenSections: List<HomeSectionId> = emptyList(),
+    val homeLayoutTipDismissed: Boolean = false,
+)
+
+/** The sections the New tab can tile. [key] is the stable id stored in settings. */
+enum class HomeSectionId(val key: String) {
+    OPEN("open"),
+    CAPTURE("capture"),
+    TESTS("tests"),
+    ;
+
+    companion object {
+        fun fromKey(key: String?): HomeSectionId? = entries.firstOrNull { it.key == key }
+    }
+}
+
+/** How a split lays its children out: [ROW] side by side (left to right), [COLUMN] stacked (top to bottom). */
+enum class HomeSplitAxis { ROW, COLUMN }
+
+/** A node of the New tab's layout tree. [weight] is this node's share among its siblings (it is meaningless on the root). */
+sealed interface HomeLayoutNode {
+    val weight: Float
+}
+
+data class HomeLayoutLeaf(val section: HomeSectionId, override val weight: Float = 1f) : HomeLayoutNode
+
+data class HomeLayoutSplit(
+    val axis: HomeSplitAxis,
+    val children: List<HomeLayoutNode>,
+    override val weight: Float = 1f,
+) : HomeLayoutNode
+
+const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
+
+/** Open + Capture side by side on top, Tests full width below (weights 1.6 : 1). */
+val DEFAULT_HOME_LAYOUT: HomeLayoutNode = HomeLayoutSplit(
+    HomeSplitAxis.COLUMN,
+    listOf(
+        HomeLayoutSplit(
+            HomeSplitAxis.ROW,
+            listOf(HomeLayoutLeaf(HomeSectionId.OPEN), HomeLayoutLeaf(HomeSectionId.CAPTURE)),
+            weight = DEFAULT_HOME_TOP_WEIGHT,
+        ),
+        HomeLayoutLeaf(HomeSectionId.TESTS),
+    ),
 )
 
 /** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,
