@@ -44,15 +44,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.testing.model.CaseRunMatrix
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
+import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.TestSuiteHistory
+import com.indagium.testing.model.deriveCaseRunMatrix
 import com.indagium.testing.model.deriveTestSuiteHistory
 import com.indagium.testing.model.summary
+import com.indagium.testing.run.mergeFinishedOutcomes
 import com.indagium.testing.run.mergeRunSnapshots
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.StoredSuiteRunHistory
@@ -81,7 +85,15 @@ private const val ROW_SEPARATOR_ALPHA = .6f
 private const val ISSUE_PILL_ALPHA = .18f
 
 /** What the suite screen derived from the run history. [loaded] is false until the stored runs were read. */
-private class SuiteScreenData(val history: TestSuiteHistory, val issues: List<IssueRecord>, val loaded: Boolean)
+private class SuiteScreenData(
+    val history: TestSuiteHistory,
+    val issues: List<IssueRecord>,
+    val loaded: Boolean,
+    /** The suite's cases against its newest finished runs (stored outcomes plus this launch's finished runs). */
+    val matrix: CaseRunMatrix,
+    /** "#N" numbers of the suite's runs by run id, oldest = 1. */
+    val ordinals: Map<String, Int>,
+)
 
 @Composable
 internal fun TestsSuiteScreen(suiteId: String) {
@@ -122,11 +134,15 @@ private class LoadedSuiteRuns(val suiteId: String, val stored: StoredSuiteRunHis
 private fun rememberSuiteScreenData(suite: TestSuite): SuiteScreenData {
     val ui = LocalTestsUi.current
     val liveRuns = ui.state.testRuns.filter { it.config.suiteId == suite.id }
+    // The disk is read again only when something it holds can have changed: another suite, a changed or pruned folder, or one of this
+    // suite's live runs finishing (it was just saved). Progress updates of a running run change `testRuns` many times a second and
+    // must not rescan every run file; they are merged below, in composition.
+    val finishedLiveIds = liveRuns.filter { it.isFinished }.map { it.id }
     val loadedRuns by produceState<LoadedSuiteRuns?>(
         initialValue = null,
         key1 = suite.id,
-        key2 = ui.state.testRuns,
-        key3 = ui.state.testRunsFolderEpoch,
+        key2 = ui.state.testRunsFolderEpoch,
+        key3 = finishedLiveIds,
     ) {
         value = LoadedSuiteRuns(suite.id, ui.state.testRunCoordinator.loadSuiteRunHistory(suite.id))
     }
@@ -134,12 +150,23 @@ private fun rememberSuiteScreenData(suite: TestSuite): SuiteScreenData {
     val loaded = loadedRuns?.suiteId == suite.id
     val stored = loadedRuns?.takeIf { loaded }?.stored ?: StoredSuiteRunHistory(liveRuns, liveRuns.map { it.summary() })
     val runs = remember(liveRuns, stored) { mergeRunSnapshots(liveRuns, stored.recentRecords) }
-    val history = remember(suite, runs, stored.summaries) { deriveTestSuiteHistory(suite, runs, allRunSummaries = stored.summaries) }
+    // The stored summaries are as old as the last read, so a run started or progressed since then comes from the live snapshots.
+    val summaries = remember(liveRuns, stored.summaries) {
+        val liveSummaries = liveRuns.map { it.summary() }
+        val liveIds = liveSummaries.mapTo(HashSet()) { it.id }
+        (liveSummaries + stored.summaries.filter { it.id !in liveIds })
+            .sortedWith(compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id })
+    }
+    val history = remember(suite, runs, summaries) { deriveTestSuiteHistory(suite, runs, allRunSummaries = summaries) }
+    val matrix = remember(suite, liveRuns, stored.finishedOutcomes) {
+        deriveCaseRunMatrix(suite, mergeFinishedOutcomes(stored.finishedOutcomes, liveRuns))
+    }
+    val ordinals = remember(summaries) { runOrdinals(summaries) }
     val issueRevision by ui.state.issueStore.revision.collectAsState()
     val issues by produceState<List<IssueRecord>>(emptyList(), issueRevision) {
         value = withContext(Dispatchers.IO) { ui.state.issueStore.list() }
     }
-    return SuiteScreenData(history, issues, loaded)
+    return SuiteScreenData(history, issues, loaded, matrix, ordinals)
 }
 
 private fun deleteSuiteAndSelectNext(ui: TestsUi, suite: TestSuite) {

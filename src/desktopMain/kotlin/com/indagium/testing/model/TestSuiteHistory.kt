@@ -126,7 +126,8 @@ private fun CaseResult.elapsedDurationMs(): Long {
     return steps.filterNot { it.setup }.sumOf { it.durationMs.coerceAtLeast(0L) }
 }
 
-private fun worseCaseStatus(left: CaseStatus, right: CaseStatus): CaseStatus {
+/** The worse of two case statuses (ERROR > FAIL > BLOCKED > CANCELLED > SKIPPED > PASS); a tie keeps [left]. */
+internal fun worseCaseStatus(left: CaseStatus, right: CaseStatus): CaseStatus {
     fun rank(status: CaseStatus): Int = when (status) {
         CaseStatus.ERROR -> 6
         CaseStatus.FAIL -> 5

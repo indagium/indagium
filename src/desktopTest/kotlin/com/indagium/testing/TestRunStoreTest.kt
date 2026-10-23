@@ -467,6 +467,43 @@ class TestRunStoreTest {
         assertEquals("run-a", store.latestSummariesBySuite(setOf("suite-a"), scanLimit = 4).bySuite["suite-a"]?.id)
     }
 
+    // ── Finished outcomes of a suite ────────────────────────────────
+
+    @Test
+    fun suiteHistoryKeepsTheNewestTwelveFinishedOutcomesAsCompactEntries() {
+        val runs = (1..15).map { savedRunFor("suite-a", "run-a-$it", RunStatus.PASSED, createdAt = it * 1_000L) }
+        savedRunFor("suite-a", "run-a-running", RunStatus.RUNNING, createdAt = 50_000L)
+        savedRunFor("suite-a", "run-a-queued", RunStatus.QUEUED, createdAt = 51_000L)
+        savedRunFor("suite-b", "run-b", RunStatus.PASSED, createdAt = 99_000L)
+
+        val history = store.listSuiteHistory("suite-a")
+
+        assertEquals(runs.takeLast(12).reversed().map { it.id }, history.finishedOutcomes.map { it.runId }, "newest first, finished only, this suite only")
+        assertTrue(history.finishedOutcomes.all { it.suiteId == "suite-a" && it.isFinished })
+        assertEquals(17, history.summaries.size, "the Runs tab still lists every run")
+        // Unchanged by the outcomes: the five newest runs (queued, running, three finished) and the latest terminal one, which is among them.
+        assertEquals(5, history.recentRecords.size)
+    }
+
+    @Test
+    fun suiteHistoryOutcomesAreOrderedByCreationNotByFileTime() {
+        val older = savedRunFor("suite-a", "run-a-old", RunStatus.FAILED, createdAt = 1_000L)
+        val newer = savedRunFor("suite-a", "run-a-new", RunStatus.PASSED, createdAt = 9_000L)
+        // The old run was rewritten last, so a scan by file time reads it first.
+        File(store.runDir(older.id), TEST_RUN_FILE_NAME).setLastModified(50_000L)
+
+        val outcomes = store.listSuiteHistory("suite-a").finishedOutcomes
+
+        assertEquals(listOf(newer.id, older.id), outcomes.map { it.runId })
+        assertEquals(RunStatus.FAILED, outcomes.last().status)
+    }
+
+    @Test
+    fun suiteHistoryOfAnUnsafeOrEmptySuiteHasNoOutcomes() {
+        assertTrue(store.listSuiteHistory("../escape").finishedOutcomes.isEmpty())
+        assertTrue(store.listSuiteHistory("suite-none").finishedOutcomes.isEmpty())
+    }
+
     // ── Transcript ──────────────────────────────────────────────────
 
     @Test

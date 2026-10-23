@@ -7,13 +7,16 @@ import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.RunCaseOutcomes
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
+import com.indagium.testing.model.SUITE_HEALTH_RUN_LIMIT
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.caseOutcomes
 import com.indagium.testing.model.driverLabel
 import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.newRunId
@@ -427,7 +430,8 @@ internal class TestRunCoordinator(
         val liveSummaries = live.map { it.summary() }
         val summaries = (liveSummaries + stored.summaries.filter { saved -> live.none { it.id == saved.id } })
             .sortedWith(compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id })
-        return StoredSuiteRunHistory(records, summaries)
+        val finishedOutcomes = mergeFinishedOutcomes(stored.finishedOutcomes, live)
+        return StoredSuiteRunHistory(records, summaries, finishedOutcomes)
     }
 
     suspend fun listRunSummariesForSuite(suiteId: String): List<RunSummary> = loadSuiteRunHistory(suiteId).summaries
@@ -628,6 +632,18 @@ internal fun RunConfig.withEffectiveModels(profiles: List<AiProviderProfile>): R
         judgeModel = judge?.model?.takeIf { it.isNotBlank() } ?: judgeModel,
         judgeReasoningEffort = judge?.reasoningEffort ?: judgeReasoningEffort,
     )
+}
+
+/**
+ * The stored compact outcomes with the finished in-memory [live] runs on top (live wins per run id), newest first and capped at
+ * [SUITE_HEALTH_RUN_LIMIT]. An unfinished live run is not an outcome yet.
+ */
+internal fun mergeFinishedOutcomes(stored: List<RunCaseOutcomes>, live: List<TestRun>): List<RunCaseOutcomes> {
+    val byId = LinkedHashMap<String, RunCaseOutcomes>()
+    stored.forEach { byId[it.runId] = it }
+    live.filter { it.isFinished }.forEach { byId[it.id] = it.caseOutcomes() }
+    return byId.values.sortedWith(compareByDescending<RunCaseOutcomes> { it.createdAt }.thenByDescending { it.runId })
+        .take(SUITE_HEALTH_RUN_LIMIT)
 }
 
 /** Prefer a live snapshot when a disk read races the same run's latest persistence write. */

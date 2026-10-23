@@ -1,7 +1,10 @@
 package com.indagium.testing.store
 
+import com.indagium.testing.model.RunCaseOutcomes
 import com.indagium.testing.model.RunSummary
+import com.indagium.testing.model.SUITE_HEALTH_RUN_LIMIT
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.caseOutcomes
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.summary
 import com.indagium.utils.writeFileAtomically
@@ -30,7 +33,17 @@ private const val MAX_LISTED_RUNS = 200
 private const val MAX_SUITE_SUMMARIES = 10_000
 private const val RECENT_SUITE_RECORDS = 5
 
-data class StoredSuiteRunHistory(val recentRecords: List<TestRun>, val summaries: List<RunSummary>)
+/**
+ * [finishedOutcomes]: the compact case outcomes of the suite's newest [SUITE_HEALTH_RUN_LIMIT] finished runs, newest first. Appended
+ * last; it holds no full runs, so it stays small however large the run files are.
+ */
+data class StoredSuiteRunHistory(
+    val recentRecords: List<TestRun>,
+    val summaries: List<RunSummary>,
+    val finishedOutcomes: List<RunCaseOutcomes> = emptyList(),
+)
+
+private val FINISHED_OUTCOME_ORDER = compareByDescending<RunCaseOutcomes> { it.createdAt }.thenByDescending { it.runId }
 
 /**
  * The newest finished run of each requested suite ([bySuite]; a suite with none is absent) and the newest finished run of any
@@ -103,6 +116,7 @@ class TestRunStore(private val baseDir: () -> File) {
         if (!isSafeId(suiteId)) return StoredSuiteRunHistory(emptyList(), emptyList())
         val summaries = ArrayList<RunSummary>()
         val recent = ArrayList<TestRun>()
+        val outcomes = ArrayList<RunCaseOutcomes>()
         var latestTerminal: TestRun? = null
         val recordOrder = compareByDescending<TestRun> { it.createdAt }.thenByDescending { it.finishedAt ?: 0L }
         val folders = baseDir().listFiles { file -> file.isDirectory && isSafeId(file.name) }.orEmpty()
@@ -115,6 +129,9 @@ class TestRunStore(private val baseDir: () -> File) {
                 recent.sortWith(recordOrder)
                 if (recent.size > RECENT_SUITE_RECORDS) recent.removeAt(recent.lastIndex)
                 if (run.isFinished) {
+                    outcomes += run.caseOutcomes()
+                    outcomes.sortWith(FINISHED_OUTCOME_ORDER)
+                    if (outcomes.size > SUITE_HEALTH_RUN_LIMIT) outcomes.removeAt(outcomes.lastIndex)
                     val previousTerminal = latestTerminal
                     if (previousTerminal == null || recordOrder.compare(run, previousTerminal) < 0) latestTerminal = run
                 }
@@ -123,7 +140,7 @@ class TestRunStore(private val baseDir: () -> File) {
         }
         val summaryOrder = compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id }
         val records = (recent + listOfNotNull(latestTerminal)).distinctBy { it.id }.sortedWith(recordOrder)
-        return StoredSuiteRunHistory(records, summaries.sortedWith(summaryOrder))
+        return StoredSuiteRunHistory(records, summaries.sortedWith(summaryOrder), outcomes.toList())
     }
 
     /**

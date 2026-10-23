@@ -12,6 +12,7 @@ import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.SuiteCaseHistory
@@ -24,6 +25,7 @@ import com.indagium.ui.caseIssueIds
 import com.indagium.ui.detail
 import com.indagium.ui.laneResultLine
 import com.indagium.ui.ranLanes
+import com.indagium.ui.runOrdinals
 import com.indagium.ui.suiteCasesCompact
 import com.indagium.ui.suiteLastRun
 import com.indagium.ui.suiteTabLabel
@@ -70,6 +72,19 @@ class TestsSuiteScreenStateTest {
         assertTrue(suiteCasesCompact(719f))
         assertFalse(suiteCasesCompact(720f))
         assertFalse(suiteCasesCompact(900f))
+    }
+
+    private fun summary(id: String, createdAt: Long) =
+        RunSummary(id, "Suite", RunStatus.PASSED, createdAt, createdAt + 1, 1, 1, 1, 1)
+
+    @Test
+    fun runOrdinalsNumberTheOldestRunOneAndBreakTiesById() {
+        val ordinals = runOrdinals(
+            listOf(summary("run-c", 3_000L), summary("run-b", 2_000L), summary("run-a2", 1_000L), summary("run-a1", 1_000L), summary("run-b", 2_000L)),
+        )
+
+        assertEquals(mapOf("run-a1" to 1, "run-a2" to 2, "run-b" to 3, "run-c" to 4), ordinals)
+        assertEquals(emptyMap(), runOrdinals(emptyList()))
     }
 
     @Test
