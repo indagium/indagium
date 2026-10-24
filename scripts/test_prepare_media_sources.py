@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import re
+import subprocess
 import tempfile
 import unittest
 import zipfile
@@ -53,6 +56,161 @@ class MediaSourceValidationTest(unittest.TestCase):
             (cache / source["archive"]).write_bytes(b"not the pinned archive")
             with self.assertRaisesRegex(media.BundleError, "Cached source checksum mismatch"):
                 media.ensure_sources([source], cache, fetch_missing=False)
+
+    def test_gitlab_macos_classifier_lookup_uses_custom_gradle_user_home(self) -> None:
+        pipeline = (media.REPO_ROOT / ".gitlab-ci.yml").read_text(encoding="utf-8")
+        lookup_lines = [
+            line.strip()
+            for line in pipeline.splitlines()
+            if line.strip().startswith(("gradle_user_home=", "ffmpeg_jar=$(find ", "zstd_jar=$(find "))
+        ]
+        self.assertEqual(
+            len(lookup_lines), 3,
+            "expected the macOS classifier lookup to define its cache and both JAR paths",
+        )
+        self.assertIn("${GRADLE_USER_HOME:-$HOME/.gradle}", lookup_lines[0])
+        self.assertTrue(all('find "$gradle_user_home/caches/' in line for line in lookup_lines[1:]))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            custom_gradle_home = root / "custom gradle home"
+            relative_jars = (
+                (
+                    "org.bytedeco/ffmpeg/8.0.1-1.5.13",
+                    "ffmpeg-8.0.1-1.5.13-macosx-arm64.jar",
+                ),
+                (
+                    "com.github.luben/zstd-jni/1.5.7-4",
+                    "zstd-jni-1.5.7-4-darwin_aarch64.jar",
+                ),
+            )
+            for relative_directory, filename in relative_jars:
+                jar = (
+                    custom_gradle_home / "caches" / "modules-2" / "files-2.1" /
+                    relative_directory / "test" / filename
+                )
+                jar.parent.mkdir(parents=True)
+                jar.write_bytes(b"fixture")
+
+            shell = "\n".join(lookup_lines + ['printf "%s\\n" "$ffmpeg_jar" "$zstd_jar"'])
+            environment = dict(os.environ)
+            environment["GRADLE_USER_HOME"] = str(custom_gradle_home)
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", shell],
+                check=True,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            selected = result.stdout.splitlines()
+            self.assertEqual(len(selected), 2)
+            self.assertTrue(all(path.startswith(str(custom_gradle_home) + os.sep) for path in selected))
+
+    @staticmethod
+    def _write_synthetic_package(
+        root: Path, *, omitted_resource: str | None = None, modified_resource: str | None = None,
+    ) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
+        repo_root = root / "repo"
+        package_root = root / "package"
+        third_party = repo_root / "licenses" / "third-party"
+        application = repo_root / "licenses" / "application"
+        for directory in (third_party / "texts", application / "texts", package_root):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        source_files = {
+            "licenses/third-party/media-components.json": third_party / "media-components.json",
+            "licenses/third-party/media-source-lock.json": third_party / "media-source-lock.json",
+            "licenses/third-party/SOURCE-BUNDLE.md": third_party / "SOURCE-BUNDLE.md",
+            "licenses/THIRD_PARTY_NOTICES.md": repo_root / "THIRD_PARTY_NOTICES.md",
+            "licenses/NOTICE": repo_root / "NOTICE",
+            "licenses/third-party/texts/shared.txt": third_party / "texts" / "shared.txt",
+            "licenses/application/texts/app-license.txt": application / "texts" / "app-license.txt",
+            "licenses/languagetool-LGPL-2.1.txt": (
+                repo_root / "src" / "desktopMain" / "resources" / "licenses" / "languagetool-LGPL-2.1.txt"
+            ),
+        }
+        for resource, path in source_files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"synthetic text for {resource}\n", encoding="utf-8")
+
+        app_inventory = {
+            "schemaVersion": 1,
+            "components": [
+                {"id": "shared-text-user", "licenseFiles": ["third-party/texts/shared.txt"]},
+                {
+                    "id": "application-texts",
+                    "licenseFiles": [
+                        "third-party/texts/shared.txt",
+                        "application/texts/app-license.txt",
+                        "languagetool-LGPL-2.1.txt",
+                    ],
+                },
+            ],
+        }
+        app_inventory_path = application / "application-components.json"
+        app_inventory_path.write_text(json.dumps(app_inventory, indent=2) + "\n", encoding="utf-8")
+
+        resources = {resource: path.read_bytes() for resource, path in source_files.items()}
+        resources["licenses/application/application-components.json"] = app_inventory_path.read_bytes()
+        if omitted_resource is not None:
+            resources.pop(omitted_resource)
+        if modified_resource is not None:
+            resources[modified_resource] = resources[modified_resource] + b" altered in package\n"
+
+        inventory: dict[str, object] = {
+            "licenseTextHashes": {"texts/shared.txt": media.sha256_file(third_party / "texts" / "shared.txt")},
+        }
+        binary_artifacts = [
+            {"id": "ffmpeg-linux-x86_64", "archive": "ffmpeg-linux-x86_64.jar", "sha256": ""},
+            {"id": "zstd-jni-linux-x64", "archive": "zstd-jni-linux-x64.jar", "sha256": ""},
+        ]
+        lock: dict[str, object] = {"binaryArtifacts": binary_artifacts}
+        ffmpeg_jar = package_root / "ffmpeg-linux-x86_64.jar"
+        zstd_jar = package_root / "zstd-jni-linux-x64.jar"
+        with zipfile.ZipFile(ffmpeg_jar, "w") as archive:
+            for resource, contents in resources.items():
+                archive.writestr(resource, contents)
+        with zipfile.ZipFile(zstd_jar, "w") as archive:
+            archive.writestr("fixture/marker.txt", b"classifier fixture")
+        binary_artifacts[0]["sha256"] = media.sha256_file(ffmpeg_jar)
+        binary_artifacts[1]["sha256"] = media.sha256_file(zstd_jar)
+        return repo_root, package_root, inventory, lock
+
+    def _validate_synthetic_package(
+        self, root: Path, *, omitted_resource: str | None = None, modified_resource: str | None = None,
+    ) -> None:
+        repo_root, package_root, inventory, lock = self._write_synthetic_package(
+            root, omitted_resource=omitted_resource, modified_resource=modified_resource,
+        )
+        media.validate_packaged_resources(package_root, "linux-x64", inventory, lock, repo_root=repo_root)
+
+    def test_complete_synthetic_package_includes_application_and_reused_media_licences(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            self._validate_synthetic_package(Path(temporary))
+
+    def test_packaged_application_inventory_is_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(media.BundleError, "licenses/application/application-components.json"):
+                self._validate_synthetic_package(
+                    Path(temporary), omitted_resource="licenses/application/application-components.json",
+                )
+
+    def test_packaged_referenced_application_texts_are_required(self) -> None:
+        missing_texts = (
+            "licenses/application/texts/app-license.txt",
+            "licenses/languagetool-LGPL-2.1.txt",
+        )
+        for missing_text in missing_texts:
+            with self.subTest(missing_text=missing_text), tempfile.TemporaryDirectory() as temporary:
+                with self.assertRaisesRegex(media.BundleError, re.escape(missing_text)):
+                    self._validate_synthetic_package(Path(temporary), omitted_resource=missing_text)
+
+    def test_modified_packaged_application_text_fails_checksum_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaisesRegex(media.BundleError, "Packaged legal resource checksum mismatch"):
+                self._validate_synthetic_package(
+                    Path(temporary), modified_resource="licenses/application/texts/app-license.txt",
+                )
 
     def test_wrong_downloaded_source_checksum_is_rejected(self) -> None:
         source = self.lock["sourceArchives"][0]

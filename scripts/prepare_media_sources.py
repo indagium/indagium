@@ -785,6 +785,7 @@ def _validate_macos_classifier_jars(packaged_jar: Path, original_jar: Path) -> N
 def validate_packaged_resources(
     package_root: Path, platform: str, inventory: dict[str, Any], lock: dict[str, Any],
     original_ffmpeg_jar: Path | None = None, original_zstd_jar: Path | None = None,
+    repo_root: Path = REPO_ROOT,
 ) -> None:
     if platform not in PLATFORM_KEYS:
         raise BundleError(f"Unsupported native platform: {platform}")
@@ -825,15 +826,62 @@ def validate_packaged_resources(
             if actual != expected_artifacts[artifact_id]["sha256"]:
                 raise BundleError(f"Packaged {artifact_id} checksum mismatch: expected {expected_artifacts[artifact_id]['sha256']}, got {actual}")
 
-    expected_resources = {
-        "licenses/third-party/media-components.json": sha256_file(LEGAL_ROOT / "media-components.json"),
-        "licenses/third-party/media-source-lock.json": sha256_file(LEGAL_ROOT / "media-source-lock.json"),
-        "licenses/third-party/SOURCE-BUNDLE.md": sha256_file(LEGAL_ROOT / "SOURCE-BUNDLE.md"),
-        "licenses/THIRD_PARTY_NOTICES.md": sha256_file(REPO_ROOT / "THIRD_PARTY_NOTICES.md"),
-        "licenses/NOTICE": sha256_file(REPO_ROOT / "NOTICE"),
-    }
+    expected_resources: dict[str, str] = {}
+
+    def require_resource(resource: str, source: Path, expected_digest: str | None = None) -> None:
+        if not source.is_file():
+            raise BundleError(f"Required packaged legal resource is missing from the repository: {source}")
+        digest = sha256_file(source)
+        if expected_digest is not None and digest != expected_digest:
+            raise BundleError(f"Repository legal resource checksum mismatch: {source}")
+        previous = expected_resources.get(resource)
+        if previous is not None and previous != digest:
+            raise BundleError(f"Conflicting expected checksums for packaged legal resource: {resource}")
+        expected_resources[resource] = digest
+
+    third_party_root = repo_root / "licenses" / "third-party"
+    require_resource(
+        "licenses/third-party/media-components.json", third_party_root / "media-components.json",
+    )
+    require_resource(
+        "licenses/third-party/media-source-lock.json", third_party_root / "media-source-lock.json",
+    )
+    require_resource("licenses/third-party/SOURCE-BUNDLE.md", third_party_root / "SOURCE-BUNDLE.md")
+    require_resource("licenses/THIRD_PARTY_NOTICES.md", repo_root / "THIRD_PARTY_NOTICES.md")
+    require_resource("licenses/NOTICE", repo_root / "NOTICE")
     for relative, digest in inventory["licenseTextHashes"].items():
-        expected_resources[f"licenses/third-party/{relative}"] = digest
+        require_resource(
+            f"licenses/third-party/{relative}", third_party_root / relative, expected_digest=digest,
+        )
+
+    application_inventory_path = repo_root / "licenses" / "application" / "application-components.json"
+    require_resource("licenses/application/application-components.json", application_inventory_path)
+    application_inventory = read_json(application_inventory_path)
+    components = application_inventory.get("components")
+    if application_inventory.get("schemaVersion") != 1 or not isinstance(components, list):
+        raise BundleError("Unknown application component inventory schema")
+    referenced_application_texts: set[str] = set()
+    for component in components:
+        if not isinstance(component, dict):
+            raise BundleError("Malformed component entry in application inventory")
+        license_files = component.get("licenseFiles")
+        if not isinstance(license_files, list):
+            raise BundleError(f"Component {component.get('id', '<unknown>')} has no licence file list")
+        for relative in license_files:
+            if not isinstance(relative, str) or not relative.strip():
+                raise BundleError(f"Invalid licence path for application component {component.get('id', '<unknown>')}")
+            path = PurePosixPath(relative)
+            if path.is_absolute() or ".." in path.parts or "\\" in relative:
+                raise BundleError(f"Unsafe licence path in application component {component.get('id', '<unknown>')}: {relative}")
+            referenced_application_texts.add(relative)
+
+    for relative in sorted(referenced_application_texts):
+        if relative.startswith(("third-party/", "application/")):
+            source = repo_root / "licenses" / relative
+        else:
+            source = repo_root / "src" / "desktopMain" / "resources" / "licenses" / relative
+        require_resource(f"licenses/{relative}", source)
+
     found: set[str] = set()
     for jar_path in jars:
         try:
@@ -1006,7 +1054,9 @@ def validate_package_only(
     repo_root: Path = REPO_ROOT
 ) -> None:
     inventory, lock = validate_inventory_only(app_version=app_version, runtime_versions=runtime_versions, repo_root=repo_root)
-    validate_packaged_resources(package_root, platform, inventory, lock, original_ffmpeg_jar, original_zstd_jar)
+    validate_packaged_resources(
+        package_root, platform, inventory, lock, original_ffmpeg_jar, original_zstd_jar, repo_root,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
