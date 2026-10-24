@@ -13,6 +13,18 @@ import kotlin.test.assertTrue
 // here.
 class HomeScreenTest {
     @Test
+    fun theOpenSectionKeepsSquareTilesWhileTheyFitAndCompactButtonsWhenSmall() {
+        // A roomy section (the default layout's top-left card on a laptop screen): square tiles.
+        assertTrue(homeOpenUsesSquareTiles(widthDp = 700f, heightDp = 500f))
+        // Too narrow for four readable tiles.
+        assertFalse(homeOpenUsesSquareTiles(widthDp = 380f, heightDp = 800f))
+        // Wide enough, but the tiles would leave no room for the recent files.
+        assertFalse(homeOpenUsesSquareTiles(widthDp = 900f, heightDp = 300f))
+        // Narrower tiles need less height: 4 x 100dp tiles fit in 360dp of height.
+        assertTrue(homeOpenUsesSquareTiles(widthDp = 436f, heightDp = 360f))
+    }
+
+    @Test
     fun recentKindForNameClassifiesByExtensionCaseInsensitively() {
         assertEquals(RecentKind.LOG, recentKindForName("logcat.log"))
         assertEquals(RecentKind.LOG, recentKindForName("dump.TXT"))
