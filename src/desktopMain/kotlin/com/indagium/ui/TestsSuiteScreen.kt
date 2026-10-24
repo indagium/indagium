@@ -73,12 +73,15 @@ import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.TestSuiteHistory
 import com.indagium.testing.model.deriveCaseRunMatrix
 import com.indagium.testing.model.deriveTestSuiteHistory
 import com.indagium.testing.model.summary
+import com.indagium.testing.run.failedCaseIds
+import com.indagium.testing.run.interruptedCaseIds
 import com.indagium.testing.run.mergeFinishedOutcomes
 import com.indagium.testing.run.mergeRunSnapshots
 import com.indagium.testing.store.StoreResult
@@ -87,7 +90,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 // The suite screen (wireframe B): the name with ▶ Run suite and a ⋯ menu, a one-line summary of the last run, and underline tabs
-// Cases · Runs · Settings. Cases is a compact table (# · case and goal · steps · latest result · issues · ⋯); Settings holds the
+// Cases · Health · Runs · Settings. Cases is a compact table (# · case and goal · steps · latest result · issues · ⋯); Settings holds the
 // less-used suite metadata (hooks, agent instructions, variables). Persisted and live run snapshots are merged with live state
 // winning so a late disk read cannot roll the view backwards; until that read completes the screen says "Loading runs…" rather
 // than claiming nothing ran.
@@ -102,7 +105,7 @@ private val MENU_COLUMN = 26.dp
 private val ROW_MIN_HEIGHT = 34.dp
 private val ROW_MIN_HEIGHT_WITH_GOAL = 44.dp
 private val ROW_START_PADDING = 6.dp
-private val SUITE_TABS_MAX_WIDTH = 330.dp
+private val SUITE_TABS_MAX_WIDTH = 430.dp
 private val DOT_SIZE = 8.dp
 private val RUN_SQUARE_SIZE = 8.dp
 private val RUN_SQUARE_GAP = 3.dp
@@ -117,7 +120,7 @@ private const val ROW_SEPARATOR_ALPHA = .6f
 private const val ISSUE_PILL_ALPHA = .18f
 
 /** What the suite screen derived from the run history. [loaded] is false until the stored runs were read. */
-private class SuiteScreenData(
+internal class SuiteScreenData(
     val history: TestSuiteHistory,
     val issues: List<IssueRecord>,
     val loaded: Boolean,
@@ -144,11 +147,12 @@ internal fun TestsSuiteScreen(suiteId: String) {
     val detailPanel: (@Composable () -> Unit)? = previewCase?.let { case -> { CaseDetailPanel(suite, case, data) } }
     TestsScreenScaffold(inspector = detailPanel) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            SuiteHeader(suite, access, onDelete = { confirmDelete = true })
+            SuiteHeader(suite, access, data.history.latestTerminalRun, onDelete = { confirmDelete = true })
             SuiteLastRunLine(suiteLastRun(data.loaded, data.history.latestTerminalRun))
             SuiteTabs(suite, if (data.loaded) data.history.runs.size else null)
             when (ui.view.selectedSuiteTab) {
                 SuiteTab.Cases -> SuiteCasesTab(suite, data)
+                SuiteTab.Health -> SuiteHealthTab(suite, data)
                 SuiteTab.Runs -> SuiteRunsTab(data)
                 SuiteTab.Settings -> SuiteSettingsTab(suite, access.editable)
             }
@@ -219,10 +223,12 @@ private fun deleteSuiteAndSelectNext(ui: TestsUi, suite: TestSuite) {
 
 /** The suite name, + New case, ▶ Run suite and the ⋯ menu (Duplicate, Export…, Delete…), with the read-only notice under it. */
 @Composable
-private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () -> Unit) {
+private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, latestFinishedRun: TestRun?, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
     val limits = LocalTestsLimits.current
     val writable = !ui.library.readOnly
+    val runnable = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) }
+    val rerunLabel = remember(latestFinishedRun) { latestFinishedRun?.let { rerunButtonLabel(failedCaseIds(it).size, interruptedCaseIds(it).size) } }
     TestsPageHeader(
         title = suite.name,
         onTitleCommit = { t -> ui.state.updateTestSuite(suite.id) { it.copy(name = t.trim()) } },
@@ -233,10 +239,21 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, onDelete: () 
         primary = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 NewCaseButton(suite)
+                if (rerunLabel != null && latestFinishedRun != null) {
+                    HintedButton(
+                        rerunLabel,
+                        onClick = {
+                            ui.openRerunDialog(latestFinishedRun)
+                            ui.reclaimFocus()
+                        },
+                        enabled = runnable,
+                        disabledHint = limits.hint,
+                    )
+                }
                 HintedButton(
                     "▶ Run suite",
                     onClick = { ui.view.runDialog = RunDialogTarget(suite.id) },
-                    enabled = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) },
+                    enabled = runnable,
                     disabledHint = limits.hint,
                     variant = ButtonVariant.Primary,
                 )
@@ -483,15 +500,22 @@ private fun LastRunsCell(data: SuiteScreenData, caseId: String, modifier: Modifi
         cells.forEachIndexed { index, cell ->
             val description = lastRunCellDescription(data.ordinals[runIds.getOrNull(index)], cell)
             val base = Modifier.size(RUN_SQUARE_SIZE).clip(RUN_SQUARE_SHAPE).semantics { contentDescription = description }
-            val fill = when (cell) {
-                CaseRunCell.PASSED -> tc.success
-                CaseRunCell.FAILED, CaseRunCell.ERROR -> DANGER_RED
-                CaseRunCell.BLOCKED -> tc.warn
-                CaseRunCell.OTHER -> tc.td.copy(alpha = RUN_SQUARE_OTHER_ALPHA)
-                CaseRunCell.NOT_IN_RUN -> null
-            }
+            val fill = caseRunCellFill(cell)
             Box(if (fill != null) base.background(fill) else base.border(1.dp, tc.br, RUN_SQUARE_SHAPE))
         }
+    }
+}
+
+/** The fill of a run square (shared with the Health grid): null for a case the run did not include, which is drawn as an outline. */
+@Composable
+internal fun caseRunCellFill(cell: CaseRunCell): Color? {
+    val tc = tc()
+    return when (cell) {
+        CaseRunCell.PASSED -> tc.success
+        CaseRunCell.FAILED, CaseRunCell.ERROR -> DANGER_RED
+        CaseRunCell.BLOCKED -> tc.warn
+        CaseRunCell.OTHER -> tc.td.copy(alpha = RUN_SQUARE_OTHER_ALPHA)
+        CaseRunCell.NOT_IN_RUN -> null
     }
 }
 
@@ -797,7 +821,7 @@ private fun SuiteSettingsTab(suite: TestSuite, editable: Boolean) {
     }
 }
 
-private fun openSuiteRun(ui: TestsUi, runId: String) {
+internal fun openSuiteRun(ui: TestsUi, runId: String) {
     ui.view.nav = TestsNav.Runs
     ui.view.selectedRunId = runId
 }

@@ -27,6 +27,7 @@ import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.summary
+import com.indagium.testing.run.rerunFailedCasesConfig
 import com.indagium.testing.store.StoreResult
 import java.time.Instant
 import java.time.LocalDate
@@ -55,6 +56,7 @@ internal sealed interface TestsNav {
 /** Tabs within one suite; stored in workspace state so switching navigation does not reset the active tab. */
 internal enum class SuiteTab(val label: String) {
     Cases("Cases"),
+    Health("Health"),
     Runs("Runs"),
     Settings("Settings"),
 }
@@ -584,9 +586,20 @@ internal const val SUITE_COMPACT_BELOW_DP = 720f
 
 internal fun suiteCasesCompact(contentWidthDp: Float): Boolean = contentWidthDp < SUITE_COMPACT_BELOW_DP
 
-/** "Cases (3)", "Runs (2)", "Settings". The run count is null while the suite's run history is still loading (no "Runs (0)" flash). */
+/**
+ * Opens the run dialog on a re-run of [run]'s failed, blocked, errored and interrupted cases (its own configuration, narrowed to those
+ * cases). Says why in the banner when there is nothing to re-run. Used by the report and by the suite header.
+ */
+internal fun TestsUi.openRerunDialog(run: TestRun) {
+    rerunFailedCasesConfig(run).onSuccess { config ->
+        view.runDialog = RunDialogTarget(run.suite.id, initialCaseIds = config.caseIds.orEmpty().toSet(), initialConfig = config)
+    }.onFailure { info(it.message ?: "Failed cases cannot be re-run.") }
+}
+
+/** "Cases (3)", "Health", "Runs (2)", "Settings". The run count is null while the suite's run history is still loading (no "Runs (0)" flash). */
 internal fun suiteTabLabel(tab: SuiteTab, caseCount: Int, runCount: Int?): String = when (tab) {
     SuiteTab.Cases -> "${tab.label} ($caseCount)"
+    SuiteTab.Health -> tab.label
     SuiteTab.Runs -> if (runCount == null) tab.label else "${tab.label} ($runCount)"
     SuiteTab.Settings -> tab.label
 }
