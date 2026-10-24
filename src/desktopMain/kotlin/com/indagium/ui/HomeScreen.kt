@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -418,6 +419,25 @@ internal val HOME_SECTION_BODY_PADDING = PaddingValues(horizontal = 16.dp, verti
 private const val HOME_ACTION_HEIGHT_DP = 44
 private const val HOME_ACTION_GAP_DP = 8
 
+// The square tiles (as before the tiling New tab) are used while the section is big enough for them; a small section gets the
+// compact buttons so the recent files stay visible.
+private const val HOME_TILE_MAX_SIZE_DP = 128
+private const val HOME_TILE_MIN_SIZE_DP = 88
+private const val HOME_TILE_GAP_DP = 12
+private const val HOME_TILE_COUNT = 4
+
+// Height the hint, the gaps and a usable recent-files list need below the tiles.
+private const val HOME_TILES_MIN_REST_HEIGHT_DP = 260
+
+/** True when the Open section's body ([widthDp] x [heightDp], inside its padding) fits the four square tiles at a readable size and
+ *  still leaves room for the recent files; otherwise the compact buttons are used. */
+internal fun homeOpenUsesSquareTiles(widthDp: Float, heightDp: Float): Boolean {
+    val tile = minOf(HOME_TILE_MAX_SIZE_DP.toFloat(), (widthDp - HOME_TILE_GAP_DP * (HOME_TILE_COUNT - 1)) / HOME_TILE_COUNT)
+    return tile >= HOME_TILE_MIN_SIZE_DP && heightDp >= tile + HOME_TILES_MIN_REST_HEIGHT_DP
+}
+
+private class HomeOpenAction(val label: String, val icon: ImageVector, val onClick: () -> Unit)
+
 @Composable
 private fun HomeOpenZone(
     state: AppState,
@@ -426,43 +446,74 @@ private fun HomeOpenZone(
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    Column(
-        modifier.padding(HOME_SECTION_BODY_PADDING),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        // The section card's header already says "Open a log"; only the hint stays.
-        AppText(
-            "Start from a file, a bug report or archive, saved notes, or a past case.",
-            color = tc.td,
-            fontSize = 12.sp,
-        )
-        FlowRow(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
-            verticalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
-        ) {
-            HomeActionButton(
-                label = "Open file…",
-                icon = Icons.Outlined.FolderOpen,
-                onReclaimFocus = onReclaimFocus,
-            ) { pickLogFileAndOpen(state, "Open Log File") }
-            HomeActionButton(
-                label = "Bug report / archive",
-                icon = Icons.Outlined.FolderZip,
-                onReclaimFocus = onReclaimFocus,
-            ) { pickLogFileAndOpen(state, "Open Bug Report or Archive") }
-            HomeActionButton(
-                label = "Open notes (.ann)",
-                icon = Icons.AutoMirrored.Outlined.StickyNote2,
-                onReclaimFocus = onReclaimFocus,
-            ) { pickNoteFileAndOpen(state) }
-            HomeActionButton(
-                label = "Past cases",
-                icon = Icons.AutoMirrored.Outlined.ManageSearch,
-                onReclaimFocus = onReclaimFocus,
-            ) { state.openCaseLibrary(tab.id) }
+    val actions = listOf(
+        HomeOpenAction("Open file…", Icons.Outlined.FolderOpen) { pickLogFileAndOpen(state, "Open Log File") },
+        HomeOpenAction("Bug report / archive", Icons.Outlined.FolderZip) { pickLogFileAndOpen(state, "Open Bug Report or Archive") },
+        HomeOpenAction("Open notes (.ann)", Icons.AutoMirrored.Outlined.StickyNote2) { pickNoteFileAndOpen(state) },
+        HomeOpenAction("Past cases", Icons.AutoMirrored.Outlined.ManageSearch) { state.openCaseLibrary(tab.id) },
+    )
+    BoxWithConstraints(modifier.padding(HOME_SECTION_BODY_PADDING)) {
+        val squareTiles = homeOpenUsesSquareTiles(maxWidth.value, maxHeight.value)
+        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // The section card's header already says "Open a log"; only the hint stays.
+            AppText(
+                "Start from a file, a bug report or archive, saved notes, or a past case.",
+                color = tc.td,
+                fontSize = 12.sp,
+            )
+            if (squareTiles) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(HOME_TILE_GAP_DP.dp)) {
+                    actions.forEach { action ->
+                        HomeTile(action.label, action.icon, onReclaimFocus, Modifier.weight(1f).testTag("home-open-tile"), action.onClick)
+                    }
+                }
+            } else {
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+                    verticalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+                ) {
+                    actions.forEach { action ->
+                        HomeActionButton(action.label, action.icon, onReclaimFocus, Modifier.testTag("home-open-button"), action.onClick)
+                    }
+                }
+            }
+            HomeRecentSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxWidth())
         }
-        HomeRecentSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxWidth())
+    }
+}
+
+/** One of the four square "Open a log" tiles, used while the section has room for them (see [homeOpenUsesSquareTiles]). Reclaims
+ *  root keyboard focus on click (see CLAUDE.md's clickable-steals-focus gotcha). */
+@Composable
+private fun HomeTile(
+    label: String,
+    icon: ImageVector,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = modifier
+            .aspectRatio(1f)
+            .widthIn(max = HOME_TILE_MAX_SIZE_DP.dp)
+            .border(1.dp, tc.br, CORNER_MD)
+            .clip(CORNER_MD),
+        onClick = {
+            onClick()
+            onReclaimFocus()
+        },
+    ) {
+        Column(
+            Modifier.fillMaxSize().padding(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Icon(icon, contentDescription = null, tint = tc.ts, modifier = Modifier.size(28.dp))
+            Spacer(Modifier.height(8.dp))
+            AppText(label, color = tc.tx, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 
