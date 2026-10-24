@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -84,7 +85,7 @@ import kotlin.math.roundToInt
 /** Below this host width (dp) the sections stack in one vertical scroll in tree order, with no grips or splitters. */
 internal const val HOME_STACK_BELOW_DP: Int = 720
 
-/** The tip shown under the title until dismissed (and again from the "?" button). */
+/** The tip shown next to the title until dismissed (and again from the "?" button). */
 internal const val HOME_LAYOUT_TIP: String =
     "Tip: drag ⠿ onto a section's edge to split it, or onto the page edge to span it. Drag a gap to resize."
 
@@ -101,7 +102,10 @@ private const val HOME_STRIP_BORDER_ALPHA = 0.55f
 private const val HOME_STRIP_DASH_DP = 5f
 private const val HOME_VERTICAL_TEXT_DEGREES = -90f
 
-private val HOME_CARD_SHAPE = RoundedCornerShape(8.dp)
+/** The section cards' corner radius; splitter lines stop this far short of both ends of their gap so they end where the corners start. */
+private const val HOME_CARD_CORNER_DP = 8
+
+private val HOME_CARD_SHAPE = RoundedCornerShape(HOME_CARD_CORNER_DP.dp)
 
 /**
  * One section's content for [HomeTilingHost]: the [icon] and [title] in its card header, an optional [action] composable
@@ -142,7 +146,7 @@ private class HomeDragCallbacks(
 private data class HomeGapKey(val index: Int)
 
 /**
- * The New tab's body: top bar (title, tip, layout presets, hidden-section chips) over the section cards. [slots] must hold
+ * The New tab's body: a one-row top bar (title, tip, hidden-section chips, layout presets) over the section cards. [slots] must hold
  * a slot for every [HomeSectionId]. [onReclaimFocus] gives root keyboard focus back after any click or drag here (see
  * CLAUDE.md's clickable-steals-focus gotcha).
  */
@@ -175,47 +179,39 @@ private fun HomeTopBar(state: AppState, slots: Map<HomeSectionId, HomeSectionSlo
     val settings = state.settings
     var tipShownAgain by remember { mutableStateOf(false) }
     val tipVisible = !settings.homeLayoutTipDismissed || tipShownAgain
-    Column(
+    // One row only: the hidden-section chips sit between the tip and the presets, so hiding a section never adds a line (and never
+    // moves the cards). When space runs out the tip, the only weighted child, ellipsizes first.
+    Row(
         Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 10.dp, bottom = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            AppText("Start", fontSize = 20.sp, color = tc.tx)
-            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                if (tipVisible) {
-                    AppText(
-                        HOME_LAYOUT_TIP,
-                        color = tc.td,
-                        fontSize = 11.sp,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false).testTag("home-tip"),
-                    )
-                    HomeIconButton(Icons.Outlined.Close, "Dismiss tip", "Dismiss tip", "home-tip-dismiss") {
-                        tipShownAgain = false
-                        state.updateSettings { it.withHomeLayoutTipDismissed(true) }
-                        onReclaimFocus()
-                    }
-                } else {
-                    HomeIconButton(Icons.AutoMirrored.Outlined.HelpOutline, "Show layout tip", HOME_LAYOUT_TIP, "home-tip-help") {
-                        tipShownAgain = true
-                        onReclaimFocus()
-                    }
+        AppText("Start", fontSize = 20.sp, color = tc.tx)
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            if (tipVisible) {
+                AppText(
+                    HOME_LAYOUT_TIP,
+                    color = tc.td,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false).testTag("home-tip"),
+                )
+                HomeIconButton(Icons.Outlined.Close, "Dismiss tip", "Dismiss tip", "home-tip-dismiss") {
+                    tipShownAgain = false
+                    state.updateSettings { it.withHomeLayoutTipDismissed(true) }
+                    onReclaimFocus()
                 }
-            }
-            AppText("Layout", color = tc.td, fontSize = 11.sp)
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                HomeLayoutPreset.entries.forEach { preset ->
-                    HomePresetButton(preset, active = preset.isActiveIn(settings)) {
-                        state.updateSettings { it.withHomeLayoutPreset(preset) }
-                        onReclaimFocus()
-                    }
+            } else {
+                HomeIconButton(Icons.AutoMirrored.Outlined.HelpOutline, "Show layout tip", HOME_LAYOUT_TIP, "home-tip-help") {
+                    tipShownAgain = true
+                    onReclaimFocus()
                 }
             }
         }
         if (settings.homeHiddenSections.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                AppText("Hidden:", color = tc.td, fontSize = 11.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppText("Hidden:", color = tc.td, fontSize = 11.sp, maxLines = 1)
                 settings.homeHiddenSections.forEach { id ->
                     slots[id]?.let { slot ->
                         HomeHiddenChip(id, slot) {
@@ -223,6 +219,15 @@ private fun HomeTopBar(state: AppState, slots: Map<HomeSectionId, HomeSectionSlo
                             onReclaimFocus()
                         }
                     }
+                }
+            }
+        }
+        AppText("Layout", color = tc.td, fontSize = 11.sp, maxLines = 1)
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            HomeLayoutPreset.entries.forEach { preset ->
+                HomePresetButton(preset, active = preset.isActiveIn(settings)) {
+                    state.updateSettings { it.withHomeLayoutPreset(preset) }
+                    onReclaimFocus()
                 }
             }
         }
@@ -580,8 +585,13 @@ private fun HomeSplitter(
             },
         contentAlignment = Alignment.Center,
     ) {
-        if (gap.axis == HomeSplitAxis.ROW) HDivider(onDragEnd = onDragEnd, onDelta = onDelta) else VDivider(onDragEnd = onDragEnd, onDelta = onDelta)
-        if (focused) Box(Modifier.matchParentSizeBorder(tc.ac))
+        // The visible line (and its hit area and focus ring) stops where the neighbouring cards' rounded corners start: a vertical
+        // line (ROW gap) is inset top and bottom, a horizontal one (COLUMN gap) left and right.
+        val inset = if (gap.axis == HomeSplitAxis.ROW) PaddingValues(vertical = HOME_CARD_CORNER_DP.dp) else PaddingValues(horizontal = HOME_CARD_CORNER_DP.dp)
+        Box(Modifier.fillMaxSize().padding(inset).testTag("home-splitter-line-$index"), contentAlignment = Alignment.Center) {
+            if (gap.axis == HomeSplitAxis.ROW) HDivider(onDragEnd = onDragEnd, onDelta = onDelta) else VDivider(onDragEnd = onDragEnd, onDelta = onDelta)
+            if (focused) Box(Modifier.matchParentSizeBorder(tc.ac))
+        }
     }
 }
 

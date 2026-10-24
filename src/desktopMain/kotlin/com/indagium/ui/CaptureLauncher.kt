@@ -264,8 +264,8 @@ internal fun HomeCaptureSection(
             modifier = Modifier.fillMaxWidth().testTag("capture-start"),
         )
         startBlockedHint?.let { AppText(it, color = tc().td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.testTag("capture-start-hint")) }
-        // The count and the rows must close over the same snapshot of service.sessions (see UnfinishedSessionsCompact).
-        UnfinishedSessionsCompact(state, service.sessions.filter { it.status != CaptureStatus.RECORDING }, onReclaimFocus)
+        // The count and the rows must close over the same snapshot of service.sessions (see UnfinishedCaptureSessionsPanel).
+        UnfinishedSessionsInline(state, service.sessions.filter { it.status != CaptureStatus.RECORDING }, onReclaimFocus)
     }
 }
 
@@ -549,9 +549,17 @@ private fun LauncherPanel(header: @Composable () -> Unit, content: @Composable (
 @Composable
 internal fun UnfinishedCaptureSessionsPanel(
     retained: List<CaptureSession>,
+    headerAction: (@Composable () -> Unit)? = null,
     content: @Composable (List<CaptureSession>) -> Unit,
 ) {
-    LauncherPanel("Unfinished sessions · ${retained.size}") {
+    LauncherPanel(
+        header = {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                AppText("Unfinished sessions · ${retained.size}", color = tc().ts, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                headerAction?.invoke()
+            }
+        },
+    ) {
         content(retained)
     }
 }
@@ -818,6 +826,9 @@ private fun DeviceLogDropdownItem(label: String, active: Boolean, onClick: () ->
     }
 }
 
+/** Default cap (dp) of [UnfinishedSessionsSection]'s scrolling list: 15 rows of ~44dp. */
+private const val UNFINISHED_LIST_DEFAULT_MAX_HEIGHT_DP = 15 * 44
+
 /** The "Unfinished sessions" panel body: item 3's multi-select + bulk delete on top of the
  * pre-existing per-row Open/Save ZIP/Open folder/Discard actions and single-row Discard confirm,
  * both left untouched below. Selection is local UI state, not [AppState] — it has no meaning
@@ -825,7 +836,11 @@ private fun DeviceLogDropdownItem(label: String, active: Boolean, onClick: () ->
  * retained-session list changes (a session can finish exporting, or be discarded from another
  * surface, out from under an open selection). */
 @Composable
-internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSession>) {
+internal fun UnfinishedSessionsSection(
+    state: AppState,
+    retained: List<CaptureSession>,
+    listMaxHeightDp: Int = UNFINISHED_LIST_DEFAULT_MAX_HEIGHT_DP,
+) {
     var discardId by remember { mutableStateOf<String?>(null) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteSelected by remember { mutableStateOf(false) }
@@ -849,9 +864,10 @@ internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSe
     )
     // Capped and scrollable: a user with 15+ retained sessions otherwise gets an
     // unbounded panel that pushes the "Start capture" button and everything below it
-    // off-screen, crowding out the rest of the capture zone. ~44dp/row covers the
-    // two-line (12sp + 10sp) text column plus the 8dp gap to the next row.
-    BoundedScrollBox(rowLimit = 15, rowDp = 44) {
+    // off-screen, crowding out the rest of the capture zone. The default (15 rows of ~44dp: the
+    // two-line (12sp + 10sp) text column plus the 8dp gap to the next row) is for the roomy dialog;
+    // the New tab's card passes a smaller cap. BoundedScrollBox draws the scrollbar.
+    BoundedScrollBoxDp(maxHeightDp = listMaxHeightDp) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             retained.forEach { session ->
                 UnfinishedSessionRow(

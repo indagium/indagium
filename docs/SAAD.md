@@ -792,8 +792,13 @@ optional header action, body) per section and hands them to `HomeTilingHost` (`u
 The Capture section is condensed: a device row (status, Refresh, pairing and tools actions, a picker when several devices are
 attached), a one-line summary of the recording options (`captureSettingsSummary`) with "Change…" opening `CaptureOptionsDialog`
 (`CaptureStartOptions` in a 640 dp dialog, plus "All capture settings…" which calls `AppState.openCaptureSettings`), device logging,
-Start capture with the reason when it is disabled (`captureStartBlockedHint`), and up to three unfinished sessions
-(`UnfinishedSessionsCompact`: Open and a ⋯ menu; "Manage all…" opens the full `UnfinishedCaptureSessionsPanel`).
+Start capture with the reason when it is disabled (`captureStartBlockedHint`), and the full unfinished-sessions panel inline
+(`UnfinishedSessionsInline`: today's `UnfinishedSessionsSection` with select all, delete selected and every row's actions; the list
+scrolls inside 320 dp, and an "Open in window…" link in the panel header shows the same panel in a dialog).
+
+The Tests section's actions that open the Tests tab pass their New tab to `AppState.openTestsTab(closeLauncherTabId)`, which closes it
+once Tests is active (like a started capture or opened file). `surfaceBeforeTests` then points at the last remaining log tab, never at
+the closed New tab; closing Tests with nothing else open leaves the empty state that `ensureHomeTab` refills.
 
 ---
 
@@ -1418,11 +1423,11 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
 | `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
-| `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. Top bar (tip, preset icons, hidden-section chips), section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
+| `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter lines inset by the 8 dp card corner, section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
 | `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |
 | `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | `HomeCaptureSection` (the condensed Capture section: device row, options summary with "Change…", Start, compact sessions; polls devices only while composed), live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
-| `CaptureOptionsDialog.kt` / `UnfinishedSessionsCompact.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture via `AppState.openCaptureSettings`) and its compact unfinished-sessions block (three rows with Open and ⋯, "Manage all…") |
+| `CaptureOptionsDialog.kt` / `UnfinishedSessionsInline.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture via `AppState.openCaptureSettings`) and its inline unfinished-sessions panel (scrolling full list, "Open in window…" dialog) |
 | `AutosaveCodec.kt` / `AutosaveScheduler.kt` / `FilterCodec.kt` / `DesktopStorage.kt` | Persistence: encoding, scheduling, the saved-filter library format, path resolution |
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
@@ -3291,7 +3296,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | New tab layout: normalise, every drop branch, resize clamps, geometry, hit-testing, presets, hide/show rules | `HomeLayoutTest` |
 | New tab layout settings decode: round trip, defaults for `{}`/legacy, sanitizing of duplicate/unknown ids, bad weights and over-deep trees | `HomeLayoutSettingCodecTest` |
 | Tiling host: default arrangement, hide/restore, last section not hideable, preset click, one settings write per grip drag, splitter commit on release, tip | `HomeTilingUiTest` |
-| Condensed Capture section: device and start-hint helpers, options dialog, compact sessions (⋯ items, Discard confirmation, Manage all) | `CaptureLauncherTest`, `CaptureOptionsDialogUiTest`, `UnfinishedSessionsCompactUiTest`, `UnfinishedCaptureSessionsPanelUiTest` |
+| Condensed Capture section: device and start-hint helpers, options dialog, inline sessions (full list with actions, Open in window…) | `CaptureLauncherTest`, `CaptureOptionsDialogUiTest`, `UnfinishedSessionsInlineUiTest`, `UnfinishedCaptureSessionsPanelUiTest` |
 | New tab Tests section: Run opens the suite with its run dialog, locked suite shows View, usage line only on Free; early-stop latest-run scan | `HomeTestsSectionUiTest`, `TestRunStoreTest` |
 | Case matrix and suite health numbers; bounded, newest-first compact outcomes; "#N" ordinals | `CaseRunMatrixTest`, `TestsSuiteHealthStateTest`, `TestRunStoreTest`, `TestsSuiteScreenStateTest` |
 | Case selection (keyboard, locked-cases notice, detail panel Run) and the Health tab (pass %, flaky badge, cell descriptions, Draft issue) | `TestsCaseSelectionStateTest`, `TestsSuiteSelectionUiTest`, `TestsSuiteHealthUiTest` |

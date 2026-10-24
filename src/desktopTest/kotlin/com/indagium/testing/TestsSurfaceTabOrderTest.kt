@@ -152,6 +152,83 @@ class TestsSurfaceTabOrderTest {
         }
     }
 
+    // ── Opened from the New tab ──────────────────────────────────────
+
+    @Test
+    fun openingTestsFromTheHomeTabClosesItAndClosingTestsFallsBackToTheLastLogTab() {
+        val dir = createTempDirectory("tests-surface-from-home").toFile()
+        val state = appState(dir)
+        try {
+            withLogTabs(state, dir, "log1", "log2")
+            state.openHomeTab()
+            val homeId = state.tabs.single { it.isCaptureLauncher }.id
+            assertEquals(ActiveSurface.Log(homeId), state.activeSurface)
+
+            state.openTestsTab(closeLauncherTabId = homeId)
+
+            assertTrue(state.tabs.none { it.isCaptureLauncher }, "the New tab is gone")
+            assertEquals(listOf("log1", "log2"), state.tabs.map { it.id })
+            assertEquals(ActiveSurface.Tests, state.activeSurface)
+            assertTrue(state.testsTabOpen)
+            state.ensureHomeTab()
+            assertTrue(state.tabs.none { it.isCaptureLauncher }, "no New tab is reopened while log tabs exist")
+
+            state.closeTestsTab()
+
+            assertFalse(state.testsTabOpen)
+            assertEquals(ActiveSurface.Log("log2"), state.activeSurface, "falls back to the remaining log tab, not the closed New tab")
+            assertEquals("log2", state.activeTabId)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun openingTestsFromTheOnlyHomeTabLeavesTestsAloneAndClosingItRefillsTheHomeTab() {
+        val dir = createTempDirectory("tests-surface-from-home-only").toFile()
+        val state = appState(dir)
+        try {
+            state.openHomeTab()
+            val homeId = state.tabs.single().id
+
+            state.openTestsTab(closeLauncherTabId = homeId)
+
+            assertTrue(state.tabs.isEmpty())
+            assertEquals(ActiveSurface.Tests, state.activeSurface)
+            state.ensureHomeTab()
+            assertTrue(state.tabs.isEmpty(), "Tests counts as something to show, so no New tab opens under it")
+
+            state.closeTestsTab()
+
+            assertNull(state.activeSurface)
+            state.ensureHomeTab()
+            assertEquals(1, state.tabs.size)
+            assertTrue(state.tabs.single().isCaptureLauncher)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun onlyALauncherTabIsClosedWhenOpeningTests() {
+        val dir = createTempDirectory("tests-surface-from-log").toFile()
+        val state = appState(dir)
+        try {
+            withLogTabs(state, dir, "log1", "log2")
+
+            state.openTestsTab(closeLauncherTabId = "log1")
+            state.openTestsTab(closeLauncherTabId = "missing")
+
+            assertEquals(listOf("log1", "log2"), state.tabs.map { it.id }, "a log tab or an unknown id is never closed")
+            assertEquals(ActiveSurface.Tests, state.activeSurface)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
     // ── Strip order ──────────────────────────────────────────────────
 
     @Test

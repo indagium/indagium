@@ -115,11 +115,17 @@ internal fun homeIssuesLine(issues: List<IssueRecord>): String? {
 private class LoadedLatestRuns(val suiteIds: Set<String>, val runs: StoredLatestRuns)
 
 /**
- * The body of the New tab's Tests card. [onReclaimFocus] gives root keyboard focus back after any click (see CLAUDE.md's
+ * The body of the New tab's Tests card. Every action that opens the Tests tab closes the New tab it came from ([launcherTabId], see
+ * [AppState.openTestsTab]). [onReclaimFocus] gives root keyboard focus back after any click (see CLAUDE.md's
  * clickable-steals-focus gotcha). Side by side (suites | latest activity, issues, usage) from [HOME_TESTS_WIDE_FROM_DP], stacked below.
  */
 @Composable
-internal fun HomeTestsSection(state: AppState, onReclaimFocus: () -> Unit, modifier: Modifier = Modifier) {
+internal fun HomeTestsSection(
+    state: AppState,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+    launcherTabId: String? = null,
+) {
     val library = state.testLibrary
     val edition by state.editionService.current.collectAsState()
     val limits = remember(library, edition) { testsLimitsUiState(library, edition.limits) }
@@ -134,9 +140,9 @@ internal fun HomeTestsSection(state: AppState, onReclaimFocus: () -> Unit, modif
         value = withContext(Dispatchers.IO) { runCatching { state.issueStore.list() }.getOrDefault(emptyList()) }
     }
     val usageLine = remember(library, edition) { testsEditionUsage(library, edition.limits)?.let { editionUsageLine(edition.label, it) } }
-    val suitesColumn: @Composable () -> Unit = { HomeTestsSuites(state, limits, edition.label, loaded, onReclaimFocus) }
+    val suitesColumn: @Composable () -> Unit = { HomeTestsSuites(state, limits, edition.label, loaded, launcherTabId, onReclaimFocus) }
     val sideColumn: @Composable () -> Unit = {
-        HomeTestsSide(state, loaded?.runs?.latestOverall, homeIssuesLine(issues), usageLine, onReclaimFocus)
+        HomeTestsSide(state, loaded?.runs?.latestOverall, homeIssuesLine(issues), usageLine, launcherTabId, onReclaimFocus)
     }
     BoxWithConstraints(modifier.fillMaxSize()) {
         val wide = maxWidth.value >= HOME_TESTS_WIDE_FROM_DP
@@ -162,6 +168,7 @@ private fun HomeTestsSuites(
     limits: TestsLimitsUiState,
     editionLabel: String,
     loaded: LoadedLatestRuns?,
+    launcherTabId: String?,
     onReclaimFocus: () -> Unit,
 ) {
     val tc = tc()
@@ -172,7 +179,7 @@ private fun HomeTestsSuites(
             HintedButton(
                 "+ New suite",
                 onClick = {
-                    createSuiteAndOpen(state)
+                    createSuiteAndOpen(state, launcherTabId)
                     onReclaimFocus()
                 },
                 enabled = !library.readOnly && limits.canCreateSuite,
@@ -196,6 +203,7 @@ private fun HomeTestsSuites(
                 lockHint = limits.hint.takeIf { locked },
                 canRun = !locked && suite.cases.any { !limits.isCaseLocked(it.id) },
                 runHint = limits.hint,
+                launcherTabId = launcherTabId,
                 onReclaimFocus = onReclaimFocus,
             )
         }
@@ -210,9 +218,9 @@ private fun lastRunOf(suiteId: String, loaded: LoadedLatestRuns?): HomeLastRun {
 }
 
 /** Creates a suite and opens the Tests tab on it; a refusal (the button is disabled in that case) leaves everything as it was. */
-private fun createSuiteAndOpen(state: AppState) {
+private fun createSuiteAndOpen(state: AppState, launcherTabId: String?) {
     val result = state.createNewTestSuite()
-    if (result is StoreResult.Ok) state.openTestsSuite(result.value.id, openRunDialog = false)
+    if (result is StoreResult.Ok) state.openTestsSuite(result.value.id, openRunDialog = false, closeLauncherTabId = launcherTabId)
 }
 
 @Composable
@@ -226,6 +234,7 @@ private fun HomeSuiteRow(
     lockHint: String?,
     canRun: Boolean,
     runHint: String,
+    launcherTabId: String?,
     onReclaimFocus: () -> Unit,
 ) {
     val tc = tc()
@@ -245,7 +254,7 @@ private fun HomeSuiteRow(
         HoverBox(
             Modifier.weight(1f).testTag("home-tests-suite-$suiteId"),
             onClick = {
-                state.openTestsSuite(suiteId, openRunDialog = false)
+                state.openTestsSuite(suiteId, openRunDialog = false, closeLauncherTabId = launcherTabId)
                 onReclaimFocus()
             },
         ) {
@@ -258,7 +267,7 @@ private fun HomeSuiteRow(
             AppButton(
                 "View",
                 onClick = {
-                    state.openTestsSuite(suiteId, openRunDialog = false)
+                    state.openTestsSuite(suiteId, openRunDialog = false, closeLauncherTabId = launcherTabId)
                     onReclaimFocus()
                 },
                 variant = ButtonVariant.Secondary,
@@ -268,7 +277,7 @@ private fun HomeSuiteRow(
             HintedButton(
                 "Run",
                 onClick = {
-                    state.openTestsSuite(suiteId, openRunDialog = true)
+                    state.openTestsSuite(suiteId, openRunDialog = true, closeLauncherTabId = launcherTabId)
                     onReclaimFocus()
                 },
                 enabled = canRun,
@@ -288,6 +297,7 @@ private fun HomeTestsSide(
     latest: RunSummary?,
     issuesLine: String?,
     usageLine: String?,
+    launcherTabId: String?,
     onReclaimFocus: () -> Unit,
 ) {
     val tc = tc()
@@ -301,7 +311,7 @@ private fun HomeTestsSide(
                 detail = "${latest.suiteName} · ${formatRunMoment(latest.finishedAt ?: latest.createdAt, System.currentTimeMillis())}",
                 tag = "home-tests-latest",
             ) {
-                openRunReport(state, latest)
+                openRunReport(state, latest, launcherTabId)
                 onReclaimFocus()
             }
         }
@@ -310,7 +320,7 @@ private fun HomeTestsSide(
             HomeActivityRow(icon = Icons.Outlined.ErrorOutline, tint = tc.warn, title = issuesLine, detail = null, tag = "home-tests-issues") {
                 state.testsView.nav = TestsNav.Issues
                 state.testsView.selectedIssueId = null
-                state.openTestsTab()
+                state.openTestsTab(launcherTabId)
                 onReclaimFocus()
             }
         }
@@ -321,10 +331,10 @@ private fun HomeTestsSide(
 }
 
 /** Opens [run]'s report in the Tests tab (Runs screen with the run selected). */
-private fun openRunReport(state: AppState, run: RunSummary) {
+private fun openRunReport(state: AppState, run: RunSummary, launcherTabId: String?) {
     state.testsView.nav = TestsNav.Runs
     state.testsView.selectedRunId = run.id
-    state.openTestsTab()
+    state.openTestsTab(launcherTabId)
 }
 
 private fun latestRunIcon(status: RunStatus): ImageVector = when (status) {
