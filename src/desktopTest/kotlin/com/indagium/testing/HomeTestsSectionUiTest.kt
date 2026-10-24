@@ -110,9 +110,18 @@ class HomeTestsSectionUiTest {
         return run
     }
 
-    private fun setSection() {
-        rule.setContent { Box(Modifier.size(900.dp, 600.dp)) { HomeTestsSection(state, onReclaimFocus = {}, modifier = Modifier.size(900.dp, 600.dp)) } }
+    private fun setSection(launcherTabId: String? = null) {
+        rule.setContent {
+            Box(Modifier.size(900.dp, 600.dp)) {
+                HomeTestsSection(state, onReclaimFocus = {}, modifier = Modifier.size(900.dp, 600.dp), launcherTabId = launcherTabId)
+            }
+        }
         rule.waitForIdle()
+    }
+
+    private fun openHome(): String {
+        state.openHomeTab()
+        return state.tabs.single { it.isCaptureLauncher }.id
     }
 
     private fun assertButtonDisabled(tag: String) {
@@ -204,6 +213,56 @@ class HomeTestsSectionUiTest {
         assertTrue(state.testsSurfaceActive)
         assertEquals(created.id, state.testsView.selectedSuiteId)
         assertNull(state.testsView.runDialog)
+    }
+
+    @Test
+    fun runFromTheNewTabClosesItAndClosingTestsLeavesASaneState() {
+        val suite = suiteWithCases("Smoke", 2)
+        val homeId = openHome()
+        setSection(launcherTabId = homeId)
+
+        rule.waitUntilAtLeastOneExists(hasText("2 cases · Not run yet"), timeoutMillis = 10_000)
+        rule.onNodeWithTag("home-tests-run-${suite.id}").performClick()
+        rule.waitForIdle()
+
+        assertTrue(state.tabs.none { it.isCaptureLauncher }, "the New tab closes when Tests opens")
+        assertTrue(state.testsSurfaceActive)
+        assertEquals(suite.id, state.testsView.selectedSuiteId)
+        assertEquals(RunDialogTarget(suite.id), state.testsView.runDialog)
+
+        state.closeTestsTab()
+        assertNull(state.activeSurface)
+        state.ensureHomeTab()
+        assertTrue(state.tabs.single().isCaptureLauncher)
+    }
+
+    @Test
+    fun latestActivityFromTheNewTabClosesItToo() {
+        val suite = suiteWithCases("Smoke")
+        val run = saveFinishedRun(suite)
+        val homeId = openHome()
+        setSection(launcherTabId = homeId)
+
+        rule.waitUntilAtLeastOneExists(hasTestTag("home-tests-latest"), timeoutMillis = 10_000)
+        rule.onNodeWithTag("home-tests-latest").performClick()
+        rule.waitForIdle()
+
+        assertTrue(state.tabs.none { it.isCaptureLauncher })
+        assertTrue(state.testsSurfaceActive)
+        assertEquals(run.id, state.testsView.selectedRunId)
+    }
+
+    @Test
+    fun aNewSuiteFromTheNewTabClosesItToo() {
+        val homeId = openHome()
+        setSection(launcherTabId = homeId)
+
+        rule.onNodeWithTag("home-tests-new-suite").performClick()
+        rule.waitForIdle()
+
+        assertTrue(state.tabs.none { it.isCaptureLauncher })
+        assertTrue(state.testsSurfaceActive)
+        assertEquals(state.testLibrary.suites.single().id, state.testsView.selectedSuiteId)
     }
 
     // ── Pure text helpers ────────────────────────────────────────────

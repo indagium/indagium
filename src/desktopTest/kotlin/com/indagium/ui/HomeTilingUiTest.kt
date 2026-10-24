@@ -117,6 +117,38 @@ class HomeTilingUiTest {
     }
 
     @Test
+    fun hiddenChipsShareTheTopBarRowAndDoNotMoveTheCards() {
+        setHost()
+        val title = bounds("home-tip")
+        val openTopBefore = bounds("home-card-open").top
+        rule.onNodeWithTag("home-hide-tests").performClick()
+        rule.waitForIdle()
+        val chip = bounds("home-hidden-chip-tests")
+        val preset = bounds("home-preset-DEFAULT")
+        assertTrue(chip.top < preset.bottom && chip.bottom > preset.top, "chip $chip shares the row of the presets $preset")
+        assertTrue(chip.top < title.bottom && chip.bottom > title.top, "chip $chip shares the row of the tip $title")
+        assertTrue(chip.right <= bounds("home-preset-THREE_COLUMNS").left, "chip sits before the Layout presets")
+        assertEquals(openTopBefore, bounds("home-card-open").top, "hiding a section must not push the cards down")
+    }
+
+    @Test
+    fun splitterLinesStopWhereTheCardCornersStart() {
+        setHost()
+        val corner = 8.dp
+        // Default layout: splitter 0 is the vertical gap between Open and Capture, splitter 1 the horizontal gap above Tests.
+        val vertical = bounds("home-splitter-0")
+        val verticalLine = bounds("home-splitter-line-0")
+        assertEquals(vertical.top + corner, verticalLine.top)
+        assertEquals(vertical.bottom - corner, verticalLine.bottom)
+        assertEquals(vertical.left, verticalLine.left)
+        val horizontal = bounds("home-splitter-1")
+        val horizontalLine = bounds("home-splitter-line-1")
+        assertEquals(horizontal.left + corner, horizontalLine.left)
+        assertEquals(horizontal.right - corner, horizontalLine.right)
+        assertEquals(horizontal.top, horizontalLine.top)
+    }
+
+    @Test
     fun theLastVisibleSectionCannotBeHidden() {
         setHost()
         rule.runOnIdle { state.updateSettings { it.withHomeLayoutPreset(HomeLayoutPreset.LOGS_ONLY) } }

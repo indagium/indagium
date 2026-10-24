@@ -6211,22 +6211,42 @@ class AppState(
     /** The surface the user was on before opening Tests, so closing it puts them back there. */
     private var surfaceBeforeTests: ActiveSurface? = null
 
-    /** Opens the Tests workspace tab, or just focuses it when it is already open. */
-    fun openTestsTab() {
-        val current = activeSurface
-        if (current !is ActiveSurface.Tests) surfaceBeforeTests = current
-        testsTabOpen = true
-        activeSurface = ActiveSurface.Tests
+    /**
+     * Opens the Tests workspace tab, or just focuses it when it is already open. When [closeLauncherTabId] names a home/launcher
+     * ("New tab") tab, that tab is closed once Tests is active — the same "no stray New tab" rule as [publishOpenedTab] for a started
+     * capture or an opened file. [surfaceBeforeTests] then points at the surface that closing the launcher leaves behind (the last
+     * remaining log tab), never at the closed launcher, so closing Tests later lands there, or on the empty state that
+     * [ensureHomeTab] refills with a fresh New tab.
+     */
+    fun openTestsTab(closeLauncherTabId: String? = null) {
+        val launcherToClose = synchronized(stateLock) {
+            val launcher = closeLauncherTabId?.takeIf { id -> tabs.any { it.id == id && it.isCaptureLauncher } }
+            val current = activeSurface
+            if (current !is ActiveSurface.Tests) {
+                surfaceBeforeTests = if (launcher != null && current == ActiveSurface.Log(launcher)) {
+                    tabs.lastOrNull { it.id != launcher }?.let { ActiveSurface.Log(it.id) }
+                } else {
+                    current
+                }
+            }
+            testsTabOpen = true
+            activeSurface = ActiveSurface.Tests
+            launcher
+        }
+        // Outside the lock: closing a tab stops its resources (see closeTabsById). Tests is already the active surface, so the close
+        // only re-points activeTabId, which closeTestsTab's fallback reads.
+        if (launcherToClose != null) closeTabsById(setOf(launcherToClose), preferredActiveId = null)
     }
 
     /**
-     * Opens the Tests workspace on [suiteId]'s Cases tab, with its run dialog open when [openRunDialog]. The workspace's view state is
-     * set BEFORE [openTestsTab], because Tests is a singleton surface that composes from that state the moment it becomes active.
+     * Opens the Tests workspace on [suiteId]'s Cases tab, with its run dialog open when [openRunDialog], closing the launcher tab
+     * [closeLauncherTabId] it was opened from (see [openTestsTab]). The workspace's view state is set BEFORE [openTestsTab], because
+     * Tests is a singleton surface that composes from that state the moment it becomes active.
      */
-    internal fun openTestsSuite(suiteId: String, openRunDialog: Boolean) {
+    internal fun openTestsSuite(suiteId: String, openRunDialog: Boolean, closeLauncherTabId: String? = null) {
         testsView.showSuite(suiteId)
         testsView.runDialog = if (openRunDialog) RunDialogTarget(suiteId) else null
-        openTestsTab()
+        openTestsTab(closeLauncherTabId)
     }
 
     /**

@@ -401,12 +401,12 @@ internal fun HomeScreen(
             action = {
                 AppButton(
                     "Open Tests →",
-                    { state.openTestsTab(); onReclaimFocus() },
+                    { state.openTestsTab(closeLauncherTabId = tab.id); onReclaimFocus() },
                     ButtonVariant.Primary,
                     modifier = Modifier.testTag("home-open-tests"),
                 )
             },
-            body = { HomeTestsSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.fillMaxSize()) },
+            body = { HomeTestsSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.fillMaxSize(), launcherTabId = tab.id) },
         ),
     )
     HomeTilingHost(state = state, slots = slots, onReclaimFocus = onReclaimFocus, modifier = modifier)
