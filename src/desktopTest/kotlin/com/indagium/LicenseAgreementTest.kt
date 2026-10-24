@@ -3,6 +3,8 @@ package com.indagium
 import com.indagium.ui.AppState
 import com.indagium.ui.LICENSE_VERSION
 import com.indagium.ui.loadLicenseAgreement
+import com.indagium.ui.loadThirdPartyLicenseEntries
+import com.indagium.ui.loadThirdPartyLicenseText
 import com.indagium.ui.settingsFromJson
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -59,6 +61,43 @@ class LicenseAgreementTest {
         assertContains(agreement, "The Indagium name, logo, icon, and branding")
         assertFalse(agreement.contains("PolyForm Noncommercial License"))
         assertFalse(agreement.contains("separate written commercial license"))
+    }
+
+    @Test
+    fun thirdPartyLicenceViewerLoadsDistinctWrapperAndNativeLicencesOffline() {
+        val entries = loadThirdPartyLicenseEntries()
+        val wrapper = entries.single { it.id == "zstd-jni" }
+        val native = entries.single { it.id == "zstandard-native" }
+        val ffmpeg = entries.single { it.id == "ffmpeg" }
+
+        assertEquals("BSD-2-Clause", wrapper.licenseExpression)
+        assertEquals("BSD-3-Clause", native.licenseExpression)
+        assertTrue(wrapper.licenseFiles.single().contains("zstd-jni-license"))
+        assertTrue(native.licenseFiles.single().contains("zstd-license"))
+        assertContains(loadThirdPartyLicenseText(ffmpeg), "GNU LESSER GENERAL PUBLIC LICENSE")
+        assertContains(loadThirdPartyLicenseText(ffmpeg), "GNU GENERAL PUBLIC LICENSE")
+        assertContains(loadThirdPartyLicenseText(native), "Meta Platforms")
+        assertTrue(entries.any { it.id == "source-delivery" })
+        val notices = entries.single { it.id == "third-party-notices" }
+        val whisper = entries.single { it.id == "whisper-cpp" }
+        val languageTool = entries.single { it.id == "languagetool" }
+        assertContains(loadThirdPartyLicenseText(notices), "OpenAI Whisper model weights")
+        assertContains(loadThirdPartyLicenseText(whisper), "MIT License")
+        assertContains(loadThirdPartyLicenseText(languageTool), "GNU LESSER GENERAL PUBLIC LICENSE")
+    }
+
+    @Test
+    fun everyLicenceViewerEntryResolvesItsBundledTexts() {
+        val entries = loadThirdPartyLicenseEntries()
+
+        assertEquals(entries.size, entries.map { it.id }.toSet().size, "Licence inventories reuse an id")
+        entries.filter { it.licenseFiles.isNotEmpty() }.forEach { entry ->
+            assertFalse(loadThirdPartyLicenseText(entry).contains("[Missing bundled legal resource"), entry.id)
+        }
+        assertFalse(entries.any { it.id == "media-closure" }, "Coverage-only rows stay out of the viewer")
+        assertContains(loadThirdPartyLicenseText(entries.single { it.id == "openregex" }), "Version 3, 29 June 2007")
+        assertContains(loadThirdPartyLicenseText(entries.single { it.id == "javax-xml-binding" }), "CDDL")
+        assertContains(loadThirdPartyLicenseText(entries.single { it.id == "r8" }), "the R8 project authors")
     }
 
     private fun com.indagium.model.AppSettings?.orEmpty() = this ?: com.indagium.model.AppSettings()

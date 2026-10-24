@@ -1,0 +1,1990 @@
+{
+  "schemaVersion": 1,
+  "inventoryDate": "2026-10-24",
+  "purpose": "Licences and notices for the media/compression libraries distributed by Indagium. Other application dependencies retain the notices supplied in their own JARs and runtime images.",
+  "platforms": {
+    "macos-arm64": {
+      "ffmpegClassifier": "macosx-arm64",
+      "zstdJniClassifier": "darwin_aarch64",
+      "additionalRuntimeLibraries": [
+        "gcc-libatomic (Mach-O x86_64 binary; shipped inside macOS arm64 classifier, loadability not asserted)"
+      ],
+      "componentIds": [
+        "ffmpeg",
+        "freetype",
+        "gcc-libatomic",
+        "harfbuzz",
+        "javacpp",
+        "javacv",
+        "lame",
+        "libaom",
+        "libvpx",
+        "libwebp",
+        "libxml2",
+        "nv-codec-headers",
+        "opencore-amr",
+        "openh264",
+        "openssl",
+        "opus",
+        "speex",
+        "srt",
+        "svt-av1",
+        "vo-amrwbenc",
+        "zimg",
+        "zlib",
+        "zstandard-native",
+        "zstd-jni"
+      ]
+    },
+    "windows-x64": {
+      "ffmpegClassifier": "windows-x86_64",
+      "zstdJniClassifier": "win_amd64",
+      "additionalRuntimeLibraries": [
+        "GCC14.1.0 libgcc/libstdc++ static runtimes",
+        "MinGW-w64 CRT",
+        "winpthreads"
+      ],
+      "componentIds": [
+        "ffmpeg",
+        "freetype",
+        "gcc-runtime-windows",
+        "harfbuzz",
+        "javacpp",
+        "javacv",
+        "lame",
+        "libaom",
+        "libvpx",
+        "libwebp",
+        "libxml2",
+        "mfx-dispatch",
+        "mingw-w64-crt",
+        "nv-codec-headers",
+        "opencore-amr",
+        "openh264",
+        "openssl",
+        "opus",
+        "speex",
+        "srt",
+        "svt-av1",
+        "vo-amrwbenc",
+        "winpthreads",
+        "zimg",
+        "zlib",
+        "zstandard-native",
+        "zstd-jni"
+      ]
+    },
+    "linux-x64": {
+      "ffmpegClassifier": "linux-x86_64",
+      "zstdJniClassifier": "linux_amd64",
+      "additionalRuntimeLibraries": [
+        "libva",
+        "libva-drm",
+        "libdrm"
+      ],
+      "componentIds": [
+        "ffmpeg",
+        "freetype",
+        "harfbuzz",
+        "javacpp",
+        "javacv",
+        "lame",
+        "libaom",
+        "libdrm",
+        "libva",
+        "libva-drm",
+        "libvpx",
+        "libwebp",
+        "libxml2",
+        "mfx-dispatch",
+        "nv-codec-headers",
+        "opencore-amr",
+        "openh264",
+        "openssl",
+        "opus",
+        "speex",
+        "srt",
+        "svt-av1",
+        "vo-amrwbenc",
+        "zimg",
+        "zlib",
+        "zstandard-native",
+        "zstd-jni"
+      ]
+    },
+    "linux-arm64": {
+      "ffmpegClassifier": "linux-arm64",
+      "zstdJniClassifier": "linux_aarch64",
+      "additionalRuntimeLibraries": [
+        "libbcm_host.so",
+        "libvchiq_arm.so",
+        "libvcos.so",
+        "libasound.so.2"
+      ],
+      "componentIds": [
+        "alsa-lib",
+        "alsa-runtime",
+        "bcm-host",
+        "ffmpeg",
+        "freetype",
+        "harfbuzz",
+        "javacpp",
+        "javacv",
+        "lame",
+        "libaom",
+        "libvpx",
+        "libwebp",
+        "libxml2",
+        "nv-codec-headers",
+        "opencore-amr",
+        "openh264",
+        "openssl",
+        "opus",
+        "speex",
+        "srt",
+        "svt-av1",
+        "vchiq-arm",
+        "vcos",
+        "vo-amrwbenc",
+        "zimg",
+        "zlib",
+        "zstandard-native",
+        "zstd-jni"
+      ]
+    }
+  },
+  "components": [
+    {
+      "id": "javacv",
+      "name": "JavaCV",
+      "version": "1.5.13",
+      "scope": "bundled-java",
+      "license": "Apache License 2.0",
+      "licenseFiles": [
+        "texts/apache-2.0.txt"
+      ],
+      "summary": "Java bindings used by Indagium for media playback and export.",
+      "licenseExpression": "Apache-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (C) 2009-2016 Samuel Audet. Source: javacv-source archive, org/bytedeco/javacv/JavaCV.java.",
+        "Full Apache 2.0 terms: texts/apache-2.0.txt."
+      ],
+      "sourceIds": [
+        "javacv-source",
+        "bytedeco-recipe"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "javacv-source",
+          "version": "1.5.13",
+          "upstreamRef": "org.bytedeco:javacv:1.5.13",
+          "archive": "javacv-1.5.13-sources.jar",
+          "sha256": "f0eff2d149c4f83dc0d2340fa89f346b49116d7c022f4198bc5e45373708496f"
+        },
+        {
+          "sourceId": "bytedeco-recipe",
+          "version": "1.5.13",
+          "upstreamRef": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+          "archive": "javacpp-presets-60df69b.tar.gz",
+          "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7"
+        }
+      ]
+    },
+    {
+      "id": "javacpp",
+      "name": "JavaCPP",
+      "version": "1.5.13",
+      "scope": "bundled-java",
+      "license": "Apache License 2.0",
+      "licenseFiles": [
+        "texts/apache-2.0.txt"
+      ],
+      "summary": "JavaCPP bindings and native library loader used by JavaCV.",
+      "licenseExpression": "Apache-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (C) 2011-2023 Samuel Audet. Source: javacpp-source archive, org/bytedeco/javacpp/Loader.java.",
+        "Full Apache 2.0 terms: texts/apache-2.0.txt."
+      ],
+      "sourceIds": [
+        "javacpp-source",
+        "bytedeco-recipe"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "javacpp-source",
+          "version": "1.5.13",
+          "upstreamRef": "org.bytedeco:javacpp:1.5.13",
+          "archive": "javacpp-1.5.13-sources.jar",
+          "sha256": "c61162d99c0dde4d3af170123cb3e786abed6667cb3864db9d6408706f6d576c"
+        },
+        {
+          "sourceId": "bytedeco-recipe",
+          "version": "1.5.13",
+          "upstreamRef": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+          "archive": "javacpp-presets-60df69b.tar.gz",
+          "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7"
+        }
+      ]
+    },
+    {
+      "id": "ffmpeg",
+      "name": "FFmpeg",
+      "version": "8.0.1-1.5.13",
+      "scope": "bundled-native",
+      "license": "GNU Lesser General Public License version 3 or later",
+      "licenseFiles": [
+        "texts/ffmpeg-lgpl-3.0.txt",
+        "texts/gpl-3.0.txt"
+      ],
+      "summary": "Shared FFmpeg libraries are built with --enable-version3 and without --enable-gpl or --enable-nonfree. They remain replaceable under their licence terms.",
+      "licenseExpression": "LGPL-3.0-or-later",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "FFmpeg project and individual source-file contributors; FFmpeg keeps per-file notices in its source tree.",
+        "The copied LGPL text names the Free Software Foundation as copyright holder of the licence text; it is not an FFmpeg contributor attribution."
+      ],
+      "sourceIds": [
+        "ffmpeg",
+        "bytedeco-recipe"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "ffmpeg",
+          "version": "8.0.1",
+          "upstreamRef": "n8.0.1",
+          "archive": "ffmpeg-8.0.1.tar.bz2",
+          "sha256": "65ff433fab5727fb2dc41f1d508dc60e6192fea44cab2e0301194feee4bcf1d7"
+        },
+        {
+          "sourceId": "bytedeco-recipe",
+          "version": "1.5.13",
+          "upstreamRef": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+          "archive": "javacpp-presets-60df69b.tar.gz",
+          "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7"
+        }
+      ]
+    },
+    {
+      "id": "zstd-jni",
+      "name": "zstd-jni",
+      "version": "1.5.7-4",
+      "scope": "bundled-native",
+      "license": "BSD 2-Clause",
+      "licenseFiles": [
+        "texts/zstd-jni-license.txt"
+      ],
+      "summary": "Java wrapper and native loader for the bundled Zstandard library.",
+      "licenseExpression": "BSD-2-Clause",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2015-present, Luben Karavelov. Source: zstd-jni-1.5.7-4/LICENSE."
+      ],
+      "sourceIds": [
+        "zstd-jni"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "zstd-jni",
+          "version": "1.5.7-4",
+          "upstreamRef": "v1.5.7-4",
+          "archive": "zstd-jni-1.5.7-4.tar.gz",
+          "sha256": "71b0e1d5fd0580725808524c21df0ccad329cfac83ad2d386fbde5a0fd616b3a"
+        }
+      ]
+    },
+    {
+      "id": "zstandard-native",
+      "name": "Zstandard native library",
+      "version": "1.5.7",
+      "scope": "bundled-native-compression",
+      "license": "BSD 3-Clause",
+      "licenseFiles": [
+        "texts/zstd-license.txt"
+      ],
+      "summary": "Native Zstandard compression library distributed inside the platform zstd-jni classifier.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) Meta Platforms, Inc. and affiliates. Source: zstd-1.5.7/LICENSE."
+      ],
+      "sourceIds": [
+        "zstd"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "zstd",
+          "version": "1.5.7",
+          "upstreamRef": "v1.5.7",
+          "archive": "zstd-1.5.7.tar.gz",
+          "sha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3"
+        }
+      ]
+    },
+    {
+      "id": "libaom",
+      "name": "libaom",
+      "version": "3.9.1",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD 2-Clause plus Alliance for Open Media Patent License 1.0",
+      "licenseFiles": [
+        "texts/libaom-license.txt",
+        "texts/aom-patent-license.txt",
+        "texts/libaom-fastfeat-license.txt",
+        "texts/libaom-libyuv-license.txt",
+        "texts/libaom-libwebm-license.txt",
+        "texts/libaom-libwebm-patents.txt",
+        "texts/libaom-vector-license.txt",
+        "texts/libaom-x86inc-license.txt"
+      ],
+      "summary": "AV1 decoder linked into FFmpeg. Upstream libaom uses BSD 2-Clause; its complete patent terms and third-party notices are included.",
+      "licenseExpression": "BSD-2-Clause AND LicenseRef-AOM-Patent-1.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2016, Alliance for Open Media; upstream third-party notices are included in each referenced text file."
+      ],
+      "sourceIds": [
+        "libaom"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libaom",
+          "version": "3.9.1",
+          "upstreamRef": "v3.9.1",
+          "archive": "aom-3.9.1.tar.gz",
+          "sha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e"
+        }
+      ]
+    },
+    {
+      "id": "svt-av1",
+      "name": "SVT-AV1",
+      "version": "3.1.2",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD 3-Clause Clear plus Alliance for Open Media Patent License 1.0",
+      "licenseFiles": [
+        "texts/svt-av1-license.md",
+        "texts/svt-av1-patents.md",
+        "texts/svt-fastfeat-license.txt",
+        "texts/svt-safestringlib-license.txt"
+      ],
+      "summary": "AV1 encoder linked into FFmpeg; the Clear BSD terms, patent terms, and bundled third-party notices are included.",
+      "licenseExpression": "BSD-3-Clause-Clear AND LicenseRef-AOM-Patent-1.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2021, Alliance for Open Media; included FastFeat and SafeStringLib notices remain applicable."
+      ],
+      "sourceIds": [
+        "svt-av1",
+        "libaom"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "svt-av1",
+          "version": "3.1.2",
+          "upstreamRef": "v3.1.2",
+          "archive": "SVT-AV1-3.1.2.tar.gz",
+          "sha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1"
+        },
+        {
+          "sourceId": "libaom",
+          "version": "3.9.1",
+          "upstreamRef": "v3.9.1",
+          "archive": "aom-3.9.1.tar.gz",
+          "sha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e"
+        }
+      ]
+    },
+    {
+      "id": "zlib",
+      "name": "zlib",
+      "version": "1.3.2",
+      "scope": "ffmpeg-linked-native",
+      "license": "zlib License",
+      "licenseFiles": [
+        "texts/zlib-license.txt"
+      ],
+      "summary": "Compression library linked into FFmpeg.",
+      "licenseExpression": "Zlib",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler."
+      ],
+      "sourceIds": [
+        "zlib"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "zlib",
+          "version": "1.3.2",
+          "upstreamRef": "v1.3.2",
+          "archive": "zlib-1.3.2.tar.gz",
+          "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16"
+        }
+      ]
+    },
+    {
+      "id": "lame",
+      "name": "LAME",
+      "version": "3.100",
+      "scope": "ffmpeg-linked-native",
+      "license": "GNU Library General Public License version 2.0",
+      "licenseFiles": [
+        "texts/lame-license.txt",
+        "texts/lame-notice.txt"
+      ],
+      "summary": "MP3 support linked into FFmpeg; upstream licence text and attribution are included.",
+      "licenseExpression": "LGPL-2.0-or-later",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "LAME project; upstream LICENSE asks redistributors to acknowledge LAME and link to www.mp3dev.org.",
+        "The full LGPL text and project notice are included."
+      ],
+      "sourceIds": [
+        "lame"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "lame",
+          "version": "3.100",
+          "upstreamRef": "3.100",
+          "archive": "lame-3.100.tar.gz",
+          "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e"
+        }
+      ]
+    },
+    {
+      "id": "speex",
+      "name": "Speex",
+      "version": "1.2.1",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD-style licence",
+      "licenseFiles": [
+        "texts/speex-license.txt"
+      ],
+      "summary": "Speex audio codec linked into FFmpeg.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright 2002-2008 Xiph.org Foundation; Jean-Marc Valin; Analog Devices Inc.; CSIRO; David Rowe; Epic Games; Jutta Degener and Carsten Bormann."
+      ],
+      "sourceIds": [
+        "speex"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "speex",
+          "version": "1.2.1",
+          "upstreamRef": "Speex-1.2.1",
+          "archive": "speex-1.2.1.tar.gz",
+          "sha256": "4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea"
+        }
+      ]
+    },
+    {
+      "id": "opencore-amr",
+      "name": "OpenCORE AMR",
+      "version": "0.1.6",
+      "scope": "ffmpeg-linked-native",
+      "license": "Apache License 2.0",
+      "licenseFiles": [
+        "texts/apache-2.0.txt",
+        "texts/opencore-amr-notice.txt",
+        "texts/vo-amrwbenc-patent-disclaimer.txt"
+      ],
+      "summary": "AMR-NB/AMR-WB codec support linked into FFmpeg.",
+      "licenseExpression": "Apache-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "OpenCORE AMR contributors; source NOTICE and patent disclaimer are included."
+      ],
+      "sourceIds": [
+        "opencore-amr"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "opencore-amr",
+          "version": "0.1.6",
+          "upstreamRef": "opencore-amr-0.1.6",
+          "archive": "opencore-amr-0.1.6.tar.gz",
+          "sha256": "483eb4061088e2b34b358e47540b5d495a96cd468e361050fae615b1809dc4a1"
+        }
+      ]
+    },
+    {
+      "id": "vo-amrwbenc",
+      "name": "VisualOn AMR-WB encoder",
+      "version": "0.1.3",
+      "scope": "ffmpeg-linked-native",
+      "license": "Apache License 2.0",
+      "licenseFiles": [
+        "texts/apache-2.0.txt",
+        "texts/vo-amrwbenc-notice.txt",
+        "texts/vo-amrwbenc-patent-disclaimer.txt"
+      ],
+      "summary": "AMR-WB encoding support linked into FFmpeg.",
+      "licenseExpression": "Apache-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "VO-AMR-WB encoder contributors; source NOTICE and patent disclaimer are included."
+      ],
+      "sourceIds": [
+        "vo-amrwbenc"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "vo-amrwbenc",
+          "version": "0.1.3",
+          "upstreamRef": "vo-amrwbenc-0.1.3",
+          "archive": "vo-amrwbenc-0.1.3.tar.gz",
+          "sha256": "5652b391e0f0e296417b841b02987d3fd33e6c0af342c69542cbb016a71d9d4e"
+        }
+      ]
+    },
+    {
+      "id": "openssl",
+      "name": "OpenSSL",
+      "version": "3.5.5",
+      "scope": "ffmpeg-linked-native",
+      "license": "Apache License 2.0",
+      "licenseFiles": [
+        "texts/openssl-license.txt"
+      ],
+      "summary": "TLS/crypto support linked into FFmpeg. OpenSSL's own full licence text is included.",
+      "licenseExpression": "Apache-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "OpenSSL project and contributors; per-file upstream copyright notices are in the pinned source archive."
+      ],
+      "sourceIds": [
+        "openssl"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "openssl",
+          "version": "3.5.5",
+          "upstreamRef": "openssl-3.5.5",
+          "archive": "openssl-3.5.5.tar.gz",
+          "sha256": "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89"
+        }
+      ]
+    },
+    {
+      "id": "openh264",
+      "name": "OpenH264",
+      "version": "2.6.0",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD-style licence with patent notice",
+      "licenseFiles": [
+        "texts/openh264-license.txt"
+      ],
+      "summary": "H.264 support is built from Cisco's source release; Indagium does not redistribute Cisco's separately delivered binary.",
+      "licenseExpression": "BSD-2-Clause AND LicenseRef-OpenH264-Patent-Notice",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2013, Cisco Systems. The source build is OpenH264 2.6.0; Cisco-distributed binaries are not included."
+      ],
+      "sourceIds": [
+        "openh264"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "openh264",
+          "version": "2.6.0",
+          "upstreamRef": "v2.6.0",
+          "archive": "openh264-2.6.0.tar.gz",
+          "sha256": "558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69"
+        }
+      ]
+    },
+    {
+      "id": "libvpx",
+      "name": "libvpx",
+      "version": "1.15.2",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD 3-Clause plus patent notice",
+      "licenseFiles": [
+        "texts/libvpx-license.txt",
+        "texts/libvpx-patents.txt"
+      ],
+      "summary": "VP8/VP9 support linked into FFmpeg.",
+      "licenseExpression": "BSD-3-Clause AND LicenseRef-Google-Patent-Grant",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2010, The WebM Project authors; included source also carries its patent notice."
+      ],
+      "sourceIds": [
+        "libvpx"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libvpx",
+          "version": "1.15.2",
+          "upstreamRef": "v1.15.2",
+          "archive": "libvpx-1.15.2.tar.gz",
+          "sha256": "26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa"
+        }
+      ]
+    },
+    {
+      "id": "alsa-lib",
+      "name": "ALSA library",
+      "version": "1.2.14",
+      "scope": "ffmpeg-linked-native-or-platform-runtime",
+      "license": "GNU Lesser General Public License version 2.1",
+      "licenseFiles": [
+        "texts/alsa-lib-license.txt"
+      ],
+      "summary": "Audio backend in Linux media builds; packaged libraries vary by target.",
+      "licenseExpression": "LGPL-2.1-or-later",
+      "platforms": [
+        "linux-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "ALSA project contributors; the LGPL text file is the license text, and upstream copyright notices are retained in source."
+      ],
+      "sourceIds": [
+        "alsa-lib"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "alsa-lib",
+          "version": "1.2.14",
+          "upstreamRef": "v1.2.14",
+          "archive": "alsa-lib-1.2.14.tar.bz2",
+          "sha256": "be9c88a0b3604367dd74167a2b754a35e142f670292ae47a2fdef27a2ee97a32"
+        }
+      ]
+    },
+    {
+      "id": "freetype",
+      "name": "FreeType",
+      "version": "2.14.1",
+      "scope": "ffmpeg-linked-native",
+      "license": "FreeType License (FTL) with BDF, PCF, and zlib notices",
+      "licenseFiles": [
+        "texts/freetype-license-choice.txt",
+        "texts/freetype-ftl-license.txt",
+        "texts/freetype-bdf-notice.txt",
+        "texts/freetype-pcf-notice.txt",
+        "texts/freetype-zlib-notice.txt",
+        "texts/freetype-zutil-notice.txt"
+      ],
+      "summary": "Font rendering support linked into FFmpeg; the chosen FTL option and embedded BDF, PCF, and zlib notices are included.",
+      "licenseExpression": "LicenseRef-FTL AND MIT AND Zlib",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "FreeType contributors; additional BDF, PCF, zlib and zutil attributions are included in referenced notices."
+      ],
+      "sourceIds": [
+        "freetype"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "freetype",
+          "version": "2.14.1",
+          "upstreamRef": "VER-2-14-1",
+          "archive": "freetype-2.14.1.tar.xz",
+          "sha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc"
+        }
+      ]
+    },
+    {
+      "id": "harfbuzz",
+      "name": "HarfBuzz",
+      "version": "12.3.0",
+      "scope": "ffmpeg-linked-native",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/harfbuzz-license.txt"
+      ],
+      "summary": "Text shaping support linked into FFmpeg.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright © 2010-2022 Google, Inc.; © 2015-2020 Ebrahim Byagowi; © 2019-2020 Facebook, Inc.; additional copyright notices are in COPYING."
+      ],
+      "sourceIds": [
+        "harfbuzz"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "harfbuzz",
+          "version": "12.3.0",
+          "upstreamRef": "12.3.0",
+          "archive": "harfbuzz-12.3.0.tar.gz",
+          "sha256": "e93af4816128fc0a02d2e84106fdfe36a3fde01086b723be8f0656a65562ca9e"
+        }
+      ]
+    },
+    {
+      "id": "opus",
+      "name": "Opus",
+      "version": "1.3.1",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD-style licence",
+      "licenseFiles": [
+        "texts/opus-license.txt"
+      ],
+      "summary": "Opus audio codec linked into FFmpeg.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright 2001-2011 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, and Erik de Castro Lopo."
+      ],
+      "sourceIds": [
+        "opus"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "opus",
+          "version": "1.3.1",
+          "upstreamRef": "v1.3.1",
+          "archive": "opus-1.3.1.tar.gz",
+          "sha256": "65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d"
+        }
+      ]
+    },
+    {
+      "id": "libxml2",
+      "name": "libxml2",
+      "version": "2.9.12",
+      "scope": "ffmpeg-linked-native",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/libxml2-license.txt"
+      ],
+      "summary": "XML support linked into FFmpeg.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (C) 1998-2012 Daniel Veillard; additional per-file notices are in the source archive."
+      ],
+      "sourceIds": [
+        "libxml2"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libxml2",
+          "version": "2.9.12",
+          "upstreamRef": "v2.9.12",
+          "archive": "libxml2-2.9.12.tar.xz",
+          "sha256": "28a92f6ab1f311acf5e478564c49088ef0ac77090d9c719bbc5d518f1fe62eb9"
+        }
+      ]
+    },
+    {
+      "id": "srt",
+      "name": "SRT",
+      "version": "1.5.4",
+      "scope": "ffmpeg-linked-native",
+      "license": "Mozilla Public License 2.0",
+      "licenseFiles": [
+        "texts/srt-license.txt"
+      ],
+      "summary": "SRT transport support linked into FFmpeg.",
+      "licenseExpression": "MPL-2.0",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Haivision SRT contributors; copyright and MPL notices are preserved in upstream source files."
+      ],
+      "sourceIds": [
+        "srt"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "srt",
+          "version": "1.5.4",
+          "upstreamRef": "v1.5.4",
+          "archive": "srt-1.5.4.tar.gz",
+          "sha256": "d0a8b600fe1b4eaaf6277530e3cfc8f15b8ce4035f16af4a5eb5d4b123640cdd"
+        }
+      ]
+    },
+    {
+      "id": "libwebp",
+      "name": "libwebp",
+      "version": "1.6.0",
+      "scope": "ffmpeg-linked-native",
+      "license": "BSD-style licence plus patent notice",
+      "licenseFiles": [
+        "texts/libwebp-license.txt",
+        "texts/libwebp-patents.txt"
+      ],
+      "summary": "WebP image codec support linked into FFmpeg.",
+      "licenseExpression": "BSD-3-Clause AND LicenseRef-Google-Patent-Grant",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2010, Google Inc.; included source also carries its patent notice."
+      ],
+      "sourceIds": [
+        "libwebp"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libwebp",
+          "version": "1.6.0",
+          "upstreamRef": "v1.6.0",
+          "archive": "libwebp-1.6.0.tar.gz",
+          "sha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136"
+        }
+      ]
+    },
+    {
+      "id": "zimg",
+      "name": "zimg",
+      "version": "3.0.6",
+      "scope": "ffmpeg-linked-native",
+      "license": "WTFPL 2.0",
+      "licenseFiles": [
+        "texts/zimg-license.txt"
+      ],
+      "summary": "Image scaling and colorspace support linked into FFmpeg.",
+      "licenseExpression": "WTFPL",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (C) 2004 Sam Hocevar."
+      ],
+      "sourceIds": [
+        "zimg"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "zimg",
+          "version": "3.0.6",
+          "upstreamRef": "release-3.0.6",
+          "archive": "zimg-3.0.6.tar.gz",
+          "sha256": "be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577"
+        }
+      ]
+    },
+    {
+      "id": "gcc-libatomic",
+      "name": "GCC libatomic runtime",
+      "version": "13.4.0",
+      "scope": "bundled-native-macos-arm64-classifier (observed binary is Mach-O x86_64)",
+      "license": "GNU GPL version 3 or later with GCC Runtime Library Exception 3.1",
+      "licenseFiles": [
+        "texts/gpl-3.0.txt",
+        "texts/gcc-runtime-exception-3.1.txt"
+      ],
+      "summary": "The macOS arm64 FFmpeg classifier includes GCC's libatomic. The inspected file is a Mach-O x86_64 binary; this inventory records its presence without claiming it can load on Apple Silicon.",
+      "licenseExpression": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "platforms": [
+        "macos-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "GCC runtime contributors; the packaged libatomic binary identifies GCC 13.4.0. The GPL and Runtime Library Exception texts are included."
+      ],
+      "sourceIds": [
+        "gcc-runtime",
+        "gcc-formula-patch",
+        "bytedeco-recipe"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "gcc-runtime",
+          "version": "13.4.0",
+          "upstreamRef": "releases/gcc-13.4.0",
+          "archive": "gcc-13.4.0.tar.xz",
+          "sha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5"
+        },
+        {
+          "sourceId": "gcc-formula-patch",
+          "version": "patch commit 8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+          "upstreamRef": "8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+          "archive": "gcc-13.4.0.diff",
+          "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949"
+        },
+        {
+          "sourceId": "bytedeco-recipe",
+          "version": "1.5.13",
+          "upstreamRef": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+          "archive": "javacpp-presets-60df69b.tar.gz",
+          "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7"
+        }
+      ]
+    },
+    {
+      "id": "gcc-runtime-windows",
+      "name": "GCC runtime libraries (Windows)",
+      "version": "14.1.0-3 (MSYS2)",
+      "scope": "statically linked in Windows FFmpeg DLLs",
+      "license": "GNU GPL version 3 or later with GCC Runtime Library Exception 3.1",
+      "licenseFiles": [
+        "texts/gpl-3.0.txt",
+        "texts/gcc-runtime-exception-3.1.txt"
+      ],
+      "summary": "GCC 14.1.0-3 static libgcc/libstdc++ runtime used by the Windows FFmpeg build; GPLv3 and GCC Runtime Library Exception text are reproduced.",
+      "licenseExpression": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "platforms": [
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "GCC contributors; Windows FFmpeg build records GCC 14.1.0-3 inputs and statically linked runtime libraries. The GPL and Runtime Library Exception texts are included."
+      ],
+      "sourceIds": [
+        "gcc-runtime-windows",
+        "msys2-gcc-package",
+        "mingw-w64"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "gcc-runtime-windows",
+          "version": "14.1.0",
+          "upstreamRef": "releases/gcc-14.1.0",
+          "archive": "gcc-14.1.0.tar.xz",
+          "sha256": "e283c654987afe3de9d8080bc0bd79534b5ca0d681a73a11ff2b5d3767426840"
+        },
+        {
+          "sourceId": "msys2-gcc-package",
+          "version": "14.1.0-3",
+          "upstreamRef": "3127522154b79ff94dedc07a5c5a613c98c17a41",
+          "archive": "msys2-mingw-packages-3127522.tar.gz",
+          "sha256": "2ea4827e26e034eb9959e5002dfef91604da31aa6fbb69106bcf518c61241592"
+        },
+        {
+          "sourceId": "mingw-w64",
+          "version": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+          "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+          "archive": "mingw-w64-90abf78.tar.gz",
+          "sha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548"
+        }
+      ]
+    },
+    {
+      "id": "mingw-w64-crt",
+      "name": "MinGW-w64 C runtime and headers",
+      "version": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+      "scope": "statically linked Windows runtime inputs",
+      "license": "see included upstream licence notice",
+      "licenseFiles": [
+        "texts/mingw-w64-license.txt"
+      ],
+      "summary": "MinGW-w64 CRT/headers from the pinned MSYS2 toolchain source snapshot used for Windows FFmpeg builds.",
+      "licenseExpression": "LicenseRef-mingw-w64",
+      "platforms": [
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2009-2013 by the mingw-w64 project; additional upstream notices are included in the source archive."
+      ],
+      "sourceIds": [
+        "mingw-w64",
+        "msys2-gcc-package"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "mingw-w64",
+          "version": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+          "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+          "archive": "mingw-w64-90abf78.tar.gz",
+          "sha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548"
+        },
+        {
+          "sourceId": "msys2-gcc-package",
+          "version": "14.1.0-3",
+          "upstreamRef": "3127522154b79ff94dedc07a5c5a613c98c17a41",
+          "archive": "msys2-mingw-packages-3127522.tar.gz",
+          "sha256": "2ea4827e26e034eb9959e5002dfef91604da31aa6fbb69106bcf518c61241592"
+        }
+      ]
+    },
+    {
+      "id": "winpthreads",
+      "name": "winpthreads",
+      "version": "12.0.0.r81.g90abf784a-1",
+      "scope": "statically linked Windows runtime input",
+      "license": "see included upstream licence notice",
+      "licenseFiles": [
+        "texts/winpthreads-license.txt"
+      ],
+      "summary": "The inspected Windows FFmpeg build enables pthreads and links winpthreads from the pinned MinGW-w64 source snapshot.",
+      "licenseExpression": "LicenseRef-mingw-w64",
+      "platforms": [
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2011 mingw-w64 project; full winpthreads COPYING text is included."
+      ],
+      "sourceIds": [
+        "mingw-w64",
+        "msys2-gcc-package"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "mingw-w64",
+          "version": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+          "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+          "archive": "mingw-w64-90abf78.tar.gz",
+          "sha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548"
+        },
+        {
+          "sourceId": "msys2-gcc-package",
+          "version": "14.1.0-3",
+          "upstreamRef": "3127522154b79ff94dedc07a5c5a613c98c17a41",
+          "archive": "msys2-mingw-packages-3127522.tar.gz",
+          "sha256": "2ea4827e26e034eb9959e5002dfef91604da31aa6fbb69106bcf518c61241592"
+        }
+      ]
+    },
+    {
+      "id": "libva",
+      "name": "Video Acceleration API (libva)",
+      "version": "2.14.0-1 (Ubuntu 22.04 source package)",
+      "scope": "bundled-native-linux-x64",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/libva-license.txt",
+        "texts/libva-ubuntu-copyright.txt"
+      ],
+      "summary": "Linux x64 FFmpeg classifier includes libva.so.2.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-x64"
+      ],
+      "copyrightAndAttribution": [
+        "libva contributors; Ubuntu 2.14.0-1 packaging copyright notice is included."
+      ],
+      "sourceIds": [
+        "libva-source",
+        "libva-source-orig",
+        "libva-source-debian"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libva-source",
+          "version": "2.14.0-1",
+          "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+          "archive": "libva_2.14.0-1.dsc",
+          "sha256": "272dcd0631bebe296862260555faa7d3d34eb5a4c33b142ef84a32ce6c818d97"
+        },
+        {
+          "sourceId": "libva-source-orig",
+          "version": "2.14.0",
+          "upstreamRef": "libva 2.14.0",
+          "archive": "libva_2.14.0.orig.tar.gz",
+          "sha256": "f21152a2170edda9d1c4dd463d52eaf62b553e83e553c0a946654523cca86d5e"
+        },
+        {
+          "sourceId": "libva-source-debian",
+          "version": "2.14.0-1",
+          "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+          "archive": "libva_2.14.0-1.debian.tar.xz",
+          "sha256": "f0d0c25dadacf98e2b7c042b71ef58c6925028d555da7e54f84005b3bcd8c628"
+        }
+      ]
+    },
+    {
+      "id": "libva-drm",
+      "name": "Video Acceleration API DRM backend",
+      "version": "2.14.0-1 (Ubuntu 22.04 source package)",
+      "scope": "bundled-native-linux-x64",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/libva-license.txt",
+        "texts/libva-ubuntu-copyright.txt"
+      ],
+      "summary": "Linux x64 FFmpeg classifier includes libva-drm.so.2.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-x64"
+      ],
+      "copyrightAndAttribution": [
+        "libva contributors; Ubuntu 2.14.0-1 packaging copyright notice is included."
+      ],
+      "sourceIds": [
+        "libva-source",
+        "libva-source-orig",
+        "libva-source-debian"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libva-source",
+          "version": "2.14.0-1",
+          "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+          "archive": "libva_2.14.0-1.dsc",
+          "sha256": "272dcd0631bebe296862260555faa7d3d34eb5a4c33b142ef84a32ce6c818d97"
+        },
+        {
+          "sourceId": "libva-source-orig",
+          "version": "2.14.0",
+          "upstreamRef": "libva 2.14.0",
+          "archive": "libva_2.14.0.orig.tar.gz",
+          "sha256": "f21152a2170edda9d1c4dd463d52eaf62b553e83e553c0a946654523cca86d5e"
+        },
+        {
+          "sourceId": "libva-source-debian",
+          "version": "2.14.0-1",
+          "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+          "archive": "libva_2.14.0-1.debian.tar.xz",
+          "sha256": "f0d0c25dadacf98e2b7c042b71ef58c6925028d555da7e54f84005b3bcd8c628"
+        }
+      ]
+    },
+    {
+      "id": "libdrm",
+      "name": "Direct Rendering Manager library",
+      "version": "2.4.113-2~ubuntu0.22.04.1",
+      "scope": "bundled-native-linux-x64",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/libdrm-ubuntu-copyright.txt"
+      ],
+      "summary": "Linux x64 FFmpeg classifier includes libdrm.so.2.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-x64"
+      ],
+      "copyrightAndAttribution": [
+        "libdrm contributors; Ubuntu 2.4.113-2~ubuntu0.22.04.1 packaging copyright notice is included."
+      ],
+      "sourceIds": [
+        "libdrm-source",
+        "libdrm-source-orig",
+        "libdrm-source-debian"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "libdrm-source",
+          "version": "2.4.113-2~ubuntu0.22.04.1",
+          "upstreamRef": "Ubuntu jammy-updates source package 2.4.113-2~ubuntu0.22.04.1",
+          "archive": "libdrm_2.4.113-2~ubuntu0.22.04.1.dsc",
+          "sha256": "51aca908b4884d500158077ff66ee0aabbdd1b1ada5271321b25d425eabd1c3e"
+        },
+        {
+          "sourceId": "libdrm-source-orig",
+          "version": "2.4.113",
+          "upstreamRef": "libdrm 2.4.113",
+          "archive": "libdrm_2.4.113.orig.tar.xz",
+          "sha256": "7fd7eb2967f63beb4606f22d50e277d993480d05ef75dd88a9bd8e677323e5e1"
+        },
+        {
+          "sourceId": "libdrm-source-debian",
+          "version": "2.4.113-2~ubuntu0.22.04.1",
+          "upstreamRef": "Ubuntu jammy-updates source package 2.4.113-2~ubuntu0.22.04.1",
+          "archive": "libdrm_2.4.113-2~ubuntu0.22.04.1.debian.tar.xz",
+          "sha256": "cb1ee404ce432906c306a5a2fa8bcadcae42bf1adc91c434dfd7d1e26aa272c0"
+        }
+      ]
+    },
+    {
+      "id": "bcm-host",
+      "name": "Raspberry Pi bcm_host userland",
+      "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "scope": "bundled-native-linux-arm64",
+      "license": "BSD 3-Clause",
+      "licenseFiles": [
+        "texts/raspberry-pi-userland-license.txt"
+      ],
+      "summary": "Linux arm64 FFmpeg classifier includes libbcm_host.so.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2012, Broadcom Europe Ltd; Copyright (c) 2015, Raspberry Pi (Trading) Ltd."
+      ],
+      "sourceIds": [
+        "raspberrypi-userland"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "raspberrypi-userland",
+          "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "upstreamRef": "a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "archive": "raspberrypi-userland-a54a0db.tar.gz",
+          "sha256": "e977277a280d76fdb6fc8c8f8c43d6e93aea29565253bf07f8d2b3356116c2fc"
+        }
+      ]
+    },
+    {
+      "id": "vchiq-arm",
+      "name": "Raspberry Pi vchiq_arm userland",
+      "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "scope": "bundled-native-linux-arm64",
+      "license": "BSD 3-Clause",
+      "licenseFiles": [
+        "texts/raspberry-pi-userland-license.txt"
+      ],
+      "summary": "Linux arm64 FFmpeg classifier includes libvchiq_arm.so.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2012, Broadcom Europe Ltd; Copyright (c) 2015, Raspberry Pi (Trading) Ltd."
+      ],
+      "sourceIds": [
+        "raspberrypi-userland"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "raspberrypi-userland",
+          "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "upstreamRef": "a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "archive": "raspberrypi-userland-a54a0db.tar.gz",
+          "sha256": "e977277a280d76fdb6fc8c8f8c43d6e93aea29565253bf07f8d2b3356116c2fc"
+        }
+      ]
+    },
+    {
+      "id": "vcos",
+      "name": "Raspberry Pi vcos userland",
+      "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "scope": "bundled-native-linux-arm64",
+      "license": "BSD 3-Clause",
+      "licenseFiles": [
+        "texts/raspberry-pi-userland-license.txt"
+      ],
+      "summary": "Linux arm64 FFmpeg classifier includes libvcos.so.",
+      "licenseExpression": "BSD-3-Clause",
+      "platforms": [
+        "linux-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright (c) 2012, Broadcom Europe Ltd; Copyright (c) 2015, Raspberry Pi (Trading) Ltd."
+      ],
+      "sourceIds": [
+        "raspberrypi-userland"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "raspberrypi-userland",
+          "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "upstreamRef": "a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+          "archive": "raspberrypi-userland-a54a0db.tar.gz",
+          "sha256": "e977277a280d76fdb6fc8c8f8c43d6e93aea29565253bf07f8d2b3356116c2fc"
+        }
+      ]
+    },
+    {
+      "id": "alsa-runtime",
+      "name": "ALSA runtime library",
+      "version": "1.2.14",
+      "scope": "bundled-native-linux-arm64",
+      "license": "GNU Lesser General Public License version 2.1",
+      "licenseFiles": [
+        "texts/alsa-lib-license.txt"
+      ],
+      "summary": "Linux arm64 FFmpeg classifier includes libasound.so.2.",
+      "licenseExpression": "LGPL-2.1-or-later",
+      "platforms": [
+        "linux-arm64"
+      ],
+      "copyrightAndAttribution": [
+        "ALSA project contributors; the LGPL text file is the license text, and upstream copyright notices are retained in source."
+      ],
+      "sourceIds": [
+        "alsa-lib"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "alsa-lib",
+          "version": "1.2.14",
+          "upstreamRef": "v1.2.14",
+          "archive": "alsa-lib-1.2.14.tar.bz2",
+          "sha256": "be9c88a0b3604367dd74167a2b754a35e142f670292ae47a2fdef27a2ee97a32"
+        }
+      ]
+    },
+    {
+      "id": "mfx-dispatch",
+      "name": "Intel Media SDK dispatcher",
+      "version": "1.35.1",
+      "scope": "FFmpeg-linked native dependency on Windows and Linux x64",
+      "license": "MIT License",
+      "licenseFiles": [
+        "texts/mfx-dispatch-license.txt"
+      ],
+      "summary": "Intel Media SDK dispatcher linked by the Windows and Linux x64 FFmpeg builds.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-x64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "Copyright 2012 Intel Corporation."
+      ],
+      "sourceIds": [
+        "mfx-dispatch"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "mfx-dispatch",
+          "version": "1.35.1",
+          "upstreamRef": "1.35.1",
+          "archive": "mfx_dispatch-1.35.1.tar.gz",
+          "sha256": "673636da98a4fd5c3e3dc5267da5429e986f53089ed6c33cdca5751f56d9416b"
+        }
+      ]
+    },
+    {
+      "id": "nv-codec-headers",
+      "name": "NVIDIA codec headers",
+      "version": "13.0.19.0",
+      "scope": "pinned FFmpeg source/build input; no standalone runtime library",
+      "license": "MIT License notices in the upstream headers",
+      "licenseFiles": [
+        "texts/nv-codec-dynlink_cuda.h-notice.txt",
+        "texts/nv-codec-dynlink_cuviddec.h-notice.txt",
+        "texts/nv-codec-dynlink_loader.h-notice.txt",
+        "texts/nv-codec-dynlink_nvcuvid.h-notice.txt",
+        "texts/nv-codec-nvEncodeAPI.h-notice.txt"
+      ],
+      "summary": "Pinned NVIDIA headers are used by the FFmpeg source build; their per-header notices are included.",
+      "licenseExpression": "MIT",
+      "platforms": [
+        "linux-arm64",
+        "linux-x64",
+        "macos-arm64",
+        "windows-x64"
+      ],
+      "copyrightAndAttribution": [
+        "NVIDIA header copyrights and license notices are copied per header; individual header scope is stated in each text file."
+      ],
+      "sourceIds": [
+        "nv-codec-headers"
+      ],
+      "sourceReferences": [
+        {
+          "sourceId": "nv-codec-headers",
+          "version": "13.0.19.0",
+          "upstreamRef": "n13.0.19.0",
+          "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+          "sha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116"
+        }
+      ]
+    },
+    {
+      "id": "source-delivery",
+      "name": "Media source and rebuild instructions",
+      "version": "2026-10-24",
+      "scope": "source-instructions",
+      "license": "Source delivery instructions",
+      "licenseFiles": [
+        "SOURCE-BUNDLE.md"
+      ],
+      "summary": "Explains source archive contents, verification, rebuild steps, and known limits.",
+      "licenseExpression": "LicenseRef-Indagium-Source-Instructions",
+      "platforms": [],
+      "copyrightAndAttribution": [
+        "Repository-authored instructions; no third-party copyright claim."
+      ],
+      "sourceIds": [],
+      "sourceReferences": []
+    }
+  ],
+  "recipeOnlySources": [
+    {
+      "name": "NASM",
+      "version": "2.14",
+      "scope": "build-tool-source",
+      "bundledInApp": false
+    },
+    {
+      "name": "x264",
+      "version": "pinned commit b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "scope": "optional-build-input; no --enable-gpl and not linked in inspected build",
+      "bundledInApp": false
+    },
+    {
+      "name": "x265",
+      "version": "3.4",
+      "scope": "optional-build-input; no --enable-gpl and not linked in inspected build",
+      "bundledInApp": false
+    }
+  ],
+  "runtimePackageResources": {
+    "javacv": "org.bytedeco:javacv:1.5.13",
+    "javacpp": "org.bytedeco:javacpp:1.5.13",
+    "ffmpeg": "org.bytedeco:ffmpeg:8.0.1-1.5.13",
+    "zstdJni": "com.github.luben:zstd-jni:1.5.7-4"
+  },
+  "licenseTextHashes": {
+    "SOURCE-BUNDLE.md": "2a513706dae8b38883fcf6200c9325897afa20536963c0a3b3e979fbca5e4262",
+    "texts/alsa-lib-license.txt": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
+    "texts/aom-patent-license.txt": "661fb8e504744e95587b556b94a58343448300606a41bea8c7a9b97125696e61",
+    "texts/apache-2.0.txt": "8b3f1762349248d444ab9acbafe73941254e36e1064954da56bb9ddbd5873ddb",
+    "texts/ffmpeg-lgpl-3.0.txt": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
+    "texts/freetype-bdf-notice.txt": "a3cbc1321f1e6e66c4b1a98deed6d0aede0d868377d94060641e9530661d1ab5",
+    "texts/freetype-ftl-license.txt": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f",
+    "texts/freetype-license-choice.txt": "bd36c8b474855fa294c2ec5c184544478ef3720aad37d65a6296a4f264fd2d3b",
+    "texts/freetype-pcf-notice.txt": "6061bb1eaa81540548b05ce2dbb5bdddc30e8ebfbad63a1a724d20eb1ec9db37",
+    "texts/freetype-zlib-notice.txt": "02421fcfbfb1d656ef0b6ff4cd3c39f2946f08c3219fa42db482add7ce1f53ea",
+    "texts/freetype-zutil-notice.txt": "d047dd537abc6d66ae71e3b92afcf112327fc59841866b88d8ce73632360faea",
+    "texts/gcc-runtime-exception-3.1.txt": "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+    "texts/gpl-3.0.txt": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
+    "texts/harfbuzz-license.txt": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64",
+    "texts/lame-license.txt": "bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd",
+    "texts/lame-notice.txt": "7a40cbd8818c57e5285e83c772a459a996d1662c824a879836b97b473c07cae4",
+    "texts/libaom-fastfeat-license.txt": "043dcfd059386f9facd376351b2bd79325778744aa442177390cdfcca54babed",
+    "texts/libaom-libwebm-license.txt": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf",
+    "texts/libaom-libwebm-patents.txt": "cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c",
+    "texts/libaom-libyuv-license.txt": "2b2cc1180c7e6988328ad2033b04b80117419db9c4c584918bbb3cfec7e9364f",
+    "texts/libaom-license.txt": "4764a286d8b2faeaf42f4418e7d7a28d58fc8fd4d00a3d0a7f44b0a4099de7f2",
+    "texts/libaom-vector-license.txt": "ff6c857ce2708e87701323078aef115c1872a1f80a9649f86dc899b48083bc60",
+    "texts/libaom-x86inc-license.txt": "719d8fa235f2068e0ae6d6a7dceb0a7720d7840f0f0ebed29957989e6ded3cd8",
+    "texts/libdrm-ubuntu-copyright.txt": "512c9a57fd8b449aa157351da9df07bf8e19f767e496a72205a4020268ddb2e0",
+    "texts/libva-license.txt": "c86a782ee845b52472dae9b9d79fb915d333628ac0efe49cdce63644814931de",
+    "texts/libva-ubuntu-copyright.txt": "b70141b6defaa0d09a2acc147fda2fde1b2a784a54eb83fc628906bc3151606b",
+    "texts/libvpx-license.txt": "8267348d5af1262c11d1a08de2f5afc77457755f1ac658627dd9acf71011d615",
+    "texts/libvpx-patents.txt": "cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c",
+    "texts/libwebp-license.txt": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf",
+    "texts/libwebp-patents.txt": "cc3273e0694ea5896145e0677699b53471b03ea43021ddc50e7923fbb9f5023c",
+    "texts/libxml2-license.txt": "c5c63674f8a83c4d2e385d96d1c670a03cb871ba2927755467017317878574bd",
+    "texts/mfx-dispatch-license.txt": "f03bff2bd2f916104d12d50caeaab41875086943ea8b88983eafa5d84890593c",
+    "texts/mingw-w64-license.txt": "99a69660981156c21336fdb5661f89341b013c94e4bf9e1c7467b4745718397f",
+    "texts/nv-codec-dynlink_cuda.h-notice.txt": "6f0d5ad2609c6fda3e0fb07fa286e7b46c2ea7b87ab12d926ab7a82c69ffe09d",
+    "texts/nv-codec-dynlink_cuviddec.h-notice.txt": "72b60be67644d841bfd54a042875b5846294d357040dd7ac8e38bde20d9e8f97",
+    "texts/nv-codec-dynlink_loader.h-notice.txt": "6f0d5ad2609c6fda3e0fb07fa286e7b46c2ea7b87ab12d926ab7a82c69ffe09d",
+    "texts/nv-codec-dynlink_nvcuvid.h-notice.txt": "72b60be67644d841bfd54a042875b5846294d357040dd7ac8e38bde20d9e8f97",
+    "texts/nv-codec-nvEncodeAPI.h-notice.txt": "72b60be67644d841bfd54a042875b5846294d357040dd7ac8e38bde20d9e8f97",
+    "texts/opencore-amr-notice.txt": "d106802b5e406073c1d10fbe9f638234c6973ebce37df71773179642085eb489",
+    "texts/openh264-license.txt": "dd5c1c9668512530fa5a96e4c29ac4033d70a7eeb0eed7a42fddb6dd794ebdbb",
+    "texts/openssl-license.txt": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+    "texts/opus-license.txt": "8338ce8d922bb4416ce3dd1e5680173332435e3f0755007ac7801ccd674fe682",
+    "texts/raspberry-pi-userland-license.txt": "bee6f1249175683d8610651706e1aa7dffcbfd3f9c4c05bc1e5ab34f313c2db5",
+    "texts/speex-license.txt": "2654a4264b2bfe298dedc508748d140111840c315cc8eb646a3a68c13fa75b01",
+    "texts/srt-license.txt": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85",
+    "texts/svt-av1-license.md": "0acc2fcb27472bdc9aaf8b71f37055bbdac4f54671b7d922f241bd7fcd0dd3e6",
+    "texts/svt-av1-patents.md": "20678ab10402659106dc4c147c97b2a6e94b5c0695415e15a8f195ebc3547922",
+    "texts/svt-fastfeat-license.txt": "043dcfd059386f9facd376351b2bd79325778744aa442177390cdfcca54babed",
+    "texts/svt-safestringlib-license.txt": "c0f99a208799ca20c9ccf31a30533d49334eb458dca5a3d14f9afe3e884e5d7d",
+    "texts/vo-amrwbenc-notice.txt": "e2ae60e14bece975eeab49210fcaf4ee529b77e6ca13e7d6556b6bb203897b31",
+    "texts/vo-amrwbenc-patent-disclaimer.txt": "f91a72705d38de34a9749c214a4cbc6ffa1da753b34b2cd11f3d6798f24ae59f",
+    "texts/winpthreads-license.txt": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177",
+    "texts/zimg-license.txt": "7637386b5f81e8a719ca336233149005e5fa28b5e6054ea7b67de49355b0ad40",
+    "texts/zlib-license.txt": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2",
+    "texts/zstd-jni-license.txt": "289a6adada5726047b9e68bf607cc44fbbac953bbb4fd29f53ffe75b5cb3e7b1",
+    "texts/zstd-license.txt": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+  },
+  "legalTextProvenance": {
+    "texts/apache-2.0.txt": {
+      "sourceId": "opencore-amr",
+      "upstreamRef": "opencore-amr-0.1.6",
+      "archive": "opencore-amr-0.1.6.tar.gz",
+      "archiveSha256": "483eb4061088e2b34b358e47540b5d495a96cd468e361050fae615b1809dc4a1",
+      "memberPath": "opencore-amr-0.1.6/LICENSE"
+    },
+    "texts/ffmpeg-lgpl-3.0.txt": {
+      "sourceId": "ffmpeg",
+      "upstreamRef": "n8.0.1",
+      "archive": "ffmpeg-8.0.1.tar.bz2",
+      "archiveSha256": "65ff433fab5727fb2dc41f1d508dc60e6192fea44cab2e0301194feee4bcf1d7",
+      "memberPath": "ffmpeg-8.0.1/COPYING.LGPLv3"
+    },
+    "texts/zstd-jni-license.txt": {
+      "sourceId": "zstd-jni",
+      "upstreamRef": "v1.5.7-4",
+      "archive": "zstd-jni-1.5.7-4.tar.gz",
+      "archiveSha256": "71b0e1d5fd0580725808524c21df0ccad329cfac83ad2d386fbde5a0fd616b3a",
+      "memberPath": "zstd-jni-1.5.7-4/LICENSE"
+    },
+    "texts/zstd-license.txt": {
+      "sourceId": "zstd",
+      "upstreamRef": "v1.5.7",
+      "archive": "zstd-1.5.7.tar.gz",
+      "archiveSha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3",
+      "memberPath": "zstd-1.5.7/LICENSE"
+    },
+    "texts/libaom-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/LICENSE"
+    },
+    "texts/aom-patent-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/PATENTS"
+    },
+    "texts/libaom-fastfeat-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/fastfeat/LICENSE"
+    },
+    "texts/libaom-libyuv-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/libyuv/LICENSE"
+    },
+    "texts/libaom-libwebm-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/libwebm/LICENSE.TXT"
+    },
+    "texts/libaom-libwebm-patents.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/libwebm/PATENTS.TXT"
+    },
+    "texts/libaom-vector-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/vector/LICENSE"
+    },
+    "texts/libaom-x86inc-license.txt": {
+      "sourceId": "libaom",
+      "upstreamRef": "v3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "archiveSha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "memberPath": "libaom-3.9.1/third_party/x86inc/LICENSE"
+    },
+    "texts/svt-av1-license.md": {
+      "sourceId": "svt-av1",
+      "upstreamRef": "v3.1.2",
+      "archive": "SVT-AV1-3.1.2.tar.gz",
+      "archiveSha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1",
+      "memberPath": "SVT-AV1-v3.1.2/LICENSE.md"
+    },
+    "texts/svt-av1-patents.md": {
+      "sourceId": "svt-av1",
+      "upstreamRef": "v3.1.2",
+      "archive": "SVT-AV1-3.1.2.tar.gz",
+      "archiveSha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1",
+      "memberPath": "SVT-AV1-v3.1.2/PATENTS.md"
+    },
+    "texts/svt-fastfeat-license.txt": {
+      "sourceId": "svt-av1",
+      "upstreamRef": "v3.1.2",
+      "archive": "SVT-AV1-3.1.2.tar.gz",
+      "archiveSha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1",
+      "memberPath": "SVT-AV1-v3.1.2/third_party/fastfeat/LICENSE"
+    },
+    "texts/svt-safestringlib-license.txt": {
+      "sourceId": "svt-av1",
+      "upstreamRef": "v3.1.2",
+      "archive": "SVT-AV1-3.1.2.tar.gz",
+      "archiveSha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1",
+      "memberPath": "SVT-AV1-v3.1.2/third_party/safestringlib/LICENSE"
+    },
+    "texts/zlib-license.txt": {
+      "sourceId": "zlib",
+      "upstreamRef": "v1.3.2",
+      "archive": "zlib-1.3.2.tar.gz",
+      "archiveSha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "memberPath": "zlib-1.3.2/LICENSE"
+    },
+    "texts/lame-license.txt": {
+      "sourceId": "lame",
+      "upstreamRef": "3.100",
+      "archive": "lame-3.100.tar.gz",
+      "archiveSha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "memberPath": "lame-3.100/COPYING"
+    },
+    "texts/speex-license.txt": {
+      "sourceId": "speex",
+      "upstreamRef": "Speex-1.2.1",
+      "archive": "speex-1.2.1.tar.gz",
+      "archiveSha256": "4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea",
+      "memberPath": "speex-1.2.1/COPYING"
+    },
+    "texts/opencore-amr-notice.txt": {
+      "sourceId": "opencore-amr",
+      "upstreamRef": "opencore-amr-0.1.6",
+      "archive": "opencore-amr-0.1.6.tar.gz",
+      "archiveSha256": "483eb4061088e2b34b358e47540b5d495a96cd468e361050fae615b1809dc4a1",
+      "memberPath": "opencore-amr-0.1.6/opencore/NOTICE"
+    },
+    "texts/vo-amrwbenc-notice.txt": {
+      "sourceId": "vo-amrwbenc",
+      "upstreamRef": "vo-amrwbenc-0.1.3",
+      "archive": "vo-amrwbenc-0.1.3.tar.gz",
+      "archiveSha256": "5652b391e0f0e296417b841b02987d3fd33e6c0af342c69542cbb016a71d9d4e",
+      "memberPath": "vo-amrwbenc-0.1.3/NOTICE"
+    },
+    "texts/openssl-license.txt": {
+      "sourceId": "openssl",
+      "upstreamRef": "openssl-3.5.5",
+      "archive": "openssl-3.5.5.tar.gz",
+      "archiveSha256": "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89",
+      "memberPath": "openssl-3.5.5/LICENSE.txt"
+    },
+    "texts/openh264-license.txt": {
+      "sourceId": "openh264",
+      "upstreamRef": "v2.6.0",
+      "archive": "openh264-2.6.0.tar.gz",
+      "archiveSha256": "558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69",
+      "memberPath": "openh264-2.6.0/LICENSE"
+    },
+    "texts/libvpx-license.txt": {
+      "sourceId": "libvpx",
+      "upstreamRef": "v1.15.2",
+      "archive": "libvpx-1.15.2.tar.gz",
+      "archiveSha256": "26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa",
+      "memberPath": "libvpx-1.15.2/LICENSE"
+    },
+    "texts/libvpx-patents.txt": {
+      "sourceId": "libvpx",
+      "upstreamRef": "v1.15.2",
+      "archive": "libvpx-1.15.2.tar.gz",
+      "archiveSha256": "26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa",
+      "memberPath": "libvpx-1.15.2/PATENTS"
+    },
+    "texts/alsa-lib-license.txt": {
+      "sourceId": "alsa-lib",
+      "upstreamRef": "v1.2.14",
+      "archive": "alsa-lib-1.2.14.tar.bz2",
+      "archiveSha256": "be9c88a0b3604367dd74167a2b754a35e142f670292ae47a2fdef27a2ee97a32",
+      "memberPath": "alsa-lib-1.2.14/COPYING"
+    },
+    "texts/freetype-license-choice.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/LICENSE.TXT"
+    },
+    "texts/freetype-ftl-license.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/docs/FTL.TXT"
+    },
+    "texts/freetype-bdf-notice.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/src/bdf/bdfdrivr.c"
+    },
+    "texts/freetype-pcf-notice.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/src/pcf/pcfdrivr.c"
+    },
+    "texts/freetype-zlib-notice.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/src/gzip/zlib.h"
+    },
+    "texts/freetype-zutil-notice.txt": {
+      "sourceId": "freetype",
+      "upstreamRef": "VER-2-14-1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "archiveSha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "memberPath": "freetype-2.14.1/src/gzip/zutil.h"
+    },
+    "texts/harfbuzz-license.txt": {
+      "sourceId": "harfbuzz",
+      "upstreamRef": "12.3.0",
+      "archive": "harfbuzz-12.3.0.tar.gz",
+      "archiveSha256": "e93af4816128fc0a02d2e84106fdfe36a3fde01086b723be8f0656a65562ca9e",
+      "memberPath": "harfbuzz-12.3.0/COPYING"
+    },
+    "texts/opus-license.txt": {
+      "sourceId": "opus",
+      "upstreamRef": "v1.3.1",
+      "archive": "opus-1.3.1.tar.gz",
+      "archiveSha256": "65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d",
+      "memberPath": "opus-1.3.1/COPYING"
+    },
+    "texts/libxml2-license.txt": {
+      "sourceId": "libxml2",
+      "upstreamRef": "v2.9.12",
+      "archive": "libxml2-2.9.12.tar.xz",
+      "archiveSha256": "28a92f6ab1f311acf5e478564c49088ef0ac77090d9c719bbc5d518f1fe62eb9",
+      "memberPath": "libxml2-2.9.12/COPYING"
+    },
+    "texts/srt-license.txt": {
+      "sourceId": "srt",
+      "upstreamRef": "v1.5.4",
+      "archive": "srt-1.5.4.tar.gz",
+      "archiveSha256": "d0a8b600fe1b4eaaf6277530e3cfc8f15b8ce4035f16af4a5eb5d4b123640cdd",
+      "memberPath": "srt-1.5.4/LICENSE"
+    },
+    "texts/libwebp-license.txt": {
+      "sourceId": "libwebp",
+      "upstreamRef": "v1.6.0",
+      "archive": "libwebp-1.6.0.tar.gz",
+      "archiveSha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136",
+      "memberPath": "libwebp-1.6.0/COPYING"
+    },
+    "texts/libwebp-patents.txt": {
+      "sourceId": "libwebp",
+      "upstreamRef": "v1.6.0",
+      "archive": "libwebp-1.6.0.tar.gz",
+      "archiveSha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136",
+      "memberPath": "libwebp-1.6.0/PATENTS"
+    },
+    "texts/zimg-license.txt": {
+      "sourceId": "zimg",
+      "upstreamRef": "release-3.0.6",
+      "archive": "zimg-3.0.6.tar.gz",
+      "archiveSha256": "be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577",
+      "memberPath": "zimg-release-3.0.6/COPYING"
+    },
+    "texts/gpl-3.0.txt": {
+      "sourceId": "gcc-runtime",
+      "upstreamRef": "releases/gcc-13.4.0",
+      "archive": "gcc-13.4.0.tar.xz",
+      "archiveSha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+      "memberPath": "gcc-13.4.0/COPYING3"
+    },
+    "texts/gcc-runtime-exception-3.1.txt": {
+      "sourceId": "gcc-runtime",
+      "upstreamRef": "releases/gcc-13.4.0",
+      "archive": "gcc-13.4.0.tar.xz",
+      "archiveSha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+      "memberPath": "gcc-13.4.0/COPYING.RUNTIME"
+    },
+    "texts/mingw-w64-license.txt": {
+      "sourceId": "mingw-w64",
+      "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+      "archive": "mingw-w64-90abf78.tar.gz",
+      "archiveSha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548",
+      "memberPath": "mingw-w64-90abf784ac344fe558e7e22cb5411d807862888d/COPYING"
+    },
+    "texts/winpthreads-license.txt": {
+      "sourceId": "mingw-w64",
+      "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+      "archive": "mingw-w64-90abf78.tar.gz",
+      "archiveSha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548",
+      "memberPath": "mingw-w64-90abf784ac344fe558e7e22cb5411d807862888d/mingw-w64-libraries/winpthreads/COPYING"
+    },
+    "texts/libva-license.txt": {
+      "sourceId": "libva-source-orig",
+      "upstreamRef": "libva 2.14.0",
+      "archive": "libva_2.14.0.orig.tar.gz",
+      "archiveSha256": "f21152a2170edda9d1c4dd463d52eaf62b553e83e553c0a946654523cca86d5e",
+      "memberPath": "libva-2.14.0/COPYING"
+    },
+    "texts/libva-ubuntu-copyright.txt": {
+      "sourceId": "libva-source-debian",
+      "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+      "archive": "libva_2.14.0-1.debian.tar.xz",
+      "archiveSha256": "f0d0c25dadacf98e2b7c042b71ef58c6925028d555da7e54f84005b3bcd8c628",
+      "memberPath": "debian/copyright"
+    },
+    "texts/libdrm-ubuntu-copyright.txt": {
+      "sourceId": "libdrm-source-debian",
+      "upstreamRef": "Ubuntu jammy-updates source package 2.4.113-2~ubuntu0.22.04.1",
+      "archive": "libdrm_2.4.113-2~ubuntu0.22.04.1.debian.tar.xz",
+      "archiveSha256": "cb1ee404ce432906c306a5a2fa8bcadcae42bf1adc91c434dfd7d1e26aa272c0",
+      "memberPath": "debian/copyright"
+    },
+    "texts/raspberry-pi-userland-license.txt": {
+      "sourceId": "raspberrypi-userland",
+      "upstreamRef": "a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "archive": "raspberrypi-userland-a54a0db.tar.gz",
+      "archiveSha256": "e977277a280d76fdb6fc8c8f8c43d6e93aea29565253bf07f8d2b3356116c2fc",
+      "memberPath": "userland-a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976/LICENCE"
+    },
+    "texts/mfx-dispatch-license.txt": {
+      "sourceId": "mfx-dispatch",
+      "upstreamRef": "1.35.1",
+      "archive": "mfx_dispatch-1.35.1.tar.gz",
+      "archiveSha256": "673636da98a4fd5c3e3dc5267da5429e986f53089ed6c33cdca5751f56d9416b",
+      "memberPath": "mfx_dispatch-1.35.1/LICENSE"
+    },
+    "texts/nv-codec-dynlink_cuda.h-notice.txt": {
+      "sourceId": "nv-codec-headers",
+      "upstreamRef": "n13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "archiveSha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "memberPath": "nv-codec-headers-n13.0.19.0/include/ffnvcodec/dynlink_cuda.h"
+    },
+    "texts/nv-codec-dynlink_cuviddec.h-notice.txt": {
+      "sourceId": "nv-codec-headers",
+      "upstreamRef": "n13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "archiveSha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "memberPath": "nv-codec-headers-n13.0.19.0/include/ffnvcodec/dynlink_cuviddec.h"
+    },
+    "texts/nv-codec-dynlink_loader.h-notice.txt": {
+      "sourceId": "nv-codec-headers",
+      "upstreamRef": "n13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "archiveSha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "memberPath": "nv-codec-headers-n13.0.19.0/include/ffnvcodec/dynlink_loader.h"
+    },
+    "texts/nv-codec-dynlink_nvcuvid.h-notice.txt": {
+      "sourceId": "nv-codec-headers",
+      "upstreamRef": "n13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "archiveSha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "memberPath": "nv-codec-headers-n13.0.19.0/include/ffnvcodec/dynlink_nvcuvid.h"
+    },
+    "texts/nv-codec-nvEncodeAPI.h-notice.txt": {
+      "sourceId": "nv-codec-headers",
+      "upstreamRef": "n13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "archiveSha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "memberPath": "nv-codec-headers-n13.0.19.0/include/ffnvcodec/nvEncodeAPI.h"
+    },
+    "SOURCE-BUNDLE.md": {
+      "repositoryPath": "licenses/third-party/SOURCE-BUNDLE.md",
+      "kind": "repository-authored-source-instructions"
+    },
+    "texts/lame-notice.txt": {
+      "sourceId": "lame",
+      "upstreamRef": "3.100",
+      "archive": "lame-3.100.tar.gz",
+      "archiveSha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "memberPath": "lame-3.100/LICENSE"
+    },
+    "texts/vo-amrwbenc-patent-disclaimer.txt": {
+      "sourceId": "vo-amrwbenc",
+      "upstreamRef": "vo-amrwbenc-0.1.3",
+      "archive": "vo-amrwbenc-0.1.3.tar.gz",
+      "archiveSha256": "5652b391e0f0e296417b841b02987d3fd33e6c0af342c69542cbb016a71d9d4e",
+      "memberPath": "vo-amrwbenc-0.1.3/amrwbenc/patent_disclaimer.txt"
+    }
+  },
+  "licenseRefDefinitions": {
+    "LicenseRef-AOM-Patent-1.0": {
+      "name": "Alliance for Open Media Patent License 1.0",
+      "text": "texts/aom-patent-license.txt"
+    },
+    "LicenseRef-OpenH264-Patent-Notice": {
+      "name": "OpenH264 patent notice and disclaimer",
+      "text": "texts/openh264-license.txt"
+    },
+    "LicenseRef-Google-Patent-Grant": {
+      "name": "Google patent grant notice",
+      "text": "texts/libvpx-patents.txt"
+    },
+    "LicenseRef-FTL": {
+      "name": "FreeType License",
+      "text": "texts/freetype-ftl-license.txt"
+    },
+    "LicenseRef-mingw-w64": {
+      "name": "MinGW-w64 upstream licence notices",
+      "text": "texts/mingw-w64-license.txt"
+    },
+    "LicenseRef-Indagium-Source-Instructions": {
+      "name": "Repository-authored source delivery and rebuild instructions",
+      "text": "SOURCE-BUNDLE.md"
+    }
+  }
+}

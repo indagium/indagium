@@ -35,21 +35,21 @@ jobs:
           case "$BUILD_SCOPE" in
             linux-portable)
               matrix='{"include":[
-                {"os":"ubuntu-latest","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-x64","linux":true,"include_deb":false,"portable_arch":"x86_64"},
-                {"os":"ubuntu-24.04-arm","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-arm64","linux":true,"include_deb":false,"portable_arch":"aarch64"}
+                {"os":"ubuntu-latest","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-x64","linux":true,"include_deb":false,"portable_arch":"x86_64","media_platform":"linux-x64"},
+                {"os":"ubuntu-24.04-arm","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-arm64","linux":true,"include_deb":false,"portable_arch":"aarch64","media_platform":"linux-arm64"}
               ]}'
               ;;
             windows-only)
               matrix='{"include":[
-                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false}
+                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false,"media_platform":"windows-x64"}
               ]}'
               ;;
             all)
               matrix='{"include":[
-                {"os":"ubuntu-latest","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-x64","linux":true,"include_deb":true,"deb_arch":"amd64","portable_arch":"x86_64"},
-                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false},
-                {"os":"macos-latest","tasks":"packageDmg","artifact_path":"build/compose/binaries/main/dmg","artifact_name":"Indagium-macos-arm64","linux":false,"include_deb":false},
-                {"os":"ubuntu-24.04-arm","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-arm64","linux":true,"include_deb":true,"deb_arch":"arm64","portable_arch":"aarch64"}
+                {"os":"ubuntu-latest","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-x64","linux":true,"include_deb":true,"deb_arch":"amd64","portable_arch":"x86_64","media_platform":"linux-x64"},
+                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false,"media_platform":"windows-x64"},
+                {"os":"macos-latest","tasks":"packageDmg","artifact_path":"build/compose/binaries/main/dmg","artifact_name":"Indagium-macos-arm64","linux":false,"include_deb":false,"media_platform":"macos-arm64"},
+                {"os":"ubuntu-24.04-arm","tasks":"packageDeb packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/deb/*.deb\nbuild/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-arm64","linux":true,"include_deb":true,"deb_arch":"arm64","portable_arch":"aarch64","media_platform":"linux-arm64"}
               ]}'
               ;;
             *)
@@ -69,6 +69,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python 3
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.x'
 
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -114,6 +119,22 @@ jobs:
             build/test-results/desktopTest
           retention-days: 7
 
+      # The archive contains pinned sources, compiler/recipe inputs, legal texts, and the hashes
+      # for the four inspected native targets. Packaging jobs validate their final app images on
+      # each target; this separate archive is retained for verification and release attachment.
+      - name: Prepare native media source archive
+        run: ./gradlew prepareMediaSources
+
+      - name: Upload native media source archive
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: Indagium-media-sources
+          path: |
+            build/Indagium-*-media-sources.tar.gz
+            build/Indagium-*-media-sources.tar.gz.sha256
+            build/Indagium-*-media-sources.tar.gz.manifest.json
+          retention-days: 7
+
       # Resolved dependency report in place of a full SBOM (small dependency footprint here
       # doesn't justify a new SBOM-generating plugin) — auditable snapshot of exactly what
       # versions this release actually resolved, alongside Dependabot's advisory scanning
@@ -145,6 +166,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Python 3
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.x'
 
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -305,6 +331,30 @@ jobs:
             }
           }
           if (-not $found) { throw "The packaged MSI is missing $resource." }
+          $appVersion = (Select-String -Path 'gradle.properties' -Pattern '^app\.version=(.+)$').Matches[0].Groups[1].Value
+          python scripts/prepare_media_sources.py --app-version $appVersion --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform ${{ matrix.media_platform }} --package-root $expanded
+
+      - name: Validate final macOS DMG media binaries and legal resources
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          set -euo pipefail
+          dmg=$(find build/compose/binaries/main/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          ffmpeg_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.bytedeco/ffmpeg/8.0.1-1.5.13" -type f -name 'ffmpeg-8.0.1-1.5.13-macosx-arm64.jar' -print -quit)
+          zstd_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/com.github.luben/zstd-jni/1.5.7-4" -type f -name 'zstd-jni-1.5.7-4-darwin_aarch64.jar' -print -quit)
+          test -n "$ffmpeg_jar"
+          test -n "$zstd_jar"
+          mountpoint=$(mktemp -d)
+          cleanup() {
+            hdiutil detach "$mountpoint" -quiet || true
+            rm -rf "$mountpoint"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint" -quiet
+          app=$(find "$mountpoint" -maxdepth 2 -type d -name 'Indagium.app' -print -quit)
+          test -n "$app"
+          app_version=$(sed -n 's/^app.version=//p' gradle.properties)
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform macos-arm64 --package-root "$app/Contents/app" --ffmpeg-jar "$ffmpeg_jar" --zstd-jar "$zstd_jar"
 
       # jpackage doesn't emit StartupWMClass in the .desktop file it generates (no Gradle DSL
       # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
@@ -381,6 +431,8 @@ jobs:
           desktop-file-validate "$desktop_file"
           grep -q '^Exec=.* %F$' "$desktop_file"
           bash scripts/validate-native-mirror-package.sh "$workdir" native/linux/libindagium_mirror.so
+          app_version=$(sed -n 's/^app.version=//p' gradle.properties)
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root "$workdir"
           rm -rf "$workdir"
 
       # Verify every Linux artifact has the architecture suffix required by its packaging format
@@ -421,6 +473,8 @@ jobs:
             grep -q '^MimeType=.*text/x-log' "$desktop_file"
             xmllint --noout "$mimeinfo_file"
             bash "$GITHUB_WORKSPACE/scripts/validate-native-mirror-package.sh" squashfs-root native/linux/libindagium_mirror.so
+            app_version=$(sed -n 's/^app.version=//p' "$GITHUB_WORKSPACE/gradle.properties")
+            python3 "$GITHUB_WORKSPACE/scripts/prepare_media_sources.py" --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root squashfs-root
           )
           rm -rf "$appimage_workdir"
 
@@ -438,6 +492,8 @@ jobs:
           ! flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'fallback-x11'
           deployment_dir=$(flatpak info --user --show-location com.indagium.Indagium)
           bash scripts/validate-native-mirror-package.sh "$deployment_dir/files" native/linux/libindagium_mirror.so
+          app_version=$(sed -n 's/^app.version=//p' gradle.properties)
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root "$deployment_dir/files"
           bash scripts/validate-flatpak-install.sh
           flatpak uninstall --user -y com.indagium.Indagium
 
@@ -460,8 +516,8 @@ jobs:
       contents: write
 
     steps:
-      # Only the package artifacts (named Indagium-*, see the build matrix) and the dependency
-      # report — never "everything in the run". A run can also hold failure-only test-report
+      # Only the package/source artifacts (named Indagium-*, see the build matrix and verify job)
+      # and the dependency report — never "everything in the run". A run can also hold failure-only test-report
       # artifacts (desktop-test-report, video-duration-test-report-*), and after "Re-run failed
       # jobs" those from the failed attempt are still there: v1.8.9's release downloaded one and
       # tried to attach ~540 report files, hit GitHub's secondary rate limit and left a broken draft.
@@ -490,6 +546,9 @@ jobs:
             artifacts/**/*.flatpak
             artifacts/**/*.msi
             artifacts/**/*.dmg
+            artifacts/**/*.tar.gz
+            artifacts/**/*.tar.gz.sha256
+            artifacts/**/*.tar.gz.manifest.json
             artifacts/**/dependency-report.txt
           fail_on_unmatched_files: true
           generate_release_notes: true
@@ -502,6 +561,10 @@ jobs:
             | Linux — ARM 64-bit | `.deb` `indagium_*_arm64.deb` · AppImage `Indagium-*-aarch64.AppImage` · Flatpak `Indagium-*-aarch64.flatpak` |
             | Windows | `Indagium-*.msi` |
             | macOS — Apple Silicon | `Indagium-*.dmg` |
+
+            The `Indagium-*-media-sources.tar.gz` archive contains pinned media-library sources,
+            build inputs, licence texts, a SHA-256 file, and a manifest. It supports inspection and
+            rebuilding; it is not a bit-for-bit reproducibility claim or patent clearance.
 
             Install a Linux `.deb` with `sudo dpkg -i <file>`, make an AppImage executable with
             `chmod +x <file>`, or use `flatpak install --user <file>` for a Flatpak bundle. The

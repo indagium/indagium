@@ -26,10 +26,11 @@ plugins {
 // it exposes the mcpStreamableHttp {} Ktor helper the older 0.8.x line lacked.
 val ktorVersion = "3.4.3"
 
-// bytedeco/javacv 1.5.13 (com.indagium.video.VideoPlayerController) — FFmpeg natives ship INSIDE
-// the jar (no user install), decode every phone recording format incl. HEVC/.mov/WebM, and stay
-// license-clean (Apache wrapper + LGPL FFmpeg build) — see the plan doc's "Decisions taken" for
-// why this beat VLCJ (GPLv3), JavaFX Media (no HEVC/.mov), and GStreamer/libVLC-direct (both need
+// bytedeco/javacv 1.5.13 (com.indagium.video.VideoPlayerController) — FFmpeg natives ship inside
+// the jar (no user install) and decode phone recordings including HEVC/.mov/WebM. The inspected
+// FFmpeg classifier is shared and LGPLv3+; see the canonical media inventory and
+// THIRD_PARTY_NOTICES.md for its complete component closure and redistribution rights.
+// This beat VLCJ (GPLv3), JavaFX Media (no HEVC/.mov), and GStreamer/libVLC-direct (both need
 // a per-OS runtime install). javacppVersion tracks javacvVersion — bytedeco releases them in
 // lockstep — while ffmpegVersion is "<ffmpeg-release>-<javacv-release>", bytedeco's own scheme for
 // pinning which FFmpeg build a given javacv/javacpp pair was tested against.
@@ -79,6 +80,20 @@ val licenseVersion = "2026-07-19"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
+val mediaLegalDirectory = file("licenses/third-party")
+val mediaSourceScript = file("scripts/prepare_media_sources.py")
+val pythonExecutable = if (org.gradle.internal.os.OperatingSystem.current().isWindows) "python" else "python3"
+val mediaLicenseInventory = file("licenses/third-party/media-components.json")
+val applicationLegalDirectory = file("licenses/application")
+val applicationLicenseInventory = file("licenses/application/application-components.json")
+val mediaSourceLock = file("licenses/third-party/media-source-lock.json")
+val mediaPlatform = when (bytedecoPlatform) {
+    "macosx-arm64" -> "macos-arm64"
+    "windows-x86_64" -> "windows-x64"
+    "linux-x86_64" -> "linux-x64"
+    "linux-arm64" -> "linux-arm64"
+    else -> "unsupported"
+}
 val scrcpyServerResource = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server-v4.1")
 val scrcpyServerMetadata = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server.properties")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
@@ -116,6 +131,11 @@ val linuxBundleArchitecture = when (System.getProperty("os.arch").lowercase()) {
     else -> "unsupported"
 }
 val composeAppDirectory = layout.buildDirectory.dir("compose/binaries/main/app/Indagium")
+val mediaPackageRoot = if (isMacHost) {
+    layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app/Contents/app")
+} else {
+    composeAppDirectory
+}
 val appImageOutput = layout.buildDirectory.file(
     "compose/binaries/main/appimage/Indagium-$appVersion-$linuxBundleArchitecture.AppImage",
 )
@@ -342,6 +362,156 @@ val generateBuildInfo by tasks.registering {
     }
 }
 
+val validateMediaLicenseInventory by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Validates the pinned media licence inventory, source closure, and native build evidence offline."
+    inputs.files(mediaSourceScript, mediaLicenseInventory, mediaSourceLock)
+    inputs.dir(mediaLegalDirectory)
+    commandLine(
+        pythonExecutable, mediaSourceScript.absolutePath,
+        "--app-version", appVersion,
+        "--ffmpeg-version", ffmpegVersion,
+        "--javacv-version", javacvVersion,
+        "--javacpp-version", javacppVersion,
+        "--zstd-jni-version", "1.5.7-4",
+        "--inventory-only",
+    )
+}
+
+val prepareMediaSources by tasks.registering(Exec::class) {
+    group = "distribution"
+    description = "Builds the SHA-256-verified native media source archive and manifest under build/."
+    dependsOn(validateMediaLicenseInventory)
+    inputs.files(mediaSourceScript, mediaLicenseInventory, mediaSourceLock, "NOTICE", "THIRD_PARTY_NOTICES.md")
+    inputs.dir(mediaLegalDirectory)
+    // Always re-check the ignored source cache. Otherwise Gradle can reuse an earlier archive
+    // without noticing a changed or corrupt cached source input.
+    outputs.upToDateWhen { false }
+    outputs.files(
+        layout.buildDirectory.file("Indagium-$appVersion-media-sources.tar.gz"),
+        layout.buildDirectory.file("Indagium-$appVersion-media-sources.tar.gz.sha256"),
+        layout.buildDirectory.file("Indagium-$appVersion-media-sources.tar.gz.manifest.json"),
+    )
+    commandLine(
+        pythonExecutable, mediaSourceScript.absolutePath,
+        "--app-version", appVersion,
+        "--ffmpeg-version", ffmpegVersion,
+        "--javacv-version", javacvVersion,
+        "--javacpp-version", javacppVersion,
+        "--zstd-jni-version", "1.5.7-4",
+        "--fetch-missing",
+    )
+}
+
+val validateMediaRuntimeArtifacts by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Checks the resolved FFmpeg and zstd-jni classifier JARs against the inspected native artifacts."
+    dependsOn(validateMediaLicenseInventory)
+    inputs.files(mediaSourceScript, mediaLicenseInventory, mediaSourceLock)
+    inputs.dir(mediaLegalDirectory)
+    doFirst {
+        val runtimeJars = configurations.getByName("desktopRuntimeClasspath").files
+        val ffmpegPrefix = "ffmpeg-$ffmpegVersion-$bytedecoPlatform"
+        val zstdPrefix = "zstd-jni-1.5.7-4-$zstdJniPlatform"
+        val ffmpegJar = runtimeJars.singleOrNull { it.name.startsWith(ffmpegPrefix) }
+            ?: error("Could not resolve exactly one FFmpeg classifier JAR for $bytedecoPlatform")
+        val zstdJar = runtimeJars.singleOrNull { it.name.startsWith(zstdPrefix) }
+            ?: error("Could not resolve exactly one zstd-jni classifier JAR for $zstdJniPlatform")
+        commandLine(
+            pythonExecutable, mediaSourceScript.absolutePath,
+            "--app-version", appVersion,
+            "--ffmpeg-version", ffmpegVersion,
+            "--javacv-version", javacvVersion,
+            "--javacpp-version", javacppVersion,
+            "--zstd-jni-version", "1.5.7-4",
+            "--validate-runtime-artifacts",
+            "--platform", mediaPlatform,
+            "--ffmpeg-jar", ffmpegJar.absolutePath,
+            "--zstd-jar", zstdJar.absolutePath,
+        )
+    }
+}
+
+val validatePackagedMediaResources by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Checks the staged app image contains the inspected native classifiers and all pinned legal resources."
+    inputs.files(mediaSourceScript, mediaLicenseInventory, mediaSourceLock)
+    inputs.dir(mediaLegalDirectory)
+    doFirst {
+        val arguments = mutableListOf(
+            pythonExecutable, mediaSourceScript.absolutePath,
+            "--app-version", appVersion,
+            "--ffmpeg-version", ffmpegVersion,
+            "--javacv-version", javacvVersion,
+            "--javacpp-version", javacppVersion,
+            "--zstd-jni-version", "1.5.7-4",
+            "--validate-package",
+            "--platform", mediaPlatform,
+            "--package-root", mediaPackageRoot.get().asFile.absolutePath,
+        )
+        if (mediaPlatform == "macos-arm64") {
+            val runtimeJars = configurations.getByName("desktopRuntimeClasspath").files
+            val ffmpegPrefix = "ffmpeg-$ffmpegVersion-$bytedecoPlatform"
+            val zstdPrefix = "zstd-jni-1.5.7-4-$zstdJniPlatform"
+            val ffmpegJar = runtimeJars.singleOrNull { it.name.startsWith(ffmpegPrefix) }
+                ?: error("Could not resolve exactly one original FFmpeg classifier JAR for $bytedecoPlatform")
+            val zstdJar = runtimeJars.singleOrNull { it.name.startsWith(zstdPrefix) }
+                ?: error("Could not resolve exactly one original zstd-jni classifier JAR for $zstdJniPlatform")
+            arguments += listOf("--ffmpeg-jar", ffmpegJar.absolutePath, "--zstd-jar", zstdJar.absolutePath)
+        }
+        commandLine(arguments)
+    }
+}
+
+val testMediaSourceGenerator by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Runs fail-closed tests for missing, corrupt, or unsupported media-source inputs."
+    inputs.files(mediaSourceScript, "scripts/test_prepare_media_sources.py", mediaLicenseInventory, mediaSourceLock)
+    commandLine(pythonExecutable, file("scripts/test_prepare_media_sources.py").absolutePath)
+}
+
+// Every module that ships on the runtime classpath must be attributed in the application inventory
+// (or, for the media closure, in media-components.json). A new or renamed dependency fails here
+// until its licence has been reviewed, instead of silently shipping without its notices.
+val validateApplicationLicenseInventory by tasks.registering {
+    group = "verification"
+    description = "Checks every runtime-classpath module is covered by licenses/application/application-components.json."
+    val runtimeClasspath = configurations.named("desktopRuntimeClasspath")
+    inputs.dir(applicationLegalDirectory)
+    doLast {
+        val inventory = groovy.json.JsonSlurper().parse(applicationLicenseInventory) as Map<*, *>
+        val components = (inventory["components"] as List<*>).map { it as Map<*, *> }
+        val missingTexts = components.flatMap { component ->
+            // Paths are resource paths under licenses/: third-party/ and application/ are copied
+            // from the repository's licenses/ tree, anything else is a checked-in resource.
+            (component["licenseFiles"] as List<*>).map { it as String }.filterNot { relative ->
+                val source = if (relative.startsWith("third-party/") || relative.startsWith("application/")) {
+                    file("licenses/$relative")
+                } else {
+                    file("src/desktopMain/resources/licenses/$relative")
+                }
+                source.isFile
+            }.map { "${component["id"]}: $it" }
+        }
+        check(missingTexts.isEmpty()) { "Licence texts referenced by the application inventory are missing: $missingTexts" }
+        val patterns = components.flatMap { component ->
+            (component["modules"] as List<*>).map { it as String }.map { pattern ->
+                Regex(pattern.split("*").joinToString(".*") { Regex.escape(it) })
+            }
+        }
+        val modules = runtimeClasspath.get().incoming.resolutionResult.allComponents
+            .filter { it.id is org.gradle.api.artifacts.component.ModuleComponentIdentifier }
+            .mapNotNull { it.moduleVersion }
+            .map { "${it.group}:${it.name}" }
+            .toSortedSet()
+        val uncovered = modules.filter { module -> patterns.none { it.matches(module) } }
+        check(uncovered.isEmpty()) {
+            "Runtime modules without a licence entry in licenses/application/application-components.json " +
+                "(review each licence, add its notices, then list it): $uncovered"
+        }
+    }
+}
+
 // Keep the in-app agreement derived from the repository's canonical legal documents. This avoids
 // displaying one set of terms in packaged builds while publishing different terms at the project root.
 val generateLicenseResources by tasks.registering {
@@ -349,8 +519,12 @@ val generateLicenseResources by tasks.registering {
     inputs.files(licenseDocuments.map(::file))
     inputs.file("THIRD_PARTY_NOTICES.md")
     inputs.file(whisperSourceLicense)
+    inputs.dir(mediaLegalDirectory)
+    inputs.dir(applicationLegalDirectory)
     outputs.dir(generatedLicenseResourcesDir)
     dependsOn(configureWhisperNative)
+    dependsOn(validateMediaLicenseInventory)
+    dependsOn(validateApplicationLicenseInventory)
     doLast {
         val licenseDirectory = generatedLicenseResourcesDir.get().dir("licenses").asFile
         licenseDirectory.mkdirs()
@@ -361,6 +535,13 @@ val generateLicenseResources by tasks.registering {
         outputFile.writeText("# Indagium License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
         whisperSourceLicense.get().asFile.copyTo(File(licenseDirectory, "whisper.cpp-LICENSE.txt"), overwrite = true)
         file("THIRD_PARTY_NOTICES.md").copyTo(File(licenseDirectory, "THIRD_PARTY_NOTICES.md"), overwrite = true)
+        file("NOTICE").copyTo(File(licenseDirectory, "NOTICE"), overwrite = true)
+        val thirdPartyDestination = File(licenseDirectory, "third-party")
+        thirdPartyDestination.deleteRecursively()
+        mediaLegalDirectory.copyRecursively(thirdPartyDestination, overwrite = true)
+        val applicationDestination = File(licenseDirectory, "application")
+        applicationDestination.deleteRecursively()
+        applicationLegalDirectory.copyRecursively(applicationDestination, overwrite = true)
     }
 }
 
@@ -617,6 +798,7 @@ tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.confi
 // ancestor of every packaging task (packageDmg/packageMsi/packageDeb/
 // packageDistributionForCurrentOS), so gating there catches all of them in one place.
 tasks.matching { it.name == "createRuntimeImage" }.configureEach {
+    dependsOn(validateMediaRuntimeArtifacts)
     doFirst {
         check(JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
             "Packaging must be run with Gradle itself on JDK 21+ (currently ${JavaVersion.current()}) — " +
@@ -626,6 +808,15 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
                 "JAVA_HOME=\$(/usr/libexec/java_home -v 21) ./gradlew packageDistributionForCurrentOS"
         }
     }
+}
+
+tasks.matching { it.name == "createDistributable" }.configureEach {
+    dependsOn(validateMediaRuntimeArtifacts)
+    finalizedBy(validatePackagedMediaResources)
+}
+
+tasks.matching { it.name == "check" }.configureEach {
+    dependsOn(testMediaSourceGenerator)
 }
 
 // Linux portable packages.  Both scripts deliberately run outside Gradle's configuration phase:
