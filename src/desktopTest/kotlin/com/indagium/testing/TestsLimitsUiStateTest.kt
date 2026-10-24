@@ -63,7 +63,6 @@ class TestsLimitsUiStateTest {
         assertTrue(lib.suites.all { ui.canCreateCase(it.id) && ui.canDuplicateSuite(it.id) })
         assertTrue(ui.lockedSuiteIds.isEmpty() && ui.lockedCaseIds.isEmpty())
         assertFalse(ui.hasLockedItems)
-        assertNull(ui.banner)
     }
 
     @Test
@@ -96,7 +95,7 @@ class TestsLimitsUiStateTest {
         assertFalse(ui.canDuplicateSuite(suite.id), "a duplicate would be a second suite")
         assertFalse(suite.cases.any { ui.canDuplicateCase(it.id) }, "a duplicate would be a sixth case")
         assertEquals(FREE_EDITION_LIMIT_HINT, ui.hint)
-        assertNull(ui.banner, "nothing is locked yet, so there is no banner")
+        assertFalse(ui.hasLockedItems, "nothing is locked yet")
     }
 
     @Test
@@ -122,8 +121,6 @@ class TestsLimitsUiStateTest {
         assertFalse(ui.canCreateCase(second.id), "a locked suite takes no new case")
         assertFalse(ui.canDuplicateCase(second.cases.first().id))
         assertTrue(ui.hasLockedItems)
-        val banner = assertNotNull(ui.banner)
-        assertTrue(banner.contains(FREE_EDITION_LIMIT_HINT) && banner.contains("1 suite(s)") && banner.contains("4 case(s)"), banner)
     }
 
     @Test

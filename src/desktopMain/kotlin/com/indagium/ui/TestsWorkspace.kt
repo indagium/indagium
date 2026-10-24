@@ -3,6 +3,7 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -22,6 +23,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.runtime.Composable
@@ -76,6 +78,9 @@ private const val NAV_SCRIM_ALPHA = 0.6f
 private const val NAV_ITEM_FONT_SP = 12
 private const val NAV_SMALL_FONT_SP = 10
 internal val TESTS_CONTENT_MAX_WIDTH = 940.dp
+private val USAGE_METER_GAP = 5.dp
+private val USAGE_BAR_HEIGHT = 4.dp
+private const val USAGE_TRACK_ALPHA = .7f
 private const val NEW_SUITE_NAME = "New suite"
 private const val EXPORT_NAME_MAX_CHARS = 60
 
@@ -126,7 +131,6 @@ internal fun TestsWorkspace(state: AppState) {
                 }
             }
             ui.banner?.let { TestsBannerView(it) { ui.banner = null } }
-            limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             state.testLibraryLoadIssues.forEach { issue ->
                 TestsBannerView(TestsBanner(issue, isError = true), dismissible = false) { }
@@ -387,13 +391,43 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
             }
         }
         Divider()
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            TestsBadge(edition.label)
-            AppText(navCaseCountLabel(library.suites.sumOf { it.cases.size }), color = tc.td, fontSize = NAV_SMALL_FONT_SP.sp)
+        val usage = remember(library, edition) { testsEditionUsage(library, edition.limits) }
+        if (usage != null) {
+            TestsUsageMeter(editionUsageLine(edition.label, usage), usage, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp))
+        } else {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                TestsBadge(edition.label)
+                AppText(navCaseCountLabel(library.suites.sumOf { it.cases.size }), color = tc.td, fontSize = NAV_SMALL_FONT_SP.sp)
+            }
+        }
+    }
+}
+
+/**
+ * The usage card at the bottom of the navigation on a limited edition: [line] ("Free · 1 of 1 suite · 5 of 5 cases"), a thin bar of the
+ * unlocked cases against the case allowance (warn colour once it is full) and, when cases are locked, how many are read-only.
+ */
+@Composable
+internal fun TestsUsageMeter(line: String, usage: TestsEditionUsage, modifier: Modifier = Modifier) {
+    val tc = tc()
+    val fraction = usage.caseCapacity?.takeIf { it > 0 }?.let { (usage.activeCases.toFloat() / it).coerceIn(0f, 1f) }
+    val full = usage.caseCapacity != null && usage.activeCases >= usage.caseCapacity
+    Column(
+        modifier.background(tc.bg, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(USAGE_METER_GAP),
+    ) {
+        AppText(line, color = tc.ts, fontSize = NAV_SMALL_FONT_SP.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        if (fraction != null) {
+            Box(Modifier.fillMaxWidth().height(USAGE_BAR_HEIGHT).background(tc.br.copy(alpha = USAGE_TRACK_ALPHA), CircleShape)) {
+                Box(Modifier.fillMaxWidth(fraction).fillMaxHeight().background(if (full) tc.warn else tc.ac, CircleShape))
+            }
+        }
+        if (usage.lockedCases > 0) {
+            AppText("${countNoun(usage.lockedCases, "case")} read-only", color = tc.td, fontSize = NAV_SMALL_FONT_SP.sp)
         }
     }
 }
