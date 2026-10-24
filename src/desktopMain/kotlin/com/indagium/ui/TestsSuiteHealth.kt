@@ -71,6 +71,9 @@ private const val DIMMED_ROW_ALPHA = .5f
 private const val CARD_VALUE_SIZE = 20
 private const val DASH = "—"
 private val CARD_MIN_WIDTH = 170.dp
+
+// Fits one 11sp line (text or the "Review →" link); reserved in every summary card so they all share one height.
+private val CARD_DETAIL_HEIGHT = 16.dp
 private val CARD_SHAPE = RoundedCornerShape(8.dp)
 private val GRID_INDEX_WIDTH = 24.dp
 private val GRID_CASE_MIN_WIDTH = 180.dp
@@ -206,50 +209,67 @@ private fun HealthSummaryCards(suite: TestSuite, data: SuiteScreenData, health: 
     val flakyNames = health.flakyCaseIds.mapNotNull { id -> suite.cases.firstOrNull { it.id == id }?.name?.ifBlank { "Untitled case" } }
     val openIssues = remember(data.issues, suite.id) { openSuiteIssueCount(data.issues, suite.id) }
     FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        HealthCard("Last run") {
-            AppText(newest.status.label(), color = runColor(newest.status), fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold)
-            val moment = formatRunMoment(newest.finishedAt ?: newest.createdAt, System.currentTimeMillis())
-            AppText(listOfNotNull(data.ordinals[newest.runId]?.let { "#$it" }, moment).joinToString(" · "), color = tc.ts, fontSize = 11.sp)
-        }
-        HealthCard("Pass rate, last ${health.runCount} ${if (health.runCount == 1) "run" else "runs"}") {
-            AppText(healthPassRateValue(health), color = tc.tx, fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold)
-            AppText(healthPassRateDetail(health), color = tc.ts, fontSize = 11.sp)
-        }
-        HealthCard("Median duration") {
-            AppText(health.medianDurationMs?.let { formatDuration(it) } ?: DASH, color = tc.tx, fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold)
-        }
-        HealthCard("Flaky cases") {
-            val color = if (flakyNames.isEmpty()) tc.tx else tc.warn
-            AppText("${flakyNames.size}", color = color, fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold)
-            flakyNames.firstOrNull()?.let { first ->
-                AppText(first, color = tc.ts, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
-            }
-        }
-        HealthCard("Open issues") {
-            AppText("$openIssues", color = tc.tx, fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold)
-            if (openIssues > 0) {
-                TestsBreadcrumbLink(
-                    "Review →",
-                    onClick = {
-                        ui.view.nav = TestsNav.Issues
-                        ui.view.selectedIssueId = null
-                    },
-                    contentDescription = "Review open issues",
-                )
-            }
-        }
+        val moment = formatRunMoment(newest.finishedAt ?: newest.createdAt, System.currentTimeMillis())
+        HealthCard(
+            "Last run",
+            value = { AppText(newest.status.label(), color = runColor(newest.status), fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold) },
+            detail = {
+                AppText(listOfNotNull(data.ordinals[newest.runId]?.let { "#$it" }, moment).joinToString(" · "), color = tc.ts, fontSize = 11.sp)
+            },
+        )
+        HealthCard(
+            "Pass rate, last ${health.runCount} ${if (health.runCount == 1) "run" else "runs"}",
+            value = { HealthCardValue(healthPassRateValue(health)) },
+            detail = { AppText(healthPassRateDetail(health), color = tc.ts, fontSize = 11.sp) },
+        )
+        HealthCard("Median duration", value = { HealthCardValue(health.medianDurationMs?.let { formatDuration(it) } ?: DASH) })
+        HealthCard(
+            "Flaky cases",
+            value = { HealthCardValue("${flakyNames.size}", color = if (flakyNames.isEmpty()) tc.tx else tc.warn) },
+            detail = flakyNames.firstOrNull()?.let { first ->
+                { AppText(first, color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            },
+        )
+        HealthCard(
+            "Open issues",
+            value = { HealthCardValue("$openIssues") },
+            detail = if (openIssues > 0) {
+                {
+                    TestsBreadcrumbLink(
+                        "Review →",
+                        onClick = {
+                            ui.view.nav = TestsNav.Issues
+                            ui.view.selectedIssueId = null
+                        },
+                        contentDescription = "Review open issues",
+                    )
+                }
+            } else {
+                null
+            },
+        )
     }
 }
 
 @Composable
-private fun HealthCard(title: String, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+private fun HealthCardValue(text: String, color: Color = tc().tx) {
+    AppText(text, color = color, fontSize = CARD_VALUE_SIZE.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+}
+
+/**
+ * One summary card: a one-line [title], the [value] and a [detail] line. The detail line is always reserved (empty when there is
+ * nothing to say) and the title never wraps, so every card in the row has the same height.
+ */
+@Composable
+private fun HealthCard(title: String, value: @Composable () -> Unit, detail: (@Composable () -> Unit)? = null) {
     val tc = tc()
     Column(
-        modifier.widthIn(min = CARD_MIN_WIDTH).background(tc.p, CARD_SHAPE).border(1.dp, tc.br, CARD_SHAPE).padding(horizontal = 12.dp, vertical = 10.dp),
+        Modifier.widthIn(min = CARD_MIN_WIDTH).background(tc.p, CARD_SHAPE).border(1.dp, tc.br, CARD_SHAPE).padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        AppText(title, color = tc.td, fontSize = 10.sp, maxLines = 2)
-        content()
+        AppText(title, color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        value()
+        Box(Modifier.height(CARD_DETAIL_HEIGHT), contentAlignment = Alignment.CenterStart) { detail?.invoke() }
     }
 }
 
