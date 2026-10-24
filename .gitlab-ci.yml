@@ -218,8 +218,9 @@ package-macos-dmg:
       set -euo pipefail
       dmg=$(find build/compose/binaries/main/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)
       test -n "$dmg"
-      ffmpeg_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.bytedeco/ffmpeg/8.0.1-1.5.13" -type f -name 'ffmpeg-8.0.1-1.5.13-macosx-arm64.jar' -print -quit)
-      zstd_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/com.github.luben/zstd-jni/1.5.7-4" -type f -name 'zstd-jni-1.5.7-4-darwin_aarch64.jar' -print -quit)
+      gradle_user_home="${GRADLE_USER_HOME:-$HOME/.gradle}"
+      ffmpeg_jar=$(find "$gradle_user_home/caches/modules-2/files-2.1/org.bytedeco/ffmpeg/8.0.1-1.5.13" -type f -name 'ffmpeg-8.0.1-1.5.13-macosx-arm64.jar' -print -quit)
+      zstd_jar=$(find "$gradle_user_home/caches/modules-2/files-2.1/com.github.luben/zstd-jni/1.5.7-4" -type f -name 'zstd-jni-1.5.7-4-darwin_aarch64.jar' -print -quit)
       test -n "$ffmpeg_jar" && test -n "$zstd_jar"
       mountpoint=$(mktemp -d)
       cleanup() {
