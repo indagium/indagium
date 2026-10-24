@@ -80,10 +80,10 @@ class KeyboardNavigationTest {
     fun theTestsWorkspaceShortcutsHaveTheirOwnHelpGroup() {
         val group = keyboardShortcutHelpGroups(mac = false).single { it.title == "Tests" }
 
-        assertEquals(listOf("Up / Down", "Alt Up / Alt Down", "Escape"), group.rows.map { it.label })
+        assertEquals(listOf("Up / Down", "Alt Up / Alt Down", "Enter", "Escape"), group.rows.map { it.label })
         assertTrue(group.rows.all { it.panel == KeyboardPanel.TESTS })
         assertEquals(
-            listOf("↑ / ↓", "⌥ ↑ / ⌥ ↓", "Escape"),
+            listOf("↑ / ↓", "⌥ ↑ / ⌥ ↓", "Enter", "Escape"),
             keyboardShortcutHelpGroups(mac = true).single { it.title == "Tests" }.rows.map { it.label },
         )
     }

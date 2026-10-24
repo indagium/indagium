@@ -10,12 +10,15 @@ import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.activeCaseIds
 import com.indagium.testing.limits.activeSuiteIds
 import com.indagium.testing.limits.decide
+import com.indagium.testing.model.CaseRunCell
+import com.indagium.testing.model.CaseRunMatrix
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.SuiteCaseLaneHistory
 import com.indagium.testing.model.TestCase
@@ -67,6 +70,15 @@ internal class TestsViewState {
 
     /** Non-null opens the case editor for that case in the centre pane. */
     var selectedCaseId: String? by mutableStateOf(null)
+
+    /**
+     * The case row selected in the suite's Cases tab: its detail panel shows beside the table. A row click selects it, a second click
+     * (or Enter, or the panel's Edit steps) opens the editor through [selectedCaseId]. Only honoured while it is a case of the suite on screen.
+     */
+    var previewCaseId: String? by mutableStateOf(null)
+
+    /** The suite screen's inline "cases are read-only" notice was dismissed. Session only; it comes back after a restart. */
+    var lockedCasesNoticeDismissed: Boolean by mutableStateOf(false)
 
     /** The one step selected in the step list (its editor is the inspector), per container (case id or shared-step id). */
     var selectedStepId: String? by mutableStateOf(null)
@@ -282,13 +294,8 @@ internal data class TestsLimitsUiState(
 
     fun canDuplicateCase(caseId: String): Boolean = caseId in duplicableCaseIds
 
-    /** True when at least one suite or case is locked, so the workspace shows its banner. */
+    /** True when at least one suite or case is locked. */
     val hasLockedItems: Boolean get() = lockedSuiteIds.isNotEmpty() || lockedCaseIds.isNotEmpty()
-
-    /** The banner text, or null when nothing is locked. */
-    val banner: String?
-        get() = if (!hasLockedItems) null else "$hint. Locked: ${lockedSuiteIds.size} suite(s), ${lockedCaseIds.size} case(s). " +
-            "Locked items stay readable, exportable, reorderable and deletable."
 }
 
 /** Maps the library and the edition's limits to the flags the UI needs. Pure; reuses [decide], the same function the store uses. */
@@ -349,6 +356,33 @@ internal fun editionUsageLine(editionLabel: String, usage: TestsEditionUsage): S
     usage.suiteCap?.let { "${usage.suitesUsed} of $it ${if (it == 1) "suite" else "suites"}" },
     usage.caseCapacity?.let { "${usage.activeCases} of $it ${if (it == 1) "case" else "cases"}" },
 ).joinToString(" · ")
+
+/**
+ * The inline notice above a suite's case table when some of its cases are locked: "Cases 6–8 are read-only on Free. You can still view,
+ * export, reorder and delete them." Null when no case of the suite is locked, or when the whole suite is (its own read-only notice covers that).
+ */
+internal fun lockedCasesNoticeText(suite: TestSuite, limits: TestsLimitsUiState, editionLabel: String): String? {
+    if (limits.isSuiteLocked(suite.id)) return null
+    val positions = suite.cases.mapIndexedNotNull { index, case -> (index + 1).takeIf { limits.isCaseLocked(case.id) } }
+    if (positions.isEmpty() || positions.size == suite.cases.size) return null
+    val single = positions.size == 1
+    return "${if (single) "Case" else "Cases"} ${caseNumberRanges(positions)} ${if (single) "is" else "are"} read-only on $editionLabel. " +
+        "You can still view, export, reorder and delete ${if (single) "it" else "them"}."
+}
+
+/** 1-based case [positions] as ranges: "7", "6–8", "2, 4–5" (consecutive numbers collapse, order and duplicates are ignored). */
+internal fun caseNumberRanges(positions: List<Int>): String {
+    val sorted = positions.distinct().sorted()
+    val parts = mutableListOf<String>()
+    var start = 0
+    while (start < sorted.size) {
+        var end = start
+        while (end + 1 < sorted.size && sorted[end + 1] == sorted[end] + 1) end++
+        parts += if (end == start) "${sorted[start]}" else "${sorted[start]}–${sorted[end]}"
+        start = end + 1
+    }
+    return parts.joinToString(", ")
+}
 
 // ── Edit access ──────────────────────────────────────────────────────
 
@@ -496,6 +530,17 @@ internal fun stepSelectionMovedBy(steps: List<TestStep>, currentId: String?, del
     return steps[(index + delta).coerceIn(0, steps.lastIndex)].id
 }
 
+/**
+ * The case [delta] places from [current] in [caseIds], clamped to the ends. With no (or an unknown) current case: the first,
+ * or the last for a negative [delta].
+ */
+internal fun caseSelectionMovedBy(caseIds: List<String>, current: String?, delta: Int): String? {
+    if (caseIds.isEmpty()) return null
+    val index = caseIds.indexOf(current)
+    if (index < 0) return if (delta < 0) caseIds.last() else caseIds.first()
+    return caseIds[(index + delta).coerceIn(0, caseIds.lastIndex)]
+}
+
 /** [text] as a whole number within [min]..[max], or null when it is not one. */
 internal fun parseWholeNumber(text: String, min: Long, max: Long): Long? = text.trim().toLongOrNull()?.takeIf { it in min..max }
 
@@ -589,6 +634,63 @@ internal fun runOrdinals(summaries: List<RunSummary>): Map<String, Int> {
     summaries.distinctBy { it.id }.sortedWith(compareBy<RunSummary> { it.createdAt }.thenBy { it.id })
         .forEachIndexed { index, summary -> ordinals[summary.id] = index + 1 }
     return ordinals
+}
+
+/** The latest finished run that ran a case: [status] is the case's worst status in it, [durationMs] its time (null when not recorded). */
+internal data class CaseLastRun(val runId: String, val momentMs: Long, val durationMs: Long?, val status: CaseStatus?)
+
+/** The newest run of [matrix] that included [caseId] (the newest column whose cell is not NOT_IN_RUN), or null when none did. */
+internal fun caseLastRun(matrix: CaseRunMatrix, caseId: String): CaseLastRun? {
+    val cells = matrix.rows[caseId]?.cells ?: return null
+    val index = cells.indexOfLast { it != CaseRunCell.NOT_IN_RUN }
+    val column = matrix.columns.getOrNull(index) ?: return null
+    val outcome = column.cases[caseId]
+    return CaseLastRun(column.runId, column.finishedAt ?: column.createdAt, outcome?.durationMs, outcome?.status)
+}
+
+/**
+ * The status of each step of [caseId] in [run] (by step id), the worst over lanes and iterations; a step with no result is absent, so
+ * a lookup gives null for "not run". Hook steps are not the case's steps and are left out. Null [run] gives an empty map.
+ */
+internal fun latestStepStatuses(run: TestRun?, caseId: String): Map<String, StepStatus?> {
+    if (run == null) return emptyMap()
+    val statuses = LinkedHashMap<String, StepStatus?>()
+    for (lane in run.lanes) {
+        for (result in lane.cases) {
+            if (result.caseId != caseId) continue
+            for (step in result.steps) {
+                if (step.setup) continue
+                val previous = statuses[step.stepId]
+                statuses[step.stepId] = if (previous == null) step.status else worseStepStatus(previous, step.status)
+            }
+        }
+    }
+    return statuses
+}
+
+/** The words of a "last runs" square for assistive tech and tests: "#21 passed" ("passed" alone when the run has no number). */
+internal fun lastRunCellDescription(ordinal: Int?, cell: CaseRunCell): String {
+    val word = when (cell) {
+        CaseRunCell.PASSED -> "passed"
+        CaseRunCell.FAILED -> "failed"
+        CaseRunCell.ERROR -> "error"
+        CaseRunCell.BLOCKED -> "blocked"
+        CaseRunCell.OTHER -> "not completed"
+        CaseRunCell.NOT_IN_RUN -> "not in run"
+    }
+    return if (ordinal == null) word else "#$ordinal $word"
+}
+
+private fun worseStepStatus(left: StepStatus, right: StepStatus): StepStatus {
+    fun rank(status: StepStatus): Int = when (status) {
+        StepStatus.ERROR -> 6
+        StepStatus.FAIL -> 5
+        StepStatus.TIMEOUT -> 4
+        StepStatus.BLOCKED -> 3
+        StepStatus.SKIPPED -> 2
+        StepStatus.PASS -> 1
+    }
+    return if (rank(left) >= rank(right)) left else right
 }
 
 /** "3 cases · 1 lane · 12 of 12 steps passed". */

@@ -8,6 +8,7 @@ package com.indagium.ui
 
 import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,8 +23,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Block
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,7 +45,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.semantics.Role
@@ -44,13 +64,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.testing.model.CaseRunCell
 import com.indagium.testing.model.CaseRunMatrix
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.RunSummary
+import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.SuiteCaseHistory
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.TestSuiteHistory
 import com.indagium.testing.model.deriveCaseRunMatrix
@@ -71,6 +94,7 @@ import kotlinx.coroutines.withContext
 
 private val INDEX_COLUMN = 24.dp
 private val STEPS_COLUMN = 44.dp
+private val LAST_RUNS_COLUMN = 72.dp
 private val LATEST_COLUMN = 150.dp
 private val ISSUES_COLUMN = 52.dp
 private val GRIP_COLUMN = 18.dp
@@ -80,6 +104,14 @@ private val ROW_MIN_HEIGHT_WITH_GOAL = 44.dp
 private val ROW_START_PADDING = 6.dp
 private val SUITE_TABS_MAX_WIDTH = 330.dp
 private val DOT_SIZE = 8.dp
+private val RUN_SQUARE_SIZE = 8.dp
+private val RUN_SQUARE_GAP = 3.dp
+private val RUN_SQUARE_SHAPE = RoundedCornerShape(2.dp)
+private const val LAST_RUNS_SHOWN = 6
+private const val RUN_SQUARE_OTHER_ALPHA = .45f
+private const val NOTICE_BORDER_ALPHA = .5f
+private val STEP_ICON_SIZE = 14.dp
+private val STEP_NUMBER_WIDTH = 16.dp
 private const val ROW_MENU_IDLE_ALPHA = .35f
 private const val ROW_SEPARATOR_ALPHA = .6f
 private const val ISSUE_PILL_ALPHA = .18f
@@ -104,7 +136,13 @@ internal fun TestsSuiteScreen(suiteId: String) {
     val access = suiteEditAccess(library, suite, limits)
     val data = rememberSuiteScreenData(suite)
     var confirmDelete by remember { mutableStateOf(false) }
-    TestsScreenScaffold {
+    // A selected row is only honoured for a case of this suite on the Cases tab (a stale id of another suite or a deleted case shows nothing).
+    LaunchedEffect(suite.id) {
+        if (ui.view.previewCaseId != null && suite.cases.none { it.id == ui.view.previewCaseId }) ui.view.previewCaseId = null
+    }
+    val previewCase = suite.cases.firstOrNull { it.id == ui.view.previewCaseId }.takeIf { ui.view.selectedSuiteTab == SuiteTab.Cases }
+    val detailPanel: (@Composable () -> Unit)? = previewCase?.let { case -> { CaseDetailPanel(suite, case, data) } }
+    TestsScreenScaffold(inspector = detailPanel) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SuiteHeader(suite, access, onDelete = { confirmDelete = true })
             SuiteLastRunLine(suiteLastRun(data.loaded, data.history.latestTerminalRun))
@@ -300,12 +338,23 @@ private fun NewCaseButton(suite: TestSuite, variant: ButtonVariant = ButtonVaria
 private fun SuiteCasesTab(suite: TestSuite, data: SuiteScreenData) {
     val ui = LocalTestsUi.current
     var caseToDelete by remember(suite.id) { mutableStateOf<TestCase?>(null) }
+    val edition by ui.state.editionService.current.collectAsState()
+    val limits = LocalTestsLimits.current
+    TestsKeyTargetEffect { event -> handleCasesKey(ui, suite, event) }
     Column(Modifier.fillMaxWidth()) {
         if (suite.cases.isEmpty()) {
             TestsHint("No cases yet. Add a case to define a workflow for the agent.")
             Spacer(Modifier.height(8.dp))
             Row { NewCaseButton(suite, ButtonVariant.Ghost) }
         } else {
+            val notice = lockedCasesNoticeText(suite, limits, edition.label)
+            if (notice != null && !ui.view.lockedCasesNoticeDismissed) {
+                LockedCasesNotice(notice) {
+                    ui.view.lockedCasesNoticeDismissed = true
+                    ui.reclaimFocus()
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val compact = suiteCasesCompact(maxWidth.value)
                 Column(Modifier.fillMaxWidth()) {
@@ -346,6 +395,7 @@ private fun CasesTableHeader() {
         TableHeading("#", Modifier.width(INDEX_COLUMN))
         TableHeading("Case", Modifier.weight(1f))
         TableHeading("Steps", Modifier.width(STEPS_COLUMN), Alignment.CenterEnd)
+        TableHeading("Last 6 runs", Modifier.width(LAST_RUNS_COLUMN))
         TableHeading("Latest", Modifier.width(LATEST_COLUMN))
         TableHeading("Issues", Modifier.width(ISSUES_COLUMN), Alignment.CenterEnd)
         Spacer(Modifier.width(MENU_COLUMN))
@@ -368,11 +418,20 @@ private fun CaseRow(suite: TestSuite, case: TestCase, row: ReorderRowScope, data
     val issueIds = caseIssueIds(history, case.id, suite.id, data.issues)
     val goal = case.description.replace('\n', ' ').trim().takeIf { it.isNotBlank() && it != case.name.trim() }
     val locked = limits.isCaseLocked(case.id)
+    val selected = case.id == ui.view.previewCaseId
+    val revealer = remember { BringIntoViewRequester() }
+    // Keyboard selection can move off screen; scrolling the row into view is a no-op for one that is already visible.
+    LaunchedEffect(selected) { if (selected) revealer.bringIntoView() }
     Column(Modifier.fillMaxWidth()) {
         TestsListRow(
-            selected = false,
-            onClick = { ui.view.selectedCaseId = case.id },
-            modifier = Modifier.onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
+            selected = selected,
+            onClick = {
+                // A click selects the row (its detail panel shows); a click on the row that is already selected opens the case.
+                if (ui.view.previewCaseId == case.id) ui.view.selectedCaseId = case.id else ui.view.previewCaseId = case.id
+                ui.reclaimFocus()
+            },
+            modifier = Modifier.bringIntoViewRequester(revealer)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }.onPointerEvent(PointerEventType.Exit) { hovered = false },
             minHeight = if (goal != null || compact) ROW_MIN_HEIGHT_WITH_GOAL else ROW_MIN_HEIGHT,
             startPadding = ROW_START_PADDING,
         ) {
@@ -400,12 +459,201 @@ private fun CaseRow(suite: TestSuite, case: TestCase, row: ReorderRowScope, data
                 Box(Modifier.width(STEPS_COLUMN), contentAlignment = Alignment.CenterEnd) {
                     AppText("${case.steps.size}", color = tc.ts, fontSize = 11.sp)
                 }
+                LastRunsCell(data, case.id, Modifier.width(LAST_RUNS_COLUMN))
                 CaseLatestCell(history, data.loaded, Modifier.width(LATEST_COLUMN))
                 Box(Modifier.width(ISSUES_COLUMN), contentAlignment = Alignment.CenterEnd) { IssuesCount(issueIds) }
             }
             CaseRowMenu(case, row, hovered, onDelete)
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br.copy(alpha = ROW_SEPARATOR_ALPHA)))
+    }
+}
+
+/** Up to the newest [LAST_RUNS_SHOWN] runs of a case as small squares, oldest first; "—" when the suite has no finished run yet. */
+@Composable
+private fun LastRunsCell(data: SuiteScreenData, caseId: String, modifier: Modifier) {
+    val tc = tc()
+    val cells = data.matrix.rows[caseId]?.cells.orEmpty().takeLast(LAST_RUNS_SHOWN)
+    if (cells.isEmpty()) {
+        AppText("—", color = tc.td, fontSize = 10.sp, modifier = modifier)
+        return
+    }
+    val runIds = data.matrix.columns.takeLast(cells.size).map { it.runId }
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(RUN_SQUARE_GAP)) {
+        cells.forEachIndexed { index, cell ->
+            val description = lastRunCellDescription(data.ordinals[runIds.getOrNull(index)], cell)
+            val base = Modifier.size(RUN_SQUARE_SIZE).clip(RUN_SQUARE_SHAPE).semantics { contentDescription = description }
+            val fill = when (cell) {
+                CaseRunCell.PASSED -> tc.success
+                CaseRunCell.FAILED, CaseRunCell.ERROR -> DANGER_RED
+                CaseRunCell.BLOCKED -> tc.warn
+                CaseRunCell.OTHER -> tc.td.copy(alpha = RUN_SQUARE_OTHER_ALPHA)
+                CaseRunCell.NOT_IN_RUN -> null
+            }
+            Box(if (fill != null) base.background(fill) else base.border(1.dp, tc.br, RUN_SQUARE_SHAPE))
+        }
+    }
+}
+
+/** The thin warn-tinted notice above the table: some cases are read-only on this edition. × hides it for the session. */
+@Composable
+private fun LockedCasesNotice(text: String, onDismiss: () -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth().border(1.dp, tc.warn.copy(alpha = NOTICE_BORDER_ALPHA), CORNER_MD).padding(start = 8.dp, top = 3.dp, bottom = 3.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(Icons.Outlined.Lock, contentDescription = null, tint = tc.warn, modifier = Modifier.size(12.dp))
+        AppText(text, color = tc.ts, fontSize = 10.sp, maxLines = 2, modifier = Modifier.weight(1f))
+        SquareIconButton("×", fontSize = 14.sp, onClick = onDismiss, modifier = Modifier.semantics { contentDescription = "Dismiss locked cases notice" })
+    }
+}
+
+/**
+ * The Cases tab's bare keys: ↑/↓ select the previous/next case (the first or last with none selected), Enter opens the selected case,
+ * Esc clears the selection. Anything else, and a key with a modifier, is left alone.
+ */
+private fun handleCasesKey(ui: TestsUi, suite: TestSuite, event: KeyEvent): Boolean {
+    if (event.isAltPressed || event.isCtrlPressed || event.isMetaPressed || event.isShiftPressed) return false
+    val view = ui.view
+    val ids = suite.cases.map { it.id }
+    val current = view.previewCaseId?.takeIf { it in ids }
+    val handled = when (event.key) {
+        Key.DirectionUp, Key.DirectionDown -> {
+            val next = caseSelectionMovedBy(ids, current, if (event.key == Key.DirectionUp) -1 else 1)
+            next?.also { view.previewCaseId = it } != null
+        }
+        Key.Enter, Key.NumPadEnter -> current?.also { view.selectedCaseId = it } != null
+        Key.Escape -> current?.also { view.previewCaseId = null } != null
+        else -> false
+    }
+    // A clicked control keeps keyboard focus; hand it back so the keys keep reaching the workspace root.
+    if (handled) ui.reclaimFocus()
+    return handled
+}
+
+/** The right-hand panel of the selected case row: goal, chips, its steps with their last result, the last run and the actions. */
+@Composable
+private fun CaseDetailPanel(suite: TestSuite, case: TestCase, data: SuiteScreenData) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val limits = LocalTestsLimits.current
+    val writable = !ui.library.readOnly
+    val locked = limits.isCaseLocked(case.id)
+    val lastRun = remember(data.matrix, case.id) { caseLastRun(data.matrix, case.id) }
+    val lastRunRecord = lastRun?.let { last -> data.history.recentRuns.firstOrNull { it.id == last.runId } }
+    val stepStatuses = remember(lastRunRecord, case.id) { latestStepStatuses(lastRunRecord, case.id) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+            TestsInspectorHeader("Case ${suite.cases.indexOfFirst { it.id == case.id } + 1}", case.name.ifBlank { "Untitled case" }, Modifier.weight(1f))
+            if (locked) LockBadge(limits.hint)
+        }
+        case.description.trim().takeIf { it.isNotEmpty() }?.let { AppText(it, color = tc.ts, fontSize = 11.sp, maxLines = 6, overflow = TextOverflow.Ellipsis) }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            suite.targetPackage.takeIf { it.isNotBlank() }?.let { TestsChip(it) }
+            TestsChip(countNoun(case.steps.size, "step"))
+        }
+        if (case.steps.isNotEmpty()) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                case.steps.forEachIndexed { index, step ->
+                    DetailStepRow(index + 1, step, if (lastRun == null) StepMark.NOT_RUN else stepMark(lastRunRecord != null, stepStatuses[step.id]))
+                }
+            }
+        }
+        DetailLastRun(data, lastRun)
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            HintedButton(
+                "Run case",
+                onClick = {
+                    ui.view.runDialog = RunDialogTarget(suite.id, case.id)
+                    ui.reclaimFocus()
+                },
+                enabled = !locked && !limits.isSuiteLocked(suite.id),
+                disabledHint = limits.hint,
+                variant = ButtonVariant.Primary,
+                leadingIcon = Icons.Outlined.PlayArrow,
+            )
+            HintedButton(
+                "Edit steps",
+                onClick = {
+                    ui.view.selectedCaseId = case.id
+                    ui.reclaimFocus()
+                },
+            )
+            HintedButton(
+                "Duplicate",
+                onClick = {
+                    ui.report(ui.state.duplicateTestCase(case.id))
+                    ui.reclaimFocus()
+                },
+                enabled = writable && limits.canDuplicateCase(case.id),
+                disabledHint = if (!writable) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
+            )
+        }
+    }
+}
+
+/** How a step of the detail panel was left by the case's last run. [UNKNOWN]: that run's steps are not loaded, so nothing is claimed. */
+private enum class StepMark { PASS, FAIL, BLOCKED, NOT_RUN, UNKNOWN }
+
+private fun stepMark(runAvailable: Boolean, status: StepStatus?): StepMark = when {
+    !runAvailable -> StepMark.UNKNOWN
+    status == null -> StepMark.NOT_RUN
+    status == StepStatus.PASS -> StepMark.PASS
+    status == StepStatus.BLOCKED || status == StepStatus.SKIPPED -> StepMark.BLOCKED
+    else -> StepMark.FAIL
+}
+
+@Composable
+private fun DetailStepRow(number: Int, step: TestStep, mark: StepMark) {
+    val tc = tc()
+    val (label, color) = when (mark) {
+        StepMark.PASS -> "passed" to tc.success
+        StepMark.FAIL -> "failed" to DANGER_RED
+        StepMark.BLOCKED -> "blocked" to tc.warn
+        StepMark.NOT_RUN -> "not run" to tc.td
+        StepMark.UNKNOWN -> "" to tc.td
+    }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.Top) {
+        AppText("$number", color = tc.td, fontSize = 10.sp, fontFamily = MONO, modifier = Modifier.width(STEP_NUMBER_WIDTH))
+        Column(Modifier.weight(1f)) {
+            AppText(step.action.ifBlank { "Untitled step" }, color = tc.tx, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (step.expected.isNotBlank()) AppText(step.expected, color = tc.td, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        val iconModifier = Modifier.size(STEP_ICON_SIZE).semantics { if (label.isNotEmpty()) contentDescription = "Step $number $label" }
+        when (mark) {
+            StepMark.PASS -> Icon(Icons.Outlined.Check, contentDescription = null, tint = color, modifier = iconModifier)
+            StepMark.FAIL -> Icon(Icons.Outlined.Close, contentDescription = null, tint = color, modifier = iconModifier)
+            StepMark.BLOCKED -> Icon(Icons.Outlined.Block, contentDescription = null, tint = color, modifier = iconModifier)
+            StepMark.NOT_RUN -> Box(iconModifier.padding(3.dp).border(1.dp, color, CircleShape))
+            StepMark.UNKNOWN -> Spacer(iconModifier)
+        }
+    }
+}
+
+/** "#21 · yesterday 19:27 · 48s · Open report →", "Not run yet", or "Loading runs…" until the stored runs were read. */
+@Composable
+private fun DetailLastRun(data: SuiteScreenData, lastRun: CaseLastRun?) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    if (lastRun == null) {
+        AppText(if (data.loaded) "Not run yet" else "Loading runs…", color = tc.td, fontSize = 11.sp)
+        return
+    }
+    val parts = listOfNotNull(
+        data.ordinals[lastRun.runId]?.let { "#$it" },
+        formatRunMoment(lastRun.momentMs, System.currentTimeMillis()),
+        lastRun.durationMs?.let { formatDuration(it) },
+    )
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText(parts.joinToString(" · "), color = tc.ts, fontSize = 11.sp)
+        TestsBreadcrumbLink("Open report →", onClick = { openSuiteRun(ui, lastRun.runId) })
     }
 }
 

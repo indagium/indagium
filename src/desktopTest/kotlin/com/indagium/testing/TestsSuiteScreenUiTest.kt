@@ -48,6 +48,7 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** The suite screen (header, last-run line, tabs, case table, Runs, Settings) composed against a real AppState. */
@@ -340,15 +341,32 @@ class TestsSuiteScreenUiTest {
     }
 
     @Test
-    fun clickingARowOpensTheCaseAndAnEmptySuiteOffersANewCase() {
+    fun clickingARowSelectsTheCaseAndEditStepsOrASecondClickOpensIt() {
         val suite = suiteWithCases("Login")
-        open(suite)
-        rule.onAllNodesWithText("Login").fetchSemanticsNodes().let { nodes ->
-            val index = nodes.indices.first { nodes[it].boundsInRoot.left >= state.testsView.navWidthDp }
-            rule.onAllNodesWithText("Login")[index].performClick()
+        open(suite, width = 1500.dp)
+        val caseId = suite.cases.single().id
+
+        fun clickRow() {
+            rule.onAllNodesWithText("Login").fetchSemanticsNodes().let { nodes ->
+                val index = nodes.indices.first { nodes[it].boundsInRoot.left >= state.testsView.navWidthDp }
+                rule.onAllNodesWithText("Login")[index].performClick()
+            }
+            rule.waitForIdle()
         }
+        clickRow()
+        assertEquals(caseId, state.testsView.previewCaseId, "a click selects the row")
+        assertNull(state.testsView.selectedCaseId, "and does not open the editor")
+        rule.onNodeWithText("Case 1").assertExists()
+        assertTrue(centre("Login").size >= 2, "the detail panel names the case next to the table row")
+
+        rule.onNodeWithText("Edit steps").performClick()
         rule.waitForIdle()
-        assertEquals(suite.cases.single().id, state.testsView.selectedCaseId)
+        assertEquals(caseId, state.testsView.selectedCaseId)
+
+        state.testsView.selectedCaseId = null
+        rule.waitForIdle()
+        clickRow()
+        assertEquals(caseId, state.testsView.selectedCaseId, "a second click on the selected row opens the case")
 
         val empty = (state.createTestSuite("Empty") as StoreResult.Ok).value
         state.testsView.selectedCaseId = null

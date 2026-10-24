@@ -309,20 +309,22 @@ internal fun TestsSplitScreen(
 ) {
     val tc = tc()
     val view = LocalTestsUi.current.view
+    // Hoisted so a screen that gains or loses its inspector (the suite's case detail panel) keeps its scroll position.
+    val mainScroll = rememberScrollState()
     if (inspector == null) {
-        TestsScrollColumn(modifier.fillMaxSize()) { main() }
+        TestsScrollColumn(modifier.fillMaxSize(), scrollState = mainScroll) { main() }
         return
     }
     BoxWithConstraints(modifier.fillMaxSize()) {
         if (testsInspectorStacked(maxWidth.value)) {
-            TestsScrollColumn(Modifier.fillMaxSize()) {
+            TestsScrollColumn(Modifier.fillMaxSize(), scrollState = mainScroll) {
                 main()
                 Divider()
                 Column(Modifier.fillMaxWidth().background(tc.p).padding(INSPECTOR_PADDING)) { inspector() }
             }
         } else {
             Row(Modifier.fillMaxSize()) {
-                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight()) { main() }
+                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight(), scrollState = mainScroll) { main() }
                 // The divider sits left of the inspector, so dragging it right makes the inspector narrower.
                 HDivider { delta -> view.inspectorWidthDp = clampTestsInspectorWidth(view.inspectorWidthDp, -delta) }
                 TestsScrollColumn(
