@@ -642,6 +642,8 @@ fun AnnotationPanel(
     /** AI profile access for the editor's text-only rewrite action. */
     rewriteState: AppState? = null,
     modifier: Modifier = Modifier.fillMaxHeight(),
+    // False when the Diagram library is its own tile (DiagramLibraryTileBody) instead of the top section of this panel.
+    showDiagramLibrary: Boolean = true,
 ) {
     val tc = tc()
     val notesLocked = LocalNotesEditLocked.current
@@ -1345,19 +1347,21 @@ fun AnnotationPanel(
                 // This is intentionally above Issue description: saved diagrams are log-specific
                 // workspace artifacts, while the issue description is private free-form context.
                 // The coordinator has already filtered the list by path + content fingerprint.
-                DiagramLibrarySection(
-                    items = diagramLibraryItems,
-                    expanded = diagramLibraryExpanded,
-                    onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
-                    onCreate = onCreateDiagram,
-                    onCreateFromNotes = onCreateDiagramFromNotes,
-                    editingEnabled = !notesLocked,
-                    selectedLineCount = tab.selected.size,
-                    notesDiagramSummary = notesDiagramSummary,
-                    onOpen = onOpenDiagramLibraryItem,
-                    onRequestDelete = { pendingDiagramLibraryDeleteId = it },
-                )
-                Divider()
+                if (showDiagramLibrary) {
+                    DiagramLibrarySection(
+                        items = diagramLibraryItems,
+                        expanded = diagramLibraryExpanded,
+                        onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
+                        onCreate = onCreateDiagram,
+                        onCreateFromNotes = onCreateDiagramFromNotes,
+                        editingEnabled = !notesLocked,
+                        selectedLineCount = tab.selected.size,
+                        notesDiagramSummary = notesDiagramSummary,
+                        onOpen = onOpenDiagramLibraryItem,
+                        onRequestDelete = { pendingDiagramLibraryDeleteId = it },
+                    )
+                    Divider()
+                }
                 // Issue description — a private working note, persisted in the .ann sidecar and
                 // autosave, but deliberately never rendered into the Markdown preview/export/MCP
                 // markdown so it stays out of anything shared or copied as the issue writeup.
@@ -1744,7 +1748,7 @@ private const val DIAGRAM_LIBRARY_PANEL_ROW_DP = 42
 private const val DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP = 168
 
 @Composable
-private fun DiagramLibrarySection(
+internal fun DiagramLibrarySection(
     items: List<DiagramLibraryItem>,
     expanded: Boolean,
     onToggle: () -> Unit,
@@ -1757,6 +1761,8 @@ private fun DiagramLibrarySection(
     onOpen: (String) -> Unit,
     onRequestDelete: (String) -> Unit,
     editingEnabled: Boolean = true,
+    // False when the section is a tile of its own: it is then always open and its header shows no chevron.
+    collapsible: Boolean = true,
 ) {
     val tc = tc()
     // Local, not lifted to AppState like RecentNotesPopup's own open flag: nothing outside this
@@ -1783,10 +1789,10 @@ private fun DiagramLibrarySection(
                 }
             }
         },
-        expanded = expanded,
-        onToggle = onToggle,
+        expanded = expanded.takeIf { collapsible },
+        onToggle = onToggle.takeIf { collapsible },
     )
-    if (!expanded) return
+    if (collapsible && !expanded) return
 
     // AnnotationPanel's outer Column is itself vertically scrollable, so use a bounded fixed
     // viewport rather than heightIn(max): Compose otherwise receives an unbounded height and the
@@ -1970,7 +1976,7 @@ private fun CreateDiagramPopup(
 }
 
 @Composable
-private fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     val tc = tc()
     Dialog(onDismissRequest = onDismiss) {
         Column(

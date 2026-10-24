@@ -134,6 +134,20 @@ internal val LocalNotesEditLocked = staticCompositionLocalOf { false }
 
 internal const val NOTES_EDIT_LOCK_MESSAGE = "AI is updating Notes — stop the run to edit."
 
+/**
+ * Whether [tab]'s in-app AI run is active, i.e. whether Notes must be locked ([LocalNotesEditLocked]). AiSidebarRuntime batches
+ * active-run changes through a revision flow; observing it here is important: whoever hosts Notes (RightSidebarPanel, or a Notes
+ * tile) and AiSidebarPanel are siblings, so otherwise a run starting/stopping would not recompose the Notes subtree's lock state.
+ */
+@Composable
+internal fun rememberNotesEditLocked(state: AppState, tab: LogTab): Boolean {
+    val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
+
+    @Suppress("UNUSED_VARIABLE")
+    val observedAiRevision = aiRevision
+    return state.aiSessions.sessionFor(tab.id).activeRun != null
+}
+
 private fun AiSidebarSection?.toggled(section: AiSidebarSection): AiSidebarSection? =
     if (this == section) null else section
 
@@ -153,14 +167,7 @@ internal fun RightSidebarPanel(
     videoContent: (@Composable () -> Unit)? = null,
     notesVisible: Boolean = state.annotationVisible,
 ) {
-    // AiSidebarRuntime batches active-run changes through this revision flow. Observing it here is
-    // important: RightSidebarPanel owns Notes, while AiSidebarPanel is a sibling and otherwise a
-    // run starting/stopping would not recompose the Notes subtree's lock state.
-    val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
-
-    @Suppress("UNUSED_VARIABLE")
-    val observedAiRevision = aiRevision
-    val notesLocked = state.aiSessions.sessionFor(tab.id).activeRun != null
+    val notesLocked = rememberNotesEditLocked(state, tab)
     val notesOn = notesVisible
     val aiOn = state.aiPanelVisible
     val videoOn = videoContent != null
@@ -294,7 +301,7 @@ private data class AiComposerSubmission(
 )
 
 @Composable
-private fun AiSidebarPanel(
+internal fun AiSidebarPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester,

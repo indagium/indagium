@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
+import com.indagium.model.LogViewSectionId
 
 val isMacOs: Boolean = System.getProperty("os.name").lowercase().startsWith("mac")
 val isLinuxOs: Boolean = System.getProperty("os.name").orEmpty().lowercase().contains("linux")
@@ -102,33 +103,44 @@ fun rovingMove(
 fun rovingActivationId(items: List<RovingItem>, index: Int): String? =
     items.getOrNull(index)?.takeIf { it.enabled }?.id
 
+// [visibleSections] (null = every section, the legacy column) limits the list to the sections whose tiles are on screen.
 fun filterKeyboardTargets(
     levelCount: Int,
     sequenceIds: List<String>,
     manualCollapseIds: List<String>,
     savedFilterIds: List<String>,
     includeModeControls: Boolean = true,
+    visibleSections: Set<LogViewSectionId>? = null,
 ): List<KeyboardTarget> = buildList {
+    fun shown(id: LogViewSectionId) = visibleSections == null || id in visibleSections
     if (includeModeControls) {
-        add(KeyboardTarget("filter-mode-tags", KeyboardTargetKind.FilterModeTags))
-        add(KeyboardTarget("filter-mode-regex", KeyboardTargetKind.FilterModeRegex))
-        add(KeyboardTarget("filter-tag-input", KeyboardTargetKind.FilterTagInput))
-        add(KeyboardTarget("filter-message-input", KeyboardTargetKind.FilterMessageInput))
+        if (shown(LogViewSectionId.TAGS)) {
+            add(KeyboardTarget("filter-mode-tags", KeyboardTargetKind.FilterModeTags))
+            add(KeyboardTarget("filter-mode-regex", KeyboardTargetKind.FilterModeRegex))
+            add(KeyboardTarget("filter-tag-input", KeyboardTargetKind.FilterTagInput))
+        }
+        if (shown(LogViewSectionId.MESSAGE_RULES)) add(KeyboardTarget("filter-message-input", KeyboardTargetKind.FilterMessageInput))
     }
-    add(KeyboardTarget("filter-highlighter-input", KeyboardTargetKind.FilterHighlighterInput))
-    add(KeyboardTarget("filter-section-log-composition", KeyboardTargetKind.FilterSection))
-    add(KeyboardTarget("filter-section-levels", KeyboardTargetKind.FilterSection))
-    repeat(levelCount) { idx -> add(KeyboardTarget("level-$idx", KeyboardTargetKind.FilterLogLevel)) }
-    add(KeyboardTarget("filter-section-sequences", KeyboardTargetKind.FilterSection))
-    sequenceIds.forEach { id -> add(KeyboardTarget("sequence:$id", KeyboardTargetKind.FilterSequence)) }
-    manualCollapseIds.forEach { id -> add(KeyboardTarget("manual:$id", KeyboardTargetKind.FilterManualCollapse)) }
-    add(KeyboardTarget("new-sequence", KeyboardTargetKind.FilterNewSequence))
-    add(KeyboardTarget("filter-section-saved", KeyboardTargetKind.FilterSection))
-    savedFilterIds.forEach { id -> add(KeyboardTarget("saved:$id", KeyboardTargetKind.FilterSavedFilter)) }
-    add(KeyboardTarget("save-current-filter", KeyboardTargetKind.FilterSaveCurrent))
-    add(KeyboardTarget("clear-filters", KeyboardTargetKind.FilterClearFilters))
-    add(KeyboardTarget("export-filters", KeyboardTargetKind.FilterExportFilters))
-    add(KeyboardTarget("import-filters", KeyboardTargetKind.FilterImportFilters))
+    if (shown(LogViewSectionId.HIGHLIGHTERS)) add(KeyboardTarget("filter-highlighter-input", KeyboardTargetKind.FilterHighlighterInput))
+    if (shown(LogViewSectionId.LOG_COMPOSITION)) add(KeyboardTarget("filter-section-log-composition", KeyboardTargetKind.FilterSection))
+    if (shown(LogViewSectionId.LOG_LEVEL)) {
+        add(KeyboardTarget("filter-section-levels", KeyboardTargetKind.FilterSection))
+        repeat(levelCount) { idx -> add(KeyboardTarget("level-$idx", KeyboardTargetKind.FilterLogLevel)) }
+    }
+    if (shown(LogViewSectionId.SEQUENCES)) {
+        add(KeyboardTarget("filter-section-sequences", KeyboardTargetKind.FilterSection))
+        sequenceIds.forEach { id -> add(KeyboardTarget("sequence:$id", KeyboardTargetKind.FilterSequence)) }
+        manualCollapseIds.forEach { id -> add(KeyboardTarget("manual:$id", KeyboardTargetKind.FilterManualCollapse)) }
+        add(KeyboardTarget("new-sequence", KeyboardTargetKind.FilterNewSequence))
+    }
+    if (shown(LogViewSectionId.SAVED_FILTERS)) {
+        add(KeyboardTarget("filter-section-saved", KeyboardTargetKind.FilterSection))
+        savedFilterIds.forEach { id -> add(KeyboardTarget("saved:$id", KeyboardTargetKind.FilterSavedFilter)) }
+        add(KeyboardTarget("save-current-filter", KeyboardTargetKind.FilterSaveCurrent))
+        add(KeyboardTarget("clear-filters", KeyboardTargetKind.FilterClearFilters))
+        add(KeyboardTarget("export-filters", KeyboardTargetKind.FilterExportFilters))
+        add(KeyboardTarget("import-filters", KeyboardTargetKind.FilterImportFilters))
+    }
 }
 
 fun annotationKeyboardTargets(

@@ -341,81 +341,14 @@ internal fun CompareView(
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
                             },
                             notesContent = {
-                                AnnotationPanel(
+                                BoundAnnotationPanel(
+                                    state = state,
                                     tab = leftTab,
-                                    settings = state.settings,
-                                    rewriteState = state,
-                                    recentNotes = state.recentNotesForTab(leftTab),
-                                    recentNotesMenuOpen = state.recentNotesMenuOpen,
-                                    activeNotePath = state.activeNoteFilePath(leftTab),
-                                    onToggleMd = { state.toggleMd(leftTab.id) },
-                                    onCopyFormat = { format, done -> state.copyAnnotationFormatAsync(leftTab.id, format, done) },
-                                    onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
-                                    onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-                                    onExportFrames = { state.exportAnnotationFrames(leftTab.id) },
-                                    onSave = { state.saveAnalysis(leftTab.id) },
-                                    onNewAnalysis = { state.newAnalysis(leftTab.id) },
-                                    onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                                    onOpenNote = { state.openNoteFileAsync(leftTab.id, it) },
-                                    onLocateLog = { state.locateLogForTab(leftTab.id, it) },
-                                    showUnverifiedRelinkNotice = state.logRelinkUnverifiedTabId == leftTab.id,
-                                    onDismissUnverifiedRelinkNotice = { state.dismissLogRelinkUnverifiedNotice() },
-                                    onUpdatePrefix = { state.setPrefix(leftTab.id, it) },
-                                    onUpdateSuffix = { state.setSuffix(leftTab.id, it) },
-                                    onUpdateIssueDescription = { state.setIssueDescription(leftTab.id, it) },
-                                    onUpdateBlock = { bid, t -> state.updateBlock(leftTab.id, bid, t) },
-                                    onRemoveBlock = { state.removeBlock(leftTab.id, it) },
-                                    onMoveBlock = { bid, d -> state.moveBlock(leftTab.id, bid, d) },
-                                    onReorderBlock = { bid, idx -> state.reorderBlock(leftTab.id, bid, idx) },
-                                    onAddNoteAfter = { state.addNoteBlock(leftTab.id, it) },
-                                    onAddImage = { bytes, provenance, after -> state.addImageBlock(leftTab.id, bytes, provenance, after) },
-                                    onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-                                    onNavigateLogRef = { state.requestAnnotationNavigation(leftTab.id, it) },
-                                    onNavigateVideoFrame = { state.navigateToVideoFrame(leftTab.id, it) },
-                                    onUpdateLogRefPresentation = { blockId, caption, presentation ->
-                                        state.updateLogRefPresentation(leftTab.id, blockId, caption, presentation)
-                                    },
-                                    onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(leftTab.id, blockId) },
-                                    onNavigateDiagramLine = { entryId -> state.navigateToLogLine(leftTab.id, entryId) },
-                                    onImportLinkedDiagram = { blockId, source, dialect, confirm ->
-                                        val diagramId = leftTab.annotations.blocks
-                                            .filterIsInstance<com.indagium.model.AnnBlock.Note>()
-                                            .firstOrNull { it.id == blockId }
-                                            ?.text
-                                            ?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
-                                            ?.attachment
-                                            ?.diagramId
-                                        val session = diagramId?.let { id ->
-                                            state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id }
-                                        }
-                                            ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
-                                        if (session == null) {
-                                            state.pendingDiagramNotice = DiagramNotice(
-                                                "Couldn't import diagram edits",
-                                                "This linked diagram is not open in a workspace.",
-                                            )
-                                            com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
-                                        } else {
-                                            state.seq3Sessions.importSource(session.id, source, dialect, confirm)
-                                        }
-                                    },
-                                    diagramLibraryItems = state.seq3Sessions.libraryForTab(leftTab),
-                                    onCreateDiagram = { state.seq3Sessions.begin(leftTab.id, leftTab.selected) },
-                                    onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(leftTab.id) },
-                                    // See FileView.kt's identical call site for why this is keyed,
-                                    // not recomputed on every recomposition.
-                                    notesDiagramSummary = remember(leftTab.annotations, leftTab.logData) { seq3NotesSelection(leftTab) },
-                                    onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, leftTab.id) },
-                                    onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
                                     width = annotationRenderedWidth,
                                     focusRequester = annotationFr,
                                     onPanelFocusChanged = { focused ->
                                         if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                                     },
-                                    keyboardFocusVisible = state.keyboardFocusVisible,
-                                    scrollStateStore = state.logViewerScrollStateStore,
-                                    highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == leftTab.id }?.blockId,
-                                    modifier = Modifier.fillMaxSize(),
                                 )
                             },
                             videoContent = if (state.videoPanelVisible && leftTab.attachedVideo != null) {
