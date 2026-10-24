@@ -48,7 +48,7 @@ private fun HomeDropTarget.toTile(): TileDropTarget<HomeSectionId> = when (this)
     is HomeDropTarget.OnPage -> TileDropTarget.OnPage(edge)
 }
 
-private fun TileDropTarget<HomeSectionId>.toHome(): HomeDropTarget = when (this) {
+internal fun TileDropTarget<HomeSectionId>.toHome(): HomeDropTarget = when (this) {
     is TileDropTarget.OnSection -> HomeDropTarget.OnSection(section, edge)
     is TileDropTarget.OnPage -> HomeDropTarget.OnPage(edge)
 }
