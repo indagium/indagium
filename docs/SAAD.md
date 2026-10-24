@@ -186,15 +186,27 @@ injection point.
 
 ### D5 — Cross-platform packaging with native components
 
-Three OSes, two architectures, and three native dependencies (FFmpeg, whisper.cpp, an Objective-C
-speech bridge). This drives the per-OS native classifier logic (`build.gradle.kts:43-58`), the
-build-time compilation of the macOS dylib, and the dependency-locking exclusions for artifacts whose
-*module name* differs per platform.
+Three OSes and two architectures share a platform-specific native dependency closure, including
+FFmpeg, zstd-jni, whisper.cpp, and the Objective-C speech bridge. This drives per-OS classifier
+selection (`build.gradle.kts:43-58`), build-time compilation of the macOS dylib, and dependency
+locking for artifacts whose *module name* differs per platform. The exact media-native scope and
+licences are maintained in `licenses/third-party/media-components.json` and
+`THIRD_PARTY_NOTICES.md`.
 
 ### D6 — Source-available licensing
 
 Indagium ships under the PolyForm Perimeter License. This is why there is a build-generated license
 resource and a mandatory in-app acceptance gate (`ui/LicenseAgreementDialog.kt`, `AppState.needsLicenseAcceptance`).
+The separate **Third-party licences…** viewer is read-only and does not change that acceptance gate.
+Third-party terms, complete legal texts, and source references are indexed in
+`licenses/third-party/media-components.json` (the native media closure) and
+`licenses/application/application-components.json` (every other runtime JAR, scrcpy-server and the
+AppImage runtime); the root `LICENSE` remains the application licence. `validateApplicationLicenseInventory`
+resolves `desktopRuntimeClasspath` and fails resource generation when a module matches no inventory
+pattern, so a new transitive dependency cannot ship without a reviewed licence entry.
+The source archive is SHA-256-pinned but is not a bit-for-bit reproducible-build claim. Inventory
+maintenance, replacement steps, and unresolved codec-patent questions are tracked in
+[`docs/legal/media-licensing.md`](legal/media-licensing.md).
 
 ---
 
@@ -2463,9 +2475,11 @@ edge during decode, and a frame-drop policy discards frames more than 100 ms lat
 consecutive drops.
 
 The dependency choice is documented in `build.gradle.kts:27-33`: FFmpeg natives ship inside the jar
-(no user install), decode every phone recording format including HEVC/`.mov`/WebM, and are
-license-clean (Apache wrapper over an LGPL FFmpeg build). VLCJ was rejected as GPLv3, JavaFX Media
-for missing HEVC/`.mov`, and GStreamer/libVLC-direct for requiring a per-OS runtime install.
+(no user install) and decode phone recordings including HEVC/`.mov`/WebM. The player uses the
+Apache JavaCV wrapper over the shared LGPLv3-or-later FFmpeg build; see `THIRD_PARTY_NOTICES.md`
+and `licenses/third-party/SOURCE-BUNDLE.md` for the native dependency closure, replaceable
+classifier JARs, and corresponding source inputs. VLCJ was rejected as GPLv3, JavaFX Media for
+missing HEVC/`.mov`, and GStreamer/libVLC-direct for requiring a per-OS runtime install.
 
 This player is used after a capture is stopped and finalized (or when an imported capture is opened).
 While a capture is live, the right-sidebar capture card's embedded mirror (§6.2) decodes the
@@ -3174,7 +3188,8 @@ The following inputs are produced at build time rather than committed:
 | Generated | Task | Why |
 |---|---|---|
 | Build info Kotlin source | `generateBuildInfo` | Version and build metadata available to the app |
-| License resources | `generateLicenseResources` | In-app agreement, full pinned `whisper.cpp` MIT license, and packaged third-party notices |
+| License resources | `generateLicenseResources` | In-app agreement, offline third-party licence viewer, full pinned `whisper.cpp` MIT license, media and application inventories, and full legal texts |
+| Native media source archive | `prepareMediaSources` | Verifies pinned native sources, recipes, legal texts, and inspected classifier JARs; writes a source archive, SHA-256 file, and manifest under `build/` |
 | Host Whisper JNI library | `configureWhisperNative` + `compileWhisperNative` | Checksummed 1.9.5 CMake source cache builds the static engine into a host library under generated desktop resources |
 | `libindagium_speech.dylib` | `compileAppleSpeechNative` (macOS only) | Keeps the Objective-C bridge reviewable in-tree and carries the generated dylib as a desktop resource |
 

@@ -26,3 +26,7 @@ org/languagetool/resource/en/pos-readme.txt (Moby public-domain data and WordNet
 agid-readme.txt (Kevin Atkinson), and 12dicts-readme.html (Alan Beale).
 Their original notices remain bundled with the library, along with the license
 and notice resources supplied by its dependency JARs.
+
+Third-party software licence rights
+
+This project includes third-party libraries and native components under the separate licences listed in THIRD_PARTY_NOTICES.md and the full inventories under licenses/application/ and licenses/third-party/. The Indagium project licence and agreement cover Indagium's own code; they do not replace or restrict rights granted by any third-party licence. In particular, FFmpeg is distributed under LGPL version 3 or later. The LGPL permissions and conditions apply to the covered FFmpeg code, including the right to modify it and the right to reverse engineer it to debug modifications under LGPLv3 section 4. The bundled FFmpeg classifier is replaceable by a compatible build as described in licenses/third-party/SOURCE-BUNDLE.md. The same applies to the LGPL-licensed LanguageTool and OpenRegex JARs, which are used unmodified and may be replaced by compatible builds. Users and redistributors must follow the applicable third-party licence terms and preserve their required notices.

@@ -1,0 +1,57 @@
+{
+  "linux-x86_64": {
+    "coordinate": "org.bytedeco:ffmpeg:8.0.1-1.5.13:linux-x86_64",
+    "sha256": "01da6cce8fb8686abd4a0be940edafcc199255cc97b37b28c49d4f696c1d9ef3",
+    "extraRuntimeEntries": {
+      "org/bytedeco/ffmpeg/linux-x86_64/libdrm.so.2": {
+        "size": 84592,
+        "sha256": "bab1e283c0fdd19eae10db2522fdc5806f0efee3c175e5e8bb1bc1b478c7e2b1"
+      },
+      "org/bytedeco/ffmpeg/linux-x86_64/libva-drm.so.2": {
+        "size": 14656,
+        "sha256": "9cf5b3c1a3f86222272ed27f68c7bfcb8d1850d8b2cc9a4037d8298583420b99"
+      },
+      "org/bytedeco/ffmpeg/linux-x86_64/libva.so.2": {
+        "size": 195088,
+        "sha256": "7ee0c548a2ce345a74b482aef98a3ddcb825504db7f1cda75020f9f999fef1c1"
+      }
+    }
+  },
+  "linux-arm64": {
+    "coordinate": "org.bytedeco:ffmpeg:8.0.1-1.5.13:linux-arm64",
+    "sha256": "2810546c9c82154ba9a389cdbdb1135db138604b04735806caa8b3cd5211aa50",
+    "extraRuntimeEntries": {
+      "org/bytedeco/ffmpeg/linux-arm64/libbcm_host.so": {
+        "size": 119104,
+        "sha256": "f6c9d6438f7ef3a691613e4b7666c932848f69e296ca05c1e425bc491df062e7"
+      },
+      "org/bytedeco/ffmpeg/linux-arm64/libasound.so.2": {
+        "size": 1690336,
+        "sha256": "04a4925d4861fa42c2cf1f5c63546d07561df8237f1b1d7d54ed3ed58b1b961d"
+      },
+      "org/bytedeco/ffmpeg/linux-arm64/libvchiq_arm.so": {
+        "size": 38392,
+        "sha256": "44f68865f23652f01f5fd6cb56df0b0bc5be5be1cb3e346362828b22dc20a859"
+      },
+      "org/bytedeco/ffmpeg/linux-arm64/libvcos.so": {
+        "size": 197648,
+        "sha256": "46c8d8f738bbafe58fffc9fd0e73e645e4a07986b079054211a4f97aad1b6266"
+      }
+    }
+  },
+  "windows-x86_64": {
+    "coordinate": "org.bytedeco:ffmpeg:8.0.1-1.5.13:windows-x86_64",
+    "sha256": "cb570de36a555156e22cac3ddb21be9051e6b3df05142a29445773ea0e7fedb9",
+    "extraRuntimeEntries": {}
+  },
+  "macosx-arm64": {
+    "coordinate": "org.bytedeco:ffmpeg:8.0.1-1.5.13:macosx-arm64",
+    "sha256": "57b4cb109b60e246e0d55734bf83c9883bf9424df42816fa06af945549dba094",
+    "extraRuntimeEntries": {
+      "org/bytedeco/ffmpeg/macosx-arm64/libatomic.1.dylib": {
+        "size": 74064,
+        "sha256": "06760924e25764c7957d72e27c6d8c01fc7acbbefd3e5871665537d9b8b04566"
+      }
+    }
+  }
+}

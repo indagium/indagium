@@ -1,0 +1,65 @@
+--- a/ffmpeg/cppbuild.sh
++++ b/ffmpeg/cppbuild.sh
+@@ -36,7 +36,8 @@
+ VO_AMRWBENC=vo-amrwbenc-0.1.3
+ OPENSSL=openssl-3.5.5
+ OPENH264_VERSION=2.6.0
+-X264=x264-stable
++X264=x264-b35605a
++X264_COMMIT=b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+ X265=3.4
+ VPX_VERSION=1.15.2
+ ALSA_VERSION=1.2.14
+@@ -60,14 +61,14 @@
+ download https://sourceforge.net/projects/opencore-amr/files/vo-amrwbenc/$VO_AMRWBENC.tar.gz/download $VO_AMRWBENC.tar.gz
+ download https://www.openssl.org/source/$OPENSSL.tar.gz $OPENSSL.tar.gz
+ download https://github.com/cisco/openh264/archive/v$OPENH264_VERSION.tar.gz openh264-$OPENH264_VERSION.tar.gz
+-download https://code.videolan.org/videolan/x264/-/archive/stable/$X264.tar.gz $X264.tar.gz
++download "https://code.videolan.org/api/v4/projects/videolan%2Fx264/repository/archive.tar.gz?sha=$X264_COMMIT" $X264.tar.gz
+ download https://github.com/videolan/x265/archive/$X265.tar.gz x265-$X265.tar.gz
+ download https://github.com/webmproject/libvpx/archive/v$VPX_VERSION.tar.gz libvpx-$VPX_VERSION.tar.gz
+ download https://ftp.osuosl.org/pub/blfs/conglomeration/alsa-lib/alsa-lib-$ALSA_VERSION.tar.bz2 alsa-lib-$ALSA_VERSION.tar.bz2
+ download https://ftp.osuosl.org/pub/blfs/conglomeration/freetype/freetype-$FREETYPE_VERSION.tar.xz freetype-$FREETYPE_VERSION.tar.xz
+ download https://github.com/harfbuzz/harfbuzz/archive/refs/tags/$HARFBUZZ_VERSION.tar.gz harfbuzz-$HARFBUZZ_VERSION.tar.gz
+ download https://github.com/lu-zero/mfx_dispatch/archive/$MFX_VERSION.tar.gz mfx_dispatch-$MFX_VERSION.tar.gz
+-download http://xmlsoft.org/sources/$XML2.tar.gz $XML2.tar.gz
++download https://download.gnome.org/sources/libxml2/2.9/$XML2.tar.xz $XML2.tar.xz
+ download https://github.com/Haivision/srt/archive/refs/tags/v$LIBSRT_VERSION.tar.gz srt-$LIBSRT_VERSION.tar.gz
+ download https://github.com/FFmpeg/nv-codec-headers/archive/n$NVCODEC_VERSION.tar.gz nv-codec-headers-$NVCODEC_VERSION.tar.gz
+ download https://github.com/webmproject/libwebp/archive/refs/tags/v$WEBP_VERSION.tar.gz libwebp-$WEBP_VERSION.tar.gz
+@@ -91,13 +92,15 @@
+ tar --totals -xzf ../srt-$LIBSRT_VERSION.tar.gz
+ tar --totals -xzf ../openh264-$OPENH264_VERSION.tar.gz
+ tar --totals -xzf ../$X264.tar.gz
++# Rename the directory emitted by the immutable archive endpoint to the build recipe name.
++mv x264-$X264_COMMIT-$X264_COMMIT $X264
+ tar --totals -xzf ../x265-$X265.tar.gz
+ tar --totals -xzf ../libvpx-$VPX_VERSION.tar.gz
+ tar --totals -xJf ../freetype-$FREETYPE_VERSION.tar.xz
+ tar --totals -xzf ../harfbuzz-$HARFBUZZ_VERSION.tar.gz
+ tar --totals -xzf ../mfx_dispatch-$MFX_VERSION.tar.gz
+ tar --totals -xzf ../nv-codec-headers-$NVCODEC_VERSION.tar.gz
+-tar --totals -xzf ../$XML2.tar.gz
++tar --totals -xJf ../$XML2.tar.xz
+ tar --totals -xzf ../libwebp-$WEBP_VERSION.tar.gz
+ tar --totals -xzf ../aom-$AOMAV1_VERSION.tar.gz
+ tar --totals -xzf ../SVT-AV1-$SVTAV1_VERSION.tar.gz
+--- a/.github/actions/deploy-ubuntu/action.yml
++++ b/.github/actions/deploy-ubuntu/action.yml
+@@ -156,12 +156,12 @@
+         fi
+ 
+         if [[ -n ${USERLAND_BUILDME:-} ]]; then
+-          curl -LOJ https://github.com/raspberrypi/userland/archive/master.tar.gz
+-          tar -xzf userland-master.tar.gz
+-          pushd userland-master
++          curl -L --fail --show-error https://github.com/raspberrypi/userland/archive/a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976.tar.gz -o userland-a54a0db.tar.gz
++          tar -xzf userland-a54a0db.tar.gz
++          pushd userland-a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976
+           bash $USERLAND_BUILDME
+           popd
+-          export USERLAND_PATH=$(pwd)/userland-master/
++          export USERLAND_PATH=$(pwd)/userland-a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976/
+           echo "USERLAND_PATH=$USERLAND_PATH" >> $GITHUB_ENV
+         fi
+ 

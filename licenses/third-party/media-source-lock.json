@@ -1,0 +1,925 @@
+{
+  "schemaVersion": 1,
+  "description": "SHA-256-pinned source inputs for the native media libraries and recipe used by Indagium. Hashes identify the exact downloaded archive bytes; they do not establish bit-for-bit reproducibility of a packaged binary.",
+  "recipe": {
+    "name": "Bytedeco JavaCPP presets FFmpeg build recipe",
+    "version": "1.5.13",
+    "revision": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+    "url": "https://github.com/bytedeco/javacpp-presets/archive/60df69b176e3623da1d53db432a5a3a82a13f2ea.tar.gz",
+    "archive": "javacpp-presets-60df69b.tar.gz",
+    "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7"
+  },
+  "sourceArchives": [
+    {
+      "id": "alsa-lib",
+      "component": "ALSA library",
+      "version": "1.2.14",
+      "archive": "alsa-lib-1.2.14.tar.bz2",
+      "url": "https://ftp.osuosl.org/pub/blfs/conglomeration/alsa-lib/alsa-lib-1.2.14.tar.bz2",
+      "upstreamRef": "v1.2.14",
+      "sha256": "be9c88a0b3604367dd74167a2b754a35e142f670292ae47a2fdef27a2ee97a32",
+      "role": "host-build-input"
+    },
+    {
+      "id": "bytedeco-recipe",
+      "component": "Bytedeco javacpp-presets FFmpeg build recipe",
+      "version": "1.5.13",
+      "archive": "javacpp-presets-60df69b.tar.gz",
+      "url": "https://github.com/bytedeco/javacpp-presets/archive/60df69b176e3623da1d53db432a5a3a82a13f2ea.tar.gz",
+      "upstreamRef": "60df69b176e3623da1d53db432a5a3a82a13f2ea",
+      "sha256": "f859626041ab40ebf36d1a7576a95a60f47e2417bd567a3c883c3258d205f5c7",
+      "role": "complete-build-recipe-and-patches"
+    },
+    {
+      "id": "ffmpeg",
+      "component": "FFmpeg",
+      "version": "8.0.1",
+      "archive": "ffmpeg-8.0.1.tar.bz2",
+      "url": "https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.bz2",
+      "upstreamRef": "n8.0.1",
+      "sha256": "65ff433fab5727fb2dc41f1d508dc60e6192fea44cab2e0301194feee4bcf1d7",
+      "role": "bundled-library-source"
+    },
+    {
+      "id": "ffmpeg-binding-source",
+      "component": "FFmpeg Java bindings supplementary source",
+      "version": "8.0.1-1.5.13",
+      "archive": "ffmpeg-8.0.1-1.5.13-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13-sources.jar",
+      "upstreamRef": "org.bytedeco:ffmpeg:8.0.1-1.5.13",
+      "sha256": "e090fb20a15de3c9411751cf917c81dbac9c44382e490df6d0d05553577d4e5f",
+      "role": "supplementary-java-source-not-native-ffmpeg-source"
+    },
+    {
+      "id": "freetype",
+      "component": "FreeType",
+      "version": "2.14.1",
+      "archive": "freetype-2.14.1.tar.xz",
+      "url": "https://ftp.osuosl.org/pub/blfs/conglomeration/freetype/freetype-2.14.1.tar.xz",
+      "upstreamRef": "VER-2-14-1",
+      "sha256": "32427e8c471ac095853212a37aef816c60b42052d4d9e48230bab3bdf2936ccc",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "gcc-formula-patch",
+      "component": "Homebrew GCC 13.4.0 Darwin patch",
+      "version": "patch commit 8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+      "archive": "gcc-13.4.0.diff",
+      "url": "https://raw.githubusercontent.com/Homebrew/formula-patches/8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d/gcc/gcc-13.4.0.diff",
+      "upstreamRef": "8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+      "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949",
+      "role": "build-patch-macos-runtime"
+    },
+    {
+      "id": "gcc-runtime",
+      "component": "GCC runtime sources for macOS libatomic",
+      "version": "13.4.0",
+      "archive": "gcc-13.4.0.tar.xz",
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-13.4.0/gcc-13.4.0.tar.xz",
+      "upstreamRef": "releases/gcc-13.4.0",
+      "sha256": "9c4ce6dbb040568fdc545588ac03c5cbc95a8dbf0c7aa490170843afb59ca8f5",
+      "role": "bundled-runtime-source-macos-arm64"
+    },
+    {
+      "id": "gcc-runtime-windows",
+      "component": "GCC runtime sources for Windows FFmpeg",
+      "version": "14.1.0",
+      "archive": "gcc-14.1.0.tar.xz",
+      "url": "https://ftp.gnu.org/gnu/gcc/gcc-14.1.0/gcc-14.1.0.tar.xz",
+      "upstreamRef": "releases/gcc-14.1.0",
+      "sha256": "e283c654987afe3de9d8080bc0bd79534b5ca0d681a73a11ff2b5d3767426840",
+      "role": "bundled-runtime-source-windows-x64"
+    },
+    {
+      "id": "harfbuzz",
+      "component": "HarfBuzz",
+      "version": "12.3.0",
+      "archive": "harfbuzz-12.3.0.tar.gz",
+      "url": "https://github.com/harfbuzz/harfbuzz/archive/refs/tags/12.3.0.tar.gz",
+      "upstreamRef": "12.3.0",
+      "sha256": "e93af4816128fc0a02d2e84106fdfe36a3fde01086b723be8f0656a65562ca9e",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "javacpp-source",
+      "component": "JavaCPP supplementary Java bindings source",
+      "version": "1.5.13",
+      "archive": "javacpp-1.5.13-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/javacpp/1.5.13/javacpp-1.5.13-sources.jar",
+      "upstreamRef": "org.bytedeco:javacpp:1.5.13",
+      "sha256": "c61162d99c0dde4d3af170123cb3e786abed6667cb3864db9d6408706f6d576c",
+      "role": "supplementary-java-source-not-native-ffmpeg-source"
+    },
+    {
+      "id": "javacv-source",
+      "component": "JavaCV supplementary Java source",
+      "version": "1.5.13",
+      "archive": "javacv-1.5.13-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/javacv/1.5.13/javacv-1.5.13-sources.jar",
+      "upstreamRef": "org.bytedeco:javacv:1.5.13",
+      "sha256": "f0eff2d149c4f83dc0d2340fa89f346b49116d7c022f4198bc5e45373708496f",
+      "role": "supplementary-java-source"
+    },
+    {
+      "id": "lame",
+      "component": "LAME",
+      "version": "3.100",
+      "archive": "lame-3.100.tar.gz",
+      "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
+      "upstreamRef": "3.100",
+      "sha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "libaom",
+      "component": "libaom",
+      "version": "3.9.1",
+      "archive": "aom-3.9.1.tar.gz",
+      "url": "https://storage.googleapis.com/aom-releases/libaom-3.9.1.tar.gz",
+      "upstreamRef": "v3.9.1",
+      "sha256": "dba99fc1c28aaade28dda59821166b2fa91c06162d1bc99fde0ddaad7cecc50e",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "libdrm-source",
+      "component": "Ubuntu libdrm source package",
+      "version": "2.4.113-2~ubuntu0.22.04.1",
+      "archive": "libdrm_2.4.113-2~ubuntu0.22.04.1.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm_2.4.113-2~ubuntu0.22.04.1.dsc",
+      "upstreamRef": "Ubuntu jammy-updates source package 2.4.113-2~ubuntu0.22.04.1",
+      "sha256": "51aca908b4884d500158077ff66ee0aabbdd1b1ada5271321b25d425eabd1c3e",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libdrm-source-debian",
+      "component": "Ubuntu libdrm packaging patch",
+      "version": "2.4.113-2~ubuntu0.22.04.1",
+      "archive": "libdrm_2.4.113-2~ubuntu0.22.04.1.debian.tar.xz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm_2.4.113-2~ubuntu0.22.04.1.debian.tar.xz",
+      "upstreamRef": "Ubuntu jammy-updates source package 2.4.113-2~ubuntu0.22.04.1",
+      "sha256": "cb1ee404ce432906c306a5a2fa8bcadcae42bf1adc91c434dfd7d1e26aa272c0",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libdrm-source-orig",
+      "component": "Ubuntu libdrm upstream source archive",
+      "version": "2.4.113",
+      "archive": "libdrm_2.4.113.orig.tar.xz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/main/libd/libdrm/libdrm_2.4.113.orig.tar.xz",
+      "upstreamRef": "libdrm 2.4.113",
+      "sha256": "7fd7eb2967f63beb4606f22d50e277d993480d05ef75dd88a9bd8e677323e5e1",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libva-source",
+      "component": "Ubuntu libva source package",
+      "version": "2.14.0-1",
+      "archive": "libva_2.14.0-1.dsc",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/libv/libva/libva_2.14.0-1.dsc",
+      "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+      "sha256": "272dcd0631bebe296862260555faa7d3d34eb5a4c33b142ef84a32ce6c818d97",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libva-source-debian",
+      "component": "Ubuntu libva packaging patch",
+      "version": "2.14.0-1",
+      "archive": "libva_2.14.0-1.debian.tar.xz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/libv/libva/libva_2.14.0-1.debian.tar.xz",
+      "upstreamRef": "Ubuntu jammy source package 2.14.0-1",
+      "sha256": "f0d0c25dadacf98e2b7c042b71ef58c6925028d555da7e54f84005b3bcd8c628",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libva-source-orig",
+      "component": "Ubuntu libva upstream source archive",
+      "version": "2.14.0",
+      "archive": "libva_2.14.0.orig.tar.gz",
+      "url": "https://archive.ubuntu.com/ubuntu/pool/universe/libv/libva/libva_2.14.0.orig.tar.gz",
+      "upstreamRef": "libva 2.14.0",
+      "sha256": "f21152a2170edda9d1c4dd463d52eaf62b553e83e553c0a946654523cca86d5e",
+      "role": "bundled-native-source-linux-x64"
+    },
+    {
+      "id": "libvpx",
+      "component": "libvpx",
+      "version": "1.15.2",
+      "archive": "libvpx-1.15.2.tar.gz",
+      "url": "https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.2.tar.gz",
+      "upstreamRef": "v1.15.2",
+      "sha256": "26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "libwebp",
+      "component": "libwebp",
+      "version": "1.6.0",
+      "archive": "libwebp-1.6.0.tar.gz",
+      "url": "https://github.com/webmproject/libwebp/archive/refs/tags/v1.6.0.tar.gz",
+      "upstreamRef": "v1.6.0",
+      "sha256": "93a852c2b3efafee3723efd4636de855b46f9fe1efddd607e1f42f60fc8f2136",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "libxml2",
+      "component": "libxml2",
+      "version": "2.9.12",
+      "archive": "libxml2-2.9.12.tar.xz",
+      "url": "https://download.gnome.org/sources/libxml2/2.9/libxml2-2.9.12.tar.xz",
+      "upstreamRef": "v2.9.12",
+      "sha256": "28a92f6ab1f311acf5e478564c49088ef0ac77090d9c719bbc5d518f1fe62eb9",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "mfx-dispatch",
+      "component": "Intel Media SDK dispatcher",
+      "version": "1.35.1",
+      "archive": "mfx_dispatch-1.35.1.tar.gz",
+      "url": "https://github.com/lu-zero/mfx_dispatch/archive/1.35.1.tar.gz",
+      "upstreamRef": "1.35.1",
+      "sha256": "673636da98a4fd5c3e3dc5267da5429e986f53089ed6c33cdca5751f56d9416b",
+      "role": "optional-build-input"
+    },
+    {
+      "id": "mingw-w64",
+      "component": "MinGW-w64 CRT and winpthreads source",
+      "version": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+      "archive": "mingw-w64-90abf78.tar.gz",
+      "url": "https://github.com/mingw-w64/mingw-w64/archive/90abf784ac344fe558e7e22cb5411d807862888d.tar.gz",
+      "upstreamRef": "90abf784ac344fe558e7e22cb5411d807862888d",
+      "sha256": "38a6a3bb3468722a93594f40ae0ce337a5c3ac647e295997423576aafa1d5548",
+      "role": "bundled-runtime-source-windows-x64"
+    },
+    {
+      "id": "msys2-gcc-package",
+      "component": "MSYS2 GCC 14.1.0 package recipe and patches",
+      "version": "14.1.0-3",
+      "archive": "msys2-mingw-packages-3127522.tar.gz",
+      "url": "https://github.com/msys2/MINGW-packages/archive/3127522154b79ff94dedc07a5c5a613c98c17a41.tar.gz",
+      "upstreamRef": "3127522154b79ff94dedc07a5c5a613c98c17a41",
+      "sha256": "2ea4827e26e034eb9959e5002dfef91604da31aa6fbb69106bcf518c61241592",
+      "role": "bundled-toolchain-recipe-windows-x64"
+    },
+    {
+      "id": "nasm",
+      "component": "NASM",
+      "version": "2.14",
+      "archive": "nasm-2.14.tar.gz",
+      "url": "https://download.videolan.org/contrib/nasm/nasm-2.14.tar.gz",
+      "upstreamRef": "nasm-2.14",
+      "sha256": "c7a66d98d306f2366169cf0dc5edb4bba4c11887c8cda1eddefee4b6fac80363",
+      "role": "build-tool-source"
+    },
+    {
+      "id": "nv-codec-headers",
+      "component": "NVIDIA codec headers",
+      "version": "13.0.19.0",
+      "archive": "nv-codec-headers-13.0.19.0.tar.gz",
+      "url": "https://github.com/FFmpeg/nv-codec-headers/archive/refs/tags/n13.0.19.0.tar.gz",
+      "upstreamRef": "n13.0.19.0",
+      "sha256": "86d15d1a7c0ac73a0eafdfc57bebfeba7da8264595bf531cf4d8db1c22940116",
+      "role": "optional-build-input"
+    },
+    {
+      "id": "opencore-amr",
+      "component": "OpenCORE AMR",
+      "version": "0.1.6",
+      "archive": "opencore-amr-0.1.6.tar.gz",
+      "url": "https://sourceforge.net/projects/opencore-amr/files/opencore-amr/opencore-amr-0.1.6.tar.gz/download",
+      "upstreamRef": "opencore-amr-0.1.6",
+      "sha256": "483eb4061088e2b34b358e47540b5d495a96cd468e361050fae615b1809dc4a1",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "openh264",
+      "component": "OpenH264",
+      "version": "2.6.0",
+      "archive": "openh264-2.6.0.tar.gz",
+      "url": "https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz",
+      "upstreamRef": "v2.6.0",
+      "sha256": "558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69",
+      "role": "ffmpeg-build-input-source-built"
+    },
+    {
+      "id": "openssl",
+      "component": "OpenSSL",
+      "version": "3.5.5",
+      "archive": "openssl-3.5.5.tar.gz",
+      "url": "https://www.openssl.org/source/openssl-3.5.5.tar.gz",
+      "upstreamRef": "openssl-3.5.5",
+      "sha256": "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "opus",
+      "component": "Opus",
+      "version": "1.3.1",
+      "archive": "opus-1.3.1.tar.gz",
+      "url": "https://archive.mozilla.org/pub/opus/opus-1.3.1.tar.gz",
+      "upstreamRef": "v1.3.1",
+      "sha256": "65b58e1e25b2a114157014736a3d9dfeaad8d41be1c8179866f144a2fb44ff9d",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "raspberrypi-userland",
+      "component": "Raspberry Pi userland runtime sources",
+      "version": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "archive": "raspberrypi-userland-a54a0db.tar.gz",
+      "url": "https://github.com/raspberrypi/userland/archive/a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976.tar.gz",
+      "upstreamRef": "a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+      "sha256": "e977277a280d76fdb6fc8c8f8c43d6e93aea29565253bf07f8d2b3356116c2fc",
+      "role": "bundled-native-source-linux-arm64"
+    },
+    {
+      "id": "speex",
+      "component": "Speex",
+      "version": "1.2.1",
+      "archive": "speex-1.2.1.tar.gz",
+      "url": "https://ftp.osuosl.org/pub/xiph/releases/speex/speex-1.2.1.tar.gz",
+      "upstreamRef": "Speex-1.2.1",
+      "sha256": "4b44d4f2b38a370a2d98a78329fefc56a0cf93d1c1be70029217baae6628feea",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "srt",
+      "component": "SRT",
+      "version": "1.5.4",
+      "archive": "srt-1.5.4.tar.gz",
+      "url": "https://github.com/Haivision/srt/archive/refs/tags/v1.5.4.tar.gz",
+      "upstreamRef": "v1.5.4",
+      "sha256": "d0a8b600fe1b4eaaf6277530e3cfc8f15b8ce4035f16af4a5eb5d4b123640cdd",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "svt-av1",
+      "component": "SVT-AV1",
+      "version": "3.1.2",
+      "archive": "SVT-AV1-3.1.2.tar.gz",
+      "url": "https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v3.1.2/SVT-AV1-v3.1.2.tar.gz",
+      "upstreamRef": "v3.1.2",
+      "sha256": "d0d73bfea42fdcc1222272bf2b0e2319e9df5574721298090c3d28315586ecb1",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "vo-amrwbenc",
+      "component": "VisualOn AMR-WB encoder",
+      "version": "0.1.3",
+      "archive": "vo-amrwbenc-0.1.3.tar.gz",
+      "url": "https://sourceforge.net/projects/opencore-amr/files/vo-amrwbenc/vo-amrwbenc-0.1.3.tar.gz/download",
+      "upstreamRef": "vo-amrwbenc-0.1.3",
+      "sha256": "5652b391e0f0e296417b841b02987d3fd33e6c0af342c69542cbb016a71d9d4e",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "x264",
+      "component": "x264 (optional, not enabled in the inspected FFmpeg build)",
+      "version": "stable snapshot pinned to commit b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "archive": "x264-b35605a.tar.gz",
+      "url": "https://code.videolan.org/api/v4/projects/videolan%2Fx264/repository/archive.tar.gz?sha=b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "upstreamRef": "b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "sha256": "c07b1c6a8faf8b7078fc44b1ae563f1673900b604744133cc728606d8c7794ec",
+      "role": "optional-build-input-not-bundled"
+    },
+    {
+      "id": "x265",
+      "component": "x265 (optional, not enabled in the inspected FFmpeg build)",
+      "version": "3.4",
+      "archive": "x265-3.4.tar.gz",
+      "url": "https://github.com/videolan/x265/archive/3.4.tar.gz",
+      "upstreamRef": "3.4",
+      "sha256": "544d147bf146f8994a7bf8521ed878c93067ea1c7c6e93ab602389be3117eaaf",
+      "role": "optional-build-input-not-bundled"
+    },
+    {
+      "id": "zimg",
+      "component": "zimg",
+      "version": "3.0.6",
+      "archive": "zimg-3.0.6.tar.gz",
+      "url": "https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.6.tar.gz",
+      "upstreamRef": "release-3.0.6",
+      "sha256": "be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "zlib",
+      "component": "zlib",
+      "version": "1.3.2",
+      "archive": "zlib-1.3.2.tar.gz",
+      "url": "https://zlib.net/zlib-1.3.2.tar.gz",
+      "upstreamRef": "v1.3.2",
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "role": "ffmpeg-build-input"
+    },
+    {
+      "id": "zstd",
+      "component": "Zstandard native source",
+      "version": "1.5.7",
+      "archive": "zstd-1.5.7.tar.gz",
+      "url": "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
+      "upstreamRef": "v1.5.7",
+      "sha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3",
+      "role": "bundled-native-source"
+    },
+    {
+      "id": "zstd-jni",
+      "component": "zstd-jni Java/native wrapper source",
+      "version": "1.5.7-4",
+      "archive": "zstd-jni-1.5.7-4.tar.gz",
+      "url": "https://github.com/luben/zstd-jni/archive/refs/tags/v1.5.7-4.tar.gz",
+      "upstreamRef": "v1.5.7-4",
+      "sha256": "71b0e1d5fd0580725808524c21df0ccad329cfac83ad2d386fbde5a0fd616b3a",
+      "role": "bundled-source"
+    }
+  ],
+  "buildInputFiles": [
+    {
+      "path": "licenses/third-party/SOURCE-BUNDLE.md",
+      "upstreamRef": "Indagium matching-source and library replacement instructions",
+      "sha256": "2a513706dae8b38883fcf6200c9325897afa20536963c0a3b3e979fbca5e4262"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/classifier-binary-evidence.json",
+      "upstreamRef": "Inspected Maven FFmpeg classifier JAR SHA-256 and bundled runtime entries",
+      "sha256": "06776136dbbda09b602542b040584c767a1496324aef409a06bdde2e1f93187c"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/ffmpeg-classifier-configurations.json",
+      "upstreamRef": "Inspected Bytedeco 1.5.13 all-classifier configure commands",
+      "sha256": "02ceef2a681b285e4dec4825251d0b16e979193b57dfdae3c99ccc2a131877f8"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/gcc-13.4.0.diff",
+      "upstreamRef": "Homebrew/formula-patches commit 8bbfd6c920e63f6ed1bf143771bfbfed0a3aaa1d",
+      "sha256": "60b22ae7f5f78b41e12c51d8c6e99ba933a7e124454fe8cdbff7200505167949"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/gcc13-homebrew.rb",
+      "upstreamRef": "Homebrew/homebrew-core commit af36c21c1e30bdae763ec747504dff4ea25540f3, formula snapshot on 2025-09-20",
+      "sha256": "3539ff782ad920169ab594ba7a106bef478b2b842642d95573a62cd58ddee015"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/indagium-pinned-build-inputs.patch",
+      "upstreamRef": "Local overlay pinning mutable upstream FFmpeg source downloads to the archives in this lock",
+      "sha256": "4882adbf1dd66bc6f229e1777fc66b2d33806225e136841781693b0e97a37588"
+    },
+    {
+      "path": "licenses/third-party/recipe-inputs/msys2-gcc14-PKGBUILD",
+      "upstreamRef": "MSYS2 MINGW-packages commit 3127522154b79ff94dedc07a5c5a613c98c17a41, mingw-w64-gcc/PKGBUILD",
+      "sha256": "30b306552c01a59389c6ce3960a88a831629d6f955aa633dc7df880687f9c8a3"
+    }
+  ],
+  "requiredComponentIds": [
+    "alsa-lib",
+    "alsa-runtime",
+    "bcm-host",
+    "ffmpeg",
+    "freetype",
+    "gcc-libatomic",
+    "gcc-runtime-windows",
+    "harfbuzz",
+    "javacpp",
+    "javacv",
+    "lame",
+    "libaom",
+    "libdrm",
+    "libva",
+    "libva-drm",
+    "libvpx",
+    "libwebp",
+    "libxml2",
+    "mfx-dispatch",
+    "mingw-w64-crt",
+    "nv-codec-headers",
+    "opencore-amr",
+    "openh264",
+    "openssl",
+    "opus",
+    "speex",
+    "srt",
+    "svt-av1",
+    "vchiq-arm",
+    "vcos",
+    "vo-amrwbenc",
+    "winpthreads",
+    "zimg",
+    "zlib",
+    "zstandard-native",
+    "zstd-jni"
+  ],
+  "componentSourceIds": {
+    "javacv": [
+      "javacv-source",
+      "bytedeco-recipe"
+    ],
+    "javacpp": [
+      "javacpp-source",
+      "bytedeco-recipe"
+    ],
+    "ffmpeg": [
+      "ffmpeg",
+      "bytedeco-recipe"
+    ],
+    "zstd-jni": [
+      "zstd-jni"
+    ],
+    "libaom": [
+      "libaom"
+    ],
+    "svt-av1": [
+      "svt-av1",
+      "libaom"
+    ],
+    "zlib": [
+      "zlib"
+    ],
+    "lame": [
+      "lame"
+    ],
+    "speex": [
+      "speex"
+    ],
+    "opencore-amr": [
+      "opencore-amr"
+    ],
+    "vo-amrwbenc": [
+      "vo-amrwbenc"
+    ],
+    "openssl": [
+      "openssl"
+    ],
+    "openh264": [
+      "openh264"
+    ],
+    "libvpx": [
+      "libvpx"
+    ],
+    "alsa-lib": [
+      "alsa-lib"
+    ],
+    "freetype": [
+      "freetype"
+    ],
+    "harfbuzz": [
+      "harfbuzz"
+    ],
+    "opus": [
+      "opus"
+    ],
+    "libxml2": [
+      "libxml2"
+    ],
+    "srt": [
+      "srt"
+    ],
+    "libwebp": [
+      "libwebp"
+    ],
+    "zimg": [
+      "zimg"
+    ],
+    "gcc-libatomic": [
+      "gcc-runtime",
+      "gcc-formula-patch",
+      "bytedeco-recipe"
+    ],
+    "gcc-runtime-windows": [
+      "gcc-runtime-windows",
+      "msys2-gcc-package",
+      "mingw-w64"
+    ],
+    "mingw-w64-crt": [
+      "mingw-w64",
+      "msys2-gcc-package"
+    ],
+    "winpthreads": [
+      "mingw-w64",
+      "msys2-gcc-package"
+    ],
+    "libva": [
+      "libva-source",
+      "libva-source-orig",
+      "libva-source-debian"
+    ],
+    "libva-drm": [
+      "libva-source",
+      "libva-source-orig",
+      "libva-source-debian"
+    ],
+    "libdrm": [
+      "libdrm-source",
+      "libdrm-source-orig",
+      "libdrm-source-debian"
+    ],
+    "bcm-host": [
+      "raspberrypi-userland"
+    ],
+    "vchiq-arm": [
+      "raspberrypi-userland"
+    ],
+    "vcos": [
+      "raspberrypi-userland"
+    ],
+    "alsa-runtime": [
+      "alsa-lib"
+    ],
+    "mfx-dispatch": [
+      "mfx-dispatch"
+    ],
+    "nv-codec-headers": [
+      "nv-codec-headers"
+    ],
+    "zstandard-native": [
+      "zstd"
+    ]
+  },
+  "platformComponentIds": {
+    "macos-arm64": [
+      "ffmpeg",
+      "freetype",
+      "gcc-libatomic",
+      "harfbuzz",
+      "javacpp",
+      "javacv",
+      "lame",
+      "libaom",
+      "libvpx",
+      "libwebp",
+      "libxml2",
+      "nv-codec-headers",
+      "opencore-amr",
+      "openh264",
+      "openssl",
+      "opus",
+      "speex",
+      "srt",
+      "svt-av1",
+      "vo-amrwbenc",
+      "zimg",
+      "zlib",
+      "zstandard-native",
+      "zstd-jni"
+    ],
+    "windows-x64": [
+      "ffmpeg",
+      "freetype",
+      "gcc-runtime-windows",
+      "harfbuzz",
+      "javacpp",
+      "javacv",
+      "lame",
+      "libaom",
+      "libvpx",
+      "libwebp",
+      "libxml2",
+      "mfx-dispatch",
+      "mingw-w64-crt",
+      "nv-codec-headers",
+      "opencore-amr",
+      "openh264",
+      "openssl",
+      "opus",
+      "speex",
+      "srt",
+      "svt-av1",
+      "vo-amrwbenc",
+      "winpthreads",
+      "zimg",
+      "zlib",
+      "zstandard-native",
+      "zstd-jni"
+    ],
+    "linux-x64": [
+      "ffmpeg",
+      "freetype",
+      "harfbuzz",
+      "javacpp",
+      "javacv",
+      "lame",
+      "libaom",
+      "libdrm",
+      "libva",
+      "libva-drm",
+      "libvpx",
+      "libwebp",
+      "libxml2",
+      "mfx-dispatch",
+      "nv-codec-headers",
+      "opencore-amr",
+      "openh264",
+      "openssl",
+      "opus",
+      "speex",
+      "srt",
+      "svt-av1",
+      "vo-amrwbenc",
+      "zimg",
+      "zlib",
+      "zstandard-native",
+      "zstd-jni"
+    ],
+    "linux-arm64": [
+      "alsa-lib",
+      "alsa-runtime",
+      "bcm-host",
+      "ffmpeg",
+      "freetype",
+      "harfbuzz",
+      "javacpp",
+      "javacv",
+      "lame",
+      "libaom",
+      "libvpx",
+      "libwebp",
+      "libxml2",
+      "nv-codec-headers",
+      "opencore-amr",
+      "openh264",
+      "openssl",
+      "opus",
+      "speex",
+      "srt",
+      "svt-av1",
+      "vchiq-arm",
+      "vcos",
+      "vo-amrwbenc",
+      "zimg",
+      "zlib",
+      "zstandard-native",
+      "zstd-jni"
+    ]
+  },
+  "binaryArtifacts": [
+    {
+      "id": "ffmpeg-base",
+      "component": "org.bytedeco:ffmpeg",
+      "version": "8.0.1-1.5.13",
+      "classifier": null,
+      "archive": "ffmpeg-8.0.1-1.5.13.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13.jar",
+      "sha256": "04eea81256800ac56b46ecc86dd4340ec5bc8341e5ecf3df373abe0f4d352ad0",
+      "platform": null
+    },
+    {
+      "id": "ffmpeg-macosx-arm64",
+      "component": "org.bytedeco:ffmpeg",
+      "version": "8.0.1-1.5.13",
+      "classifier": "macosx-arm64",
+      "archive": "ffmpeg-8.0.1-1.5.13-macosx-arm64.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13-macosx-arm64.jar",
+      "sha256": "57b4cb109b60e246e0d55734bf83c9883bf9424df42816fa06af945549dba094",
+      "platform": "macos-arm64"
+    },
+    {
+      "id": "ffmpeg-windows-x86_64",
+      "component": "org.bytedeco:ffmpeg",
+      "version": "8.0.1-1.5.13",
+      "classifier": "windows-x86_64",
+      "archive": "ffmpeg-8.0.1-1.5.13-windows-x86_64.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13-windows-x86_64.jar",
+      "sha256": "cb570de36a555156e22cac3ddb21be9051e6b3df05142a29445773ea0e7fedb9",
+      "platform": "windows-x64"
+    },
+    {
+      "id": "ffmpeg-linux-x86_64",
+      "component": "org.bytedeco:ffmpeg",
+      "version": "8.0.1-1.5.13",
+      "classifier": "linux-x86_64",
+      "archive": "ffmpeg-8.0.1-1.5.13-linux-x86_64.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13-linux-x86_64.jar",
+      "sha256": "01da6cce8fb8686abd4a0be940edafcc199255cc97b37b28c49d4f696c1d9ef3",
+      "platform": "linux-x64"
+    },
+    {
+      "id": "ffmpeg-linux-arm64",
+      "component": "org.bytedeco:ffmpeg",
+      "version": "8.0.1-1.5.13",
+      "classifier": "linux-arm64",
+      "archive": "ffmpeg-8.0.1-1.5.13-linux-arm64.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/bytedeco/ffmpeg/8.0.1-1.5.13/ffmpeg-8.0.1-1.5.13-linux-arm64.jar",
+      "sha256": "2810546c9c82154ba9a389cdbdb1135db138604b04735806caa8b3cd5211aa50",
+      "platform": "linux-arm64"
+    },
+    {
+      "id": "zstd-jni-macos-arm64",
+      "component": "com.github.luben:zstd-jni",
+      "version": "1.5.7-4",
+      "classifier": "darwin_aarch64",
+      "archive": "zstd-jni-1.5.7-4-darwin_aarch64.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/github/luben/zstd-jni/1.5.7-4/zstd-jni-1.5.7-4-darwin_aarch64.jar",
+      "sha256": "79d3212ddb30943306b0698498a748ee1bba54271af57da8529c29b76e58c652",
+      "platform": "macos-arm64"
+    },
+    {
+      "id": "zstd-jni-windows-x64",
+      "component": "com.github.luben:zstd-jni",
+      "version": "1.5.7-4",
+      "classifier": "win_amd64",
+      "archive": "zstd-jni-1.5.7-4-win_amd64.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/github/luben/zstd-jni/1.5.7-4/zstd-jni-1.5.7-4-win_amd64.jar",
+      "sha256": "84f7b564ffa9b5e40582e3aca7cb9b4d0ea04d029c297fe99957d0845c49bff2",
+      "platform": "windows-x64"
+    },
+    {
+      "id": "zstd-jni-linux-x64",
+      "component": "com.github.luben:zstd-jni",
+      "version": "1.5.7-4",
+      "classifier": "linux_amd64",
+      "archive": "zstd-jni-1.5.7-4-linux_amd64.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/github/luben/zstd-jni/1.5.7-4/zstd-jni-1.5.7-4-linux_amd64.jar",
+      "sha256": "5383742fb9e7287a5d614460faf5da3b5164904f615c9e3135efbf4556eb8235",
+      "platform": "linux-x64"
+    },
+    {
+      "id": "zstd-jni-linux-arm64",
+      "component": "com.github.luben:zstd-jni",
+      "version": "1.5.7-4",
+      "classifier": "linux_aarch64",
+      "archive": "zstd-jni-1.5.7-4-linux_aarch64.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/github/luben/zstd-jni/1.5.7-4/zstd-jni-1.5.7-4-linux_aarch64.jar",
+      "sha256": "dc534b700476e9fd5c464d4bc872e8788f44b978c3a21f1f93376dc598c92a46",
+      "platform": "linux-arm64"
+    }
+  ],
+  "componentSourceVersions": {
+    "javacv": "1.5.13",
+    "javacpp": "1.5.13",
+    "ffmpeg": "8.0.1-1.5.13",
+    "zstd-jni": "1.5.7-4",
+    "zstandard-native": "1.5.7",
+    "libaom": "3.9.1",
+    "svt-av1": "3.1.2",
+    "zlib": "1.3.2",
+    "lame": "3.100",
+    "speex": "1.2.1",
+    "opencore-amr": "0.1.6",
+    "vo-amrwbenc": "0.1.3",
+    "openssl": "3.5.5",
+    "openh264": "2.6.0",
+    "libvpx": "1.15.2",
+    "alsa-lib": "1.2.14",
+    "freetype": "2.14.1",
+    "harfbuzz": "12.3.0",
+    "opus": "1.3.1",
+    "libxml2": "2.9.12",
+    "srt": "1.5.4",
+    "libwebp": "1.6.0",
+    "zimg": "3.0.6",
+    "gcc-libatomic": "13.4.0",
+    "gcc-runtime-windows": "14.1.0-3 (MSYS2)",
+    "mingw-w64-crt": "commit 90abf784ac344fe558e7e22cb5411d807862888d",
+    "winpthreads": "12.0.0.r81.g90abf784a-1",
+    "libva": "2.14.0-1 (Ubuntu 22.04 source package)",
+    "libva-drm": "2.14.0-1 (Ubuntu 22.04 source package)",
+    "libdrm": "2.4.113-2~ubuntu0.22.04.1",
+    "bcm-host": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+    "vchiq-arm": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+    "vcos": "commit a54a0dbb2b8dcf9bafdddfc9a9374fb51d97e976",
+    "alsa-runtime": "1.2.14",
+    "mfx-dispatch": "1.35.1",
+    "nv-codec-headers": "13.0.19.0"
+  },
+  "requiredSourceIds": [
+    "alsa-lib",
+    "bytedeco-recipe",
+    "ffmpeg",
+    "ffmpeg-binding-source",
+    "freetype",
+    "gcc-formula-patch",
+    "gcc-runtime",
+    "gcc-runtime-windows",
+    "harfbuzz",
+    "javacpp-source",
+    "javacv-source",
+    "lame",
+    "libaom",
+    "libdrm-source",
+    "libdrm-source-debian",
+    "libdrm-source-orig",
+    "libva-source",
+    "libva-source-debian",
+    "libva-source-orig",
+    "libvpx",
+    "libwebp",
+    "libxml2",
+    "mfx-dispatch",
+    "mingw-w64",
+    "msys2-gcc-package",
+    "nasm",
+    "nv-codec-headers",
+    "opencore-amr",
+    "openh264",
+    "openssl",
+    "opus",
+    "raspberrypi-userland",
+    "speex",
+    "srt",
+    "svt-av1",
+    "vo-amrwbenc",
+    "x264",
+    "x265",
+    "zimg",
+    "zlib",
+    "zstd",
+    "zstd-jni"
+  ]
+}

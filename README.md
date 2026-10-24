@@ -431,4 +431,4 @@ Indagium is source-available under the [PolyForm Perimeter License 1.0.0](LICENS
 
 You may not provide a product that competes with Indagium, including a free or paid substitute distributed under different branding. See the [license](LICENSE) for the complete terms.
 
-The Indagium name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The Indagium name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the [public licence index](https://indagium.com/licenses/) summarizes the media and application libraries. The app includes an offline third-party licence viewer. To assemble the pinned native media sources and legal texts with checksums, run `./gradlew prepareMediaSources`; see [source instructions](licenses/third-party/SOURCE-BUNDLE.md). The generated archive is a local build artifact, not a published download.

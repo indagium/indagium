@@ -36,9 +36,34 @@ verify:
   cache: *gradle_cache
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  # The licence-inventory checks wired into resource generation and `check` run Python.
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq python3
   script:
     - chmod +x gradlew
     - ./gradlew build
+
+media-sources:
+  stage: verify
+  needs:
+    - job: verify
+      optional: true
+  cache: *gradle_cache
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl python3
+  script:
+    - chmod +x gradlew
+    - ./gradlew prepareMediaSources
+  artifacts:
+    name: "Indagium-media-sources-$CI_COMMIT_REF_SLUG-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - build/Indagium-*-media-sources.tar.gz
+      - build/Indagium-*-media-sources.tar.gz.sha256
+      - build/Indagium-*-media-sources.tar.gz.manifest.json
+    expire_in: 90 days
 
 # Shared by the x64 and arm64 .deb jobs — identical packaging, different runner architecture.
 # jpackage only ever builds for the machine it runs on, so an arm64 .deb needs an arm64 runner.
@@ -46,7 +71,7 @@ verify:
   stage: package
   cache: *gradle_cache
   before_script:
-    - apt-get update -qq && apt-get install -y -qq desktop-file-utils fakeroot
+    - apt-get update -qq && apt-get install -y -qq desktop-file-utils fakeroot curl python3
   script:
     - chmod +x gradlew
     - ./gradlew packageDeb
@@ -89,17 +114,28 @@ verify:
         cp packaging/linux/indagium-mimeinfo.xml "$mimeinfo_file"
       fi
     - dpkg-deb -b "$workdir" "$deb"
-    - desktop-file-validate "$desktop_file"
-    - grep -q '^Exec=.* %F$' "$desktop_file"
+    - finaldir=$(mktemp -d)
+    - dpkg-deb -R "$deb" "$finaldir"
+    - final_desktop_file=$(find "$finaldir/opt" -maxdepth 3 -type f -name '*.desktop')
+    - desktop-file-validate "$final_desktop_file"
+    - app_version=$(sed -n 's/^app.version=//p' gradle.properties)
+    - python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform "$MEDIA_PLATFORM" --package-root "$finaldir"
+    - grep -q '^Exec=.* %F$' "$final_desktop_file"
     - rm -rf "$workdir"
+    - rm -rf "$finaldir"
   artifacts:
     paths:
       - build/compose/binaries/main/deb/*.deb
+      - build/Indagium-*-media-sources.tar.gz
+      - build/Indagium-*-media-sources.tar.gz.sha256
+      - build/Indagium-*-media-sources.tar.gz.manifest.json
     expire_in: 90 days
 
 package-linux-deb:
   extends: .package-linux-deb
-  needs: ["verify"]
+  needs: ["verify", "media-sources"]
+  variables:
+    MEDIA_PLATFORM: linux-x64
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
   artifacts:
@@ -111,6 +147,9 @@ package-linux-deb:
 # — verify is tag-only, and packageDeb compiles everything it needs anyway.
 package-linux-arm64-deb:
   extends: .package-linux-deb
+  needs: ["media-sources"]
+  variables:
+    MEDIA_PLATFORM: linux-arm64
   # small, not medium: the arm64 medium/large runners are Premium/Ultimate-only, so a medium tag
   # fails instantly with "no runners with these tags". small-arm64 is on every tier and matches
   # the small-amd64 spec (2 vCPU / 8 GB) the x64 .deb job above already builds on.
@@ -128,7 +167,7 @@ package-linux-arm64-deb:
 # part of the automatic tag pipeline.
 package-windows-msi:
   stage: package
-  needs: ["verify"]
+  needs: ["verify", "media-sources"]
   tags:
     - saas-windows-medium-amd64
   rules:
@@ -136,21 +175,32 @@ package-windows-msi:
       when: manual
       allow_failure: true
   before_script:
-    - choco install temurin21 -y --no-progress
+    - choco install temurin21 python3 -y --no-progress
     - refreshenv
   script:
     - .\gradlew.bat packageMsi
+    - $msi = (Get-ChildItem 'build/compose/binaries/main/msi' -Filter '*.msi' -File | Select-Object -First 1).FullName
+    - if (-not $msi) { throw 'The Windows MSI was not produced.' }
+    - $expanded = Join-Path $env:TEMP 'indagium-msi-expanded'
+    - New-Item -ItemType Directory -Force -Path $expanded | Out-Null
+    - $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$expanded`"") -Wait -PassThru
+    - if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed with exit code $($process.ExitCode)." }
+    - $appVersion = (Select-String -Path 'gradle.properties' -Pattern '^app\.version=(.+)$').Matches[0].Groups[1].Value
+    - python scripts/prepare_media_sources.py --app-version $appVersion --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform windows-x64 --package-root $expanded
   artifacts:
     name: "Indagium-windows-x64-$CI_COMMIT_TAG"
     paths:
       - build/compose/binaries/main/msi/*.msi
+      - build/Indagium-*-media-sources.tar.gz
+      - build/Indagium-*-media-sources.tar.gz.sha256
+      - build/Indagium-*-media-sources.tar.gz.manifest.json
     expire_in: 90 days
 
 # Optional, triggered manually — see package-windows-msi above. Runs on GitLab's Apple
 # Silicon (M1) SaaS runners, matching the arm64 macOS build GitHub Actions produces.
 package-macos-dmg:
   stage: package
-  needs: ["verify"]
+  needs: ["verify", "media-sources"]
   tags:
     - saas-macos-medium-m1
   rules:
@@ -158,14 +208,35 @@ package-macos-dmg:
       when: manual
       allow_failure: true
   before_script:
-    - brew install --quiet openjdk@21
+    - brew install --quiet openjdk@21 python@3.12
     - export JAVA_HOME="/opt/homebrew/opt/openjdk@21"
     - export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"
   script:
     - chmod +x gradlew
     - ./gradlew packageDmg
+    - |
+      set -euo pipefail
+      dmg=$(find build/compose/binaries/main/dmg -maxdepth 1 -type f -name '*.dmg' -print -quit)
+      test -n "$dmg"
+      ffmpeg_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/org.bytedeco/ffmpeg/8.0.1-1.5.13" -type f -name 'ffmpeg-8.0.1-1.5.13-macosx-arm64.jar' -print -quit)
+      zstd_jar=$(find "$HOME/.gradle/caches/modules-2/files-2.1/com.github.luben/zstd-jni/1.5.7-4" -type f -name 'zstd-jni-1.5.7-4-darwin_aarch64.jar' -print -quit)
+      test -n "$ffmpeg_jar" && test -n "$zstd_jar"
+      mountpoint=$(mktemp -d)
+      cleanup() {
+        hdiutil detach "$mountpoint" -quiet || true
+        rm -rf "$mountpoint"
+      }
+      trap cleanup EXIT
+      hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint" -quiet
+      app=$(find "$mountpoint" -maxdepth 2 -type d -name 'Indagium.app' -print -quit)
+      test -n "$app"
+      app_version=$(sed -n 's/^app.version=//p' gradle.properties)
+      python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform macos-arm64 --package-root "$app/Contents/app" --ffmpeg-jar "$ffmpeg_jar" --zstd-jar "$zstd_jar"
   artifacts:
     name: "Indagium-macos-arm64-$CI_COMMIT_TAG"
     paths:
       - build/compose/binaries/main/dmg/*.dmg
+      - build/Indagium-*-media-sources.tar.gz
+      - build/Indagium-*-media-sources.tar.gz.sha256
+      - build/Indagium-*-media-sources.tar.gz.manifest.json
     expire_in: 90 days
