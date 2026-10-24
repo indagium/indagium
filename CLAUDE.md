@@ -105,6 +105,7 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `ui/LogViewer.kt` | The row list; the only production caller that passes a `cancellationCheck` |
 | `ui/FilterPanel.kt` | Left sidebar; bound to `AppState` by `BoundFilterPanel` in `ui/FileView.kt` |
 | `ui/AnnotationPanel.kt` + `ui/AnnotationManager.kt` | Notes UI and its block-model mutations |
+| `ui/HomeTiling.kt` + `ui/HomeLayout.kt` | New tab tiling: split tree in `AppSettings.homeLayout` (JSON-only, codec in `HomeLayoutSettingsJson.kt`), pure geometry/drop/sanitize logic, manual pointer drag (not DnD), splitter commits on release |
 | `ui/AutosaveCodec.kt` | The on-disk format. **Append new token fields last** — see the versioning note below |
 | `debug/ControlServer.kt` + `debug/IndagiumToolOperations.kt` | Tool catalogue and handlers. Names must match or `IndagiumToolGateway`'s `init` throws |
 | `testing/run/TestRunCoordinator.kt` + `StepSequence.kt` | AI test runs: the coordinator (own IO scope, devices, cancel/close) and the per-step `finish_step` protocol. The tool catalogues are `debug/TestSuiteToolCatalog.kt`, `TestRunToolCatalog.kt`, `IssueToolCatalog.kt` (appended to `MCP_TOOLS`) |

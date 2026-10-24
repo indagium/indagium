@@ -433,7 +433,7 @@ streaming tab before launching `adb logcat`, and uses `TailCoordinator` to appen
 the recorder writes the raw log.
 
 The toolbar's Capture action focuses the existing live tab or creates a session-only **New capture**
-launcher tab. The launcher lists devices, actionable tool errors, and non-recording retained
+launcher tab (the New tab, §6.3). The launcher lists devices, actionable tool errors, and non-recording retained
 sessions. Starting a device closes the launcher and activates a normal `LogTab`; filters, selection,
 folding, search, and Notes therefore operate on a live capture through the same viewer path as a
 file-backed log. `LogTab.captureSessionId` marks an active stream and `isCaptureLauncher` marks the
@@ -756,6 +756,44 @@ those host tools and requires only the `org.freedesktop.Flatpak` talk permission
 cover process, archive, persistence, settings, selection bounds, cancellation, and mapping paths;
 they do not prove Compose layout fidelity, and live device/scrcpy verification across all supported
 platforms is unavailable in the current environment.
+
+### 6.3 The New tab: a tiling launcher
+
+The New tab (`HomeScreen`, `ui/HomeScreen.kt`; the same session-only tab that §6.2 calls the capture launcher) is a
+window-manager-style host of three sections, `HomeSectionId` `OPEN` (Open a log, `HomeOpenZone`), `CAPTURE`
+(`HomeCaptureSection`) and `TESTS` (`HomeTestsSection`, §26.15). `HomeScreen` only builds one `HomeSectionSlot` (icon, title,
+optional header action, body) per section and hands them to `HomeTilingHost` (`ui/HomeTiling.kt`).
+
+- **Model.** The arrangement is a split tree in `AppSettings.homeLayout` (`model/Model.kt`): `HomeLayoutLeaf(section, weight)` and
+  `HomeLayoutSplit(axis, children, weight)`, axis `ROW` or `COLUMN`. The default is `COLUMN[ROW[open, capture] at 1.6, tests at 1]`
+  (`DEFAULT_HOME_LAYOUT`). Hidden sections live in `homeHiddenSections` and are kept out of the tree until restored. `ui/HomeLayout.kt`
+  is UI-free: normalisation (empty splits dropped, single-child splits collapsed, same-axis child splits flattened), `dropHomeSection`,
+  `resizeHomeSplit` (the neighbour pair's total weight is constant; clamped to `HOME_MIN_PAIR_SHARE` and `HOME_MIN_SECTION_DP`),
+  `homeGeometry` (the one source of card and gap rectangles for layout, drop overlay, size labels and preset icons),
+  `homeDropTargetAt` (page-edge bands win over the card under the pointer), the five `HomeLayoutPreset`s and the `AppSettings.withHome*`
+  mutators (`withHomeSectionHidden` refuses to hide the last visible section; `withHomeSectionShown` re-adds at the trailing page
+  edge). The settings JSON codec is `ui/HomeLayoutSettingsJson.kt` (§13.4).
+- **Moving a section is a manual pointer drag, not Compose or AWT drag-and-drop.** The card's grip uses `detectMoveDragGestures`
+  (`ui/AppCursors.kt`) and an overlay draws the drop preview, label and the "Full width"/"Full height" page strips. A manual drag never
+  reaches the window's file-drop target (`App.kt`), the overlay can follow the pointer live, and a UI test can drive it. A drop is one
+  `updateSettings`.
+- **Splitters commit once.** `HDivider`/`VDivider` drags edit only an in-memory `draft` layout and write settings on release
+  (`onDragEnd`), because `AppState.updateSettings` autosaves synchronously. A focused splitter also resizes by 24 dp per arrow key.
+- **Fixed composition order.** The host's custom `Layout` receives its children flat, one `key(id)` per section in enum order, each
+  measured to its rect. Moving a section changes only its rect, so its remembered state and effects (the device poll, pairing dialogs,
+  filters) survive. Nested `Row`/`Column` would recompose it from scratch.
+- **Hidden means not composed.** A hidden section has no rect and is not composed, so a hidden Capture section does not poll adb
+  (the 3 s poll is a `LaunchedEffect` inside `HomeCaptureSection`). A "Hidden:" chip in the top bar restores it.
+- **Narrow windows.** Below `HOME_STACK_BELOW_DP` (720 dp) the sections stack in one vertical scroll in tree order, each at 75% of the
+  viewport height clamped to 320-560 dp; grips and splitters are off, hide and presets still work.
+- **Presets and tip.** The top bar shows a mini-icon per preset (drawn from `homeGeometry`; the active one is `isActiveIn`) and a
+  dismissible tip (`homeLayoutTipDismissed`); once dismissed, a "?" button shows it again.
+
+The Capture section is condensed: a device row (status, Refresh, pairing and tools actions, a picker when several devices are
+attached), a one-line summary of the recording options (`captureSettingsSummary`) with "Change…" opening `CaptureOptionsDialog`
+(`CaptureStartOptions` in a 640 dp dialog, plus "All capture settings…" which calls `AppState.openCaptureSettings`), device logging,
+Start capture with the reason when it is disabled (`captureStartBlockedHint`), and up to three unfinished sessions
+(`UnfinishedSessionsCompact`: Open and a ⋯ menu; "Manage all…" opens the full `UnfinishedCaptureSessionsPanel`).
 
 ---
 
@@ -1379,12 +1417,18 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `Dialogs.kt` / `NoteRewrite.kt` / `NoteRewriteDialog.kt` | Shared Markdown note editor and text-only rewrite preview; selection snapshots are guarded against stale drafts and Apply is one undoable editor change |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
-| `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | Session-only device launcher, live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
+| `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
+| `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. Top bar (tip, preset icons, hidden-section chips), section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
+| `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
+| `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |
+| `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | `HomeCaptureSection` (the condensed Capture section: device row, options summary with "Change…", Start, compact sessions; polls devices only while composed), live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
+| `CaptureOptionsDialog.kt` / `UnfinishedSessionsCompact.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture via `AppState.openCaptureSettings`) and its compact unfinished-sessions block (three rows with Open and ⋯, "Manage all…") |
 | `AutosaveCodec.kt` / `AutosaveScheduler.kt` / `FilterCodec.kt` / `DesktopStorage.kt` | Persistence: encoding, scheduling, the saved-filter library format, path resolution |
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
 | `Components.kt` / `Theme.kt` / `Shortcuts.kt` | Shared widgets, 20 theme palettes, the keyboard-shortcut catalogue |
 | `Tests*.kt` / `TestRun*.kt` / `Issue*.kt` / `Testing*.kt` / `TrackerWiring.kt` / `ReorderableColumn.kt` | The AI test-suites surface: Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), run dialog, live view and report, issue dialog, Settings sections, and the wiring that connects `testing/` to `AppState` (§26.2) |
+| `TestsSuiteHealth.kt` | The suite screen's Health tab: summary cards, the cases-by-last-12-runs grid, and the latest-failure card (§26.15) |
 
 ### 9.4 `debug` — automation
 
@@ -2119,6 +2163,23 @@ lives only in the OS keychain (§26.9.3). Test suites, runs and issues are store
 (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only, §26.3), not in the autosave.
 `AppSettings.proofreading` is also keyed-JSON-only; it defaults to enabled English (`en-US`), with
 `en-GB` as the alternate variant. The frozen positional settings decoder is unchanged.
+
+The New tab's tiling (§6.3) adds three more JSON-only settings, appended last to `settingsJson()` after `workflowAiSelections`
+(`ui/AutosaveCodec.kt:698-701`) and decoded by `homeLayoutSettingsFromJson()` (`ui/HomeLayoutSettingsJson.kt`), called from
+`settingsFromJson` (`:905`); like the rest they never enter the positional form.
+
+- `homeLayout`: the split tree. A split is `{"split":"row"|"column","w":1.6,"children":[...]}`, a leaf `{"section":"open"|"capture"|"tests","w":1}`.
+- `homeHiddenSections`: an array of the same section keys, in the order they were hidden.
+- `homeLayoutTipDismissed`: a boolean, default `false`.
+
+The decoder never throws, and a hand-edited or corrupt file still yields a layout holding every section exactly once. A node that is
+malformed, names an unknown section id, or nests deeper than `HOME_LAYOUT_MAX_DEPTH` (8) is dropped, then `sanitizeHomeLayoutState`
+(`ui/HomeLayout.kt`) makes the rest consistent: the first duplicate of a section wins; a weight that is non-finite or <= 0 becomes 1 and
+every weight is clamped to 0.05-20; a section that is both in the tree and hidden stays visible; a section in neither is appended at the
+trailing page edge, so a section added by a later version appears by itself; the tree is normalised (empty and single-child splits
+collapse, same-axis splits flatten); an empty tree, or every section hidden, falls back to `DEFAULT_HOME_LAYOUT` with nothing hidden.
+At least one section is therefore always visible. The mutators (`withHomeLayout`, `withHomeSectionHidden`) go through the same
+sanitizer, so settings written by the UI satisfy the same invariants.
 
 ### 13.5 Restore is metadata-only
 
@@ -3227,6 +3288,13 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Secrets stay off argv; fallback to memory; real macOS keychain round trip | `SecretStoreCommandTest`, `MacOsKeychainRoundTripTest` |
 | Tracker client (JSON and SSE, session header), issue creator, proxied tools | `TrackerMcpClientTest`, `TrackerIssueCreatorTest`, `TrackerToolsTest`, `TrackerSendTest` |
 | MCP authoring, run and issue tool contracts; per-call external approvals | `TestSuiteToolsGatewayTest`, `TestRunToolsGatewayTest`, `IssueToolsGatewayTest`, `ExternalScriptApprovalTest`, `ExternalRunApprovalTest`, `ExternalRerunApprovalTest`, `IndagiumToolGatewaySuspendTest` |
+| New tab layout: normalise, every drop branch, resize clamps, geometry, hit-testing, presets, hide/show rules | `HomeLayoutTest` |
+| New tab layout settings decode: round trip, defaults for `{}`/legacy, sanitizing of duplicate/unknown ids, bad weights and over-deep trees | `HomeLayoutSettingCodecTest` |
+| Tiling host: default arrangement, hide/restore, last section not hideable, preset click, one settings write per grip drag, splitter commit on release, tip | `HomeTilingUiTest` |
+| Condensed Capture section: device and start-hint helpers, options dialog, compact sessions (⋯ items, Discard confirmation, Manage all) | `CaptureLauncherTest`, `CaptureOptionsDialogUiTest`, `UnfinishedSessionsCompactUiTest`, `UnfinishedCaptureSessionsPanelUiTest` |
+| New tab Tests section: Run opens the suite with its run dialog, locked suite shows View, usage line only on Free; early-stop latest-run scan | `HomeTestsSectionUiTest`, `TestRunStoreTest` |
+| Case matrix and suite health numbers; bounded, newest-first compact outcomes; "#N" ordinals | `CaseRunMatrixTest`, `TestsSuiteHealthStateTest`, `TestRunStoreTest`, `TestsSuiteScreenStateTest` |
+| Case selection (keyboard, locked-cases notice, detail panel Run) and the Health tab (pass %, flaky badge, cell descriptions, Draft issue) | `TestsCaseSelectionStateTest`, `TestsSuiteSelectionUiTest`, `TestsSuiteHealthUiTest` |
 
 `AutosaveGoldenV1Test` is the interesting one architecturally: it is a **frozen fixture** that pins
 the legacy settings format. It is the reason the positional decoder cannot be deleted, and the reason
@@ -3314,9 +3382,14 @@ stricter one should have claimed. Add cases to `LogParserTest`.
 
 ### 22.4 Add a persisted setting
 
-1. Add the field to `AppSettings` (`model/Model.kt:704`) with a default.
-2. Add it to `settingsJson()` and `settingsFromJson()` (`ui/AutosaveCodec.kt:550,808`), keyed by
-   name.
+1. Add the field to `AppSettings` (`model/Model.kt:1293`) with a default.
+2. Add it to `settingsJson()` and `settingsFromJson()` (`ui/AutosaveCodec.kt:588,902`), keyed by
+   name, appended after the last existing field. A structured setting (a tree, a list of records)
+   gets its own codec file and a single call from each of the two functions, because
+   `AutosaveCodec.kt` is at detekt's per-file function limit; `ui/HomeLayoutSettingsJson.kt` is the
+   model. Its decoder must never throw and must sanitize whatever it reads (a hand-edited file is
+   valid input), so that a missing or malformed key gives the default and the result always
+   satisfies the setting's invariants.
 3. **Do not touch `settingsFromToken`** — the legacy positional decoder is frozen by
    `AutosaveGoldenV1Test`.
 4. If the setting belongs to a token-encoded type instead (tab, filter, annotation), **append the
@@ -5120,17 +5193,22 @@ before / after screenshot or, for a recorded row, the images of its `before` / `
 
 ### 26.15 The Tests workspace UI
 
-The workspace (`ui/TestsWorkspace.kt:85`, `TestsWorkspace`) is a full-tab surface (`ActiveSurface.Tests`). Its only state is
+The workspace (`ui/TestsWorkspace.kt:88`, `TestsWorkspace`) is a full-tab surface (`ActiveSurface.Tests`), opened from the New tab's Run tests section
+(`AppState.openTestsSuite(suiteId, openRunDialog)`, which sets the view state before `openTestsTab()`, because Tests is a singleton surface that
+composes from that state as soon as it is active) and from its tab chip in the tab strip; the main toolbar has no Tests button. Its only state is
 `TestsViewState` (`ui/TestsUiState.kt`, owned by `AppState`, in memory, never autosaved, so there is no `AutosaveCodec` change); the library
-itself lives in `TestLibraryStore` (§26.3). Every screen reads the shared `TestsUi` (`ui/TestsWidgets.kt:133`: the `AppState`, the view
+itself lives in `TestLibraryStore` (§26.3). Every screen reads the shared `TestsUi` (`ui/TestsWidgets.kt:134`: the `AppState`, the view
 state, the root `FocusRequester`, the banner and the key target) through `LocalTestsUi`.
 
 **Shell.** The root `Column` has no header strip: a recording banner (while `testStepRecordingSession` is set), the dismissible error/info
-banner, the edition-limit and read-only notices (`TestsLockedNotice`), then the navigation pane beside the centre. The pane is a tree
+banner, the library read-only notice (`TestsLockedNotice`), then the navigation pane beside the centre. There is no full-width edition
+banner: edition limits show as the nav footer's usage meter and, per suite, the slim locked-cases notice (suite screen below). The pane is a tree
 (`TestsNavPane`): a **Suites** header with a count, `+` (New suite) and ⋯ (Import suite…, Agent profiles…); each suite row has a caret
 and lists its cases when expanded (`TestsViewState.expandedSuiteIds`; the selected suite expands itself; `filterNavTree` makes the
 search box filter suites and cases, a case match expanding its suite); a **Library** group (Shared steps, Scripts, Examples for agents);
-an **Activity** group (Runs, Issues, with counts). The edition badge and the case count sit in the pane footer. Dragging a suite row's
+an **Activity** group (Runs, Issues, with counts). The pane footer shows, on a limited edition, `TestsUsageMeter` (`testsEditionUsage(library, limits)`, null when unlimited; the line from
+`editionUsageLine`, e.g. "Free · 1 of 1 suite · 5 of 5 cases", over a thin bar), otherwise the edition badge and the case count. No Upgrade link is
+shown anywhere; `AppState.openEditionUpgrade()` is an empty hook, called from nowhere, that marks where one will go. Dragging a suite row's
 grip reorders suites and dragging a case row's grip reorders the cases of that suite (`ReorderableColumn`, the case column nested in the
 suite's row; `moveTestCase`; both off while searching, in a read-only library and, for cases, in a read-only suite). Alt+↑/↓ on a
 focused nav row moves that row (a nested column consumes the key, so a case never moves its suite). Cases also reorder in the suite's table.
@@ -5141,20 +5219,21 @@ opens it as an overlay over a scrim (`TestsNarrowLayout`). `TestsCenter` picks t
 for `Suites`, from the selected suite and case.
 
 **Split screen and inspector.** Every centre screen is built with `TestsScreenScaffold`, which is `TestsSplitScreen`
-(`ui/TestsWidgets.kt:304`): `main | HDivider | inspector`, the inspector `inspectorWidthDp` wide (default 380, clamped 300–560 by
+(`ui/TestsWidgets.kt:305`): `main | HDivider | inspector`, the inspector `inspectorWidthDp` wide (default 380, clamped 300–560 by
 `clampTestsInspectorWidth`). When the centre plus inspector are narrower than `TESTS_INSPECTOR_STACK_BELOW_DP` (900 dp,
 `testsInspectorStacked`) the inspector stacks under the main content in one scroll column. A screen without an inspector passes `null`.
-Scrolling is `TestsScrollColumn` (`:278`: `verticalScroll` plus a `VerticalScrollbar` in the app's `appScrollbarStyle`, laid out like
+Scrolling is `TestsScrollColumn` (`:279`: `verticalScroll` plus a `VerticalScrollbar` in the app's `appScrollbarStyle`, laid out like
 `BoundedScrollBoxDp` so the scrollbar never takes part in sizing); no Tests screen uses a bare `verticalScroll`. Selectable rows are
-`TestsListRow` (`:343`, `HoverBox`-based, accent background while selected), screen titles `TestsPageHeader` (`:572`: title field, one
-primary button, ⋯ `TestsOverflowMenu`, optional breadcrumb), the inspector's top `TestsInspectorHeader` (`:635`).
+`TestsListRow` (`:346`, `HoverBox`-based, accent background while selected), screen titles `TestsPageHeader` (`:681`: title field, one
+primary button, ⋯ `TestsOverflowMenu`, optional breadcrumb), the inspector's top `TestsInspectorHeader` (`:752`).
 
-**Keyboard routing.** The root `Column` has `onPreviewKeyEvent { ui.routeKey(it) }` (`TestsWorkspace.kt:99`). `TestsUi.routeKey`
-(`TestsWidgets.kt:154`) offers a key-down to the one current `TestsKeyTarget` and only when **no text input has focus**: the shared
+**Keyboard routing.** The root `Column` has `onPreviewKeyEvent { ui.routeKey(it) }` (`TestsWorkspace.kt:102`). `TestsUi.routeKey`
+(`TestsWidgets.kt:155`) offers a key-down to the one current `TestsKeyTarget` and only when **no text input has focus**: the shared
 fields (`CommitTextField`, `InlineField`, the multi-line field) report their focus into `TestsUi.textFocus`, a `TextInputFocusTracker`
-(`ui/Components.kt:163`) provided through `LocalTextInputFocusTracker`, so arrows move the caret and Esc cancels an edit while typing. A
-screen registers itself with `TestsKeyTargetEffect` (`:186`) for as long as it is composed (the last one to register wins). Two do:
-the step list (`handleStepKey`, `TestsSteps.kt:161`: ↑/↓ select the previous/next step, ⌥↑/⌥↓ move the selected step through the same
+(`ui/Components.kt:164`) provided through `LocalTextInputFocusTracker`, so arrows move the caret and Esc cancels an edit while typing. A
+screen registers itself with `TestsKeyTargetEffect` (`:187`) for as long as it is composed (the last one to register wins). Three do:
+the suite's Cases tab (`handleCasesKey`, `TestsSuiteScreen.kt`: ↑/↓ select the previous/next case through `caseSelectionMovedBy`, Enter opens the
+selected case, Esc clears the selection), the step list (`handleStepKey`, `TestsSteps.kt:167`: ↑/↓ select the previous/next step, ⌥↑/⌥↓ move the selected step through the same
 `StepListOps.move` as the ⋯ menu, Esc closes the case-field editor) and the run report (`TestRunReport.kt`: ↑/↓ move the selected report
 row on the Results tab, `reportSelectionMovedBy`). Every popup, menu and clickable that can take focus calls `TestsUi.reclaimFocus()` when
 it closes (the CLAUDE.md focus gotcha), or the root handler stops receiving keys. The help dialog lists the keys under **Tests**
@@ -5167,10 +5246,10 @@ sets `TestsViewState.caseInspectorField`, which replaces the step editor in the 
 selecting a step, Done or Esc clears it. The steps header is "Steps N" over a wrapping row of visible compact buttons (`CaseStepsHeader`, `TestsStepAuthoring.kt`):
 **+ Add step** (appends a blank step after the selection), **Draft steps with AI…**, **Record from device…**, **Paste log lines as
 checks…**, **Improve steps with AI…**, and, only when they apply, **Insert shared sequence…** (shared steps exist) and **Rewrite with AI
-from saved recording** (stored recording evidence exists). A disabled button keeps its reason as a tooltip (`HintedButton`). `StepListSection` (`TestsSteps.kt:110`) draws fixed 34 dp rows
+from saved recording** (stored recording evidence exists). A disabled button keeps its reason as a tooltip (`HintedButton`). `StepListSection` (`TestsSteps.kt:116`) draws fixed 34 dp rows
 (`StepRow` in a `ReorderableColumn` with `fixedRowHeight`: grip on hover, number, action, kind badge, check summary, last-result dot, ⋯)
 and keeps one step selected while there are steps (`TestsViewState.selectedStepId`, per case or shared step), so the inspector is never
-empty. The inspector is `SelectedStepInspector` (`:284`): `TestsInspectorHeader` ("Step N of M") over `StepEditor` (Performed by, kind fields,
+empty. The inspector is `SelectedStepInspector` (`:292`): `TestsInspectorHeader` ("Step N of M") over `StepEditor` (Performed by, kind fields,
 Action, Expected, Checks, then collapsible Examples and **Advanced** with a one-line summary when closed). The inspector also shows, under the title, a strip of
 thumbnails of the step's golden screenshots (`StepScreenshotStrip`; a click opens Examples and scrolls to it) and, for a step that came from
 a recording whose evidence is stored, **Recorded screens** (`RecordedScreensPanel`: the stored before / after image, read off the UI thread
@@ -5182,23 +5261,59 @@ inspector. Each script row's ⋯ menu includes **Delete…** beside Move up/down
 from the list. The row and editor header share one confirmation dialog, bound to the requested script ID; deleting another row
 preserves the current selection, and references in steps, hooks and checks are described before confirmation.
 
-**Suite screen** (`TestsSuiteScreen.kt:87`). `TestsPageHeader` (suite name, **+ New case** (Secondary `HintedButton`, same enable rules and hint; the empty state offers a ghost one too), **▶ Run suite**, ⋯ Duplicate, Export…, Delete…), a last-run
+**Suite screen** (`TestsSuiteScreen.kt:134`). `TestsPageHeader` (suite name, **+ New case** (Secondary `HintedButton`, same enable rules and hint; the empty state offers a ghost one too), **Re-run failed (N)** (only after a finished run with failures; `rerunFailedCasesConfig` through the same `TestsUi.openRerunDialog(run)` as the report), **▶ Run suite**, ⋯ Duplicate, Export…, Delete…), a last-run
 line (status dot, `formatRunMoment`, cases, lanes, "N of M steps passed", Open report; "Loading runs…" until the history first loads,
-never "Not run yet"), and `UnderlineTabs` **Cases · Runs · Settings** (`SuiteTab`). Cases is a table of `TestsListRow`s (number, case with
-goal line, steps, latest result with one dot per lane and a tooltip, linked-issue count that opens Issues, ⋯ with Move up/down, Duplicate,
-Delete…; grip always visible for drag-reorder), switching to a compact row below `SUITE_COMPACT_BELOW_DP` (720 dp). Runs reuses the Runs
-screen's `RunHistoryList`. Settings groups Setup & teardown, Agent instructions and Variables.
+never "Not run yet"), and `UnderlineTabs` **Cases · Health · Runs · Settings** (`SuiteTab`). The screen is a `TestsScreenScaffold` whose inspector is
+the case detail panel, so it reuses `inspectorWidthDp`, the `HDivider` and the stacking below 900 dp.
+
+- **Cases** is a table of `TestsListRow`s (number, case with goal line, steps, **Last 6 runs**, latest result with one dot per lane and a tooltip,
+  linked-issue count that opens Issues, ⋯ with Move up/down, Duplicate, Delete…; grip always visible for drag-reorder), switching to a compact
+  row below `SUITE_COMPACT_BELOW_DP` (720 dp), where the Last 6 runs column is dropped. Last 6 runs is a row of 8 dp squares from the case matrix
+  (passed, failed, blocked or outlined for not in run), each with a content description. A slim, dismissible notice above the table
+  (`lockedCasesNoticeText`: "Cases 6–8 are read-only on Free. …"; null when nothing is locked or the whole suite is; dismissal is
+  `TestsViewState.lockedCasesNoticeDismissed`, session only) replaces the old full-width edition banner.
+- **Selection.** A click selects the row (`TestsViewState.previewCaseId`, session only) and opens the **case detail panel** (`CaseDetailPanel`:
+  "Case N", name, description, package and step-count chips, the steps with the status each had in the case's last run, "#N · date ·
+  duration · Open report →", **Run case** (`RunDialogTarget(suite, case)`), **Edit steps**, **Duplicate**). Opening the editor
+  (`selectedCaseId`) takes **Edit steps**, a second click on the selected row, or Enter; ↑/↓ move the selection, Esc clears it
+  (`handleCasesKey`; listed in the help dialog under **Tests**). The second-click rule avoids a double-click delay on every first click.
+- **Health** (`ui/TestsSuiteHealth.kt`, `SuiteHealthTab`) reads the matrix of the suite's newest 12 finished runs (`SUITE_HEALTH_RUN_LIMIT`):
+  summary cards (last run; pass rate over passed and failed runs, cancelled excluded; median duration; flaky cases; open issues with
+  "Review draft →"), the grid of every case against those runs (columns "#N", tooltip with date and status, per-case pass %, flaky badge,
+  ▶ Run case when runnable, locked cases dimmed with `LockBadge`), a legend, and, when a run failed, a **Latest failure** card. A case is flaky
+  when it both passed and failed inside the window or a run marked it flaky. The card is the only place that loads a full run:
+  `testRunCoordinator.loadRun(latestFailedRunId)`, then `firstFailure(buildMatrix(run))`, showing the judge's reasoning or observation
+  trimmed to 280 characters, **Open run log** and **Draft issue…** (`IssueDialogTarget.FromStep`).
+- **Runs** reuses the Runs screen's `RunHistoryList`. **Settings** groups Setup & teardown, Agent instructions and Variables.
+
+**Run history, outcomes and "#N".** `TestRunStore.listSuiteHistory` (`testing/store/TestRunStore.kt:115`) already scans the suite's run files; it now
+also keeps, for the newest 12 finished runs only, a compact `RunCaseOutcomes` (`testing/model/CaseRunHistory.kt`: per case the worst status
+across lanes and iterations, the slowest lane's duration, the flaky mark) in `StoredSuiteRunHistory.finishedOutcomes`, so a scan never
+holds more than the one full run it is decoding (a run file can be 64 MB). `TestRunCoordinator.loadSuiteRunHistory` merges this launch's
+finished live runs in; `deriveCaseRunMatrix(suite, outcomes)` (columns oldest to newest, a row per case, `NOT_IN_RUN` where a run lacked the
+case) and `deriveSuiteHealth(matrix)` are pure. `runOrdinals(summaries)` (`TestsUiState.kt`) numbers runs "#N" (oldest = 1) for display
+only: nothing stores it, so numbers shift when an older run is deleted and one run can carry different numbers in lists holding
+different runs. `rememberSuiteScreenData` (`TestsSuiteScreen.kt:176`) re-reads the disk only when its key changes, the key being
+(suite id, `testRunsFolderEpoch`, the ids of this suite's finished live runs); a running run changes `testRuns` many times a second, and
+those progress updates are merged in composition from the live snapshots instead of rescanning every run file.
+
+**New tab data.** The New tab's Tests section needs only each suite's newest finished run. `TestRunStore.latestSummariesBySuite`
+(`:152`) walks the run folders newest-first by `run.json` modification time and stops as soon as every requested suite (and an overall
+latest) has a finished run, within `scanLimit` folders; unfinished runs never count. `AppState.latestTestRunSummaries`
+(`ui/TestRunActions.kt`) calls it on IO over `activeTestFolders()`, never starts the coordinator, and lets live `testRuns` win.
+`HomeTestsSection` reloads on `testRunsFolderEpoch`, the ids of finished `testRuns` and the suite ids, and keys its issue counts on
+`issueStore.revision`. Its Run button opens the suite with its run dialog (`openTestsSuite`); a locked suite shows View instead.
 
 **Run report** (`TestRunReport.kt`). The header is `TestsPageHeader` with the re-run button (**Re-run failed (N)**, **Re-run interrupted (N)** or
-**Re-run failed and interrupted (N)**; only when N > 0 and the run is not active) and ⋯ (Export report…, Compare with…). `runVerdict(run)` (`TestRunUiState.kt:687`, pure) gives the verdict box its status and
-headline; `runMetaLine` gives the meta line (time range, cases × repeats, lanes, judge mode). `RunReportTab` (`:779`) is **Results ·
+**Re-run failed and interrupted (N)**; only when N > 0 and the run is not active; it opens the dialog through `TestsUi.openRerunDialog(run)`, shared with the suite header's **Re-run failed (N)**) and ⋯ (Export report…, Compare with…). `runVerdict(run)` (`TestRunUiState.kt:795`, pure) gives the verdict box its status and
+headline; `runMetaLine` gives the meta line (time range, cases × repeats, lanes, judge mode). `RunReportTab` (`TestRunUiState.kt:933`) is **Results ·
 Compare · Activity · Usage**. Results shows run warnings, the live view while active (`TestRunLiveView`), multi-select filter pills with
 counts (`TestRunReportFilter`, `reportFilterCounts`) and the case/step matrix (`buildMatrix`). The selected step's detail
 (`StepDetailFor`; Apply fix…, Mark as agent error, Create issue…) is the **inspector**; `firstNonPassingSelection` preselects the first
 non-passing step. Compare loads the previous run only while that tab or the picker is open. Activity and Usage are per lane.
 
-**Runs and Issues.** Runs (`TestsRunsScreen`, `:104`) is a suite dropdown, status pills with counts and `RunHistoryList` grouped by day
-(`groupRunsByDay`, `TestsUiState.kt:565`), "Loading runs…" until the first read finished. A run row is status chip · suite (or "N cases") · pass bar · note · clock · hover ⋯; the bar
+**Runs and Issues.** Runs (`TestsRunsScreen`, `TestRunReport.kt:117`) is a suite dropdown, status pills with counts and `RunHistoryList` grouped by day
+(`groupRunsByDay`, `TestsUiState.kt:753`), "Loading runs…" until the first read finished. A run row is status chip · suite (or "N cases") · pass bar · note · clock · hover ⋯; the bar
 (`RunPassBar`) and the "a/b" label (monospace, right-aligned) and the note live in fixed-width slots so every row's bar starts and ends at the same
 x, across day groups and in the suite's Runs tab. The row ⋯ and the report's ⋯ hold **Delete run…** (disabled while the run is queued or running);
 the Runs header ⋯ holds **Delete N shown runs…** (`deletableRuns` over the current suite filter and status pill, never a queued/running run);
@@ -5209,9 +5324,9 @@ inspector (Edit… primary and a danger **Delete…** button, ⋯ for Copy Markd
 **Delete N shown issues…** (every issue the search shows; a confirmation states the count), a read-only (newer-version) issue is never deleted from
 the UI, and the newest issue is selected when the screen opens.
 
-**Dialogs.** All Tests dialogs, including the confirmation dialogs, are built on `TestsDialogFrame` (`TestsWidgets.kt:1161`): 8 dp
+**Dialogs.** All Tests dialogs, including the confirmation dialogs, are built on `TestsDialogFrame` (`TestsWidgets.kt:1246`): 8 dp
 corners, 20 dp padding, 14 sp title, scrolling body with a scrollbar, a centred `DialogActionButton` footer; `TestsConfirmDialog`
-(`:1246`) is a thin wrapper that adds the focus reclaim. A `Dialog` wider than 580 dp needs `usePlatformDefaultWidth = false`
+(`:1331`) is a thin wrapper that adds the focus reclaim. A `Dialog` wider than 580 dp needs `usePlatformDefaultWidth = false`
 (CLAUDE.md), which every call site sets.
 
 **Theme and formatting.** Pass/success status is `ThemeColors.success` (`ui/Theme.kt:81`, appended last, derived per light/dark family
