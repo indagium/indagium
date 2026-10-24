@@ -53,13 +53,14 @@ class TestsSuiteScreenStateTest {
     private fun laneHistory(status: CaseStatus?) = SuiteCaseLaneHistory(lane, status, 48_000L, 2, emptyList(), 0)
 
     @Test
-    fun theSuiteHasExactlyThreeTabsInOrder() {
-        assertEquals(listOf("Cases", "Runs", "Settings"), SuiteTab.entries.map { it.label })
+    fun theSuiteHasExactlyFourTabsInOrder() {
+        assertEquals(listOf("Cases", "Health", "Runs", "Settings"), SuiteTab.entries.map { it.label })
     }
 
     @Test
     fun tabLabelsCarryCountsAndHideTheRunCountWhileLoading() {
         assertEquals("Cases (3)", suiteTabLabel(SuiteTab.Cases, 3, 0))
+        assertEquals("Health", suiteTabLabel(SuiteTab.Health, 3, 2))
         assertEquals("Runs (2)", suiteTabLabel(SuiteTab.Runs, 3, 2))
         assertEquals("Runs (0)", suiteTabLabel(SuiteTab.Runs, 3, 0))
         assertEquals("Runs", suiteTabLabel(SuiteTab.Runs, 3, null), "no count until the history loaded")

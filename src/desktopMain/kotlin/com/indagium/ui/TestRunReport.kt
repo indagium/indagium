@@ -76,7 +76,6 @@ import com.indagium.testing.run.compareTestRuns
 import com.indagium.testing.run.failedCaseIds
 import com.indagium.testing.run.interruptedCaseIds
 import com.indagium.testing.run.previousTerminalRunSummaryOfSameSuite
-import com.indagium.testing.run.rerunFailedCasesConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -437,11 +436,7 @@ private fun RunReport(run: TestRun, runDir: File) {
             breadcrumb = { TestsBreadcrumbLink("‹ Runs", onClick = { view.selectedRunId = null }, contentDescription = "Back to runs") },
             primary = if (rerunLabel != null && !active) {
                 {
-                    AppButton(rerunLabel, onClick = {
-                        rerunFailedCasesConfig(run).onSuccess { config ->
-                            view.runDialog = RunDialogTarget(run.suite.id, initialCaseIds = config.caseIds.orEmpty().toSet(), initialConfig = config)
-                        }.onFailure { ui.info(it.message ?: "Failed cases cannot be re-run.") }
-                    }, variant = ButtonVariant.Primary)
+                    AppButton(rerunLabel, onClick = { ui.openRerunDialog(run) }, variant = ButtonVariant.Primary)
                 }
             } else {
                 null
