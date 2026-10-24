@@ -1580,6 +1580,20 @@ data class AppSettings(
     val homeLayout: HomeLayoutNode = DEFAULT_HOME_LAYOUT,
     val homeHiddenSections: List<HomeSectionId> = emptyList(),
     val homeLayoutTipDismissed: Boolean = false,
+    // The log view's tiling layout (ui/LogViewLayout.kt). A null layout means "Classic derived from the legacy
+    // filterPanelWidth / annotationPanelWidth / rightSidebarSplit / compareSplit" (lazy migration); the tree, once stored, holds
+    // every section of its scope exactly once, and the *Hidden lists name the sections currently not shown (they keep their
+    // place in the tree). The compare view has its own layout and hidden list. JSON-only (ui/LogViewLayoutSettingsJson.kt),
+    // same rule as above: the frozen positional settings decoder must not gain a field.
+    val logViewLayout: TileNode<LogViewSectionId>? = null,
+    val logViewHidden: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
+    val logViewCollapsed: List<LogViewSectionId> = emptyList(),
+    val logViewTilesLocked: Boolean = false,
+    val lastLogViewPreset: LogViewPresetId = LogViewPresetId.CLASSIC,
+    val compareLayout: TileNode<LogViewSectionId>? = null,
+    val compareHidden: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
+    val lastComparePreset: LogViewPresetId = LogViewPresetId.COMPARE_GRID,
+    val compareSyncScroll: Boolean = false,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1621,6 +1635,42 @@ typealias HomeSplitAxis = TileAxis
 typealias HomeLayoutNode = TileNode<HomeSectionId>
 typealias HomeLayoutLeaf = TileLeaf<HomeSectionId>
 typealias HomeLayoutSplit = TileSplit<HomeSectionId>
+
+/** Which view a log-view tile belongs to: the single log view, the compare view, or both. */
+enum class LogViewScope { SINGLE, COMPARE, BOTH }
+
+/** The sidebar a log-view tile is toggled with in the tab strip; [NONE] tiles are never switched off by a group. */
+enum class LogViewTileGroup { NONE, FILTERS, NOTES, AI, VIDEO }
+
+/** The tiles of the log view and the compare view. [key] is the stable id stored in settings; declaration order is the filter panel's order. */
+enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val scope: LogViewScope) {
+    TAGS("tags", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    MESSAGE_RULES("message_rules", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    LOG_COMPOSITION("log_composition", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    HIGHLIGHTERS("highlighters", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    LOG_LEVEL("log_level", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    SEQUENCES("sequences", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    ISSUES("issues", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    SAVED_FILTERS("saved_filters", LogViewTileGroup.FILTERS, LogViewScope.BOTH),
+    LOG("log", LogViewTileGroup.NONE, LogViewScope.SINGLE),
+    ORIGINAL("original", LogViewTileGroup.NONE, LogViewScope.SINGLE),
+    LOG_A("log_a", LogViewTileGroup.NONE, LogViewScope.COMPARE),
+    LOG_B("log_b", LogViewTileGroup.NONE, LogViewScope.COMPARE),
+    ORIGINAL_A("original_a", LogViewTileGroup.NONE, LogViewScope.COMPARE),
+    ORIGINAL_B("original_b", LogViewTileGroup.NONE, LogViewScope.COMPARE),
+    NOTES("notes", LogViewTileGroup.NOTES, LogViewScope.BOTH),
+    DIAGRAMS("diagrams", LogViewTileGroup.NOTES, LogViewScope.BOTH),
+    AI("ai", LogViewTileGroup.AI, LogViewScope.BOTH),
+    VIDEO("video", LogViewTileGroup.VIDEO, LogViewScope.BOTH),
+    ;
+
+    companion object {
+        fun fromKey(key: String?): LogViewSectionId? = entries.firstOrNull { it.key == key }
+    }
+}
+
+/** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the last two are for the compare view. */
+enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS }
 
 const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
 

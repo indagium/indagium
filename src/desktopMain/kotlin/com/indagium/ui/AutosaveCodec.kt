@@ -699,6 +699,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("homeLayout", homeLayoutJson(homeLayout))
     put("homeHiddenSections", homeHiddenSectionsJson(homeHiddenSections))
     put("homeLayoutTipDismissed", homeLayoutTipDismissed)
+    // Log view / compare view tiling layout, JSON form only (see LogViewLayoutSettingsJson.kt).
+    putLogViewLayoutSettings(this@settingsJson)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -1053,7 +1055,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeLayout = home.layout,
         homeHiddenSections = home.hidden,
         homeLayoutTipDismissed = home.tipDismissed,
-    )
+    ).withLogViewLayoutSettingsFrom(o)
 }.getOrNull()
 
 /**
