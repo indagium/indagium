@@ -481,7 +481,27 @@ internal fun <K> resizeProjected(
 ): TileNode<K> {
     if (!gap.resizable) return fullRoot
     val resized = resizeTileSplit(projection.root, gap.path, gap.index, deltaDp, gap.splitExtent, minSizeDp, minPairShare, collapsed, collapsedExtentDp)
-    val split = nodeAt(resized, gap.path) as? TileSplit ?: return fullRoot
+    return writeBackPair(fullRoot, projection, gap, resized)
+}
+
+/**
+ * [resetTilePair] for a double-click on a [gap] of the projected tree's geometry: resets the projection, then writes the two
+ * siblings' new weights and sizes back into the matching siblings of [fullRoot]. Hidden siblings are untouched.
+ */
+internal fun <K> resetProjected(
+    fullRoot: TileNode<K>,
+    projection: TileProjection<K>,
+    gap: TileGap,
+    defaultDp: (TileNode<K>) -> Float?,
+): TileNode<K> {
+    if (!gap.resizable) return fullRoot
+    return writeBackPair(fullRoot, projection, gap, resetTilePair(projection.root, gap.path, gap.index, defaultDp))
+}
+
+// Copies the weights and pinned sizes of the two siblings around [gap] in [changed] (a change of the projected tree) to their
+// counterparts in [fullRoot].
+private fun <K> writeBackPair(fullRoot: TileNode<K>, projection: TileProjection<K>, gap: TileGap, changed: TileNode<K>): TileNode<K> {
+    val split = nodeAt(changed, gap.path) as? TileSplit ?: return fullRoot
     val before = split.children.getOrNull(gap.index - 1) ?: return fullRoot
     val after = split.children.getOrNull(gap.index) ?: return fullRoot
     val beforeAt = projection.fullIndexOf(gap.path, gap.index - 1)
