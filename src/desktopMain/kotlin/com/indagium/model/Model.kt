@@ -1595,20 +1595,32 @@ enum class HomeSectionId(val key: String) {
 }
 
 /** How a split lays its children out: [ROW] side by side (left to right), [COLUMN] stacked (top to bottom). */
-enum class HomeSplitAxis { ROW, COLUMN }
+enum class TileAxis { ROW, COLUMN }
 
-/** A node of the New tab's layout tree. [weight] is this node's share among its siblings (it is meaningless on the root). */
-sealed interface HomeLayoutNode {
+/**
+ * A node of a tiling layout tree (the New tab's and the log view's); [K] identifies a leaf's section. [weight] is this
+ * node's share among its siblings (meaningless on the root and on a pinned node). [sizeDp], when set, pins the node to that
+ * many dp along its parent's axis instead (see ui/TileLayout.kt for how pinned nodes are laid out and resized).
+ */
+sealed interface TileNode<K> {
     val weight: Float
+    val sizeDp: Float?
 }
 
-data class HomeLayoutLeaf(val section: HomeSectionId, override val weight: Float = 1f) : HomeLayoutNode
+data class TileLeaf<K>(val section: K, override val weight: Float = 1f, override val sizeDp: Float? = null) : TileNode<K>
 
-data class HomeLayoutSplit(
-    val axis: HomeSplitAxis,
-    val children: List<HomeLayoutNode>,
+data class TileSplit<K>(
+    val axis: TileAxis,
+    val children: List<TileNode<K>>,
     override val weight: Float = 1f,
-) : HomeLayoutNode
+    override val sizeDp: Float? = null,
+) : TileNode<K>
+
+// The New tab's names for the generic tiling types.
+typealias HomeSplitAxis = TileAxis
+typealias HomeLayoutNode = TileNode<HomeSectionId>
+typealias HomeLayoutLeaf = TileLeaf<HomeSectionId>
+typealias HomeLayoutSplit = TileSplit<HomeSectionId>
 
 const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
 
