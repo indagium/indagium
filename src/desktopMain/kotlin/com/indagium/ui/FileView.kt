@@ -50,6 +50,7 @@ internal fun BoundFilterPanel(
     onPanelFocusChanged: (Boolean) -> Unit = {},
     captureDeviceEvents: CaptureDeviceEventsModel? = null,
     onCaptureDeviceEventReturnFocus: () -> Unit = {},
+    host: SectionHost? = null,
 ) {
     if (!state.filterVisible) return
     // Grouped into one data class rather than five more lambdas on this already-~90-parameter
@@ -228,6 +229,7 @@ internal fun BoundFilterPanel(
         captureDeviceEvents = captureDeviceEvents,
         captureDeviceEventsState = state,
         onCaptureDeviceEventReturnFocus = onCaptureDeviceEventReturnFocus,
+        host = host,
     )
     HDivider { delta ->
         // Recompute live instead of closing over `width`/`liveMaxWidth()` as of the last
@@ -317,12 +319,7 @@ internal fun FileView(
         // otherwise happily squeeze LogViewer's weight(1f) share to nothing on a narrow window.
         var rowWidthPx by remember { mutableStateOf(0) }
         val rowDensity = LocalDensity.current
-        val retainedCaptureTimeline = state.captureTimelineFor(tab.id) ?: tab.captureTimeline
-        val hasTimelineOnlyVideoPanel = retainedCaptureTimeline != null &&
-            retainedCaptureTimeline.availabilityIntervals.isNotEmpty() &&
-            retainedCaptureTimeline.availabilityFramesRendered != true &&
-            (retainedCaptureTimeline.showUnavailableFrames ?: state.settings.captureSettings.showUnavailableFrames) &&
-            state.captureSnapshotSessionFor(tab.id)?.settings?.recordVideo != false
+        val hasTimelineOnlyVideoPanel = hasTimelineOnlyVideoPanel(state, tab)
         // Hoisted above the Row so the Filters panel can reserve the sidebar's minimum width the
         // same way the sidebar reserves the filter panel's rendered width below.
         val liveStatusSidebarVisible = state.videoPanelVisible &&
@@ -519,84 +516,20 @@ internal fun FileView(
                     },
                     notesVisible = notesVisibleForTab,
                     notesContent = {
-                        AnnotationPanel(
+                        BoundAnnotationPanel(
+                            state = state,
                             tab = tab,
-                            settings = state.settings,
-                            rewriteState = state,
-                            recentNotes = state.recentNotesForTab(tab),
-                            recentNotesMenuOpen = state.recentNotesMenuOpen,
-                            activeNotePath = state.activeNoteFilePath(tab),
-                            onToggleMd = { state.toggleMd(tab.id) },
-                            onCopyFormat = { format, done -> state.copyAnnotationFormatAsync(tab.id, format, done) },
-                            onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
-                            onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-                            onExportFrames = { state.exportAnnotationFrames(tab.id) },
-                            onSave = { state.saveAnalysis(tab.id) },
-                            onNewAnalysis = { state.newAnalysis(tab.id) },
-                            onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                            onOpenNote = { state.openNoteFileAsync(tab.id, it) },
-                            onLocateLog = { state.locateLogForTab(tab.id, it) },
-                            showUnverifiedRelinkNotice = state.logRelinkUnverifiedTabId == tab.id,
-                            onDismissUnverifiedRelinkNotice = { state.dismissLogRelinkUnverifiedNotice() },
-                            onUpdatePrefix = { state.setPrefix(tab.id, it) },
-                            onUpdateSuffix = { state.setSuffix(tab.id, it) },
-                            onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
-                            onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                            onRemoveBlock = { state.removeBlock(tab.id, it) },
-                            onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                            onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
-                            onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
-                            onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
-                            onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-                            onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
-                            onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
-                            onUpdateLogRefPresentation = { blockId, caption, presentation ->
-                                state.updateLogRefPresentation(tab.id, blockId, caption, presentation)
-                            },
-                            onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
-                            onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
-                            onImportLinkedDiagram = { blockId, source, dialect, confirm ->
-                                val diagramId = (tab.annotations.blocks.filterIsInstance<com.indagium.model.AnnBlock.Note>()
-                                    .firstOrNull { it.id == blockId }?.text?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
-                                    ?.attachment?.diagramId)
-                                val session = diagramId?.let { id -> state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id } }
-                                    ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
-                                if (session == null) {
-                                    state.pendingDiagramNotice = DiagramNotice(
-                                        "Couldn't import diagram edits",
-                                        "This linked diagram is not open in a workspace.",
-                                    )
-                                    com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
-                                } else {
-                                    state.seq3Sessions.importSource(session.id, source, dialect, confirm)
-                                }
-                            },
-                            diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
-                            onCreateDiagram = {
-                                state.seq3Sessions.begin(tab.id, tab.selected)
-                            },
-                            onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
-                            // seq3NotesSelection is a cheap list walk, but keyed on the two inputs it
-                            // actually reads so it isn't rerun on every recomposition (e.g. a selection
-                            // drag or an unrelated panel resize) — see that function's own doc.
-                            notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
-                            onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
-                            onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
                             width = annotationRenderedWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
                             },
-                            keyboardFocusVisible = state.keyboardFocusVisible,
-                            scrollStateStore = state.logViewerScrollStateStore,
-                            highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
-                            modifier = Modifier.fillMaxSize(),
                         )
                     },
-                    videoContent = if (state.videoPanelVisible && tab.captureSessionId != null) {
-                        { CaptureCard(state = state, tab = tab) }
-                    } else if (state.videoPanelVisible && (tab.attachedVideo != null || hasTimelineOnlyVideoPanel)) {
-                        { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
+                    videoContent = if (state.videoPanelVisible &&
+                        (tab.captureSessionId != null || tab.attachedVideo != null || hasTimelineOnlyVideoPanel)
+                    ) {
+                        { VideoTileBody(state = state, tab = tab) }
                     } else {
                         null
                     },
