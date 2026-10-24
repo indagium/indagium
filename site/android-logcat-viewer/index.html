@@ -41,7 +41,7 @@
           {
             "@type": "Question",
             "name": "Does Indagium capture logs directly from a connected device?",
-            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Existing files still open offline; see the Android logcat capture guide for setup." }
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Save a ZIP by default or choose Indagium Compact (.ind); both reopen in Indagium with available video linked to the log. Existing files still open offline; see the Android logcat capture guide for setup." }
           },
           {
             "@type": "Question",
@@ -99,7 +99,7 @@
           <article class="evidence-card"><span>02</span><h3>Android bugreports</h3><p>Open a bugreport's .zip or .7z archive directly and pick which content to load into the active tab, instead of extracting the whole archive to disk first.</p></article>
           <article class="evidence-card"><span>03</span><h3><a class="inline-link" href="/dlt-viewer/">DLT captures</a></h3><p>Open .dlt binary captures and raw DLT streams; frames are decoded as records, and non-verbose payloads are kept as readable text/hex (not interpreted through FIBEX or ARXML).</p></article>
           <article class="evidence-card"><span>04</span><h3>DLT Viewer exports</h3><p>Open DLT Viewer text and CSV exports the same way as a native logcat file, including split parts that repeat the CSV header row.</p></article>
-          <article class="evidence-card"><span>05</span><h3>Capture Android logcat live</h3><p>Connect over USB or Android 11+ wireless debugging to stream logcat and record screen video together. Save a ZIP and reopen it with the available video synchronized to the log.</p></article>
+          <article class="evidence-card"><span>05</span><h3>Capture Android logcat live</h3><p>Connect over USB or Android 11+ wireless debugging to stream logcat and record screen video together. Save a ZIP by default or choose <a class="inline-link" href="/ind-format/">Indagium Compact (.ind)</a>; reopen either archive in Indagium with available video synchronized to the log.</p></article>
         </div>
       </section>
       <section class="section split-callout" aria-labelledby="viewer-next-title">
@@ -112,7 +112,7 @@
         <p class="section-lede">Common questions about opening and reading logcat files, bugreports, and DLT captures in Indagium.</p>
         <div class="faq-list">
           <div><h3>What log formats can I open in Indagium's Android log viewer?</h3><p>Indagium opens logcat text in threadtime, time, brief, and bare formats (unrecognised lines are shown with tag RAW), plus DLT (.dlt) binary captures, raw DLT streams, and DLT Viewer text/CSV exports.</p></div>
-          <div><h3>Does Indagium capture logs directly from a connected device?</h3><p>Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Existing files still open offline; see the Android logcat capture guide for setup.</p></div>
+          <div><h3>Does Indagium capture logs directly from a connected device?</h3><p>Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Save a ZIP by default or choose <a class="inline-link" href="/ind-format/">Indagium Compact (.ind)</a>; both reopen in Indagium with available video linked to the log. Existing files still open offline; see the Android logcat capture guide for setup.</p></div>
           <div><h3>Is Indagium free to use?</h3><p>Yes, Indagium is free to use for both commercial and non-commercial purposes. It is source-available under the PolyForm Perimeter License, not open source.</p></div>
           <div><h3>Can I read logcat files without Android Studio?</h3><p>Yes. Android Studio's Logcat window follows a connected device; Indagium opens the saved .txt or .log file instead, as a focused desktop app for macOS, Windows, and Linux with filters, folded sequences, and side-by-side comparison.</p></div>
           <div><h3>How large a logcat file can the viewer open?</h3><p>Multi-gigabyte logs, with an optional split-on-open for the very biggest files.</p></div>
