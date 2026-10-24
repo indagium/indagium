@@ -1217,7 +1217,7 @@ internal fun FilterBarToolbarButton(
 }
 
 @Composable
-fun LogViewer(
+internal fun LogViewer(
     tab: LogTab,
     modifier: Modifier = Modifier,
     settings: AppSettings = AppSettings(),
@@ -1315,6 +1315,9 @@ fun LogViewer(
     // Capture archives expose their range exporter through the ordinary Export menu. Nullable and
     // last to preserve every existing preview/test/CompareView caller.
     onExportCaptureRange: (() -> Unit)? = null,
+    // Tiled mode (log-view tiling, ui/LogViewerTiles.kt): instead of one Column with banners and a draggable split, LogViewer emits
+    // the Original and Log tiles into the enclosing TilingSurface. null (every other caller) keeps the single Column below.
+    tiles: LogViewerTiles? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -1402,7 +1405,13 @@ fun LogViewer(
     fun toolbarRovingItems(): List<RovingItem> =
         toolbarActions.mapIndexed { idx, action -> RovingItem(idx.toString(), action.enabled) }
 
-    Column(modifier.fillMaxSize().background(tc.bg)) {
+    // The 34dp toolbar row. [leading] / [trailing] are only filled in tiled mode: the log tile's move grip before the
+    // buttons and its maximize button after them. Keyboard order (toolbarActions above) is unaffected.
+    @Composable
+    fun Toolbar(
+        leading: @Composable RowScope.() -> Unit = {},
+        trailing: @Composable RowScope.() -> Unit = {},
+    ) {
         Row(
             Modifier.fillMaxWidth().height(34.dp)
                 .background(tc.p)
@@ -1430,7 +1439,8 @@ fun LogViewer(
                 },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Spacer(Modifier.width(12.dp))
+            leading()
+            Spacer(Modifier.width(if (tiles == null) 12.dp else 4.dp))
             Box {
                 AppButton(
                     "Export ▾",
@@ -1500,6 +1510,7 @@ fun LogViewer(
                 onClick = onToggleUnfiltered,
                 modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("unfiltered")) tc.ac else Color.Transparent, CORNER_MD),
             )
+            trailing()
             Spacer(Modifier.width(8.dp))
             if (toolbarContextMenuOpen) {
                 ToolbarOptionsPopup(
@@ -1516,7 +1527,9 @@ fun LogViewer(
                 )
             }
         }
+    }
 
+    LogViewerFrame(tiled = tiles != null, modifier = modifier, background = tc.bg, toolbar = { Toolbar() }) { fill ->
         @Composable
         fun ItemList(
             listItems: List<LogItem>,
@@ -2559,181 +2572,219 @@ fun LogViewer(
                 }
             }
 
-            Column(
-                Modifier.fillMaxWidth().weight(1f)
-                    .onGloballyPositioned { containerH = it.size.height / density }
-            ) {
-                // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
-                Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
-                    SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
-                    if (showSearchScopeChip && unfilteredSearch.active &&
-                        (tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES)
-                    ) {
-                        val originalFieldSearch = unfilteredSearch
-                        SearchBar(
-                            tabId = tab.id,
-                            search = originalFieldSearch,
-                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Unfiltered" else null,
-                            mode = tab.searchMode,
-                            // The remaining Original field must still be able to reopen Filtered
-                            // after the user closes its sibling in Two searches mode.
-                            showModeSelector = tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active,
-                            sameModeIsNoop = selectedSearchModeIsFullyOpen,
-                            onModeChange = onSearchToggleScope,
-                            showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
-                            syncEnabled = settings.syncSplitPanelSelectionAndScroll,
-                            onSyncToggle = onToggleSearchSync,
-                            searchScopeBehavior = settings.searchScopeBehavior,
-                            lastManualSearchMode = settings.lastManualSearchMode,
-                            fieldState = searchFieldStates.field(originalFieldSearch.scope, originalFieldSearch.query),
-                            onQueryChange = onSearchQueryChange,
-                            onToggleCase = onSearchToggleCase,
-                            onNext = onSearchNext,
-                            onPrev = onSearchPrev,
-                            onClose = { scope ->
-                                onSearchClose(scope)
-                                runCatching { originalFocusRequester.requestFocus() }
-                            },
-                            onFocused = onSearchFocused,
-                            autoFocus = tab.focusedSearchScope == originalFieldSearch.scope,
-                        )
-                    }
-                    // Original panel's Δt values use its local selection, independent of the
-                    // Filtered panel's tab.selected below; the gutter width itself stays fixed.
-                    val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
-                    ColHeader(
-                        hasPidTid,
-                        showRowNumbers = settings.showRowNumbers,
-                        rowNumDigits = tab.logData.size.toString().length,
-                        showTimeDelta = tab.showTimeDelta,
-                        timeDeltaChars = originalTimeDeltaChars,
-                        hasTidMap = tab.tidMap != null,
-                        pidFieldChars = pidFieldChars,
-                        contentFontSizeSp = settings.fontSize,
-                    )
-                    ItemList(
-                        listItems = allItems,
-                        listSummary = computedAllItems.summary,
-                        boundsMap = allBoundsAbs,
-                        posY = allBoxPosY,
-                        effectiveTab = tab.copy(
-                            selected = localAllSelected,
-                            search = unfilteredSearch,
-                        ),
-                        itemOnSelRow = allOnSelRow,
-                        itemOnSelRowRange = allOnSelRowRange,
-                        itemOnSelectAll = allOnSelectAll,
-                        itemOnClearSelection = allOnClearSelection,
-                        itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
-                        itemsLoading = computedAllItems.loading,
-                        panelKey = "${tab.id}:original",
-                        listState = allLazyState,
-                        externalFr = originalFocusRequester,
-                        timeDeltaChars = originalTimeDeltaChars,
-                    )
-                }
-                VDivider { delta ->
-                    val cur = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
-                    splitDp = (cur + delta).coerceIn(50f, (containerH - 60f).coerceAtLeast(100f))
-                }
-                // Panel2 fills the rest with weight(1f).
-                // Find fields and selection mirror are independently controlled for each panel.
-                Column(Modifier.fillMaxWidth().weight(1f)) {
-                    SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
-                    // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view, not
-                    // the tab as a whole — it edits `tab.filter`, which only this panel (and the
-                    // single-view branch below) applies, so it renders here, directly above the
-                    // Find bar, same placement contract as SearchBar itself. This and the
-                    // single-view site below are the two mutually exclusive branches of
-                    // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given
-                    // tab, so exactly one FilterBar is ever composed despite there being two call
-                    // sites in source: the single-writer property FilterBar.kt's own header
-                    // documents still holds structurally. Do not "fix" this by rendering both.
-                    if (filterBar != null && filterBarActions != null) {
-                        FilterBar(
-                            tab = tab,
-                            model = filterBar,
-                            actions = filterBarActions,
-                            logFocusRequester = focusRequester,
-                        )
-                    }
-                    if ((tab.searchMode == SearchMode.FILTERED || tab.searchMode == SearchMode.TWO_SEARCHES) && filteredSearch.active
-                    ) {
-                        SearchBar(
-                            tabId = tab.id,
-                            search = filteredSearch,
-                            fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Filtered" else null,
-                            mode = tab.searchMode,
-                            showModeSelector = showSearchScopeChip,
-                            sameModeIsNoop = selectedSearchModeIsFullyOpen,
-                            onModeChange = onSearchToggleScope,
-                            showSyncToggle = showSearchScopeChip && tab.searchMode == SearchMode.TWO_SEARCHES,
-                            syncEnabled = settings.syncSplitPanelSelectionAndScroll,
-                            onSyncToggle = onToggleSearchSync,
-                            searchScopeBehavior = settings.searchScopeBehavior,
-                            lastManualSearchMode = settings.lastManualSearchMode,
-                            fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
-                            onSearchAllLines = if (showSearchScopeChip && tab.searchMode == SearchMode.FILTERED) onSearchAllLines else null,
-                            onQueryChange = onSearchQueryChange,
-                            onToggleCase = onSearchToggleCase,
-                            onNext = onSearchNext,
-                            onPrev = onSearchPrev,
-                            // Same fix as the single-view branch below: Escape removes the
-                            // focused find field entirely, so without an explicit refocus here
-                            // keyboard focus falls off the tree and App.kt's root
-                            // onPreviewKeyEvent/handleGlobalKey stops receiving Ctrl+F until a
-                            // click restores focus somewhere — reusing this panel's own
-                            // externalFr (wired to the Filtered ItemList below) fixes that.
-                            onClose = {
-                                onSearchClose(filteredSearch.scope)
-                                runCatching { focusRequester?.requestFocus() }
-                            },
-                            onFocused = onSearchFocused,
-                            autoFocus = tab.focusedSearchScope == filteredSearch.scope,
-                        )
-                    }
-                    val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
-                    ColHeader(
-                        hasPidTid,
-                        showRowNumbers = settings.showRowNumbers,
-                        rowNumDigits = tab.logData.size.toString().length,
-                        showTimeDelta = tab.showTimeDelta,
-                        timeDeltaChars = filteredTimeDeltaChars,
-                        hasTidMap = tab.tidMap != null,
-                        pidFieldChars = pidFieldChars,
-                        contentFontSizeSp = settings.fontSize,
-                    )
-                    ItemList(
-                        listItems = items,
-                        listSummary = computedItems.summary,
-                        boundsMap = rowBoundsAbs,
-                        posY = boxPosY,
-                        effectiveTab = tab.copy(search = filteredSearch),
-                        itemOnSelRow = { id, multi, range ->
-                            onSelRow(id, multi, range)
-                            if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
-                            if (effectiveSyncSelectionAndScroll && !multi && !range) {
-                                // Resolved by the rowClickSync LaunchedEffect below, not inline in
-                                // this callback (1.3(a)) — that used to run on syncScope with no
-                                // staleness guard, so a click landing inside the 250ms
-                                // LOADING_GRACE_MS window right after ANY expand (exactly what
-                                // pressing an Issues-panel entry does) would resolve against a
-                                // stale allItems and scroll to the wrong row with no retry.
-                                rowClickSyncId = id
-                                rowClickSyncRevision = syncSelectionAndScrollRevision
-                            }
+            // The Original pane: its Find bar (when open), column header and list. The banner (legacy) or the tile header (tiled)
+            // above it belongs to the host, which also decides [showPidTid].
+            @Composable
+            fun OriginalPane(showPidTid: Boolean) {
+                if (showSearchScopeChip && unfilteredSearch.active &&
+                    (tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES)
+                ) {
+                    val originalFieldSearch = unfilteredSearch
+                    SearchBar(
+                        tabId = tab.id,
+                        search = originalFieldSearch,
+                        fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Unfiltered" else null,
+                        mode = tab.searchMode,
+                        // The remaining Original field must still be able to reopen Filtered
+                        // after the user closes its sibling in Two searches mode.
+                        showModeSelector = tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active,
+                        sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                        onModeChange = onSearchToggleScope,
+                        showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
+                        syncEnabled = settings.syncSplitPanelSelectionAndScroll,
+                        onSyncToggle = onToggleSearchSync,
+                        searchScopeBehavior = settings.searchScopeBehavior,
+                        lastManualSearchMode = settings.lastManualSearchMode,
+                        fieldState = searchFieldStates.field(originalFieldSearch.scope, originalFieldSearch.query),
+                        onQueryChange = onSearchQueryChange,
+                        onToggleCase = onSearchToggleCase,
+                        onNext = onSearchNext,
+                        onPrev = onSearchPrev,
+                        onClose = { scope ->
+                            onSearchClose(scope)
+                            runCatching { originalFocusRequester.requestFocus() }
                         },
-                        itemOnSelRowRange = { ids ->
-                            onSelRowRange(ids)
-                            if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
-                        },
-                        panelKey = "${tab.id}:main",
-                        listState = filteredLazyState,
-                        externalFr = focusRequester,
-                        onFocusChangedExternal = onPanelFocusChanged,
-                        timeDeltaChars = filteredTimeDeltaChars,
+                        onFocused = onSearchFocused,
+                        autoFocus = tab.focusedSearchScope == originalFieldSearch.scope,
                     )
                 }
+                // Original panel's Δt values use its local selection, independent of the
+                // Filtered panel's tab.selected below; the gutter width itself stays fixed.
+                val originalTimeDeltaChars = rememberTimeDeltaChars(tab, allItems)
+                ColHeader(
+                    showPidTid,
+                    showRowNumbers = settings.showRowNumbers,
+                    rowNumDigits = tab.logData.size.toString().length,
+                    showTimeDelta = tab.showTimeDelta,
+                    timeDeltaChars = originalTimeDeltaChars,
+                    hasTidMap = tab.tidMap != null,
+                    pidFieldChars = pidFieldChars,
+                    contentFontSizeSp = settings.fontSize,
+                )
+                ItemList(
+                    listItems = allItems,
+                    listSummary = computedAllItems.summary,
+                    boundsMap = allBoundsAbs,
+                    posY = allBoxPosY,
+                    effectiveTab = tab.copy(
+                        selected = localAllSelected,
+                        search = unfilteredSearch,
+                    ),
+                    itemOnSelRow = allOnSelRow,
+                    itemOnSelRowRange = allOnSelRowRange,
+                    itemOnSelectAll = allOnSelectAll,
+                    itemOnClearSelection = allOnClearSelection,
+                    itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
+                    itemsLoading = computedAllItems.loading,
+                    panelKey = "${tab.id}:original",
+                    listState = allLazyState,
+                    externalFr = originalFocusRequester,
+                    timeDeltaChars = originalTimeDeltaChars,
+                )
+            }
+
+            // The Filtered pane of the split: filter bar, Find bar, column header and list.
+            @Composable
+            fun FilteredSplitPane(showPidTid: Boolean) {
+                // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view, not
+                // the tab as a whole — it edits `tab.filter`, which only this panel (and the
+                // single-view branch below) applies, so it renders here, directly above the
+                // Find bar, same placement contract as SearchBar itself. This and the
+                // single-view site below are the two mutually exclusive branches of
+                // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given
+                // tab, so exactly one FilterBar is ever composed despite there being two call
+                // sites in source: the single-writer property FilterBar.kt's own header
+                // documents still holds structurally. Do not "fix" this by rendering both.
+                if (filterBar != null && filterBarActions != null) {
+                    FilterBar(
+                        tab = tab,
+                        model = filterBar,
+                        actions = filterBarActions,
+                        logFocusRequester = focusRequester,
+                    )
+                }
+                if ((tab.searchMode == SearchMode.FILTERED || tab.searchMode == SearchMode.TWO_SEARCHES) && filteredSearch.active
+                ) {
+                    SearchBar(
+                        tabId = tab.id,
+                        search = filteredSearch,
+                        fieldLabel = if (tab.searchMode == SearchMode.TWO_SEARCHES) "Find in Filtered" else null,
+                        mode = tab.searchMode,
+                        showModeSelector = showSearchScopeChip,
+                        sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                        onModeChange = onSearchToggleScope,
+                        showSyncToggle = showSearchScopeChip && tab.searchMode == SearchMode.TWO_SEARCHES,
+                        syncEnabled = settings.syncSplitPanelSelectionAndScroll,
+                        onSyncToggle = onToggleSearchSync,
+                        searchScopeBehavior = settings.searchScopeBehavior,
+                        lastManualSearchMode = settings.lastManualSearchMode,
+                        fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
+                        onSearchAllLines = if (showSearchScopeChip && tab.searchMode == SearchMode.FILTERED) onSearchAllLines else null,
+                        onQueryChange = onSearchQueryChange,
+                        onToggleCase = onSearchToggleCase,
+                        onNext = onSearchNext,
+                        onPrev = onSearchPrev,
+                        // Same fix as the single-view branch below: Escape removes the
+                        // focused find field entirely, so without an explicit refocus here
+                        // keyboard focus falls off the tree and App.kt's root
+                        // onPreviewKeyEvent/handleGlobalKey stops receiving Ctrl+F until a
+                        // click restores focus somewhere — reusing this panel's own
+                        // externalFr (wired to the Filtered ItemList below) fixes that.
+                        onClose = {
+                            onSearchClose(filteredSearch.scope)
+                            runCatching { focusRequester?.requestFocus() }
+                        },
+                        onFocused = onSearchFocused,
+                        autoFocus = tab.focusedSearchScope == filteredSearch.scope,
+                    )
+                }
+                val filteredTimeDeltaChars = rememberTimeDeltaChars(tab, items)
+                ColHeader(
+                    showPidTid,
+                    showRowNumbers = settings.showRowNumbers,
+                    rowNumDigits = tab.logData.size.toString().length,
+                    showTimeDelta = tab.showTimeDelta,
+                    timeDeltaChars = filteredTimeDeltaChars,
+                    hasTidMap = tab.tidMap != null,
+                    pidFieldChars = pidFieldChars,
+                    contentFontSizeSp = settings.fontSize,
+                )
+                ItemList(
+                    listItems = items,
+                    listSummary = computedItems.summary,
+                    boundsMap = rowBoundsAbs,
+                    posY = boxPosY,
+                    effectiveTab = tab.copy(search = filteredSearch),
+                    itemOnSelRow = { id, multi, range ->
+                        onSelRow(id, multi, range)
+                        if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
+                        if (effectiveSyncSelectionAndScroll && !multi && !range) {
+                            // Resolved by the rowClickSync LaunchedEffect below, not inline in
+                            // this callback (1.3(a)) — that used to run on syncScope with no
+                            // staleness guard, so a click landing inside the 250ms
+                            // LOADING_GRACE_MS window right after ANY expand (exactly what
+                            // pressing an Issues-panel entry does) would resolve against a
+                            // stale allItems and scroll to the wrong row with no retry.
+                            rowClickSyncId = id
+                            rowClickSyncRevision = syncSelectionAndScrollRevision
+                        }
+                    },
+                    itemOnSelRowRange = { ids ->
+                        onSelRowRange(ids)
+                        if (effectiveSyncSelectionAndScroll) selectionSyncRevision = syncSelectionAndScrollRevision
+                    },
+                    panelKey = "${tab.id}:main",
+                    listState = filteredLazyState,
+                    externalFr = focusRequester,
+                    onFocusChangedExternal = onPanelFocusChanged,
+                    timeDeltaChars = filteredTimeDeltaChars,
+                )
+            }
+
+            if (tiles == null) {
+                Column(
+                    Modifier.fillMaxWidth().then(fill)
+                        .onGloballyPositioned { containerH = it.size.height / density },
+                ) {
+                    // Fixed height for Panel1 → cursor drag adds directly to splitDp → 1:1 tracking.
+                    Column(Modifier.fillMaxWidth().height(effectiveSplitDp.dp)) {
+                        SectionBanner("Original — $totalCnt lines", tc.seq1, tc)
+                        OriginalPane(hasPidTid)
+                    }
+                    VDivider { delta ->
+                        val cur = if (splitDp < 0f) maxOf(50f, (containerH - 10f) / 2f) else splitDp
+                        splitDp = (cur + delta).coerceIn(50f, (containerH - 60f).coerceAtLeast(100f))
+                    }
+                    // Panel2 fills the rest with weight(1f).
+                    // Find fields and selection mirror are independently controlled for each panel.
+                    Column(Modifier.fillMaxWidth().weight(1f)) {
+                        SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
+                        FilteredSplitPane(hasPidTid)
+                    }
+                }
+            } else {
+                // Tiled: Original above Log in the composition, whatever their rects. The split Column's containerH, which the open-
+                // split restore effect above waits on, comes from the Log tile instead.
+                tiles.scope.Tile(
+                    tiles.originalId,
+                    tiles.originalSlot(
+                        totalLines = totalCnt,
+                        followSelection = effectiveSyncSelectionAndScroll,
+                        onToggleFollow = onToggleSearchSync,
+                        onClose = onToggleUnfiltered,
+                        onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
+                    ) { info ->
+                        Column(Modifier.fillMaxSize().background(tc.bg)) {
+                            OriginalPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                        }
+                    },
+                )
+                tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
+                    Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
+                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing)
+                        FilteredSplitPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                    }
+                })
             }
         } else {
             val mainLazyState = scrollStates.lazyState("${tab.id}:main")
@@ -2857,67 +2908,84 @@ fun LogViewer(
                 }
                 onConsumeSearchNavigation(request.id)
             }
-            // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view — it edits
-            // `tab.filter`, which this single-view branch applies directly — so it renders here,
-            // directly above the Find bar, same placement contract as SearchBar itself. This and
-            // the split-view site above are the two mutually exclusive branches of
-            // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given tab, so
-            // exactly one FilterBar is ever composed despite there being two call sites in source:
-            // the single-writer property FilterBar.kt's own header documents still holds
-            // structurally. Do not "fix" this by rendering both.
-            if (filterBar != null && filterBarActions != null) {
-                FilterBar(
-                    tab = tab,
-                    model = filterBar,
-                    actions = filterBarActions,
-                    logFocusRequester = focusRequester,
+
+            // The Filtered pane of a single (non-split) log: filter bar, Find bar, column header and list. The enclosing Column (legacy)
+            // or the Log tile (tiled) is the host's; [showPidTid] is the host's call, too.
+            @Composable
+            fun SinglePane(showPidTid: Boolean) {
+                // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view — it edits
+                // `tab.filter`, which this single-view branch applies directly — so it renders here,
+                // directly above the Find bar, same placement contract as SearchBar itself. This and
+                // the split-view site above are the two mutually exclusive branches of
+                // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given tab, so
+                // exactly one FilterBar is ever composed despite there being two call sites in source:
+                // the single-writer property FilterBar.kt's own header documents still holds
+                // structurally. Do not "fix" this by rendering both.
+                if (filterBar != null && filterBarActions != null) {
+                    FilterBar(
+                        tab = tab,
+                        model = filterBar,
+                        actions = filterBarActions,
+                        logFocusRequester = focusRequester,
+                    )
+                }
+                if (filteredSearch.active && tab.searchMode == SearchMode.FILTERED) {
+                    SearchBar(
+                        tabId = tab.id,
+                        search = filteredSearch,
+                        mode = tab.searchMode,
+                        showModeSelector = showSearchScopeChip,
+                        sameModeIsNoop = selectedSearchModeIsFullyOpen,
+                        onModeChange = onSearchToggleScope,
+                        onSearchAllLines = if (showSearchScopeChip) onSearchAllLines else null,
+                        searchScopeBehavior = settings.searchScopeBehavior,
+                        lastManualSearchMode = settings.lastManualSearchMode,
+                        fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
+                        onQueryChange = onSearchQueryChange,
+                        onToggleCase = onSearchToggleCase,
+                        onNext = onSearchNext,
+                        onPrev = onSearchPrev,
+                        // Escape (SearchBar's own key handler) closes and returns focus to the log
+                        // row list — reusing this view's own externalFr rather than a second
+                        // FocusRequester the caller would otherwise need to hoist and manage.
+                        onClose = { scope ->
+                            onSearchClose(scope)
+                            runCatching { focusRequester?.requestFocus() }
+                        },
+                        onFocused = onSearchFocused,
+                        autoFocus = tab.focusedSearchScope == SearchScope.FILTERED,
+                    )
+                }
+                val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
+                ColHeader(
+                    showPidTid,
+                    showRowNumbers = settings.showRowNumbers,
+                    rowNumDigits = tab.logData.size.toString().length,
+                    showTimeDelta = tab.showTimeDelta,
+                    timeDeltaChars = mainTimeDeltaChars,
+                    hasTidMap = tab.tidMap != null,
+                    pidFieldChars = pidFieldChars,
+                    contentFontSizeSp = settings.fontSize,
+                )
+                ItemList(
+                    items, computedItems.summary, rowBoundsAbs, boxPosY,
+                    effectiveTab = tab.copy(search = filteredSearch),
+                    panelKey = "${tab.id}:main", listState = mainLazyState,
+                    externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
+                    timeDeltaChars = mainTimeDeltaChars,
                 )
             }
-            if (filteredSearch.active && tab.searchMode == SearchMode.FILTERED) {
-                SearchBar(
-                    tabId = tab.id,
-                    search = filteredSearch,
-                    mode = tab.searchMode,
-                    showModeSelector = showSearchScopeChip,
-                    sameModeIsNoop = selectedSearchModeIsFullyOpen,
-                    onModeChange = onSearchToggleScope,
-                    onSearchAllLines = if (showSearchScopeChip) onSearchAllLines else null,
-                    searchScopeBehavior = settings.searchScopeBehavior,
-                    lastManualSearchMode = settings.lastManualSearchMode,
-                    fieldState = searchFieldStates.field(filteredSearch.scope, filteredSearch.query),
-                    onQueryChange = onSearchQueryChange,
-                    onToggleCase = onSearchToggleCase,
-                    onNext = onSearchNext,
-                    onPrev = onSearchPrev,
-                    // Escape (SearchBar's own key handler) closes and returns focus to the log
-                    // row list — reusing this view's own externalFr rather than a second
-                    // FocusRequester the caller would otherwise need to hoist and manage.
-                    onClose = { scope ->
-                        onSearchClose(scope)
-                        runCatching { focusRequester?.requestFocus() }
-                    },
-                    onFocused = onSearchFocused,
-                    autoFocus = tab.focusedSearchScope == SearchScope.FILTERED,
-                )
+
+            if (tiles == null) {
+                SinglePane(hasPidTid)
+            } else {
+                tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
+                    Column(Modifier.fillMaxSize().background(tc.bg)) {
+                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing)
+                        SinglePane(pidTidColumnsVisible(hasPidTid, info.widthDp))
+                    }
+                })
             }
-            val mainTimeDeltaChars = rememberTimeDeltaChars(tab, items)
-            ColHeader(
-                hasPidTid,
-                showRowNumbers = settings.showRowNumbers,
-                rowNumDigits = tab.logData.size.toString().length,
-                showTimeDelta = tab.showTimeDelta,
-                timeDeltaChars = mainTimeDeltaChars,
-                hasTidMap = tab.tidMap != null,
-                pidFieldChars = pidFieldChars,
-                contentFontSizeSp = settings.fontSize,
-            )
-            ItemList(
-                items, computedItems.summary, rowBoundsAbs, boxPosY,
-                effectiveTab = tab.copy(search = filteredSearch),
-                panelKey = "${tab.id}:main", listState = mainLazyState,
-                externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
-                timeDeltaChars = mainTimeDeltaChars,
-            )
         }
     }
 }
@@ -4551,9 +4619,11 @@ private fun SectionBanner(label: String, color: Color, tc: ThemeColors) {
 }
 
 @Composable
-private fun ColumnScope.EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
+private fun EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
+    // Always the last child of its pane's Column, so fillMaxSize takes exactly what a weight(1f) would (and needs no ColumnScope,
+    // which a tiled LogViewer does not have).
     Column(
-        Modifier.fillMaxSize().weight(1f),
+        Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
         if (totalCount == 0) {
