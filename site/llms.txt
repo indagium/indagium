@@ -1,6 +1,6 @@
 # Indagium (version 1.8.10)
 
-> Indagium is an analysis-first Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens saved logcat files and adb bugreports, and can also capture live Android logcat with screen video over USB or Android 11+ wireless debugging. It filters, folds, compares, annotates, and investigates evidence, then exports notes and logs. Capture snapshots are portable ZIP files that include a synchronization anchor so an included video is linked to its log when reopened. Indagium is source-available under the PolyForm Perimeter License, not open source.
+> Indagium is an analysis-first Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens saved logcat files and adb bugreports, and can also capture live Android logcat with screen video over USB or Android 11+ wireless debugging. It filters, folds, compares, annotates, and investigates evidence, then exports notes and logs. Capture snapshots default to compatible ZIP archives, with experimental Indagium Compact (.ind) for opening in Indagium; it losslessly compresses logs and can use lossy AV1 video when smaller, while synchronization metadata links available video to its log. Indagium is source-available under the PolyForm Perimeter License, not open source.
 
 ## Pages
 
@@ -8,7 +8,8 @@
 - [Android Logcat Viewer](https://indagium.com/android-logcat-viewer/): Open and read large logcat text files, use the minimap and thread map, and compare tabs.
 - [Android Logcat Analyzer](https://indagium.com/logcat-analyzer/): Filter, highlight, search, fold sequences, and export findings.
 - [Sequence Diagrams](https://indagium.com/sequence-diagrams/): Create editable interaction diagrams from selected Android log rows or a filtered view, retain source evidence, and export an image snapshot or Mermaid/PlantUML source.
-- [Android Logcat Capture](https://indagium.com/android-logcat-capture/): Capture Android logcat and screen video over USB or wireless debugging in one session that waits through reboots and temporary disconnects; review device-event timing and export synchronized evidence.
+- [Android Logcat Capture](https://indagium.com/android-logcat-capture/): Capture Android logcat and screen video over USB or wireless debugging in one session that waits through reboots and temporary disconnects; review device-event timing and save ZIP by default or Compact capture archives.
+- [Indagium Compact (.ind)](https://indagium.com/ind-format/): Compare ZIP and Compact capture archives, learn about lossless log compression and optional AV1 conversion, and open or extract capture evidence.
 - [AI Tests](https://indagium.com/ai-tests/): Build Android suites with reusable steps, scripts, checks, and setup hooks; run cases on device lanes, inspect saved evidence and reports, and follow up with issues.
 - [Android Bug Report Viewer](https://indagium.com/android-bug-report-viewer/): Open adb bugreport .zip/.7z archives and choose logs to analyze.
 - [Log Analysis Workflow](https://indagium.com/log-analysis-workflow/): Compare the analysis workspace with generic log viewers and manual video attachment.

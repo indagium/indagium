@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Learn how Indagium Compact (.ind) packages Android capture logs, optional video, notes, markers, screenshots, and synchronization metadata." />
+    <link rel="canonical" href="https://indagium.com/ind-format/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content="Indagium Compact (.ind) Capture Archives | Indagium" />
+    <meta property="og:description" content="Indagium Compact is an experimental capture archive with losslessly compressed log data and optional AV1 video when it makes the video smaller." />
+    <meta property="og:url" content="https://indagium.com/ind-format/" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="Indagium Compact (.ind) Capture Archives | Indagium" />
+    <meta name="twitter:description" content="Indagium Compact is an experimental capture archive with losslessly compressed log data and optional AV1 video when it makes the video smaller." />
+    <title>Indagium Compact (.ind) Capture Archives | Indagium</title>
+    <link rel="stylesheet" href="/styles.css?v=20261024-2" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Android Logcat Capture", "item": "https://indagium.com/android-logcat-capture/" },
+          { "@type": "ListItem", "position": 3, "name": "Indagium Compact (.ind)", "item": "https://indagium.com/ind-format/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is Indagium Compact (.ind)?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "It is an experimental capture archive for Indagium. It can contain losslessly compressed log data, optional recorded video, notes, markers, screenshots, and synchronization metadata, and is intended to be opened in Indagium."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Indagium Compact convert the video?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "When video is included, AV1 conversion is lossy and can take extra time and working space. Indagium uses the converted video only when it is smaller, copies video that is already AV1, and keeps the original video when AV1 would not make it smaller or the encoder is unavailable."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Why choose ZIP instead of Compact?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "ZIP is the default and uses standard compression methods for broader compatibility with archive tools. Compact targets a smaller archive for opening in Indagium."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need to install zstd?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The zstd compression library is bundled with Indagium's desktop app, so nothing needs to be installed on the Android device or separately on the computer. If the bundled native library cannot load on the computer, Compact stores the log with DEFLATE instead."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I open or extract a Compact capture?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Use Open in Indagium or drag the .ind file onto the app. From an opened capture, choose Export → Export capture range… to choose an archive output for a time range or extract all files, the plain log, or the video as stored. Extraction always copies from the whole archive, turns off the time-range controls, and does not convert the video."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What if an attachment service rejects the .ind extension?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Choose ZIP for the capture, or place the .ind file inside a ZIP archive before attaching it to a service that rejects the .ind extension."
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a>
+      <nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
+      <a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a>
+    </header>
+    <main id="main">
+      <section class="page-hero capture-page-hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Android device capture <span>/</span> Archive formats</p>
+          <h1 id="page-title">Indagium Compact <em>(.ind)</em></h1>
+          <p class="page-lede">Compact is an experimental Indagium capture archive for keeping the log, optional screen video, notes, markers, screenshots, and synchronization metadata together. It losslessly compresses log data and can use AV1 video when that makes the video smaller. Open the archive in Indagium to continue the investigation.</p>
+          <div class="hero-actions"><a class="button" href="/android-logcat-capture/#capture-snapshots-title">See capture save options <span aria-hidden="true">→</span></a><a class="text-link" href="/android-logcat-capture/">Read the Android capture guide <span aria-hidden="true">→</span></a></div>
+        </div>
+      </section>
+
+      <section class="section" id="size-examples" aria-labelledby="compact-measured-title">
+        <p class="eyebrow">Measured exports <span>/</span> two emulator captures</p>
+        <h2 id="compact-measured-title">Real captures, <em>measured side by side.</em></h2>
+        <p class="section-lede">These examples compare complete ZIP and Compact archives from the same capture range. They show what happened in these two sessions; results vary with the log and screen content.</p>
+        <div class="comparison-table-wrap">
+          <table class="comparison-table">
+            <thead><tr><th scope="col">Capture</th><th scope="col">ZIP</th><th scope="col">Compact (.ind)</th><th scope="col">Size reduction</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">50-minute emulator capture</th><td>778.8 MB</td><td>61.8 MB</td><td>92.1% smaller</td></tr>
+              <tr><th scope="row">30-minute emulator capture</th><td>467.4 MB</td><td>38.6 MB</td><td>91.7% smaller</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="compact-measurement-note">Sizes use decimal MB (1 MB = 1,000,000 bytes), rounded to one decimal place; reductions are calculated from exact file sizes. Both pairs used the same complete export range. Hashes verified identical logs, notes, synchronization data, and mapping indexes; video duration and resolution matched within each pair. Most measured savings came from lossy H.264-to-AV1 video conversion.</p>
+      </section>
+
+      <section class="section" aria-labelledby="compact-contents-title">
+        <p class="eyebrow">One capture archive <span>/</span> linked evidence</p>
+        <h2 id="compact-contents-title">Keep the log and its context <em>together.</em></h2>
+        <p class="section-lede">An Indagium Compact archive uses the same capture contents and synchronization metadata as a ZIP export, with compact-specific compression choices. Depending on what was captured and selected, it can include the log, optional screen video, notes, markers, screenshots, and timing metadata that links the available video to the log.</p>
+        <div class="feature-matrix">
+          <article class="evidence-card"><span>LOG</span><h3>Lossless log compression</h3><p>The zstd compression library is included in Indagium; no separate installation is needed. If Indagium cannot load its bundled native library on this computer, the log uses DEFLATE, the standard ZIP compression method.</p></article>
+          <article class="evidence-card"><span>VIDEO</span><h3>AV1 only when it saves space</h3><p>Converting video to AV1 is lossy and can take extra time and working space. Compact uses that conversion only when the result is smaller. Video already in AV1 is copied; if conversion is unavailable or would not make the video smaller, the original video is kept.</p></article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="compact-comparison-title">
+        <p class="eyebrow">Two archive choices <span>/</span> choose at export</p>
+        <h2 id="compact-comparison-title">ZIP and Compact, <em>side by side.</em></h2>
+        <div class="comparison-table-wrap">
+          <table class="comparison-table">
+            <thead><tr><th scope="col">Choice</th><th scope="col">ZIP</th><th scope="col">Indagium Compact (.ind)</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Default and use</th><td>Selected by default; uses standard ZIP compression methods for broader compatibility with archive tools.</td><td>Optional experimental format, intended for smaller capture archives opened in Indagium.</td></tr>
+              <tr><th scope="row">Log</th><td>Stored with DEFLATE, the standard ZIP compression method.</td><td>Lossless zstd compression, built into Indagium. No separate installation needed.</td></tr>
+              <tr><th scope="row">Video</th><td>Keeps the video prepared for the export, without additional AV1 conversion.</td><td>Copies video already in AV1. Otherwise, encodes to AV1 and uses the result only if it is smaller; keeps the original if the encoder is unavailable or the result is not smaller.</td></tr>
+              <tr><th scope="row">Time and working space</th><td>No additional AV1 conversion step.</td><td>AV1 conversion is lossy and can take extra time and working space.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="section-lede">A Compact archive that uses zstd for its log may not be readable by standard unzip tools. Choose ZIP when archive-tool compatibility matters.</p>
+      </section>
+
+      <section class="section" aria-labelledby="compact-workflow-title">
+        <p class="eyebrow">Save <span>/</span> open <span>/</span> export</p>
+        <h2 id="compact-workflow-title">Choose the archive at the <em>point of use.</em></h2>
+        <div class="feature-matrix">
+          <article class="evidence-card"><span>01 · SAVE</span><h3>Choose ZIP or Compact</h3><p>In <b>Save snapshot</b>, use the Format section to choose ZIP or Indagium Compact (.ind); ZIP is selected by default. For a stopped or retained capture, use <b>Save Compact</b> to save the complete session.</p></article>
+          <article class="evidence-card"><span>02 · OPEN</span><h3>Open the archive in Indagium</h3><p>Choose <b>Open</b> in Indagium or drag and drop the .ind file onto the app. The log, available video, and capture metadata open together for review.</p></article>
+          <article class="evidence-card"><span>03 · EXPORT</span><h3>Extract the files you need</h3><p>From an opened capture, choose <b>Export → Export capture range…</b> to choose an archive output for a time range or extract all files to a folder, the plain .log, or the video as stored. Extraction always copies from the whole archive, turns off the time-range controls, and does not convert video.</p></article>
+          <article class="evidence-card"><span>04 · ATTACH</span><h3>Work around extension filters</h3><p>Some attachment services reject the .ind extension. Choose ZIP instead, or place the .ind file inside a ZIP archive before attaching it.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="faq" aria-labelledby="compact-faq-title">
+        <p class="eyebrow">Questions</p>
+        <h2 id="compact-faq-title">Compact, <em>answered.</em></h2>
+        <div class="faq-list">
+          <div><h3>What is Indagium Compact (.ind)?</h3><p>It is an experimental capture archive for Indagium. It can contain losslessly compressed log data, optional recorded video, notes, markers, screenshots, and synchronization metadata, and is intended to be opened in Indagium.</p></div>
+          <div><h3>Does Indagium Compact convert the video?</h3><p>When video is included, AV1 conversion is lossy and can take extra time and working space. Indagium uses the converted video only when it is smaller, copies video that is already AV1, and keeps the original video when AV1 would not make it smaller or the encoder is unavailable.</p></div>
+          <div><h3>Why choose ZIP instead of Compact?</h3><p>ZIP is the default and uses standard compression methods for broader compatibility with archive tools. Compact targets a smaller archive for opening in Indagium.</p></div>
+          <div><h3>Do I need to install zstd?</h3><p>No. The zstd compression library is bundled with Indagium's desktop app, so nothing needs to be installed on the Android device or separately on the computer. If the bundled native library cannot load on the computer, Compact stores the log with DEFLATE instead.</p></div>
+          <div><h3>How do I open or extract a Compact capture?</h3><p>Use Open in Indagium or drag the .ind file onto the app. From an opened capture, choose <b>Export → Export capture range…</b> to choose an archive output for a time range or extract all files, the plain log, or the video as stored. Extraction always copies from the whole archive, turns off the time-range controls, and does not convert the video.</p></div>
+          <div><h3>What if an attachment service rejects the .ind extension?</h3><p>Choose ZIP for the capture, or place the .ind file inside a ZIP archive before attaching it to a service that rejects the .ind extension.</p></div>
+        </div>
+      </section>
+
+      <section class="section guide-band" aria-labelledby="compact-next-title">
+        <p class="eyebrow">Continue with capture</p>
+        <h2 id="compact-next-title">From device session to <em>shareable evidence.</em></h2>
+        <div class="guide-links"><a href="/android-logcat-capture/#capture-snapshots-title"><span>Capture</span><b>See snapshot and saved session options →</b></a><a href="/android-logcat-viewer/"><span>Viewer</span><b>Open and investigate logcat evidence →</b></a><a href="/logcat-analyzer/"><span>Analysis</span><b>Filter and explain the evidence →</b></a></div>
+      </section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>
