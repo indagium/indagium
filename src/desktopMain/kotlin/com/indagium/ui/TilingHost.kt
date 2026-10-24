@@ -158,13 +158,14 @@ internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float)
  * [headerAction] before the header buttons, and the [body] that fills the rest of the card (the body does its own scrolling).
  * A [headerless] tile draws no header at all: its body brings its own bar and may place [TileScope.Grip] and
  * [TileScope.MaximizeButton] in it. [collapsible] / [hideable] / [maximizable] choose which header buttons show; [canHide] false
- * disables the hide button (the last visible tile).
+ * disables the hide button (the last visible tile). [iconTint] colours the header icon (null = the theme's secondary text colour).
  */
 internal class TileSlot(
     val icon: ImageVector,
     val title: String,
     val summary: String? = null,
     val headerAction: (@Composable RowScope.() -> Unit)? = null,
+    val iconTint: Color? = null,
     val headerless: Boolean = false,
     val collapsible: Boolean = false,
     val hideable: Boolean = true,
@@ -559,7 +560,7 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         if (s.gripsEnabled) TileGrip(s, id, slot.title)
-        if (parts.showIcon) Icon(slot.icon, contentDescription = null, tint = tc.ts, modifier = Modifier.size(15.dp))
+        if (parts.showIcon) Icon(slot.icon, contentDescription = null, tint = slot.iconTint ?: tc.ts, modifier = Modifier.size(15.dp))
         val title: @Composable (Modifier) -> Unit = { titleModifier ->
             AppText(
                 slot.title,
@@ -587,7 +588,8 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
             title(Modifier.weight(1f))
         }
         sizeText?.let { AppText(it, color = tc.td, fontSize = 10.sp, modifier = Modifier.testTag("$prefix-size-$key")) }
-        slot.headerAction?.invoke(this)
+        // The header actions may place TileScope.MaximizeButton, which names its tile after this local (as in a headerless body).
+        slot.headerAction?.let { action -> CompositionLocalProvider(LocalTileTitle provides slot.title) { action(this@Row) } }
         if (slot.collapsible && !s.stacked) {
             val label = if (collapsed) "Expand" else "Collapse"
             TileIconButton(

@@ -677,7 +677,10 @@ fun ColHeader(
             // from contentFontSizeSp (the row's own font), not COL_HEADER_FONT_SP — see
             // headerPidColumnWidth/pidFieldColumnWidth's own docs for why.
             val pidColWidth = headerPidColumnWidth(pidFieldChars, contentFontSizeSp.toFloat())
-            AppText("PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(pidColWidth))
+            AppText(
+                "PID", color = tc.td, fontSize = 9.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.width(pidColWidth).testTag("colheader-pid"),
+            )
             // TID is the same class of drift as PID above: entry.tid.toString().padStart(5) is a
             // genuinely fixed 5-char field in the row (unlike TIMESTAMP/TAG below, which are
             // unpadded free text with no fixed width to derive from), so it's sized the same way —
