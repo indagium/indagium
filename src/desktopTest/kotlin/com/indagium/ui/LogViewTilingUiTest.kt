@@ -15,6 +15,7 @@ import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -25,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.width
 import com.indagium.debug.AppLogger
+import com.indagium.model.ChromeEdge
 import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -33,6 +35,8 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarAlign
+import com.indagium.model.ToolbarPlacement
 import com.indagium.model.VoiceInputSettings
 import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.voice.VoiceAudio
@@ -105,7 +109,7 @@ class LogViewTilingUiTest {
     }
 
     /** Composes a Layout button over the FileView, in a host [width] x [height] dp. */
-    private fun setup(width: Int = 1100, height: Int = 700, showUnfiltered: Boolean = false, configure: (AppState) -> Unit = {}) {
+    private fun setup(width: Int = 1100, height: Int = 700, showUnfiltered: Boolean = false, chrome: Boolean = false, configure: (AppState) -> Unit = {}) {
         directory = createTempDirectory("log-view-tiling-ui").toFile()
         state = AppState(
             autosaveFile = File(directory, "state.cache"),
@@ -119,9 +123,16 @@ class LogViewTilingUiTest {
         configure(state)
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME, LocalVoiceInputUi provides voiceUi) {
-                Column(Modifier.size(width.dp, height.dp)) {
-                    Box(Modifier.fillMaxWidth().height(36.dp)) { LayoutMenuButton(state, onReclaimFocus = {}) }
-                    Box(Modifier.weight(1f).fillMaxWidth()) { state.tab(TAB_ID)?.let { FileView(state, it) } }
+                if (chrome) {
+                    // The real window chrome around the view: the toolbar's bar or its tile, the dock strips between them.
+                    Box(Modifier.size(width.dp, height.dp)) {
+                        ChromeScaffold(state) { state.tab(TAB_ID)?.let { FileView(state, it) } }
+                    }
+                } else {
+                    Column(Modifier.size(width.dp, height.dp)) {
+                        Box(Modifier.fillMaxWidth().height(36.dp)) { LayoutMenuButton(state, onReclaimFocus = {}) }
+                        Box(Modifier.weight(1f).fillMaxWidth()) { state.tab(TAB_ID)?.let { FileView(state, it) } }
+                    }
                 }
             }
         }
@@ -392,5 +403,178 @@ class LogViewTilingUiTest {
         }
         val logged = if (logFile.exists()) logFile.readText() else ""
         assertFalse("no tile layout id" in logged, "a composable was emitted outside a Tile: $logged")
+    }
+
+    // ── The toolbar as a tile ──────────────────────────────────────
+
+    private fun inLayout(s: AppState) {
+        s.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.IN_LAYOUT) }
+    }
+
+    // Presses [grip], pulls it past the touch slop and moves to the window point ([x], [y]) dp, leaving the finger down.
+    private fun dragGripTo(grip: String, x: Float, y: Float) {
+        val origin = bounds(grip)
+        val d = rule.density.density
+        val node = rule.onNodeWithTag(grip)
+        node.performTouchInput {
+            down(center)
+            moveBy(Offset(30f, 30f))
+        }
+        rule.waitForIdle()
+        node.performTouchInput { moveTo(Offset((x - origin.left.value) * d, (y - origin.top.value) * d)) }
+        rule.waitForIdle()
+    }
+
+    private fun centerOf(tag: String): Pair<Float, Float> = bounds(tag).let { (it.left.value + it.right.value) / 2f to (it.top.value + it.bottom.value) / 2f }
+
+    @Test
+    fun theToolbarTileShowsTheToolbarAboveTagsAndTheChromeDrawsNone() {
+        setup(height = 1000, chrome = true, configure = ::inLayout)
+        assertTrue(exists("tile-card-toolbar"))
+        assertEquals(1, rule.onAllNodesWithTag("main-toolbar").fetchSemanticsNodes().size, "one toolbar: the tile's")
+        assertTrue(exists("tile-grip-toolbar"))
+        assertFalse(exists("chrome-grip-toolbar"))
+        assertFalse(exists("main-toolbar-bar") && bounds("main-toolbar-bar").width.value > 0f, "the chrome draws no toolbar bar")
+        rule.onNodeWithTag("tile-card-toolbar").assertExists()
+        rule.onNodeWithContentDescription("New tab").assertExists()
+        // Slim, at the top of the left column, above Tags; its own bar, no header; nothing to hide, collapse or maximize.
+        assertTrue(bounds("tile-card-toolbar").bottom <= bounds("tile-card-tags").top)
+        assertEquals(80f, bounds("tile-card-toolbar").height.value, 1f)
+        assertEquals(bounds("tile-card-tags").left, bounds("tile-card-toolbar").left)
+        listOf("header", "hide", "collapse", "maximize", "size").forEach { assertFalse(exists("tile-$it-toolbar"), "no $it on the toolbar tile") }
+        // Its buttons work: New tab opens the home tab.
+        rule.onNodeWithContentDescription("New tab").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tabs.any { it.isCaptureLauncher })
+    }
+
+    @Test
+    fun theToolbarIsNoTileWhileItIsOnABar() {
+        setup(chrome = true)
+        assertFalse(exists("tile-card-toolbar"))
+        assertTrue(exists("main-toolbar"))
+        assertTrue(exists("chrome-grip-toolbar"))
+    }
+
+    @Test
+    fun theToolbarTileCannotBeHiddenAndIsNotInTheLayoutMenu() {
+        setup(chrome = true, configure = ::inLayout)
+        state.hideLogViewTile(LogViewSectionId.TOOLBAR)
+        rule.waitForIdle()
+        assertFalse(LogViewSectionId.TOOLBAR in state.settings.logViewHidden)
+        assertTrue(exists("tile-card-toolbar"))
+        state.updateSettings { it.copy(logViewHidden = it.logViewHidden + LogViewSectionId.TOOLBAR) }
+        rule.waitForIdle()
+        assertTrue(exists("tile-card-toolbar"), "even a hand-edited hidden list does not hide it")
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-panel-notes"))
+        assertFalse(exists("layout-menu-panel-toolbar"))
+    }
+
+    @Test
+    fun aStoredLayoutThatLacksTheToolbarTileGetsItBackWhileInLayout() {
+        setup(chrome = true) {
+            it.updateSettings { s -> s.copy(toolbarPlacement = ToolbarPlacement.IN_LAYOUT, logViewLayout = classicLogViewLayout(LogViewLegacySizes())) }
+        }
+        assertTrue(exists("tile-card-toolbar"))
+        // A layout edit stores the completed tree.
+        state.commitLogViewLayout(state.currentLogViewLayout())
+        assertTrue(LogViewSectionId.TOOLBAR in tileLeafSections(assertNotNull(state.settings.logViewLayout)))
+    }
+
+    @Test
+    fun draggingTheToolbarBarOverTheTilesShowsTheDropPreviewAndInsertsTheTileOnRelease() {
+        setup(chrome = true)
+        assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
+        val log = bounds("tile-card-log")
+        dragGripTo("chrome-grip-toolbar", log.left.value + log.width.value * 0.08f, log.top.value + log.height.value / 2f)
+        assertTrue(exists("tile-drop-preview"), "the normal tile drop preview")
+        assertFalse(exists("chrome-dock-tabs-end") && false)
+        assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement, "nothing is written while dragging")
+        rule.onNodeWithTag("chrome-grip-toolbar").performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement)
+        assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarFallbackPlacement, "the bar it left is the fallback")
+        assertTrue(LogViewSectionId.TOOLBAR in tileLeafSections(assertNotNull(state.settings.logViewLayout)))
+        assertTrue(exists("tile-card-toolbar"))
+        assertTrue(bounds("tile-card-toolbar").right <= bounds("tile-card-log").left, "left of the log, where it was dropped")
+        assertFalse(exists("chrome-grip-toolbar"))
+        assertFalse(exists("tile-drop-preview"))
+    }
+
+    @Test
+    fun draggingTheToolbarBarOntoADockStripStillDocksIt() {
+        setup(chrome = true)
+        val log = bounds("tile-card-log")
+        // Over the content's bottom edge strip (not the log's middle): the chrome's target wins and the tiles show none of theirs.
+        dragGripTo("chrome-grip-toolbar", log.left.value + log.width.value / 2f, log.bottom.value - 6f)
+        assertFalse(exists("tile-drop-preview"))
+        rule.onNodeWithTag("chrome-grip-toolbar").performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
+        assertFalse(exists("tile-card-toolbar"))
+    }
+
+    @Test
+    fun draggingTheToolbarTileOntoAnEdgeStripPutsItBackOnABar() {
+        setup(chrome = true, configure = ::inLayout)
+        // Press, pull past the slop; the chrome's strips appear and the tiles show no target of their own over one.
+        val grip = bounds("tile-grip-toolbar")
+        val d = rule.density.density
+        val node = rule.onNodeWithTag("tile-grip-toolbar")
+        node.performTouchInput {
+            down(center)
+            moveBy(Offset(30f, 30f))
+        }
+        rule.waitForIdle()
+        assertTrue(exists("chrome-dock-bottom-end"), "the dock strips show while the toolbar tile is dragged")
+        val (x, y) = centerOf("chrome-dock-bottom-end")
+        node.performTouchInput { moveTo(Offset((x - grip.left.value) * d, (y - grip.top.value) * d)) }
+        rule.waitForIdle()
+        assertFalse(exists("tile-drop-preview"), "no tile target under a dock strip")
+        assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement, "nothing is written while dragging")
+        node.performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
+        assertEquals(ChromeEdge.BOTTOM, state.settings.toolbarEdge)
+        assertEquals(ToolbarAlign.END, state.settings.toolbarAlign)
+        assertFalse(exists("tile-card-toolbar"))
+        assertFalse(exists("chrome-dock-bottom-end"))
+        assertTrue(exists("main-toolbar-bar"))
+        assertTrue(LogViewSectionId.TOOLBAR !in tileLeafSections(assertNotNull(state.settings.logViewLayout ?: state.currentLogViewLayout())))
+    }
+
+    @Test
+    fun movingTheToolbarTileToAnotherTileKeepsItInTheLayout() {
+        setup(chrome = true, configure = ::inLayout)
+        val log = bounds("tile-card-log")
+        dragGripTo("tile-grip-toolbar", log.left.value + log.width.value * 0.92f, log.top.value + log.height.value / 2f)
+        assertTrue(exists("tile-drop-preview"))
+        rule.onNodeWithTag("tile-grip-toolbar").performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement)
+        assertTrue(bounds("tile-card-toolbar").left >= bounds("tile-card-log").right, "right of the log now")
+    }
+
+    @Test
+    fun aMaximizedTileCoversTheToolbarTileSoTheChromeShowsTheFallbackBarMeanwhile() {
+        setup(chrome = true, configure = ::inLayout)
+        assertFalse(exists("main-toolbar-bar") && bounds("main-toolbar-bar").width.value > 0f)
+        rule.onNodeWithTag("tile-maximize-notes").performClick()
+        rule.waitForIdle()
+        assertFalse(exists("tile-card-toolbar"))
+        assertTrue(exists("main-toolbar"), "never left without the toolbar")
+        assertEquals(1, rule.onAllNodesWithTag("main-toolbar").fetchSemanticsNodes().size)
+        rule.onNodeWithTag("tile-maximize-notes").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("tile-card-toolbar"))
+    }
+
+    @Test
+    fun theToolbarTileIsASlimCardInTheStackedNarrowView() {
+        setup(width = 600, height = 700, chrome = true, configure = ::inLayout)
+        assertTrue(exists("tile-card-toolbar"))
+        assertEquals(TOOLBAR_STACKED_CARD_DP, bounds("tile-card-toolbar").height.value, 1f)
     }
 }

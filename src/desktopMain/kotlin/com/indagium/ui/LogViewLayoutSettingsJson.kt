@@ -5,6 +5,7 @@ import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.TileNode
+import com.indagium.model.ToolbarPlacement
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -62,22 +63,27 @@ private fun JsonObject.layoutAndHidden(
     hiddenKey: String,
     scope: LogViewScope,
     defaultHidden: List<LogViewSectionId>,
+    toolbarInLayout: Boolean,
 ): Pair<TileNode<LogViewSectionId>?, List<LogViewSectionId>> {
     val tree = logViewTileTreeFromJson(this[layoutKey])
     val hidden = idsFromJson(this[hiddenKey]) ?: defaultHidden
     if (tree == null) {
-        return null to sanitizeLogViewLayoutState(null, hidden, scope).second
+        return null to sanitizeLogViewLayoutState(null, hidden, scope, toolbarInLayout).second
     }
-    return sanitizeLogViewLayoutState(tree, hidden, scope).let { it.first to it.second }
+    return sanitizeLogViewLayoutState(tree, hidden, scope, toolbarInLayout).let { it.first to it.second }
 }
+
+// True when the settings object stores the toolbar as a tile of the layout; read from the raw key so the order the sections are decoded in
+// does not matter (the toolbar tile is kept in a stored single-view tree only then).
+private fun JsonObject.toolbarInLayout(): Boolean = (this["toolbarPlacement"] as? JsonPrimitive)?.contentOrNull == ToolbarPlacement.IN_LAYOUT.name
 
 /**
  * [this] with the log-view tiling fields read from [o] (the parsed settings object); absent or malformed keys leave the
  * defaults of a fresh [AppSettings]. Called from AutosaveCodec.settingsFromJson.
  */
 internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettings {
-    val single = o.layoutAndHidden("logViewLayout", "logViewHidden", LogViewScope.SINGLE, logViewHidden)
-    val compare = o.layoutAndHidden("compareLayout", "compareHidden", LogViewScope.COMPARE, compareHidden)
+    val single = o.layoutAndHidden("logViewLayout", "logViewHidden", LogViewScope.SINGLE, logViewHidden, o.toolbarInLayout())
+    val compare = o.layoutAndHidden("compareLayout", "compareHidden", LogViewScope.COMPARE, compareHidden, false)
     return copy(
         logViewLayout = single.first,
         logViewHidden = single.second,

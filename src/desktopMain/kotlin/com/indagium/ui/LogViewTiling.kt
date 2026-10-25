@@ -11,9 +11,11 @@ import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -38,13 +40,13 @@ import com.indagium.model.TileSplit
 import kotlin.math.abs
 
 // The single log view as tiles: FileView's Row of (filter panel | log | Notes / AI / Video sidebar) is one tiling surface here. The
-// content lambda emits the tiles in a FIXED order (filters, Original + Log, Notes, Diagram library, AI, Video) and branches only
+// content lambda emits the tiles in a FIXED order (Toolbar, filters, Original + Log, Notes, Diagram library, AI, Video) and branches only
 // on visibility, never on the layout, so moving a tile only changes its rect and never rebuilds its composition (the log's scroll,
 // the notes editor, a playing video all survive a drag). The pure rules live in LogViewLayout.kt / LogViewLayoutState.kt.
 
 private const val LOG_VIEW_TITLE_SP = 12f
 private const val LOG_VIEW_CORNER_DP = 8
-private const val LOG_VIEW_HOST_PAD_DP = 6
+internal const val LOG_VIEW_HOST_PAD_DP = 6
 private const val LOG_VIEW_STACKED_SHARE = 0.85f
 private const val LOG_VIEW_STACKED_MIN_DP = 280f
 private const val LOG_VIEW_STACKED_MAX_DP = 520f
@@ -95,6 +97,7 @@ internal fun logViewDefaultDp(node: TileNode<LogViewSectionId>): Float? {
     val leaves = tileLeafSections(node)
     return when {
         leaves == listOf(LogViewSectionId.LOG_LEVEL) -> DEFAULT_LOG_LEVEL_DP
+        leaves == listOf(LogViewSectionId.TOOLBAR) -> TOOLBAR_TILE_COLUMN_DP
         leaves.all { it.group == LogViewTileGroup.FILTERS } -> DEFAULT_FILTER_COLUMN_DP
         leaves.all { it.group != LogViewTileGroup.NONE } -> DEFAULT_RIGHT_COLUMN_DP
         else -> null
@@ -179,6 +182,7 @@ internal fun LogViewSurface(
     widthDp: Float,
     heightDp: Float,
     callbacks: TilingCallbacks<LogViewSectionId>,
+    external: TileExternalDrag<LogViewSectionId>? = null,
     content: @Composable TileScope<LogViewSectionId>.() -> Unit,
 ) {
     if (widthDp < LOG_VIEW_STACK_BELOW_DP) {
@@ -189,6 +193,8 @@ internal fun LogViewSurface(
             cardHeightDp = (heightDp * LOG_VIEW_STACKED_SHARE).coerceIn(LOG_VIEW_STACKED_MIN_DP, LOG_VIEW_STACKED_MAX_DP),
             spec = LOG_VIEW_CHROME_SPEC,
             callbacks = callbacks,
+            // The toolbar's card is a slim one, not a screenful.
+            heightOf = { id -> TOOLBAR_STACKED_CARD_DP.takeIf { id == LogViewSectionId.TOOLBAR } },
             content = content,
         )
     } else {
@@ -203,6 +209,7 @@ internal fun LogViewSurface(
             heightDp = heightDp,
             spec = LOG_VIEW_CHROME_SPEC,
             callbacks = callbacks,
+            external = external,
             content = content,
         )
     }
@@ -221,6 +228,14 @@ private fun LogViewTileSurface(
     val ctx = state.logViewTileContext(tab)
     val isVisible: (LogViewSectionId) -> Boolean = { logViewTileVisible(it, ctx, settings.logViewHidden) }
     val baseLayout = state.currentLogViewLayout()
+
+    // The chrome's toolbar bar can be dropped into these tiles: it asks the host to put the toolbar tile at the drop target.
+    val bridge = LocalToolbarDock.current
+    val currentBase by rememberUpdatedState(baseLayout)
+    DisposableEffect(bridge, state) {
+        bridge?.dropInLayout = { target -> state.updateSettings { it.withToolbarDroppedInLayout(dropTile(currentBase, LogViewSectionId.TOOLBAR, target)) } }
+        onDispose { bridge?.dropInLayout = null }
+    }
 
     // A capture tab keeps the video height remembered for its device: Video is pinned to that share of the host height while the tab
     // is active, and a resize of Video writes back to the per-device layout instead of the global one.
@@ -263,11 +278,17 @@ private fun LogViewTileSurface(
         onReclaimFocus = focus.returnToLog,
         dropLabel = ::logViewDropLabel,
         defaultDp = ::logViewDefaultDp,
+        // The toolbar tile can be dragged out of the tiles onto the window chrome's edge strips; see ToolbarTile.kt.
+        onDragPointer = { id, pointer -> if (id == LogViewSectionId.TOOLBAR) bridge?.tileDragPointerRoot = pointer },
+        takeDrop = { id, pointer -> id == LogViewSectionId.TOOLBAR && bridge?.tileRelease?.invoke(pointer) == true },
+        suppressDrop = { id -> id == LogViewSectionId.TOOLBAR && bridge?.let { b -> b.tileDragPointerRoot?.let(b::overChromeZone) } == true },
     )
     val content: @Composable TileScope<LogViewSectionId>.() -> Unit = {
         LogViewTiles(state, tab, focus, inputs, isVisible, collapsibleTiles, toggles) { videoExpanded = it }
     }
-    LogViewSurface(layout, isVisible, collapsedTiles, parked, settings.logViewTilesLocked, state.logViewMaximized, widthDp, heightDp, callbacks, content)
+    LogViewSurface(
+        layout, isVisible, collapsedTiles, parked, settings.logViewTilesLocked, state.logViewMaximized, widthDp, heightDp, callbacks, bridge?.external, content,
+    )
 }
 
 // The tiles, in the fixed emission order. Every composable here emits only through Tile (the filter panel through its
@@ -284,6 +305,7 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
     onVideoExpandedChange: (Boolean) -> Unit,
 ) {
     val visibleFilters = LOG_VIEW_FILTER_TILES.filterTo(HashSet()) { isVisible(it) }
+    ToolbarTile(state, focus.returnToLog)
     BoundFilterPanel(
         state = state,
         tab = tab,

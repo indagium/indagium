@@ -9,6 +9,7 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarPlacement
 
 // The log view's (and the compare view's) tiling layout, bound to the generic engine in TileLayout.kt: the presets and the
 // legacy-size derivation, which tiles are applicable / visible, the sanitizer that keeps a stored tree complete, the settings
@@ -76,6 +77,10 @@ internal val LOG_VIEW_FILTER_TILES: List<LogViewSectionId> = LogViewSectionId.en
 /** The tiles that hold the log itself: always visible, never hideable. */
 internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
+
+/** The tiles that cannot be hidden: the log tiles and the toolbar tile (the toolbar must always be reachable). */
+internal val LogViewSectionId.neverHidden: Boolean
+    get() = isLogTile || this == LogViewSectionId.TOOLBAR
 
 /** Geometry parameters of the log view: gaps, minimum tile size and the least pair share a resize leaves. */
 internal val LOG_VIEW_TILE_SPEC: TileGeometrySpec = TileGeometrySpec(
@@ -281,9 +286,13 @@ enum class LogViewLayoutPreset(
     }
 }
 
-/** The single log view's layout: the stored one, else Classic derived from the legacy [sizes]. */
+/**
+ * The single log view's layout: the stored one, else Classic derived from the legacy [sizes]; with the toolbar tile in it exactly while
+ * the toolbar is IN_LAYOUT (a stored tree that lacks it gets it at its default anchor, a stale one loses it), so the drawn layout
+ * is right even before the next commit sanitizes the stored one.
+ */
 internal fun effectiveLogViewLayout(settings: AppSettings, sizes: LogViewLegacySizes): LogViewNode =
-    settings.logViewLayout ?: LogViewLayoutPreset.CLASSIC.layout(sizes)
+    withToolbarTile(settings.logViewLayout ?: LogViewLayoutPreset.CLASSIC.layout(sizes), settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
 
 /** The compare view's layout: the stored one, else Compare grid derived from the legacy [sizes]. */
 internal fun effectiveCompareLayout(settings: AppSettings, sizes: LogViewLegacySizes): LogViewNode =
@@ -302,7 +311,7 @@ internal fun logViewPresetIsActive(preset: LogViewLayoutPreset, settings: AppSet
     val tree = if (compare) effectiveCompareLayout(settings, sizes) else effectiveLogViewLayout(settings, sizes)
     val hidden = if (compare) settings.compareHidden else settings.logViewHidden
     if (hidden.toSet() != preset.hidden) return false
-    val shown = withoutHidden(tree, hidden) ?: return false
+    val shown = withoutHidden(tree, hidden + LogViewSectionId.TOOLBAR) ?: return false
     val expected = withoutHidden(preset.layout(sizes), preset.hidden) ?: return false
     return tileLayoutShapeEquals(shown, expected)
 }
@@ -323,6 +332,7 @@ data class LogViewTileContext(
     val filterBarVisible: Boolean,
     val filterModeTags: Boolean,
     val hasVideoPanel: Boolean,
+    val toolbarInLayout: Boolean = false,
     val groupOn: (LogViewTileGroup) -> Boolean,
 )
 
@@ -341,19 +351,20 @@ fun logViewTileApplicable(id: LogViewSectionId, ctx: LogViewTileContext): Boolea
         LogViewSectionId.VIDEO -> ctx.hasVideoPanel
         LogViewSectionId.TAGS -> !ctx.filterBarVisible
         LogViewSectionId.MESSAGE_RULES -> !ctx.filterBarVisible && ctx.filterModeTags
+        LogViewSectionId.TOOLBAR -> ctx.toolbarInLayout
         else -> true
     }
 }
 
-/** Applicable, its group switched on and not in [hidden]; the log tiles ignore [hidden] (they cannot be hidden). */
+/** Applicable, its group switched on and not in [hidden]; the log tiles and the toolbar tile ignore [hidden] (they cannot be hidden). */
 fun logViewTileVisible(id: LogViewSectionId, ctx: LogViewTileContext, hidden: Collection<LogViewSectionId>): Boolean =
     logViewTileApplicable(id, ctx) &&
         (id.group == LogViewTileGroup.NONE || ctx.groupOn(id.group)) &&
-        (id.isLogTile || id !in hidden)
+        (id.neverHidden || id !in hidden)
 
 /** How many applicable tiles of [scope] the hidden list hides (the Layout button's badge); tiles off through a group do not count. */
 fun logViewHiddenBadgeCount(ctx: LogViewTileContext, hidden: Collection<LogViewSectionId>, scope: LogViewScope): Int =
-    hidden.distinct().count { !it.isLogTile && it.inScope(scope) && logViewTileApplicable(it, ctx) }
+    hidden.distinct().count { !it.neverHidden && it.inScope(scope) && logViewTileApplicable(it, ctx) }
 
 // ---------------------------------------------------------------------------------------------------------------
 // Sanitizing
@@ -426,27 +437,72 @@ private fun defaultPreset(scope: LogViewScope): LogViewLayoutPreset =
  *   Diagram library below Notes, Video above Notes, AI below Notes, a filter tile below its predecessor in declaration order,
  *   Tags above the first filter tile), and appended at the trailing page edge when the anchor is not in the tree either;
  * - an empty tree falls back to the default preset (Classic / Compare grid);
- * - the log tiles are never hidden, and the hidden list keeps only distinct tiles of [scope] (a hidden tile stays in the tree).
+ * - the log tiles and the toolbar tile are never hidden, and the hidden list keeps only distinct tiles of [scope] (a hidden tile
+ *   stays in the tree);
+ * - the toolbar tile ([LogViewSectionId.TOOLBAR]) belongs in a single view's tree exactly when [toolbarInLayout]: then a missing one is
+ *   inserted slim above the first tile (the top of the left column), otherwise a stored one is removed.
  */
 internal fun sanitizeLogViewLayoutState(
     tree: LogViewNode?,
     hidden: List<LogViewSectionId>,
     scope: LogViewScope,
+    toolbarInLayout: Boolean = false,
 ): Pair<LogViewNode, List<LogViewSectionId>> {
-    val wanted = LogViewSectionId.entries.filter { it.inScope(scope) }
+    val wanted = LogViewSectionId.entries.filter { it.inScope(scope) && (it != LogViewSectionId.TOOLBAR || toolbarInLayout) }
     val seen = mutableSetOf<LogViewSectionId>()
     val cleaned = tree?.let { keepScope(it, scope) }?.let { sanitizeTileTree(it, seen) }?.let { normalizeTileLayout(it) }
         ?.let { clampPins(it) }
+        ?.let { if (toolbarInLayout) it else removeTile(it, LogViewSectionId.TOOLBAR) }
     val start = cleaned ?: defaultPreset(scope).layout(LogViewLegacySizes())
     val present = tileLeafSections(start).toMutableSet()
     val complete = wanted.filter { it !in present }.fold(start) { acc, id ->
-        val anchor = anchorFor(id, present)
-        val placed = if (anchor != null) insertAt(acc, id, anchor) else appendTile(acc, id)
+        val placed = if (id == LogViewSectionId.TOOLBAR) {
+            withToolbarTile(acc, true)
+        } else {
+            anchorFor(id, present)?.let { insertAt(acc, id, it) } ?: appendTile(acc, id)
+        }
         present += id
         placed
     }
-    val hiddenKept = hidden.distinct().filter { it.inScope(scope) && !it.isLogTile }
+    val hiddenKept = hidden.distinct().filter { it.inScope(scope) && !it.neverHidden }
     return complete to hiddenKept
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The toolbar tile
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Pinned extent (dp) of the slim toolbar tile in a COLUMN (its height) and in a ROW (its width); also the least pin allows. */
+const val TOOLBAR_TILE_COLUMN_DP: Float = 80f
+const val TOOLBAR_TILE_ROW_DP: Float = 150f
+
+/** [tree] with the toolbar tile pinned to its slim size in its parent's axis, unless the user has already sized it (a pinned leaf is left alone). */
+internal fun pinToolbarTile(node: LogViewNode, parentAxis: TileAxis? = null): LogViewNode = when (node) {
+    is TileLeaf ->
+        if (node.section == LogViewSectionId.TOOLBAR && node.sizeDp == null && parentAxis != null) {
+            node.copy(sizeDp = if (parentAxis == TileAxis.COLUMN) TOOLBAR_TILE_COLUMN_DP else TOOLBAR_TILE_ROW_DP)
+        } else {
+            node
+        }
+    is TileSplit -> node.copy(children = node.children.map { pinToolbarTile(it, node.axis) })
+}
+
+/**
+ * [tree] with the toolbar tile present ([present]) or absent: a missing tile is inserted slim above the first tile (the top of the left
+ * column, which is the top of the filter column in every preset that has one); an unwanted one is removed. Returns [tree] itself when
+ * it already is right.
+ */
+internal fun withToolbarTile(tree: LogViewNode, present: Boolean): LogViewNode {
+    val has = LogViewSectionId.TOOLBAR in tileLeafSections(tree)
+    return when {
+        present == has -> tree
+        !present -> removeTile(tree, LogViewSectionId.TOOLBAR) ?: tree
+        else -> {
+            val first = tileLeafSections(tree).firstOrNull()
+            val inserted = if (first != null) insertAt(tree, LogViewSectionId.TOOLBAR, first to TileEdge.TOP) else appendTile(tree, LogViewSectionId.TOOLBAR)
+            pinToolbarTile(inserted)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -455,11 +511,12 @@ internal fun sanitizeLogViewLayoutState(
 
 // The hidden list after hiding or showing [id]; null when the request is refused (a log tile or a tile of another scope).
 private fun toggledHidden(hidden: List<LogViewSectionId>, id: LogViewSectionId, hide: Boolean, scope: LogViewScope): List<LogViewSectionId>? =
-    if (id.isLogTile || !id.inScope(scope)) null else if (hide) (hidden + id).distinct() else hidden - id
+    if (id.neverHidden || !id.inScope(scope)) null else if (hide) (hidden + id).distinct() else hidden - id
 
 /** Stores [tree] (sanitized against the hidden list) as the single log view's layout. */
 internal fun AppSettings.withLogViewLayout(tree: TileNode<LogViewSectionId>): AppSettings =
-    sanitizeLogViewLayoutState(tree, logViewHidden, LogViewScope.SINGLE).let { copy(logViewLayout = it.first, logViewHidden = it.second) }
+    sanitizeLogViewLayoutState(tree, logViewHidden, LogViewScope.SINGLE, toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
+        .let { copy(logViewLayout = it.first, logViewHidden = it.second) }
 
 /** Hides or shows [id] in the single log view. Refuses (returns this) for the Log tile and for compare-only tiles. */
 internal fun AppSettings.withLogViewTileHidden(id: LogViewSectionId, hidden: Boolean): AppSettings =
@@ -468,13 +525,13 @@ internal fun AppSettings.withLogViewTileHidden(id: LogViewSectionId, hidden: Boo
 /** Applies [preset] to the single log view: its layout (from [sizes]), its hidden tiles, and remembers it as the last preset. */
 internal fun AppSettings.withLogViewPreset(preset: LogViewLayoutPreset, sizes: LogViewLegacySizes): AppSettings {
     if (preset.scope != LogViewScope.SINGLE) return this
-    val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.SINGLE)
+    val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.SINGLE, toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
     return copy(logViewLayout = state.first, logViewHidden = state.second, lastLogViewPreset = preset.id)
 }
 
 /** Collapses or expands [id] (to its header). The log tiles cannot collapse. */
 internal fun AppSettings.withLogViewTileCollapsed(id: LogViewSectionId, collapsed: Boolean): AppSettings {
-    if (id.isLogTile) return this
+    if (id.neverHidden) return this
     val next = if (collapsed) (logViewCollapsed + id).distinct() else logViewCollapsed - id
     return if (next == logViewCollapsed) this else copy(logViewCollapsed = next)
 }
@@ -501,26 +558,30 @@ internal fun AppSettings.withComparePreset(preset: LogViewLayoutPreset, sizes: L
 // Titles, drop captions, focus order
 // ---------------------------------------------------------------------------------------------------------------
 
-internal fun logViewTileTitle(id: LogViewSectionId): String = when (id) {
-    LogViewSectionId.TAGS -> "Tags"
-    LogViewSectionId.MESSAGE_RULES -> "Message rules"
-    LogViewSectionId.LOG_COMPOSITION -> "Log composition"
-    LogViewSectionId.HIGHLIGHTERS -> "Highlighters"
-    LogViewSectionId.LOG_LEVEL -> "Log level"
-    LogViewSectionId.SEQUENCES -> "Sequences"
-    LogViewSectionId.ISSUES -> "Issues"
-    LogViewSectionId.SAVED_FILTERS -> "Saved filters"
-    LogViewSectionId.LOG -> "Log"
-    LogViewSectionId.ORIGINAL -> "Original"
-    LogViewSectionId.LOG_A -> "Log A"
-    LogViewSectionId.LOG_B -> "Log B"
-    LogViewSectionId.ORIGINAL_A -> "Original A"
-    LogViewSectionId.ORIGINAL_B -> "Original B"
-    LogViewSectionId.NOTES -> "Notes"
-    LogViewSectionId.DIAGRAMS -> "Diagram library"
-    LogViewSectionId.AI -> "AI assistant"
-    LogViewSectionId.VIDEO -> "Video"
-}
+private val TILE_TITLES: Map<LogViewSectionId, String> = mapOf(
+    LogViewSectionId.TAGS to "Tags",
+    LogViewSectionId.MESSAGE_RULES to "Message rules",
+    LogViewSectionId.LOG_COMPOSITION to "Log composition",
+    LogViewSectionId.HIGHLIGHTERS to "Highlighters",
+    LogViewSectionId.LOG_LEVEL to "Log level",
+    LogViewSectionId.SEQUENCES to "Sequences",
+    LogViewSectionId.ISSUES to "Issues",
+    LogViewSectionId.SAVED_FILTERS to "Saved filters",
+    LogViewSectionId.LOG to "Log",
+    LogViewSectionId.ORIGINAL to "Original",
+    LogViewSectionId.LOG_A to "Log A",
+    LogViewSectionId.LOG_B to "Log B",
+    LogViewSectionId.ORIGINAL_A to "Original A",
+    LogViewSectionId.ORIGINAL_B to "Original B",
+    LogViewSectionId.NOTES to "Notes",
+    LogViewSectionId.DIAGRAMS to "Diagram library",
+    LogViewSectionId.AI to "AI assistant",
+    LogViewSectionId.VIDEO to "Video",
+    LogViewSectionId.TOOLBAR to "Toolbar",
+)
+
+/** The title a tile's header, drop caption and menu entry use; the table has an entry for every [LogViewSectionId] (a test walks them all). */
+internal fun logViewTileTitle(id: LogViewSectionId): String = TILE_TITLES.getValue(id)
 
 /** The caption shown on the drop overlay, worded like the New tab's. */
 internal fun logViewDropLabel(target: TileDropTarget<LogViewSectionId>): String = when (target) {
@@ -555,4 +616,4 @@ internal fun LogViewSectionId.focusPanel(): LogViewFocusPanel = when (this) {
 
 /** The panels of the visible tiles in reading order (depth first), the filter tiles collapsed into one FILTERS stop. */
 internal fun logViewFocusOrder(projectionRoot: TileNode<LogViewSectionId>): List<LogViewFocusPanel> =
-    tileLeafSections(projectionRoot).map { it.focusPanel() }.distinct()
+    tileLeafSections(projectionRoot).filter { it != LogViewSectionId.TOOLBAR }.map { it.focusPanel() }.distinct()

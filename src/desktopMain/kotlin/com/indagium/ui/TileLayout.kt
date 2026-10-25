@@ -583,7 +583,18 @@ internal fun <K> maximizedTileGeometry(id: K, width: Float, height: Float): Tile
 
 /** Geometry with the tiles of [order] stacked top to bottom, each [width] x [cardHeight] dp with [gap] dp between (narrow hosts). */
 internal fun <K> stackedTileGeometry(order: List<K>, width: Float, cardHeight: Float, gap: Float): TileGeometry<K> =
-    TileGeometry(order.mapIndexed { i, id -> TileCardRect(id, TileRect(0f, i * (cardHeight + gap), width, cardHeight)) }, emptyList())
+    stackedTileGeometry(order, width, order.map { cardHeight }, gap)
+
+/** As above with a height of its own for each tile of [order] ([heights], the same length). */
+internal fun <K> stackedTileGeometry(order: List<K>, width: Float, heights: List<Float>, gap: Float): TileGeometry<K> {
+    var y = 0f
+    return TileGeometry(
+        order.mapIndexed { i, id ->
+            TileCardRect(id, TileRect(0f, y, width, heights[i])).also { y += heights[i] + gap }
+        },
+        emptyList(),
+    )
+}
 
 /** "50% × 62%": [card]'s size as a share of the host. */
 internal fun tileSizeLabel(card: TileRect, hostWidth: Float, hostHeight: Float): String {

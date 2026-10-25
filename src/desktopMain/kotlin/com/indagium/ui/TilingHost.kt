@@ -37,6 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -179,6 +180,11 @@ internal class TileSlot(
  * or a splitter double-click is one gesture). [onMaximize] gets the tile to maximize, or null to restore. [onReclaimFocus] must give
  * root keyboard focus back (CLAUDE.md's clickable-steals-focus gotcha); it is called after every click and drag here.
  * [dropLabel] captions the drop overlay. [defaultDp] is the size a double-click on a splitter resets a node to (null = equalize).
+ *
+ * Three optional hooks let something outside the surface take part in a tile's move (the window chrome, for the toolbar tile):
+ * [onDragPointer] hears the dragged tile and the pointer (window root px; null when the drag is over), [takeDrop] is asked first on
+ * release and returns true when it handled the drop itself (the surface then drops nothing), and [suppressDrop] says that the pointer
+ * is over a target of the outsider, so the surface shows no tile drop target for it.
  */
 internal class TilingCallbacks<K>(
     val onCommitLayout: (TileNode<K>) -> Unit,
@@ -188,7 +194,20 @@ internal class TilingCallbacks<K>(
     val onReclaimFocus: () -> Unit,
     val dropLabel: (TileDropTarget<K>) -> String,
     val defaultDp: (TileNode<K>) -> Float? = { null },
+    val onDragPointer: (K, Offset?) -> Unit = { _, _ -> },
+    val takeDrop: (K, Offset) -> Boolean = { _, _ -> false },
+    val suppressDrop: (K) -> Boolean = { false },
 )
+
+/**
+ * A tile [id] being dragged from OUTSIDE the surface (the window chrome's toolbar bar) over it: the owner sets [pointerRoot] (window root
+ * px, null when no such drag is over the surface) and the surface shows the same drop target and preview as for a tile move; the
+ * surface keeps [resolver] up to date, so the owner can ask what a release at a root px point would drop [id] on.
+ */
+internal class TileExternalDrag<K>(val id: K) {
+    var pointerRoot by mutableStateOf<Offset?>(null)
+    var resolver: ((Offset) -> TileDropTarget<K>?)? = null
+}
 
 /** The receiver of a surface's content lambda: emits the tiles. */
 internal interface TileScope<K> {
@@ -253,6 +272,7 @@ private val LocalTileTitle = compositionLocalOf { "tile" }
 private class TileDragState<K> {
     var dragged by mutableStateOf<K?>(null)
     var pointer by mutableStateOf<Offset?>(null)
+    var pointerRoot: Offset? = null
     var hostRoot by mutableStateOf(Offset.Zero)
     var draft by mutableStateOf<TileNode<K>?>(null)
     var draggingGap by mutableStateOf<Int?>(null)
@@ -293,22 +313,29 @@ private class TileScopeImpl<K>(
     fun gripStart(id: K) {
         drag.dragged = id
         drag.pointer = null
+        drag.pointerRoot = null
     }
 
     fun gripMove(rootPx: Offset) {
+        drag.pointerRoot = rootPx
         drag.pointer = Offset((rootPx.x - drag.hostRoot.x) / density, (rootPx.y - drag.hostRoot.y) / density)
+        drag.dragged?.let { callbacks.onDragPointer(it, rootPx) }
     }
 
     fun gripEnd(id: K) {
-        // Hit-tested again from the latest pointer rather than the last composed target: the release can land before the next frame.
-        val drop = drag.pointer?.let { tileDropTargetAt(geometry, host.w, host.h, it.x, it.y, id) }
+        // The outsider (the chrome's dock strips) is asked first; otherwise the drop is hit-tested again from the latest pointer
+        // rather than the last composed target: the release can land before the next frame.
+        val handled = drag.pointerRoot?.let { callbacks.takeDrop(id, it) } == true
+        val drop = if (handled) null else drag.pointer?.let { tileDropTargetAt(geometry, host.w, host.h, it.x, it.y, id) }
         gripCancel()
         if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop))
     }
 
     fun gripCancel() {
+        drag.dragged?.let { callbacks.onDragPointer(it, null) }
         drag.dragged = null
         drag.pointer = null
+        drag.pointerRoot = null
         callbacks.onReclaimFocus()
     }
 
@@ -344,6 +371,7 @@ internal fun <K> TilingSurface(
     heightDp: Float,
     spec: TileChromeSpec<K>,
     callbacks: TilingCallbacks<K>,
+    external: TileExternalDrag<K>? = null,
     content: @Composable TileScope<K>.() -> Unit,
 ) {
     val drag = remember { TileDragState<K>() }
@@ -372,7 +400,18 @@ internal fun <K> TilingSurface(
     )
     val density = LocalDensity.current.density
     scope.density = density
-    val target = drag.dragged?.let { dragged -> drag.pointer?.let { tileDropTargetAt(geometry, widthDp, heightDp, it.x, it.y, dragged) } }
+    val suppressed = drag.dragged?.let(callbacks.suppressDrop) == true
+    val target = drag.dragged?.takeIf { !suppressed }?.let { dragged ->
+        drag.pointer?.let { tileDropTargetAt(geometry, widthDp, heightDp, it.x, it.y, dragged) }
+    }
+    // A drag from outside answers to the same maths: the resolver turns a window pixel into the target a release there would drop on.
+    val resolveExternal: (Offset) -> TileDropTarget<K>? = { root ->
+        external?.let { tileDropTargetAt(geometry, widthDp, heightDp, (root.x - drag.hostRoot.x) / density, (root.y - drag.hostRoot.y) / density, it.id) }
+    }
+    SideEffect { external?.resolver = resolveExternal }
+    DisposableEffect(external) { onDispose { external?.resolver = null } }
+    val externalPointer = external?.pointerRoot
+    val externalTarget = externalPointer?.let(resolveExternal)
     Box(Modifier.fillMaxSize().onGloballyPositioned { drag.hostRoot = it.positionInRoot() }) {
         TilingLayout(Modifier.fillMaxSize(), geometry, spec) {
             scope.content()
@@ -415,7 +454,8 @@ internal fun <K> TilingSurface(
                 }
             }
         }
-        if (drag.dragged != null) TileDropOverlay(scope, target)
+        if (drag.dragged != null && !suppressed) TileDropOverlay(scope, target)
+        if (externalPointer != null) TileDropOverlay(scope, externalTarget)
     }
 }
 
@@ -436,12 +476,14 @@ internal fun <K> TileStackedSurface(
     spec: TileChromeSpec<K>,
     callbacks: TilingCallbacks<K>,
     modifier: Modifier = Modifier,
+    heightOf: (K) -> Float? = { null },
     content: @Composable TileScope<K>.() -> Unit,
 ) {
     val drag = remember { TileDragState<K>() }
     val order = projectTileLayout(fullLayout) { isVisible(it) && it !in parked }?.let { tileLeafSections(it.root) }.orEmpty()
     val composedIds = tileLeafSections(fullLayout).filterTo(HashSet()) { isVisible(it) } + parked
-    val totalDp = max(0f, order.size * (cardHeightDp + spec.gapColumnDp) - spec.gapColumnDp)
+    val heights = order.map { heightOf(it) ?: cardHeightDp }
+    val totalDp = max(0f, heights.sumOf { (it + spec.gapColumnDp).toDouble() }.toFloat() - spec.gapColumnDp)
     // The width comes from onSizeChanged, not BoxWithConstraints: that is a SubcomposeLayout, and a Popup-based dropdown several
     // levels inside one (the AI and filter panels' pickers) has thrown "layouts are not part of the same hierarchy". The first frame is
     // laid out at width 0 and settles on the next one.
@@ -450,7 +492,7 @@ internal fun <K> TileStackedSurface(
     val widthDp = widthPx / density
     ScrollColumnWithBar(modifier.fillMaxSize(), endGutter = 8.dp) {
         Box(Modifier.fillMaxWidth().height(totalDp.dp).onSizeChanged { widthPx = it.width }) {
-            val geometry = stackedTileGeometry(order, widthDp, cardHeightDp, spec.gapColumnDp)
+            val geometry = stackedTileGeometry(order, widthDp, heights, spec.gapColumnDp)
             val scope = TileScopeImpl<K>(
                 spec = spec,
                 callbacks = callbacks,

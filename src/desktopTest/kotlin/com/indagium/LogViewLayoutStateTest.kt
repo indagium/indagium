@@ -99,7 +99,10 @@ class LogViewLayoutStateTest {
         val partial = TileSplit(TileAxis.ROW, listOf(TileLeaf(LogViewSectionId.LOG), TileLeaf(LogViewSectionId.NOTES)))
         state.commitLogViewLayout(partial)
         val stored = assertNotNull(state.settings.logViewLayout)
-        assertEquals(LogViewSectionId.entries.filter { it.scope != com.indagium.model.LogViewScope.COMPARE }.toSet(), tileLeafSections(stored).toSet())
+        assertEquals(
+            LogViewSectionId.entries.filter { it.scope != com.indagium.model.LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR }.toSet(),
+            tileLeafSections(stored).toSet(),
+        )
     }
 
     @Test
