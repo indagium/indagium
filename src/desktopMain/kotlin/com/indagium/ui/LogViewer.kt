@@ -15,7 +15,6 @@ import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Movie
-import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -1432,18 +1431,30 @@ internal fun LogViewer(
         add(LogViewerToolbarAction("unfiltered", true, onToggleUnfiltered))
     }
 
-    fun toolbarIndexFor(id: String): Int = toolbarActions.indexOfFirst { it.id == id }
-
     fun toolbarRovingItems(): List<RovingItem> =
         toolbarActions.mapIndexed { idx, action -> RovingItem(idx.toString(), action.enabled) }
 
     // The 34dp toolbar row. [leading] / [trailing] are only filled in tiled mode: the log tile's move grip before the
-    // buttons and its maximize button after them. Keyboard order (toolbarActions above) is unaffected.
+    // buttons and its maximize button after them ([leading] is told how wide the compare file name may be). Tiled, [tileWidthDp] (the
+    // Log tile's width) picks how much of the toolbar fits (logToolbarVariant); untiled it is always the full toolbar. Keyboard order
+    // (toolbarActions above) is unaffected: an action in the "⋯" menu is still reached, the menu button shows the cursor.
     @Composable
     fun Toolbar(
-        leading: @Composable RowScope.() -> Unit = {},
+        leading: @Composable RowScope.(Dp) -> Unit = {},
         trailing: @Composable RowScope.() -> Unit = {},
+        tileWidthDp: Float? = null,
     ) {
+        val hasFilterBar = filterBarVisible != null && onToggleFilterBar != null
+        val variant = if (tiles != null && tileWidthDp != null) {
+            logToolbarVariant(logToolbarAvailableDp(tileWidthDp, tiles.logHeaderLeading != null), hasFilterBar, tab.showUnfiltered)
+        } else {
+            LogToolbarVariant.FULL
+        }
+        val nameMaxDp = if (tiles != null && tileWidthDp != null) {
+            logToolbarNameMaxDp(tileWidthDp, variant, hasFilterBar, tab.showUnfiltered).dp
+        } else {
+            SIDE_NAME_MAX_DP.dp
+        }
         Row(
             Modifier.fillMaxWidth().height(34.dp)
                 .background(tc.p)
@@ -1478,76 +1489,37 @@ internal fun LogViewer(
                 },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            leading()
+            leading(nameMaxDp)
             Spacer(Modifier.width(if (tiles == null) 12.dp else 4.dp))
-            Box {
-                AppButton(
-                    "Export ▾",
-                    onClick = { exportMenuOpen = true },
-                    modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("export")) tc.ac else Color.Transparent, CORNER_MD),
-                )
-                if (exportMenuOpen) {
-                    ExportMenuPopup(
-                        onExportTxt = { exportMenuOpen = false; onExportTxt() },
-                        onExportCsv = { exportMenuOpen = false; onExportCsv() },
-                        onExportCaptureRange = onExportCaptureRange?.let { callback ->
-                            { exportMenuOpen = false; callback() }
-                        },
-                        onDismiss = { exportMenuOpen = false },
-                        tc = tc,
-                    )
-                }
-            }
-            if (filterBarVisible != null && onToggleFilterBar != null) {
-                Spacer(Modifier.width(8.dp))
-                FilterBarToolbarButton(
-                    visible = filterBarVisible,
-                    onToggle = onToggleFilterBar,
-                    modifier = Modifier
-                        .testTag("filter-bar-toolbar-toggle")
-                        .border(1.dp, if (toolbarIndex == toolbarIndexFor("filter-bar")) tc.ac else Color.Transparent, CORNER_MD),
-                )
-            }
-            Spacer(Modifier.width(8.dp))
-            // Primary variant when on is this toolbar's only "active" state affordance (Unfiltered,
-            // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
-            // has no comparably natural alternate label, so a filled/tinted button is the toggle cue).
-            AppButton(
-                "Δt",
-                onClick = onToggleTimeDelta,
-                variant = if (tab.showTimeDelta) ButtonVariant.Primary else ButtonVariant.Secondary,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("time-delta")) tc.ac else Color.Transparent, CORNER_MD),
-            )
-            Spacer(Modifier.width(8.dp))
-            AppButton(
-                "",
-                onClick = onOpenSearch,
-                variant = if (filteredSearch.active || unfilteredSearch.active) ButtonVariant.Primary else ButtonVariant.Secondary,
-                leadingIcon = Icons.Outlined.Search,
-                horizontalPadding = 10.dp,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("search")) tc.ac else Color.Transparent, CORNER_MD),
-            )
-            Spacer(Modifier.width(8.dp))
-            val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
-            AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
-            AppButton(
-                "Expand all",
-                onClick = onExpandAll,
-                enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("expand-all")) tc.ac else Color.Transparent, CORNER_MD),
-            )
-            Spacer(Modifier.width(4.dp))
-            AppButton(
-                "Collapse all",
-                onClick = onCollapseAll,
-                enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("collapse-all")) tc.ac else Color.Transparent, CORNER_MD),
-            )
-            Spacer(Modifier.width(4.dp))
-            AppButton(
-                if (tab.showUnfiltered) "Hide original" else "Unfiltered",
-                onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("unfiltered")) tc.ac else Color.Transparent, CORNER_MD),
+            LogToolbarControls(
+                variant,
+                LogToolbarModel(
+                    LogToolbarView(
+                        tiled = tiles != null,
+                        showTimeDelta = tab.showTimeDelta,
+                        showUnfiltered = tab.showUnfiltered,
+                        searchActive = filteredSearch.active || unfilteredSearch.active,
+                        filterBarVisible = filterBarVisible,
+                        canExpandAll = canExpandAll,
+                        canCollapseAll = canCollapseAll,
+                        countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries",
+                        focusedId = toolbarIndex?.let { toolbarActions.getOrNull(it)?.id },
+                        exportMenuOpen = exportMenuOpen,
+                    ),
+                    LogToolbarActions(
+                        onToggleFilterBar = onToggleFilterBar,
+                        onExportMenuOpenChange = { exportMenuOpen = it },
+                        onExportTxt = onExportTxt,
+                        onExportCsv = onExportCsv,
+                        onExportCaptureRange = onExportCaptureRange,
+                        onToggleTimeDelta = onToggleTimeDelta,
+                        onOpenSearch = onOpenSearch,
+                        onExpandAll = onExpandAll,
+                        onCollapseAll = onCollapseAll,
+                        onToggleUnfiltered = onToggleUnfiltered,
+                        onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
+                    ),
+                ),
             )
             trailing()
             Spacer(Modifier.width(8.dp))
@@ -2829,7 +2801,7 @@ internal fun LogViewer(
                 )
                 tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
                     Column(Modifier.fillMaxSize().background(tc.bg).onGloballyPositioned { containerH = it.size.height / density }) {
-                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing)
+                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
                         FilteredSplitPane(pidTidColumnsVisible(hasPidTid, info.widthDp))
                     }
                 })
@@ -3030,7 +3002,7 @@ internal fun LogViewer(
             } else {
                 tiles.scope.Tile(tiles.logId, tiles.logSlot { info ->
                     Column(Modifier.fillMaxSize().background(tc.bg)) {
-                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing)
+                        Toolbar(leading = tiles.toolbarLeading, trailing = tiles.toolbarTrailing, tileWidthDp = info.widthDp)
                         SinglePane(pidTidColumnsVisible(hasPidTid, info.widthDp))
                     }
                 })
@@ -4695,7 +4667,7 @@ private fun EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {
 }
 
 @Composable
-private fun ExportMenuPopup(
+internal fun ExportMenuPopup(
     onExportTxt: () -> Unit,
     onExportCsv: () -> Unit,
     onExportCaptureRange: (() -> Unit)?,

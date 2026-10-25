@@ -34,6 +34,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.CompareFilterTarget
@@ -49,15 +50,19 @@ import kotlinx.coroutines.launch
 
 private const val STRIP_HEIGHT_DP = 32
 private const val BADGE_SIZE_DP = 18
-private const val SIDE_NAME_MAX_DP = 110
-private const val PICKER_WIDTH_DP = 150
 private const val PILL_HEIGHT_DP = 22
 
 /** Test tag of the strip's A | B | Both switch. */
 internal const val COMPARE_TARGET_TAG = "compare-target"
 
+/** Test tag of the strip's B tab picker. */
+internal const val COMPARE_PICKER_TAG = "compare-tab-picker"
+
 /** Test tag of the strip's scroll link toggle. */
 internal const val COMPARE_SYNC_TAG = "compare-sync-scroll"
+
+/** Test tag of the file name in the header of [side] ("a" / "b"). */
+internal fun compareNameTag(side: String): String = "compare-name-${side.lowercase()}"
 
 /** Test tag of the A / B badge of [side] ("a" / "b"), see [compareBadgeTag]. */
 internal fun compareBadgeTag(side: String): String = "compare-badge-${side.lowercase()}"
@@ -79,9 +84,13 @@ internal class ComparePanelFocus(
 
 private val TARGET_LABELS = listOf("A", "B", "Both")
 
-/** "Filters apply to  A | B | Both" and the scroll link; sits above the tiles because the tiles can be moved, a toolbar must not. */
+/**
+ * "Filters apply to  A | B | Both", the picker that chooses which tab B shows (the full [CompareTabPicker]: every tab as a pill, an
+ * overflow list and drag reorder, in the width the other two leave) and the scroll link. It sits above the tiles because the tiles can
+ * be moved, a toolbar must not.
+ */
 @Composable
-internal fun CompareFilterStrip(state: AppState, onReclaimFocus: () -> Unit) {
+internal fun CompareFilterStrip(state: AppState, left: LogTab, right: LogTab, onReclaimFocus: () -> Unit) {
     val tc = tc()
     val target = state.compareFilterTarget
     Row(
@@ -102,7 +111,14 @@ internal fun CompareFilterStrip(state: AppState, onReclaimFocus: () -> Unit) {
             segmentHorizontalPadding = 10.dp,
             modifier = Modifier.testTag(COMPARE_TARGET_TAG),
         )
-        Spacer(Modifier.weight(1f))
+        AppText("B:", color = tc.ts, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+        CompareTabPicker(
+            state = state,
+            leftTab = left,
+            rightTab = right,
+            modifier = Modifier.weight(1f).height(PILL_HEIGHT_DP.dp).testTag(COMPARE_PICKER_TAG),
+            onReclaimFocus = onReclaimFocus,
+        )
         CompareTabPill(
             label = "Link scroll",
             icon = Icons.Outlined.Link,
@@ -231,7 +247,7 @@ private fun TileScope<LogViewSectionId>.CompareTiles(
         onExportCaptureRange = null,
         tiles = LogViewerTiles(
             this, LogViewSectionId.LOG_A, LogViewSectionId.ORIGINAL_A,
-            logHeaderLeading = { CompareSideLeading(state, "A", left, right, compareSideIsEdited(target, sideIsRight = false)) },
+            logHeaderLeading = { nameMaxDp -> CompareSideLeading("A", left, right, compareSideIsEdited(target, sideIsRight = false), nameMaxDp) },
         ),
         compare = true,
     )
@@ -243,7 +259,7 @@ private fun TileScope<LogViewSectionId>.CompareTiles(
         onExportCaptureRange = null,
         tiles = LogViewerTiles(
             this, LogViewSectionId.LOG_B, LogViewSectionId.ORIGINAL_B,
-            logHeaderLeading = { CompareSideLeading(state, "B", left, right, compareSideIsEdited(target, sideIsRight = true)) },
+            logHeaderLeading = { nameMaxDp -> CompareSideLeading("B", left, right, compareSideIsEdited(target, sideIsRight = true), nameMaxDp) },
         ),
         compare = true,
     )
@@ -269,10 +285,11 @@ internal fun compareTabKind(tab: LogTab): String = when {
 
 /**
  * The start of a side's log header: the A / B badge (filled with the accent while the filter panel edits this side), the kind pill, and
- * the file name (A) or the picker that chooses what B shows (B).
+ * the file name, which takes at most [nameMaxDp] and ellipsizes (the toolbar's own items overflow only after it is down to its minimum).
+ * Which tab B shows is chosen in the strip above the tiles ([CompareFilterStrip]).
  */
 @Composable
-private fun RowScope.CompareSideLeading(state: AppState, side: String, left: LogTab, right: LogTab, edited: Boolean) {
+private fun RowScope.CompareSideLeading(side: String, left: LogTab, right: LogTab, edited: Boolean, nameMaxDp: Dp) {
     val tc = tc()
     val tab = if (side == "A") left else right
     CompareSideBadge(side, edited)
@@ -284,24 +301,14 @@ private fun RowScope.CompareSideLeading(state: AppState, side: String, left: Log
         modifier = Modifier.border(1.dp, tc.br, CORNER_SM).padding(horizontal = 4.dp, vertical = 1.dp),
     )
     Spacer(Modifier.width(4.dp))
-    if (side == "B") {
-        CompareTabPicker(
-            state = state,
-            leftTab = left,
-            rightTab = right,
-            modifier = Modifier.width(PICKER_WIDTH_DP.dp).height(PILL_HEIGHT_DP.dp),
-            compact = true,
-        )
-    } else {
-        AppText(
-            tab.filename,
-            color = tc.tx,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = SIDE_NAME_MAX_DP.dp),
-        )
-    }
+    AppText(
+        tab.filename,
+        color = tc.tx,
+        fontSize = 11.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.widthIn(max = nameMaxDp).testTag(compareNameTag(side)),
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)

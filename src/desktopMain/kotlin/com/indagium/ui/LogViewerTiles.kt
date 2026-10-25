@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.indagium.model.LogViewSectionId
 
@@ -23,18 +24,19 @@ import com.indagium.model.LogViewSectionId
 /**
  * The tiling surface to emit into ([scope]) and which tile ids stand for this log: [logId] and [originalId] (LOG / ORIGINAL in the
  * single view; LOG_A / ORIGINAL_A and LOG_B / ORIGINAL_B in compare). [logHeaderLeading] adds content to the Log tile's toolbar
- * right after the move grip (compare's A/B badge and file name).
+ * right after the move grip (compare's A/B badge and file name); it is told how wide the file name may be ([logToolbarNameMaxDp]) so the
+ * name ellipsizes before any toolbar item overflows.
  */
 internal class LogViewerTiles(
     val scope: TileScope<LogViewSectionId>,
     val logId: LogViewSectionId,
     val originalId: LogViewSectionId,
-    val logHeaderLeading: (@Composable RowScope.() -> Unit)? = null,
+    val logHeaderLeading: (@Composable RowScope.(nameMaxDp: Dp) -> Unit)? = null,
 ) {
     /** Before the toolbar buttons: the Log tile's move grip (nothing while tiles are locked), then [logHeaderLeading]. */
-    val toolbarLeading: @Composable RowScope.() -> Unit = {
+    val toolbarLeading: @Composable RowScope.(Dp) -> Unit = { nameMaxDp ->
         scope.Grip(logId)
-        logHeaderLeading?.invoke(this)
+        logHeaderLeading?.invoke(this, nameMaxDp)
     }
 
     /** After the toolbar buttons: the Log tile's maximize button. */
