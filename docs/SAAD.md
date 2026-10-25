@@ -812,6 +812,57 @@ The Tests section's actions that open the Tests tab pass their New tab to `AppSt
 once Tests is active (like a started capture or opened file). `surfaceBeforeTests` then points at the last remaining log tab, never at
 the closed New tab; closing Tests with nothing else open leaves the empty state that `ensureHomeTab` refills.
 
+### 6.4 Log view tiling
+
+The single (non-compare) log view is a tiling surface: the filter panel's eight sections, Original, Log, Notes, the Diagram library,
+AI and Video are tiles of one `TilingSurface` (`ui/TilingHost.kt`, the generic host also behind the New tab, §6.3) laid out by the
+generic engine in `ui/TileLayout.kt` (`TileNode<K>` trees, `tileGeometry`, `dropTile`, `resizeProjected`, `projectTileLayout`).
+The compare view still uses its legacy two-panel layout (its tiles, `LOG_A`/`LOG_B`/`ORIGINAL_A`/`ORIGINAL_B`, are a later phase).
+
+- **Model.** `LogViewSectionId` (`model/Model.kt`) names every tile with its tab-strip group (`LogViewTileGroup`: filters, notes, AI,
+  video, or none for the log tiles) and scope. `ui/LogViewLayout.kt` is UI-free: the presets (`LogViewLayoutPreset` Classic, Review,
+  Log focus, Filters on top, derived from `LogViewLegacySizes`), `effectiveLogViewLayout` (the stored tree, else Classic from the legacy
+  `filterPanelWidth`/`annotationPanelWidth`/`rightSidebarSplit`), applicability and visibility (`logViewTileVisible` =
+  applicable AND its group flag on AND not in `logViewHidden`), `sanitizeLogViewLayoutState` (a stored tree always holds every tile
+  once; missing tiles return at default anchors) and the `AppSettings.withLogView*` mutators.
+- **Host.** `LogViewTilingHost` (`ui/LogViewTiling.kt`) replaces FileView's former `Row`. It measures itself with `onSizeChanged`, never
+  `BoxWithConstraints`: that is a `SubcomposeLayout`, and the Popup-based dropdowns of the AI and filter panels have thrown "layouts are
+  not part of the same hierarchy" inside one (`TileStackedSurface` measures the same way). Below `LOG_VIEW_STACK_BELOW_DP` (720 dp)
+  the tiles stack in one scroll (no grips or splitters). Layout edits (a drop, a splitter release, an arrow-key resize) reach
+  `AppState.commitLogViewLayout` once, on release.
+- **Fixed emission order.** The content lambda emits filters (`BoundFilterPanel` with a `TiledSectionHost`), Original + Log
+  (`BoundLogViewer` with `LogViewerTiles`), Notes, Diagram library, AI, Video, and branches only on visibility, never on the layout,
+  so a move changes a tile's rect but never its place in the composition: the log's scroll, the notes editor and a playing video survive
+  drags. Every composable inside the surface emits through a `Tile`; anything else would be measured 0 x 0 and logged once.
+- **Filter panel as tiles.** `FilterPanel` stays one composable. It emits each of its sections through `SectionHost.Section`;
+  `TiledSectionHost` (`ui/TiledSectionHost.kt`) turns each into a tile: title/icon/summary, the Tags | Regex switch as the Tags
+  tile's header action, the section's pills next to it, and a scrolling body under the panel's input chain (keys, file drops, focus
+  group). One `FocusRequester` fits one node, so only the first visible filter tile (`focusOwner`) carries it; "the panel has focus"
+  is true while any filter tile does, and the keyboard focus border is drawn on the filter tiles. Tag dropdowns anchor at the Tags
+  tile's right edge. Collapse maps onto the panel's own flags (`highlightersExpanded`, `lvlExpanded`, `seqExpanded`, `crashExpanded`,
+  `sfExpanded`, `logCompositionExpanded`, via the section's own toggle, which also clears editors) and everything else onto
+  `AppSettings.logViewCollapsed`. Only tiles in a COLUMN split collapse to their header.
+- **Right-side tiles.** Notes (`BoundAnnotationPanel`, with the Diagram library section left out of it while its own tile is visible),
+  Diagram library (`DiagramLibraryTileBody`, its "+ diagram" menu in the tile header), AI (`AiSidebarPanel`) and Video
+  (`VideoTileBody`). Notes and the Diagram library sit under `LocalNotesEditLocked` (`rememberNotesEditLocked`). A detached video player
+  keeps its window by staying composed: the host *parks* the Video tile (0 x 0) when the player reports it left the sidebar.
+  A capture tab keeps its per-device video height: Video is pinned to `captureMirrorLayouts[device].videoSplit` x the host height while
+  the tab is active, and resizing Video writes the per-device layout, never the global one.
+- **Maximize** is `AppState.logViewMaximized`, session-only; Esc restores it (handled on the host's preview pass because the log viewer
+  consumes every Esc). F6 cycles `logViewFocusOrder` of the visible tiles (all filter tiles are one stop).
+- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `TabBar` (single log views only): four preset
+  thumbnails drawn from `tileGeometry`, a Panels checklist of the applicable tiles, "Lock tiles" (hides grips) and "Reset to <preset>".
+  The badge counts applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the Diagram library
+  hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth (workspace profiles
+  and shortcuts included); `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
+  Filter group off instead of listing eight hidden tiles (the badge stays meaningful and the Filter button reflects it);
+  `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
+  switches the group on again. `revealFilterTiles` (Cmd+1, Ctrl+F, the filter bar's residual chip) un-hides, expands and un-maximizes.
+- **Persistence and migration.** `logViewLayout` (nullable), `logViewHidden` (default `[diagrams]`), `logViewCollapsed`,
+  `logViewTilesLocked` and `lastLogViewPreset` are JSON-only settings (`ui/LogViewLayoutSettingsJson.kt`, §13.4). A null layout means Classic
+  derived from the legacy panel widths, so an old autosave restores into the previous sizes; the legacy token fields keep being
+  written, but a stored layout wins. The maximized tile, the per-tile focus and the video pin are not persisted.
+
 ---
 
 ## 7. Package dependency graph
@@ -1437,6 +1488,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
 | `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter lines inset by the 8 dp card corner, section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
+| `LogViewTiling.kt` / `LogViewLayoutState.kt` / `TiledSectionHost.kt` | The single log view on tiles (§6.4): `LogViewTilingHost` (size via `onSizeChanged`, fixed emission order, capture video pin, parked video, maximize), the `AppState` extensions behind the Layout menu, shortcuts and tab-strip toggles (commit/hide/show/preset/reset/lock/collapse/reveal), and the `SectionHost` that turns the filter panel's sections into tiles |
+| `LogViewLayout.kt` / `LayoutMenu.kt` / `BoundLogViewer.kt` | UI-free log-view layout model (presets, legacy derivation, visibility, sanitizer, mutators); the tab-strip Layout menu (preset thumbnails, Panels, Lock, Reset, hidden badge); `LogViewer` bound to `AppState` for the tiled and the legacy view |
 | `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |
 | `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | `HomeCaptureSection` (the condensed Capture section: device row, options summary with "Change…", Start, compact sessions; polls devices only while composed), live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
 | `CaptureOptionsDialog.kt` / `UnfinishedSessionsInline.kt` | The Capture section's "Recording options" dialog (hosts `CaptureStartOptions`, links to Settings → Capture via `AppState.openCaptureSettings`) and its inline unfinished-sessions panel (scrolling full list, "Open in window…" dialog) |
@@ -2197,6 +2250,12 @@ trailing page edge, so a section added by a later version appears by itself; the
 collapse, same-axis splits flatten); an empty tree, or every section hidden, falls back to `DEFAULT_HOME_LAYOUT` with nothing hidden.
 At least one section is therefore always visible. The mutators (`withHomeLayout`, `withHomeSectionHidden`) go through the same
 sanitizer, so settings written by the UI satisfy the same invariants.
+
+The log view's tiling (§6.4) adds five more JSON-only settings, decoded by the log-view codec in `ui/LogViewLayoutSettingsJson.kt`
+next to the compare view's four: `logViewLayout` (a tree of `{"split":..,"children":[..]}` / `{"section":"<key>","w":..,"dp":..}` nodes, absent while the
+user has not changed the layout), `logViewHidden` (tile keys, default `["diagrams"]`), `logViewCollapsed` (tile keys), `logViewTilesLocked` (boolean) and
+`lastLogViewPreset` (the `LogViewPresetId` name: `CLASSIC`, `REVIEW`, `LOG_FOCUS`, `FILTERS_ON_TOP`). The decoder sanitizes through `sanitizeLogViewLayoutState`, so every tile
+appears exactly once whatever the file says.
 
 ### 13.5 Restore is metadata-only
 

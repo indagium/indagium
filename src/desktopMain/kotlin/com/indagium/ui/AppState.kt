@@ -3220,6 +3220,10 @@ class AppState(
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
     var compareFilterRight by mutableStateOf(true)
+
+    // The log-view tile shown full-size (Esc restores): session-only, never persisted, global like the layout it temporarily covers.
+    // The tiling host and the AppState.reveal*/hide* helpers in LogViewLayoutState.kt read and clear it.
+    var logViewMaximized by mutableStateOf<LogViewSectionId?>(null)
     var isLoading by mutableStateOf(false)
     val logViewerScrollStateStore = LogViewerScrollStateStore()
 
@@ -6769,12 +6773,10 @@ class AppState(
      * the Highlighters / Log level sections collapsed.
      */
     fun openFilterPanelRevealing(tabId: String) {
-        val filter = tab(tabId)?.filter
-        if (filter != null) {
-            val sections = residualChipSectionsToReveal(filter)
-            updateFilterPanelUiState { revealSections(sections) }
-        }
-        updateFilterVisible(true)
+        val sections = tab(tabId)?.filter?.let(::residualChipSectionsToReveal).orEmpty()
+        if (sections.isNotEmpty()) updateFilterPanelUiState { revealSections(sections) }
+        // Un-hides and expands the tiles of those sections and turns the Filter group on (the legacy updateFilterVisible(true)).
+        revealFilterTiles(sections.mapNotNull(FilterPanelSection::logViewTile))
     }
 
     fun updateFilterBarVisible(visible: Boolean) {

@@ -1763,6 +1763,8 @@ internal fun DiagramLibrarySection(
     editingEnabled: Boolean = true,
     // False when the section is a tile of its own: it is then always open and its header shows no chevron.
     collapsible: Boolean = true,
+    // False when the tile's own header carries the title and the "+ diagram" button (DiagramLibraryHeaderAction): only the list shows.
+    showHeader: Boolean = true,
 ) {
     val tc = tc()
     // Local, not lifted to AppState like RecentNotesPopup's own open flag: nothing outside this
@@ -1770,28 +1772,30 @@ internal fun DiagramLibrarySection(
     // KeyboardTargetKind.NoteRecentNotes does for RecentNotesPopup), so there's nothing to gain
     // from threading it through AnnotationPanel's params and every call site.
     var createMenuOpen by remember { mutableStateOf(false) }
-    SectionHeader(
-        "Diagram library",
-        trailing = {
-            AppText(items.size.toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
-            Spacer(Modifier.width(8.dp))
-            Box {
-                LabelIconButton("+ diagram", fontSize = 10.sp, enabled = editingEnabled, onClick = { createMenuOpen = true })
-                if (createMenuOpen) {
-                    CreateDiagramPopup(
-                        selectedLineCount = selectedLineCount,
-                        notesDiagramSummary = notesDiagramSummary,
-                        onCreateFromSelection = { createMenuOpen = false; if (editingEnabled) onCreate() },
-                        onCreateFromNotes = { createMenuOpen = false; if (editingEnabled) onCreateFromNotes() },
-                        onDismiss = { createMenuOpen = false },
-                        tc = tc,
-                    )
+    if (showHeader) {
+        SectionHeader(
+            "Diagram library",
+            trailing = {
+                AppText(items.size.toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                Spacer(Modifier.width(8.dp))
+                Box {
+                    LabelIconButton("+ diagram", fontSize = 10.sp, enabled = editingEnabled, onClick = { createMenuOpen = true })
+                    if (createMenuOpen) {
+                        CreateDiagramPopup(
+                            selectedLineCount = selectedLineCount,
+                            notesDiagramSummary = notesDiagramSummary,
+                            onCreateFromSelection = { createMenuOpen = false; if (editingEnabled) onCreate() },
+                            onCreateFromNotes = { createMenuOpen = false; if (editingEnabled) onCreateFromNotes() },
+                            onDismiss = { createMenuOpen = false },
+                            tc = tc,
+                        )
+                    }
                 }
-            }
-        },
-        expanded = expanded.takeIf { collapsible },
-        onToggle = onToggle.takeIf { collapsible },
-    )
+            },
+            expanded = expanded.takeIf { collapsible },
+            onToggle = onToggle.takeIf { collapsible },
+        )
+    }
     if (collapsible && !expanded) return
 
     // AnnotationPanel's outer Column is itself vertically scrollable, so use a bounded fixed
@@ -1890,7 +1894,7 @@ internal fun DiagramLibrarySection(
  * excluded from arrow-key roving via [RovingItem.enabled]) when there is nothing to draw.
  */
 @Composable
-private fun CreateDiagramPopup(
+internal fun CreateDiagramPopup(
     selectedLineCount: Int,
     notesDiagramSummary: Seq3NotesSelection?,
     onCreateFromSelection: () -> Unit,

@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.key
@@ -1124,70 +1125,98 @@ internal fun FilterPanel(
             }
         }
     }
-    // The panel's drop target, focus, and keyboard handling. The column host applies it once, on the outer scrolling Column; a
-    // tiled host must apply it to every tile body (SectionChrome.bodyModifier) so keys and drops work wherever focus lands.
-    val panelInputModifier = Modifier
+    // The panel's keyboard handling, shared by every copy of the input chain below.
+    val panelKeyHandler: (KeyEvent) -> Boolean = handler@{ ev ->
+        if (ev.type != KeyEventType.KeyDown) return@handler false
+        if (ev.key == Key.Escape && pidPopover.isOpen) {
+            pidPopover.close()
+            return@handler true
+        }
+        val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
+        if (fieldFocused) {
+            if (ev.key == Key.Escape) {
+                // The Highlighters add field and inline editor handle their own Escape (cancel /
+                // clear); a panel-level clear here would run before they ever saw the key.
+                val otherFieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || kwFieldFocused
+                if (hlFieldFocused && !otherFieldFocused) return@handler false
+                if (tagFieldFocused) {
+                    clearTagSearch()
+                } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
+                    cancelPendingMessageRule()
+                } else if (kwFieldFocused) {
+                    kwDisplay = ""; onSetKw("")
+                } else {
+                    runCatching { focusRequester?.requestFocus() }
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            when {
+                ev.isAltPressed && ev.key == Key.DirectionUp ->
+                    moveSavedFilterTarget(-1) || moveSequenceTarget(-1)
+                ev.isAltPressed && ev.key == Key.DirectionDown ->
+                    moveSavedFilterTarget(+1) || moveSequenceTarget(+1)
+                ev.key == Key.DirectionUp -> { moveFilterFocus(-1); true }
+                ev.key == Key.DirectionDown -> { moveFilterFocus(+1); true }
+                ev.key == Key.DirectionLeft -> { moveFilterFocus(-1); true }
+                ev.key == Key.DirectionRight -> { moveFilterFocus(+1); true }
+                ev.key == Key.Enter || ev.key == Key.NumPadEnter -> { activateFilterTarget(); true }
+                ev.key == Key.Spacebar -> { activateFilterTarget(spaceActivation = true); true }
+                ev.key == Key.Delete || ev.key == Key.Backspace -> deleteFilterTarget()
+                ev.key == Key.Escape -> {
+                    colorPickerSeqId = null
+                    hlSection.closeColorPickers()
+                    colorPickerManualId = null
+                    seqColorPickerOpen = false
+                    editingSeqId = null
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    // The panel's drop target, focus, and keyboard handling. The column host applies one copy on the outer scrolling Column; a tiled
+    // host applies a copy to every tile body (SectionChrome.bodyModifier) so keys and drops work wherever focus lands. A
+    // FocusRequester may be attached to a single node, so only the host's focusOwner tile gets the panel's; [id] tells the focus
+    // callback which tile moved, so "the panel has focus" stays true while focus moves between tiles.
+    val focusedTiles = remember { mutableSetOf<LogViewSectionId?>() }
+
+    fun inputChain(id: LogViewSectionId?, withRequester: Boolean): Modifier = Modifier
         .dragAndDropTarget(
             shouldStartDragAndDrop = { event ->
                 runCatching { isFileDropData(event.dragData()) }.getOrDefault(false)
             },
             target = filterDropTarget,
         )
-        .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+        .then(if (withRequester && focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
         .focusGroup()
         .focusable()
-        .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
-        .onPreviewKeyEvent { ev ->
-            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-            if (ev.key == Key.Escape && pidPopover.isOpen) {
-                pidPopover.close()
-                return@onPreviewKeyEvent true
-            }
-            val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
-            if (fieldFocused) {
-                if (ev.key == Key.Escape) {
-                    // The Highlighters add field and inline editor handle their own Escape (cancel /
-                    // clear); a panel-level clear here would run before they ever saw the key.
-                    val otherFieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || kwFieldFocused
-                    if (hlFieldFocused && !otherFieldFocused) return@onPreviewKeyEvent false
-                    if (tagFieldFocused) {
-                        clearTagSearch()
-                    } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
-                        cancelPendingMessageRule()
-                    } else if (kwFieldFocused) {
-                        kwDisplay = ""; onSetKw("")
-                    } else {
-                        runCatching { focusRequester?.requestFocus() }
-                    }
-                    true
-                } else {
-                    false
-                }
-            } else {
-                when {
-                    ev.isAltPressed && ev.key == Key.DirectionUp ->
-                        moveSavedFilterTarget(-1) || moveSequenceTarget(-1)
-                    ev.isAltPressed && ev.key == Key.DirectionDown ->
-                        moveSavedFilterTarget(+1) || moveSequenceTarget(+1)
-                    ev.key == Key.DirectionUp -> { moveFilterFocus(-1); true }
-                    ev.key == Key.DirectionDown -> { moveFilterFocus(+1); true }
-                    ev.key == Key.DirectionLeft -> { moveFilterFocus(-1); true }
-                    ev.key == Key.DirectionRight -> { moveFilterFocus(+1); true }
-                    ev.key == Key.Enter || ev.key == Key.NumPadEnter -> { activateFilterTarget(); true }
-                    ev.key == Key.Spacebar -> { activateFilterTarget(spaceActivation = true); true }
-                    ev.key == Key.Delete || ev.key == Key.Backspace -> deleteFilterTarget()
-                    ev.key == Key.Escape -> {
-                        colorPickerSeqId = null
-                        hlSection.closeColorPickers()
-                        colorPickerManualId = null
-                        seqColorPickerOpen = false
-                        editingSeqId = null
-                        true
-                    }
-                    else -> false
-                }
-            }
+        .onFocusChanged {
+            if (it.hasFocus) focusedTiles += id else focusedTiles -= id
+            val focused = focusedTiles.isNotEmpty()
+            panelFocused = focused
+            onPanelFocusChanged(focused)
         }
+        .onPreviewKeyEvent(panelKeyHandler)
+    val panelInputModifier = inputChain(null, true)
+    val tiledHost = !sectionHost.hostsInColumn
+    val focusBorder = if (tiledHost && panelFocused && keyboardFocusVisible) Modifier.border(1.dp, tc.ac) else Modifier
+    // The Tags tile's right edge anchors the tag dropdowns that open beside the panel (the column host measures it on its Column).
+    val tagsAnchor = if (tiledHost) {
+        Modifier.onGloballyPositioned { coords -> panelRightPx = (coords.positionInWindow().x + coords.size.width).roundToInt() }
+    } else {
+        Modifier
+    }
+    val inputFor: (LogViewSectionId) -> Modifier = { id ->
+        if (!tiledHost) {
+            panelInputModifier
+        } else {
+            inputChain(id, withRequester = id == sectionHost.focusOwner).then(focusBorder).then(if (id == LogViewSectionId.TAGS) tagsAnchor else Modifier)
+        }
+    }
 
     // Hosted, the dialogs live inside the TAGS / SAVED_FILTERS section bodies so nothing is emitted outside a section; unhosted they
     // stay after the column, where they always were.
@@ -1270,7 +1299,7 @@ internal fun FilterPanel(
                     ),
                     // Regex mode has never had a section header, only the mode strip above the pattern field.
                     column = ColumnSectionOptions(headerShown = filter.mode == FilterMode.TAGS),
-                    bodyModifier = panelInputModifier,
+                    bodyModifier = inputFor(LogViewSectionId.TAGS),
                 ),
             ) {
                 if (filter.mode == FilterMode.TAGS) {
@@ -1617,7 +1646,7 @@ internal fun FilterPanel(
                                 }
                             }
                         }) else null,
-                        bodyModifier = panelInputModifier,
+                        bodyModifier = inputFor(LogViewSectionId.MESSAGE_RULES),
                     ),
                 ) {
                     if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
@@ -1950,7 +1979,7 @@ internal fun FilterPanel(
                     fpState.logCompositionExpanded = !fpState.logCompositionExpanded
                     onUiStateChanged()
                 },
-                bodyModifier = panelInputModifier,
+                bodyModifier = inputFor(LogViewSectionId.LOG_COMPOSITION),
             ),
         ) {
             LogCompositionFreshnessEffect(
@@ -2065,7 +2094,7 @@ internal fun FilterPanel(
             host = sectionHost,
             sectionModifier = Modifier.bringIntoViewRequester(highlightersReveal),
             dividerAfter = true,
-            bodyModifier = panelInputModifier,
+            bodyModifier = inputFor(LogViewSectionId.HIGHLIGHTERS),
         )
 
         // ── Log Level ─────────────────────────────────────────────
@@ -2080,7 +2109,7 @@ internal fun FilterPanel(
                     onUiStateChanged()
                 },
                 column = ColumnSectionOptions(wrapper = Modifier.bringIntoViewRequester(levelsReveal)),
-                bodyModifier = panelInputModifier,
+                bodyModifier = inputFor(LogViewSectionId.LOG_LEVEL),
             ),
         ) {
             if (fpState.lvlExpanded) {
@@ -2107,7 +2136,7 @@ internal fun FilterPanel(
                     fpState.seqExpanded = !fpState.seqExpanded
                     onUiStateChanged()
                 },
-                bodyModifier = panelInputModifier,
+                bodyModifier = inputFor(LogViewSectionId.SEQUENCES),
             ),
         ) {
             if (fpState.seqExpanded) {
@@ -2531,7 +2560,7 @@ internal fun FilterPanel(
                     fpState.crashExpanded = !fpState.crashExpanded
                     onUiStateChanged()
                 },
-                bodyModifier = panelInputModifier,
+                bodyModifier = inputFor(LogViewSectionId.ISSUES),
             ),
         ) {
             if (fpState.crashExpanded) {
@@ -2681,7 +2710,7 @@ internal fun FilterPanel(
                     onUiStateChanged()
                 },
                 column = ColumnSectionOptions(dividerAfter = false),
-                bodyModifier = panelInputModifier,
+                bodyModifier = inputFor(LogViewSectionId.SAVED_FILTERS),
             ),
         ) {
             if (fpState.sfExpanded) {

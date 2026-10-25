@@ -12,8 +12,6 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalDensity
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.model.*
@@ -231,6 +229,8 @@ internal fun BoundFilterPanel(
         onCaptureDeviceEventReturnFocus = onCaptureDeviceEventReturnFocus,
         host = host,
     )
+    // Tiled, the splitters between tiles replace this panel's own right-edge divider and its width guard.
+    if (host != null && !host.hostsInColumn) return
     HDivider { delta ->
         // Recompute live instead of closing over `width`/`liveMaxWidth()` as of the last
         // recomposition: the drag gesture can deliver several deltas before recomposition catches
@@ -269,14 +269,21 @@ internal fun FileView(
     val captureDeviceEvents = rememberCaptureDeviceEvents(state, tab)
     var importedRangeEditorOpen by remember(tab.id) { mutableStateOf(false) }
 
+    // The F6 / panel-focus stops for the tiles that are showing, in the layout's reading order. Original and Log are one stop (the log
+    // viewer has a single requester), as are all the filter tiles; Video and the Diagram library have no focus target of their own.
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
-        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
-        add(KeyboardPanel.LOG_VIEW to logViewerFr)
-        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
-        if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
+        state.logViewVisiblePanels(tab).forEach { panel ->
+            when (panel) {
+                LogViewFocusPanel.FILTERS -> add(KeyboardPanel.FILTERS to filterFr)
+                LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG -> if (none { it.second == logViewerFr }) add(KeyboardPanel.LOG_VIEW to logViewerFr)
+                LogViewFocusPanel.NOTES -> add(KeyboardPanel.NOTES to annotationFr)
+                LogViewFocusPanel.AI -> add(KeyboardPanel.AI to aiFr)
+                else -> Unit
+            }
+        }
     }
 
-    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, tab.id) {
+    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, state.settings.logViewHidden, tab.id) {
         val panel = requestedPanelFocus ?: return@LaunchedEffect
         val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
         runCatching { fr.requestFocus() }
@@ -313,229 +320,31 @@ internal fun FileView(
                 deviceEvents = captureDeviceEvents,
             )
         }
-        // Tracked so the right sidebar's rendered width can be clamped to what this row actually
-        // has available (annotationPanelEffectiveMaxWidth below) — the stored annotationPanelWidth
-        // alone (now allowed up to ANNOTATION_PANEL_MAX_WIDTH, for a big capture mirror) would
-        // otherwise happily squeeze LogViewer's weight(1f) share to nothing on a narrow window.
-        var rowWidthPx by remember { mutableStateOf(0) }
-        val rowDensity = LocalDensity.current
-        val hasTimelineOnlyVideoPanel = hasTimelineOnlyVideoPanel(state, tab)
-        // Hoisted above the Row so the Filters panel can reserve the sidebar's minimum width the
-        // same way the sidebar reserves the filter panel's rendered width below.
-        val liveStatusSidebarVisible = state.videoPanelVisible &&
-            (tab.attachedVideo != null || tab.captureSessionId != null || hasTimelineOnlyVideoPanel)
-        val notesVisibleForTab = state.annotationVisible
-        val rightSidebarVisible = notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible
-
-        // Evaluated live (reads state, not recomposition-time locals) because HDivider drag
-        // callbacks call these between recompositions. Before the first layout pass
-        // rowWidthPx is 0; treating that as "no guard yet" keeps the panel at its stored width for
-        // that frame instead of flashing at FILTER_PANEL_MIN_WIDTH.
-        fun filterEffectiveMaxNow(): Float =
-            if (rowWidthPx <= 0) {
-                FILTER_PANEL_MAX_WIDTH
-            } else {
-                filterPanelEffectiveMaxWidth(
-                    availableRowWidth = with(rowDensity) { rowWidthPx.toDp().value },
-                    rightSidebarVisible = rightSidebarVisible,
-                )
-            }
-
-        fun filterRenderedWidthNow(): Float = minOf(state.filterPanelWidth, filterEffectiveMaxNow())
-        Row(Modifier.weight(1f).fillMaxWidth().onSizeChanged { rowWidthPx = it.width }) {
-            BoundFilterPanel(
-                state, tab,
-                width = filterRenderedWidthNow(),
-                liveMaxWidth = ::filterEffectiveMaxNow,
-                focusRequester = filterFr,
-                filterBarVisible = state.filterBarVisible,
+        // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
+        // (ui/FilterBar.kt) is part of the log tile's toolbar and independently gated by filterBarVisible.
+        LogViewTilingHost(
+            state = state,
+            tab = tab,
+            focus = LogViewPanelFocus(
+                filters = filterFr,
+                log = logViewerFr,
+                notes = annotationFr,
+                ai = aiFr,
+                onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                returnToLog = { runCatching { logViewerFr.requestFocus() } },
+            ),
+            inputs = LogViewHostInputs(
                 filterSearchRequest = filterSearchRequest,
                 onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-                onPanelFocusChanged = { focused ->
-                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
-                },
                 captureDeviceEvents = captureDeviceEvents,
-                onCaptureDeviceEventReturnFocus = { runCatching { logViewerFr.requestFocus() } },
-            )
-            // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
-            // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
-            // its duplicate Tags/Regex/message-rule controls while this bar is active. The model is a
-            // plain data class of values recomputed per recomposition (cheap, and content-equality is
-            // what keeps LogViewer skippable); actions holds lambdas and is remembered below.
-            val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
-                tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
-            }
-            val filterBarModel = if (state.filterBarVisible) {
-                FilterBarModel(
-                    sortedTags = filterBarSortedTags,
-                    tagUsage = state.tagUsage,
-                    mostUsedTagLimit = state.settings.mostUsedTagLimit,
-                    regexHistory = state.regexPatternHistory,
-                    showRegexFilterSummary = state.settings.showRegexFilterSummary,
-                )
-            } else {
-                null
-            }
-            val filterBarActions = remember(state, tab.id) {
-                FilterBarActions(
-                    onSetFilterMode = { mode -> state.setFilterMode(tab.id, mode) },
-                    onStartRegexSearch = { state.startRegexSearch(tab.id) },
-                    onToggleTag = { state.toggleTag(tab.id, it) },
-                    onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
-                    onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
-                    onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
-                    onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
-                    onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
-                    onSetKwInTag = { state.setKwInTag(tab.id, it) },
-                    onToggleKwInTagRegex = { state.toggleKwInTagRx(tab.id) },
-                    onSetKw = { state.setKw(tab.id, it) },
-                    onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
-                        state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
-                    },
-                    onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-                    onRememberRegexPattern = { state.rememberRegexPattern(it) },
-                    onClearRegexHistory = { state.clearRegexPatternHistory() },
-                    onOpenFilterPanel = { state.openFilterPanelRevealing(tab.id) },
-                )
-            }
-            LogViewer(
-                tab = tab, modifier = Modifier.weight(1f),
-                settings = state.settings,
-                onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
-                onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
-                onCtxMenu = { id, x, y, sel, panelSel, capture ->
-                    state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel, annotationCapture = capture)
-                },
-                onToggleGroup = { state.toggleGroup(tab.id, it) },
-                onClearFilter = { state.requestClearFilter(tab.id) },
-                onExpandAll = { state.expandAll(tab.id) },
-                onCollapseAll = { state.collapseAll(tab.id) },
-                onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
-                onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-                onOpenSearch = { if (state.isSearchOpen(tab.id)) state.closeSearch(tab.id) else state.openSearch(tab.id) },
-                onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
-                onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
-                onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
-                onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
-                onExportTxt = { state.exportFilteredTxt(tab.id) },
-                onExportCsv = { state.exportFilteredCsv(tab.id) },
-                scrollStateStore = state.logViewerScrollStateStore,
-                annotationNavigationRequest = state.pendingAnnotationNavigation,
-                onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
-                    state.searchNavigationFor(tab.id, scope)?.let { scope to it }
-                }.toMap(),
-                onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
-                onSelectAll = { state.selectAll(tab.id) },
-                onClearSelection = { state.clearSelection(tab.id) },
-                onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
-                onAddAnnotation = { capture -> state.requestAddAnn(tab.id, capture) },
-                onCopyText = { text -> state.copyToClipboard(text) },
-                onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
-                onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
-                onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
-                navScrollMargin = state.settings.navScrollMargin,
-                focusRequester = logViewerFr,
-                onPanelFocusChanged = { focused ->
-                    if (focused) {
-                        focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
-                        state.searchFocusTabId = tab.id
-                    }
-                },
-                keyboardFocusVisible = state.keyboardFocusVisible,
-                onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
-                onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                onSearchQueryChange = { scope, query -> state.setSearchQuery(tab.id, query, scope) },
-                onSearchToggleCase = { scope -> state.toggleSearchCase(tab.id, scope) },
-                onSearchNext = { scope -> state.searchNext(tab.id, scope) },
-                onSearchPrev = { scope -> state.searchPrev(tab.id, scope) },
-                onSearchClose = { scope -> state.closeSearch(tab.id, scope) },
-                showSearchScopeChip = true,
-                onSearchToggleScope = { mode -> state.setSearchMode(tab.id, mode) },
-                onToggleSearchSync = {
-                    state.updateSettings {
-                        it.copy(syncSplitPanelSelectionAndScroll = !it.syncSplitPanelSelectionAndScroll)
-                    }
-                },
-                onSearchFocused = { scope -> state.focusSearch(tab.id, scope) },
-                onSearchAllLines = { state.searchAllLines(tab.id) },
-                syncSelectionAndScroll = state.settings.syncSplitPanelSelectionAndScroll,
-                syncSelectionAndScrollRevision = state.splitSyncRevision,
-                filterBar = filterBarModel,
-                filterBarActions = filterBarActions,
-                filterBarVisible = state.filterBarVisible,
-                onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
                 onExportCaptureRange = if (archiveBackedCapture) {
                     { importedRangeEditorOpen = true }
                 } else {
                     null
                 },
-            )
-            if (rightSidebarVisible) {
-                val rowWidthDp = with(rowDensity) { rowWidthPx.toDp().value }
-                // The sidebar is clamped from the filter panel's RENDERED width, not its stored
-                // one (which may now be far larger than the window allows) — see
-                // filterPanelEffectiveMaxWidth for why the two guards are ordered this way.
-                val annotationEffectiveMax = annotationPanelEffectiveMaxWidth(
-                    availableRowWidth = rowWidthDp,
-                    filterVisible = state.filterVisible,
-                    filterPanelWidth = filterRenderedWidthNow(),
-                )
-                // The rendered width only ever clamps DOWN from the stored value — the stored
-                // value itself is left alone so widening the window again restores it without a
-                // redrag. Both the sidebar's own width and the divider drag below are computed
-                // from this same rendered value, never from the raw (possibly much larger) stored
-                // annotationPanelWidth, so dragging tracks the mouse from wherever the sidebar's
-                // edge actually is on screen right now.
-                val annotationRenderedWidth = minOf(state.annotationPanelWidth, annotationEffectiveMax)
-                HDivider { delta ->
-                    // Recompute live instead of closing over annotationRenderedWidth/
-                    // annotationEffectiveMax above: those are plain vals frozen at whatever this
-                    // composable's last recomposition happened to see, but HDivider's drag gesture
-                    // (Components.kt) can fire several deltas before recomposition catches up, and
-                    // state.annotationPanelWidth already reflects each prior delta immediately
-                    // (mutableStateOf writes are synchronous even when recomposition is deferred).
-                    // Closing over the stale locals here reproduced the drag jitter/snap-back —
-                    // every delta landed on the same pre-drag base instead of the mouse's actual
-                    // running position.
-                    val liveEffectiveMax = annotationPanelEffectiveMaxWidth(
-                        availableRowWidth = with(rowDensity) { rowWidthPx.toDp().value },
-                        filterVisible = state.filterVisible,
-                        filterPanelWidth = filterRenderedWidthNow(),
-                    )
-                    val liveRenderedWidth = minOf(state.annotationPanelWidth, liveEffectiveMax)
-                    state.updateAnnotationPanelWidth((liveRenderedWidth - delta).coerceAtMost(liveEffectiveMax))
-                }
-                RightSidebarPanel(
-                    state = state,
-                    tab = tab,
-                    width = annotationRenderedWidth,
-                    aiFocusRequester = aiFr,
-                    onAiPanelFocusChanged = { focused ->
-                        if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
-                    },
-                    notesVisible = notesVisibleForTab,
-                    notesContent = {
-                        BoundAnnotationPanel(
-                            state = state,
-                            tab = tab,
-                            width = annotationRenderedWidth,
-                            focusRequester = annotationFr,
-                            onPanelFocusChanged = { focused ->
-                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
-                            },
-                        )
-                    },
-                    videoContent = if (state.videoPanelVisible &&
-                        (tab.captureSessionId != null || tab.attachedVideo != null || hasTimelineOnlyVideoPanel)
-                    ) {
-                        { VideoTileBody(state = state, tab = tab) }
-                    } else {
-                        null
-                    },
-                )
-            }
-        }
+            ),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        )
         val archiveSession = if (archiveBackedCapture) state.captureSnapshotSessionFor(tab.id) else null
         if (importedRangeEditorOpen && archiveSession != null) {
             CaptureSnapshotPopover(
