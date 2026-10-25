@@ -1305,7 +1305,7 @@ internal fun FilterPanel(
                 if (filter.mode == FilterMode.TAGS) {
                     // Combined pills for pkg prefixes + included/excluded tags
                     if (totalActive > 0 && fpState.incPillsExpanded) {
-                        BoundedScrollBox(minOf(totalActive, filterListRows)) {
+                        FlexScrollBox(minOf(totalActive, filterListRows) * 28, Modifier.testTag("filter-tags-list")) {
                             FlowRow(
                                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1650,7 +1650,7 @@ internal fun FilterPanel(
                     ),
                 ) {
                     if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
-                        BoundedScrollBox(minOf(msgInc.size, filterListRows)) {
+                        FlexScrollBox(minOf(msgInc.size, filterListRows) * 28, Modifier.testTag("filter-message-rules-list")) {
                             FlowRow(
                                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1663,7 +1663,7 @@ internal fun FilterPanel(
                         }
                     }
                     if (msgExc.isNotEmpty() && fpState.excMsgPillsExpanded) {
-                        BoundedScrollBox(minOf(msgExc.size, filterListRows)) {
+                        FlexScrollBox(minOf(msgExc.size, filterListRows) * 28, Modifier.testTag("filter-message-rules-list")) {
                             FlowRow(
                                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -2170,210 +2170,213 @@ internal fun FilterPanel(
                     val currentDragId = rememberUpdatedState(dragId)
                     val rowHeightPx = 28f * density
                     val rowHeightDp = (rowHeightPx / density).dp
-                    Box(
-                        Modifier.fillMaxWidth()
-                            .height(rowHeightDp * sequenceIds.size)
-                            .pointerInput(sequenceIds, rowHeightPx) {
-                                var downPos = Offset.Zero
-                                var downId: String? = null
-                                var dragging = false
-                                awaitReorderPointerScope {
-                                    while (true) {
-                                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                                        val ch = ev.changes.firstOrNull() ?: continue
-                                        when (ev.type) {
-                                            PointerEventType.Press -> {
-                                                downPos = ch.position
-                                                dragging = false
-                                                val idx = (ch.position.y / rowHeightPx).toInt()
-                                                    .coerceIn(0, sequenceIds.lastIndex.coerceAtLeast(0))
-                                                downId = sequenceIds.getOrNull(idx)
-                                            }
-
-                                            PointerEventType.Move -> {
-                                                if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
-                                                    val id = downId ?: continue
-                                                    dragging = true
-                                                    holdMoveDragCursor()
-                                                    dragId = id
-                                                    dragStartIndex = sequenceIds.indexOf(id)
-                                                    dragStartTopY = dragStartIndex * rowHeightPx
-                                                    dragOffsetY = 0f
-                                                    justReleasedSequenceId = null
-                                                    liveVisualSequenceIds = sequenceIds
+                    // The sequence list is the section's flex part.
+                    FlexScrollBox(minOf(sequenceIds.size, filterListRows) * 28, Modifier.testTag("filter-sequences-list")) {
+                        Box(
+                            Modifier.fillMaxWidth()
+                                .height(rowHeightDp * sequenceIds.size)
+                                .pointerInput(sequenceIds, rowHeightPx) {
+                                    var downPos = Offset.Zero
+                                    var downId: String? = null
+                                    var dragging = false
+                                    awaitReorderPointerScope {
+                                        while (true) {
+                                            val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                            val ch = ev.changes.firstOrNull() ?: continue
+                                            when (ev.type) {
+                                                PointerEventType.Press -> {
+                                                    downPos = ch.position
+                                                    dragging = false
+                                                    val idx = (ch.position.y / rowHeightPx).toInt()
+                                                        .coerceIn(0, sequenceIds.lastIndex.coerceAtLeast(0))
+                                                    downId = sequenceIds.getOrNull(idx)
                                                 }
-                                                if (dragging && dragId != null) {
-                                                    ch.consume()
-                                                    dragOffsetY = ch.position.y - downPos.y
-                                                    liveVisualSequenceIds = sequenceOrderDuringDrag(
-                                                        visibleIds = sequenceIds,
-                                                        draggedId = dragId,
-                                                        dragStartIndex = dragStartIndex,
-                                                        dragOffsetY = dragOffsetY,
-                                                        rowHeight = rowHeightPx,
-                                                    )
-                                                }
-                                            }
 
-                                            PointerEventType.Release -> {
-                                                releaseMoveDragCursor()
-                                                if (dragging && dragId != null) {
-                                                    val releasedId = currentDragId.value ?: dragId
-                                                    val releasedOrder = currentVisualSequenceIds.value
-                                                    val targetIdx = releasedOrder.indexOf(releasedId)
-                                                    if (releasedId != null && targetIdx >= 0 && targetIdx != sequenceIds.indexOf(releasedId)) {
-                                                        liveVisualSequenceIds = releasedOrder
-                                                        onReorderSeq(releasedId, targetIdx)
+                                                PointerEventType.Move -> {
+                                                    if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                                        val id = downId ?: continue
+                                                        dragging = true
+                                                        holdMoveDragCursor()
+                                                        dragId = id
+                                                        dragStartIndex = sequenceIds.indexOf(id)
+                                                        dragStartTopY = dragStartIndex * rowHeightPx
+                                                        dragOffsetY = 0f
+                                                        justReleasedSequenceId = null
+                                                        liveVisualSequenceIds = sequenceIds
                                                     }
-                                                    justReleasedSequenceId = releasedId
+                                                    if (dragging && dragId != null) {
+                                                        ch.consume()
+                                                        dragOffsetY = ch.position.y - downPos.y
+                                                        liveVisualSequenceIds = sequenceOrderDuringDrag(
+                                                            visibleIds = sequenceIds,
+                                                            draggedId = dragId,
+                                                            dragStartIndex = dragStartIndex,
+                                                            dragOffsetY = dragOffsetY,
+                                                            rowHeight = rowHeightPx,
+                                                        )
+                                                    }
                                                 }
-                                                dragId = null
-                                                dragStartIndex = -1
-                                                dragStartTopY = 0f
-                                                dragOffsetY = 0f
-                                                downId = null
-                                                dragging = false
-                                            }
 
-                                            else -> {}
+                                                PointerEventType.Release -> {
+                                                    releaseMoveDragCursor()
+                                                    if (dragging && dragId != null) {
+                                                        val releasedId = currentDragId.value ?: dragId
+                                                        val releasedOrder = currentVisualSequenceIds.value
+                                                        val targetIdx = releasedOrder.indexOf(releasedId)
+                                                        if (releasedId != null && targetIdx >= 0 && targetIdx != sequenceIds.indexOf(releasedId)) {
+                                                            liveVisualSequenceIds = releasedOrder
+                                                            onReorderSeq(releasedId, targetIdx)
+                                                        }
+                                                        justReleasedSequenceId = releasedId
+                                                    }
+                                                    dragId = null
+                                                    dragStartIndex = -1
+                                                    dragStartTopY = 0f
+                                                    dragOffsetY = 0f
+                                                    downId = null
+                                                    dragging = false
+                                                }
+
+                                                else -> {}
+                                            }
                                         }
                                     }
                                 }
-                            }
-                    ) {
-                        tab.filter.sequences.forEach { def ->
-                            key(def.id) {
-                                val isDragging = dragId == def.id
-                                val targetIndex = visualSequenceIds.indexOf(def.id).takeIf { it >= 0 }
-                                    ?: tab.filter.sequences.indexOf(def)
-                                val targetY = targetIndex * rowHeightPx
-                                val animatedY by animateFloatAsState(
-                                    targetValue = targetY,
-                                    animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
-                                    label = "sequence-y-${def.id}",
-                                )
-                                val sequenceY = sequenceRenderY(
-                                    isDragging = isDragging,
-                                    isJustReleased = justReleasedSequenceId == def.id,
-                                    pointerY = dragStartTopY + dragOffsetY,
-                                    targetY = targetY,
-                                    animatedY = animatedY,
-                                )
-                                Column(
-                                    Modifier.fillMaxWidth()
-                                        .height(rowHeightDp)
-                                        .offset { IntOffset(0, sequenceY.roundToInt()) }
-                                        .zIndex(if (isDragging) 1f else 0f)
-                                        .graphicsLayer {
-                                            if (isDragging) {
-                                                scaleX = 1.02f
-                                                scaleY = 1.02f
-                                            }
-                                        }
-                                ) {
-                                    Row(
+                        ) {
+                            tab.filter.sequences.forEach { def ->
+                                key(def.id) {
+                                    val isDragging = dragId == def.id
+                                    val targetIndex = visualSequenceIds.indexOf(def.id).takeIf { it >= 0 }
+                                        ?: tab.filter.sequences.indexOf(def)
+                                    val targetY = targetIndex * rowHeightPx
+                                    val animatedY by animateFloatAsState(
+                                        targetValue = targetY,
+                                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                                        label = "sequence-y-${def.id}",
+                                    )
+                                    val sequenceY = sequenceRenderY(
+                                        isDragging = isDragging,
+                                        isJustReleased = justReleasedSequenceId == def.id,
+                                        pointerY = dragStartTopY + dragOffsetY,
+                                        targetY = targetY,
+                                        animatedY = animatedY,
+                                    )
+                                    Column(
                                         Modifier.fillMaxWidth()
-                                            .fillMaxHeight()
-                                            .background(sequenceRowBaseBackground(isDragging, def.enabled, tc))
-                                            .background(if (isDragging) tc.ac.copy(.12f) else Color.Transparent)
-                                            .padding(horizontal = 12.dp, vertical = 3.dp),
-                                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
-                                    ) {
-                                        AppText("⠿", color = tc.td, fontSize = 12.sp, modifier = Modifier.moveCursor())
-                                        AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
-                                        HighlighterColorPicker(
-                                            color = def.color,
-                                            onColorChange = { onSetSeqColor(def.id, it) },
-                                            customColors = highlighterActions.customColors,
-                                            onSaveCustomColor = highlighterActions.onSaveCustomColor,
-                                            onDeleteCustomColor = highlighterActions.onDeleteCustomColor,
-                                            paletteColumns = highlighterActions.paletteColumns,
-                                            onPaletteColumnsChange = highlighterActions.onPaletteColumnsChange,
-                                            pickerOpen = colorPickerSeqId == def.id,
-                                            onPickerOpenChange = { open -> colorPickerSeqId = if (open) def.id else null },
-                                            testTagPrefix = "sequence-color-${def.id}",
-                                            customColorEditorExpanded = highlighterActions.customColorEditorExpanded,
-                                            onCustomColorEditorExpandedChange = highlighterActions.onCustomColorEditorExpandedChange,
-                                        )
-                                        AppText(
-                                            sequenceLabel(def),
-                                            color = if (def.enabled) tc.tx else tc.td,
-                                            fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
-                                        )
-                                        // Wave 2.1: a thread-scoped ("async") sequence otherwise looks
-                                        // identical to an unscoped one in this list — the only visible
-                                        // difference is which lines it swallows, which the user can't
-                                        // see without opening the editor. This badge is why a run
-                                        // looks narrower than expected: it's pinned to one thread.
-                                        // Also doubles as the "turn scoping off" control (Task 3) —
-                                        // clicking it always succeeds, so no failure state to show here.
-                                        if (def.scopeTid != null) {
-                                            TooltipArea(tooltip = { ToolbarTooltip("Pinned to tid ${def.scopeTid} — click to unpin") }) {
-                                                AppText(
-                                                    "tid ${def.scopeTid}",
-                                                    color = tc.ac,
-                                                    fontSize = 9.sp,
-                                                    fontFamily = MONO,
-                                                    modifier = Modifier
-                                                        .background(tc.ac.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
-                                                        .clickable {
-                                                            seqScopeToggleFailedId = null
-                                                            onSetSeqScoped(def.id, false)
-                                                        }
-                                                        .padding(horizontal = 4.dp, vertical = 1.dp),
-                                                )
+                                            .height(rowHeightDp)
+                                            .offset { IntOffset(0, sequenceY.roundToInt()) }
+                                            .zIndex(if (isDragging) 1f else 0f)
+                                            .graphicsLayer {
+                                                if (isDragging) {
+                                                    scaleX = 1.02f
+                                                    scaleY = 1.02f
+                                                }
                                             }
-                                        } else if (seqScopeToggleFailedId == def.id) {
-                                            // Task 3: "switch to thread-scoped" resolves the tid from a
-                                            // fresh scan of THIS tab's own log data (AppState.
-                                            // setSequenceScoped) rather than trusting a stale click — a
-                                            // scan that comes back with no match must never leave the
-                                            // user guessing whether the switch silently happened.
-                                            TooltipArea(tooltip = {
-                                                Box(
-                                                    Modifier.background(tc.p2, CORNER_SM).border(0.5.dp, tc.br, CORNER_SM)
-                                                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                                                ) {
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth()
+                                                .fillMaxHeight()
+                                                .background(sequenceRowBaseBackground(isDragging, def.enabled, tc))
+                                                .background(if (isDragging) tc.ac.copy(.12f) else Color.Transparent)
+                                                .padding(horizontal = 12.dp, vertical = 3.dp),
+                                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                        ) {
+                                            AppText("⠿", color = tc.td, fontSize = 12.sp, modifier = Modifier.moveCursor())
+                                            AppText("${targetIndex + 1}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, modifier = Modifier.width(12.dp))
+                                            HighlighterColorPicker(
+                                                color = def.color,
+                                                onColorChange = { onSetSeqColor(def.id, it) },
+                                                customColors = highlighterActions.customColors,
+                                                onSaveCustomColor = highlighterActions.onSaveCustomColor,
+                                                onDeleteCustomColor = highlighterActions.onDeleteCustomColor,
+                                                paletteColumns = highlighterActions.paletteColumns,
+                                                onPaletteColumnsChange = highlighterActions.onPaletteColumnsChange,
+                                                pickerOpen = colorPickerSeqId == def.id,
+                                                onPickerOpenChange = { open -> colorPickerSeqId = if (open) def.id else null },
+                                                testTagPrefix = "sequence-color-${def.id}",
+                                                customColorEditorExpanded = highlighterActions.customColorEditorExpanded,
+                                                onCustomColorEditorExpandedChange = highlighterActions.onCustomColorEditorExpandedChange,
+                                            )
+                                            AppText(
+                                                sequenceLabel(def),
+                                                color = if (def.enabled) tc.tx else tc.td,
+                                                fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
+                                            )
+                                            // Wave 2.1: a thread-scoped ("async") sequence otherwise looks
+                                            // identical to an unscoped one in this list — the only visible
+                                            // difference is which lines it swallows, which the user can't
+                                            // see without opening the editor. This badge is why a run
+                                            // looks narrower than expected: it's pinned to one thread.
+                                            // Also doubles as the "turn scoping off" control (Task 3) —
+                                            // clicking it always succeeds, so no failure state to show here.
+                                            if (def.scopeTid != null) {
+                                                TooltipArea(tooltip = { ToolbarTooltip("Pinned to tid ${def.scopeTid} — click to unpin") }) {
                                                     AppText(
-                                                        "No log line matches this sequence's start pattern — left unscoped.",
-                                                        color = tc.tx, fontSize = 10.sp,
+                                                        "tid ${def.scopeTid}",
+                                                        color = tc.ac,
+                                                        fontSize = 9.sp,
+                                                        fontFamily = MONO,
+                                                        modifier = Modifier
+                                                            .background(tc.ac.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                                            .clickable {
+                                                                seqScopeToggleFailedId = null
+                                                                onSetSeqScoped(def.id, false)
+                                                            }
+                                                            .padding(horizontal = 4.dp, vertical = 1.dp),
                                                     )
                                                 }
-                                            }) {
-                                                AppText(
-                                                    "no match",
-                                                    color = LogLevel.W.defaultColor,
-                                                    fontSize = 9.sp,
-                                                    fontFamily = MONO,
-                                                    modifier = Modifier
-                                                        .background(LogLevel.W.defaultColor.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
-                                                        .padding(horizontal = 4.dp, vertical = 1.dp),
+                                            } else if (seqScopeToggleFailedId == def.id) {
+                                                // Task 3: "switch to thread-scoped" resolves the tid from a
+                                                // fresh scan of THIS tab's own log data (AppState.
+                                                // setSequenceScoped) rather than trusting a stale click — a
+                                                // scan that comes back with no match must never leave the
+                                                // user guessing whether the switch silently happened.
+                                                TooltipArea(tooltip = {
+                                                    Box(
+                                                        Modifier.background(tc.p2, CORNER_SM).border(0.5.dp, tc.br, CORNER_SM)
+                                                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                                                    ) {
+                                                        AppText(
+                                                            "No log line matches this sequence's start pattern — left unscoped.",
+                                                            color = tc.tx, fontSize = 10.sp,
+                                                        )
+                                                    }
+                                                }) {
+                                                    AppText(
+                                                        "no match",
+                                                        color = LogLevel.W.defaultColor,
+                                                        fontSize = 9.sp,
+                                                        fontFamily = MONO,
+                                                        modifier = Modifier
+                                                            .background(LogLevel.W.defaultColor.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                                            .padding(horizontal = 4.dp, vertical = 1.dp),
+                                                    )
+                                                }
+                                            }
+                                            // Turn thread-scoping ON (only shown while unscoped — once
+                                            // scoped, the badge above is the toggle back off). ⏱ mirrors
+                                            // the "async" framing "Set async sequence start" already uses
+                                            // in the log-row context menu (App.kt) for the creation-time
+                                            // path this control mirrors for an existing sequence.
+                                            if (def.scopeTid == null) {
+                                                SquareIconButton(
+                                                    "⏱",
+                                                    fontSize = 11.sp,
+                                                    onClick = { seqScopeToggleFailedId = if (onSetSeqScoped(def.id, true)) null else def.id },
+                                                    tooltip = "Async: pin to the thread (tid) of the first matching line so interleaved runs don't merge",
                                                 )
                                             }
-                                        }
-                                        // Turn thread-scoping ON (only shown while unscoped — once
-                                        // scoped, the badge above is the toggle back off). ⏱ mirrors
-                                        // the "async" framing "Set async sequence start" already uses
-                                        // in the log-row context menu (App.kt) for the creation-time
-                                        // path this control mirrors for an existing sequence.
-                                        if (def.scopeTid == null) {
                                             SquareIconButton(
-                                                "⏱",
+                                                "✎",
                                                 fontSize = 11.sp,
-                                                onClick = { seqScopeToggleFailedId = if (onSetSeqScoped(def.id, true)) null else def.id },
-                                                tooltip = "Async: pin to the thread (tid) of the first matching line so interleaved runs don't merge",
+                                                onClick = { editingSeqId = if (editingSeqId == def.id) null else def.id },
+                                                tooltip = "Edit sequence",
                                             )
+                                            TooltipArea(tooltip = { ToolbarTooltip("Enable / disable sequence") }) {
+                                                RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
+                                            }
+                                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) }, tooltip = "Remove sequence")
                                         }
-                                        SquareIconButton(
-                                            "✎",
-                                            fontSize = 11.sp,
-                                            onClick = { editingSeqId = if (editingSeqId == def.id) null else def.id },
-                                            tooltip = "Edit sequence",
-                                        )
-                                        TooltipArea(tooltip = { ToolbarTooltip("Enable / disable sequence") }) {
-                                            RoundIndicator(active = def.enabled, color = def.color, onClick = { onToggleSeqEnabled(def.id) })
-                                        }
-                                        SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveSeq(def.id) }, tooltip = "Remove sequence")
                                     }
                                 }
                             }
@@ -2665,7 +2668,7 @@ internal fun FilterPanel(
                     val boxHeightDp = remember(crashGroups, expandedGroupIds, filterListRows) {
                         issuesBoxHeightDp(crashGroups, expandedGroupIds, filterListRows)
                     }
-                    BoundedScrollBoxDp(boxHeightDp) {
+                    FlexScrollBox(boxHeightDp, Modifier.testTag("filter-issues-list")) {
                         crashGroups.forEach { group ->
                             val gid = group.representative.id
                             IssueSiteRow(
@@ -2686,7 +2689,7 @@ internal fun FilterPanel(
                 }
                 if (shouldRenderDeviceEventRows && captureDeviceEvents != null && captureDeviceEventsState != null) {
                     val eventRowsHeight = minOf(captureDeviceEvents.intervals.size.coerceAtLeast(1), filterListRows.coerceAtLeast(1)) * 96
-                    BoundedScrollBoxDp(eventRowsHeight) {
+                    val eventRows: @Composable ColumnScope.() -> Unit = {
                         CaptureDeviceEventsIssueRows(
                             state = captureDeviceEventsState,
                             tab = tab,
@@ -2694,6 +2697,8 @@ internal fun FilterPanel(
                             onReturnFocus = onCaptureDeviceEventReturnFocus,
                         )
                     }
+                    // The tile has one flex part: the event rows are it only when there are no crash groups above them.
+                    if (crashGroups.isEmpty()) FlexScrollBox(eventRowsHeight, content = eventRows) else BoundedScrollBoxDp(eventRowsHeight, content = eventRows)
                 }
             }
         }
@@ -2834,100 +2839,129 @@ private fun SavedFilterLibrary(
             onClear = { onSearchChanged("") },
         )
 
-        if (query.isNotEmpty()) {
-            SavedFilterGroupHeader(
-                title = "Search results",
-                count = searchResults.size,
-                expanded = true,
-                collapsible = false,
-            )
-            if (searchResults.isEmpty()) {
-                AppText(
-                    "No saved filters match “$query”",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                    maxLines = 2,
+        // The folder tree is the section's flex part; the search field above it stays.
+        FlexScrollBox(SAVED_FILTER_TREE_CAP_DP, Modifier.testTag("filter-saved-filters-tree")) {
+            if (query.isNotEmpty()) {
+                SavedFilterGroupHeader(
+                    title = "Search results",
+                    count = searchResults.size,
+                    expanded = true,
+                    collapsible = false,
                 )
-            } else {
-                ScrollableItems(
-                    itemCount = searchResults.size,
-                    rowDp = 30,
-                    maxDp = filterListRows.coerceAtLeast(1) * 30,
-                ) {
-                    searchResults.forEach { filter ->
-                        SavedFilterLibraryRow(
-                            filter = filter,
-                            folders = folders,
-                            folderLabel = null,
-                            active = activeFilterItemId == filter.id,
-                            isProjection = true,
-                            onLoad = onLoad,
-                            onClearActive = onClearActive,
-                            onToggleFavorite = onToggleFavorite,
-                            onMoveToFolder = onMoveToFolder,
-                            onRename = onRename,
-                            onDelete = onDelete,
-                        )
+                if (searchResults.isEmpty()) {
+                    AppText(
+                        "No saved filters match “$query”",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                        maxLines = 2,
+                    )
+                } else {
+                    ScrollableItems(
+                        itemCount = searchResults.size,
+                        rowDp = 30,
+                        maxDp = filterListRows.coerceAtLeast(1) * 30,
+                    ) {
+                        searchResults.forEach { filter ->
+                            SavedFilterLibraryRow(
+                                filter = filter,
+                                folders = folders,
+                                folderLabel = null,
+                                active = activeFilterItemId == filter.id,
+                                isProjection = true,
+                                onLoad = onLoad,
+                                onClearActive = onClearActive,
+                                onToggleFavorite = onToggleFavorite,
+                                onMoveToFolder = onMoveToFolder,
+                                onRename = onRename,
+                                onDelete = onDelete,
+                            )
+                        }
+                    }
+                }
+                return@FlexScrollBox
+            }
+
+            val favorites = savedFilters.filter { it.favorite }
+            if (favorites.isNotEmpty()) {
+                SavedFilterGroupHeader(
+                    title = "Favorites",
+                    icon = Icons.Outlined.StarBorder,
+                    count = favorites.size,
+                    expanded = favoritesExpanded,
+                    onToggle = onToggleFavorites,
+                )
+                if (favoritesExpanded) {
+                    ScrollableItems(
+                        itemCount = favorites.size,
+                        rowDp = 30,
+                        maxDp = filterListRows.coerceAtLeast(1) * 30,
+                    ) {
+                        favorites.forEach { filter ->
+                            SavedFilterLibraryRow(
+                                filter = filter,
+                                folders = folders,
+                                folderLabel = null,
+                                active = activeFilterItemId == filter.id,
+                                isProjection = true,
+                                onLoad = onLoad,
+                                onClearActive = onClearActive,
+                                onToggleFavorite = onToggleFavorite,
+                                onMoveToFolder = onMoveToFolder,
+                                onRename = onRename,
+                                onDelete = onDelete,
+                            )
+                        }
                     }
                 }
             }
-            return@Column
-        }
 
-        val favorites = savedFilters.filter { it.favorite }
-        if (favorites.isNotEmpty()) {
-            SavedFilterGroupHeader(
-                title = "Favorites",
-                icon = Icons.Outlined.StarBorder,
-                count = favorites.size,
-                expanded = favoritesExpanded,
-                onToggle = onToggleFavorites,
-            )
-            if (favoritesExpanded) {
-                ScrollableItems(
-                    itemCount = favorites.size,
-                    rowDp = 30,
-                    maxDp = filterListRows.coerceAtLeast(1) * 30,
-                ) {
-                    favorites.forEach { filter ->
-                        SavedFilterLibraryRow(
-                            filter = filter,
-                            folders = folders,
-                            folderLabel = null,
-                            active = activeFilterItemId == filter.id,
-                            isProjection = true,
-                            onLoad = onLoad,
-                            onClearActive = onClearActive,
-                            onToggleFavorite = onToggleFavorite,
-                            onMoveToFolder = onMoveToFolder,
-                            onRename = onRename,
-                            onDelete = onDelete,
-                        )
-                    }
+            folders.forEachIndexed { folderIndex, folder ->
+                val items = savedFilters.filter { it.folderId == folder.id }
+                val expanded = folder.id !in collapsedFolderIds
+                SavedFilterGroupHeader(
+                    title = folder.name,
+                    icon = Icons.Outlined.Folder,
+                    count = items.size,
+                    expanded = expanded,
+                    onToggle = { onToggleFolder(folder.id) },
+                    onRename = { onBeginRenameFolder(folder) },
+                    onDelete = { onDeleteFolder(folder.id) },
+                    canMoveUp = folderIndex > 0,
+                    canMoveDown = folderIndex < folders.lastIndex,
+                    onMoveUp = { onReorderFolder(folder.id, folderIndex - 1) },
+                    onMoveDown = { onReorderFolder(folder.id, folderIndex + 1) },
+                )
+                if (expanded) {
+                    SavedFilterCanonicalList(
+                        filters = items,
+                        folders = folders,
+                        activeFilterItemId = activeFilterItemId,
+                        maxRows = filterListRows,
+                        onLoad = onLoad,
+                        onClearActive = onClearActive,
+                        onToggleFavorite = onToggleFavorite,
+                        onMoveToFolder = onMoveToFolder,
+                        onReorderWithinFolder = onReorderWithinFolder,
+                        onRename = onRename,
+                        onDelete = onDelete,
+                    )
                 }
             }
-        }
 
-        folders.forEachIndexed { folderIndex, folder ->
-            val items = savedFilters.filter { it.folderId == folder.id }
-            val expanded = folder.id !in collapsedFolderIds
+            val ungrouped = savedFilters.filter { it.folderId == null || it.folderId !in folderById }
+            val ungroupedKey = "__ungrouped__"
+            val ungroupedExpanded = ungroupedKey !in collapsedFolderIds
             SavedFilterGroupHeader(
-                title = folder.name,
+                title = "Ungrouped",
                 icon = Icons.Outlined.Folder,
-                count = items.size,
-                expanded = expanded,
-                onToggle = { onToggleFolder(folder.id) },
-                onRename = { onBeginRenameFolder(folder) },
-                onDelete = { onDeleteFolder(folder.id) },
-                canMoveUp = folderIndex > 0,
-                canMoveDown = folderIndex < folders.lastIndex,
-                onMoveUp = { onReorderFolder(folder.id, folderIndex - 1) },
-                onMoveDown = { onReorderFolder(folder.id, folderIndex + 1) },
+                count = ungrouped.size,
+                expanded = ungroupedExpanded,
+                onToggle = { onToggleFolder(ungroupedKey) },
             )
-            if (expanded) {
+            if (ungroupedExpanded) {
                 SavedFilterCanonicalList(
-                    filters = items,
+                    filters = ungrouped,
                     folders = folders,
                     activeFilterItemId = activeFilterItemId,
                     maxRows = filterListRows,
@@ -2940,32 +2974,6 @@ private fun SavedFilterLibrary(
                     onDelete = onDelete,
                 )
             }
-        }
-
-        val ungrouped = savedFilters.filter { it.folderId == null || it.folderId !in folderById }
-        val ungroupedKey = "__ungrouped__"
-        val ungroupedExpanded = ungroupedKey !in collapsedFolderIds
-        SavedFilterGroupHeader(
-            title = "Ungrouped",
-            icon = Icons.Outlined.Folder,
-            count = ungrouped.size,
-            expanded = ungroupedExpanded,
-            onToggle = { onToggleFolder(ungroupedKey) },
-        )
-        if (ungroupedExpanded) {
-            SavedFilterCanonicalList(
-                filters = ungrouped,
-                folders = folders,
-                activeFilterItemId = activeFilterItemId,
-                maxRows = filterListRows,
-                onLoad = onLoad,
-                onClearActive = onClearActive,
-                onToggleFavorite = onToggleFavorite,
-                onMoveToFolder = onMoveToFolder,
-                onReorderWithinFolder = onReorderWithinFolder,
-                onRename = onRename,
-                onDelete = onDelete,
-            )
         }
     }
 }
@@ -3479,6 +3487,9 @@ internal fun issuesBoxHeightDp(groups: List<IssueSiteGroup>, expandedIds: Set<St
 // is the expensive end of the debounce inventory (SAAD 12.5), not a keystroke-latency path.
 private const val LOG_COMPOSITION_REFRESH_DEBOUNCE_MS = 400L
 
+// The saved-filter tree's share of its tile's default height (main grew with the folders; each folder's own list is still capped by filterListRows).
+private const val SAVED_FILTER_TREE_CAP_DP = 240
+
 // Rows per page in the Log composition list (Stage 2c paging). Each row is a rich card — masked
 // template + sample line + action row, ~103dp (LOG_COMPOSITION_ROW_DP below) — unlike the compact
 // single-line-ish rows filterListRows (model/Model.kt) sizes for: tag/highlighter/sequence pills at
@@ -3982,7 +3993,7 @@ private fun LogCompositionResults(
             val pageCount = logCompositionPageCount(matched.size)
             val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)
             val shown = logCompositionPageItems(matched, page)
-            BoundedScrollBox(minOf(shown.size, filterListRows), rowDp = LOG_COMPOSITION_ROW_DP) {
+            FlexScrollBox(minOf(shown.size, filterListRows) * LOG_COMPOSITION_ROW_DP, Modifier.testTag("filter-log-composition-list")) {
                 shown.forEach { t ->
                     val sample = tab.rmap[t.firstEntryId]?.msg ?: t.template
                     val spec = messageRuleSpecForTemplate(t)

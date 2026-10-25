@@ -7,6 +7,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -28,6 +29,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -59,6 +61,8 @@ private const val COLUMN_CENTER_FROM_RIGHT_DP = 150f
 private const val OUTER_EXTRA_DP = 400
 private const val WHEEL_TURNS_TO_END = 40
 private const val WHEEL_TURN = 200f
+private const val FIXED_PART_DP = 50
+private val FIXED_PART_COLOR = Color(0xFFCCDDEE)
 private val HOST_BACKGROUND = Color(0xFF204060)
 private val OUTER_BACKGROUND = Color(0xFF884488)
 
@@ -100,6 +104,11 @@ class TilingScrollUiTest {
     private val clicks = mutableMapOf<ScrollTile, Int>()
     private val focusE = FocusRequester()
 
+    // What the host is built from: the spec, how a tile's slot is made and the host's height. The sized tests swap them.
+    private var hostSpec = SCROLL_SPEC
+    private var slotFor: (ScrollTile) -> TileSlot = ::slot
+    private var hostHeight = HOST_H
+
     private fun slot(id: ScrollTile) = TileSlot(icon = Icons.Outlined.Description, title = "Tile ${id.key}", collapsible = true) {
         if (id == ScrollTile.C) {
             val inner = rememberScrollState()
@@ -119,8 +128,8 @@ class TilingScrollUiTest {
     private fun setHost() {
         rule.setContent {
             // The host sits in a taller box of another colour, so anything a card paints outside the host shows.
-            Box(Modifier.size(HOST_W.dp, (HOST_H + OUTER_EXTRA_DP).dp).background(OUTER_BACKGROUND)) {
-                Box(Modifier.size(HOST_W.dp, HOST_H.dp).background(HOST_BACKGROUND)) {
+            Box(Modifier.size(HOST_W.dp, (hostHeight + OUTER_EXTRA_DP).dp).background(OUTER_BACKGROUND)) {
+                Box(Modifier.size(HOST_W.dp, hostHeight.dp).background(HOST_BACKGROUND)) {
                     TilingSurface(
                         fullLayout = layout,
                         isVisible = { true },
@@ -129,8 +138,8 @@ class TilingScrollUiTest {
                         maximized = null,
                         locked = false,
                         widthDp = HOST_W.toFloat(),
-                        heightDp = HOST_H.toFloat(),
-                        spec = SCROLL_SPEC,
+                        heightDp = hostHeight.toFloat(),
+                        spec = hostSpec,
                         callbacks = TilingCallbacks(
                             onCommitLayout = {
                                 commits += it
@@ -143,7 +152,7 @@ class TilingScrollUiTest {
                             dropLabel = { "drop" },
                         ),
                     ) {
-                        ScrollTile.entries.forEach { Tile(it, slot(it)) }
+                        ScrollTile.entries.forEach { Tile(it, slotFor(it)) }
                     }
                 }
             }
@@ -391,5 +400,168 @@ class TilingScrollUiTest {
         assertTrue(bounds("t-card-log").width.value != before, "the drag still resizes")
         assertEquals(setOf(background), pixelsOf("t-splitter-0"), "dragged")
         splitter.performTouchInput { up() }
+    }
+
+    // ---- content-sized tiles (the log view's setup: gutter, end handle, bodies that report what they need) ----------
+
+    private val sizedSpec = SCROLL_SPEC.copy(scrollGutterDp = TILE_SCROLL_GUTTER_DP, scrollEndHandle = true)
+
+    // B: 50 dp of content. C: 50 dp that always shows and a list of 20 rows of 24 dp (480 dp). D: the same list with 3 rows (72 dp).
+    // E: content again.
+    private fun sizedSlot(id: ScrollTile): TileSlot {
+        val sizing = if (id == ScrollTile.B || id == ScrollTile.E) TileBodySizing.CONTENT else TileBodySizing.FLEX
+        return TileSlot(icon = Icons.Outlined.Description, title = "Tile ${id.key}", sizing = sizing) {
+            Column(Modifier.fillMaxWidth().testTag("body-${id.key}")) {
+                Box(Modifier.fillMaxWidth().height(FIXED_PART_DP.dp).background(FIXED_PART_COLOR).testTag("fixed-${id.key}"))
+                if (sizing == TileBodySizing.FLEX) {
+                    val rows = if (id == ScrollTile.C) 20 else 3
+                    FlexScrollBox(TILE_FLEX_DEFAULT_CAP_DP.toInt(), Modifier.testTag("flex-${id.key}")) {
+                        repeat(rows) { Text("row $it", Modifier.height(24.dp)) }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun setSizedHost(layoutTree: TileNode<ScrollTile>, height: Int = HOST_H) {
+        hostSpec = sizedSpec
+        slotFor = ::sizedSlot
+        hostHeight = height
+        layout = layoutTree
+        setHost()
+    }
+
+    private fun heightOf(tag: String) = bounds(tag).height.value
+
+    private val sizedChrome = 33f
+
+    @Test
+    fun theColumnScrollbarNeverOverlapsACardOrAScrollbarInsideOne() {
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null, ScrollTile.E to null))
+        assertTrue(exists("t-scrollbar-b"), "83 + 323 + 155 + 83 dp do not fit 400")
+        val bar = bounds("t-scrollbar-b")
+        listOf(ScrollTile.B, ScrollTile.C, ScrollTile.D, ScrollTile.E).forEach { id ->
+            val card = bounds("t-card-${id.key}")
+            assertTrue(card.right.value <= bar.left.value, "the scrollbar $bar is clear of the card $card")
+        }
+        // The list scrollbars inside the cards are inside the cards, so they are clear of it too.
+        assertTrue(bounds("t-card-c").right.value <= bar.left.value)
+        // The strip is kept whether the column overflows or not: the card is just as wide with nothing to scroll.
+        val wide = bounds("t-card-b").width.value
+        layout = layoutOf(ScrollTile.B to null)
+        rule.waitForIdle()
+        assertTrue(!exists("t-scrollbar-b"))
+        assertEquals(wide, bounds("t-card-b").width.value, 0.5f)
+        assertEquals(HOST_W - TILE_SCROLL_GUTTER_DP, bounds("t-card-b").right.value, 0.5f)
+    }
+
+    @Test
+    fun aContentTileHasNoHandleAndIsAsTallAsItsContentEvenWhenALargerSizeIsStored() {
+        setSizedHost(layoutOf(ScrollTile.B to 400f, ScrollTile.C to null))
+        assertEquals(sizedChrome + 50f, heightOf("t-card-b"), 0.6f)
+        // Splitters: 0 is the log | column gap, 1 the gap under B, 2 the one under C. B has nothing to drag.
+        assertTrue(exists("t-splitter-0"))
+        assertTrue(!exists("t-splitter-1"), "no handle under a content tile")
+        assertTrue(exists("t-splitter-2"))
+    }
+
+    @Test
+    fun theDefaultHeightIsTheHeaderTheFixedPartAndTheCappedFlexContent() {
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null), height = 900)
+        // C: 480 dp of rows, shown at the 240 dp cap. D: 72 dp of rows, shown whole.
+        assertEquals(sizedChrome + 50f + 240f, heightOf("t-card-c"), 0.6f)
+        assertEquals(240f, heightOf("flex-c"), 0.6f)
+        assertEquals(50f, heightOf("fixed-c"), 0.6f)
+        assertEquals(sizedChrome + 50f + 72f, heightOf("t-card-d"), 0.6f)
+        assertEquals(72f, heightOf("flex-d"), 0.6f)
+        // D is the last tile and only as tall as its list: the rest of the column is left empty, not given to a tile.
+        assertTrue(bounds("t-card-d").bottom.value < 900f - 100f)
+        assertTrue(commits.isEmpty())
+    }
+
+    @Test
+    fun resizingAFlexTileChangesOnlyItsListAndTheFixedPartStaysInFull() {
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null), height = 900)
+        val density = rule.density.density
+        val splitter = rule.onNodeWithTag("t-splitter-2")
+        splitter.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, 40f * density))
+            moveBy(Offset(0f, 60f * density))
+        }
+        rule.waitForIdle()
+        assertEquals(0, commits.size, "nothing is written while dragging")
+        val grown = heightOf("flex-c") - 240f
+        assertTrue(grown in 80f..100.5f, "the list grew by $grown")
+        assertEquals(50f, heightOf("fixed-c"), 0.6f)
+        assertEquals(sizedChrome + 50f + 240f + grown, heightOf("t-card-c"), 0.6f)
+        splitter.performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(1, commits.size)
+        val column = (commits.single() as TileSplit<ScrollTile>).children.last() as TileSplit<ScrollTile>
+        assertEquals(sizedChrome + 50f + 240f + grown, column.children[1].sizeDp!!, 1f)
+        // As small as it gets: about one row (40 dp) of the list and all of the fixed part.
+        rule.onNodeWithTag("t-splitter-2").performTouchInput {
+            down(center)
+            moveBy(Offset(0f, -2000f * density))
+            up()
+        }
+        rule.waitForIdle()
+        assertEquals(40f, heightOf("flex-c"), 0.6f)
+        assertEquals(50f, heightOf("fixed-c"), 0.6f)
+        assertTrue(bounds("fixed-c").bottom.value <= bounds("t-card-c").bottom.value, "the fixed part is inside the card")
+        // As large as it gets: the whole list, no empty space under it.
+        rule.onNodeWithTag("t-splitter-2").performTouchInput {
+            down(center)
+            moveBy(Offset(0f, 2000f * density))
+            up()
+        }
+        rule.waitForIdle()
+        assertEquals(480f, heightOf("flex-c"), 0.6f)
+        assertEquals(sizedChrome + 50f + 480f, heightOf("t-card-c"), 0.6f)
+    }
+
+    @Test
+    fun theLastTileHasABottomHandleThatWritesItsSizeOnReleaseOnly() {
+        // 83 + 323 do not fit the 400 dp host: the column scrolls, C is the last tile.
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null))
+        assertTrue(exists("t-scrollbar-b"))
+        val density = rule.density.density
+        repeat(WHEEL_TURNS_TO_END) { wheelOverColumn(WHEEL_TURN) }
+        // The handle sits in the gap under C, inside the host: the window edge is not in its way.
+        val handle = bounds("t-splitter-2")
+        assertEquals(bounds("t-card-c").bottom.value, handle.top.value, 0.5f)
+        assertTrue(handle.bottom.value <= HOST_H + 0.5f, "the handle is inside the host: $handle")
+        val before = heightOf("t-card-c")
+        rule.onNodeWithTag("t-splitter-2").performTouchInput {
+            down(center)
+            moveBy(Offset(0f, 30f * density))
+            moveBy(Offset(0f, 30f * density))
+        }
+        rule.waitForIdle()
+        assertEquals(0, commits.size, "nothing is written while dragging")
+        val grown = heightOf("t-card-c") - before
+        assertTrue(grown in 40f..60.5f, "C grew by $grown while dragging")
+        rule.onNodeWithTag("t-splitter-2").performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(1, commits.size)
+        val column = (commits.single() as TileSplit<ScrollTile>).children.last() as TileSplit<ScrollTile>
+        assertEquals(before + grown, column.children.last().sizeDp!!, 1f)
+        // A double click on the handle puts the tile back to the height its content asks for.
+        rule.onNodeWithTag("t-splitter-2").performTouchInput { doubleClick() }
+        rule.waitForIdle()
+        assertEquals(2, commits.size)
+        assertEquals(null, ((commits.last() as TileSplit<ScrollTile>).children.last() as TileSplit<ScrollTile>).children.last().sizeDp)
+    }
+
+    @Test
+    fun aLargerStoredSizeIsClampedAtLayoutAndNotRewritten() {
+        val stored = layoutOf(ScrollTile.B to null, ScrollTile.C to 2000f)
+        setSizedHost(stored, height = 900)
+        // 2000 was stored (an old file, or a list that has since got shorter): the tile is as tall as its content, nothing is written.
+        assertEquals(sizedChrome + 50f + 480f, heightOf("t-card-c"), 0.6f)
+        assertEquals(480f, heightOf("flex-c"), 0.6f)
+        assertEquals(0, commits.size)
+        assertEquals(stored, layout)
     }
 }

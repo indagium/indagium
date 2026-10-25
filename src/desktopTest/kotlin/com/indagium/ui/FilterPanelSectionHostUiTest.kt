@@ -13,8 +13,11 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.LogAnalysis
@@ -68,7 +71,7 @@ class FilterPanelSectionHostUiTest {
     @get:Rule
     val rule = createComposeRule()
 
-    private fun tabFor(mode: FilterMode): LogTab {
+    private fun tabFor(mode: FilterMode, activeTags: Set<String> = emptySet()): LogTab {
         val log = listOf(
             LogEntry(1, "00:00:00", LogLevel.I, "Alpha", "alpha", pid = 100, tid = 1),
             LogEntry(2, "00:00:01", LogLevel.D, "Beta", "beta", pid = 100, tid = 1),
@@ -78,7 +81,7 @@ class FilterPanelSectionHostUiTest {
             filename = "section-host.log",
             logData = log,
             rmap = log.associateBy(LogEntry::id),
-            filter = Filter(mode = mode),
+            filter = Filter(mode = mode, activeTags = activeTags),
             analysis = LogAnalysis(tagCounts = log.groupingBy(LogEntry::tag).eachCount(), pending = false),
         )
     }
@@ -87,10 +90,11 @@ class FilterPanelSectionHostUiTest {
         mode: FilterMode = FilterMode.TAGS,
         filterBarVisible: Boolean = false,
         initialHost: SectionHost? = null,
+        activeTags: Set<String> = emptySet(),
         test: (hostOf: () -> SectionHost?, setHost: (SectionHost?) -> Unit) -> Unit,
     ) {
         val directory = createTempDirectory("filter-panel-section-host-ui").toFile()
-        val tab = tabFor(mode)
+        val tab = tabFor(mode, activeTags)
         val state = AppState(
             autosaveFile = File(directory, "state.cache"),
             notesDir = File(directory, "notes"),
@@ -187,5 +191,24 @@ class FilterPanelSectionHostUiTest {
             }
             assertEquals(unhosted, hosted)
         }
+    }
+
+    @Test
+    fun aFlexListOutsideAContentSizedTileIsTheBoundedBoxItAlwaysWas() {
+        // In the single scrolling column (no tile is sized by its content) a section's list is capped at the row setting (5 rows of 28 dp
+        // by default) and scrolls inside, exactly as BoundedScrollBox did; the section is not stretched to anything.
+        val tags = (0 until 40).map { "Tag$it" }.toSet()
+        withPanel(initialHost = ColumnSectionHost, activeTags = tags) { _, _ ->
+            val list = rule.onNodeWithTag("filter-tags-list").getBoundsInRoot()
+            assertEquals(140f, list.height.value, 0.7f)
+            // 40 chips are much more than that: the list scrolls (its content is taller than the box).
+            assertTrue(rule.onNodeWithTag("filter-panel-tags-input").getBoundsInRoot().top >= list.bottom)
+        }
+    }
+
+    @Test
+    fun onlyLogLevelIsContentAndTheOtherFilterSectionsAreFlex() {
+        assertEquals(TileBodySizing.CONTENT, filterTileSizing(LogViewSectionId.LOG_LEVEL))
+        ALL_SECTIONS.filter { it != LogViewSectionId.LOG_LEVEL }.forEach { assertEquals(TileBodySizing.FLEX, filterTileSizing(it), "$it") }
     }
 }

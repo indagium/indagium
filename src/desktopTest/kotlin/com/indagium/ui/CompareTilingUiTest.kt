@@ -20,6 +20,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -30,6 +31,7 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
 import com.indagium.debug.AppLogger
 import com.indagium.model.CompareFilterTarget
 import com.indagium.model.Filter
@@ -202,6 +204,25 @@ class CompareTilingUiTest {
         assertTrue(rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top < tagsTop, "the wheel scrolled the filter column")
         assertEquals(logBefore, bounds("tile-card-log_a"), "the logs did not move")
         assertFalse(exists("tile-scrollbar-log_a"))
+    }
+
+    @Test
+    fun theCompareFilterColumnIsSizedByItsContentWithAScrollbarGutterAndAHandleUnderItsLastTile() {
+        setup(height = 560)
+        // Tags with nothing active is its header and input, not a share of the window.
+        assertTrue(bounds("tile-card-tags").height.value < 90f, "Tags is ${bounds("tile-card-tags").height}")
+        assertTrue(exists("tile-scrollbar-tags"), "the eight tiles together are taller than 560 dp")
+        val bar = rule.onNodeWithTag("tile-scrollbar-tags").getUnclippedBoundsInRoot()
+        LOG_VIEW_FILTER_TILES.forEach { tile ->
+            val card = rule.onNodeWithTag("tile-card-${tile.key}").getUnclippedBoundsInRoot()
+            assertTrue(card.right.value <= bar.left.value, "$tile ends at ${card.right}, the scrollbar starts at ${bar.left}")
+        }
+        // Notes is the only tile of its column and has a handle right under it, inside the window (Saved filters, with no list yet, has nothing to drag).
+        val notes = rule.onNodeWithTag("tile-card-notes").getBoundsInRoot()
+        val handles = rule.onAllNodesWithContentDescription("Resize sections")
+        val under = (0 until handles.fetchSemanticsNodes().size).map { handles[it].getBoundsInRoot() }
+            .firstOrNull { kotlin.math.abs(it.top.value - notes.bottom.value) < 1f }
+        assertTrue(under != null, "a handle under the last tile of the right column")
     }
 
     @Test

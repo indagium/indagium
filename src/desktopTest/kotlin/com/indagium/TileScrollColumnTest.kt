@@ -4,6 +4,8 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.ui.TileBodyMeasure
+import com.indagium.ui.TileBodySizing
 import com.indagium.ui.TileDropTarget
 import com.indagium.ui.TileEdge
 import com.indagium.ui.TileGeometry
@@ -11,6 +13,7 @@ import com.indagium.ui.TileGeometrySpec
 import com.indagium.ui.TileRect
 import com.indagium.ui.TileScrollRegion
 import com.indagium.ui.TileScrollState
+import com.indagium.ui.TileSizing
 import com.indagium.ui.dropTile
 import com.indagium.ui.projectTileLayout
 import com.indagium.ui.resetProjected
@@ -335,5 +338,169 @@ class TileScrollColumnTest {
         assertFalse(TileScrollRegion(S.B, viewport, 100.4f).scrolls)
         assertTrue(TileScrollRegion(S.B, viewport, 101f).scrolls)
         assertEquals(40f, TileScrollRegion(S.B, viewport, 140f).maxOffset, EPS)
+    }
+
+    // ---- content-sized tiles ---------------------------------------------------------------------------------------
+
+    // The log view's setup: a gutter for the scrollbar and a splitter under the last tile.
+    private val sizedSpec = SPEC.copy(scrollGutterDp = 8f, scrollEndHandle = true)
+
+    private fun sizedGeometry(root: TileNode<S>, sizing: Map<S, TileSizing>, collapsed: Set<S> = emptySet(), spec: TileGeometrySpec = sizedSpec) =
+        tileGeometry(root, HOST_W, HOST_H, spec, collapsed, scrolls) { sizing[it] }
+
+    private fun resizeSized(root: TileNode<S>, sizing: Map<S, TileSizing>, gapIndex: Int, delta: Float): TileNode<S> {
+        val projection = assertNotNull(projectTileLayout(root) { true })
+        val gap = sizedGeometry(projection.root, sizing).gaps.filter { it.scrolling }[gapIndex - 1]
+        return resizeProjected(root, projection, gap, delta, MIN, MIN_SHARE, emptySet(), HEADER, SCROLL_MIN, SCROLL_MAX) { sizing[it] }
+    }
+
+    // Content: exactly 100 dp. Flex: 120..400 dp, 200 by default.
+    private val content100 = TileSizing(100f, 100f, 100f)
+    private val flex120to400 = TileSizing(120f, 400f, 200f)
+
+    @Test
+    fun aContentTileIsExactlyAsTallAsItsContentWhateverItsStoredSize() {
+        val sizing = mapOf(S.B to content100, S.C to flex120to400)
+        val root = sideColumn(leaf(S.B, dp = 400f), leaf(S.C, dp = 300f))
+        val geo = sizedGeometry(root, sizing)
+        // The stored 400 is clamped at layout time to what the content needs; the stored tree is untouched.
+        assertEquals(100f, geo.rect(S.B).h, EPS)
+        assertEquals(300f, geo.rect(S.C).h, EPS)
+        assertEquals(listOf(false, true), geo.gaps.filter { it.scrolling }.map { it.resizable })
+        // Nothing to drag under B: a resize of that gap leaves the layout as it is.
+        val projection = assertNotNull(projectTileLayout(root) { true })
+        val gap = geo.gaps.first { it.scrolling }
+        assertEquals(root, resizeProjected(root, projection, gap, 80f, MIN, MIN_SHARE, emptySet(), HEADER, SCROLL_MIN, SCROLL_MAX) { sizing[it] })
+        // Unpinned or pinned small, B is the same 100.
+        assertEquals(100f, sizedGeometry(sideColumn(leaf(S.B), leaf(S.C, dp = 300f)), sizing).rect(S.B).h, EPS)
+        assertEquals(100f, sizedGeometry(sideColumn(leaf(S.B, dp = 20f), leaf(S.C, dp = 300f)), sizing).rect(S.B).h, EPS)
+    }
+
+    @Test
+    fun aFlexTileResizesWithinItsBoundsAndABiggerStoredSizeIsClampedWithoutBeingRewritten() {
+        val sizing = mapOf(S.B to flex120to400, S.C to content100)
+        val root = sideColumn(leaf(S.B, dp = 300f), leaf(S.C))
+        assertEquals(400f, sizedGeometry(resizeSized(root, sizing, 1, 5000f), sizing).rect(S.B).h, EPS)
+        assertEquals(120f, sizedGeometry(resizeSized(root, sizing, 1, -5000f), sizing).rect(S.B).h, EPS)
+        // An old file stored 1500: the tile is drawn at its maximum and the tree keeps the 1500 until the user resizes.
+        val old = sideColumn(leaf(S.B, dp = 1500f), leaf(S.C))
+        assertEquals(400f, sizedGeometry(old, sizing).rect(S.B).h, EPS)
+        assertEquals(1500f, (((old as TileSplit<S>).children.last() as TileSplit<S>).children.first()).sizeDp)
+        // A resize starts from the height it is drawn at, not from the stored number.
+        assertEquals(350f, sizedGeometry(resizeSized(old, sizing, 1, -50f), sizing).rect(S.B).h, EPS)
+    }
+
+    @Test
+    fun anUnpinnedTileTakesItsDefaultAndTheLastOneGrowsIntoWhatIsLeftOnlyUpToItsMaximum() {
+        val extent = HOST_H - GAP - GAP // two tiles: one gap between, one end handle below
+        // Content on top, a flex tile with a default last: it grows to its maximum.
+        val grown = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C)), mapOf(S.B to content100, S.C to flex120to400))
+        assertEquals(100f, grown.rect(S.B).h, EPS)
+        assertEquals(400f, grown.rect(S.C).h, EPS)
+        // With a larger maximum it takes everything that is left, which fills the column exactly (and nothing scrolls).
+        val roomy = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C)), mapOf(S.B to content100, S.C to TileSizing(120f, 900f, 200f)))
+        assertEquals(extent - 100f, roomy.rect(S.C).h, EPS)
+        assertFalse(roomy.scrollRegions.single().scrolls)
+        // A stored size is not stretched, and neither is a last tile that is only content: the rest stays empty.
+        val pinned = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C, dp = 150f)), mapOf(S.B to content100, S.C to flex120to400))
+        assertEquals(150f, pinned.rect(S.C).h, EPS)
+        val contentLast = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C)), mapOf(S.B to flex120to400, S.C to content100))
+        assertEquals(200f, contentLast.rect(S.B).h, EPS)
+        assertEquals(100f, contentLast.rect(S.C).h, EPS)
+        assertTrue(contentLast.rect(S.C).bottom < HOST_H - 100f, "the column's leftover stays empty")
+    }
+
+    @Test
+    fun fillTilesShareWhatIsLeftByWeightEachWithinItsBounds() {
+        val fill = { max: Float -> TileSizing(100f, max, null) }
+        val extent = HOST_H - GAP - GAP
+        val even = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C)), mapOf(S.B to fill(2000f), S.C to fill(2000f)))
+        assertEquals(extent / 2, even.rect(S.B).h, EPS)
+        assertEquals(extent / 2, even.rect(S.C).h, EPS)
+        // C cannot be taller than its content, so B gets the rest.
+        val capped = sizedGeometry(sideColumn(leaf(S.B), leaf(S.C)), mapOf(S.B to fill(2000f), S.C to fill(200f)))
+        assertEquals(200f, capped.rect(S.C).h, EPS)
+        assertEquals(extent - 200f, capped.rect(S.B).h, EPS)
+        // Weights count: 3 to 1.
+        val weighted = sizedGeometry(sideColumn(leaf(S.B, 3f), leaf(S.C, 1f)), mapOf(S.B to fill(2000f), S.C to fill(2000f)))
+        assertEquals(extent * 3 / 4, weighted.rect(S.B).h, EPS)
+    }
+
+    @Test
+    fun theLastTileHasAnEndHandleThatResizesItAndWritesItsSize() {
+        val sizing = mapOf(S.B to content100, S.C to flex120to400)
+        val root = sideColumn(leaf(S.B), leaf(S.C, dp = 250f))
+        val geo = sizedGeometry(root, sizing)
+        val handles = geo.gaps.filter { it.scrolling }
+        assertEquals(listOf(1, 2), handles.map { it.index }, "a gap under B and one under the last tile")
+        val end = handles.last()
+        assertEquals(geo.rect(S.C).bottom, end.rect.y, EPS)
+        assertEquals(GAP, end.rect.h, EPS)
+        assertEquals(geo.rect(S.C).w, end.rect.w, EPS)
+        assertTrue(end.resizable)
+        // The content ends below the handle, so scrolling reaches it.
+        assertEquals(end.rect.bottom, geo.scrollRegions.single().contentHeight, EPS)
+        val resized = resizeSized(root, sizing, 2, 60f)
+        val after = sizedGeometry(resized, sizing)
+        assertEquals(310f, after.rect(S.C).h, EPS)
+        assertEquals(listOf(null, 310f), (((resized as TileSplit<S>).children.last() as TileSplit<S>).children).map { it.sizeDp })
+        // Double click: the tile goes back to the height its content asks for.
+        val projection = assertNotNull(projectTileLayout(resized) { true })
+        val reset = resetProjected(resized, projection, sizedGeometry(resized, sizing).gaps.last { it.scrolling }) { null }
+        assertEquals(listOf(null, null), (((reset as TileSplit<S>).children.last() as TileSplit<S>).children).map { it.sizeDp })
+        // Without the option there is no handle, as before.
+        assertEquals(1, sizedGeometry(root, sizing, spec = SPEC).gaps.count { it.scrolling })
+    }
+
+    @Test
+    fun theFirstResizePinsOnlyTheTilesThatDependOnTheOthers() {
+        val fill = TileSizing(100f, 2000f, null)
+        val sizing = mapOf(S.B to flex120to400, S.C to content100, S.D to fill, S.E to flex120to400)
+        val root = sideColumn(leaf(S.B), leaf(S.C), leaf(S.D), leaf(S.E))
+        val before = sizedGeometry(root, sizing)
+        val resized = resizeSized(root, sizing, 1, 30f)
+        val slots = ((resized as TileSplit<S>).children.last() as TileSplit<S>).children.map { it.sizeDp }
+        // B (resized), D (shares what is left) and E (the last one, which may grow into what is left) are pinned; C is just content.
+        assertEquals(listOf(230f, null, before.rect(S.D).h, before.rect(S.E).h), slots)
+        val after = sizedGeometry(resized, sizing)
+        assertEquals(before.rect(S.D).h, after.rect(S.D).h, EPS)
+        assertEquals(before.rect(S.E).h, after.rect(S.E).h, EPS)
+    }
+
+    @Test
+    fun theCardsLeaveTheScrollbarGutterFree() {
+        val sizing = mapOf(S.B to flex120to400, S.C to flex120to400)
+        val geo = sizedGeometry(sideColumn(leaf(S.B, dp = 400f), leaf(S.C, dp = 400f)), sizing)
+        val region = geo.scrollRegions.single()
+        geo.cards.filter { it.section != S.LOG }.forEach { assertEquals(region.viewport.w - 8f, it.rect.w, EPS, "${it.section} is narrowed") }
+        geo.gaps.filter { it.scrolling }.forEach { assertEquals(region.viewport.w - 8f, it.rect.w, EPS) }
+        assertTrue(geo.cards.filter { it.section != S.LOG }.all { it.rect.right <= region.viewport.right - 8f + EPS })
+        // Whether the column overflows or not (here: it does not), the cards keep the same width.
+        val short = sizedGeometry(sideColumn(leaf(S.B, dp = 150f)), mapOf(S.B to flex120to400))
+        assertEquals(region.viewport.w - 8f, short.rect(S.B).w, EPS)
+        assertFalse(short.scrollRegions.single().scrolls)
+    }
+
+    @Test
+    fun aTileSizingComesFromWhatTheBodyMeasured() {
+        // A flex body: 33 dp of header, 50 dp that always shows and a 600 dp list capped at 240 by default.
+        val flex = TileBodyMeasure(TileBodySizing.FLEX, chromeDp = 33f, fixedDp = 50f, flexNaturalDp = 600f, flexCapDp = 240f)
+        assertEquals(TileSizing(33f + 50f + 40f, 33f + 50f + 600f, 33f + 50f + 240f), flex.toSizing(2000f))
+        // A short list is shown whole: nothing to drag, and the default is the same.
+        val short = flex.copy(flexNaturalDp = 20f).toSizing(2000f)!!
+        assertEquals(33f + 50f + 20f, short.minDp, EPS)
+        assertEquals(short.minDp, short.maxDp, EPS)
+        assertEquals(short.minDp, short.defaultDp!!, EPS)
+        assertFalse(short.resizable)
+        // An empty list leaves the header and the fixed part.
+        assertEquals(83f, flex.copy(flexNaturalDp = 0f).toSizing(2000f)!!.maxDp, EPS)
+        // No cap: the tile shares the column by weight. Never taller than the surface allows.
+        val fill = flex.copy(flexCapDp = null, flexNaturalDp = 5000f).toSizing(2000f)!!
+        assertNull(fill.defaultDp)
+        assertEquals(2000f, fill.maxDp, EPS)
+        // Content: header + body, no more, no less. Fill (not measured): unknown.
+        val content = TileBodyMeasure(TileBodySizing.CONTENT, chromeDp = 33f, fixedDp = 47f).toSizing(2000f)!!
+        assertEquals(TileSizing(80f, 80f, 80f), content)
+        assertNull(TileBodyMeasure(TileBodySizing.FILL, 33f).toSizing(2000f))
     }
 }

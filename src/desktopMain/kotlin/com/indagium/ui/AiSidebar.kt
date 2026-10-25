@@ -301,7 +301,8 @@ internal fun AiSidebarPanel(
                 }
             },
     ) {
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        // The conversation is the tile's flex part (TileFlexRegion.kt); the prompt composer under it stays at its own height.
+        FlexRegion(scroll, capDp = null, fill = Modifier.weight(1f).fillMaxWidth()) {
             SelectionContainer {
                 Column(
                     Modifier.fillMaxWidth().verticalScroll(scroll)
@@ -460,11 +461,13 @@ internal fun AiSidebarPanel(
                     }
                 }
             }
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                style = appScrollbarStyle(colors),
-            )
+            Box(Modifier.matchParentSize()) {
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(scroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                    style = appScrollbarStyle(colors),
+                )
+            }
         }
         VDivider { delta ->
             promptEditorHeight = (promptEditorHeight - delta.dp).coerceIn(60.dp, 260.dp)
