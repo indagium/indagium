@@ -14,7 +14,6 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -69,6 +68,7 @@ import androidx.compose.ui.layout.MeasurePolicy
 import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -442,14 +442,20 @@ internal fun <K> TileStackedSurface(
     val order = projectTileLayout(fullLayout) { isVisible(it) && it !in parked }?.let { tileLeafSections(it.root) }.orEmpty()
     val composedIds = tileLeafSections(fullLayout).filterTo(HashSet()) { isVisible(it) } + parked
     val totalDp = max(0f, order.size * (cardHeightDp + spec.gapColumnDp) - spec.gapColumnDp)
+    // The width comes from onSizeChanged, not BoxWithConstraints: that is a SubcomposeLayout, and a Popup-based dropdown several
+    // levels inside one (the AI and filter panels' pickers) has thrown "layouts are not part of the same hierarchy". The first frame is
+    // laid out at width 0 and settles on the next one.
+    var widthPx by remember { mutableStateOf(0) }
+    val density = LocalDensity.current.density
+    val widthDp = widthPx / density
     ScrollColumnWithBar(modifier.fillMaxSize(), endGutter = 8.dp) {
-        BoxWithConstraints(Modifier.fillMaxWidth().height(totalDp.dp)) {
-            val geometry = stackedTileGeometry(order, maxWidth.value, cardHeightDp, spec.gapColumnDp)
+        Box(Modifier.fillMaxWidth().height(totalDp.dp).onSizeChanged { widthPx = it.width }) {
+            val geometry = stackedTileGeometry(order, widthDp, cardHeightDp, spec.gapColumnDp)
             val scope = TileScopeImpl<K>(
                 spec = spec,
                 callbacks = callbacks,
                 geometry = geometry,
-                host = TileRect(0f, 0f, maxWidth.value, totalDp),
+                host = TileRect(0f, 0f, widthDp, totalDp),
                 fullLayout = fullLayout,
                 composed = { it in composedIds },
                 collapsed = emptySet(),

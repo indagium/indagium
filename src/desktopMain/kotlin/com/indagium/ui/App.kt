@@ -412,7 +412,7 @@ fun App(
                                 }
                             } else {
                                 if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
-                                state.updateFilterVisible(true)
+                                state.revealFilterTiles()
                                 pendingPanelFocus = KeyboardPanel.FILTERS
                                 state.activeTab()?.id?.let { tabId ->
                                     nextFilterSearchRequestNonce += 1
@@ -441,7 +441,7 @@ fun App(
                 }
             }
             Column(Modifier.fillMaxSize()) {
-                TabBar(state)
+                TabBar(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
                 HeapPressureBanner(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
@@ -2845,7 +2845,7 @@ private fun handleGlobalImagePaste(ev: KeyEvent, state: AppState): Boolean {
         ?.let(::imageBytesFromTransferable) ?: return false
     // Appended at the end: with focus outside Notes there is no "block being edited" to anchor to.
     state.addImageBlock(tabId, bytes, "pasted from clipboard", null) ?: return false
-    if (!state.annotationVisible) state.updateAnnotationVisible(true)
+    state.showLogViewTile(LogViewSectionId.NOTES)
     return true
 }
 
@@ -2870,9 +2870,9 @@ private fun handleGlobalKey(
         ev.isShiftPressed && ev.key == Key.O  -> { state.activeTab()?.id?.let(state::openCaseLibrary); true }
         ev.isAltPressed && ev.key == Key.F   -> { onFocusFilterSearch(SearchScope.UNFILTERED); true }
         ev.key == Key.F                      -> { onFocusFilterSearch(SearchScope.FILTERED); true }
-        ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
+        ev.key == Key.One                    -> { state.revealFilterTiles(); onFocusPanel(KeyboardPanel.FILTERS); true }
         ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
-        ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }
+        ev.key == Key.Three                  -> { state.showLogViewTile(LogViewSectionId.NOTES); onFocusPanel(KeyboardPanel.NOTES); true }
         ev.key == Key.RightBracket           -> { navigateTab(state, +1); true }
         ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
         ev.key == Key.W && state.testsSurfaceActive -> { state.closeTestsTab(); true }

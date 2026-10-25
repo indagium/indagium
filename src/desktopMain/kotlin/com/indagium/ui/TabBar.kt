@@ -76,7 +76,7 @@ internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String {
 
 // ── TabBar ────────────────────────────────────────────────────────────
 @Composable
-internal fun TabBar(state: AppState) {
+internal fun TabBar(state: AppState, onReclaimFocus: () -> Unit = {}) {
     val tc = tc()
     val toolbarGap = 4.dp
     val leftShape = RoundedCornerShape(topStart = 7.dp, bottomStart = 7.dp)
@@ -185,6 +185,9 @@ internal fun TabBar(state: AppState) {
                 contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp),
             ) { state.toggleRecentFilesMenu() }
         }
+        Spacer(Modifier.width(toolbarGap))
+        // The log view's Layout menu (draws nothing outside a single log view), just before Settings.
+        LayoutMenuButton(state, onReclaimFocus)
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(
             "⚙",

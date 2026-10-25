@@ -63,6 +63,9 @@ internal interface SectionHost {
     /** The sections whose tiles are currently visible, or null when every section is (the legacy column). */
     val visibleSections: Set<LogViewSectionId>? get() = null
 
+    /** The one tile whose body carries the panel's FocusRequester (a requester fits a single node); null in the column host. */
+    val focusOwner: LogViewSectionId? get() = null
+
     /**
      * Emits one section. [content] gets the size of the tile body, or null in the column host. A section's [content] decides
      * for itself whether it is expanded (it draws nothing when collapsed): a host composes it either way, which is what lets a

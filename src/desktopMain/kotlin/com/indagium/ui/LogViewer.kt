@@ -1447,7 +1447,14 @@ internal fun LogViewer(
         Row(
             Modifier.fillMaxWidth().height(34.dp)
                 .background(tc.p)
-                .border(BorderStroke(1.dp, tc.br))
+                // Tiled, the card already draws the outer 1dp border; the toolbar keeps only its divider with the log below.
+                .then(
+                    if (tiles == null) {
+                        Modifier.border(BorderStroke(1.dp, tc.br))
+                    } else {
+                        Modifier.drawBehind { drawRect(tc.br, topLeft = Offset(0f, size.height - 1.dp.toPx()), size = Size(size.width, 1.dp.toPx())) }
+                    },
+                )
                 .onSizeChanged { toolbarWidthPx = it.width }
                 .pointerInput("toolbar-context", tab.id) {
                     awaitPointerEventScope {
