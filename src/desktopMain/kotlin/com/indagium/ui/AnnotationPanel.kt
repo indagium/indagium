@@ -657,7 +657,18 @@ fun AnnotationPanel(
     val ann = tab.annotations
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
-    val headerButtonModifier = Modifier.height(28.dp)
+    // The buttons are the log toolbar's own AppButtons at their natural height (TileToolbarStyle.kt), so there is no modifier of their own;
+    // a click or a dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
+    val headerButtonModifier = Modifier
+
+    fun reclaimFocus() {
+        runCatching { focusRequester?.requestFocus() }
+    }
+
+    fun tap(action: () -> Unit) {
+        action()
+        reclaimFocus()
+    }
     // Open+▾ split-button shapes — same joined-pair idea as TabBar's log-file Open/▾ precedent
     // (TabBar.kt's leftShape/middleShape/rightShape), just built off CORNER_MD's 4.dp radius
     // instead of the toolbar's 7.dp so the corners match every other AppButton in this header.
@@ -1119,23 +1130,26 @@ fun AnnotationPanel(
                 modifier = Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 12.dp, vertical = 5.dp),
             )
         }
+        // The Notes tile's button bar looks like the log toolbar above the log (TileToolbarStyle.kt): on the card, no band or border, buttons
+        // TILE_HEADER_GAP_DP apart, left-aligned, a hairline under it. It is part of the tile's fixed part.
         Box(
-            Modifier.fillMaxWidth().heightIn(min = 36.dp).background(tc.p2)
-                .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp, vertical = 4.dp),
+            Modifier.fillMaxWidth().heightIn(min = TILE_TOOLBAR_HEIGHT_DP.dp).testTag("notes-toolbar").tileToolbarDivider(tc.br)
+                .padding(horizontal = TILE_TOOLBAR_PADDING_DP.dp, vertical = 4.dp),
         ) {
             FlowRow(
-                Modifier.align(Alignment.Center),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
+                Modifier.align(Alignment.CenterStart),
+                verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
+                horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
             ) {
-                AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
+                AppButton("Preview", onClick = { tap(onToggleMd) }, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 CopyFormatSplitButton(
                     defaultFormat = settings.annotationCopyFormat,
                     feedback = copyFeedback,
                     modifier = headerButtonModifier,
+                    onReclaimFocus = ::reclaimFocus,
                 )
-                AppButton("Save", onClick = { mutate(onSave) }, enabled = !notesLocked, modifier = headerButtonModifier)
-                AppButton("New", onClick = { mutate(onNewAnalysis) }, enabled = !notesLocked, modifier = headerButtonModifier)
+                AppButton("Save", onClick = { tap { mutate(onSave) } }, enabled = !notesLocked, modifier = headerButtonModifier)
+                AppButton("New", onClick = { tap { mutate(onNewAnalysis) } }, enabled = !notesLocked, modifier = headerButtonModifier)
                 // Only when this tab has no log at all (opened via Case Library's "Open notes
                 // only," a blank new tab, or its own log going missing) — the guided reconnect
                 // path for Change 2's "note opened without its log" hazard. See
@@ -1143,7 +1157,7 @@ fun AnnotationPanel(
                 // relative in purpose) rather than earlier in the row; it's a rare state and, per
                 // the FlowRow comment above, is allowed to be the thing that wraps to its own line.
                 if (tab.logData.isEmpty()) {
-                    AppButton("Locate log…", onClick = { mutate(::openLocateLogPicker) }, enabled = !notesLocked, modifier = headerButtonModifier)
+                    AppButton("Locate log…", onClick = { tap { mutate(::openLocateLogPicker) } }, enabled = !notesLocked, modifier = headerButtonModifier)
                 }
                 // Wrapped in its own zero-spacing Row so FlowRow's 4.dp horizontalArrangement gap
                 // treats Open+▾ as one atomic child instead of prying them apart — same reason
@@ -1151,7 +1165,7 @@ fun AnnotationPanel(
                 Row {
                     AppButton(
                         "Open",
-                        onClick = { mutate(::openNotePicker) },
+                        onClick = { tap { mutate(::openNotePicker) } },
                         enabled = !notesLocked,
                         modifier = headerButtonModifier,
                         shape = if (hasRecentNotes) openJoinedShape else CORNER_MD,
@@ -1167,14 +1181,14 @@ fun AnnotationPanel(
                                 modifier = headerButtonModifier.width(18.dp),
                                 horizontalPadding = 0.dp,
                                 shape = recentNotesDropdownShape,
-                                onClick = onToggleRecentNotes,
+                                onClick = { tap(onToggleRecentNotes) },
                             )
                             if (recentNotesMenuOpen) {
                                 RecentNotesPopup(
                                     recentNotes = recentNotes,
                                     activeNotePath = activeNotePath,
-                                    onOpenNote = { file -> mutate { onOpenNote(file) } },
-                                    onDismiss = onToggleRecentNotes,
+                                    onOpenNote = { file -> tap { mutate { onOpenNote(file) } } },
+                                    onDismiss = { tap(onToggleRecentNotes) },
                                     tc = tc,
                                 )
                             }
@@ -2262,6 +2276,7 @@ private fun CopyFormatSplitButton(
     defaultFormat: AnnotationCopyFormat,
     feedback: CopyFeedbackState,
     modifier: Modifier = Modifier,
+    onReclaimFocus: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
@@ -2272,7 +2287,7 @@ private fun CopyFormatSplitButton(
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
             AppButton(
                 feedback.phase.label,
-                onClick = { feedback.start(defaultFormat) },
+                onClick = { feedback.start(defaultFormat); onReclaimFocus() },
                 enabled = feedback.phase != CopyPhase.Copying,
                 modifier = modifier,
                 horizontalPadding = 8.dp,
@@ -2280,9 +2295,9 @@ private fun CopyFormatSplitButton(
             )
             AppButton(
                 "▾",
-                onClick = { expanded = !expanded },
+                onClick = { expanded = !expanded; onReclaimFocus() },
                 enabled = feedback.phase != CopyPhase.Copying,
-                modifier = modifier.height(28.dp).width(18.dp),
+                modifier = modifier.width(18.dp),
                 horizontalPadding = 0.dp,
                 shape = rightShape,
             )
@@ -2291,7 +2306,7 @@ private fun CopyFormatSplitButton(
             Popup(
                 alignment = Alignment.TopEnd,
                 offset = IntOffset(0, (34 * density).roundToInt()),
-                onDismissRequest = { expanded = false },
+                onDismissRequest = { expanded = false; onReclaimFocus() },
                 properties = PopupProperties(focusable = true),
             ) {
                 Column(
@@ -2306,6 +2321,7 @@ private fun CopyFormatSplitButton(
                             onClick = {
                                 expanded = false
                                 feedback.start(format)
+                                onReclaimFocus()
                             },
                         ) {
                             Row(

@@ -916,6 +916,15 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   keeps its window by staying composed: the host *parks* the Video tile (0 x 0) when the player reports it left the sidebar.
   A capture tab keeps its per-device video height: Video is pinned to `captureMirrorLayouts[device].videoSplit` x the host height while
   the tab is active, and resizing Video writes the per-device layout, never the global one.
+- **Toolbars at the top of a tile's body share one look** (`ui/TileToolbarStyle.kt`). The log toolbar and the Notes tile's button bar (Preview, Copy ▾, Save,
+  New, Locate log…, Open ▾; tag `notes-toolbar`) use the same `AppButton` (outlined, rounded, transparent on the card, natural height) `TILE_HEADER_GAP_DP`
+  apart, `TILE_TOOLBAR_PADDING_DP` (8 dp, a tile header's) from the sides, at least `TILE_TOOLBAR_HEIGHT_DP` (34 dp) tall and left-aligned, with only a
+  hairline (`tileToolbarDivider`) under them: no tinted band and no border of their own. The Notes bar wraps instead of clipping, and every click or
+  dismissed popup (the Copy format menu, the recent notes list) hands the keyboard back to the panel's `FocusRequester`. The AI composer follows the same style
+  but is not a toolbar: it sits on the card (tag `ai-composer`, no band or border) as the tile's fixed part below the conversation, with a 60 dp text field
+  (0.5 dp border, `CORNER_MD`, like the buttons), the Send button (unchanged), an outlined mic (`DictationMic(outlined = true)`) and an 11 sp hint on one row,
+  `TILE_HEADER_GAP_DP` apart. There is no splitter between the conversation and the composer (the old drag changed a session-only editor height, which no
+  longer exists): the tile is resized from its own handle, the conversation takes the extra height and the composer stays at the bottom of the tile.
 - **Toolbar tile.** `LogViewSectionId.TOOLBAR` (`ui/ToolbarTile.kt`) is the main toolbar as a slim, headerless, movable and resizable tile of the single
   view's layout, present exactly while `AppSettings.toolbarPlacement == IN_LAYOUT` (§6.6). It is the one non-log tile that is never hideable
   (`neverHidden`: the sanitizer keeps it out of the hidden list, `hideLogViewTile` refuses it, the Layout menu's Panels list skips it, no hide,
