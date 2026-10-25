@@ -898,6 +898,32 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   derived from the legacy panel widths, so an old autosave restores into the previous sizes; the legacy token fields keep being
   written, but a stored layout wins. The maximized tile, the per-tile focus and the video pin are not persisted.
 
+### 6.5 Tab strip appearance
+
+The tab strip has eight looks (`TabStripStyle`: Current, Raised, Segmented, Typed, Compact, Source colour, Two-line, Quiet), chosen in
+Settings > Appearance > Tabs (`ui/TabsAppearanceSettings.kt`: a thumbnail grid, Tab size, Tab label, three detail checkboxes). Current
+is the default and draws exactly what the shell always drew (`TabStripStyleUiTest` compares its pixels with a copy of the old shell).
+
+- **Pure side** (`ui/TabAppearance.kt`, `TabAppearanceTest`): `tabKind` derives LOG / ZIP / IND / CAPTURE / LIVE / HOME from the
+  `LogTab` fields that already say where a tab came from (live = a running capture or a live-tailed file); `tabKindBadge` (LOG, ZIP,
+  IND are the Recent files list's labels), `tabSourceColor`, `tabLabelParts` (FILE_SESSION is exactly `tabDisplayLabel`, SESSION_ONLY is
+  the folder or archive, FILE_ONLY the bare name), `tabStripHeightDp` (Compact 28, Two-line 44, the rest 36) and the FIT-width maths.
+- **Drawing** (`ui/TabStyles.kt`): `TabShell(..., appearance: TabAppearance = TabAppearance.Default)` keeps one structure for every
+  style (stripe overlay + Row of live dot, badge, label, close) and varies only metrics, the chrome behind the Row and the label type.
+  Diagram and Tests tabs go through the same shell with their own kinds.
+- **Details rule.** The badge and the source stripe are independent details any style can add (`tabShowTypeBadge`, `tabShowSourceStripe`).
+  Typed always draws the badge and Source colour always the stripe (`tabBadgeShown` / `tabStripeShown`); while one of those styles is
+  selected its checkbox is shown checked and locked. "Close button on every tab" off keeps the button for the active and hovered tab only
+  (its room stays reserved, so the label does not reflow).
+- **FIT size.** FIXED keeps the equal-share maths untouched. FIT sizes each tab from its label (`tabFitContentDp`, an estimate from the
+  character count, clamped 72..240 dp), fits the last tabs that add up to the strip (`splitTabsForVisibilityFit`, same overflow button and
+  `visibleTabLimit`), and shrinks them together when one over-long tab overflows. Drag reorder uses `tabIndexAtX` for the press and
+  `browserTabOrderDuringDragVariable` (the dragged centre plus the same quarter-width bias against each other tab's resting centre; equal widths
+  give the fixed result) with `tabOffsets` for where every tab sits during the drag.
+- **Persistence.** `tabStripStyle`, `tabSizeMode`, `tabLabelMode`, `tabShowTypeBadge`, `tabShowSourceStripe`, `tabCloseOnEvery` and the
+  docking fields stored for the next phase (`chromeLocked`, `tabStripPosition`, `toolbarPlacement`, `toolbarEdge`) are JSON-only settings
+  (`ui/ChromeSettingsJson.kt`, never throws, an unknown or mistyped value keeps the default).
+
 ---
 
 ## 7. Package dependency graph
