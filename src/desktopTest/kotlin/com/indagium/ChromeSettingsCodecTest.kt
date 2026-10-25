@@ -104,6 +104,21 @@ class ChromeSettingsCodecTest {
     }
 
     @Test
+    fun theNewLabelModeIsStoredByNameAndAnUnknownNameFallsBackToTheDefault() {
+        val json = AppSettings().copy(tabLabelMode = TabLabelMode.FILE_FOLDER_ALWAYS).settingsJson()
+        assertTrue("\"FILE_FOLDER_ALWAYS\"" in json, "stored by name: $json")
+        assertEquals(TabLabelMode.FILE_FOLDER_ALWAYS, decode(json).tabLabelMode)
+        // A file written by a newer build that this one does not know decodes to the default instead of failing.
+        val unknown = withKeys(AppSettings()) { it["tabLabelMode"] = parse("\"FILE_AND_PARENT_OF_PARENT\"") }
+        assertEquals(TabLabelMode.FILE_SESSION, decode(unknown).tabLabelMode)
+        // The three older names still decode to the same values.
+        val older = listOf("FILE_SESSION" to TabLabelMode.FILE_SESSION, "SESSION_ONLY" to TabLabelMode.SESSION_ONLY, "FILE_ONLY" to TabLabelMode.FILE_ONLY)
+        older.forEach { (name, mode) ->
+            assertEquals(mode, decode(withKeys(AppSettings()) { it["tabLabelMode"] = parse("\"$name\"") }).tabLabelMode)
+        }
+    }
+
+    @Test
     fun absentKeysAndALegacyTokenGiveDefaults() {
         val legacyToken = listOf("LIGHT", "12", "true", "", "5").joinToString("|") { value ->
             if (value.isEmpty()) "~" else Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray())

@@ -22,8 +22,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -373,11 +375,45 @@ class TabStripStyleUiTest {
         rule.onNodeWithText("Fit label").performClick()
         rule.waitForIdle()
         assertEquals(TabSizeMode.FIT, state.settings.tabSizeMode)
-        rule.onNodeWithText("Session only").performClick()
+        rule.onNodeWithText("Folder").performClick()
         rule.waitForIdle()
         assertEquals(TabLabelMode.SESSION_ONLY, state.settings.tabLabelMode)
         rule.onNodeWithTag("tab-detail-close-button-on-every-tab", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertFalse(state.settings.tabCloseOnEvery)
+    }
+
+    // The Tab label control: the four options, the one-line hint under it and every option fully inside the control at the widths of the
+    // settings dialog's content column (about 650 dp) and well below it.
+    @Test
+    fun theTabLabelControlNamesTheFolderOptionsExplainsTheDefaultAndDoesNotClip() {
+        listOf(700, 480, 420).forEach { width ->
+            state = newState()
+            rule.setContent {
+                CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                    Column(Modifier.width(width.dp)) { TabsAppearanceSettings(state) }
+                }
+            }
+            rule.waitForIdle()
+            val labels = listOf("File (+ folder if same name)", "Folder", "File only", "File — folder")
+            assertEquals(labels, TabLabelMode.entries.map(::tabLabelModeLabel))
+            val control = rule.onNodeWithTag(TAB_LABEL_CONTROL_TAG).getBoundsInRoot()
+            labels.forEach { label ->
+                val text = rule.onNodeWithText(label).getUnclippedBoundsInRoot()
+                assertTrue(text.left >= control.left && text.right <= control.right, "$label is inside the control at $width dp: $text in $control")
+                assertTrue(text.right <= width.dp, "$label is inside the column at $width dp")
+            }
+            assertTrue(control.right <= width.dp, "the control fits a $width dp column: $control")
+            val hint = rule.onNodeWithTag(TAB_LABEL_HINT_TAG).getBoundsInRoot()
+            assertTrue(hint.top >= control.bottom, "the hint sits under the control")
+            rule.onNodeWithTag(TAB_LABEL_HINT_TAG).assertTextEquals("The folder is added when two open tabs have the same file name.")
+            // Choosing the new option stores it, and the highlight follows.
+            rule.onNodeWithText("File — folder").performClick()
+            rule.waitForIdle()
+            assertEquals(TabLabelMode.FILE_FOLDER_ALWAYS, state.settings.tabLabelMode)
+            rule.onNodeWithText("File (+ folder if same name)").performClick()
+            rule.waitForIdle()
+            assertEquals(TabLabelMode.FILE_SESSION, state.settings.tabLabelMode)
+        }
     }
 }

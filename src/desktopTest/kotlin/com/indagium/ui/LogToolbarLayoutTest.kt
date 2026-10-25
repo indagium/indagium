@@ -4,6 +4,9 @@ import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
+// The Log tile's grip, the gaps around the controls, the maximize button and the card border (see TILED_FIXED_DP).
+private const val FIXED_TILED_DP = 22f + 6f + 6f + 22f + 4f + 8f + 2f
+
 /** The pure rules that decide how much of the log toolbar fits a tile: labels to icons, count to a tooltip, then the "⋯" menu. */
 class LogToolbarLayoutTest {
     private fun variantAt(availableDp: Float, hasFilterBar: Boolean = false, originalOpen: Boolean = false) =
@@ -87,8 +90,20 @@ class LogToolbarLayoutTest {
 
     @Test
     fun theAvailableWidthIsTheTileMinusGripMaximizeAndCompareBadges() {
-        assertEquals(1000f - 62f, logToolbarAvailableDp(1000f, compareSide = false))
-        assertEquals(1000f - 62f - 74f - SIDE_NAME_MIN_DP, logToolbarAvailableDp(1000f, compareSide = true))
+        assertEquals(1000f - FIXED_TILED_DP, logToolbarAvailableDp(1000f, compareSide = false))
+        assertEquals(1000f - FIXED_TILED_DP - 74f - SIDE_NAME_MIN_DP, logToolbarAvailableDp(1000f, compareSide = true))
+    }
+
+    // Every button pair of the header, including the one before the maximize button, is one standard gap apart.
+    @Test
+    fun buttonsOfTheHeaderAreOneGapApart() {
+        assertEquals(TILE_HEADER_GAP_DP, LOG_TOOLBAR_GAP_DP)
+        // Grip, gap, controls, gap, maximize, then the 4 + 8 dp of trailing space and the card's border.
+        assertEquals(22f + 2 * LOG_TOOLBAR_GAP_DP + 22f + 4f + 8f + 2f, FIXED_TILED_DP)
+        // The gaps between the estimated items are all the same: dropping one item frees its width plus one gap.
+        val full = logToolbarContentDp(LogToolbarVariant.FULL, hasFilterBar = false, originalOpen = false)
+        val withFilterBar = logToolbarContentDp(LogToolbarVariant.FULL, hasFilterBar = true, originalOpen = false)
+        assertEquals(40f + LOG_TOOLBAR_GAP_DP, withFilterBar - full)
     }
 
     // The tile widths (single view, no filter bar) behind each variant, so a threshold change is a deliberate edit of this test.
@@ -105,6 +120,23 @@ class LogToolbarLayoutTest {
         assertEquals(LogToolbarItem.TIME_DELTA, variantOfTile(250).overflow.first())
     }
 
+    // The exact tile widths at which each variant gives way to the next (single view, no filter bar): the estimates with one 6 dp gap
+    // between every pair of buttons and 70 dp of grip, gaps, maximize button and border around the controls.
+    @Test
+    fun exactTileWidthsWhereEachVariantStarts() {
+        fun variantOfTile(tileDp: Int) = logToolbarVariant(logToolbarAvailableDp(tileDp.toFloat(), false), hasFilterBar = false, originalOpen = false)
+        val icons = LogToolbarVariant(iconLabels = true, showCount = false)
+        assertEquals(LogToolbarVariant.FULL, variantOfTile(630))
+        assertEquals(LogToolbarVariant(iconLabels = true, showCount = true), variantOfTile(629))
+        assertEquals(LogToolbarVariant(iconLabels = true, showCount = true), variantOfTile(478))
+        assertEquals(icons, variantOfTile(477))
+        assertEquals(icons, variantOfTile(360))
+        assertEquals(icons.copy(overflow = listOf(LogToolbarItem.EXPAND_ALL, LogToolbarItem.COLLAPSE_ALL, LogToolbarItem.UNFILTERED)), variantOfTile(359))
+        assertEquals(icons.copy(overflow = listOf(LogToolbarItem.EXPAND_ALL, LogToolbarItem.COLLAPSE_ALL, LogToolbarItem.UNFILTERED)), variantOfTile(276))
+        assertEquals(LogToolbarItem.TIME_DELTA, variantOfTile(275).overflow.first())
+        assertEquals(LogToolbarItem.TIME_DELTA, variantOfTile(234).overflow.first())
+    }
+
     @Test
     fun theCompareFileNameShrinksBeforeAnyItemOverflows() {
         // Whenever a variant fits the room left after the badges and the shortest name, the name gets at least that shortest width.
@@ -112,7 +144,7 @@ class LogToolbarLayoutTest {
             val available = logToolbarAvailableDp(tile.toFloat(), compareSide = true)
             val variant = logToolbarVariant(available, hasFilterBar = false, originalOpen = false)
             if (logToolbarContentDp(variant, false, false) <= available) {
-                val room = tile - 62f - 74f - logToolbarContentDp(variant, false, false)
+                val room = tile - FIXED_TILED_DP - 74f - logToolbarContentDp(variant, false, false)
                 assertTrue(room >= SIDE_NAME_MIN_DP, "tile $tile leaves the name only $room dp")
             }
             val nameMax = logToolbarNameMaxDp(tile.toFloat(), variant, false, false)

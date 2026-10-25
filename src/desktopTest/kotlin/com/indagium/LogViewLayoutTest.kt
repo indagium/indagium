@@ -50,6 +50,7 @@ import com.indagium.ui.logViewDropLabel
 import com.indagium.ui.logViewFocusOrder
 import com.indagium.ui.logViewHiddenBadgeCount
 import com.indagium.ui.logViewPresetIsActive
+import com.indagium.ui.logViewScrollsInColumn
 import com.indagium.ui.logViewTileApplicable
 import com.indagium.ui.logViewTileTitle
 import com.indagium.ui.logViewTileVisible
@@ -650,6 +651,60 @@ class LogViewLayoutTest {
         // A size the user already chose is kept.
         val sized = pinToolbarTile(TileSplit(TileAxis.ROW, listOf(TileLeaf(TOOLBAR, 1f, 222f), TileLeaf(LOG))))
         assertEquals(222f, findLeaf(sized, TOOLBAR).sizeDp)
+    }
+
+    // ---- scrolling side columns --------------------------------------------------------------------------------
+
+    @Test
+    fun onlyTheLogTilesVideoAndTheToolbarKeepTheirColumnFromScrolling() {
+        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, VIDEO, TOOLBAR)
+        LogViewSectionId.entries.forEach { assertEquals(it !in fixed, logViewScrollsInColumn(it), "scrolls($it)") }
+    }
+
+    // An existing layout (weights and a pinned Log level, no heights) must look exactly as it did: the old tree decodes unchanged and
+    // the scrolling-column geometry gives every tile the rect the fitting geometry gave it, in the presets and without Video.
+    @Test
+    fun theDerivedPresetsAreLaidOutExactlyAsBeforeByScrollingColumns() {
+        val hostW = 1500f
+        val hostH = 820f
+        listOf(emptySet(), setOf(VIDEO)).forEach { absent ->
+            LogViewLayoutPreset.entries.forEach { preset ->
+                val tree = preset.hidden.fold(preset.layout(sizes) as TileNode<LogViewSectionId>?) { acc, id -> acc?.let { removeTile(it, id) } }
+                val projection = assertNotNull(projectTileLayout(assertNotNull(tree)) { it !in absent })
+                val before = tileGeometry(projection.root, hostW, hostH, LOG_VIEW_TILE_SPEC)
+                val now = tileGeometry(projection.root, hostW, hostH, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
+                assertEquals(before.cards.map { it.section }, now.cards.map { it.section })
+                before.cards.zip(now.cards).forEach { (a, b) ->
+                    listOf(a.rect.x to b.rect.x, a.rect.y to b.rect.y, a.rect.w to b.rect.w, a.rect.h to b.rect.h).forEach { (x, y) ->
+                        assertEquals(x, y, 0.01f, "${a.section} in $preset without $absent")
+                    }
+                }
+                assertTrue(now.scrollRegions.none { it.scrolls }, "a column of weights fits: $preset without $absent")
+            }
+        }
+    }
+
+    @Test
+    fun theFilterColumnOfTheClassicLayoutIsAScrollingColumnAndTheRightOneIsNotWhileVideoShows() {
+        val projection = assertNotNull(projectTileLayout(classicLogViewLayout(sizes)) { it != DIAGRAMS })
+        val geometry = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
+        assertEquals(listOf(TAGS), geometry.scrollRegions.map { it.key })
+        val noVideo = assertNotNull(projectTileLayout(classicLogViewLayout(sizes)) { it != DIAGRAMS && it != VIDEO })
+        val withoutVideo = tileGeometry(noVideo.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
+        assertEquals(listOf(TAGS, NOTES), withoutVideo.scrollRegions.map { it.key })
+    }
+
+    @Test
+    fun aHeightSetInAScrollingColumnSurvivesSanitizingWithinThePinRange() {
+        val tree = classicLogViewLayout(sizes)
+        val filterColumn = ((tree as TileSplit).children[0] as TileSplit)
+        val tall = filterColumn.copy(
+            children = filterColumn.children.mapIndexed { i, c -> (c as TileLeaf).copy(sizeDp = if (i == 0) 640f else 12f) },
+        )
+        val stored = AppSettings().withLogViewLayout(tree.copy(children = listOf(tall) + tree.children.drop(1))).logViewLayout!!
+        val back = ((stored as TileSplit).children[0] as TileSplit).children
+        assertEquals(640f, back[0].sizeDp)
+        assertEquals(80f, back[1].sizeDp, "a height under the minimum is raised to it")
     }
 
     private fun dropToolbar(tree: TileNode<LogViewSectionId>, target: TileDropTarget<LogViewSectionId>) =

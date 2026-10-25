@@ -48,11 +48,15 @@ private const val COLLAPSE_ALL_DP = 94f
 private const val UNFILTERED_DP = 80f
 private const val HIDE_ORIGINAL_DP = 102f
 private const val ICON_BUTTON_DP = 36f
-private const val LEFT_GAP_DP = 8f
-private const val RIGHT_GAP_DP = 4f
 
-/** The Log tile's move grip and the gap after it, the maximize button with its two gaps, and the card's own border. */
-private const val TILED_FIXED_DP = 22f + 4f + 22f + 4f + 8f + 2f
+/**
+ * The gap (dp) between two neighbouring buttons of the log toolbar, the one the standard tile header puts between its own buttons
+ * ([TILE_HEADER_GAP_DP]): also between the move grip and Export and before the maximize button, so no pair sits flush.
+ */
+internal const val LOG_TOOLBAR_GAP_DP = TILE_HEADER_GAP_DP
+
+/** The Log tile's move grip with the gap after it, the gap before the maximize button and the button, its trailing gaps, and the card's own border. */
+private const val TILED_FIXED_DP = 22f + LOG_TOOLBAR_GAP_DP + LOG_TOOLBAR_GAP_DP + 22f + 4f + 8f + 2f
 
 /** A compare side's A / B badge, kind pill and their gaps (the file name after them shrinks first, down to [SIDE_NAME_MIN_DP]). */
 private const val COMPARE_SIDE_FIXED_DP = 18f + 4f + 48f + 4f
@@ -67,9 +71,6 @@ private val OVERFLOW_STAGES: List<List<LogToolbarItem>> = listOf(
     listOf(LogToolbarItem.EXPAND_ALL, LogToolbarItem.COLLAPSE_ALL, LogToolbarItem.UNFILTERED),
     listOf(LogToolbarItem.FILTER_BAR, LogToolbarItem.TIME_DELTA, LogToolbarItem.EXPAND_ALL, LogToolbarItem.COLLAPSE_ALL, LogToolbarItem.UNFILTERED),
 )
-
-// Which of the items stay on the bar are the right-hand group (separated by 4 dp) rather than the left-hand one (8 dp).
-private val RIGHT_GROUP = setOf(LogToolbarItem.EXPAND_ALL, LogToolbarItem.COLLAPSE_ALL, LogToolbarItem.UNFILTERED)
 
 private fun itemDp(item: LogToolbarItem, variant: LogToolbarVariant, originalOpen: Boolean): Float = when (item) {
     LogToolbarItem.EXPORT -> EXPORT_DP
@@ -87,10 +88,10 @@ internal fun logToolbarContentDp(variant: LogToolbarVariant, hasFilterBar: Boole
     LogToolbarItem.entries.forEach { item ->
         if (item == LogToolbarItem.FILTER_BAR && !hasFilterBar) return@forEach
         if (item in variant.overflow) return@forEach
-        total += itemDp(item, variant, originalOpen) + if (item in RIGHT_GROUP) RIGHT_GAP_DP else LEFT_GAP_DP
+        total += itemDp(item, variant, originalOpen) + LOG_TOOLBAR_GAP_DP
     }
-    if (variant.showCount) total += COUNT_MIN_DP + LEFT_GAP_DP
-    if (variant.hasOverflow) total += ICON_BUTTON_DP + RIGHT_GAP_DP
+    if (variant.showCount) total += COUNT_MIN_DP + LOG_TOOLBAR_GAP_DP
+    if (variant.hasOverflow) total += ICON_BUTTON_DP + LOG_TOOLBAR_GAP_DP
     return total
 }
 

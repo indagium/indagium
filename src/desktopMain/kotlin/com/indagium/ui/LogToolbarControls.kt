@@ -121,7 +121,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         }
     }
     if (model.hasFilterBar && LogToolbarItem.FILTER_BAR !in overflow) {
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         FilterBarToolbarButton(
             visible = model.view.filterBarVisible == true,
             onToggle = { model.actions.onToggleFilterBar?.invoke() },
@@ -131,7 +131,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         )
     }
     if (LogToolbarItem.TIME_DELTA !in overflow) {
-        Spacer(Modifier.width(8.dp))
+        Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         // Primary variant when on is this toolbar's only "active" state affordance (Unfiltered,
         // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
         // has no comparably natural alternate label, so a filled/tinted button is the toggle cue).
@@ -142,7 +142,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
             modifier = ring(LogToolbarItem.TIME_DELTA),
         )
     }
-    Spacer(Modifier.width(8.dp))
+    Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
     AppButton(
         "",
         onClick = model.actions.onOpenSearch,
@@ -151,7 +151,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         horizontalPadding = 10.dp,
         modifier = ring(LogToolbarItem.SEARCH),
     )
-    Spacer(Modifier.width(8.dp))
+    Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
     if (variant.showCount) {
         AppText(
             model.view.countLabel,
@@ -175,7 +175,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         return needed
     }
     if (LogToolbarItem.EXPAND_ALL !in overflow) {
-        if (gap()) Spacer(Modifier.width(4.dp))
+        if (gap()) Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         if (variant.iconLabels) {
             LogToolbarIconButton(
                 Icons.Outlined.UnfoldMore, "Expand all", model.view.canExpandAll, false,
@@ -186,7 +186,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         }
     }
     if (LogToolbarItem.COLLAPSE_ALL !in overflow) {
-        if (gap()) Spacer(Modifier.width(4.dp))
+        if (gap()) Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         if (variant.iconLabels) {
             LogToolbarIconButton(
                 Icons.Outlined.UnfoldLess, "Collapse all", model.view.canCollapseAll, false,
@@ -197,7 +197,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         }
     }
     if (LogToolbarItem.UNFILTERED !in overflow) {
-        if (gap()) Spacer(Modifier.width(4.dp))
+        if (gap()) Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         if (variant.iconLabels) {
             LogToolbarIconButton(
                 Icons.Outlined.Description, unfilteredLabel(model.view.showUnfiltered), true, model.view.showUnfiltered,
@@ -212,7 +212,7 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         }
     }
     if (variant.hasOverflow) {
-        if (gap()) Spacer(Modifier.width(4.dp))
+        if (gap()) Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         LogToolbarOverflow(variant.overflow, model)
     }
 }

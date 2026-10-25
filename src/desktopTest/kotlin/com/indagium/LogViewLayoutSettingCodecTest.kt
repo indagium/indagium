@@ -213,6 +213,32 @@ class LogViewLayoutSettingCodecTest {
     }
 
     @Test
+    fun heightsPinnedInAScrollingColumnRoundTripAndAnOldTreeDecodesWithoutThem() {
+        val tall = TileSplit(
+            TileAxis.ROW,
+            listOf(
+                TileLeaf(LOG),
+                TileSplit(TileAxis.COLUMN, listOf(TileLeaf(TAGS, 1f, 420f), TileLeaf(NOTES, 1f, 1750f), TileLeaf(AI)), 1f, 250f),
+            ),
+        )
+        val stored = AppSettings().copy(logViewLayout = tall)
+        val back = decode(stored.settingsJson()).logViewLayout!!
+
+        fun leaf(id: LogViewSectionId, node: TileNode<LogViewSectionId> = back): TileLeaf<LogViewSectionId>? = when (node) {
+            is TileLeaf -> node.takeIf { it.section == id }
+            is TileSplit -> node.children.firstNotNullOfOrNull { leaf(id, it) }
+        }
+        assertEquals(420f, leaf(TAGS)?.sizeDp, "heights are the leaves' own sizeDp, no new field")
+        assertEquals(1750f, leaf(NOTES)?.sizeDp)
+        assertNull(leaf(AI)?.sizeDp)
+        // An autosave written before heights existed: weights, one pinned Log level; it decodes as it was written.
+        val old = AppSettings().withLogViewPreset(LogViewLayoutPreset.CLASSIC, sizes)
+        assertEquals(old.logViewLayout, decode(old.settingsJson()).logViewLayout)
+        val filterColumn = ((old.logViewLayout as TileSplit).children[0] as TileSplit).children
+        assertTrue(filterColumn.all { it.sizeDp == null || (it as TileLeaf).section == LogViewSectionId.LOG_LEVEL })
+    }
+
+    @Test
     fun treeJsonUsesStableKeys() {
         val json = logViewTileTreeJson(TileSplit(TileAxis.ROW, listOf(TileLeaf(LogViewSectionId.MESSAGE_RULES, 1f, 120f), TileLeaf(LOG))))
         assertTrue(json.toString().contains("\"section\":\"message_rules\""))

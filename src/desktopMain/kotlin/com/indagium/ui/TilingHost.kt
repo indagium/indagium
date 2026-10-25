@@ -8,10 +8,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
-import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,7 +82,6 @@ import androidx.compose.ui.unit.sp
 import com.indagium.debug.AppLogger
 import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -105,7 +102,6 @@ private const val TILE_STRIP_FILL_ALPHA = 0.12f
 private const val TILE_STRIP_BORDER_ALPHA = 0.55f
 private const val TILE_STRIP_DASH_DP = 5f
 private const val TILE_VERTICAL_TEXT_DEGREES = -90f
-private const val TILE_TOUCH_EPSILON_DP = 0.5f
 
 /** Host width (dp) a tile header needs to keep its summary text; narrower headers drop it first. */
 internal const val TILE_HEADER_SUMMARY_MIN_DP = 300f
@@ -113,21 +109,18 @@ internal const val TILE_HEADER_SUMMARY_MIN_DP = 300f
 /** Host width (dp) a tile header needs to keep its icon; narrower headers drop it after the summary. The grip and buttons are never dropped. */
 internal const val TILE_HEADER_ICON_MIN_DP = 180f
 
-/** When a tile's size readout ("50% × 62%") shows in its header. */
-internal enum class TileSizeLabelMode {
-    /** Whenever the card is at least [TileChromeSpec.sizeLabelMinDp] wide (the New tab). */
-    WHEN_WIDE,
-
-    /** Only while the pointer is over the card's header or a splitter next to the card is being dragged. */
-    ON_HOVER_OR_DRAG,
-}
+/** The gap (dp) between two neighbouring buttons or parts of a tile header. */
+internal const val TILE_HEADER_GAP_DP = 6f
 
 /**
  * Everything that makes one tiling surface look and size the way it does. [headerDp] is the tile header's height, which is also
  * the height of a collapsed tile; [cornerDp] the card radius (splitter lines stop that far short of both ends of their gap);
  * [minTileDp] and [minPairShare] bound a resize (see [TileGeometrySpec]); [tagPrefix] starts every test tag
- * (`<prefix>-card-<key>`, `-grip-`, `-hide-`, `-collapse-`, `-size-`, `-maximize-`, `-header-`, `<prefix>-splitter-<i>`,
- * `-splitter-line-<i>`, `-drop-preview`, `-page-strip-<edge>`); [keyOf] gives the stable, unique string a tile's tags use.
+ * (`<prefix>-card-<key>`, `-grip-`, `-hide-`, `-collapse-`, `-maximize-`, `-header-`, `<prefix>-splitter-<i>`,
+ * `-splitter-line-<i>`, `-scrollbar-<key>`, `-drop-preview`, `-page-strip-<edge>`); [keyOf] gives the stable, unique string a tile's tags use.
+ * [scrolls] says which tiles may sit in a scrolling column (a COLUMN split of only such tiles keeps its tiles' heights and scrolls when
+ * they add up to more than the window; see TileLayout.kt), with [scrollMinDp] / [scrollMaxDp] bounding a tile's height there; the
+ * default is none, a surface that always fits.
  */
 internal data class TileChromeSpec<K>(
     val headerDp: Float,
@@ -135,12 +128,13 @@ internal data class TileChromeSpec<K>(
     val gapRowDp: Float,
     val gapColumnDp: Float,
     val cornerDp: Int,
-    val sizeLabel: TileSizeLabelMode,
-    val sizeLabelMinDp: Float,
     val minTileDp: Float,
     val minPairShare: Float,
     val tagPrefix: String,
     val keyOf: (K) -> String,
+    val scrollMinDp: Float = minTileDp,
+    val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
+    val scrolls: (K) -> Boolean = { false },
 ) {
     internal fun geometrySpec(): TileGeometrySpec = TileGeometrySpec(
         gapRowDp = gapRowDp,
@@ -148,6 +142,8 @@ internal data class TileChromeSpec<K>(
         collapsedExtentDp = headerDp,
         minTileDp = minTileDp,
         minPairShare = minPairShare,
+        scrollMinDp = scrollMinDp,
+        scrollMaxDp = scrollMaxDp,
     )
 }
 
@@ -231,17 +227,6 @@ internal data class TileHeaderParts(val showIcon: Boolean, val showSummary: Bool
 internal fun tileHeaderParts(widthDp: Float): TileHeaderParts =
     TileHeaderParts(showIcon = widthDp >= TILE_HEADER_ICON_MIN_DP, showSummary = widthDp >= TILE_HEADER_SUMMARY_MIN_DP)
 
-/** True when [card] sits against the strip of [gap] (shares its edge and overlaps it along the strip). */
-internal fun tileTouchesGap(card: TileRect, gap: TileGap): Boolean {
-    val strip = gap.rect
-    val eps = TILE_TOUCH_EPSILON_DP
-    return if (gap.axis == TileAxis.ROW) {
-        (abs(card.right - strip.x) <= eps || abs(card.x - strip.right) <= eps) && card.y < strip.bottom - eps && card.bottom > strip.y + eps
-    } else {
-        (abs(card.bottom - strip.y) <= eps || abs(card.y - strip.bottom) <= eps) && card.x < strip.right - eps && card.right > strip.x + eps
-    }
-}
-
 /** Arrow-key resize of a focused splitter: left/right on a ROW gap, up/down on a COLUMN gap; null for any other key. */
 internal fun tileSplitterKeyDelta(axis: TileAxis, key: Key): Float? = when (axis) {
     TileAxis.ROW -> when (key) {
@@ -262,6 +247,8 @@ private data class TileCardKey(val key: String)
 
 private data class TileGapKey(val index: Int)
 
+private data class TileScrollbarKey(val index: Int)
+
 private val LocalTileTitle = compositionLocalOf { "tile" }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -275,7 +262,7 @@ private class TileDragState<K> {
     var pointerRoot: Offset? = null
     var hostRoot by mutableStateOf(Offset.Zero)
     var draft by mutableStateOf<TileNode<K>?>(null)
-    var draggingGap by mutableStateOf<Int?>(null)
+    val scroll = TileScrollState<K>()
 }
 
 // What one composition of a surface knows; it is the [TileScope] the content lambda receives. [composed] says which tiles are kept
@@ -294,6 +281,13 @@ private class TileScopeImpl<K>(
     val drag: TileDragState<K>,
 ) : TileScope<K> {
     var density: Float = 1f
+
+    /** The geometry as it is on screen: scrolling columns shifted by their offsets, cards cut to their viewports. What a drop hit-tests. */
+    fun visibleGeometry(): TileGeometry<K> = geometry.visibleCards(drag.scroll::offsetOf)
+
+    /** The scrolling column the card of [id] sits in, if any. */
+    fun regionOf(id: K): TileScrollRegion<K>? =
+        geometry.cards.firstOrNull { it.section == id }?.scrollRegion?.let { geometry.scrollRegions.getOrNull(it) }
 
     @Composable
     override fun Tile(id: K, slot: TileSlot, modifier: Modifier) {
@@ -326,7 +320,7 @@ private class TileScopeImpl<K>(
         // The outsider (the chrome's dock strips) is asked first; otherwise the drop is hit-tested again from the latest pointer
         // rather than the last composed target: the release can land before the next frame.
         val handled = drag.pointerRoot?.let { callbacks.takeDrop(id, it) } == true
-        val drop = if (handled) null else drag.pointer?.let { tileDropTargetAt(geometry, host.w, host.h, it.x, it.y, id) }
+        val drop = if (handled) null else drag.pointer?.let { tileDropTargetAt(visibleGeometry(), host.w, host.h, it.x, it.y, id) }
         gripCancel()
         if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop))
     }
@@ -337,13 +331,6 @@ private class TileScopeImpl<K>(
         drag.pointer = null
         drag.pointerRoot = null
         callbacks.onReclaimFocus()
-    }
-
-    /** True when [id]'s size readout is shown. [hovered] is whether the pointer is over its header. */
-    fun showsSizeReadout(rect: TileRect, hovered: Boolean): Boolean = when {
-        stacked -> false
-        spec.sizeLabel == TileSizeLabelMode.WHEN_WIDE -> rect.w >= spec.sizeLabelMinDp
-        else -> hovered || drag.draggingGap?.let { geometry.gaps.getOrNull(it) }?.let { tileTouchesGap(rect, it) } == true
     }
 }
 
@@ -381,7 +368,7 @@ internal fun <K> TilingSurface(
     val maximizedId: K? = maximized?.takeIf { id -> projection != null && id in tileLeafSections(projection.root) }
     val geometry: TileGeometry<K> = when {
         maximizedId != null -> maximizedTileGeometry(maximizedId, widthDp, heightDp)
-        projection != null -> tileGeometry(projection.root, widthDp, heightDp, spec.geometrySpec(), collapsed)
+        projection != null -> tileGeometry(projection.root, widthDp, heightDp, spec.geometrySpec(), collapsed, spec.scrolls)
         else -> TileGeometry(emptyList(), emptyList())
     }
     val composedIds = tileLeafSections(layout).filterTo(HashSet()) { isVisible(it) } + parked
@@ -400,46 +387,52 @@ internal fun <K> TilingSurface(
     )
     val density = LocalDensity.current.density
     scope.density = density
+    drag.scroll.density = density
+    drag.scroll.regions = geometry.scrollRegions
+    // Drops are hit-tested against what is on screen, which differs from the geometry inside a scrolled column.
     val suppressed = drag.dragged?.let(callbacks.suppressDrop) == true
     val target = drag.dragged?.takeIf { !suppressed }?.let { dragged ->
-        drag.pointer?.let { tileDropTargetAt(geometry, widthDp, heightDp, it.x, it.y, dragged) }
+        drag.pointer?.let { tileDropTargetAt(scope.visibleGeometry(), widthDp, heightDp, it.x, it.y, dragged) }
     }
     // A drag from outside answers to the same maths: the resolver turns a window pixel into the target a release there would drop on.
     val resolveExternal: (Offset) -> TileDropTarget<K>? = { root ->
-        external?.let { tileDropTargetAt(geometry, widthDp, heightDp, (root.x - drag.hostRoot.x) / density, (root.y - drag.hostRoot.y) / density, it.id) }
+        external?.let {
+            tileDropTargetAt(scope.visibleGeometry(), widthDp, heightDp, (root.x - drag.hostRoot.x) / density, (root.y - drag.hostRoot.y) / density, it.id)
+        }
     }
     SideEffect { external?.resolver = resolveExternal }
     DisposableEffect(external) { onDispose { external?.resolver = null } }
     val externalPointer = external?.pointerRoot
     val externalTarget = externalPointer?.let(resolveExternal)
     Box(Modifier.fillMaxSize().onGloballyPositioned { drag.hostRoot = it.positionInRoot() }) {
-        TilingLayout(Modifier.fillMaxSize(), geometry, spec) {
+        TilingLayout(Modifier.fillMaxSize(), geometry, spec, drag.scroll) {
             scope.content()
             geometry.gaps.forEachIndexed { index, gap ->
                 if (gap.resizable) {
                     key(index) {
+                        fun resized(from: TileNode<K>, proj: TileProjection<K>, delta: Float) = resizeProjected(
+                            from, proj, gap, delta, spec.minTileDp, spec.minPairShare, collapsed, spec.headerDp, spec.scrollMinDp, spec.scrollMaxDp,
+                        )
                         TileSplitter(
                             index = index,
                             gap = gap,
                             spec = spec,
+                            modifier = gap.scrollRegion?.let { geometry.scrollRegions.getOrNull(it) }
+                                ?.let { Modifier.tileScrollRegion(drag.scroll, it, gap.rect) } ?: Modifier,
                             onDelta = { delta ->
                                 val current = drag.draft ?: fullLayout
-                                projectTileLayout(current, shown)?.let { proj ->
-                                    drag.draggingGap = index
-                                    drag.draft = resizeProjected(current, proj, gap, delta, spec.minTileDp, spec.minPairShare, collapsed, spec.headerDp)
-                                }
+                                projectTileLayout(current, shown)?.let { proj -> drag.draft = resized(current, proj, delta) }
                             },
                             onDragEnd = {
                                 val committed = drag.draft
                                 drag.draft = null
-                                drag.draggingGap = null
                                 if (committed != null && committed != fullLayout) callbacks.onCommitLayout(committed)
                                 callbacks.onReclaimFocus()
                             },
                             onKeyResize = { delta ->
                                 projectTileLayout(fullLayout, shown)?.let { proj ->
-                                    val resized = resizeProjected(fullLayout, proj, gap, delta, spec.minTileDp, spec.minPairShare, collapsed, spec.headerDp)
-                                    if (resized != fullLayout) callbacks.onCommitLayout(resized)
+                                    val next = resized(fullLayout, proj, delta)
+                                    if (next != fullLayout) callbacks.onCommitLayout(next)
                                 }
                             },
                             onReset = {
@@ -450,6 +443,15 @@ internal fun <K> TilingSurface(
                                 callbacks.onReclaimFocus()
                             },
                         )
+                    }
+                }
+            }
+            geometry.scrollRegions.forEachIndexed { index, region ->
+                if (region.scrolls) {
+                    key(index) {
+                        Box(Modifier.layoutId(TileScrollbarKey(index))) {
+                            TileRegionScrollbar(drag.scroll, region, "${spec.tagPrefix}-scrollbar-${spec.keyOf(region.key)}")
+                        }
                     }
                 }
             }
@@ -465,7 +467,7 @@ internal fun <K> TilingSurface(
 
 /**
  * The same tiles stacked top to bottom in tree order, each [cardHeightDp] tall, inside one vertical scroll (narrow hosts): no
- * grips, splitters, size readouts, collapsing or maximizing, but the hide button stays. [parked] tiles stay composed at 0 x 0.
+ * grips, splitters, collapsing or maximizing, but the hide button stays. [parked] tiles stay composed at 0 x 0.
  */
 @Composable
 internal fun <K> TileStackedSurface(
@@ -506,7 +508,7 @@ internal fun <K> TileStackedSurface(
                 stacked = true,
                 drag = drag,
             )
-            TilingLayout(Modifier.fillMaxSize(), geometry, spec) { scope.content() }
+            TilingLayout(Modifier.fillMaxSize(), geometry, spec, drag.scroll) { scope.content() }
         }
     }
 }
@@ -516,49 +518,66 @@ internal fun <K> TileStackedSurface(
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * Lays every child out at its rect of [geometry]: cards by [TileCardKey], splitters by [TileGapKey]. A card with no rect (parked,
- * or behind a maximized tile) and a child with no recognised layout id (a Popup or Dialog anchor emitted by a content lambda)
- * are measured 0 x 0 at the origin; the latter is logged once, because it means a caller emitted something outside a Tile.
+ * Lays every child out at its rect of [geometry]: cards by [TileCardKey], splitters by [TileGapKey], scrollbars by [TileScrollbarKey]. A
+ * card or splitter inside a scrolling column is placed shifted by that column's offset ([scroll], read while placing, so a scroll
+ * re-places but does not recompose). A card with no rect (parked, or behind a maximized tile) and a child with no recognised layout id
+ * (a Popup or Dialog anchor emitted by a content lambda) are measured 0 x 0 at the origin; the latter is logged once, because it
+ * means a caller emitted something outside a Tile.
  */
 @Composable
-private fun <K> TilingLayout(modifier: Modifier, geometry: TileGeometry<K>, spec: TileChromeSpec<K>, content: @Composable () -> Unit) {
+private fun <K> TilingLayout(
+    modifier: Modifier,
+    geometry: TileGeometry<K>,
+    spec: TileChromeSpec<K>,
+    scroll: TileScrollState<K>,
+    content: @Composable () -> Unit,
+) {
     val density = LocalDensity.current.density
     val warned = remember { BooleanArray(1) }
-    val rects = geometry.cards.associate { spec.keyOf(it.section) to it.rect }
+    val cards = geometry.cards.associateBy { spec.keyOf(it.section) }
     val gaps = geometry.gaps
-    val policy = remember(rects, gaps, density) {
+    val regions = geometry.scrollRegions
+    val policy = remember(cards, gaps, regions, density) {
         MeasurePolicy { measurables, constraints ->
             val placed = measurables.map { measurable ->
                 when (val id = measurable.layoutId) {
-                    is TileCardKey -> placeAt(measurable, rects[id.key], density)
-                    is TileGapKey -> placeAt(measurable, gaps.getOrNull(id.index)?.rect, density)
+                    is TileCardKey -> placeAt(measurable, cards[id.key]?.rect, density, cards[id.key]?.scrollRegion)
+                    is TileGapKey -> placeAt(measurable, gaps.getOrNull(id.index)?.rect, density, gaps.getOrNull(id.index)?.scrollRegion)
+                    is TileScrollbarKey -> placeAt(measurable, regions.getOrNull(id.index)?.let(::scrollbarRect), density, null)
                     else -> {
                         if (!warned[0]) {
                             warned[0] = true
                             AppLogger.warn("tiling", "A tiling surface child has no tile layout id and is measured 0x0 (emitted outside a Tile?)")
                         }
-                        placeAt(measurable, null, density)
+                        placeAt(measurable, null, density, null)
                     }
                 }
             }
             layout(constraints.maxWidth, constraints.maxHeight) {
-                placed.forEach { it.placeable.place(it.x, it.y) }
+                placed.forEach { tile ->
+                    val shift = tile.region?.let { regions.getOrNull(it) }?.let { (scroll.offsetOf(it) * density).roundToInt() } ?: 0
+                    tile.placeable.place(tile.x, tile.y - shift)
+                }
             }
         }
     }
     Layout(content = content, modifier = modifier, measurePolicy = policy)
 }
 
-private class PlacedTile(val placeable: Placeable, val x: Int, val y: Int)
+// The scrollbar's strip: the right edge of the column's viewport.
+private fun <K> scrollbarRect(region: TileScrollRegion<K>): TileRect =
+    TileRect(region.viewport.right - TILE_SCROLLBAR_DP, region.viewport.y, TILE_SCROLLBAR_DP, region.viewport.h)
 
-private fun placeAt(measurable: Measurable, rect: TileRect?, density: Float): PlacedTile {
-    if (rect == null) return PlacedTile(measurable.measure(Constraints.fixed(0, 0)), 0, 0)
+private class PlacedTile(val placeable: Placeable, val x: Int, val y: Int, val region: Int?)
+
+private fun placeAt(measurable: Measurable, rect: TileRect?, density: Float, region: Int?): PlacedTile {
+    if (rect == null) return PlacedTile(measurable.measure(Constraints.fixed(0, 0)), 0, 0, null)
     // Rounded per edge, so neighbouring cards and splitters never open a pixel seam.
     val left = (rect.x * density).roundToInt()
     val top = (rect.y * density).roundToInt()
     val width = ((rect.x + rect.w) * density).roundToInt() - left
     val height = ((rect.y + rect.h) * density).roundToInt() - top
-    return PlacedTile(measurable.measure(Constraints.fixed(width.coerceAtLeast(0), height.coerceAtLeast(0))), left, top)
+    return PlacedTile(measurable.measure(Constraints.fixed(width.coerceAtLeast(0), height.coerceAtLeast(0))), left, top, region)
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -573,8 +592,10 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val shape = RoundedCornerShape(s.spec.cornerDp.dp)
     val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else 1f
     val bodyInfo = TileBodyInfo(rect?.w ?: 0f, if (collapsed) 0f else max(0f, (rect?.h ?: 0f) - headerHeight))
+    val region = s.regionOf(id)
     Column(
         modifier
+            .then(if (region != null && rect != null) Modifier.tileScrollRegion(s.drag.scroll, region, rect) else Modifier)
             .alpha(if (s.drag.dragged == id) TILE_DRAGGED_CARD_ALPHA else 1f)
             .clip(shape)
             .background(tc.p)
@@ -597,15 +618,12 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
     val tc = tc()
     val prefix = s.spec.tagPrefix
     val key = s.spec.keyOf(id)
-    val interaction = remember { MutableInteractionSource() }
-    val hovered by interaction.collectIsHoveredAsState()
     val parts = tileHeaderParts(rect?.w ?: 0f)
-    val sizeText = rect?.takeIf { s.showsSizeReadout(it, hovered) }?.let { tileSizeLabel(it, s.host.w, s.host.h) }
     val callbacks = s.callbacks
     Row(
-        Modifier.fillMaxWidth().height(s.spec.headerDp.dp).padding(horizontal = 8.dp).hoverable(interaction).testTag("$prefix-header-$key"),
+        Modifier.fillMaxWidth().height(s.spec.headerDp.dp).padding(horizontal = 8.dp).testTag("$prefix-header-$key"),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
     ) {
         if (s.gripsEnabled) TileGrip(s, id, slot.title)
         if (parts.showIcon) Icon(slot.icon, contentDescription = null, tint = slot.iconTint ?: tc.ts, modifier = Modifier.size(15.dp))
@@ -621,7 +639,7 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
             )
         }
         if (parts.showSummary && slot.summary != null) {
-            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
                 title(Modifier.weight(1f, fill = false))
                 AppText(
                     slot.summary,
@@ -635,7 +653,6 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
         } else {
             title(Modifier.weight(1f))
         }
-        sizeText?.let { AppText(it, color = tc.td, fontSize = 10.sp, modifier = Modifier.testTag("$prefix-size-$key")) }
         // The header actions may place TileScope.MaximizeButton, which names its tile after this local (as in a headerless body).
         slot.headerAction?.let { action -> CompositionLocalProvider(LocalTileTitle provides slot.title) { action(this@Row) } }
         if (slot.collapsible && !s.stacked) {
@@ -750,6 +767,7 @@ private fun <K> TileSplitter(
     index: Int,
     gap: TileGap,
     spec: TileChromeSpec<K>,
+    modifier: Modifier,
     onDelta: (Float) -> Unit,
     onDragEnd: () -> Unit,
     onKeyResize: (Float) -> Unit,
@@ -761,7 +779,7 @@ private fun <K> TileSplitter(
     val currentKeyResize by rememberUpdatedState(onKeyResize)
     val currentReset by rememberUpdatedState(onReset)
     Box(
-        Modifier
+        modifier
             .layoutId(TileGapKey(index))
             .testTag("${spec.tagPrefix}-splitter-$index")
             .semantics { contentDescription = "Resize sections" }
@@ -774,12 +792,17 @@ private fun <K> TileSplitter(
             },
         contentAlignment = Alignment.Center,
     ) {
-        // The visible line (and its hit area and focus ring) stops where the neighbouring cards' rounded corners start: a vertical
-        // line (ROW gap) is inset top and bottom, a horizontal one (COLUMN gap) left and right.
+        // The splitter is never drawn, at rest, hovered or dragged: the gap, the resize cursor and the hit area are all there is. Its hit
+        // area (and the keyboard focus ring) stops where the neighbouring cards' rounded corners start: a vertical splitter (ROW gap)
+        // is inset top and bottom, a horizontal one (COLUMN gap) left and right.
         val corner = spec.cornerDp.dp
         val inset = if (gap.axis == TileAxis.ROW) PaddingValues(vertical = corner) else PaddingValues(horizontal = corner)
         Box(Modifier.fillMaxSize().padding(inset).testTag("${spec.tagPrefix}-splitter-line-$index"), contentAlignment = Alignment.Center) {
-            if (gap.axis == TileAxis.ROW) HDivider(onDragEnd = onDragEnd, onDelta = onDelta) else VDivider(onDragEnd = onDragEnd, onDelta = onDelta)
+            if (gap.axis == TileAxis.ROW) {
+                HDivider(onDragEnd = onDragEnd, showLine = false, onDelta = onDelta)
+            } else {
+                VDivider(onDragEnd = onDragEnd, showLine = false, onDelta = onDelta)
+            }
             if (focused) Box(Modifier.fillMaxSize().border(1.dp, tc.ac, RoundedCornerShape(2.dp)))
         }
     }
@@ -794,7 +817,7 @@ private fun <K> TileDropOverlay(s: TileScopeImpl<K>, target: TileDropTarget<K>?)
     val tc = tc()
     val prefix = s.spec.tagPrefix
     val shape = RoundedCornerShape(s.spec.cornerDp.dp)
-    val preview = target?.let { tileDropPreview(s.geometry, s.host.w, s.host.h, it) }
+    val preview = target?.let { tileDropPreview(s.visibleGeometry(), s.host.w, s.host.h, it) }
     Box(Modifier.fillMaxSize()) {
         TileEdge.entries.forEach { edge ->
             TilePageStrip(s, edge, active = target == TileDropTarget.OnPage(edge))

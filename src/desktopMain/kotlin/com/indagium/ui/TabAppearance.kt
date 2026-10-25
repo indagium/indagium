@@ -94,14 +94,17 @@ internal fun tabDisambiguation(tab: LogTab, allTabs: List<LogTab>): String? {
     return "$expandedSuffix$LABEL_SEPARATOR${tab.id.take(SHORT_ID_LENGTH)}"
 }
 
-/** The folder or archive a tab's file lives in (what a capture session or a bug report is), or the file name when the tab has no source path. */
-private fun tabSessionName(tab: LogTab, allTabs: List<LogTab>): String {
-    tabDisambiguation(tab, allTabs)?.let { return it }
-    val sourcePath = tab.sourcePath?.takeIf { it.isNotBlank() } ?: return tab.filename
+// The name of the folder or archive [tab]'s file lives in, or null when the tab has no source path (or the path has no folder part).
+private fun tabContainerName(tab: LogTab): String? {
+    val sourcePath = tab.sourcePath?.takeIf { it.isNotBlank() } ?: return null
     val archiveSeparator = sourcePath.indexOf('!')
     val container = if (archiveSeparator >= 0) File(sourcePath.substring(0, archiveSeparator)) else File(sourcePath).parentFile
-    return container?.name?.takeIf { it.isNotBlank() } ?: tab.filename
+    return container?.name?.takeIf { it.isNotBlank() }
 }
+
+/** The folder or archive a tab's file lives in (what a capture session or a bug report is), or the file name when the tab has no source path. */
+private fun tabSessionName(tab: LogTab, allTabs: List<LogTab>): String =
+    tabDisambiguation(tab, allTabs) ?: tabContainerName(tab) ?: tab.filename
 
 /** A tab's label: [primary] and, when the label has a second part, [secondary] (shown after a dash). */
 internal data class TabLabelParts(val primary: String, val secondary: String? = null) {
@@ -110,14 +113,17 @@ internal data class TabLabelParts(val primary: String, val secondary: String? = 
 }
 
 /**
- * The label parts of [tab] for [mode]: FILE_SESSION is the file name, with the session (see [tabDisambiguation]) appended only
- * when another tab has the same file name, so `joined()` is exactly [tabDisplayLabel]; SESSION_ONLY the folder/archive the file
- * lives in; FILE_ONLY the bare file name.
+ * The label parts of [tab] for [mode]: FILE_SESSION (the default) is the file name, with the folder or archive (see
+ * [tabDisambiguation]) appended only when another open tab has the same file name, so `joined()` is exactly [tabDisplayLabel];
+ * SESSION_ONLY the folder/archive the file lives in; FILE_ONLY the bare file name; FILE_FOLDER_ALWAYS `file — folder` for every tab
+ * (the disambiguation wins where it is more specific than the folder, so two tabs never get the same label; a tab with no source
+ * path and a unique name is just the file name).
  */
 internal fun tabLabelParts(tab: LogTab, allTabs: List<LogTab>, mode: TabLabelMode): TabLabelParts = when (mode) {
     TabLabelMode.FILE_SESSION -> TabLabelParts(tab.filename, tabDisambiguation(tab, allTabs))
     TabLabelMode.SESSION_ONLY -> TabLabelParts(tabSessionName(tab, allTabs))
     TabLabelMode.FILE_ONLY -> TabLabelParts(tab.filename)
+    TabLabelMode.FILE_FOLDER_ALWAYS -> TabLabelParts(tab.filename, tabDisambiguation(tab, allTabs) ?: tabContainerName(tab))
 }
 
 /**

@@ -132,6 +132,48 @@ class TabAppearanceTest {
     }
 
     @Test
+    fun fileFolderAlwaysShowsTheFolderEvenWithoutACollision() {
+        val unique = tab("u", "unique.log", "/logs/capture-2026/unique.log")
+        val alone = listOf(unique)
+        assertEquals("unique.log — capture-2026", tabLabelParts(unique, alone, TabLabelMode.FILE_FOLDER_ALWAYS).joined())
+        // The default stays the bare name until another open tab shares it; the always-mode label does not change then.
+        assertEquals("unique.log", tabLabelParts(unique, alone, TabLabelMode.FILE_SESSION).joined())
+        val twin = tab("t", "unique.log", "/logs/other/unique.log")
+        val both = listOf(unique, twin)
+        assertEquals("unique.log — capture-2026", tabLabelParts(unique, both, TabLabelMode.FILE_FOLDER_ALWAYS).joined())
+        assertEquals("unique.log — other", tabLabelParts(twin, both, TabLabelMode.FILE_FOLDER_ALWAYS).joined())
+        assertEquals("unique.log — capture-2026", tabLabelParts(unique, both, TabLabelMode.FILE_SESSION).joined())
+        // An archive entry shows its archive; the file name and the folder are the two parts.
+        val entry = tab("e", "main.log", "/logs/report.zip!FS/main.log")
+        val parts = tabLabelParts(entry, listOf(entry), TabLabelMode.FILE_FOLDER_ALWAYS)
+        assertEquals("main.log", parts.primary)
+        assertEquals("report.zip", parts.secondary)
+    }
+
+    @Test
+    fun fileFolderAlwaysNeverGivesTwoTabsTheSameLabel() {
+        // Same file name in two folders that are both called "shared": the folder alone cannot tell them apart.
+        val a = tab("real-a-134567", "same.log", "/x/shared/same.log")
+        val b = tab("real-b-1234567", "same.log", "/y/shared/same.log")
+        val all = listOf(a, b)
+        val labels = all.map { tabLabelParts(it, all, TabLabelMode.FILE_FOLDER_ALWAYS).joined() }
+        assertEquals(2, labels.toSet().size, "labels $labels must differ")
+        assertTrue(labels.all { it.startsWith("same.log — shared") })
+        // A tab with no source path falls back to the disambiguation (the tab id) when it needs one, and is just the file name otherwise.
+        val pathlessA = tab("aaaaaaaa-1", "p.log")
+        val pathlessB = tab("bbbbbbbb-2", "p.log")
+        assertEquals("p.log — aaaaaaaa", tabLabelParts(pathlessA, listOf(pathlessA, pathlessB), TabLabelMode.FILE_FOLDER_ALWAYS).joined())
+        assertEquals("p.log", tabLabelParts(pathlessA, listOf(pathlessA), TabLabelMode.FILE_FOLDER_ALWAYS).joined())
+    }
+
+    @Test
+    fun theTwoLineDetailLineKeepsTheFileNameOnlyWhenTheFirstLineLacksIt() {
+        val t = tab("a", "a.log", "/logs/f/a.log")
+        assertEquals("0 lines", tabDetailLine(t, TabKind.LOG, TabLabelMode.FILE_FOLDER_ALWAYS))
+        assertEquals("a.log · 0 lines", tabDetailLine(t, TabKind.LOG, TabLabelMode.SESSION_ONLY))
+    }
+
+    @Test
     fun theDetailLineSaysRowsAndState() {
         val rows = (1..3).map { com.indagium.model.LogEntry(it, "10:00:00.000", com.indagium.model.LogLevel.I, "T", "m$it") }
         val plain = mkTab("a", "a.log", rows).copy(sourcePath = "/logs/f/a.log")

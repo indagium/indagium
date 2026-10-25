@@ -57,10 +57,18 @@ internal fun tabStyleLabel(style: TabStripStyle): String = when (style) {
 }
 
 internal fun tabLabelModeLabel(mode: TabLabelMode): String = when (mode) {
-    TabLabelMode.FILE_SESSION -> "File — session"
-    TabLabelMode.SESSION_ONLY -> "Session only"
+    TabLabelMode.FILE_SESSION -> "File (+ folder if same name)"
+    TabLabelMode.SESSION_ONLY -> "Folder"
     TabLabelMode.FILE_ONLY -> "File only"
+    TabLabelMode.FILE_FOLDER_ALWAYS -> "File — folder"
 }
+
+/** The hint under the Tab label control: what the default does, which is the one choice whose name does not say it all. */
+internal const val TAB_LABEL_HINT: String = "The folder is added when two open tabs have the same file name."
+
+/** Test tags of the Tab label control and its hint. */
+internal const val TAB_LABEL_CONTROL_TAG = "tab-label-mode"
+internal const val TAB_LABEL_HINT_TAG = "tab-label-hint"
 
 private val THUMB_WIDTH = 84.dp
 private val THUMB_HEIGHT = 34.dp
@@ -88,7 +96,11 @@ internal fun TabsAppearanceSettings(state: AppState) {
                 options = modes.map(::tabLabelModeLabel),
                 selectedIndices = setOf(modes.indexOf(settings.tabLabelMode)),
                 onToggle = { idx -> state.updateSettings { it.copy(tabLabelMode = modes[idx]) } },
+                modifier = Modifier.testTag(TAB_LABEL_CONTROL_TAG),
+                segmentFontSize = 11.sp,
+                segmentHorizontalPadding = 8.dp,
             )
+            AppText(TAB_LABEL_HINT, color = tc.td, fontSize = 10.sp, modifier = Modifier.testTag(TAB_LABEL_HINT_TAG))
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {

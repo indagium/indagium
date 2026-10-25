@@ -193,7 +193,7 @@ private fun activeWindow() = KeyboardFocusManager.getCurrentKeyboardFocusManager
 internal val dragCursorOverride = mutableStateOf<AwtCursor?>(null)
 
 @Composable
-fun HDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
+fun HDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
@@ -232,12 +232,13 @@ fun HDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
             .pointerHoverIcon(PointerIcon(cursor)),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.width(4.dp).fillMaxHeight().background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+        // [showLine] false (the tiling surfaces): the hit area, cursor and drag stay, the bar is never drawn.
+        if (showLine) Box(Modifier.width(4.dp).fillMaxHeight().background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
     }
 }
 
 @Composable
-fun VDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
+fun VDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
@@ -267,7 +268,7 @@ fun VDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
             .pointerHoverIcon(PointerIcon(cursor)),
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.fillMaxWidth().height(4.dp).background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
+        if (showLine) Box(Modifier.fillMaxWidth().height(4.dp).background(if (hovered || dragging) tc.ac.copy(.5f) else tc.br))
     }
 }
 

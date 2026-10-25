@@ -60,7 +60,6 @@ internal const val HOME_LAYOUT_TIP: String =
     "Tip: drag ⠿ onto a section's edge to split it, or onto the page edge to span it. Drag a gap to resize."
 
 private const val HOME_TILE_GAP_DP = 12f
-private const val HOME_SIZE_LABEL_MIN_CARD_DP = 360f
 private const val HOME_STACKED_HEIGHT_SHARE = 0.75f
 private const val HOME_STACKED_MIN_HEIGHT_DP = 320f
 private const val HOME_STACKED_MAX_HEIGHT_DP = 560f
@@ -88,15 +87,13 @@ internal fun homeSplitterKeyDelta(axis: HomeSplitAxis, key: Key): Float? = tileS
 internal fun homeStackedCardHeight(viewportHeightDp: Float): Float =
     (viewportHeightDp * HOME_STACKED_HEIGHT_SHARE).coerceIn(HOME_STACKED_MIN_HEIGHT_DP, HOME_STACKED_MAX_HEIGHT_DP)
 
-/** The New tab's chrome: 36dp headers, 12dp gaps, the size readout whenever a card is at least 360dp wide, no collapse or maximize. */
+/** The New tab's chrome: 36dp headers, 12dp gaps, no collapse or maximize. */
 private val HOME_TILE_SPEC = TileChromeSpec<HomeSectionId>(
     headerDp = HOME_HEADER_DP,
     titleSp = HOME_TITLE_SP,
     gapRowDp = HOME_TILE_GAP_DP,
     gapColumnDp = HOME_TILE_GAP_DP,
     cornerDp = HOME_CARD_CORNER_DP,
-    sizeLabel = TileSizeLabelMode.WHEN_WIDE,
-    sizeLabelMinDp = HOME_SIZE_LABEL_MIN_CARD_DP,
     minTileDp = HOME_MIN_SECTION_DP,
     minPairShare = HOME_MIN_PAIR_SHARE,
     tagPrefix = "home",

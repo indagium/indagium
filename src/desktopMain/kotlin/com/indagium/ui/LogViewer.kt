@@ -1490,7 +1490,7 @@ internal fun LogViewer(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             leading(nameMaxDp)
-            Spacer(Modifier.width(if (tiles == null) 12.dp else 4.dp))
+            Spacer(Modifier.width(if (tiles == null) 12.dp else LOG_TOOLBAR_GAP_DP.dp))
             LogToolbarControls(
                 variant,
                 LogToolbarModel(

@@ -55,19 +55,20 @@ private const val DEFAULT_RIGHT_COLUMN_DP = 360f
 private const val DEFAULT_LOG_LEVEL_DP = 80f
 private const val PIN_EPSILON_DP = 0.5f
 
-/** The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, a size readout only while hovering a header or dragging a splitter, `tile-*` tags. */
+/** The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]). */
 internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     headerDp = LOG_VIEW_TILE_HEADER_DP,
     titleSp = LOG_VIEW_TITLE_SP,
     gapRowDp = LOG_VIEW_GAP_ROW_DP,
     gapColumnDp = LOG_VIEW_GAP_COLUMN_DP,
     cornerDp = LOG_VIEW_CORNER_DP,
-    sizeLabel = TileSizeLabelMode.ON_HOVER_OR_DRAG,
-    sizeLabelMinDp = 0f,
     minTileDp = LOG_VIEW_MIN_TILE_DP,
     minPairShare = LOG_VIEW_MIN_PAIR_SHARE,
     tagPrefix = "tile",
     keyOf = { it.key },
+    scrollMinDp = LOG_VIEW_PIN_MIN_DP,
+    scrollMaxDp = LOG_VIEW_PIN_MAX_DP,
+    scrolls = ::logViewScrollsInColumn,
 )
 
 /**
