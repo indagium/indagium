@@ -1594,6 +1594,20 @@ data class AppSettings(
     val compareHidden: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
     val lastComparePreset: LogViewPresetId = LogViewPresetId.COMPARE_GRID,
     val compareSyncScroll: Boolean = false,
+    // The window chrome: how the tab strip looks (tabStripStyle ... tabCloseOnEvery, ui/TabAppearance.kt) and where the tab strip
+    // and the main toolbar sit (tabStripPosition, toolbarPlacement, toolbarEdge) and whether that placement is locked. The
+    // position fields are stored from Phase 8 on but only wired by the docking work. JSON-only (ui/ChromeSettingsJson.kt),
+    // same rule as above: the frozen positional settings decoder must not gain a field.
+    val tabStripStyle: TabStripStyle = TabStripStyle.CURRENT,
+    val tabSizeMode: TabSizeMode = TabSizeMode.FIXED,
+    val tabLabelMode: TabLabelMode = TabLabelMode.FILE_SESSION,
+    val tabShowTypeBadge: Boolean = false,
+    val tabShowSourceStripe: Boolean = false,
+    val tabCloseOnEvery: Boolean = true,
+    val chromeLocked: Boolean = false,
+    val tabStripPosition: TabStripPosition = TabStripPosition.TOP,
+    val toolbarPlacement: ToolbarPlacement = ToolbarPlacement.WITH_TABS_END,
+    val toolbarEdge: ChromeEdge = ChromeEdge.TOP,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1678,6 +1692,24 @@ enum class CompareFilterTarget { A, B, BOTH }
 
 /** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the last two are for the compare view. */
 enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS }
+
+/** How the tab strip is drawn (Settings > Appearance > Tabs): [CURRENT] is the long-standing look and the default. */
+enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_STRIPE, TWO_LINE, QUIET }
+
+/** [FIXED]: every visible tab gets an equal share of the strip. [FIT]: a tab is as wide as its label. */
+enum class TabSizeMode { FIXED, FIT }
+
+/** What a log tab's label shows: the file name (with the session / folder appended when two tabs share a file name), only the session, or only the file. */
+enum class TabLabelMode { FILE_SESSION, SESSION_ONLY, FILE_ONLY }
+
+/** Which window edge the tab strip sits on. */
+enum class TabStripPosition { TOP, LEFT, RIGHT, BOTTOM }
+
+/** Where the main toolbar sits relative to the tab strip: at the strip's start or end, as its own bar beside it, or docked to its own window edge. */
+enum class ToolbarPlacement { WITH_TABS_START, WITH_TABS_END, BESIDE_TABS, OWN_EDGE }
+
+/** A window edge the main toolbar can be docked to. */
+enum class ChromeEdge { TOP, LEFT, RIGHT, BOTTOM }
 
 const val DEFAULT_HOME_TOP_WEIGHT: Float = 1.6f
 

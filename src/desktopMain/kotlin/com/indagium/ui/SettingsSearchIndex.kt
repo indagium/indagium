@@ -164,6 +164,48 @@ private fun appearance() = buildList {
             listOf("icons only", "buttons"),
         ),
     )
+    add(
+        entry(
+            SettingsSection.Appearance, "Tab style",
+            "How the tab strip looks: current, raised, segmented, typed, compact, source colour, two-line or quiet.",
+            listOf("tabs", "tab bar", "appearance", "look", "raised", "compact", "segmented"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance, "Tab size",
+            "Fixed gives every tab an equal share of the strip; Fit label sizes each tab to its name.",
+            listOf("tabs", "width", "tab bar", "fixed", "fit"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance, "Tab label",
+            "Show the file name with its session, the session only, or the file name only on a tab.",
+            listOf("tabs", "title", "name", "file", "session", "folder"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance, "File-type badge",
+            "Adds a LOG, ZIP or IND badge before the tab name.",
+            listOf("tabs", "type", "log", "zip", "ind", "capture"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance, "Source colour stripe",
+            "Adds a coloured stripe on top of a tab by where it came from: file, live capture, bug report or capture.",
+            listOf("tabs", "color", "colour", "source", "stripe", "live"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance, "Close button on every tab",
+            "Off shows a tab's close button only on the active tab and under the pointer.",
+            listOf("tabs", "x", "close", "hover"),
+        ),
+    )
     if (isLinuxOs) {
         add(
             entry(

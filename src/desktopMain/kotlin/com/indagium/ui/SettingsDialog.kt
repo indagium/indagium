@@ -721,6 +721,7 @@ private fun AppearanceSettingsSection(state: AppState) {
     }
     AppearanceBasicsRow(state)
     AppearanceSystemFontSelectors(state)
+    TabsAppearanceSettings(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",

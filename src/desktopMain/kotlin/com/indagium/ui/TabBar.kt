@@ -22,14 +22,12 @@ import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.*
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -37,7 +35,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
-import java.io.File
 import kotlin.math.roundToInt
 
 // Fraction of a tab's own width used as the drag-reorder snap threshold — moved here from
@@ -45,34 +42,8 @@ import kotlin.math.roundToInt
 internal const val TAB_DRAG_SNAP_BIAS = 0.25f
 
 /** Only disambiguate labels when a filename collision is actually visible to the user. */
-internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String {
-    val sameNameTabs = allTabs.filter { it.filename == tab.filename }
-    if (sameNameTabs.size < 2) return tab.filename
-
-    fun sourceSuffix(candidate: LogTab, includeArchiveEntryPath: Boolean): String {
-        val sourcePath = candidate.sourcePath.orEmpty()
-        val archiveSeparator = sourcePath.indexOf('!')
-        if (archiveSeparator >= 0) {
-            val archiveName = File(sourcePath.substring(0, archiveSeparator)).name.takeIf { it.isNotBlank() }
-            val entryPath = sourcePath.substring(archiveSeparator + 1).trim('/').takeIf { it.isNotBlank() }
-            if (archiveName != null && includeArchiveEntryPath && entryPath != null) return "$archiveName/$entryPath"
-            if (archiveName != null) return archiveName
-        }
-        return File(sourcePath).parentFile?.name?.takeIf { it.isNotBlank() } ?: candidate.id.take(8)
-    }
-
-    val compactSuffix = sourceSuffix(tab, includeArchiveEntryPath = false)
-    if (sameNameTabs.count { sourceSuffix(it, includeArchiveEntryPath = false) == compactSuffix } == 1) {
-        return "${tab.filename} — $compactSuffix"
-    }
-
-    val expandedSuffix = sourceSuffix(tab, includeArchiveEntryPath = true)
-    if (sameNameTabs.count { sourceSuffix(it, includeArchiveEntryPath = true) == expandedSuffix } == 1) {
-        return "${tab.filename} — $expandedSuffix"
-    }
-
-    return "${tab.filename} — $expandedSuffix — ${tab.id.take(8)}"
-}
+internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String =
+    tabLabelParts(tab, allTabs, TabLabelMode.FILE_SESSION).joined()
 
 // ── TabBar ────────────────────────────────────────────────────────────
 @Composable
@@ -86,8 +57,10 @@ internal fun TabBar(state: AppState, onReclaimFocus: () -> Unit = {}) {
     val hasRecentFiles = state.recentFiles.isNotEmpty()
     val showToolbarText = !state.settings.toolbarIconOnlyButtons
     val homeActive = state.activeTab()?.isCaptureLauncher == true
+    val tabStyle = state.settings.tabStripStyle
     Row(
-        Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
+        Modifier.fillMaxWidth().height(tabStripHeightDp(tabStyle).dp).testTag("tab-strip").background(tabStripBackground(tabStyle, tc))
+            .border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
@@ -468,18 +441,46 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     }
 
     val visibleTabLimit = state.settings.visibleTabLimit
-    val (visibleRefs, overflowRefs) = remember(renderOrder, containerPx, visibleTabLimit) {
-        splitTabsForVisibility(
-            tabs = renderOrder,
-            containerPx = containerPx,
-            minTabPx = minTabPx,
-            overflowButtonPx = ovBtnPx,
-            visibleTabLimit = visibleTabLimit,
-        )
-    }
-
+    val settings = state.settings
+    val fit = settings.tabsFitLabel()
+    val stripHeightDp = tabStripHeightDp(settings.tabStripStyle)
     val logById = state.tabs.associateBy { it.id }
     val diagramById = state.seq3Sessions.sessions.associateBy { it.id }
+
+    // Label and look of every tab in the strip, per the Tabs appearance settings (the default is today's tabDisplayLabel).
+    fun describe(ref: TabRef): TabDescriptor? = when (ref) {
+        is TabRef.Log -> logById[ref.tabId]?.let { logTabDescriptor(it, state.tabs, settings) }
+        is TabRef.Diagram -> diagramById[ref.sessionId]?.let {
+            workspaceTabDescriptor(it.document.title.ifBlank { "Diagram" }, TabKind.DIAGRAM, settings)
+        }
+        TabRef.Tests -> workspaceTabDescriptor("Tests", TabKind.TESTS, settings)
+    }
+    val descriptors = renderOrder.mapNotNull { ref -> describe(ref)?.let { ref.rawId() to it } }.toMap()
+    // FIT only: each tab as wide as its label (the equal-share maths of FIXED needs none of this).
+    val fitWidthsPx = if (fit) {
+        fitTabWidthsPx(renderOrder.map { ref -> descriptors[ref.rawId()]?.let { tabFitContentDp(it.label, it.appearance) } ?: FIT_TAB_MIN_DP }, density)
+    } else {
+        emptyList()
+    }
+    val (visibleRefs, overflowRefs) = remember(renderOrder, containerPx, visibleTabLimit, fit, fitWidthsPx) {
+        if (fit) {
+            splitTabsForVisibilityFit(
+                tabs = renderOrder,
+                widthsPx = fitWidthsPx,
+                containerPx = containerPx,
+                overflowButtonPx = ovBtnPx,
+                visibleTabLimit = visibleTabLimit,
+            )
+        } else {
+            splitTabsForVisibility(
+                tabs = renderOrder,
+                containerPx = containerPx,
+                minTabPx = minTabPx,
+                overflowButtonPx = ovBtnPx,
+                visibleTabLimit = visibleTabLimit,
+            )
+        }
+    }
 
     val visibleTabIds = visibleRefs.map { it.rawId() }
     val overflowTabIds = overflowRefs.map { it.rawId() }
@@ -494,9 +495,16 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     }
     val tabWidthPx =
         if (visibleRefs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleRefs.size else minTabPx.toFloat()
+    // Each visible tab's width: an equal share of the strip (FIXED, unchanged), or its label's width, scaled down together when they
+    // would not fit (FIT).
+    val fitWidthById = if (fit) renderOrder.map { it.rawId() }.zip(fitWidthsPx).toMap() else emptyMap()
+    val visibleWidthsPx =
+        if (fit) shrinkTabWidthsToFit(visibleTabIds.map { fitWidthById[it] ?: minTabPx.toFloat() }, tabAreaPx.toFloat()) else emptyList()
+    val widthById = if (fit) visibleTabIds.zip(visibleWidthsPx).toMap() else emptyMap()
     val visualOrderIds =
         liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size }
             ?: visibleTabIds
+    val visualOffsetsPx = if (fit) tabOffsets(visualOrderIds.map { widthById[it] ?: tabWidthPx }) else emptyList()
     val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
     val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
     val currentUnifiedOrder by rememberUpdatedState(renderOrder)
@@ -524,7 +532,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
         Box(
             Modifier.weight(1f).fillMaxHeight()
                 .onSizeChanged { tabAreaPx = it.width }
-                .pointerInput(visibleTabIds, tabWidthPx) {
+                .pointerInput(visibleTabIds, tabWidthPx, visibleWidthsPx) {
                     var downPos = Offset.Zero
                     var downId: String? = null
                     var dragging = false
@@ -535,8 +543,11 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             when (ev.type) {
                                 PointerEventType.Press -> {
                                     downPos = ch.position; dragging = false
-                                    val idx = (ch.position.x / tabWidthPx).toInt()
-                                        .coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                    val idx = if (fit) {
+                                        tabIndexAtX(ch.position.x, visibleWidthsPx)
+                                    } else {
+                                        (ch.position.x / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                    }
                                     downId = visibleTabIds.getOrNull(idx)
                                 }
 
@@ -552,13 +563,23 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     if (dragging && dragTabId != null) {
                                         ch.consume()
                                         dragOffsetX = ch.position.x - downPos.x
-                                        liveVisualTabIds = browserTabOrderDuringDrag(
-                                            visibleIds = visibleTabIds,
-                                            draggedId = dragTabId,
-                                            dragStartIndex = dragStartIndex,
-                                            dragOffsetX = dragOffsetX,
-                                            tabWidth = tabWidthPx,
-                                        )
+                                        liveVisualTabIds = if (fit) {
+                                            browserTabOrderDuringDragVariable(
+                                                visibleIds = visibleTabIds,
+                                                widthsPx = visibleWidthsPx,
+                                                draggedId = dragTabId,
+                                                dragStartIndex = dragStartIndex,
+                                                dragOffsetX = dragOffsetX,
+                                            )
+                                        } else {
+                                            browserTabOrderDuringDrag(
+                                                visibleIds = visibleTabIds,
+                                                draggedId = dragTabId,
+                                                dragStartIndex = dragStartIndex,
+                                                dragOffsetX = dragOffsetX,
+                                                tabWidth = tabWidthPx,
+                                            )
+                                        }
                                     }
                                 }
 
@@ -585,13 +606,14 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                 key(ref.rawId()) {
                     val isDragging = ref.rawId() == dragTabId
                     val targetIndex = visualOrderIds.indexOf(ref.rawId()).takeIf { it >= 0 } ?: visibleRefs.indexOf(ref)
-                    val targetX = targetIndex * tabWidthPx
+                    val targetX = if (fit) visualOffsetsPx.getOrElse(targetIndex) { 0f } else targetIndex * tabWidthPx
                     val animatedX by animateFloatAsState(
                         targetValue = targetX,
                         animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
                         label = "tab-x-${ref.rawId()}",
                     )
-                    val startX = (dragStartIndex.takeIf { it >= 0 } ?: targetIndex) * tabWidthPx
+                    val startIndex = dragStartIndex.takeIf { it >= 0 } ?: targetIndex
+                    val startX = if (fit) tabOffsets(visibleWidthsPx).getOrElse(startIndex) { 0f } else startIndex * tabWidthPx
                     val tabX = tabRenderX(
                         isDragging = isDragging,
                         isJustReleased = ref.rawId() == justReleasedTabId,
@@ -602,7 +624,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                     Box(
                         Modifier
                             .offset { IntOffset(tabX.roundToInt(), 0) }
-                            .width((tabWidthPx / density).dp)
+                            .width(((widthById[ref.rawId()] ?: tabWidthPx) / density).dp)
                             .fillMaxHeight()
                             .zIndex(if (isDragging) 1f else 0f)
                             .graphicsLayer {
@@ -614,9 +636,11 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                     ) {
                         when (ref) {
                             is TabRef.Log -> logById[ref.tabId]?.let { tab ->
+                                val described = descriptors[ref.rawId()]
                                 TabItem(
                                     tab = tab,
-                                    label = tabDisplayLabel(tab, state.tabs),
+                                    label = described?.label ?: tabDisplayLabel(tab, state.tabs),
+                                    appearance = described?.appearance ?: TabAppearance.Default,
                                     isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
                                     showClose = true,
                                     dragging = isDragging,
@@ -631,6 +655,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 TabShell(
                                     pointerKey = workspace.id,
                                     label = workspace.document.title.ifBlank { "Diagram" },
+                                    appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
                                     tooltip = diagramTabTooltip(workspace),
                                     isActive = active,
                                     showClose = true,
@@ -642,7 +667,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 if (ctxMenuSessionId == workspace.id) {
                                     Popup(
                                         alignment = Alignment.TopStart,
-                                        offset = IntOffset(0, (34 * density).roundToInt()),
+                                        offset = IntOffset(0, ((stripHeightDp - 2) * density).roundToInt()),
                                         onDismissRequest = { ctxMenuSessionId = null },
                                         properties = PopupProperties(focusable = true),
                                     ) {
@@ -689,6 +714,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             TabRef.Tests -> TabShell(
                                 pointerKey = TESTS_TAB_RAW_ID,
                                 label = "Tests",
+                                appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
                                 tooltip = "AI test suites",
                                 isActive = state.testsSurfaceActive,
                                 showClose = true,
@@ -711,7 +737,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                 if (overflowOpen) {
                     Popup(
                         alignment = Alignment.TopStart,
-                        offset = IntOffset(0, (36 * density).toInt()),
+                        offset = IntOffset(0, (stripHeightDp * density).toInt()),
                         onDismissRequest = { overflowOpen = false },
                         properties = PopupProperties(focusable = true),
                     ) {
@@ -722,11 +748,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                         ) {
                             Column(Modifier.padding(vertical = 4.dp)) {
                                 overflowRefs.forEach { ref ->
-                                    val label = when (ref) {
-                                        is TabRef.Log -> logById[ref.tabId]?.let { tabDisplayLabel(it, state.tabs) }
-                                        is TabRef.Diagram -> diagramById[ref.sessionId]?.document?.title?.ifBlank { "Diagram" }
-                                        TabRef.Tests -> "Tests"
-                                    } ?: return@forEach
+                                    val label = descriptors[ref.rawId()]?.label ?: return@forEach
                                     HoverBox(
                                         modifier = Modifier.fillMaxWidth(),
                                         onClick = {
@@ -761,146 +783,4 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
             }
         }
     }
-}
-
-// ── Shared ────────────────────────────────────────────────────────────
-
-/** The log-tab visual recipe, generalised so [TabOverflowRow] can render a diagram tab through the
- *  exact same shell instead of an ad-hoc pill.  [pointerKey] replaces `tab.id` as the
- *  `pointerInput` restart key (cross-tab/cross-workspace id collisions are the same hazard either
- *  way — see the ID-collision note in CLAUDE.md); [tooltip] is the plain-text tooltip body
- *  (log tabs show the source path, diagram tabs show title/range/source); [leading] is an
- *  optional composable slot before the label (log tabs use it for the live-tailing `●`).
- */
-@Composable
-internal fun TabShell(
-    pointerKey: Any,
-    label: String,
-    tooltip: String,
-    isActive: Boolean,
-    showClose: Boolean,
-    dragging: Boolean = false,
-    leading: (@Composable () -> Unit)? = null,
-    onClick: () -> Unit,
-    onClose: () -> Unit,
-    onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
-) {
-    val tc = tc()
-    val density = LocalDensity.current.density
-    var hov by remember { mutableStateOf(false) }
-    var rowRoot by remember { mutableStateOf(Offset.Zero) }
-    val accent = tc.ac
-    Row(
-        Modifier.fillMaxWidth().height(36.dp)
-            .background(if (isActive) tc.bg else if (hov || dragging) tc.p else tc.p2)
-            .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
-            .drawBehind {
-                if (isActive) {
-                    val stroke = 2.dp.toPx()
-                    drawRect(
-                        color = accent,
-                        topLeft = Offset(0f, size.height - stroke),
-                        size = androidx.compose.ui.geometry.Size(size.width, stroke),
-                    )
-                }
-            }
-            .onGloballyPositioned { rowRoot = it.positionInRoot() }
-            .onPointerEvent(PointerEventType.Enter) { hov = true }
-            .onPointerEvent(PointerEventType.Exit) { hov = false }
-            .pointerInput(pointerKey) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val ev = awaitPointerEvent(PointerEventPass.Initial)
-                        if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
-                            val ch = ev.changes.firstOrNull() ?: continue
-                            ch.consume()
-                            onCtxMenu((rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density)
-                        }
-                    }
-                }
-            }
-            .clickable(onClick = onClick).padding(start = 12.dp, end = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
-    ) {
-        leading?.invoke()
-        TooltipArea(
-            tooltip = {
-                val tooltipScroll = rememberScrollState()
-                Box(
-                    Modifier
-                        .widthIn(max = 760.dp)
-                        .heightIn(max = 180.dp)
-                        .background(tc.p2, RoundedCornerShape(4.dp))
-                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                        .verticalScroll(tooltipScroll)
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    AppText(
-                        tooltip,
-                        color = tc.tx,
-                        fontSize = 11.sp,
-                        fontFamily = MONO,
-                        maxLines = Int.MAX_VALUE,
-                        overflow = TextOverflow.Clip,
-                    )
-                }
-            },
-            modifier = Modifier.weight(1f),
-        ) {
-            AppText(
-                label,
-                color = if (isActive || dragging) tc.tx else tc.ts,
-                fontSize = 12.sp,
-                fontFamily = MONO,
-                overflow = TextOverflow.Ellipsis,
-                maxLines = 1,
-            )
-        }
-        if (showClose) {
-            CloseButton(onClick = onClose)
-        }
-    }
-}
-
-@Composable
-internal fun TabItem(
-    tab: LogTab, isActive: Boolean, showClose: Boolean,
-    label: String = tab.filename,
-    dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
-    onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
-) {
-    val tc = tc()
-    TabShell(
-        pointerKey = tab.id,
-        label = label,
-        tooltip = tab.sourcePath ?: tab.filename,
-        isActive = isActive,
-        showClose = showClose,
-        dragging = dragging,
-        // Live tailing (utils/FileTailer.kt) is toggled from the tab's right-click context menu,
-        // not a clickable button here — this is purely an indicator, plain and non-interactive.
-        leading = if (tab.tailing) {
-            {
-                TooltipArea(
-                    tooltip = {
-                        Box(
-                            Modifier.background(tc.p2, RoundedCornerShape(4.dp))
-                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            AppText("Live tailing — watching file for new lines", color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                        }
-                    },
-                ) {
-                    AppText("●", color = DANGER_RED, fontSize = 10.sp)
-                }
-            }
-        } else {
-            null
-        },
-        onClick = onClick,
-        onClose = onClose,
-        onCtxMenu = onCtxMenu,
-    )
 }
