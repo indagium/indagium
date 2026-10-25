@@ -21,18 +21,22 @@ import com.indagium.model.LogViewSectionId.ORIGINAL_B
 import com.indagium.model.LogViewSectionId.SAVED_FILTERS
 import com.indagium.model.LogViewSectionId.SEQUENCES
 import com.indagium.model.LogViewSectionId.TAGS
+import com.indagium.model.LogViewSectionId.TOOLBAR
 import com.indagium.model.LogViewSectionId.VIDEO
 import com.indagium.model.LogViewTileGroup
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.LOG_VIEW_FILTER_TILES
 import com.indagium.ui.LOG_VIEW_TILE_SPEC
 import com.indagium.ui.LogViewFocusPanel
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
 import com.indagium.ui.LogViewTileContext
+import com.indagium.ui.TOOLBAR_TILE_COLUMN_DP
+import com.indagium.ui.TOOLBAR_TILE_ROW_DP
 import com.indagium.ui.TileDropTarget
 import com.indagium.ui.TileEdge
 import com.indagium.ui.classicLogViewLayout
@@ -41,6 +45,7 @@ import com.indagium.ui.compareGridLayout
 import com.indagium.ui.effectiveCompareLayout
 import com.indagium.ui.effectiveLogViewLayout
 import com.indagium.ui.isLogTile
+import com.indagium.ui.layoutMenuPanels
 import com.indagium.ui.logViewDropLabel
 import com.indagium.ui.logViewFocusOrder
 import com.indagium.ui.logViewHiddenBadgeCount
@@ -48,6 +53,8 @@ import com.indagium.ui.logViewPresetIsActive
 import com.indagium.ui.logViewTileApplicable
 import com.indagium.ui.logViewTileTitle
 import com.indagium.ui.logViewTileVisible
+import com.indagium.ui.neverHidden
+import com.indagium.ui.pinToolbarTile
 import com.indagium.ui.projectTileLayout
 import com.indagium.ui.removeTile
 import com.indagium.ui.sanitizeLogViewLayoutState
@@ -62,6 +69,9 @@ import com.indagium.ui.withLogViewPreset
 import com.indagium.ui.withLogViewTileCollapsed
 import com.indagium.ui.withLogViewTileHidden
 import com.indagium.ui.withLogViewTilesLocked
+import com.indagium.ui.withToolbarDroppedInLayout
+import com.indagium.ui.withToolbarPlacement
+import com.indagium.ui.withToolbarTile
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -72,7 +82,9 @@ import kotlin.test.assertTrue
 
 class LogViewLayoutTest {
     private val sizes = LogViewLegacySizes(filterPanelWidth = 300f, annotationPanelWidth = 420f, rightSidebarSplit = 0.3f, compareSplit = 0.4f)
-    private val singleIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE }.toSet()
+
+    // The tiles of a stored single-view tree: every single-view tile but the toolbar, which is in it only while the toolbar is IN_LAYOUT.
+    private val singleIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR }.toSet()
     private val compareIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.SINGLE }.toSet()
 
     private fun ctx(
@@ -451,7 +463,7 @@ class LogViewLayoutTest {
     fun titlesAndDropLabels() {
         val expected = listOf(
             "Tags", "Message rules", "Log composition", "Highlighters", "Log level", "Sequences", "Issues", "Saved filters",
-            "Log", "Original", "Log A", "Log B", "Original A", "Original B", "Notes", "Diagram library", "AI assistant", "Video",
+            "Log", "Original", "Log A", "Log B", "Original A", "Original B", "Notes", "Diagram library", "AI assistant", "Video", "Toolbar",
         )
         assertEquals(expected, LogViewSectionId.entries.map { logViewTileTitle(it) })
         assertEquals("Below Notes", logViewDropLabel(TileDropTarget.OnSection(NOTES, TileEdge.BOTTOM)))
@@ -508,5 +520,143 @@ class LogViewLayoutTest {
         assertTrue(geometry.cardOf(TAGS)!!.h > geometry.cardOf(HIGHLIGHTERS)!!.h * 2f)
         assertNotNull(geometry.cardOf(ISSUES))
         assertNotNull(geometry.cardOf(LOG_COMPOSITION))
+    }
+
+    // ---- the toolbar tile ----------------------------------------------------------------------------------------
+
+    private fun inLayoutCtx(compare: Boolean = false) = ctx(compare = compare).copy(toolbarInLayout = true)
+
+    private fun filterColumn(tree: TileNode<LogViewSectionId>) = (tree as TileSplit).children.first() as TileSplit
+
+    @Test
+    fun theToolbarTileIsInAStoredTreeExactlyWhileTheToolbarIsInTheLayout() {
+        val plain = sanitizeLogViewLayoutState(classicLogViewLayout(sizes), emptyList(), LogViewScope.SINGLE).first
+        assertFalse(TOOLBAR in leafIds(plain))
+        val inLayout = sanitizeLogViewLayoutState(classicLogViewLayout(sizes), emptyList(), LogViewScope.SINGLE, toolbarInLayout = true).first
+        assertEquals(singleIds + TOOLBAR, leafIds(inLayout).toSet())
+        assertEquals(leafIds(inLayout).size, leafIds(inLayout).toSet().size, "once")
+        // Out of the layout again, the next sanitize removes it.
+        assertFalse(TOOLBAR in leafIds(sanitizeLogViewLayoutState(inLayout, emptyList(), LogViewScope.SINGLE).first))
+        // The compare view never has it.
+        assertFalse(TOOLBAR in leafIds(sanitizeLogViewLayoutState(null, emptyList(), LogViewScope.COMPARE, toolbarInLayout = true).first))
+        assertFalse(TOOLBAR in leafIds(sanitizeLogViewLayoutState(inLayout, emptyList(), LogViewScope.COMPARE, toolbarInLayout = true).first))
+        // Idempotent.
+        val once = sanitizeLogViewLayoutState(inLayout, emptyList(), LogViewScope.SINGLE, true)
+        assertEquals(once, sanitizeLogViewLayoutState(once.first, once.second, LogViewScope.SINGLE, true))
+    }
+
+    @Test
+    fun aMissingToolbarTileIsReinsertedSlimAtTheTopOfTheLeftColumn() {
+        val column = filterColumn(sanitizeLogViewLayoutState(classicLogViewLayout(sizes), emptyList(), LogViewScope.SINGLE, true).first)
+        val first = column.children.first() as TileLeaf
+        assertEquals(TOOLBAR, first.section)
+        assertEquals(TOOLBAR_TILE_COLUMN_DP, first.sizeDp, "slim: pinned to its natural height")
+        assertEquals(TAGS, (column.children[1] as TileLeaf).section, "above Tags, the first tile of the column")
+        // From nothing at all, or with the tile hidden or lost with a malformed tree.
+        val fromScratch = sanitizeLogViewLayoutState(null, emptyList(), LogViewScope.SINGLE, true)
+        assertEquals(TOOLBAR, tileLeafSections(fromScratch.first).first())
+        val hiddenToo = sanitizeLogViewLayoutState(classicLogViewLayout(sizes), listOf(TOOLBAR, NOTES), LogViewScope.SINGLE, true)
+        assertEquals(listOf(NOTES), hiddenToo.second, "the toolbar tile is never in the hidden list")
+        assertTrue(TOOLBAR in leafIds(hiddenToo.first))
+    }
+
+    @Test
+    fun effectiveLayoutHasTheToolbarTileOnlyWhileInLayoutWithoutAStoredEdit() {
+        val derived = effectiveLogViewLayout(AppSettings(toolbarPlacement = ToolbarPlacement.IN_LAYOUT), sizes)
+        assertEquals(TOOLBAR, tileLeafSections(derived).first())
+        assertEquals(singleIds + TOOLBAR, leafIds(derived).toSet())
+        // A stored tree that still holds the tile after the toolbar left the layout is drawn without it.
+        val stale = AppSettings(logViewLayout = derived)
+        assertFalse(TOOLBAR in leafIds(effectiveLogViewLayout(stale, sizes)))
+        // Everything else is returned as stored.
+        val stored = classicLogViewLayout(sizes)
+        assertSame(stored, effectiveLogViewLayout(AppSettings(logViewLayout = stored), sizes))
+        assertEquals(classicLogViewLayout(sizes), effectiveLogViewLayout(AppSettings(), sizes))
+    }
+
+    @Test
+    fun withToolbarTileInsertsOrRemovesAndLeavesAnAlreadyRightTreeAlone() {
+        val tree = classicLogViewLayout(sizes)
+        assertSame(tree, withToolbarTile(tree, false))
+        val with = withToolbarTile(tree, true)
+        assertSame(with, withToolbarTile(with, true))
+        assertEquals(tree, withToolbarTile(with, false).let { removeTile(it, TOOLBAR) ?: it })
+    }
+
+    @Test
+    fun theToolbarTileAppliesOnlyInTheSingleViewWhileInLayoutAndIsNeverHidden() {
+        assertFalse(logViewTileApplicable(TOOLBAR, ctx()))
+        assertTrue(logViewTileApplicable(TOOLBAR, inLayoutCtx()))
+        assertFalse(logViewTileApplicable(TOOLBAR, inLayoutCtx(compare = true)))
+        // Whatever the group switches and the hidden list say.
+        assertTrue(logViewTileVisible(TOOLBAR, inLayoutCtx().copy(groupOn = { false }), listOf(TOOLBAR, DIAGRAMS)))
+        assertFalse(logViewTileVisible(TOOLBAR, ctx(), emptyList()))
+        assertTrue(TOOLBAR.neverHidden && LOG.neverHidden && !NOTES.neverHidden)
+        assertFalse(TOOLBAR.isLogTile)
+        val settings = AppSettings()
+        assertSame(settings, settings.withLogViewTileHidden(TOOLBAR, true), "refused")
+        assertSame(settings, settings.withLogViewTileCollapsed(TOOLBAR, true), "it does not collapse either")
+        assertEquals(0, logViewHiddenBadgeCount(inLayoutCtx(), listOf(TOOLBAR), LogViewScope.SINGLE))
+    }
+
+    @Test
+    fun theLayoutMenusPanelsNeverListTheToolbar() {
+        assertFalse(TOOLBAR in layoutMenuPanels(inLayoutCtx()))
+        assertTrue(NOTES in layoutMenuPanels(inLayoutCtx()))
+    }
+
+    @Test
+    fun theToolbarTileIsNoF6Stop() {
+        val tree = withToolbarTile(classicLogViewLayout(sizes), true)
+        assertEquals(logViewFocusOrder(classicLogViewLayout(sizes)), logViewFocusOrder(tree))
+    }
+
+    @Test
+    fun aPresetStaysActiveWhileTheToolbarTileIsInTheLayout() {
+        val inLayout = AppSettings(toolbarPlacement = ToolbarPlacement.IN_LAYOUT).withLogViewPreset(LogViewLayoutPreset.CLASSIC, sizes)
+        assertTrue(TOOLBAR in leafIds(assertNotNull(inLayout.logViewLayout)), "a preset keeps the toolbar in the layout")
+        assertTrue(logViewPresetIsActive(LogViewLayoutPreset.CLASSIC, inLayout, sizes))
+        assertFalse(logViewPresetIsActive(LogViewLayoutPreset.REVIEW, inLayout, sizes))
+    }
+
+    @Test
+    fun choosingTheToolbarPlacementMovesTheTileInAndOutOfTheStoredLayout() {
+        val base = AppSettings(toolbarPlacement = ToolbarPlacement.OWN_EDGE, logViewLayout = classicLogViewLayout(sizes))
+        val into = base.withToolbarPlacement(ToolbarPlacement.IN_LAYOUT)
+        assertEquals(ToolbarPlacement.IN_LAYOUT, into.toolbarPlacement)
+        assertEquals(ToolbarPlacement.OWN_EDGE, into.toolbarFallbackPlacement, "the placement it replaces is the fallback")
+        assertTrue(TOOLBAR in leafIds(assertNotNull(into.logViewLayout)))
+        val out = into.withToolbarPlacement(ToolbarPlacement.WITH_TABS_START)
+        assertEquals(ToolbarPlacement.WITH_TABS_START, out.toolbarPlacement)
+        assertEquals(ToolbarPlacement.OWN_EDGE, out.toolbarFallbackPlacement, "the fallback is not touched by leaving")
+        assertFalse(TOOLBAR in leafIds(assertNotNull(out.logViewLayout)))
+        assertSame(into, into.withToolbarPlacement(ToolbarPlacement.IN_LAYOUT))
+        // Choosing IN_LAYOUT twice keeps the real fallback.
+        assertEquals(ToolbarPlacement.OWN_EDGE, into.withToolbarPlacement(ToolbarPlacement.IN_LAYOUT).toolbarFallbackPlacement)
+    }
+
+    @Test
+    fun droppingTheToolbarIntoTheLayoutPinsItSlimInItsParentsAxis() {
+        val settings = AppSettings(toolbarPlacement = ToolbarPlacement.WITH_TABS_END, logViewLayout = classicLogViewLayout(sizes))
+        val tree = dropToolbar(classicLogViewLayout(sizes), TileDropTarget.OnSection(LOG, TileEdge.LEFT))
+        val dropped = settings.withToolbarDroppedInLayout(tree)
+        assertEquals(ToolbarPlacement.IN_LAYOUT, dropped.toolbarPlacement)
+        assertEquals(ToolbarPlacement.WITH_TABS_END, dropped.toolbarFallbackPlacement)
+        val stored = assertNotNull(dropped.logViewLayout)
+        val leaf = findLeaf(stored, TOOLBAR)
+        assertEquals(TOOLBAR_TILE_ROW_DP, leaf.sizeDp, "beside the log, in a row: pinned to a slim width")
+        val above = dropToolbar(classicLogViewLayout(sizes), TileDropTarget.OnSection(LOG, TileEdge.TOP))
+        assertEquals(TOOLBAR_TILE_COLUMN_DP, findLeaf(assertNotNull(settings.withToolbarDroppedInLayout(above).logViewLayout), TOOLBAR).sizeDp)
+        // A size the user already chose is kept.
+        val sized = pinToolbarTile(TileSplit(TileAxis.ROW, listOf(TileLeaf(TOOLBAR, 1f, 222f), TileLeaf(LOG))))
+        assertEquals(222f, findLeaf(sized, TOOLBAR).sizeDp)
+    }
+
+    private fun dropToolbar(tree: TileNode<LogViewSectionId>, target: TileDropTarget<LogViewSectionId>) =
+        com.indagium.ui.dropTile(tree, TOOLBAR, target)
+
+    private fun findLeaf(tree: TileNode<LogViewSectionId>, id: LogViewSectionId): TileLeaf<LogViewSectionId> = when (tree) {
+        is TileLeaf -> tree.takeIf { it.section == id } ?: error("no $id")
+        is TileSplit -> tree.children.firstNotNullOf { runCatching { findLeaf(it, id) }.getOrNull() }
     }
 }

@@ -41,7 +41,7 @@ import kotlin.test.assertTrue
 // positional token defaults them, same as `{}`.
 class LogViewLayoutSettingCodecTest {
     private val sizes = LogViewLegacySizes(300f, 420f, 0.4f, 0.4f)
-    private val singleIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE }.toSet()
+    private val singleIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE && it != LogViewSectionId.TOOLBAR }.toSet()
     private val compareIds = LogViewSectionId.entries.filter { it.scope != LogViewScope.SINGLE }.toSet()
 
     private fun decode(json: String): AppSettings = settingsFromJson(json)!!

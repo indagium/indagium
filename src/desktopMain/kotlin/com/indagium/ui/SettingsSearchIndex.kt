@@ -227,8 +227,14 @@ private fun chromePlacement() = listOf(
     ),
     entry(
         SettingsSection.Appearance, "Toolbar placement",
-        "Where the main toolbar sits: at the start or end of the tab strip, beside a vertical tab strip, or on an edge of its own.",
-        listOf("toolbar", "buttons", "dock", "tabs", "beside", "own edge", "vertical"),
+        "Where the main toolbar sits: at the start or end of the tab strip, beside a vertical tab strip, on an edge of its own, or as a tile in the log view.",
+        listOf("toolbar", "buttons", "dock", "tabs", "beside", "own edge", "vertical", "tile", "layout", "log view"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Toolbar alignment",
+        "Where the buttons sit along a toolbar that has a bar of its own: at the start, the centre or the end, " +
+            "and before or after the tab bar on the tab strip's edge.",
+        listOf("toolbar", "align", "start", "end", "center", "before tabs", "after tabs", "right", "left"),
     ),
     entry(
         SettingsSection.Appearance, "Toolbar edge",

@@ -9,6 +9,7 @@ import com.indagium.model.LogViewTileGroup
 import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarPlacement
 
 // The single log view's tiling state as AppState extensions (AppState.kt is far too big to grow): the legacy sizes and tile
 // context the pure LogViewLayout.kt functions read, and the commit / hide / show / preset / reset / lock / collapse / reveal
@@ -40,6 +41,7 @@ internal fun AppState.logViewTileContext(tab: LogTab): LogViewTileContext =
         filterBarVisible = filterBarVisible,
         filterModeTags = tab.filter.mode == FilterMode.TAGS,
         hasVideoPanel = hasVideoTileContent(tab),
+        toolbarInLayout = settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT && logViewMaximized == null,
         groupOn = ::logViewGroupOn,
     )
 

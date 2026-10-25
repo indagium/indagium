@@ -726,6 +726,7 @@ fun ToolbarBtn(
     shape: RoundedCornerShape = CORNER_MD,
     contentPadding: PaddingValues = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
     baseBg: Color = Color.Transparent,
+    ellipsize: Boolean = false,
     onClick: () -> Unit,
 ) {
     val tc = tc()
@@ -773,6 +774,8 @@ fun ToolbarBtn(
                             color = contentColor,
                             fontSize = 12.sp,
                             fontWeight = if (active && enabled) FontWeight.Medium else FontWeight.Normal,
+                            // A label in a column of fixed width (a vertical toolbar) shortens with an ellipsis instead of being cut.
+                            overflow = if (ellipsize) TextOverflow.Ellipsis else TextOverflow.Clip,
                         )
                     }
                 }

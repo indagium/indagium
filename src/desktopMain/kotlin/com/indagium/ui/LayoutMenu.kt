@@ -68,6 +68,9 @@ private const val THUMB_LOG_FILL_ALPHA = 0.9f
 private const val BADGE_SIZE_DP = 14
 private const val MENU_GAP_PX = 4
 
+/** Height (dp) of a button in a wrapping toolbar (MainToolbar's flow layout), the same as a vertical toolbar's buttons. */
+internal const val WRAPPED_BUTTON_HEIGHT_DP = 32
+
 /** The active log tab when the Layout menu applies (a single log view or the compare view); null on the New tab, a diagram and the tests tab. */
 internal fun layoutMenuTab(state: AppState): LogTab? {
     val tab = state.activeTab() ?: return null
@@ -83,29 +86,37 @@ private fun AppState.layoutMenuContext(tab: LogTab): LogViewTileContext {
 
 private val ORIGINAL_TILES = setOf(LogViewSectionId.ORIGINAL, LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B)
 
-/** The tiles the Panels checklist offers for [ctx]: every applicable tile except the log tiles and the Original tiles (each has its own ×). */
+/**
+ * The tiles the Panels checklist offers for [ctx]: every applicable tile except the log tiles, the toolbar tile (never hideable) and the
+ * Original tiles (each has its own ×).
+ */
 internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
-    LogViewSectionId.entries.filter { !it.isLogTile && it !in ORIGINAL_TILES && logViewTileApplicable(it, ctx) }
+    LogViewSectionId.entries.filter { !it.neverHidden && it !in ORIGINAL_TILES && logViewTileApplicable(it, ctx) }
 
 /**
  * The toolbar button, with the hidden-tile badge. Draws nothing where the menu does not apply (see [layoutMenuTab]). In a [vertical]
- * toolbar it fills the toolbar's width, and its menu opens beside it rather than below.
+ * toolbar it fills the toolbar's width, and its menu opens beside it ([menuBeside]) rather than below. In a [wrap]ping toolbar (a row of
+ * buttons that flows onto more lines, with 32 dp buttons) it is a fixed-size button.
  */
 @Composable
-internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, vertical: Boolean = false) {
+internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, vertical: Boolean = false, wrap: Boolean = false, menuBeside: Boolean = vertical) {
     val tab = layoutMenuTab(state) ?: return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val ctx = state.layoutMenuContext(tab)
     val badge = if (ctx.compare) state.compareBadgeCount(ctx) else state.logViewBadgeCount(ctx)
-    Box(if (vertical) Modifier.fillMaxWidth() else Modifier.fillMaxHeight()) {
+    Box(if (vertical) Modifier.fillMaxWidth() else if (wrap) Modifier else Modifier.fillMaxHeight()) {
         ToolbarBtn(
             "",
             icon = Icons.Outlined.Dashboard,
             showLabel = false,
             tooltip = "Layout",
             active = open,
-            modifier = (if (vertical) Modifier.fillMaxWidth().height(36.dp) else Modifier.fillMaxHeight().width(36.dp)).testTag("layout-menu-button"),
+            modifier = when {
+                vertical -> Modifier.fillMaxWidth().height(36.dp)
+                wrap -> Modifier.width(36.dp).height(WRAPPED_BUTTON_HEIGHT_DP.dp)
+                else -> Modifier.fillMaxHeight().width(36.dp)
+            }.testTag("layout-menu-button"),
             shape = RoundedCornerShape(7.dp),
         ) { open = !open }
         if (badge > 0) {
@@ -121,7 +132,7 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
             ) { AppText(badge.toString(), color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
         }
         if (open) {
-            LayoutMenuPopup(state, tab, vertical = vertical, onReclaimFocus = onReclaimFocus, onDismiss = {
+            LayoutMenuPopup(state, tab, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = {
                 open = false
                 onReclaimFocus()
             })

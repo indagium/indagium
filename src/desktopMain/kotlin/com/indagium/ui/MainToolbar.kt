@@ -1,12 +1,16 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -30,14 +34,20 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 
 // The main toolbar: New tab, the panel toggles (Filter, Notes, AI, Video, Compare, Cases), Open with its recent-files arrow, the Layout
-// menu and Settings. A horizontal toolbar is the row the window always had; a vertical one is the same buttons stacked in a column (the
-// toolbar is docked to a left / right edge, or sits in a vertical tab strip's bar). The groups keep their joined corners: left / middle /
-// right of a row become top / middle / bottom of a column.
+// menu and Settings. It comes in three shapes: the row the window always had (a horizontal bar), the same buttons stacked in a column
+// (a bar on a left / right edge, or a tile narrower than tall), and a row that wraps onto further lines when it is too long for the room
+// (the toolbar inside a vertical tab bar, or in a wide tile). The groups keep their joined corners in the row and the column (left /
+// middle / right of a row become top / middle / bottom of a column); in the wrapping row every button stands alone, since a line break
+// could otherwise split a group.
 
 private val TOOLBAR_GAP = 4.dp
+private val WRAP_GAP = 2.dp
+private val WRAP_PADDING = 2.dp
 private val VERTICAL_BUTTON_HEIGHT = 32.dp
 private val VERTICAL_SETTINGS_HEIGHT = 36.dp
 private val VERTICAL_RECENT_HEIGHT = 18.dp
+private val WRAP_BUTTON_HEIGHT = WRAPPED_BUTTON_HEIGHT_DP.dp
+private val WRAP_BUTTON_PADDING = PaddingValues(horizontal = 8.dp, vertical = 5.dp)
 private const val CORNER_DP = 7
 
 private class ToolbarShapes(vertical: Boolean) {
@@ -48,46 +58,79 @@ private class ToolbarShapes(vertical: Boolean) {
     val solo = RoundedCornerShape(corner)
 }
 
+// How the buttons are laid out; see the header comment.
+private enum class ToolbarMode { BAR, COLUMN, FLOW }
+
 /**
- * The toolbar for [orientation]. In a vertical toolbar the buttons fill its width; they show their labels only when [labelsFit] (the
- * toolbar is in a wide bar such as a vertical tab strip, and the "Icons only" setting is off). Every click hands keyboard focus back through
- * [onReclaimFocus] (a clicked button otherwise keeps it, CLAUDE.md). [onRecentAnchor] is told where the Recent
- * files arrow sits (root coordinates, dp) so the menu can open next to it. It draws no bar of its own: see [ChromeScaffold] / [TabBar].
+ * The toolbar for [orientation]. A vertical toolbar stacks full-width buttons; a horizontal one with [wrap] flows onto further lines
+ * instead of running out of room. Labels follow the "Icons only" setting in every shape ([showLabels] overrides it, for a tile too
+ * narrow for them); a label shortens with an ellipsis when the column is narrow. [popupsBeside] opens the Layout menu beside its button
+ * rather than below it (the default for a vertical toolbar). Every click hands keyboard focus back through [onReclaimFocus] (a clicked
+ * button otherwise keeps it, CLAUDE.md). [onRecentAnchor] is told where the Recent files arrow sits (root coordinates, dp) so the menu
+ * can open next to it. It draws no bar of its own: see [ChromeScaffold] / [TabBar].
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun MainToolbar(
     state: AppState,
     orientation: ChromeOrientation,
     onReclaimFocus: () -> Unit = {},
     modifier: Modifier = Modifier,
-    labelsFit: Boolean = true,
     onRecentAnchor: (TileRect) -> Unit = {},
+    wrap: Boolean = false,
+    popupsBeside: Boolean = orientation == ChromeOrientation.VERTICAL,
+    showLabels: Boolean? = null,
 ) {
-    val vertical = orientation == ChromeOrientation.VERTICAL
+    val mode = when {
+        orientation == ChromeOrientation.VERTICAL -> ToolbarMode.COLUMN
+        wrap -> ToolbarMode.FLOW
+        else -> ToolbarMode.BAR
+    }
+    val labels = showLabels ?: !state.settings.toolbarIconOnlyButtons
     val tagged = modifier.testTag("main-toolbar")
-    if (vertical) {
-        Column(tagged.verticalScroll(rememberScrollState())) { ToolbarButtons(state, true, labelsFit, onReclaimFocus, onRecentAnchor) }
-    } else {
-        Row(tagged, verticalAlignment = Alignment.CenterVertically) { ToolbarButtons(state, false, labelsFit, onReclaimFocus, onRecentAnchor) }
+    when (mode) {
+        ToolbarMode.COLUMN -> Column(tagged.verticalScroll(rememberScrollState())) {
+            ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor)
+        }
+        ToolbarMode.FLOW -> FlowRow(
+            tagged.verticalScroll(rememberScrollState()).padding(WRAP_PADDING),
+            horizontalArrangement = Arrangement.spacedBy(WRAP_GAP),
+            verticalArrangement = Arrangement.spacedBy(WRAP_GAP),
+        ) { ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor) }
+        ToolbarMode.BAR -> Row(tagged, verticalAlignment = Alignment.CenterVertically) {
+            ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor)
+        }
     }
 }
 
 @Composable
 private fun ToolbarButtons(
     state: AppState,
-    vertical: Boolean,
-    labelsFit: Boolean,
+    mode: ToolbarMode,
+    labels: Boolean,
+    popupsBeside: Boolean,
     onReclaimFocus: () -> Unit,
     onRecentAnchor: (TileRect) -> Unit,
 ) {
+    val vertical = mode == ToolbarMode.COLUMN
+    val flow = mode == ToolbarMode.FLOW
     val shapes = ToolbarShapes(vertical)
     val hasRecentFiles = state.recentFiles.isNotEmpty()
-    val showToolbarText = !state.settings.toolbarIconOnlyButtons && (!vertical || labelsFit)
     val homeActive = state.activeTab()?.isCaptureLauncher == true
     val density = LocalDensity.current.density
-    // A horizontal button is as tall as the bar, a vertical one as wide as it.
-    val fill = if (vertical) Modifier.fillMaxWidth().height(VERTICAL_BUTTON_HEIGHT) else Modifier.fillMaxHeight()
-    val gap: @Composable () -> Unit = { Spacer(if (vertical) Modifier.height(TOOLBAR_GAP) else Modifier.width(TOOLBAR_GAP)) }
+    // A bar button is as tall as the bar, a column button as wide as it, a flowing button a fixed height.
+    val fill = when (mode) {
+        ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_BUTTON_HEIGHT)
+        ToolbarMode.FLOW -> Modifier.height(WRAP_BUTTON_HEIGHT)
+        ToolbarMode.BAR -> Modifier.fillMaxHeight()
+    }
+    // Where the joined corners go: a flowing button stands alone.
+    val lead = if (flow) shapes.solo else shapes.lead
+    val middle = if (flow) shapes.solo else shapes.middle
+    val pad = if (flow) WRAP_BUTTON_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp)
+    val gap: @Composable () -> Unit = {
+        if (!flow) Spacer(if (vertical) Modifier.height(TOOLBAR_GAP) else Modifier.width(TOOLBAR_GAP))
+    }
     gap()
     ToolbarBtn(
         "",
@@ -97,34 +140,41 @@ private fun ToolbarButtons(
         active = homeActive,
         modifier = fill,
         shape = shapes.solo,
+        contentPadding = pad,
     ) { state.openHomeTab(); onReclaimFocus() }
     gap()
     ToolbarBtn(
         "Filter",
         icon = Icons.Outlined.FilterList,
-        showLabel = showToolbarText,
+        showLabel = labels,
         tooltip = "Toggle filter panel",
         active = state.filterVisible,
         modifier = fill,
-        shape = shapes.lead,
+        shape = lead,
+        contentPadding = pad,
+        ellipsize = vertical,
     ) { state.updateFilterVisible(!state.filterVisible); onReclaimFocus() }
     ToolbarBtn(
         "Notes",
         icon = Icons.AutoMirrored.Outlined.StickyNote2,
-        showLabel = showToolbarText,
+        showLabel = labels,
         tooltip = "Toggle notes panel",
         active = state.annotationVisible,
         modifier = fill,
-        shape = shapes.middle,
+        shape = middle,
+        contentPadding = pad,
+        ellipsize = vertical,
     ) { state.updateAnnotationVisible(!state.annotationVisible); onReclaimFocus() }
     ToolbarBtn(
         "AI",
         icon = Icons.Outlined.AutoAwesome,
-        showLabel = showToolbarText,
+        showLabel = labels,
         tooltip = "Toggle AI panel",
         active = state.aiPanelVisible,
         modifier = fill,
-        shape = shapes.middle,
+        shape = middle,
+        contentPadding = pad,
+        ellipsize = vertical,
     ) { state.updateAiPanelVisible(!state.aiPanelVisible); onReclaimFocus() }
     // Capture sessions expose a status card before a video attachment exists; the same global
     // toggle must therefore remain reachable for live tabs as well as imported captures.
@@ -135,63 +185,111 @@ private fun ToolbarButtons(
         ToolbarBtn(
             "Video",
             icon = Icons.Outlined.Movie,
-            showLabel = showToolbarText,
+            showLabel = labels,
             tooltip = "Toggle video in sidebar",
             active = state.videoPanelVisible,
             modifier = fill,
-            shape = shapes.middle,
+            shape = middle,
+            contentPadding = pad,
+            ellipsize = vertical,
         ) { state.updateVideoPanelVisible(!state.videoPanelVisible); onReclaimFocus() }
     }
     ToolbarBtn(
         "Compare",
         icon = Icons.AutoMirrored.Outlined.CompareArrows,
-        showLabel = showToolbarText,
+        showLabel = labels,
         tooltip = "Toggle compare view",
         active = state.compareMode,
         enabled = state.canCompare,
         modifier = fill,
-        shape = shapes.middle,
+        shape = middle,
+        contentPadding = pad,
+        ellipsize = vertical,
     ) { state.updateCompareMode(!state.compareMode); onReclaimFocus() }
     ToolbarBtn(
         "Cases",
         icon = Icons.AutoMirrored.Outlined.ManageSearch,
-        showLabel = showToolbarText,
+        showLabel = labels,
         tooltip = "Search past analyses",
         enabled = state.tabs.isNotEmpty(),
         modifier = fill,
-        shape = shapes.middle,
+        shape = middle,
+        contentPadding = pad,
+        ellipsize = vertical,
     ) { state.activeTab()?.id?.let(state::openCaseLibrary); onReclaimFocus() }
-    ToolbarBtn(
-        "Open",
-        icon = Icons.Outlined.FolderOpen,
-        showLabel = showToolbarText,
-        tooltip = "Open log file",
-        modifier = fill,
-        shape = if (hasRecentFiles) shapes.middle else shapes.tail,
-    ) { pickLogFileAndOpen(state, "Open Log File"); onReclaimFocus() }
-    if (hasRecentFiles) {
-        ToolbarBtn(
-            "▾",
-            active = state.recentMenuOpen,
-            tooltip = "Recent files",
-            modifier = (if (vertical) Modifier.fillMaxWidth().height(VERTICAL_RECENT_HEIGHT) else Modifier.fillMaxHeight().width(18.dp))
-                .onGloballyPositioned { c ->
-                    val p = c.positionInRoot()
-                    onRecentAnchor(TileRect(p.x / density, p.y / density, c.size.width / density, c.size.height / density))
-                },
-            shape = shapes.tail,
-            contentPadding = PaddingValues(horizontal = 0.dp, vertical = if (vertical) 0.dp else 5.dp),
-        ) { state.toggleRecentFilesMenu(); onReclaimFocus() }
-    }
+    OpenButtons(state, mode, labels, fill, pad, hasRecentFiles, onReclaimFocus, onRecentAnchor, density)
     gap()
     // The log view's Layout menu (single log view and compare; draws nothing elsewhere), just before Settings.
-    LayoutMenuButton(state, onReclaimFocus, vertical = vertical)
+    LayoutMenuButton(state, onReclaimFocus, vertical = vertical, wrap = flow, menuBeside = popupsBeside)
     gap()
     ToolbarBtn(
         "⚙",
         tooltip = "Settings",
-        modifier = if (vertical) Modifier.fillMaxWidth().height(VERTICAL_SETTINGS_HEIGHT) else Modifier.fillMaxHeight().width(36.dp),
+        modifier = when (mode) {
+            ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_SETTINGS_HEIGHT)
+            ToolbarMode.FLOW -> Modifier.width(36.dp).height(WRAP_BUTTON_HEIGHT)
+            ToolbarMode.BAR -> Modifier.fillMaxHeight().width(36.dp)
+        },
         shape = shapes.solo,
     ) { state.settingsOpen = true; onReclaimFocus() }
     gap()
+}
+
+// Open and, once there are recent files, its arrow. In a flowing toolbar the two stay together on one line.
+@Composable
+private fun OpenButtons(
+    state: AppState,
+    mode: ToolbarMode,
+    labels: Boolean,
+    fill: Modifier,
+    pad: PaddingValues,
+    hasRecentFiles: Boolean,
+    onReclaimFocus: () -> Unit,
+    onRecentAnchor: (TileRect) -> Unit,
+    density: Float,
+) {
+    val vertical = mode == ToolbarMode.COLUMN
+    val flow = mode == ToolbarMode.FLOW
+    val shapes = ToolbarShapes(vertical)
+    // In the flowing row the pair is a group of its own: Open takes the lead corners, the arrow the tail.
+    val pairShapes = ToolbarShapes(false)
+    val open: @Composable () -> Unit = {
+        ToolbarBtn(
+            "Open",
+            icon = Icons.Outlined.FolderOpen,
+            showLabel = labels,
+            tooltip = "Open log file",
+            modifier = fill,
+            shape = when {
+                flow -> if (hasRecentFiles) pairShapes.lead else pairShapes.solo
+                hasRecentFiles -> shapes.middle
+                else -> shapes.tail
+            },
+            contentPadding = pad,
+            ellipsize = vertical,
+        ) { pickLogFileAndOpen(state, "Open Log File"); onReclaimFocus() }
+    }
+    val recent: @Composable () -> Unit = {
+        ToolbarBtn(
+            "▾",
+            active = state.recentMenuOpen,
+            tooltip = "Recent files",
+            modifier = when (mode) {
+                ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_RECENT_HEIGHT)
+                ToolbarMode.FLOW -> Modifier.width(18.dp).height(WRAP_BUTTON_HEIGHT)
+                ToolbarMode.BAR -> Modifier.fillMaxHeight().width(18.dp)
+            }.onGloballyPositioned { c ->
+                val p = c.positionInRoot()
+                onRecentAnchor(TileRect(p.x / density, p.y / density, c.size.width / density, c.size.height / density))
+            },
+            shape = if (flow) pairShapes.tail else shapes.tail,
+            contentPadding = PaddingValues(horizontal = 0.dp, vertical = if (vertical) 0.dp else 5.dp),
+        ) { state.toggleRecentFilesMenu(); onReclaimFocus() }
+    }
+    if (flow && hasRecentFiles) {
+        Row { open(); recent() }
+    } else {
+        open()
+        if (hasRecentFiles) recent()
+    }
 }

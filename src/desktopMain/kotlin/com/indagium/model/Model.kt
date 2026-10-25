@@ -1608,6 +1608,13 @@ data class AppSettings(
     val tabStripPosition: TabStripPosition = TabStripPosition.TOP,
     val toolbarPlacement: ToolbarPlacement = ToolbarPlacement.WITH_TABS_END,
     val toolbarEdge: ChromeEdge = ChromeEdge.TOP,
+    // The second chrome step (JSON-only too, appended last): whether the toolbar's own bar is the OUTER one (window side) when it shares an
+    // edge with the tab bar, where the buttons sit along an own bar, the vertical tab bar's width in dp, and the placement the toolbar
+    // falls back to on a surface that has no log-view tiles while it is IN_LAYOUT.
+    val toolbarOuter: Boolean = false,
+    val toolbarAlign: ToolbarAlign = ToolbarAlign.START,
+    val verticalTabBarWidthDp: Float = DEFAULT_VERTICAL_TAB_BAR_DP,
+    val toolbarFallbackPlacement: ToolbarPlacement = ToolbarPlacement.WITH_TABS_END,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1676,6 +1683,9 @@ enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val sc
     DIAGRAMS("diagrams", LogViewTileGroup.NOTES, LogViewScope.BOTH),
     AI("ai", LogViewTileGroup.AI, LogViewScope.BOTH),
     VIDEO("video", LogViewTileGroup.VIDEO, LogViewScope.BOTH),
+
+    /** The main toolbar as a slim tile; present in a stored layout only while ToolbarPlacement.IN_LAYOUT, and never hideable. */
+    TOOLBAR("toolbar", LogViewTileGroup.NONE, LogViewScope.SINGLE),
     ;
 
     companion object {
@@ -1705,8 +1715,20 @@ enum class TabLabelMode { FILE_SESSION, SESSION_ONLY, FILE_ONLY }
 /** Which window edge the tab strip sits on. */
 enum class TabStripPosition { TOP, LEFT, RIGHT, BOTTOM }
 
-/** Where the main toolbar sits relative to the tab strip: at the strip's start or end, as its own bar beside it, or docked to its own window edge. */
-enum class ToolbarPlacement { WITH_TABS_START, WITH_TABS_END, BESIDE_TABS, OWN_EDGE }
+/**
+ * Where the main toolbar sits relative to the tab strip: at the strip's start or end, as its own bar beside it (legacy: the same edge as a
+ * vertical strip, on its content side), docked to its own window edge, or as a tile of the log view's layout ([IN_LAYOUT]; surfaces
+ * without those tiles show it as a bar at the fallback placement). Stored by name, so new values only ever go last.
+ */
+enum class ToolbarPlacement { WITH_TABS_START, WITH_TABS_END, BESIDE_TABS, OWN_EDGE, IN_LAYOUT }
+
+/** Where the toolbar's buttons sit along a bar of its own: at its start (left / top), centred, or at its end (right / bottom). */
+enum class ToolbarAlign { START, CENTER, END }
+
+/** The vertical tab bar's default width (dp) and the range its splitter keeps it in. */
+const val DEFAULT_VERTICAL_TAB_BAR_DP: Float = 200f
+const val MIN_VERTICAL_TAB_BAR_DP: Float = 140f
+const val MAX_VERTICAL_TAB_BAR_DP: Float = 480f
 
 /** A window edge the main toolbar can be docked to. */
 enum class ChromeEdge { TOP, LEFT, RIGHT, BOTTOM }

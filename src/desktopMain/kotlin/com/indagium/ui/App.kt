@@ -2401,9 +2401,9 @@ fun App(
                 ) {
                     val menuWidth = 320.dp
                     // Beside the Recent button wherever the toolbar is docked; under a top toolbar it is where it always was.
-                    val arrangement = chromeArrangement(state.settings)
+                    val arrangement = chromeArrangement(state.settings, state.toolbarHostedInLayout())
                     val place = recentMenuPlacement(
-                        arrangement.toolbarBarEdge ?: arrangement.tabEdge, chromeAnchors.recentButton, maxWidth.value, maxHeight.value,
+                        recentMenuEdge(arrangement, chromeAnchors.recentButton, maxWidth.value), chromeAnchors.recentButton, maxWidth.value, maxHeight.value,
                     )
                     Box(
                         Modifier
