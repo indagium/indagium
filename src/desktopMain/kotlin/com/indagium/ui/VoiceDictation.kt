@@ -588,10 +588,13 @@ internal fun DictationMic(
     modifier: Modifier = Modifier,
     size: Dp = INLINE_MIC_SIZE,
     standalone: Boolean = false,
+    // A rounded square with the toolbar buttons' 0.5 dp border (AppButton, Secondary) instead of the bare circle: for a mic that sits in a row of buttons.
+    outlined: Boolean = false,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val phase = control.phase
+    val shape: Shape = if (outlined) CORNER_MD else CircleShape
     val tint = when {
         phase == DictationPhase.Recording || phase == DictationPhase.Failed -> DANGER_RED
         phase == DictationPhase.CheckingModel -> tc.td.copy(alpha = .4f)
@@ -614,7 +617,9 @@ internal fun DictationMic(
             },
         ) {
             Box(
-                Modifier.size(size).clip(CircleShape).background(background, CircleShape)
+                Modifier.size(size)
+                    .then(if (outlined) Modifier.border(0.5.dp, if (phase == DictationPhase.Recording) DANGER_RED.copy(.5f) else tc.br, shape) else Modifier)
+                    .clip(shape).background(background, shape)
                     .semantics {
                         contentDescription = control.semanticDescription()
                         if (control.failure != null) stateDescription = control.failure

@@ -66,6 +66,7 @@ import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -76,7 +77,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -212,7 +212,6 @@ internal fun AiSidebarPanel(
     val scroll = rememberScrollState()
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
-    var promptEditorHeight by remember { mutableStateOf(60.dp) }
     var modelDraft by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
     var reasoningEffortDraft by remember(profile.id, profile.reasoningEffort) { mutableStateOf(profile.reasoningEffort) }
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
@@ -300,12 +299,13 @@ internal fun AiSidebarPanel(
             },
     ) {
         // The conversation is the tile's flex part (TileFlexRegion.kt); the prompt composer under it stays at its own height.
-        FlexRegion(scroll, capDp = null, fill = Modifier.weight(1f).fillMaxWidth()) {
+        FlexRegion(scroll, Modifier.testTag("ai-conversation"), capDp = null, fill = Modifier.weight(1f).fillMaxWidth()) {
             SelectionContainer {
                 Column(
+                    // Side padding like the tile header's (8 dp) and room at the right for the thin scrollbar and its gap.
                     Modifier.fillMaxWidth().verticalScroll(scroll)
-                        .padding(start = 10.dp, top = 8.dp, end = 18.dp, bottom = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                        .padding(start = TILE_TOOLBAR_PADDING_DP.dp, top = 8.dp, end = TILE_TOOLBAR_PADDING_DP.dp + TILE_SCROLL_GUTTER_DP.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
                 ) {
                     // Actions and Provider share one row as an accordion (opening one closes the
                     // other) rather than two independently-collapsible sections stacked on top of
@@ -313,7 +313,7 @@ internal fun AiSidebarPanel(
                     // regardless of what either section's content contains. The expanded section is
                     // tracked on AppState, not a local `remember`, so it survives the AI panel being
                     // toggled off and back on (see aiSidebarExpandedSection).
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
                         AiSectionTab(
                             "Commands",
                             expanded = state.aiSidebarExpandedSection == AiSidebarSection.ACTIONS,
@@ -463,13 +463,11 @@ internal fun AiSidebarPanel(
                 ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp))
             }
         }
-        VDivider { delta ->
-            promptEditorHeight = (promptEditorHeight - delta.dp).coerceIn(60.dp, 260.dp)
-        }
+        // No splitter between the conversation and the composer: the composer is the tile's fixed part at its own height, the conversation
+        // above it is the flex region (the tile itself is resized from its own handle).
         AiPromptComposer(
             tabId = tab.id,
             prompt = prompt,
-            editorHeight = promptEditorHeight,
             running = session.activeRun,
             retryAvailable = session.activeRun == null && session.lastPrompt != null,
             customCommands = state.customAiCommands,
@@ -1432,7 +1430,6 @@ private fun AiConfirmationCard(
 private fun AiPromptComposer(
     tabId: String,
     prompt: String,
-    editorHeight: Dp,
     running: AiRun?,
     retryAvailable: Boolean,
     customCommands: List<CustomAiCommand>,
@@ -1542,9 +1539,11 @@ private fun AiPromptComposer(
         return accepted
     }
 
+    // On the card, like the Notes tile's button bar and the log toolbar (TileToolbarStyle.kt): no band, no border of its own; the field,
+    // the mic and the hint row use the toolbar controls' border, radius and TILE_HEADER_GAP_DP.
     Column(
-        Modifier.fillMaxWidth().background(colors.p2).border(BorderStroke(1.dp, colors.br)).padding(8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        Modifier.fillMaxWidth().testTag("ai-composer").padding(horizontal = TILE_TOOLBAR_PADDING_DP.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
     ) {
         if (selectedCommand != null || contextLineIds.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1562,7 +1561,7 @@ private fun AiPromptComposer(
             }
         }
         Box(
-            Modifier.fillMaxWidth().height(editorHeight)
+            Modifier.fillMaxWidth().height(COMPOSER_EDITOR_HEIGHT_DP.dp).testTag("ai-prompt-field")
                 .onGloballyPositioned { fieldWidthPx = it.size.width }
                 .onSizeChanged { promptViewportHeightPx = it.height },
         ) {
@@ -1576,7 +1575,7 @@ private fun AiPromptComposer(
                 cursorBrush = SolidColor(colors.ac),
                 onTextLayout = { promptLayout = it },
                 modifier = Modifier.fillMaxSize()
-                    .background(colors.bg, CORNER_SM).border(1.dp, colors.br, CORNER_SM)
+                    .background(colors.bg, CORNER_MD).border(0.5.dp, colors.br, CORNER_MD)
                     .padding(start = 7.dp, top = 7.dp, end = 28.dp, bottom = 7.dp)
                     .verticalScroll(promptScroll)
                     // Runs before BasicTextField's own key handling (arrow-key cursor movement,
@@ -1676,7 +1675,7 @@ private fun AiPromptComposer(
                 }
             }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp), verticalAlignment = Alignment.CenterVertically) {
             if (running == null) {
                 AppButton(
                     "Send",
@@ -1684,18 +1683,23 @@ private fun AiPromptComposer(
                     variant = ButtonVariant.Primary,
                     enabled = prompt.isNotBlank() || selectedCommand != null,
                 )
-                if (dictation != null) DictationMic(dictation, size = COMPOSER_MIC_SIZE, standalone = true)
+                if (dictation != null) DictationMic(dictation, size = COMPOSER_MIC_SIZE, standalone = true, outlined = true)
                 if (retryAvailable) AppButton("Retry", onClick = onRetry, variant = ButtonVariant.Secondary)
                 ComposerHint(voiceSupported, voiceState, dictation)
             } else {
                 AppButton("Stop", onClick = onStop, variant = ButtonVariant.Secondary, isDanger = true)
-                AppText("Esc to stop", color = colors.td, fontSize = 10.sp)
+                AppText("Esc to stop", color = colors.td, fontSize = COMPOSER_HINT_SP.sp)
             }
         }
     }
 }
 
+/** The composer's text field is this tall (dp) in every tile: the conversation above it takes whatever the tile gives. */
+private const val COMPOSER_EDITOR_HEIGHT_DP = 60
+
+// As tall as the buttons beside it (an AppButton is 24 dp: 12 sp text + 5 dp padding above and below).
 private val COMPOSER_MIC_SIZE = 24.dp
+private const val COMPOSER_HINT_SP = 11
 
 /** The line beside the composer's buttons: the send shortcut, or the live dictation status with its elapsed time. */
 @Composable
@@ -1711,7 +1715,7 @@ private fun RowScope.ComposerHint(voiceSupported: Boolean, voiceState: VoiceInpu
     AppText(
         hint,
         color = if (voiceSupported && voiceState is VoiceInputState.Failed) DANGER_RED else colors.td,
-        fontSize = 10.sp,
+        fontSize = COMPOSER_HINT_SP.sp,
         overflow = TextOverflow.Ellipsis,
         modifier = Modifier.weight(1f, fill = false),
     )

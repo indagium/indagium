@@ -9,11 +9,17 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -31,6 +37,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.width
 import com.indagium.debug.AppLogger
+import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.ChromeEdge
 import com.indagium.model.FilterMode
 import com.indagium.model.Highlighter
@@ -846,5 +853,87 @@ class LogViewTilingUiTest {
         assertTrue(heightOf("tile-card-log_level") < 120f, "Log level is ${heightOf("tile-card-log_level")} dp, not 1900")
         assertEquals(500f, heightOf("tile-card-tags"), 0.8f)
         assertEquals(stored, state.settings.logViewLayout, "reading an old size does not rewrite it")
+    }
+
+    // ---- the Notes bar and the AI composer in the log toolbar's style --------------------------------------------------------------------------
+
+    private fun pixelAt(tag: String, xDp: Float, yDp: Float): Int {
+        val image = rule.onNodeWithTag(tag).captureToImage().toPixelMap()
+        val d = rule.density.density
+        return image[(xDp * d).toInt(), (yDp * d).toInt()].toArgb()
+    }
+
+    // A button of the Notes bar by its label ("Preview" alone also names a highlighter sample elsewhere in the window).
+    private fun notesBarButton(label: String) = rule.onAllNodes(hasText(label) and hasAnyAncestor(hasTestTag("notes-toolbar")))[0]
+
+    @Test
+    fun theNotesButtonBarUsesTheLogToolbarsButtonsOnTheCardBackgroundWithNoBand() {
+        setup(width = 1300, height = 800)
+        val bar = bounds("notes-toolbar")
+        val save = notesBarButton("Save").getBoundsInRoot()
+        val new = notesBarButton("New").getBoundsInRoot()
+        val export = bounds(logToolbarTag(LogToolbarItem.EXPORT.id))
+        // The same AppButton at its natural height as the log toolbar's Export, not a taller button of the bar's own.
+        assertEquals(export.height.value, save.height.value, 0.6f, "Notes buttons are as tall as the log toolbar's")
+        // The same gap between buttons as the toolbar and the tile header (Copy's ▾ and Open's ▾ halves are joined, so use two plain buttons).
+        assertEquals(TILE_HEADER_GAP_DP, new.left.value - save.right.value, 0.6f)
+        // The tile header's side padding, and the toolbar's height.
+        // (Preview is disabled with no notes, so its node is the label inside the button: 10 dp of AppButton padding further in.)
+        val preview = notesBarButton("Preview").getBoundsInRoot()
+        assertEquals(TILE_TOOLBAR_PADDING_DP + 10f, preview.left.value - bar.left.value, 0.6f)
+        assertEquals(TILE_TOOLBAR_HEIGHT_DP, bar.height.value, 0.6f)
+        // No tinted band: the bar is the card's own colour (it used to be the panel's second background, with a border all round).
+        val card = LIGHT_THEME.p.toArgb()
+        assertEquals(card, pixelAt("notes-toolbar", bar.width.value - 20f, 6f))
+        assertEquals(card, pixelAt("notes-toolbar", bar.width.value - 20f, bar.height.value / 2f))
+        assertTrue(LIGHT_THEME.p2.toArgb() != card, "the band colour is not the card colour, so the check means something")
+    }
+
+    @Test
+    fun theNotesBarKeepsItsActionsAndTheCopyDropdown() {
+        setup(width = 1300, height = 800)
+        listOf("Preview", "Copy", "Save", "New", "Open").forEach { notesBarButton(it).assertExists() }
+        notesBarButton("▾").assertExists()
+        notesBarButton("▾").performClick()
+        rule.waitForIdle()
+        AnnotationCopyFormat.entries.forEach { rule.onNodeWithText(it.label).assertExists() }
+    }
+
+    @Test
+    fun theAiTileHasNoSplitterInsideItAndTheComposerSitsAtTheBottomOfTheTile() {
+        setup(width = 1300, height = 900) { it.aiPanelVisible = true }
+        val card = bounds("tile-card-ai")
+        val conversation = bounds("ai-conversation")
+        val composer = bounds("ai-composer")
+        // Nothing between the conversation and the composer: no divider bar, no handle.
+        assertEquals(conversation.bottom.value, composer.top.value, 0.6f, "the composer starts where the conversation ends")
+        assertTrue(card.bottom.value - composer.bottom.value < 12f, "the composer is at the bottom of the tile: $composer in $card")
+        val field = bounds("ai-prompt-field").height.value
+        assertEquals(60f, field, 0.6f)
+        // A drag across the old divider's place does nothing to the composer (it used to resize the text field).
+        val d = rule.density.density
+        val y = (composer.top.value - card.top.value) * d
+        rule.onNodeWithTag("tile-card-ai").performTouchInput {
+            down(Offset(center.x, y - 2f * d))
+            moveBy(Offset(0f, -40f * d))
+            moveBy(Offset(0f, -40f * d))
+            up()
+        }
+        rule.waitForIdle()
+        assertEquals(field, bounds("ai-prompt-field").height.value, 0.6f)
+        assertEquals(composer.top.value, bounds("ai-composer").top.value, 0.6f)
+        // The composer is on the card: no band colour behind its buttons' row.
+        assertEquals(LIGHT_THEME.p.toArgb(), pixelAt("ai-composer", 4f, bounds("ai-composer").height.value - 4f))
+    }
+
+    @Test
+    fun theComposerStaysAtTheBottomWhenTheAiTileIsMadeTaller() {
+        setup(width = 1300, height = 900) { it.aiPanelVisible = true }
+        growBy("ai", 150f)
+        val card = bounds("tile-card-ai")
+        val composer = bounds("ai-composer")
+        assertTrue(card.bottom.value - composer.bottom.value < 12f, "the composer is still at the bottom: $composer in $card")
+        assertEquals(bounds("ai-conversation").bottom.value, composer.top.value, 0.6f)
+        assertEquals(60f, bounds("ai-prompt-field").height.value, 0.6f, "the field kept its fixed height")
     }
 }
