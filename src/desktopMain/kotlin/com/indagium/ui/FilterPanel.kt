@@ -1649,28 +1649,28 @@ internal fun FilterPanel(
                         bodyModifier = inputFor(LogViewSectionId.MESSAGE_RULES),
                     ),
                 ) {
-                    if (msgInc.isNotEmpty() && fpState.incMsgPillsExpanded) {
-                        FlexScrollBox(minOf(msgInc.size, filterListRows) * 28, Modifier.testTag("filter-message-rules-list")) {
-                            FlowRow(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                msgInc.forEach { rule ->
-                                    TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) }
+                    // The rule chips are the section's one flex part: included and excluded rules share one list (a tile has one scrolling list).
+                    val shownInc = msgInc.takeIf { fpState.incMsgPillsExpanded }.orEmpty()
+                    val shownExc = msgExc.takeIf { fpState.excMsgPillsExpanded }.orEmpty()
+                    if (shownInc.isNotEmpty() || shownExc.isNotEmpty()) {
+                        val rows = minOf(shownInc.size, filterListRows) + minOf(shownExc.size, filterListRows)
+                        FlexScrollBox(rows * 28, Modifier.testTag("filter-message-rules-list")) {
+                            if (shownInc.isNotEmpty()) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    shownInc.forEach { rule -> TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) } }
                                 }
                             }
-                        }
-                    }
-                    if (msgExc.isNotEmpty() && fpState.excMsgPillsExpanded) {
-                        FlexScrollBox(minOf(msgExc.size, filterListRows) * 28, Modifier.testTag("filter-message-rules-list")) {
-                            FlowRow(
-                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                msgExc.forEach { rule ->
-                                    TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) }
+                            if (shownExc.isNotEmpty()) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    shownExc.forEach { rule -> TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) } }
                                 }
                             }
                         }
@@ -2840,7 +2840,7 @@ private fun SavedFilterLibrary(
         )
 
         // The folder tree is the section's flex part; the search field above it stays.
-        FlexScrollBox(SAVED_FILTER_TREE_CAP_DP, Modifier.testTag("filter-saved-filters-tree")) {
+        SavedFilterTree(Modifier.testTag("filter-saved-filters-tree")) {
             if (query.isNotEmpty()) {
                 SavedFilterGroupHeader(
                     title = "Search results",
@@ -2857,7 +2857,7 @@ private fun SavedFilterLibrary(
                         maxLines = 2,
                     )
                 } else {
-                    ScrollableItems(
+                    NestedScrollableItems(
                         itemCount = searchResults.size,
                         rowDp = 30,
                         maxDp = filterListRows.coerceAtLeast(1) * 30,
@@ -2879,7 +2879,7 @@ private fun SavedFilterLibrary(
                         }
                     }
                 }
-                return@FlexScrollBox
+                return@SavedFilterTree
             }
 
             val favorites = savedFilters.filter { it.favorite }
@@ -2892,7 +2892,7 @@ private fun SavedFilterLibrary(
                     onToggle = onToggleFavorites,
                 )
                 if (favoritesExpanded) {
-                    ScrollableItems(
+                    NestedScrollableItems(
                         itemCount = favorites.size,
                         rowDp = 30,
                         maxDp = filterListRows.coerceAtLeast(1) * 30,
@@ -3080,7 +3080,7 @@ private fun SavedFilterCanonicalList(
     }
     val currentVisualIds = rememberUpdatedState(visualIds)
     val currentDragId = rememberUpdatedState(dragId)
-    ScrollableItems(
+    NestedScrollableItems(
         itemCount = filters.size,
         rowDp = 30,
         maxDp = maxRows.coerceAtLeast(1) * 30,
@@ -3486,9 +3486,6 @@ internal fun issuesBoxHeightDp(groups: List<IssueSiteGroup>, expandedIds: Set<St
 // content-autosave debounce rather than the 150ms in-view-search one: a scan over the visible set
 // is the expensive end of the debounce inventory (SAAD 12.5), not a keystroke-latency path.
 private const val LOG_COMPOSITION_REFRESH_DEBOUNCE_MS = 400L
-
-// The saved-filter tree's share of its tile's default height (main grew with the folders; each folder's own list is still capped by filterListRows).
-private const val SAVED_FILTER_TREE_CAP_DP = 240
 
 // Rows per page in the Log composition list (Stage 2c paging). Each row is a rich card — masked
 // template + sample line + action row, ~103dp (LOG_COMPOSITION_ROW_DP below) — unlike the compact

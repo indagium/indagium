@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.LocalTextSelectionColors
@@ -1677,7 +1676,6 @@ internal fun LogViewer(
                     selfScrolling = false
                 }
             }
-            val scrollbarStyle = appScrollbarStyle(tc)
             val density = LocalDensity.current
             // Must cover EVERYTHING drawn in the CenterEnd column beside the log rows — the
             // Minimap strip AND VerticalScrollbar now render side by side there when
@@ -2110,19 +2108,11 @@ internal fun LogViewer(
                                     onHideMinimap = onToggleMinimap,
                                 )
                             }
-                            VerticalScrollbar(
-                                adapter = rememberScrollbarAdapter(lazyState),
-                                modifier = Modifier.fillMaxHeight(),
-                                style = scrollbarStyle,
-                            )
+                            ThinVerticalScrollbar(lazyState, Modifier.fillMaxHeight())
                         }
                     }
                     if (!settings.autoLogRowWrap) {
-                        HorizontalScrollbar(
-                            adapter = rememberScrollbarAdapter(hScroll),
-                            modifier = Modifier.fillMaxWidth().padding(end = 8.dp),
-                            style = scrollbarStyle,
-                        )
+                        ThinHorizontalScrollbar(hScroll, Modifier.fillMaxWidth().padding(end = 8.dp))
                     }
                     Box(Modifier.fillMaxWidth().height(3.dp)) {
                         if (itemsLoading) IndeterminateLoadingLine(Modifier.fillMaxWidth())

@@ -485,22 +485,71 @@ class TileScrollColumnTest {
     fun aTileSizingComesFromWhatTheBodyMeasured() {
         // A flex body: 33 dp of header, 50 dp that always shows and a 600 dp list capped at 240 by default.
         val flex = TileBodyMeasure(TileBodySizing.FLEX, chromeDp = 33f, fixedDp = 50f, flexNaturalDp = 600f, flexCapDp = 240f)
-        assertEquals(TileSizing(33f + 50f + 40f, 33f + 50f + 600f, 33f + 50f + 240f), flex.toSizing(2000f))
-        // A short list is shown whole: nothing to drag, and the default is the same.
+        // Resizable up to the surface's maximum (not just to the list's height); the unstored height and the leftover-space stretch stay content based.
+        assertEquals(TileSizing(33f + 50f + 40f, 2000f, 33f + 50f + 240f, fitDp = 33f + 50f + 600f), flex.toSizing(2000f))
+        // A short list is shown whole by default (the same height as before) but the tile can be made taller than it: the extra is empty list area.
         val short = flex.copy(flexNaturalDp = 20f).toSizing(2000f)!!
         assertEquals(33f + 50f + 20f, short.minDp, EPS)
-        assertEquals(short.minDp, short.maxDp, EPS)
+        assertEquals(2000f, short.maxDp, EPS)
         assertEquals(short.minDp, short.defaultDp!!, EPS)
-        assertFalse(short.resizable)
-        // An empty list leaves the header and the fixed part.
-        assertEquals(83f, flex.copy(flexNaturalDp = 0f).toSizing(2000f)!!.maxDp, EPS)
-        // No cap: the tile shares the column by weight. Never taller than the surface allows.
+        assertEquals(short.minDp, short.fitDp, EPS)
+        assertTrue(short.resizable)
+        // An empty list leaves the header and the fixed part by default and still resizes.
+        val empty = flex.copy(flexNaturalDp = 0f).toSizing(2000f)!!
+        assertEquals(83f, empty.minDp, EPS)
+        assertEquals(83f, empty.defaultDp!!, EPS)
+        assertEquals(83f, empty.fitDp, EPS)
+        assertEquals(2000f, empty.maxDp, EPS)
+        assertTrue(empty.resizable)
+        // No cap: the tile shares the column by weight, within [min, fit]. It may be resized to the surface's maximum.
         val fill = flex.copy(flexCapDp = null, flexNaturalDp = 5000f).toSizing(2000f)!!
         assertNull(fill.defaultDp)
         assertEquals(2000f, fill.maxDp, EPS)
+        assertEquals(2000f, fill.fitDp, EPS)
+        val emptyFill = flex.copy(flexCapDp = null, flexNaturalDp = 0f).toSizing(2000f)!!
+        assertNull(emptyFill.defaultDp)
+        assertEquals(83f, emptyFill.fitDp, EPS)
+        assertEquals(2000f, emptyFill.maxDp, EPS)
         // Content: header + body, no more, no less. Fill (not measured): unknown.
         val content = TileBodyMeasure(TileBodySizing.CONTENT, chromeDp = 33f, fixedDp = 47f).toSizing(2000f)!!
         assertEquals(TileSizing(80f, 80f, 80f), content)
+        assertFalse(content.resizable)
         assertNull(TileBodyMeasure(TileBodySizing.FILL, 33f).toSizing(2000f))
+    }
+
+    // ---- flex tiles resize regardless of their content ----------------------------------------------------------------------------------------
+
+    // A flex tile whose list holds nothing today: 80 dp by default (header + fixed part), resizable up to the surface's maximum.
+    private val emptyFlex = TileSizing(80f, 2000f, 80f, fitDp = 80f)
+
+    @Test
+    fun aFlexTileWithAnEmptyListResizesTallerThanItsContentAndKeepsItsDefaultHeightUntilThen() {
+        val sizing = mapOf(S.B to emptyFlex, S.C to TileSizing(100f, 100f, 100f))
+        val root = sideColumn(leaf(S.B), leaf(S.C))
+        // Default: content based, and not stretched into the room the column has.
+        assertEquals(80f, sizedGeometry(root, sizing).rect(S.B).h, EPS)
+        assertTrue(sizedGeometry(root, sizing).gaps.first { it.scrolling }.resizable, "there is a handle under it")
+        // Dragged taller than any content it has; the size is the tile's own sizeDp.
+        val resized = resizeSized(root, sizing, 1, 300f)
+        assertEquals(380f, sizedGeometry(resized, sizing).rect(S.B).h, EPS)
+        assertEquals(380f, ((resized as TileSplit<S>).children.last() as TileSplit<S>).children.first().sizeDp!!, EPS)
+        // And as far as the surface's maximum, not a dp further.
+        assertEquals(2000f, sizedGeometry(resizeSized(root, sizing, 1, 99999f), sizing).rect(S.B).h, EPS)
+        // Back down to its least: the fixed part with no list.
+        assertEquals(80f, sizedGeometry(resizeSized(resized, sizing, 1, -5000f), sizing).rect(S.B).h, EPS)
+    }
+
+    @Test
+    fun aFillTileIsAsTallAsItsContentByDefaultButResizesPastIt() {
+        val fill = TileSizing(100f, 2000f, null, fitDp = 140f)
+        val sizing = mapOf(S.B to content100, S.C to fill)
+        val root = sideColumn(leaf(S.B), leaf(S.C))
+        // Sharing what is left by weight, it is never taller than its content...
+        assertEquals(140f, sizedGeometry(root, sizing).rect(S.C).h, EPS)
+        // ... until the user asks for more (the end handle under the last tile).
+        val resized = resizeSized(root, sizing, 2, 400f)
+        assertEquals(540f, sizedGeometry(resized, sizing).rect(S.C).h, EPS)
+        // A stored size past the content is honoured as it is.
+        assertEquals(500f, sizedGeometry(sideColumn(leaf(S.B), leaf(S.C, dp = 500f)), sizing).rect(S.C).h, EPS)
     }
 }

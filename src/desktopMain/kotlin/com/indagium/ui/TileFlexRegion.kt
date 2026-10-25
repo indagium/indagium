@@ -1,7 +1,6 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -10,11 +9,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -64,15 +63,20 @@ internal data class TileBodyMeasure(
     val flexNaturalDp: Float = 0f,
     val flexCapDp: Float? = null,
 ) {
-    /** The bounds and default of the tile's outer height, [maxDp] being the most a tile may ever be (null for a [TileBodySizing.FILL] body). */
+    /**
+     * The bounds and default of the tile's outer height, [maxDp] being the most a tile may ever be (null for a [TileBodySizing.FILL] body). A flex
+     * tile resizes between its least (the fixed part and about a row of the list, or all of a shorter list) and [maxDp], whatever its list holds
+     * now: the list may be empty today and fill later, and extra room the user chose shows as empty list area. Only the height it has before any
+     * resize stays content based: the fixed part plus the list at its natural height (to the cap), which is also as far as leftover room stretches it.
+     */
     fun toSizing(maxDp: Float): TileSizing? = when (mode) {
         TileBodySizing.FILL -> null
         TileBodySizing.CONTENT -> (chromeDp + fixedDp).let { TileSizing(it, it, it) }
         TileBodySizing.FLEX -> {
             val base = chromeDp + fixedDp
             val low = base + min(flexNaturalDp, TILE_FLEX_MIN_DP)
-            val high = max(low, min(base + flexNaturalDp, maxDp))
-            TileSizing(low, high, flexCapDp?.let { (base + min(flexNaturalDp, it)).coerceIn(low, high) })
+            val fit = min(base + flexNaturalDp, maxDp).coerceAtLeast(low)
+            TileSizing(low, max(low, maxDp), flexCapDp?.let { (base + min(flexNaturalDp, it)).coerceIn(low, fit) }, fit)
         }
     }
 }
@@ -125,7 +129,8 @@ internal val LocalTileFlex = compositionLocalOf<TileFlexHost?> { null }
  * The one scrollable part of a [TileBodySizing.FLEX] body. [scrollState] is the state of the vertical scroll the content holds (its
  * `maxValue` gives the natural height: the content must scroll with exactly this state, in a column that is NOT `fillMaxSize`, and keep any
  * scrollbar in a `matchParentSize()` box so it does not claim the whole height). In a tile of a scrolling column the region is as tall as the
- * surface allots (at most its natural height); elsewhere it is capped at [capDp], or, with `capDp == null`, takes [fill] (e.g.
+ * surface allots, whatever its content: the list scrolls when it is longer, and when it is shorter (a tile the user made taller than its list) the rest of
+ * the region is empty; elsewhere it is capped at [capDp], or, with `capDp == null`, takes [fill] (e.g.
  * `Modifier.weight(1f)`), which is what Notes and the AI conversation have always done. [capDp] is also the region's share of the tile's
  * default height; null means the tile shares the column by weight. [modifier] applies in every case.
  */
@@ -144,17 +149,24 @@ internal fun FlexRegion(
         capDp != null -> Modifier.fillMaxWidth().heightIn(max = capDp.dp)
         else -> fill
     }
-    Box(modifier.then(sizing), content = content)
+    // The region is the tile's one scrolling list: a list inside it shows all its rows instead of scrolling (and drawing a scrollbar) of its own.
+    CompositionLocalProvider(LocalFlatLists provides LocalInTile.current) {
+        Box(modifier.then(sizing), content = content)
+    }
 }
 
-// The region's height: what the surface allots, else its cap, and never more than its content (the box wraps it). Reports the natural height.
+// The region's height: what the surface allots, else its cap, and never more than its content (the box wraps it) until the surface allots more:
+// a tile the user made taller than its list leaves the list at the top and the rest of the region empty (so a composer under an empty
+// conversation stays at the bottom of the tile). Reports the natural height, which is the content's, not the allotment's.
 private fun Modifier.flexHeight(host: TileFlexHost, scroll: ScrollState, capDp: Int?): Modifier = layout { measurable, constraints ->
-    val limitDp = host.allottedDp ?: capDp?.toFloat() ?: TILE_FLEX_DEFAULT_CAP_DP
-    val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = min(constraints.maxHeight, (limitDp * density).roundToInt())))
+    val allotted = host.allottedDp
+    val limitPx = min(constraints.maxHeight, ((allotted ?: capDp?.toFloat() ?: TILE_FLEX_DEFAULT_CAP_DP) * density).roundToInt())
+    val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = limitPx))
     val hidden = scroll.maxValue.takeIf { it != Int.MAX_VALUE } ?: 0
-    host.shownPx = placeable.height
+    val height = if (allotted != null) max(placeable.height, limitPx) else placeable.height
+    host.shownPx = height
     host.onFlex((placeable.height + hidden) / density, capDp?.toFloat())
-    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+    layout(placeable.width, height) { placeable.place(0, 0) }
 }
 
 /**
@@ -172,11 +184,7 @@ internal fun FlexScrollBox(
         Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
         // In a matchParentSize box so the scrollbar's fillMaxHeight does not pin the region to its cap.
         Box(Modifier.matchParentSize()) {
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scrollState),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                style = appScrollbarStyle(tc()),
-            )
+            ThinVerticalScrollbar(scrollState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }
@@ -190,15 +198,18 @@ internal fun FlexScrollBox(
 internal fun TileBodyColumn(info: TileBodyInfo, modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     val scrolling = !info.contentSized
     val state = rememberScrollState()
+    // While the body scrolls as a whole, its scrollbar gets a strip of its own (only while it overflows: a body that fits keeps its full width),
+    // so it never lies over the scrollbar of a flex list inside the body. ScrollState.maxValue is Int.MAX_VALUE until the first layout.
+    val overflowing = scrolling && state.maxValue in 1 until Int.MAX_VALUE
     Box((if (scrolling) Modifier.fillMaxSize() else Modifier.fillMaxWidth()).then(modifier)) {
-        Column(Modifier.fillMaxWidth().then(if (scrolling) Modifier.verticalScroll(state) else Modifier), content = content)
+        Column(
+            Modifier.fillMaxWidth().then(if (scrolling) Modifier.verticalScroll(state) else Modifier)
+                .then(if (overflowing) Modifier.padding(end = TILE_SCROLL_GUTTER_DP.dp) else Modifier),
+            content = content,
+        )
         if (scrolling) {
             Box(Modifier.matchParentSize()) {
-                VerticalScrollbar(
-                    adapter = rememberScrollbarAdapter(state),
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                    style = appScrollbarStyle(tc()),
-                )
+                ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
     }

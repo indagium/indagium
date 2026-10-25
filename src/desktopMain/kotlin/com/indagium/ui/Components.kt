@@ -457,11 +457,7 @@ internal fun ScrollableItems(
     ) {
         Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
         Box(Modifier.matchParentSize()) {
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scrollState),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                style = appScrollbarStyle(tc()),
-            )
+            ThinVerticalScrollbar(scrollState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }
@@ -501,11 +497,7 @@ internal fun BoundedScrollBoxDp(
         // fillMaxHeight() doesn't participate in sizing the outer Box — a plain fillMaxHeight child
         // measures at the full `h` cap and would pin the Box to it, defeating heightIn above.
         Box(Modifier.matchParentSize()) {
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scrollState),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                style = appScrollbarStyle(tc()),
-            )
+            ThinVerticalScrollbar(scrollState, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }
@@ -544,11 +536,7 @@ internal fun ScrollColumnWithBar(
             content = content,
         )
         Box(Modifier.matchParentSize()) {
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(state),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                style = appScrollbarStyle(tc()),
-            )
+            ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
         }
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ExperimentalTestApi
@@ -25,6 +26,8 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.SavedFilter
+import com.indagium.model.SavedFilterFolder
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
@@ -91,6 +94,7 @@ class FilterPanelSectionHostUiTest {
         filterBarVisible: Boolean = false,
         initialHost: SectionHost? = null,
         activeTags: Set<String> = emptySet(),
+        configure: (AppState) -> Unit = {},
         test: (hostOf: () -> SectionHost?, setHost: (SectionHost?) -> Unit) -> Unit,
     ) {
         val directory = createTempDirectory("filter-panel-section-host-ui").toFile()
@@ -101,7 +105,7 @@ class FilterPanelSectionHostUiTest {
             archiveCacheDir = File(directory, "archives"),
             customCommandsDir = File(directory, "commands"),
             autoExportNotes = false,
-        ).also { it.tabs = listOf(tab); it.filterPanelWidth = PANEL_WIDTH }
+        ).also { it.tabs = listOf(tab); it.filterPanelWidth = PANEL_WIDTH; configure(it) }
         var host by mutableStateOf(initialHost)
         try {
             rule.setContent {
@@ -203,6 +207,29 @@ class FilterPanelSectionHostUiTest {
             assertEquals(140f, list.height.value, 0.7f)
             // 40 chips are much more than that: the list scrolls (its content is taller than the box).
             assertTrue(rule.onNodeWithTag("filter-panel-tags-input").getBoundsInRoot().top >= list.bottom)
+        }
+    }
+
+    private fun savedFilter(id: String, folder: String?) = SavedFilter(
+        id, "Filter $id", emptySet(), emptySet(), "", false, FilterMode.TAGS, emptySet(), "", false, emptyList(), false, folderId = folder,
+    )
+
+    private fun scrollablesBelow(node: SemanticsNode): Int =
+        (if (node.config.contains(SemanticsProperties.VerticalScrollAxisRange)) 1 else 0) + node.children.sumOf(::scrollablesBelow)
+
+    @Test
+    fun theLegacyColumnKeepsEachSavedFilterGroupsOwnCappedList() {
+        // Outside a tile (no flex region) the saved filters are what they were on main: every group of rows caps at the rows setting and scrolls
+        // inside, in the panel's one column. Only a tile makes the tree a single scroller (see LogViewTilingUiTest).
+        withPanel(
+            initialHost = ColumnSectionHost,
+            configure = { s ->
+                s.savedFilterFolders = listOf(SavedFilterFolder("folder-a", "Work"))
+                s.savedFilters = (1..12).map { savedFilter("s$it", if (it <= 6) "folder-a" else null) }
+            },
+        ) { _, _ ->
+            val tree = rule.onNodeWithTag("filter-saved-filters-tree", useUnmergedTree = true).fetchSemanticsNode()
+            assertEquals(2, scrollablesBelow(tree), "one list for the folder and one for Ungrouped")
         }
     }
 
