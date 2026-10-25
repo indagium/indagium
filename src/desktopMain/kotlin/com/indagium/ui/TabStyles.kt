@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -35,6 +37,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -54,12 +57,14 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.LogTab
+import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 
 // How each tab strip style (Settings > Appearance > Tabs) draws one tab. The shell keeps one structure for every style (a stripe
 // overlay and a Row of [live dot] [badge] [label] [close]) and only the metrics, the chrome behind the Row and the label's type
 // change, so a behaviour (click, right-click menu, tooltip, drag, close) is the same in every style. CURRENT is the long-standing
-// look and produces exactly the modifiers the shell had before styles existed.
+// look and produces exactly the modifiers the shell had before styles existed. A strip on another window edge (TabAppearance.position)
+// turns the same drawing around: the accent mark, a raised card's open side and the source stripe move to the matching side of the tab.
 
 private val RAISED_RADIUS = 8.dp
 private val SEGMENT_RADIUS = 6.dp
@@ -78,8 +83,16 @@ private data class TabMetrics(
     val stripeTop: Dp,
 )
 
-private fun tabMetrics(style: TabStripStyle): TabMetrics = when (style) {
-    TabStripStyle.RAISED -> TabMetrics(12.dp, 6.dp, 7.dp, PaddingValues(start = 1.dp, end = 1.dp, top = 4.dp), 8.dp, 4.dp)
+// The raised card's gap sits on the side away from the content: above a top strip's tabs, below a bottom strip's, beside a side strip's.
+private fun raisedInset(position: TabStripPosition): PaddingValues = when (position) {
+    TabStripPosition.TOP -> PaddingValues(start = 1.dp, end = 1.dp, top = 4.dp)
+    TabStripPosition.BOTTOM -> PaddingValues(start = 1.dp, end = 1.dp, bottom = 4.dp)
+    TabStripPosition.LEFT -> PaddingValues(start = 4.dp, top = 1.dp, bottom = 1.dp)
+    TabStripPosition.RIGHT -> PaddingValues(end = 4.dp, top = 1.dp, bottom = 1.dp)
+}
+
+private fun tabMetrics(style: TabStripStyle, position: TabStripPosition): TabMetrics = when (style) {
+    TabStripStyle.RAISED -> TabMetrics(12.dp, 6.dp, 7.dp, raisedInset(position), 8.dp, 4.dp)
     TabStripStyle.SEGMENTED -> TabMetrics(10.dp, 4.dp, 6.dp, PaddingValues(horizontal = 2.dp, vertical = 3.dp), 8.dp, 3.dp)
     TabStripStyle.COMPACT, TabStripStyle.QUIET -> TabMetrics(10.dp, 4.dp, 6.dp, PaddingValues(), 0.dp, 0.dp)
     else -> TabMetrics(12.dp, 6.dp, 7.dp, PaddingValues(), 0.dp, 0.dp)
@@ -101,16 +114,32 @@ private fun tabLabelStyle(style: TabStripStyle, active: Boolean, lit: Boolean, t
 /** The strip's own background: the app background for QUIET, the panel tone for every other style. */
 internal fun tabStripBackground(style: TabStripStyle, tc: ThemeColors): Color = if (style == TabStripStyle.QUIET) tc.bg else tc.p2
 
-// The raised style's active card: filled like the content below and outlined on the top and sides only, so it opens into the content.
-private fun Modifier.raisedCard(tc: ThemeColors): Modifier {
-    val shape = RoundedCornerShape(topStart = RAISED_RADIUS, topEnd = RAISED_RADIUS)
+// The raised style's active card: filled like the content beside it and outlined on every side but the one facing the content, so it
+// opens into the content.
+private fun raisedShape(position: TabStripPosition): RoundedCornerShape = when (position) {
+    TabStripPosition.TOP -> RoundedCornerShape(topStart = RAISED_RADIUS, topEnd = RAISED_RADIUS)
+    TabStripPosition.BOTTOM -> RoundedCornerShape(bottomStart = RAISED_RADIUS, bottomEnd = RAISED_RADIUS)
+    TabStripPosition.LEFT -> RoundedCornerShape(topStart = RAISED_RADIUS, bottomStart = RAISED_RADIUS)
+    TabStripPosition.RIGHT -> RoundedCornerShape(topEnd = RAISED_RADIUS, bottomEnd = RAISED_RADIUS)
+}
+
+private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition): Modifier {
+    val shape = raisedShape(position)
     return background(tc.bg, shape).drawBehind {
         val inset = 0.5.dp.toPx()
+        val overshoot = RAISED_RADIUS.toPx() * 2
+        // The outline is a rounded rect that runs past the open side, which the clip then cuts off.
+        val (topLeft, outline) = when (position) {
+            TabStripPosition.TOP -> Offset(inset, inset) to Size(size.width - 2 * inset, size.height + overshoot)
+            TabStripPosition.BOTTOM -> Offset(inset, -overshoot) to Size(size.width - 2 * inset, size.height + overshoot - inset)
+            TabStripPosition.LEFT -> Offset(inset, inset) to Size(size.width + overshoot, size.height - 2 * inset)
+            TabStripPosition.RIGHT -> Offset(-overshoot, inset) to Size(size.width + overshoot - inset, size.height - 2 * inset)
+        }
         clipRect {
             drawRoundRect(
                 color = tc.br,
-                topLeft = Offset(inset, inset),
-                size = Size(size.width - 2 * inset, size.height + RAISED_RADIUS.toPx() * 2),
+                topLeft = topLeft,
+                size = outline,
                 cornerRadius = CornerRadius(RAISED_RADIUS.toPx()),
                 style = Stroke(1.dp.toPx()),
             )
@@ -118,13 +147,31 @@ private fun Modifier.raisedCard(tc: ThemeColors): Modifier {
     }
 }
 
+// A [thickness] mark along the side of the tab that faces the content: the bottom of a top strip's tab, the top of a bottom strip's,
+// the right of a left strip's, the left of a right strip's.
+private fun DrawScope.contentSideMark(position: TabStripPosition, thickness: Float, color: Color) {
+    when (position) {
+        TabStripPosition.TOP -> drawRect(color, Offset(0f, size.height - thickness), Size(size.width, thickness))
+        TabStripPosition.BOTTOM -> drawRect(color, Offset.Zero, Size(size.width, thickness))
+        TabStripPosition.LEFT -> drawRect(color, Offset(size.width - thickness, 0f), Size(thickness, size.height))
+        TabStripPosition.RIGHT -> drawRect(color, Offset.Zero, Size(thickness, size.height))
+    }
+}
+
 // The chrome behind one tab: its fill, outline and the accent mark of the active tab.
-private fun Modifier.tabChrome(style: TabStripStyle, isActive: Boolean, hovered: Boolean, dragging: Boolean, tc: ThemeColors): Modifier {
+private fun Modifier.tabChrome(
+    style: TabStripStyle,
+    isActive: Boolean,
+    hovered: Boolean,
+    dragging: Boolean,
+    tc: ThemeColors,
+    position: TabStripPosition,
+): Modifier {
     val accent = tc.ac
     val lit = hovered || dragging
     return when (style) {
         TabStripStyle.RAISED ->
-            if (isActive) raisedCard(tc) else background(if (lit) tc.hv else Color.Transparent, RoundedCornerShape(SEGMENT_RADIUS))
+            if (isActive) raisedCard(tc, position) else background(if (lit) tc.hv else Color.Transparent, RoundedCornerShape(SEGMENT_RADIUS))
 
         TabStripStyle.SEGMENTED -> {
             val shape = RoundedCornerShape(SEGMENT_RADIUS)
@@ -135,27 +182,11 @@ private fun Modifier.tabChrome(style: TabStripStyle, isActive: Boolean, hovered:
             }
         }
 
-        TabStripStyle.QUIET -> drawBehind {
-            val stroke = ACCENT_UNDERLINE.toPx()
-            drawRect(
-                color = if (isActive) accent else tc.br,
-                topLeft = Offset(0f, size.height - stroke),
-                size = Size(size.width, stroke),
-            )
-        }
+        TabStripStyle.QUIET -> drawBehind { contentSideMark(position, ACCENT_UNDERLINE.toPx(), if (isActive) accent else tc.br) }
 
         else -> background(if (isActive) tc.bg else if (lit) tc.p else tc.p2)
             .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
-            .drawBehind {
-                if (isActive) {
-                    val stroke = ACCENT_UNDERLINE.toPx()
-                    drawRect(
-                        color = accent,
-                        topLeft = Offset(0f, size.height - stroke),
-                        size = Size(size.width, stroke),
-                    )
-                }
-            }
+            .drawBehind { if (isActive) contentSideMark(position, ACCENT_UNDERLINE.toPx(), accent) }
     }
 }
 
@@ -218,7 +249,8 @@ internal fun TabShell(
     var hov by remember { mutableStateOf(false) }
     var rowRoot by remember { mutableStateOf(Offset.Zero) }
     val style = appearance.style
-    val metrics = tabMetrics(style)
+    val position = appearance.position
+    val metrics = tabMetrics(style, position)
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc)
     Box(Modifier.fillMaxWidth()) {
@@ -226,7 +258,7 @@ internal fun TabShell(
             Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
                 .padding(metrics.inset)
                 .testTag("tab-$pointerKey")
-                .tabChrome(style, isActive, hov, dragging, tc)
+                .tabChrome(style, isActive, hov, dragging, tc, position)
                 .onGloballyPositioned { rowRoot = it.positionInRoot() }
                 .onPointerEvent(PointerEventType.Enter) { hov = true }
                 .onPointerEvent(PointerEventType.Exit) { hov = false }
@@ -264,14 +296,47 @@ internal fun TabShell(
             }
         }
         if (appearance.showStripe) {
-            Box(
-                Modifier.align(Alignment.TopStart).fillMaxWidth()
-                    .padding(top = metrics.stripeTop, start = metrics.stripeInsetHorizontal, end = metrics.stripeInsetHorizontal)
-                    .height(STRIPE_HEIGHT)
-                    .testTag("tab-stripe-$pointerKey")
-                    .background(tabSourceColor(appearance.kind, tc), RoundedCornerShape(bottomStart = 1.dp, bottomEnd = 1.dp)),
+            TabSourceStripe(
+                pointerKey = pointerKey,
+                position = position,
+                metrics = metrics,
+                color = tabSourceColor(appearance.kind, tc),
+                modifier = Modifier.align(
+                    when (position) {
+                        TabStripPosition.TOP, TabStripPosition.LEFT -> Alignment.TopStart
+                        TabStripPosition.BOTTOM -> Alignment.BottomStart
+                        TabStripPosition.RIGHT -> Alignment.TopEnd
+                    },
+                ),
             )
         }
+    }
+}
+
+// The source-colour stripe along the tab's outer side (away from the content): across the top of a top strip's tab, along the left of a
+// left strip's, and so on.
+@Composable
+private fun TabSourceStripe(pointerKey: Any, position: TabStripPosition, metrics: TabMetrics, color: Color, modifier: Modifier) {
+    val inset = metrics.stripeInsetHorizontal
+    val offset = metrics.stripeTop
+    val tag = Modifier.testTag("tab-stripe-$pointerKey")
+    when (position) {
+        TabStripPosition.TOP -> Box(
+            modifier.fillMaxWidth().padding(top = offset, start = inset, end = inset).height(STRIPE_HEIGHT).then(tag)
+                .background(color, RoundedCornerShape(bottomStart = 1.dp, bottomEnd = 1.dp)),
+        )
+        TabStripPosition.BOTTOM -> Box(
+            modifier.fillMaxWidth().padding(bottom = offset, start = inset, end = inset).height(STRIPE_HEIGHT).then(tag)
+                .background(color, RoundedCornerShape(topStart = 1.dp, topEnd = 1.dp)),
+        )
+        TabStripPosition.LEFT -> Box(
+            modifier.fillMaxHeight().padding(start = offset, top = inset, bottom = inset).width(STRIPE_HEIGHT).then(tag)
+                .background(color, RoundedCornerShape(topEnd = 1.dp, bottomEnd = 1.dp)),
+        )
+        TabStripPosition.RIGHT -> Box(
+            modifier.fillMaxHeight().padding(end = offset, top = inset, bottom = inset).width(STRIPE_HEIGHT).then(tag)
+                .background(color, RoundedCornerShape(topStart = 1.dp, bottomStart = 1.dp)),
+        )
     }
 }
 

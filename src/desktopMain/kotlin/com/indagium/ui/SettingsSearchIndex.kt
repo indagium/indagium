@@ -206,6 +206,7 @@ private fun appearance() = buildList {
             listOf("tabs", "x", "close", "hover"),
         ),
     )
+    addAll(chromePlacement())
     if (isLinuxOs) {
         add(
             entry(
@@ -216,6 +217,30 @@ private fun appearance() = buildList {
         )
     }
 }
+
+// Settings > Appearance > Tabs, the placement half (ui/ChromePlacementSettings.kt).
+private fun chromePlacement() = listOf(
+    entry(
+        SettingsSection.Appearance, "Tab position",
+        "Which window edge the tab strip sits on: top, left, right or bottom. Left and right stack the tabs vertically.",
+        listOf("tabs", "tab bar", "vertical", "side", "edge", "dock", "move"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Toolbar placement",
+        "Where the main toolbar sits: at the start or end of the tab strip, beside a vertical tab strip, or on an edge of its own.",
+        listOf("toolbar", "buttons", "dock", "tabs", "beside", "own edge", "vertical"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Toolbar edge",
+        "The window edge the toolbar is docked to when it has an edge of its own.",
+        listOf("toolbar", "dock", "top", "bottom", "left", "right"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Lock tabs and toolbar",
+        "Hides the grips that drag the tab strip and the toolbar to another edge, so they stay where they are.",
+        listOf("tabs", "toolbar", "grip", "lock", "dock", "move", "drag"),
+    ),
+)
 
 private fun editorBehavior() = listOf(
     entry(SettingsSection.EditorBehavior, "Visible tabs", "How many tabs show before the rest collapse into a menu.", listOf("tab bar", "overflow")),

@@ -104,6 +104,7 @@ internal fun TabsAppearanceSettings(state: AppState) {
             state.updateSettings { it.copy(tabCloseOnEvery = !it.tabCloseOnEvery) }
         }
     }
+    ChromePlacementSettings(state)
 }
 
 @Composable

@@ -241,6 +241,7 @@ fun App(
         )
     }
     val rootFocusRequester = remember { FocusRequester() }
+    val chromeAnchors = remember { ChromeAnchors() }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
     var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
     var pendingFilterSearchRequest by remember { mutableStateOf<FilterSearchRequest?>(null) }
@@ -440,58 +441,52 @@ fun App(
                     showLoadingOverlay = false
                 }
             }
-            Column(Modifier.fillMaxSize()) {
-                TabBar(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
-                HeapPressureBanner(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
-                val activeTab = state.activeTab()
-                val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
-                // The content area. The loading cover lives inside it (not at the window root) so the
-                // tab bar stays visible while a file loads.
-                Box(Modifier.weight(1f).fillMaxWidth()) {
-                    when {
-                        // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
-                        // is nothing else to show, so this only ever paints for the one frame between
-                        // that condition becoming true and the LaunchedEffect below reacting to it —
-                        // an empty Box, not the old static text, since the text would otherwise flash
-                        // and immediately be replaced by the home tab.
-                        state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() && !state.testsTabOpen ->
-                            Box(Modifier.fillMaxSize())
+            // The tab strip and the toolbar sit on the edges Settings > Appearance > Tabs chooses; everything else is the content.
+            ChromeScaffold(
+                state = state,
+                onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                anchors = chromeAnchors,
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    HeapPressureBanner(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
+                    val activeTab = state.activeTab()
+                    val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
+                    // The content area. The loading cover lives inside it (not at the window root) so the
+                    // tab bar stays visible while a file loads.
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        when {
+                            // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
+                            // is nothing else to show, so this only ever paints for the one frame between
+                            // that condition becoming true and the LaunchedEffect below reacting to it —
+                            // an empty Box, not the old static text, since the text would otherwise flash
+                            // and immediately be replaced by the home tab.
+                            state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() && !state.testsTabOpen ->
+                                Box(Modifier.fillMaxSize())
 
-                        // The single AI test-suites workspace tab: like a diagram it owns the whole content area
-                        // and no log tab. Its selection/search state lives in AppState.testsView, so leaving
-                        // composition here (switching tabs) does not reset it.
-                        activeSurface is ActiveSurface.Tests && state.testsTabOpen -> TestsWorkspace(state)
+                            // The single AI test-suites workspace tab: like a diagram it owns the whole content area
+                            // and no log tab. Its selection/search state lives in AppState.testsView, so leaving
+                            // composition here (switching tabs) does not reset it.
+                            activeSurface is ActiveSurface.Tests && state.testsTabOpen -> TestsWorkspace(state)
 
-                        // Keyed on the session id — matching the log path's key(activeTab.id) just
-                        // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
-                        // per-session instead of leaking whatever the previously active diagram tab
-                        // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
-                        activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
-                            Seq3Workspace(state, activeSurface.sessionId)
-                        }
-                        // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
-                        // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
-                        // (step 7), this is the only place that still knows about the home tab at all.
-                        activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
-                            HomeScreen(
+                            // Keyed on the session id — matching the log path's key(activeTab.id) just
+                            // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
+                            // per-session instead of leaking whatever the previously active diagram tab
+                            // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
+                            activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
+                                Seq3Workspace(state, activeSurface.sessionId)
+                            }
+                            // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
+                            // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
+                            // (step 7), this is the only place that still knows about the home tab at all.
+                            activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
+                                HomeScreen(
+                                    state = state,
+                                    tab = activeTab,
+                                    onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                                )
+                            }
+                            state.compareMode -> CompareView(
                                 state = state,
-                                tab = activeTab,
-                                onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
-                            )
-                        }
-                        state.compareMode -> CompareView(
-                            state = state,
-                            requestedPanelFocus = pendingPanelFocus,
-                            filterSearchRequest = pendingFilterSearchRequest,
-                            onFilterSearchRequestConsumed = { request ->
-                                pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
-                            },
-                            onPanelFocusConsumed = { pendingPanelFocus = null },
-                        )
-                        activeTab != null -> key(activeTab.id) {
-                            FileView(
-                                state = state,
-                                tab = activeTab,
                                 requestedPanelFocus = pendingPanelFocus,
                                 filterSearchRequest = pendingFilterSearchRequest,
                                 onFilterSearchRequestConsumed = { request ->
@@ -499,17 +494,29 @@ fun App(
                                 },
                                 onPanelFocusConsumed = { pendingPanelFocus = null },
                             )
+                            activeTab != null -> key(activeTab.id) {
+                                FileView(
+                                    state = state,
+                                    tab = activeTab,
+                                    requestedPanelFocus = pendingPanelFocus,
+                                    filterSearchRequest = pendingFilterSearchRequest,
+                                    onFilterSearchRequestConsumed = { request ->
+                                        pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                                    },
+                                    onPanelFocusConsumed = { pendingPanelFocus = null },
+                                )
+                            }
                         }
-                    }
-                    if (showLoadingOverlay) {
-                        Box(
-                            Modifier.fillMaxSize().background(loadingOverlayBackground(tc)),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
-                                Spacer(Modifier.height(12.dp))
-                                IndeterminateLoadingLine(Modifier.width(180.dp))
+                        if (showLoadingOverlay) {
+                            Box(
+                                Modifier.fillMaxSize().background(loadingOverlayBackground(tc)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
+                                    Spacer(Modifier.height(12.dp))
+                                    IndeterminateLoadingLine(Modifier.width(180.dp))
+                                }
                             }
                         }
                     }
@@ -2393,10 +2400,23 @@ fun App(
                     )
                 ) {
                     val menuWidth = 320.dp
+                    // Beside the Recent button wherever the toolbar is docked; under a top toolbar it is where it always was.
+                    val arrangement = chromeArrangement(state.settings)
+                    val place = recentMenuPlacement(
+                        arrangement.toolbarBarEdge ?: arrangement.tabEdge, chromeAnchors.recentButton, maxWidth.value, maxHeight.value,
+                    )
                     Box(
                         Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(x = (-8).dp, y = 44.dp)
+                            .align(
+                                when {
+                                    place.alignBottom -> if (place.alignEnd) Alignment.BottomEnd else Alignment.BottomStart
+                                    else -> if (place.alignEnd) Alignment.TopEnd else Alignment.TopStart
+                                },
+                            )
+                            .offset(
+                                x = if (place.alignEnd) (-place.dx).dp else place.dx.dp,
+                                y = if (place.alignBottom) (-place.dy).dp else place.dy.dp,
+                            )
                             .width(menuWidth)
                             .background(tc.p, RoundedCornerShape(7.dp))
                             .border(1.dp, tc.br, RoundedCornerShape(7.dp)),

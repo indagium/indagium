@@ -5,6 +5,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
+import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import java.io.File
 import kotlin.math.max
@@ -156,7 +157,8 @@ internal fun tabStripeShown(settings: AppSettings): Boolean = settings.tabShowSo
 /**
  * Everything the tab shell needs to draw one tab beyond the label: the strip style, the kind (for badge and stripe), whether the
  * badge/stripe/close button show, the dim second line and whether the tab is live-tailing (only for width estimates; the dot itself is
- * the shell's `leading` slot). [Default] is the long-standing look and draws exactly what the shell drew before styles existed.
+ * the shell's `leading` slot). [position] is the window edge the strip sits on: the active tab's accent mark and a raised card face the
+ * content side of it. [Default] is the long-standing look and draws exactly what the shell drew before styles existed.
  */
 internal data class TabAppearance(
     val style: TabStripStyle = TabStripStyle.CURRENT,
@@ -166,6 +168,7 @@ internal data class TabAppearance(
     val closeAlways: Boolean = true,
     val secondLine: String? = null,
     val tailing: Boolean = false,
+    val position: TabStripPosition = TabStripPosition.TOP,
 ) {
     companion object {
         val Default = TabAppearance()
@@ -183,6 +186,7 @@ private fun appearanceOf(settings: AppSettings, kind: TabKind, secondLine: Strin
     closeAlways = settings.tabCloseOnEvery,
     secondLine = secondLine,
     tailing = tailing,
+    position = settings.tabStripPosition,
 )
 
 internal fun logTabDescriptor(tab: LogTab, allTabs: List<LogTab>, settings: AppSettings): TabDescriptor {

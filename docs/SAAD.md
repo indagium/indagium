@@ -270,7 +270,7 @@ and [§15.2](#152-ai-investigation-round-trip).
 flowchart TB
     subgraph shell["UI shell — package ui (Compose)"]
         appc["App.kt<br/>root, dialogs, drag-drop, global keys"]
-        tabbar["TabBar"]
+        tabbar["ChromeScaffold<br/>TabStrip · MainToolbar"]
         fileview["FileView / CompareView"]
         viewer["LogViewer + Minimap + TidMap + SearchBar"]
         fpanel["FilterPanel"]
@@ -850,7 +850,7 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   the tab is active, and resizing Video writes the per-device layout, never the global one.
 - **Maximize** is `AppState.logViewMaximized`, session-only; Esc restores it (handled on the host's preview pass because the log viewer
   consumes every Esc). F6 cycles `logViewFocusOrder` of the visible tiles (all filter tiles are one stop).
-- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `TabBar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): four preset
+- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `MainToolbar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): four preset
   thumbnails drawn from `tileGeometry`, a Panels checklist of the applicable tiles, "Lock tiles" (hides grips) and "Reset to <preset>".
   The badge counts applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the Diagram library
   hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth (workspace profiles
@@ -921,8 +921,52 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
   `browserTabOrderDuringDragVariable` (the dragged centre plus the same quarter-width bias against each other tab's resting centre; equal widths
   give the fixed result) with `tabOffsets` for where every tab sits during the drag.
 - **Persistence.** `tabStripStyle`, `tabSizeMode`, `tabLabelMode`, `tabShowTypeBadge`, `tabShowSourceStripe`, `tabCloseOnEvery` and the
-  docking fields stored for the next phase (`chromeLocked`, `tabStripPosition`, `toolbarPlacement`, `toolbarEdge`) are JSON-only settings
+  placement fields (`chromeLocked`, `tabStripPosition`, `toolbarPlacement`, `toolbarEdge`, used by §6.6) are JSON-only settings
   (`ui/ChromeSettingsJson.kt`, never throws, an unknown or mistyped value keeps the default).
+
+### 6.6 Tab and toolbar placement (the window chrome)
+
+The tab strip can sit on any window edge and the main toolbar next to it or on an edge of its own. The root of `App.kt` is
+`ChromeScaffold` (`ui/ChromeScaffold.kt`); the content (heap banner + the active surface) is its `content` slot. Settings >
+Appearance > Tabs adds Tab position (Top / Left / Right / Bottom), Toolbar placement (With tabs · start, With tabs · end (default),
+Beside tabs, Own edge), the Toolbar edge for Own edge and "Lock tabs and toolbar" (`ui/ChromePlacementSettings.kt`, search entries in
+`SettingsSearchIndex`). All of it is the four JSON-only fields of §6.5; nothing in the positional settings decoder changed.
+
+- **Pure side** (`ui/ChromeLayout.kt`, `ChromeLayoutTest`). `ChromeArrangement(tabPosition, placement, toolbarEdge)` is what the settings ask
+  for (`chromeArrangement(settings)`). The rule: BESIDE_TABS is valid only with a vertical strip (LEFT / RIGHT); `sanitized()` turns an
+  invalid combination into WITH_TABS_END without rewriting the stored value (so moving the strip to a side again restores Beside tabs).
+  `chromeFrames` turns an arrangement, the window size and the toolbar's measured length into rects: the tab bar and the toolbar's own bar
+  (null while it shares the tab bar), the tab strip and toolbar inside them (1 dp of cross padding, as the strip always had), the
+  content, and the grips. Top and bottom bars span the window, left and right bars fill what is between; two bars on one edge stack with
+  the tab strip outermost. A vertical tab bar is 200 dp wide, a toolbar-only bar 36 dp (horizontal) or 40 dp (vertical); a toolbar sharing
+  a vertical tab bar leaves the tabs at least 150 dp (it scrolls instead). `chromeDockZones` gives the targets for the part being dragged:
+  the tab strip the four edges; the toolbar the four edges plus the two halves of the tab bar (`TabsStart` / `TabsEnd`), where next to a
+  vertical strip `BesideTabs` replaces that strip's own edge (they are the same spot). The edge strips lie inside the content along the
+  window edges, top and bottom full width and left and right between them, so no zones overlap. `applyChromeDock` is the drop: strip on an
+  edge moves it (the toolbar travels with it while it shares the bar), toolbar on an edge is OWN_EDGE there (or BESIDE_TABS on the strip's
+  own vertical edge), on the tab bar's halves WITH_TABS_START / END; the result is sanitized.
+- **Scaffold.** One `Layout` that always emits the same children in the same order (the two bar backdrops, the tab strip, the toolbar, the
+  two bar borders, the content, the two grips) and only changes their rects, so the content is never re-parented when the strip or the
+  toolbar moves: what it remembers survives (`ChromeScaffoldUiTest` keeps a counter across every position). The toolbar is measured first
+  with its cross size fixed because its natural length decides how much of a shared bar is left for the tabs. Borders are separate
+  children above the tabs because `Modifier.border` paints after its content; this keeps the default (TOP + WITH_TABS_END) pixel-identical
+  to the old one-piece bar (the test compares it with `TabBar`, which stays as that one-piece horizontal bar for tests). Test tags:
+  `tab-strip` (the tab bar), `main-toolbar`, `main-toolbar-bar`, `chrome-grip-tabs`, `chrome-grip-toolbar`, `chrome-dock-<top|bottom|left|
+  right|tabs-start|tabs-end|beside-tabs>`.
+- **Parts.** `TabStrip(orientation)` is `TabOverflowRow` (`ui/TabBar.kt`) with a vertical mode: tabs stacked one style-height each along y,
+  the overflow button under them, and the FIT-width drag maths reused with equal lengths (`TabStripAxis.kt` supplies the row-or-column
+  container). `TabAppearance.position` makes the active mark, a raised card's open side and the source stripe face the content side.
+  `MainToolbar(orientation)` (`ui/MainToolbar.kt`) is the old button row; vertically it stacks the same buttons (icon-only unless it is
+  in a vertical tab bar and "Icons only" is off), joined groups turning top / middle / bottom. Layout stays before Settings. Popups from
+  the strip (overflow list, diagram tab menu) open on the content side of their edge (`ChromePopupPositionProvider`), the Layout menu
+  beside a vertical toolbar and above a bottom one, and the Recent files menu next to its button (`recentMenuPlacement`; under a top
+  toolbar it keeps its old place).
+- **Grips and dragging.** `ChromeGrip` is a manual pointer drag (`detectMoveDragGestures`, not Compose/AWT drag-and-drop, so App.kt's
+  file-drop target never sees it). A vertical part has a 14 dp grip header that is always drawn; a horizontal part's grip is a 12 dp
+  overlay at the part's start that takes no room and shows only under the pointer, so a horizontal bar looks exactly as it always did.
+  While a grip is dragged the drop strips show (each tagged, the one under the pointer highlighted); the release is hit-tested again from the
+  last pointer position and written once through `updateSettings`; a release outside every strip changes nothing. `chromeLocked` removes
+  both grips (and the vertical headers' room). The tab strip and the toolbar are never hideable; every drag end reclaims root focus.
 
 ---
 
