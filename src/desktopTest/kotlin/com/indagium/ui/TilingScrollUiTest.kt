@@ -62,6 +62,9 @@ private const val OUTER_EXTRA_DP = 400
 private const val WHEEL_TURNS_TO_END = 40
 private const val WHEEL_TURN = 200f
 private const val FIXED_PART_DP = 50
+private const val DRAG_STEP_DP = 100f
+private const val PX_TOLERANCE_DP = 0.6f
+private const val COMMIT_TOLERANCE_DP = 1f
 private val FIXED_PART_COLOR = Color(0xFFCCDDEE)
 private val HOST_BACKGROUND = Color(0xFF204060)
 private val OUTER_BACKGROUND = Color(0xFF884488)
@@ -408,15 +411,17 @@ class TilingScrollUiTest {
 
     // B: 50 dp of content. C: 50 dp that always shows and a list of 20 rows of 24 dp (480 dp). D: the same list with 3 rows (72 dp).
     // E: content again.
+    private var rowsOf: (ScrollTile) -> Int = { if (it == ScrollTile.C) 20 else 3 }
+
     private fun sizedSlot(id: ScrollTile): TileSlot {
         val sizing = if (id == ScrollTile.B || id == ScrollTile.E) TileBodySizing.CONTENT else TileBodySizing.FLEX
         return TileSlot(icon = Icons.Outlined.Description, title = "Tile ${id.key}", sizing = sizing) {
             Column(Modifier.fillMaxWidth().testTag("body-${id.key}")) {
                 Box(Modifier.fillMaxWidth().height(FIXED_PART_DP.dp).background(FIXED_PART_COLOR).testTag("fixed-${id.key}"))
                 if (sizing == TileBodySizing.FLEX) {
-                    val rows = if (id == ScrollTile.C) 20 else 3
+                    val rows = rowsOf(id)
                     FlexScrollBox(TILE_FLEX_DEFAULT_CAP_DP.toInt(), Modifier.testTag("flex-${id.key}")) {
-                        repeat(rows) { Text("row $it", Modifier.height(24.dp)) }
+                        repeat(rows) { Text("row $it", Modifier.height(24.dp).testTag("row-${id.key}-$it")) }
                     }
                 }
             }
@@ -510,15 +515,73 @@ class TilingScrollUiTest {
         assertEquals(40f, heightOf("flex-c"), 0.6f)
         assertEquals(50f, heightOf("fixed-c"), 0.6f)
         assertTrue(bounds("fixed-c").bottom.value <= bounds("t-card-c").bottom.value, "the fixed part is inside the card")
-        // As large as it gets: the whole list, no empty space under it.
+        // As large as it gets: the surface's maximum, however short the list is. The list stays at its natural height at the top of the region and the
+        // rest of the region is empty (the fixed part stays where it was).
         rule.onNodeWithTag("t-splitter-2").performTouchInput {
             down(center)
-            moveBy(Offset(0f, 2000f * density))
+            moveBy(Offset(0f, 5000f * density))
             up()
         }
         rule.waitForIdle()
-        assertEquals(480f, heightOf("flex-c"), 0.6f)
-        assertEquals(sizedChrome + 50f + 480f, heightOf("t-card-c"), 0.6f)
+        assertEquals(2000f, heightOf("t-card-c"), 0.6f)
+        assertEquals(2000f - sizedChrome - 50f, heightOf("flex-c"), 0.6f)
+        assertEquals(50f, heightOf("fixed-c"), 0.6f)
+    }
+
+    // A flex tile can be made taller than its list: the list keeps its natural height and the rest of the region is empty.
+    private fun assertResizesPastItsList(tile: ScrollTile, naturalListDp: Float, defaultListDp: Float) {
+        val key = tile.key
+        val density = rule.density.density
+        assertEquals(defaultListDp, heightOf("flex-$key"), PX_TOLERANCE_DP)
+        val defaultCard = heightOf("t-card-$key")
+        assertEquals(sizedChrome + FIXED_PART_DP + defaultListDp, defaultCard, PX_TOLERANCE_DP)
+        assertEquals(0, commits.size, "the default height is not stored")
+        val handle = rule.onNodeWithTag("t-splitter-${ScrollTile.entries.indexOf(tile)}")
+        handle.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, DRAG_STEP_DP * density))
+            moveBy(Offset(0f, DRAG_STEP_DP * density))
+        }
+        rule.waitForIdle()
+        assertEquals(0, commits.size, "nothing is written while dragging")
+        val grown = heightOf("t-card-$key") - defaultCard
+        assertTrue(grown in (2 * DRAG_STEP_DP - 40f)..(2 * DRAG_STEP_DP + PX_TOLERANCE_DP), "the tile grew by $grown past its list")
+        assertEquals(defaultListDp + grown, heightOf("flex-$key"), PX_TOLERANCE_DP)
+        assertEquals(FIXED_PART_DP.toFloat(), heightOf("fixed-$key"), PX_TOLERANCE_DP)
+        if (naturalListDp > 0f) {
+            // The rows keep their size and sit at the top of the region.
+            assertEquals(bounds("flex-$key").top.value, bounds("row-$key-0").top.value, PX_TOLERANCE_DP)
+        }
+        handle.performTouchInput { up() }
+        rule.waitForIdle()
+        assertEquals(1, commits.size, "written once, on release")
+        val column = (commits.single() as TileSplit<ScrollTile>).children.last() as TileSplit<ScrollTile>
+        assertEquals(defaultCard + grown, column.children.single { (it as TileLeaf).section == tile }.sizeDp!!, COMMIT_TOLERANCE_DP)
+        assertEquals(defaultCard + grown, heightOf("t-card-$key"), PX_TOLERANCE_DP)
+    }
+
+    @Test
+    fun aFlexTileWithAShortListCanBeMadeTallerThanItsList() {
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null), height = 900)
+        assertResizesPastItsList(ScrollTile.D, naturalListDp = 72f, defaultListDp = 72f)
+    }
+
+    @Test
+    fun aFlexTileWithAnEmptyListHasAHandleAndCanBeMadeTaller() {
+        rowsOf = { if (it == ScrollTile.D) 0 else 3 }
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null), height = 900)
+        assertEquals(0f, heightOf("flex-d"), 0.6f)
+        assertEquals(sizedChrome + 50f, heightOf("t-card-d"), 0.6f)
+        assertTrue(exists("t-splitter-3"), "a handle under the empty-list tile (the last one)")
+        assertResizesPastItsList(ScrollTile.D, naturalListDp = 0f, defaultListDp = 0f)
+    }
+
+    @Test
+    fun aStoredFlexHeightIsKeptWhateverTheListHolds() {
+        // The size is the tile's own: a stored 400 stays 400 whatever the list holds.
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to 400f), height = 900)
+        assertEquals(400f, heightOf("t-card-d"), 0.6f)
+        assertEquals(400f - sizedChrome - 50f, heightOf("flex-d"), 0.6f)
     }
 
     @Test
@@ -555,13 +618,34 @@ class TilingScrollUiTest {
     }
 
     @Test
-    fun aLargerStoredSizeIsClampedAtLayoutAndNotRewritten() {
-        val stored = layoutOf(ScrollTile.B to null, ScrollTile.C to 2000f)
+    fun aStoredSizeOutsideTheBoundsIsClampedAtLayoutAndNotRewritten() {
+        // 3000 was stored (an old file with a larger maximum): the tile is as tall as the surface allows, nothing is written.
+        val stored = layoutOf(ScrollTile.B to null, ScrollTile.C to 3000f)
         setSizedHost(stored, height = 900)
-        // 2000 was stored (an old file, or a list that has since got shorter): the tile is as tall as its content, nothing is written.
-        assertEquals(sizedChrome + 50f + 480f, heightOf("t-card-c"), 0.6f)
-        assertEquals(480f, heightOf("flex-c"), 0.6f)
+        assertEquals(2000f, heightOf("t-card-c"), 0.6f)
         assertEquals(0, commits.size)
         assertEquals(stored, layout)
+        // A size below the least (a header, the fixed part and one row of the list) is raised to it; a size in between is honoured.
+        layout = layoutOf(ScrollTile.B to null, ScrollTile.C to 20f)
+        rule.waitForIdle()
+        assertEquals(sizedChrome + 50f + 40f, heightOf("t-card-c"), 0.6f)
+        layout = layoutOf(ScrollTile.B to null, ScrollTile.C to 700f)
+        rule.waitForIdle()
+        assertEquals(700f, heightOf("t-card-c"), 0.6f)
+        assertEquals(0, commits.size)
+    }
+
+    @Test
+    fun theColumnScrollbarIsAsThinAsTheAppsOtherSideSectionScrollbars() {
+        setSizedHost(layoutOf(ScrollTile.B to null, ScrollTile.C to null, ScrollTile.D to null, ScrollTile.E to null))
+        assertTrue(exists("t-scrollbar-b"))
+        // The shared thin bar is THIN_SCROLLBAR_DP wide; a list's scrollbar in a card (the flex region's) is the same helper.
+        assertEquals(THIN_SCROLLBAR_DP, bounds("t-scrollbar-b").width.value, 0.1f)
+        assertEquals(TILE_SCROLLBAR_DP, THIN_SCROLLBAR_DP)
+        // And the strip the cards leave for it is that bar plus a small gap, no more.
+        assertEquals(THIN_SCROLLBAR_DP + TILE_SCROLLBAR_GAP_DP, TILE_SCROLL_GUTTER_DP, 0.01f)
+        assertTrue(TILE_SCROLL_GUTTER_DP <= 8f)
+        assertEquals(HOST_W - TILE_SCROLL_GUTTER_DP, bounds("t-card-b").right.value, 0.5f)
+        assertEquals(HOST_W.toFloat(), bounds("t-scrollbar-b").right.value, 0.5f)
     }
 }

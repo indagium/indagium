@@ -13,8 +13,10 @@ import kotlin.math.min
 //   viewport the last open tile takes the rest.
 // - Sized (at least one leaf has a TileSizing, i.e. its body reported what its content needs): a tile is as tall as its content wants.
 //   A stored sizeDp is clamped to [min, max] at layout time (never rewritten); an unpinned tile with a default takes it; an unpinned "fill"
-//   tile (default null: Notes, AI) and any child without a TileSizing share what is left by weight, each within its bounds. A column that
-//   ends up shorter than its viewport leaves the rest empty, except that the last open tile may grow into it up to its max.
+//   tile (default null: Notes, AI) and any child without a TileSizing share what is left by weight, each within [min, fit]. A column that
+//   ends up shorter than its viewport leaves the rest empty, except that the last open tile may grow into it up to its fit height.
+//   [max] is only how far the user may resize a tile (a flex tile can be made taller than its list: the extra shows as empty list area);
+//   [fit] is how tall the tile is when its whole content shows, which is as far as the column's own leftover space ever stretches it.
 
 /** Least height (dp) of a tile's flex part that a resize leaves, about one row (never more than the part's natural height). */
 const val TILE_FLEX_MIN_DP: Float = 40f
@@ -25,13 +27,17 @@ const val TILE_FLEX_DEFAULT_CAP_DP: Float = 240f
 private const val TILE_SIZING_EPSILON_DP: Float = 0.5f
 
 /**
- * What a tile's content asks of its OUTER height (header included) in a scrolling column: at least [minDp] and at most [maxDp] (equal for a
- * tile with no flex part: it cannot be resized), [defaultDp] while it has no stored size, or null for a "fill" tile that shares what the
- * column leaves by weight.
+ * What a tile's content asks of its OUTER height (header included) in a scrolling column: at least [minDp] and at most [maxDp] when the user
+ * resizes it (equal for a tile with no flex part: it cannot be resized), [defaultDp] while it has no stored size, or null for a "fill" tile that
+ * shares what the column leaves by weight. [fitDp] is the height at which all of the tile's content shows (header + fixed part + the whole list);
+ * an unstored height never goes beyond it, however much room the column has. It is [maxDp] unless a body says otherwise.
  */
-data class TileSizing(val minDp: Float, val maxDp: Float, val defaultDp: Float?) {
+data class TileSizing(val minDp: Float, val maxDp: Float, val defaultDp: Float?, val fitDp: Float = maxDp) {
     /** [maxDp], never below [minDp]. */
     val hiDp: Float get() = max(minDp, maxDp)
+
+    /** [fitDp], within [minDp]..[hiDp]. */
+    val fitHiDp: Float get() = fitDp.coerceIn(minDp, hiDp)
 
     /** False when the tile has no room to grow or shrink (nothing to drag). */
     val resizable: Boolean get() = hiDp - minDp > TILE_SIZING_EPSILON_DP
@@ -133,14 +139,15 @@ private fun <K> sizedPlan(
         max(0f, extent - settledSum),
         weight = { children[it].weight },
         lo = { sizing[it]?.minDp ?: minTileDp },
-        hi = { sizing[it]?.hiDp ?: Float.MAX_VALUE },
+        hi = { sizing[it]?.fitHiDp ?: Float.MAX_VALUE },
     )
     shared.forEach { (i, dp) -> sizes[i] = dp }
-    // The last open tile may take what is left, up to its max, when it has a default of its own (a stored size is respected as it is).
+    // The last open tile may take what is left, up to the height that shows all its content, when it has a default of its own (a stored size is
+    // respected as it is).
     val receiver = children.indices.lastOrNull { !isCollapsed[it] }?.takeIf { !isPinned[it] && canGrowBeyondDefault(sizing[it]) }
     if (receiver != null) {
         val slack = extent - sizes.sumOf { it.toDouble() }.toFloat()
-        if (slack > 0f) sizes[receiver] = min(sizes[receiver] + slack, sizing[receiver]!!.hiDp)
+        if (slack > 0f) sizes[receiver] = min(sizes[receiver] + slack, sizing[receiver]!!.fitHiDp)
     }
     val dependent = children.indices.map { i -> !isCollapsed[i] && !isPinned[i] && (i in sharing || i == receiver) }
     return TileScrollPlan(sizes, isCollapsed, isPinned, sizing, dependent)
@@ -168,7 +175,7 @@ private fun <K> settledHeight(
 
 private fun canGrowBeyondDefault(sizing: TileSizing?): Boolean {
     val default = sizing?.defaultDp ?: return false
-    return sizing.hiDp - default > TILE_SIZING_EPSILON_DP
+    return sizing.fitHiDp - default > TILE_SIZING_EPSILON_DP
 }
 
 // Shares [total] among [items] by weight, each within [lo, hi]: a tile that would get less than its minimum is held at it, then (once none

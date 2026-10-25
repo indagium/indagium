@@ -19,6 +19,7 @@ import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -36,6 +37,8 @@ import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.SavedFilter
+import com.indagium.model.SavedFilterFolder
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
@@ -704,13 +707,95 @@ class LogViewTilingUiTest {
     @Test
     fun aTileThatIsOnlyContentHasNoHandleUnderIt() {
         setup()
-        // Log level is a row of chips; Highlighters above it has a list and an add form.
+        // Log level is a row of chips: nothing to drag under it.
         assertTrue(handleUnder("log_level") == null, "nothing to drag under Log level")
-        assertTrue(handleUnder("tags") == null, "an empty Tags tile is header and input only")
-        // With active tags there is a list to resize.
+        // A flex tile can be resized whatever its list holds today, an empty one included.
+        assertNotNull(handleUnder("tags"), "an empty Tags tile still has a handle: its list will fill later")
         state.upFlt(TAB_ID) { it.copy(activeTags = (0 until 24).map { i -> "AAAA$i" }.toSet()) }
         rule.waitForIdle()
         assertNotNull(handleUnder("tags"))
+    }
+
+    // Drags the handle under [tile] by [dyDp] and returns how much taller the card got.
+    private fun growBy(tile: String, dyDp: Float): Float {
+        val before = heightOf("tile-card-$tile")
+        dragBy(assertNotNull(handleUnder(tile), "a handle under $tile"), dyDp)
+        return heightOf("tile-card-$tile") - before
+    }
+
+    private fun storedHeight(tile: LogViewSectionId): Float? {
+        fun find(node: TileNode<LogViewSectionId>): TileNode<LogViewSectionId>? = when (node) {
+            is TileLeaf -> node.takeIf { it.section == tile }
+            is TileSplit -> node.children.firstNotNullOfOrNull(::find)
+        }
+        return state.settings.logViewLayout?.let(::find)?.sizeDp
+    }
+
+    @Test
+    fun anEmptyTagsTileCanBeMadeTallerThanItsContentAndWritesItsHeightOnRelease() {
+        setup(height = 900)
+        val before = heightOf("tile-card-tags")
+        assertEquals(null, storedHeight(LogViewSectionId.TAGS), "the default height is not stored")
+        val grown = growBy("tags", 120f)
+        assertTrue(grown > 90f, "Tags with no active tags grew by $grown")
+        // The input stays in the card at its full size; the extra room is the (empty) list area.
+        assertTrue(bounds("filter-panel-tags-input").bottom <= bounds("tile-card-tags").bottom)
+        assertEquals(before + grown, storedHeight(LogViewSectionId.TAGS)!!, 1f)
+    }
+
+    @Test
+    fun theAiTileWithAnEmptyConversationCanBeMadeTallerAndWritesItsHeightOnRelease() {
+        setup(height = 900) { it.aiPanelVisible = true }
+        val before = heightOf("tile-card-ai")
+        assertEquals(null, storedHeight(LogViewSectionId.AI))
+        assertTrue(before < 300f, "an empty conversation leaves only the header and the composer: $before dp")
+        val grown = growBy("ai", 160f)
+        assertTrue(grown > 120f, "AI grew by $grown")
+        assertEquals(before + grown, storedHeight(LogViewSectionId.AI)!!, 1f)
+        assertEquals(before + grown, heightOf("tile-card-ai"), 1f)
+        // The composer stays at the bottom of the card and the (empty) conversation took the extra room above it.
+        val composer = rule.onNodeWithText("Ask about this log tab…", useUnmergedTree = true).getBoundsInRoot()
+        assertTrue(bounds("tile-card-ai").bottom - composer.bottom < 100.dp, "the composer is at the bottom: $composer in ${bounds("tile-card-ai")}")
+        assertTrue(composer.top - bounds("tile-card-ai").top > 160.dp, "and the conversation area above it is the extra room")
+    }
+
+    @Test
+    fun theNotesTileCanBeMadeTallerThanItsNotesAndWritesItsHeightOnRelease() {
+        setup(height = 900) { it.aiPanelVisible = true }
+        val before = heightOf("tile-card-notes")
+        val grown = growBy("notes", 150f)
+        assertTrue(grown > 110f, "Notes grew by $grown past its content")
+        assertEquals(before + grown, storedHeight(LogViewSectionId.NOTES)!!, 1f)
+    }
+
+    @Test
+    fun theDefaultHeightsStayBasedOnTheContent() {
+        setup(height = 900) { it.aiPanelVisible = true }
+        // No tile of the default layout is stretched into the room the window has: every flex tile is its header, fixed part and list.
+        assertTrue(heightOf("tile-card-tags") < 120f, "an empty Tags tile is its header and input: ${heightOf("tile-card-tags")}")
+        assertTrue(heightOf("tile-card-ai") < 300f)
+    }
+
+    private fun saved(id: String, folder: String? = null, favorite: Boolean = false) = SavedFilter(
+        id, "Filter $id", emptySet(), emptySet(), "", false, FilterMode.TAGS, emptySet(), "", false, emptyList(), false,
+        folderId = folder, favorite = favorite,
+    )
+
+    private fun scrollablesBelow(node: androidx.compose.ui.semantics.SemanticsNode): Int =
+        (if (node.config.contains(androidx.compose.ui.semantics.SemanticsProperties.VerticalScrollAxisRange)) 1 else 0) +
+            node.children.sumOf(::scrollablesBelow)
+
+    @Test
+    fun theSavedFiltersTileHasExactlyOneScrollerInItsTreeEvenWithBigFoldersAndFavorites() {
+        setup(height = 1200) { s ->
+            s.savedFilterFolders = listOf(SavedFilterFolder("folder-a", "Work"), SavedFilterFolder("folder-b", "Home"))
+            s.savedFilters = (1..30).map { i ->
+                saved("s$i", folder = when { i <= 12 -> "folder-a"; i <= 18 -> "folder-b"; else -> null }, favorite = i % 5 == 0)
+            }
+        }
+        val tree = rule.onNodeWithTag("filter-saved-filters-tree", useUnmergedTree = true).fetchSemanticsNode()
+        // The region's own column is the only scrollable: no list per folder, per favorites or per Ungrouped inside it.
+        assertEquals(1, scrollablesBelow(tree), "one scrollable in the tree")
     }
 
     @Test
@@ -743,15 +828,23 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun aStoredHeightLargerThanTheContentIsClampedAtLayoutAndLeftAsStored() {
+    fun aStoredHeightOutsideTheBoundsIsClampedAtLayoutAndLeftAsStored() {
         val classic = classicLogViewLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
         val filters = classic.children.first() as TileSplit<LogViewSectionId>
         val bloated = filters.copy(
-            children = filters.children.map { if ((it as TileLeaf).section == LogViewSectionId.TAGS) it.copy(sizeDp = 1900f) else it },
+            children = filters.children.map {
+                when ((it as TileLeaf).section) {
+                    // A content-only tile is as tall as its content whatever is stored; a flex tile honours a stored size up to the maximum.
+                    LogViewSectionId.LOG_LEVEL -> it.copy(sizeDp = 1900f)
+                    LogViewSectionId.TAGS -> it.copy(sizeDp = 500f)
+                    else -> it
+                }
+            },
         )
         val stored = classic.copy(children = listOf(bloated) + classic.children.drop(1))
         setup(height = 900) { it.updateSettings { s -> s.withLogViewLayout(stored) } }
-        assertTrue(heightOf("tile-card-tags") < 90f, "Tags is ${heightOf("tile-card-tags")} dp, not 1900")
+        assertTrue(heightOf("tile-card-log_level") < 120f, "Log level is ${heightOf("tile-card-log_level")} dp, not 1900")
+        assertEquals(500f, heightOf("tile-card-tags"), 0.8f)
         assertEquals(stored, state.settings.logViewLayout, "reading an old size does not rewrite it")
     }
 }

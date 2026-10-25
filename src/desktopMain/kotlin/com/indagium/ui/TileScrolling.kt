@@ -2,11 +2,10 @@
 
 package com.indagium.ui
 
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.scrollable
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.relocation.BringIntoViewResponder
 import androidx.compose.foundation.relocation.bringIntoViewResponder
 import androidx.compose.foundation.v2.ScrollbarAdapter
@@ -34,8 +33,8 @@ import kotlin.math.max
 // same [ScrollableState] (a wheel over any of them scrolls the column, and a nested scrollable inside that cannot scroll any more
 // hands the rest to it), and a graphicsLayer clip, which clips drawing AND hit-testing, cuts the part outside the viewport.
 
-/** Width (dp) of a scrolling column's scrollbar, drawn along the right edge of the column. */
-internal const val TILE_SCROLLBAR_DP = 6f
+/** Width (dp) of a scrolling column's scrollbar, drawn along the right edge of the column: the app's thin side-section bar ([ThinVerticalScrollbar]). */
+internal const val TILE_SCROLLBAR_DP = THIN_SCROLLBAR_DP
 
 /** Gap (dp) between a scrolling column's cards and its scrollbar. */
 internal const val TILE_SCROLLBAR_GAP_DP = 2f
@@ -141,12 +140,7 @@ private class TileScrollbarAdapter<K>(
 /** The thin scrollbar of a scrolling column that overflows; the surface sizes and places it ([TILE_SCROLLBAR_DP] wide, in the column's right-hand gutter). */
 @Composable
 internal fun <K> TileRegionScrollbar(scroll: TileScrollState<K>, region: TileScrollRegion<K>, tag: String) {
-    val tc = tc()
     val latest = rememberUpdatedState(region)
     val adapter = remember(scroll) { TileScrollbarAdapter(scroll) { latest.value } }
-    VerticalScrollbar(
-        adapter = adapter,
-        modifier = Modifier.fillMaxSize().testTag(tag),
-        style = appScrollbarStyle(tc),
-    )
+    ThinVerticalScrollbar(adapter, Modifier.fillMaxHeight().testTag(tag))
 }

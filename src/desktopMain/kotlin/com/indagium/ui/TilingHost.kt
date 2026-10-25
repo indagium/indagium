@@ -636,7 +636,8 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
         }
         // A collapsed tile keeps its body composed (so it keeps its state) but gives it no height.
         TileBodyHost(
-            modifier = if (collapsed) Modifier.fillMaxWidth().height(0.dp) else Modifier.weight(1f).fillMaxWidth(),
+            // One dp short on the right: the card's 1 dp border is drawn over its content, so a scrollbar at the body's edge would lie under it.
+            modifier = if (collapsed) Modifier.fillMaxWidth().height(0.dp) else Modifier.weight(1f).fillMaxWidth().padding(end = 1.dp),
             contentSized = contentSized,
             onMeasured = { totalPx, density ->
                 val fixed = max(0f, (totalPx - flex.shownPx) / density)
@@ -644,7 +645,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             },
         ) {
             val provided = flex.takeIf { contentSized && slot.sizing == TileBodySizing.FLEX }
-            CompositionLocalProvider(LocalTileTitle provides slot.title, LocalTileFlex provides provided) { slot.body(bodyInfo) }
+            CompositionLocalProvider(LocalTileTitle provides slot.title, LocalTileFlex provides provided, LocalInTile provides true) { slot.body(bodyInfo) }
         }
     }
 }

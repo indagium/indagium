@@ -9,7 +9,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.TooltipArea
-import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
@@ -29,7 +28,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -462,11 +460,7 @@ internal fun AiSidebarPanel(
                 }
             }
             Box(Modifier.matchParentSize()) {
-                VerticalScrollbar(
-                    adapter = rememberScrollbarAdapter(scroll),
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                    style = appScrollbarStyle(colors),
-                )
+                ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp))
             }
         }
         VDivider { delta ->
@@ -1162,9 +1156,11 @@ private fun AiRunCard(
                     onToggle = { expanded = !expanded },
                 )
                 if (expanded) {
-                    Box(Modifier.fillMaxWidth().heightIn(max = 220.dp)) {
+                    // In the tile the conversation is the one scrolling list: the investigation shows all its steps in it, with no scrollbar of its own.
+                    val flat = LocalFlatLists.current
+                    Box(Modifier.fillMaxWidth().then(if (flat) Modifier else Modifier.heightIn(max = 220.dp))) {
                         Column(
-                            Modifier.verticalScroll(traceScroll).padding(end = 10.dp),
+                            Modifier.then(if (flat) Modifier else Modifier.verticalScroll(traceScroll).padding(end = 10.dp)),
                             verticalArrangement = Arrangement.spacedBy(3.dp),
                         ) {
                             traceEvents.forEach { event ->
@@ -1184,11 +1180,7 @@ private fun AiRunCard(
                                 }
                             }
                         }
-                        VerticalScrollbar(
-                            adapter = rememberScrollbarAdapter(traceScroll),
-                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-                            style = appScrollbarStyle(colors),
-                        )
+                        if (!flat) ThinVerticalScrollbar(traceScroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
                     }
                 }
             }
@@ -1626,11 +1618,9 @@ private fun AiPromptComposer(
                     inner()
                 },
             )
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(promptScroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
-                    .padding(top = if (prompt.isBlank()) 4.dp else 24.dp, bottom = 4.dp),
-                style = appScrollbarStyle(colors),
+            ThinVerticalScrollbar(
+                promptScroll,
+                Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(top = if (prompt.isBlank()) 4.dp else 24.dp, bottom = 4.dp),
             )
             if (prompt.isNotBlank()) {
                 SquareIconButton(

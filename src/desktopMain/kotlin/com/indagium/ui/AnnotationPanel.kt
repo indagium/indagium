@@ -1721,11 +1721,7 @@ fun AnnotationPanel(
                 }
             }
             Box(Modifier.matchParentSize()) {
-                VerticalScrollbar(
-                    adapter = rememberScrollbarAdapter(scroll),
-                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-                    style = appScrollbarStyle(tc),
-                )
+                ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
 
@@ -1809,11 +1805,13 @@ internal fun DiagramLibrarySection(
     // The viewport keeps four dp of breathing room above and below each library list. Include
     // those in the measured section height so the 42-dp item and its related range line are not
     // clipped by the padded Box.
+    // Inside a tile's flex region (the Notes list) the region scrolls, so the library shows every row and has no scrollbar of its own.
+    val flat = LocalFlatLists.current
     val listHeight = (items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP)
-        .coerceIn(DIAGRAM_LIBRARY_PANEL_ROW_DP, DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP).dp
+        .coerceIn(DIAGRAM_LIBRARY_PANEL_ROW_DP, if (flat) Int.MAX_VALUE else DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP).dp
         .plus(8.dp)
     val listScroll = rememberScrollState()
-    val needsScrollbar = items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP > DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP
+    val needsScrollbar = !flat && items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP > DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP
     Box(Modifier.fillMaxWidth().height(listHeight).padding(vertical = 4.dp)) {
         if (items.isEmpty()) {
             AppText(

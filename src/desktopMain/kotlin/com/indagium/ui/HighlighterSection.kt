@@ -974,7 +974,7 @@ private fun HighlighterEditor(
                 messageRuleScopeOptions(sortedTags, tagSearch).filter { it.packagePrefix == null }
             }
             InlineField(tagSearch, { tagSearch = it }, "scope tag…", Modifier.fillMaxWidth(), onClear = { tagSearch = "" })
-            ScrollableItems(options.size, maxDp = 120) {
+            NestedScrollableItems(options.size, maxDp = 120) {
                 options.forEach { option ->
                     HoverBox(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),

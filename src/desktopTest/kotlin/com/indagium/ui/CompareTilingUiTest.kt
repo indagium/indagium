@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
@@ -28,6 +29,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
@@ -217,12 +219,34 @@ class CompareTilingUiTest {
             val card = rule.onNodeWithTag("tile-card-${tile.key}").getUnclippedBoundsInRoot()
             assertTrue(card.right.value <= bar.left.value, "$tile ends at ${card.right}, the scrollbar starts at ${bar.left}")
         }
-        // Notes is the only tile of its column and has a handle right under it, inside the window (Saved filters, with no list yet, has nothing to drag).
+        // Notes is the only tile of its column and has a handle right under it, inside the window.
         val notes = rule.onNodeWithTag("tile-card-notes").getBoundsInRoot()
         val handles = rule.onAllNodesWithContentDescription("Resize sections")
         val under = (0 until handles.fetchSemanticsNodes().size).map { handles[it].getBoundsInRoot() }
             .firstOrNull { kotlin.math.abs(it.top.value - notes.bottom.value) < 1f }
         assertTrue(under != null, "a handle under the last tile of the right column")
+    }
+
+    @Test
+    fun aFlexTileOfTheCompareFilterColumnResizesTallerThanItsEmptyListAndWritesTheCompareLayout() {
+        setup(height = 900)
+        val tags = bounds("tile-card-tags")
+        val handles = rule.onAllNodesWithContentDescription("Resize sections")
+        val handle = (0 until handles.fetchSemanticsNodes().size).map { handles[it] }
+            .firstOrNull { kotlin.math.abs(it.getBoundsInRoot().top.value - tags.bottom.value) < 1f }
+        assertNotNull(handle, "Tags has nothing in its list yet and still has a handle")
+        val density = rule.density.density
+        handle.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, 60f * density))
+            moveBy(Offset(0f, 60f * density))
+            up()
+        }
+        rule.waitForIdle()
+        val grown = bounds("tile-card-tags").height.value - tags.height.value
+        assertTrue(grown > 90f, "Tags grew by $grown past its (empty) list")
+        val written = (state.settings.compareLayout as TileSplit<LogViewSectionId>).children.first() as TileSplit<LogViewSectionId>
+        assertEquals(tags.height.value + grown, (written.children.first { (it as TileLeaf).section == LogViewSectionId.TAGS } as TileLeaf).sizeDp!!, 1f)
     }
 
     @Test
