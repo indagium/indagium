@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -86,22 +87,25 @@ private val ORIGINAL_TILES = setOf(LogViewSectionId.ORIGINAL, LogViewSectionId.O
 internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
     LogViewSectionId.entries.filter { !it.isLogTile && it !in ORIGINAL_TILES && logViewTileApplicable(it, ctx) }
 
-/** The toolbar button, with the hidden-tile badge. Draws nothing where the menu does not apply (see [layoutMenuTab]). */
+/**
+ * The toolbar button, with the hidden-tile badge. Draws nothing where the menu does not apply (see [layoutMenuTab]). In a [vertical]
+ * toolbar it fills the toolbar's width, and its menu opens beside it rather than below.
+ */
 @Composable
-internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit) {
+internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, vertical: Boolean = false) {
     val tab = layoutMenuTab(state) ?: return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val ctx = state.layoutMenuContext(tab)
     val badge = if (ctx.compare) state.compareBadgeCount(ctx) else state.logViewBadgeCount(ctx)
-    Box(Modifier.fillMaxHeight()) {
+    Box(if (vertical) Modifier.fillMaxWidth() else Modifier.fillMaxHeight()) {
         ToolbarBtn(
             "",
             icon = Icons.Outlined.Dashboard,
             showLabel = false,
             tooltip = "Layout",
             active = open,
-            modifier = Modifier.fillMaxHeight().width(36.dp).testTag("layout-menu-button"),
+            modifier = (if (vertical) Modifier.fillMaxWidth().height(36.dp) else Modifier.fillMaxHeight().width(36.dp)).testTag("layout-menu-button"),
             shape = RoundedCornerShape(7.dp),
         ) { open = !open }
         if (badge > 0) {
@@ -117,7 +121,7 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit) {
             ) { AppText(badge.toString(), color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
         }
         if (open) {
-            LayoutMenuPopup(state, tab, onReclaimFocus = onReclaimFocus, onDismiss = {
+            LayoutMenuPopup(state, tab, vertical = vertical, onReclaimFocus = onReclaimFocus, onDismiss = {
                 open = false
                 onReclaimFocus()
             })
@@ -125,25 +129,46 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit) {
     }
 }
 
-// Below the button, right edge aligned with it, kept inside the window.
-private class LayoutMenuPositionProvider : PopupPositionProvider {
+// Below the button (above it when there is no room below), right edge aligned with it, kept inside the window. From a vertical
+// toolbar: beside the button instead, on the side with room (right of it, else left), top aligned.
+private class LayoutMenuPositionProvider(private val vertical: Boolean) : PopupPositionProvider {
     override fun calculatePosition(anchorBounds: IntRect, windowSize: IntSize, layoutDirection: LayoutDirection, popupContentSize: IntSize): IntOffset {
-        val x = (anchorBounds.right - popupContentSize.width).coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-        val y = (anchorBounds.bottom + MENU_GAP_PX).coerceIn(0, (windowSize.height - popupContentSize.height).coerceAtLeast(0))
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val maxY = (windowSize.height - popupContentSize.height).coerceAtLeast(0)
+        if (vertical) {
+            val right = anchorBounds.right + MENU_GAP_PX
+            val x = if (right <= maxX) right else (anchorBounds.left - MENU_GAP_PX - popupContentSize.width).coerceAtLeast(0)
+            return IntOffset(x, anchorBounds.top.coerceIn(0, maxY))
+        }
+        val x = (anchorBounds.right - popupContentSize.width).coerceIn(0, maxX)
+        val below = anchorBounds.bottom + MENU_GAP_PX
+        val above = anchorBounds.top - MENU_GAP_PX - popupContentSize.height
+        // Above the button when the toolbar is on the bottom edge and there is no room below.
+        val y = if (below > maxY && above >= 0) above else below.coerceIn(0, maxY)
         return IntOffset(x, y)
     }
 }
 
 /** The popup itself: presets, Panels, Lock tiles, Reset. [onDismiss] must also reclaim focus; [onReclaimFocus] follows every click. */
 @Composable
-internal fun LayoutMenuPopup(state: AppState, tab: LogTab, onReclaimFocus: () -> Unit, onDismiss: () -> Unit) {
+internal fun LayoutMenuPopup(
+    state: AppState,
+    tab: LogTab,
+    onReclaimFocus: () -> Unit,
+    onDismiss: () -> Unit,
+    vertical: Boolean = false,
+) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     val ctx = state.layoutMenuContext(tab)
     val compare = ctx.compare
     val settings = state.settings
     val hidden = if (compare) settings.compareHidden else settings.logViewHidden
-    Popup(popupPositionProvider = remember { LayoutMenuPositionProvider() }, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
+    Popup(
+        popupPositionProvider = remember(vertical) { LayoutMenuPositionProvider(vertical) },
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
         Column(
             Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape).padding(vertical = 8.dp).testTag("layout-menu-popup"),
         ) {

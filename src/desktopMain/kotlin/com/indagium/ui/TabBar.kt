@@ -8,17 +8,9 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.CompareArrows
-import androidx.compose.material.icons.automirrored.outlined.ManageSearch
-import androidx.compose.material.icons.automirrored.outlined.StickyNote2
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.FilterList
-import androidx.compose.material.icons.outlined.FolderOpen
-import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,130 +38,36 @@ internal fun tabDisplayLabel(tab: LogTab, allTabs: List<LogTab>): String =
     tabLabelParts(tab, allTabs, TabLabelMode.FILE_SESSION).joined()
 
 // ── TabBar ────────────────────────────────────────────────────────────
+
+/**
+ * The tab strip and the main toolbar in one horizontal bar, as the window always had them (TOP, toolbar at the end). The window itself
+ * uses [ChromeScaffold], which places the two parts ([TabStrip], [MainToolbar]) on any edge; this is the same bar in one piece, for
+ * tests and previews that need the strip without the scaffold.
+ */
 @Composable
 internal fun TabBar(state: AppState, onReclaimFocus: () -> Unit = {}) {
     val tc = tc()
-    val toolbarGap = 4.dp
-    val leftShape = RoundedCornerShape(topStart = 7.dp, bottomStart = 7.dp)
-    val middleShape = RoundedCornerShape(0.dp)
-    val rightShape = RoundedCornerShape(topEnd = 7.dp, bottomEnd = 7.dp)
-    val standaloneShape = RoundedCornerShape(7.dp)
-    val hasRecentFiles = state.recentFiles.isNotEmpty()
-    val showToolbarText = !state.settings.toolbarIconOnlyButtons
-    val homeActive = state.activeTab()?.isCaptureLauncher == true
     val tabStyle = state.settings.tabStripStyle
     Row(
         Modifier.fillMaxWidth().height(tabStripHeightDp(tabStyle).dp).testTag("tab-strip").background(tabStripBackground(tabStyle, tc))
             .border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
-        // Outside TabOverflowRow, not inside it: that row's drag-reorder math divides the strip's
-        // pixel width by its own visible-tab count, so adding a sibling button here (rather than
-        // one more item inside the row) keeps that math untouched.
-        Spacer(Modifier.width(toolbarGap))
-        ToolbarBtn(
-            "",
-            icon = Icons.Outlined.Add,
-            showLabel = false,
-            tooltip = "New tab",
-            active = homeActive,
-            modifier = Modifier.fillMaxHeight(),
-            shape = standaloneShape,
-        ) { state.openHomeTab() }
-        Spacer(Modifier.width(toolbarGap))
-        ToolbarBtn(
-            "Filter",
-            icon = Icons.Outlined.FilterList,
-            showLabel = showToolbarText,
-            tooltip = "Toggle filter panel",
-            active = state.filterVisible,
-            modifier = Modifier.fillMaxHeight(),
-            shape = leftShape,
-        ) { state.updateFilterVisible(!state.filterVisible) }
-        ToolbarBtn(
-            "Notes",
-            icon = Icons.AutoMirrored.Outlined.StickyNote2,
-            showLabel = showToolbarText,
-            tooltip = "Toggle notes panel",
-            active = state.annotationVisible,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.updateAnnotationVisible(!state.annotationVisible) }
-        ToolbarBtn(
-            "AI",
-            icon = Icons.Outlined.AutoAwesome,
-            showLabel = showToolbarText,
-            tooltip = "Toggle AI panel",
-            active = state.aiPanelVisible,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
-        // Capture sessions expose a status card before a video attachment exists; the same global
-        // toggle must therefore remain reachable for live tabs as well as imported captures.
-        val activeTabCanShowVideo = state.tab(state.activeTabId)?.let {
-            it.attachedVideo != null || it.captureSessionId != null
-        } == true
-        if (activeTabCanShowVideo) {
-            ToolbarBtn(
-                "Video",
-                icon = Icons.Outlined.Movie,
-                showLabel = showToolbarText,
-                tooltip = "Toggle video in sidebar",
-                active = state.videoPanelVisible,
-                modifier = Modifier.fillMaxHeight(),
-                shape = middleShape,
-            ) { state.updateVideoPanelVisible(!state.videoPanelVisible) }
-        }
-        ToolbarBtn(
-            "Compare",
-            icon = Icons.AutoMirrored.Outlined.CompareArrows,
-            showLabel = showToolbarText,
-            tooltip = "Toggle compare view",
-            active = state.compareMode,
-            enabled = state.canCompare,
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.updateCompareMode(!state.compareMode) }
-        ToolbarBtn(
-            "Cases",
-            icon = Icons.AutoMirrored.Outlined.ManageSearch,
-            showLabel = showToolbarText,
-            tooltip = "Search past analyses",
-            enabled = state.tabs.isNotEmpty(),
-            modifier = Modifier.fillMaxHeight(),
-            shape = middleShape,
-        ) { state.activeTab()?.id?.let(state::openCaseLibrary) }
-        ToolbarBtn(
-            "Open",
-            icon = Icons.Outlined.FolderOpen,
-            showLabel = showToolbarText,
-            tooltip = "Open log file",
-            modifier = Modifier.fillMaxHeight(),
-            shape = if (hasRecentFiles) middleShape else rightShape,
-        ) { pickLogFileAndOpen(state, "Open Log File") }
-        if (hasRecentFiles) {
-            ToolbarBtn(
-                "▾",
-                active = state.recentMenuOpen,
-                tooltip = "Recent files",
-                modifier = Modifier.fillMaxHeight().width(18.dp),
-                shape = rightShape,
-                contentPadding = PaddingValues(horizontal = 0.dp, vertical = 5.dp),
-            ) { state.toggleRecentFilesMenu() }
-        }
-        Spacer(Modifier.width(toolbarGap))
-        // The log view's Layout menu (single log view and compare; draws nothing elsewhere), just before Settings.
-        LayoutMenuButton(state, onReclaimFocus)
-        Spacer(Modifier.width(toolbarGap))
-        ToolbarBtn(
-            "⚙",
-            tooltip = "Settings",
-            modifier = Modifier.fillMaxHeight().width(36.dp),
-            shape = standaloneShape
-        ) { state.settingsOpen = true }
-        Spacer(Modifier.width(toolbarGap))
+        TabStrip(state, ChromeOrientation.HORIZONTAL, Modifier.weight(1f).fillMaxHeight(), onReclaimFocus)
+        // Outside the strip, not inside it: its drag-reorder math divides the strip's pixel width by its own visible-tab count, so a
+        // sibling (rather than one more item inside the row) keeps that math untouched.
+        MainToolbar(state, ChromeOrientation.HORIZONTAL, onReclaimFocus, Modifier.fillMaxHeight())
     }
+}
+
+/**
+ * The tabs: log tabs, diagram workspaces and the Tests tab in one strip with overflow, drag reorder and the style from Settings >
+ * Appearance > Tabs. Horizontal tabs share the strip's width (or fit their label); vertical tabs stack, one style-height each. It draws
+ * no bar of its own: the bar (background, border) belongs to [ChromeScaffold] / [TabBar].
+ */
+@Composable
+internal fun TabStrip(state: AppState, orientation: ChromeOrientation, modifier: Modifier = Modifier, onReclaimFocus: () -> Unit = {}) {
+    TabOverflowRow(state = state, modifier = modifier, vertical = orientation == ChromeOrientation.VERTICAL, onReclaimFocus = onReclaimFocus)
 }
 
 /**
@@ -375,14 +273,17 @@ internal fun <T> tabOrderAfterVisibleReorder(
     overflowIds: List<T>,
 ): List<T> = overflowIds + visibleIds
 
+// [vertical] stacks the tabs top to bottom, each one style-height tall (the main axis below is then y, not x); the overflow button goes
+// under them. A vertical strip lays its tabs out like FIT mode does (one length per tab, here all equal), so it reuses that drag maths.
 @Composable
-internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
+internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boolean = false, onReclaimFocus: () -> Unit = {}) {
     val tc = tc()
     val density = LocalDensity.current.density
     var containerPx by remember { mutableStateOf(0) }
     var tabAreaPx by remember { mutableStateOf(0) }
     var dragTabId by remember { mutableStateOf<String?>(null) }
     var dragStartIndex by remember { mutableStateOf(-1) }
+    // Along the strip's main axis (x for a horizontal strip, y for a vertical one).
     var dragOffsetX by remember { mutableStateOf(0f) }
     var justReleasedTabId by remember { mutableStateOf<String?>(null) }
     var liveVisualTabIds by remember { mutableStateOf(emptyList<String>()) }
@@ -391,6 +292,17 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     // AppState field: a log tab's context menu is the window-level state.tabCtx overlay (App.kt),
     // but a diagram tab's menu only ever needs a Popup anchored to that tab's own Box.
     var ctxMenuSessionId by remember { mutableStateOf<String?>(null) }
+
+    // A dismissed Popup (and a clicked item) hands keyboard focus back to the root, which a clickable otherwise keeps (CLAUDE.md).
+    fun dismissCtxMenu() {
+        ctxMenuSessionId = null
+        onReclaimFocus()
+    }
+
+    fun dismissOverflow() {
+        overflowOpen = false
+        onReclaimFocus()
+    }
 
     // The strip's own interleaving of log tabs and diagram workspaces — the union order that lets
     // a diagram tab sit anywhere among log tabs. Deliberately session-only Compose state, not a
@@ -410,8 +322,10 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     // something to persist; state.tabOrder is otherwise never read to drive anything.
     var unifiedOrder by remember { mutableStateOf(state.tabOrder) }
 
+    val stripHeightDp = tabStripHeightDp(state.settings.tabStripStyle)
     val minTabPx = (80 * density).toInt()
-    val ovBtnPx = (40 * density).toInt()
+    // A vertical strip's overflow button is as tall as a tab; a horizontal one is 40 dp wide.
+    val ovBtnPx = if (vertical) (stripHeightDp * density).toInt() else (40 * density).toInt()
 
     val logTabIds = state.tabs.map { it.id }
     val diagramSessionIds = state.seq3Sessions.sessions.map { it.id }
@@ -442,8 +356,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 
     val visibleTabLimit = state.settings.visibleTabLimit
     val settings = state.settings
-    val fit = settings.tabsFitLabel()
-    val stripHeightDp = tabStripHeightDp(settings.tabStripStyle)
+    val position = settings.tabStripPosition
+    // The widths-differ maths (FIT) also serves a vertical strip, where every tab's length along the strip is one style height.
+    val fit = vertical || settings.tabsFitLabel()
     val logById = state.tabs.associateBy { it.id }
     val diagramById = state.seq3Sessions.sessions.associateBy { it.id }
 
@@ -457,7 +372,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     }
     val descriptors = renderOrder.mapNotNull { ref -> describe(ref)?.let { ref.rawId() to it } }.toMap()
     // FIT only: each tab as wide as its label (the equal-share maths of FIXED needs none of this).
-    val fitWidthsPx = if (fit) {
+    val fitWidthsPx = if (vertical) {
+        renderOrder.map { stripHeightDp * density }
+    } else if (fit) {
         fitTabWidthsPx(renderOrder.map { ref -> descriptors[ref.rawId()]?.let { tabFitContentDp(it.label, it.appearance) } ?: FIT_TAB_MIN_DP }, density)
     } else {
         emptyList()
@@ -524,16 +441,14 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
         state.seq3Sessions.reorderSessions(diagramOrder)
     }
 
-    Row(
-        modifier
-            .onSizeChanged { containerPx = it.width },
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    // The strip itself: a row (tabs, then the overflow button) or, vertical, a column of the same.
+    TabStripAxis(vertical, modifier.onSizeChanged { containerPx = if (vertical) it.height else it.width }) {
         Box(
-            Modifier.weight(1f).fillMaxHeight()
-                .onSizeChanged { tabAreaPx = it.width }
+            Modifier.fillStrip()
+                .onSizeChanged { tabAreaPx = if (vertical) it.height else it.width }
                 .pointerInput(visibleTabIds, tabWidthPx, visibleWidthsPx) {
                     var downPos = Offset.Zero
+                    var downMain = 0f
                     var downId: String? = null
                     var dragging = false
                     awaitReorderPointerScope {
@@ -543,10 +458,12 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                             when (ev.type) {
                                 PointerEventType.Press -> {
                                     downPos = ch.position; dragging = false
+                                    val pointerMain = if (vertical) ch.position.y else ch.position.x
+                                    downMain = pointerMain
                                     val idx = if (fit) {
-                                        tabIndexAtX(ch.position.x, visibleWidthsPx)
+                                        tabIndexAtX(pointerMain, visibleWidthsPx)
                                     } else {
-                                        (ch.position.x / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                                        (pointerMain / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
                                     }
                                     downId = visibleTabIds.getOrNull(idx)
                                 }
@@ -562,7 +479,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     }
                                     if (dragging && dragTabId != null) {
                                         ch.consume()
-                                        dragOffsetX = ch.position.x - downPos.x
+                                        dragOffsetX = (if (vertical) ch.position.y else ch.position.x) - downMain
                                         liveVisualTabIds = if (fit) {
                                             browserTabOrderDuringDragVariable(
                                                 visibleIds = visibleTabIds,
@@ -621,11 +538,16 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                         targetX = targetX,
                         animatedX = animatedX,
                     )
+                    val tabLengthDp = ((widthById[ref.rawId()] ?: tabWidthPx) / density).dp
                     Box(
                         Modifier
-                            .offset { IntOffset(tabX.roundToInt(), 0) }
-                            .width(((widthById[ref.rawId()] ?: tabWidthPx) / density).dp)
-                            .fillMaxHeight()
+                            .then(
+                                if (vertical) {
+                                    Modifier.offset { IntOffset(0, tabX.roundToInt()) }.height(tabLengthDp).fillMaxWidth()
+                                } else {
+                                    Modifier.offset { IntOffset(tabX.roundToInt(), 0) }.width(tabLengthDp).fillMaxHeight()
+                                },
+                            )
                             .zIndex(if (isDragging) 1f else 0f)
                             .graphicsLayer {
                                 if (isDragging) {
@@ -644,8 +566,8 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
                                     showClose = true,
                                     dragging = isDragging,
-                                    onClick = { if (dragTabId == null) state.activateTab(tab.id) },
-                                    onClose = { state.closeTab(tab.id) },
+                                    onClick = { if (dragTabId == null) state.activateTab(tab.id).also { onReclaimFocus() } },
+                                    onClose = { state.closeTab(tab.id).also { onReclaimFocus() } },
                                     onCtxMenu = { x, y -> state.tabCtx = TabCtxMenuState(tab.id, x, y) },
                                 )
                             }
@@ -660,15 +582,16 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     isActive = active,
                                     showClose = true,
                                     dragging = isDragging,
-                                    onClick = { if (dragTabId == null) state.seq3Sessions.activate(workspace.id) },
-                                    onClose = { state.seq3Sessions.close(workspace.id) },
+                                    onClick = { if (dragTabId == null) state.seq3Sessions.activate(workspace.id).also { onReclaimFocus() } },
+                                    onClose = { state.seq3Sessions.close(workspace.id).also { onReclaimFocus() } },
                                     onCtxMenu = { _, _ -> ctxMenuSessionId = workspace.id },
                                 )
                                 if (ctxMenuSessionId == workspace.id) {
                                     Popup(
-                                        alignment = Alignment.TopStart,
-                                        offset = IntOffset(0, ((stripHeightDp - 2) * density).roundToInt()),
-                                        onDismissRequest = { ctxMenuSessionId = null },
+                                        popupPositionProvider = remember(position, density, stripHeightDp) {
+                                            ChromePopupPositionProvider(position, ((stripHeightDp - 2) * density).roundToInt())
+                                        },
+                                        onDismissRequest = ::dismissCtxMenu,
                                         properties = PopupProperties(focusable = true),
                                     ) {
                                         Column(
@@ -683,28 +606,28 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                             // own log-tab precedent).
                                             CtxItem(icon = Icons.Outlined.ContentCopy, label = "Copy diagram title") {
                                                 state.copyToClipboard(workspace.document.title.ifBlank { "Diagram" })
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                             CtxDivider()
                                             CtxItem(icon = Icons.Outlined.Close, label = "Close") {
                                                 state.seq3Sessions.close(workspace.id)
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                             CtxItem(icon = Icons.Outlined.Block, label = "Close other diagrams") {
                                                 closeOtherDiagramWorkspaces(state, keepId = workspace.id)
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                             CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the right") {
                                                 closeDiagramWorkspacesToRight(state, workspace.id)
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                             CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the left") {
                                                 closeDiagramWorkspacesToLeft(state, workspace.id)
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                             CtxItem(icon = Icons.Outlined.Block, label = "Close all diagrams") {
                                                 closeAllDiagramWorkspaces(state)
-                                                ctxMenuSessionId = null
+                                                dismissCtxMenu()
                                             }
                                         }
                                     }
@@ -719,8 +642,8 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 isActive = state.testsSurfaceActive,
                                 showClose = true,
                                 dragging = isDragging,
-                                onClick = { if (dragTabId == null) state.openTestsTab() },
-                                onClose = { state.closeTestsTab() },
+                                onClick = { if (dragTabId == null) state.openTestsTab().also { onReclaimFocus() } },
+                                onClose = { state.closeTestsTab().also { onReclaimFocus() } },
                             )
                         }
                     }
@@ -728,17 +651,19 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
             }
         }
         if (overflowRefs.isNotEmpty()) {
-            Box(Modifier.fillMaxHeight()) {
+            val overflowFill = if (vertical) Modifier.fillMaxWidth().height(stripHeightDp.dp) else Modifier.fillMaxHeight()
+            Box(overflowFill) {
                 ToolbarBtn(
                     "▾ ${overflowRefs.size}",
                     active = overflowOpen,
-                    modifier = Modifier.fillMaxHeight(),
+                    modifier = overflowFill,
                 ) { overflowOpen = !overflowOpen }
                 if (overflowOpen) {
                     Popup(
-                        alignment = Alignment.TopStart,
-                        offset = IntOffset(0, (stripHeightDp * density).toInt()),
-                        onDismissRequest = { overflowOpen = false },
+                        popupPositionProvider = remember(position, density, stripHeightDp) {
+                            ChromePopupPositionProvider(position, (stripHeightDp * density).toInt())
+                        },
+                        onDismissRequest = ::dismissOverflow,
                         properties = PopupProperties(focusable = true),
                     ) {
                         Box(
@@ -765,7 +690,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                                 is TabRef.Diagram -> state.seq3Sessions.activate(ref.sessionId)
                                                 TabRef.Tests -> state.openTestsTab()
                                             }
-                                            overflowOpen = false
+                                            dismissOverflow()
                                         },
                                     ) {
                                         AppText(
