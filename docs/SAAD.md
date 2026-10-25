@@ -859,7 +859,8 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
   switches the group on again. `revealFilterTiles` (Cmd+1, Ctrl+F, the filter bar's residual chip) un-hides, expands and un-maximizes.
 - **Compare on tiles.** `CompareView` (`ui/CompareView.kt`: which tabs are A and B, F6, displayed filters) puts a strip above one `TilingSurface`
-  (`ui/CompareTiling.kt`): "Filters apply to" with an A | B | Both `SegmentedControl` and a "Link scroll" pill (`AppSettings.compareSyncScroll`). The strip is
+  (`ui/CompareTiling.kt`): "Filters apply to" with an A | B | Both `SegmentedControl`, "B:" with the full `CompareTabPicker` (every tab as a pill, the overflow
+  list and drag reorder, in the width left over; picking a pill sets `compareTabId`) and a "Link scroll" pill (`AppSettings.compareSyncScroll`). The strip is
   not a tile because tiles move. The tiles are the filter sections, A (Original over Log), B (Original over Log), Notes, Diagram library, AI and
   Video, emitted in that fixed order; Notes, AI and Video follow the left tab, as they always did. `LogViewTilingFrame` (size, Esc to restore a
   maximized tile) and `LogViewSurface` (wide `TilingSurface` or `TileStackedSurface` below 720 dp) are shared with the single view. The layout is
@@ -867,9 +868,19 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   (Compare grid = originals on top, A left; Compare rows = both Originals in one row, both Logs in the next), edited by `commitCompareLayout` /
   `AppState.hideLogViewTile` (compare-aware) on release. ORIGINAL_A / ORIGINAL_B apply per tab's own `showUnfiltered` (`compareTileContext`).
   `BoundLogViewer(compare = true)` binds each side without the horizontal filter bar and the Find scope chip (compare searches each tab's Filtered slot
-  only). Each log header starts with an A / B badge (accent while the filter panel edits that side), a kind pill (Log / Live / Capture) and the file name;
-  B's has the compact `CompareTabPicker` (the current tab as a pill, every other tab in the "v N" list). The Layout menu works in compare: the two compare
+  only). Each log header starts with an A / B badge (accent while the filter panel edits that side), a kind pill (Log / Live / Capture) and the file name,
+  which ellipsizes first when the tile narrows (see "Log toolbar in a tile"). The Layout menu works in compare: the two compare
   presets, the shared panels, Lock and Reset (`layoutMenuContext` picks the compare context while compare is on).
+- **Log toolbar in a tile.** The log toolbar is the Log tile's header, so it degrades by the tile's width instead of clipping. The pure rule is
+  `logToolbarVariant` (`ui/LogToolbarLayout.kt`, estimated button widths, the tile minus grip, maximize and, in compare, the A / B badge, kind pill
+  and a 40 dp file name): wide = the legacy toolbar; then Expand all / Collapse all / Unfiltered become icon buttons with tooltips; then the "N / M
+  entries" count becomes the tooltip of the empty bar space (and the first line of the menu); then Expand all, Collapse all and Unfiltered move
+  into a "⋯" menu (`LogToolbarControls.kt`: a focusable `Popup` like the Export menu, focus returned to the log on dismiss or pick), then Δt and
+  the filter bar toggle follow. Export, Search, the grip and maximize always stay. In single-view tile widths (no filter bar, Unfiltered closed) the
+  variants start at about 624 dp (labels), 472 dp (icons + count), 352 dp (icons), 272 dp (first overflow) and below that Δt overflows too;
+  compare adds 114 dp to each. `toolbarActions` and its roving keyboard order are unchanged: an action in the menu is still reached (Enter runs it,
+  the "⋯" button carries the cursor ring). The untiled toolbar is always the full variant. `LogViewerTiles.logHeaderLeading` receives the file
+  name's maximum width (`logToolbarNameMaxDp`).
 - **Filters apply to A | B | Both.** `AppState.compareFilterTarget` (`CompareFilterTarget`) decides what each pane shows, through the pure
   `compareDisplayedFilters(target, A's filter, B's filter)` (`ui/CompareFilters.kt`): A = A's filter on A, and on B only A's highlighters;
   B = B's own filter on B, and on A only B's highlighters (the filter panel then edits B's tab, `compareFilterEditTabId`); Both = A's filter on both
@@ -1513,6 +1524,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter lines inset by the 8 dp card corner, section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
 | `LogViewTiling.kt` / `LogViewLayoutState.kt` / `TiledSectionHost.kt` | The single log view on tiles (§6.4): `LogViewTilingHost` (size via `onSizeChanged`, fixed emission order, capture video pin, parked video, maximize), the `AppState` extensions behind the Layout menu, shortcuts and tab-strip toggles (commit/hide/show/preset/reset/lock/collapse/reveal), and the `SectionHost` that turns the filter panel's sections into tiles |
+| `LogToolbarLayout.kt` / `LogToolbarControls.kt` | The log toolbar's width variants (pure) and the buttons / "⋯" overflow menu that draw them (§6.4) |
 | `CompareTiling.kt` / `CompareFilters.kt` / `CompareLayoutState.kt` | The compare view on tiles (§6.4): the strip with the A \| B \| Both switch and the scroll link, the host and its fixed emission order, the A / B badges, `CompareScrollSync`; the pure filter-target rules and `nearestEntryIndexByTime`; the `AppState` extensions for the tab pair, tile context, layout commit, presets and badge |
 | `LogViewLayout.kt` / `LayoutMenu.kt` / `BoundLogViewer.kt` | UI-free log-view layout model (presets, legacy derivation, visibility, sanitizer, mutators); the tab-strip Layout menu (preset thumbnails, Panels, Lock, Reset, hidden badge); `LogViewer` bound to `AppState` for the tiled and the legacy view |
 | `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |

@@ -114,7 +114,7 @@ internal fun CompareView(
             }
         },
     ) {
-        CompareFilterStrip(state, onReclaimFocus = reclaim)
+        CompareFilterStrip(state, leftTab, rightTab, onReclaimFocus = reclaim)
         CompareTilingHost(
             state = state,
             left = leftTab,
@@ -145,9 +145,9 @@ internal fun CompareTabPicker(
     leftTab: LogTab,
     rightTab: LogTab,
     modifier: Modifier = Modifier,
-    // The tiled compare view hosts the picker inside B's small log header: only the tab being compared shows as a pill and every other
-    // tab is in the "▾ N" list, so the current choice is always visible however narrow the header is.
-    compact: Boolean = false,
+    // Gives the log list the keyboard focus back once a pill or overflow row was clicked or the overflow list was dismissed: a clicked
+    // pill (and a dismissed Popup) keeps keyboard focus otherwise, and the compare view's keys stop working.
+    onReclaimFocus: () -> Unit = {},
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
@@ -168,18 +168,14 @@ internal fun CompareTabPicker(
     LaunchedEffect(state.tabs.map { it.id }) {
         compareOrderIds = orderedTabsForComparePicker(state.tabs, compareOrderIds).map { it.id }
     }
-    val (visibleTabs, overflowTabs) = remember(orderedTabs, containerPx, state.settings.visibleTabLimit, compact, rightTab.id) {
-        if (compact) {
-            orderedTabs.filter { it.id == rightTab.id } to orderedTabs.filter { it.id != rightTab.id }
-        } else {
-            splitTabsForVisibility(
-                tabs = orderedTabs,
-                containerPx = containerPx,
-                minTabPx = minTabPx,
-                overflowButtonPx = ovBtnPx,
-                visibleTabLimit = state.settings.visibleTabLimit,
-            )
-        }
+    val (visibleTabs, overflowTabs) = remember(orderedTabs, containerPx, state.settings.visibleTabLimit) {
+        splitTabsForVisibility(
+            tabs = orderedTabs,
+            containerPx = containerPx,
+            minTabPx = minTabPx,
+            overflowButtonPx = ovBtnPx,
+            visibleTabLimit = state.settings.visibleTabLimit,
+        )
     }
 
     val visibleTabIds = visibleTabs.map { it.id }
@@ -206,6 +202,7 @@ internal fun CompareTabPicker(
         if (tabId == leftTab.id) state.activateTab(rightTab.id)
         state.compareTabId = tabId
         overflowOpen = false
+        onReclaimFocus()
     }
 
     Row(
@@ -333,7 +330,7 @@ internal fun CompareTabPicker(
                     Popup(
                         alignment = Alignment.TopEnd,
                         offset = IntOffset(0, (22 * density).toInt()),
-                        onDismissRequest = { overflowOpen = false },
+                        onDismissRequest = { overflowOpen = false; onReclaimFocus() },
                         properties = PopupProperties(focusable = true),
                     ) {
                         ScrollColumnWithBar(

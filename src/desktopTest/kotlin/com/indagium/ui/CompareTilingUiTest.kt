@@ -12,6 +12,8 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
@@ -63,6 +65,7 @@ import kotlin.test.assertTrue
 
 private const val A_ID = "cmp-ui-a"
 private const val B_ID = "cmp-ui-b"
+private const val C_ID = "cmp-ui-c"
 private const val SECONDS_PER_MINUTE = 60
 
 /** The real CompareView on tiles: the 2 x 2 arrangement, the A | B | Both switch, the A / B badges, the scroll link and the Layout menu. */
@@ -201,6 +204,55 @@ class CompareTilingUiTest {
         rule.waitForIdle()
         rule.onNodeWithTag(compareBadgeTag("A")).assertContentDescriptionEquals("A, filters apply here")
         rule.onNodeWithTag(compareBadgeTag("B")).assertContentDescriptionEquals("B, filters do not apply here")
+    }
+
+    private fun pill(label: String): SemanticsMatcher = hasText(label) and hasAnyAncestor(hasTestTag(COMPARE_PICKER_TAG))
+
+    @Test
+    fun theStripShowsTheFullTabPickerAndSelectingAPillChangesTheComparedTab() {
+        setup {
+            it.tabs = it.tabs + mkTab(C_ID, "gamma.log", rows("GammaTag"))
+        }
+        // Every tab is a pill, as before the compare view was tiled (not just the compared one), in the strip above the tiles.
+        val strip = bounds(COMPARE_PICKER_TAG)
+        assertTrue(strip.bottom <= bounds("tile-card-original_a").top, "the picker is above the tiles")
+        rule.onNode(pill("alpha.log")).assertExists()
+        rule.onNode(pill("beta.log")).assertExists()
+        rule.onNode(pill("gamma.log")).assertExists()
+        assertEquals(B_ID, state.compareTabId)
+        rule.onNode(pill("gamma.log")).performClick()
+        rule.waitForIdle()
+        assertEquals(C_ID, state.compareTabId)
+        // B's own header names the new tab, next to the B badge, without a picker of its own.
+        rule.onNodeWithTag(compareNameTag("B")).assertTextEquals("gamma.log")
+        assertEquals(1, rule.onAllNodes(hasText("gamma.log") and hasAnyAncestor(hasTestTag("tile-card-log_b"))).fetchSemanticsNodes().size)
+        rule.onAllNodesWithTag(COMPARE_PICKER_TAG).assertCountEquals(1)
+        assertTrue(rule.onAllNodes(hasTestTag(COMPARE_PICKER_TAG) and hasAnyAncestor(hasTestTag("tile-card-log_b"))).fetchSemanticsNodes().isEmpty())
+    }
+
+    @Test
+    fun selectingTheLeftTabInThePickerSwapsTheSides() {
+        setup()
+        rule.onNode(pill("alpha.log")).performClick()
+        rule.waitForIdle()
+        assertEquals(A_ID, state.compareTabId)
+        assertEquals(B_ID, state.activeTabId, "A moved to the tab B showed")
+    }
+
+    @Test
+    fun aNarrowCompareTileKeepsItsToolbarActionsReachableAndNamesTheFile() {
+        setup(width = 900)
+        // Each log tile is well under 450 dp wide: Expand all and friends are icons or in the overflow menu, never clipped away.
+        listOf("log_a", "log_b").forEach { id ->
+            val card = bounds("tile-card-$id")
+            assertTrue(card.right - card.left < 450.dp, "the $id tile is narrow: $card")
+        }
+        rule.onAllNodesWithTag(logToolbarTag("export")).assertCountEquals(2)
+        rule.onAllNodesWithTag(logToolbarTag("search")).assertCountEquals(2)
+        rule.onNodeWithTag(compareNameTag("A")).assertTextEquals("alpha.log")
+        rule.onNodeWithTag(compareNameTag("B")).assertTextEquals("beta.log")
+        val reachable = exists(LOG_TOOLBAR_OVERFLOW_TAG) || exists(logToolbarTag("expand-all"))
+        assertTrue(reachable, "Expand all is an icon or in the overflow menu")
     }
 
     @Test
