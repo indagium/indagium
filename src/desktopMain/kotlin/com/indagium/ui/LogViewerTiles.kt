@@ -39,8 +39,9 @@ internal class LogViewerTiles(
         logHeaderLeading?.invoke(this, nameMaxDp)
     }
 
-    /** After the toolbar buttons: the Log tile's maximize button. */
+    /** After the toolbar buttons: the Log tile's maximize button, a regular button gap away from the last of them. */
     val toolbarTrailing: @Composable RowScope.() -> Unit = {
+        Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
         scope.MaximizeButton(logId)
         Spacer(Modifier.width(TOOLBAR_TRAILING_GAP_DP.dp))
     }

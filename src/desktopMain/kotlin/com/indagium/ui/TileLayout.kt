@@ -6,18 +6,24 @@ import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.roundToInt
 
 // The generic tiling engine behind the New tab and the log view: pure tree operations, geometry and drop hit-testing over a
 // TileNode<K> tree whose leaves are identified by K. No Compose imports on purpose: the host's custom Layout, the drop
-// overlay, the size labels and the preset mini-icons all read the same TileGeometry, and everything here is unit-tested
-// without a UI. HomeLayout.kt binds K to HomeSectionId and keeps the New tab's names; the settings codec is TileLayoutJson.kt.
+// overlay and the preset mini-icons all read the same TileGeometry, and everything here is unit-tested without a UI.
+// HomeLayout.kt binds K to HomeSectionId and keeps the New tab's names; the settings codec is TileLayoutJson.kt.
 //
 // Sizing along a split's axis. A child is one of:
 // - collapsed: a leaf of a COLUMN split that is in the `collapsed` set; it takes exactly collapsedExtentDp;
 // - pinned: it has a sizeDp; it takes that many dp. If that would leave the weighted children less than minTileDp each, all
 //   pinned sizes scale down together. When no weighted child is left, the pinned sizes act as weights over what remains;
 // - weighted: the rest share what remains by weight.
+//
+// Scrolling columns. A COLUMN split whose leaves all satisfy the caller's `scrolls` predicate (the log view: the side sections, never
+// the log or Video) does not have to fit its viewport. Its children's heights are their sizeDp (pinned: at least scrollMinDp), the
+// weighted ones share what the pinned ones leave (minTileDp each at the least), and when everything is pinned and shorter than the
+// viewport the last tile that is not collapsed takes the rest. The column's content (the heights plus the gaps) may be taller than
+// the viewport; the host then scrolls it, and TileGeometry says so through a TileScrollRegion. A resize there changes only the tile
+// above the gap (the weighted siblings are first pinned at the height they have), so nothing else shrinks and the tiles below move.
 
 /** Width (dp) of the page-edge drop bands along the four host edges. They win over the card under the pointer. */
 const val TILE_PAGE_BAND_DP: Float = 28f
@@ -26,6 +32,9 @@ const val TILE_MIN_WEIGHT: Float = 0.05f
 const val TILE_MAX_WEIGHT: Float = 20f
 const val TILE_MIN_SIZE_DP: Float = 1f
 const val TILE_MAX_SIZE_DP: Float = 8000f
+
+// A scrolling column scrolls only when its content is taller than the viewport by more than this.
+private const val TILE_SCROLL_EPSILON_DP: Float = 0.5f
 
 /** Height (dp) a collapsed tile keeps along its COLUMN split: just its header. */
 const val TILE_COLLAPSED_EXTENT_DP: Float = 32f
@@ -61,7 +70,11 @@ data class TileRect(val x: Float, val y: Float, val w: Float, val h: Float) {
     fun contains(px: Float, py: Float): Boolean = px >= x && px < right && py >= y && py < bottom
 }
 
-data class TileCardRect<K>(val section: K, val rect: TileRect)
+/**
+ * A card's [rect]; [scrollRegion] is the index in [TileGeometry.scrollRegions] of the scrolling column it sits in (its rect is then in
+ * unscrolled content coordinates).
+ */
+data class TileCardRect<K>(val section: K, val rect: TileRect, val scrollRegion: Int? = null)
 
 /**
  * The gap between two siblings of a split.
@@ -72,7 +85,9 @@ data class TileCardRect<K>(val section: K, val rect: TileRect)
  * @property rect the gap strip itself, which is also the splitter hit area.
  * @property splitExtent the split's extent along [axis] in dp (its size minus all its gaps); it is what a resize needs to
  * turn a drag of d dp into weight terms.
- * @property resizable false when a neighbour is collapsed: dragging that gap does nothing.
+ * @property resizable false when a neighbour is collapsed: dragging that gap does nothing (in a scrolling column: when the tile above is collapsed).
+ * @property scrolling true when the split that owns the gap is a scrolling column: a resize changes only the tile above the gap.
+ * @property scrollRegion the index in [TileGeometry.scrollRegions] of the scrolling column the gap lies in (its rect is unscrolled).
  */
 data class TileGap(
     val path: List<Int>,
@@ -81,16 +96,47 @@ data class TileGap(
     val rect: TileRect,
     val splitExtent: Float,
     val resizable: Boolean = true,
+    val scrolling: Boolean = false,
+    val scrollRegion: Int? = null,
 )
 
-data class TileGeometry<K>(val cards: List<TileCardRect<K>>, val gaps: List<TileGap>) {
+/**
+ * A scrolling column: [key] is its first leaf (stable while the column is), [viewport] the rect it shows and [contentHeight] the
+ * height of its children plus gaps. Rects of the cards and gaps inside are in unscrolled content coordinates (the viewport's top is
+ * content offset 0); the host shifts them by the scroll offset.
+ */
+data class TileScrollRegion<K>(val key: K, val viewport: TileRect, val contentHeight: Float) {
+    /** How far the content can scroll (dp); 0 while it fits. */
+    val maxOffset: Float get() = if (contentHeight - viewport.h > TILE_SCROLL_EPSILON_DP) contentHeight - viewport.h else 0f
+
+    val scrolls: Boolean get() = maxOffset > 0f
+}
+
+data class TileGeometry<K>(val cards: List<TileCardRect<K>>, val gaps: List<TileGap>, val scrollRegions: List<TileScrollRegion<K>> = emptyList()) {
     fun cardOf(section: K): TileRect? = cards.firstOrNull { it.section == section }?.rect
+
+    /**
+     * The cards as they are on screen with each scrolling column scrolled by [offsetOf]: shifted, cut to the column's viewport, and
+     * dropped when nothing of them shows. Gaps are left out. This is what drop hit-testing and the drop preview use.
+     */
+    fun visibleCards(offsetOf: (TileScrollRegion<K>) -> Float): TileGeometry<K> {
+        if (scrollRegions.isEmpty()) return TileGeometry(cards, emptyList(), scrollRegions)
+        val shown = cards.mapNotNull { card ->
+            val region = card.scrollRegion?.let { scrollRegions.getOrNull(it) } ?: return@mapNotNull card
+            val shifted = card.rect.copy(y = card.rect.y - offsetOf(region))
+            val top = max(shifted.y, region.viewport.y)
+            val bottom = min(shifted.bottom, region.viewport.bottom)
+            if (bottom - top <= 0f) null else TileCardRect(card.section, shifted.copy(y = top, h = bottom - top))
+        }
+        return TileGeometry(shown, emptyList(), scrollRegions)
+    }
 }
 
 /**
  * What [tileGeometry] needs besides the tree. [gapRowDp] separates side-by-side children (a ROW split), [gapColumnDp]
  * stacked ones (a COLUMN split). [minTileDp] is the least a weighted child is squeezed to by pinned siblings and the least a
  * resize leaves a tile along the split axis; [minPairShare] is the least share of a pair's total weight a resize leaves.
+ * [scrollMinDp] / [scrollMaxDp] bound the height of a pinned tile in a scrolling column.
  */
 data class TileGeometrySpec(
     val gapRowDp: Float,
@@ -98,6 +144,8 @@ data class TileGeometrySpec(
     val collapsedExtentDp: Float = TILE_COLLAPSED_EXTENT_DP,
     val minTileDp: Float,
     val minPairShare: Float,
+    val scrollMinDp: Float = minTileDp,
+    val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
 )
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -284,6 +332,48 @@ private fun <K> sizePlan(split: TileSplit<K>, extent: Float, minTileDp: Float, c
     return TileSizePlan(sizes, isCollapsed, isPinned, scale, weightedExtent)
 }
 
+// How a scrolling column's children are sized; see the header comment. [extent] is the viewport height minus the gaps.
+private class TileScrollPlan(val sizes: List<Float>, val collapsed: List<Boolean>, val pinned: List<Boolean>)
+
+private fun <K> scrollPlan(
+    split: TileSplit<K>,
+    extent: Float,
+    minTileDp: Float,
+    scrollMinDp: Float,
+    collapsedExtentDp: Float,
+    collapsedSet: Set<K>,
+): TileScrollPlan {
+    val children = split.children
+    val isCollapsed = children.map { it is TileLeaf && it.section in collapsedSet }
+    val isPinned = children.mapIndexed { i, c -> !isCollapsed[i] && c.pinnedDp() != null }
+
+    fun fixedSize(i: Int): Float = if (isCollapsed[i]) collapsedExtentDp else max(children[i].pinnedDp()!!, scrollMinDp)
+    val fixed = children.indices.filter { isCollapsed[it] || isPinned[it] }.sumOf { fixedSize(it).toDouble() }.toFloat()
+    val weighted = children.indices.filter { !isCollapsed[it] && !isPinned[it] }
+    val weightSum = weighted.sumOf { children[it].weight.toDouble() }.toFloat()
+    // The weighted tiles share what is left exactly as a fitting column shares it, unless the fixed ones leave less than minTileDp each:
+    // then they get that much between them and the column is taller than its viewport (and scrolls) instead of squeezing the fixed ones.
+    val weightedExtent = max(max(0f, extent - fixed), weighted.size * minTileDp)
+    val sizes = children.indices.map { i ->
+        when {
+            isCollapsed[i] || isPinned[i] -> fixedSize(i)
+            weightSum > 0f -> weightedExtent * children[i].weight / weightSum
+            else -> weightedExtent / weighted.size
+        }
+    }.toMutableList()
+    if (weighted.isEmpty()) {
+        // Everything is pinned or collapsed: when that is shorter than the viewport the last open tile takes the rest.
+        val slack = extent - sizes.sumOf { it.toDouble() }.toFloat()
+        val last = children.indices.lastOrNull { !isCollapsed[it] }
+        if (slack > 0f && last != null) sizes[last] = sizes[last] + slack
+    }
+    return TileScrollPlan(sizes, isCollapsed, isPinned)
+}
+
+// True when [split] is a column whose leaves all satisfy [scrolls]: it keeps its children's heights and scrolls instead of fitting.
+private fun <K> isScrollingColumn(split: TileSplit<K>, scrolls: (K) -> Boolean): Boolean =
+    split.axis == TileAxis.COLUMN && tileLeafSections(split).all(scrolls)
+
 // ---------------------------------------------------------------------------------------------------------------
 // Resize
 // ---------------------------------------------------------------------------------------------------------------
@@ -296,6 +386,10 @@ private fun <K> sizePlan(split: TileSplit<K>, extent: Float, minTileDp: Float, c
  * - pinned with pinned: the dp moves between them, their total staying constant.
  * [extentDp] is [TileGap.splitExtent]; [collapsed] and [collapsedExtentDp] must be what the geometry was laid out with. A gap
  * next to a collapsed tile, and invalid input, return [root] unchanged.
+ *
+ * With a [scrollRange] (the split is a scrolling column, [TileGap.scrolling]) only the tile above the gap changes: its sizeDp becomes its
+ * current height plus [deltaDp] within the range, and every weighted sibling is pinned at the height it has now, so no other tile
+ * changes size. A gap under a collapsed tile does nothing. The split's pinned heights are at least the range's start.
  */
 internal fun <K> resizeTileSplit(
     root: TileNode<K>,
@@ -307,11 +401,32 @@ internal fun <K> resizeTileSplit(
     minPairShare: Float,
     collapsed: Set<K> = emptySet(),
     collapsedExtentDp: Float = TILE_COLLAPSED_EXTENT_DP,
+    scrollRange: ClosedFloatingPointRange<Float>? = null,
 ): TileNode<K> {
     if (extentDp <= 0f || !deltaDp.isFinite()) return root
     return updateSplitAt(root, path) { split ->
-        resizePair(split, index, deltaDp, minSizeDp, minPairShare, sizePlan(split, extentDp, minSizeDp, collapsedExtentDp, collapsed))
+        if (scrollRange != null) {
+            val plan = scrollPlan(split, extentDp, minSizeDp, scrollRange.start, collapsedExtentDp, collapsed)
+            resizeScrolled(split, index, deltaDp, plan, scrollRange)
+        } else {
+            resizePair(split, index, deltaDp, minSizeDp, minPairShare, sizePlan(split, extentDp, minSizeDp, collapsedExtentDp, collapsed))
+        }
     }
+}
+
+private fun <K> resizeScrolled(split: TileSplit<K>, index: Int, deltaDp: Float, plan: TileScrollPlan, range: ClosedFloatingPointRange<Float>): TileSplit<K> {
+    val above = index - 1
+    if (index !in 1 until split.children.size || plan.collapsed[above]) return split
+    val resized = (plan.sizes[above] + deltaDp).coerceIn(range.start, max(range.start, range.endInclusive))
+    return split.copy(
+        children = split.children.mapIndexed { i, c ->
+            when {
+                i == above -> c.withTileSlot(c.weight, resized)
+                !plan.collapsed[i] && !plan.pinned[i] -> c.withTileSlot(c.weight, plan.sizes[i])
+                else -> c
+            }
+        },
+    )
 }
 
 private fun <K> updateSplitAt(node: TileNode<K>, path: List<Int>, update: (TileSplit<K>) -> TileSplit<K>): TileNode<K> {
@@ -397,12 +512,23 @@ private fun <K> resizeMixedPair(split: TileSplit<K>, index: Int, deltaDp: Float,
 /**
  * Resets the two siblings around gap [index] of the split at [path] (a double-click on the splitter): a sibling that has a
  * default size ([defaultDp] non-null) is pinned to it, and when both are weighted with no default they get equal weights
- * (their total is kept). A pinned sibling without a default is left as it is.
+ * (their total is kept). A pinned sibling without a default is left as it is. With [scrolling] only the sibling above the gap
+ * is reset: to its default height, or to weighted when it has none.
  */
-internal fun <K> resetTilePair(root: TileNode<K>, path: List<Int>, index: Int, defaultDp: (TileNode<K>) -> Float?): TileNode<K> =
+internal fun <K> resetTilePair(
+    root: TileNode<K>,
+    path: List<Int>,
+    index: Int,
+    scrolling: Boolean = false,
+    defaultDp: (TileNode<K>) -> Float?,
+): TileNode<K> =
     updateSplitAt(root, path) { split ->
         if (index !in 1 until split.children.size) {
             split
+        } else if (scrolling) {
+            // In a scrolling column the gap belongs to the tile above it: back to its default height, or back to weighted.
+            val above = split.children[index - 1]
+            split.withPair(index, above.withTileSlot(above.weight, defaultDp(above)), split.children[index])
         } else {
             val before = split.children[index - 1]
             val after = split.children[index]
@@ -467,7 +593,8 @@ private fun <K> prune(node: TileNode<K>, path: List<Int>, isVisible: (K) -> Bool
 
 /**
  * [resizeTileSplit] for a drag on a [gap] of the projected tree's geometry: resizes the projection, then writes the two
- * siblings' new weights and sizes back into the matching siblings of [fullRoot]. Hidden siblings are untouched.
+ * siblings' new weights and sizes back into the matching siblings of [fullRoot]. Hidden siblings are untouched. A scrolling gap
+ * ([TileGap.scrolling]) can change every visible sibling's pinned size, so all of them are written back.
  */
 internal fun <K> resizeProjected(
     fullRoot: TileNode<K>,
@@ -478,10 +605,15 @@ internal fun <K> resizeProjected(
     minPairShare: Float,
     collapsed: Set<K> = emptySet(),
     collapsedExtentDp: Float = TILE_COLLAPSED_EXTENT_DP,
+    scrollMinDp: Float = minSizeDp,
+    scrollMaxDp: Float = TILE_MAX_SIZE_DP,
 ): TileNode<K> {
     if (!gap.resizable) return fullRoot
-    val resized = resizeTileSplit(projection.root, gap.path, gap.index, deltaDp, gap.splitExtent, minSizeDp, minPairShare, collapsed, collapsedExtentDp)
-    return writeBackPair(fullRoot, projection, gap, resized)
+    val scrollRange = if (gap.scrolling) scrollMinDp..scrollMaxDp else null
+    val resized = resizeTileSplit(
+        projection.root, gap.path, gap.index, deltaDp, gap.splitExtent, minSizeDp, minPairShare, collapsed, collapsedExtentDp, scrollRange,
+    )
+    return if (gap.scrolling) writeBackSiblings(fullRoot, projection, gap, resized) else writeBackPair(fullRoot, projection, gap, resized)
 }
 
 /**
@@ -495,7 +627,7 @@ internal fun <K> resetProjected(
     defaultDp: (TileNode<K>) -> Float?,
 ): TileNode<K> {
     if (!gap.resizable) return fullRoot
-    return writeBackPair(fullRoot, projection, gap, resetTilePair(projection.root, gap.path, gap.index, defaultDp))
+    return writeBackPair(fullRoot, projection, gap, resetTilePair(projection.root, gap.path, gap.index, gap.scrolling, defaultDp))
 }
 
 // Copies the weights and pinned sizes of the two siblings around [gap] in [changed] (a change of the projected tree) to their
@@ -519,61 +651,91 @@ private fun <K> writeBackPair(fullRoot: TileNode<K>, projection: TileProjection<
     }
 }
 
+// Copies the weights and pinned sizes of every child of the split that owns [gap] in [changed] to its counterpart in [fullRoot].
+private fun <K> writeBackSiblings(fullRoot: TileNode<K>, projection: TileProjection<K>, gap: TileGap, changed: TileNode<K>): TileNode<K> {
+    val split = nodeAt(changed, gap.path) as? TileSplit ?: return fullRoot
+    val projected = split.children.indices.associateBy { projection.fullIndexOf(gap.path, it) }
+    return updateSplitAt(fullRoot, projection.fullPathOf(gap.path)) { full ->
+        full.copy(
+            children = full.children.mapIndexed { i, c ->
+                projected[i]?.let { split.children[it] }?.let { c.withTileSlot(it.weight, it.sizeDp) } ?: c
+            },
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
  * Card rects and gaps for [root] laid out in a [width] x [height] dp host. Leaves in [collapsed] that sit in a COLUMN split
- * shrink to [TileGeometrySpec.collapsedExtentDp]; the gaps next to them are not resizable.
+ * shrink to [TileGeometrySpec.collapsedExtentDp]; the gaps next to them are not resizable. A COLUMN split whose leaves all
+ * satisfy [scrolls] is a scrolling column (see the header comment): it keeps its children's heights, may be taller than its
+ * rect, and is reported in [TileGeometry.scrollRegions]. Splits nested inside one are laid out normally in their children's rects.
  */
-internal fun <K> tileGeometry(root: TileNode<K>, width: Float, height: Float, spec: TileGeometrySpec, collapsed: Set<K> = emptySet()): TileGeometry<K> {
+internal fun <K> tileGeometry(
+    root: TileNode<K>,
+    width: Float,
+    height: Float,
+    spec: TileGeometrySpec,
+    collapsed: Set<K> = emptySet(),
+    scrolls: (K) -> Boolean = { false },
+): TileGeometry<K> {
+    val layout = TileLayoutRun(spec, collapsed, scrolls)
+    layout.node(root, TileRect(0f, 0f, width, height), emptyList(), null)
+    return TileGeometry(layout.cards, layout.gaps, layout.regions)
+}
+
+// One geometry computation: the settings it runs with and the lists it fills. [region] is the scrolling column a node sits in, if any.
+private class TileLayoutRun<K>(val spec: TileGeometrySpec, val collapsed: Set<K>, val scrolls: (K) -> Boolean) {
     val cards = mutableListOf<TileCardRect<K>>()
     val gaps = mutableListOf<TileGap>()
-    layoutNode(root, TileRect(0f, 0f, width, height), spec, collapsed, emptyList(), cards, gaps)
-    return TileGeometry(cards, gaps)
-}
+    val regions = mutableListOf<TileScrollRegion<K>>()
 
-private fun <K> layoutNode(
-    node: TileNode<K>,
-    rect: TileRect,
-    spec: TileGeometrySpec,
-    collapsed: Set<K>,
-    path: List<Int>,
-    cards: MutableList<TileCardRect<K>>,
-    gaps: MutableList<TileGap>,
-) {
-    when (node) {
-        is TileLeaf -> cards += TileCardRect(node.section, rect)
-        is TileSplit -> layoutSplit(node, rect, spec, collapsed, path, cards, gaps)
-    }
-}
-
-private fun <K> layoutSplit(
-    split: TileSplit<K>,
-    rect: TileRect,
-    spec: TileGeometrySpec,
-    collapsed: Set<K>,
-    path: List<Int>,
-    cards: MutableList<TileCardRect<K>>,
-    gaps: MutableList<TileGap>,
-) {
-    val horizontal = split.axis == TileAxis.ROW
-    val gap = if (horizontal) spec.gapRowDp else spec.gapColumnDp
-    val total = if (horizontal) rect.w else rect.h
-    val extent = max(0f, total - gap * (split.children.size - 1))
-    val plan = sizePlan(split, extent, spec.minTileDp, spec.collapsedExtentDp, collapsed)
-    var cursor = if (horizontal) rect.x else rect.y
-    split.children.forEachIndexed { i, child ->
-        if (i > 0) {
-            val strip = if (horizontal) TileRect(cursor, rect.y, gap, rect.h) else TileRect(rect.x, cursor, rect.w, gap)
-            gaps += TileGap(path, i, split.axis, strip, extent, resizable = !plan.collapsed[i - 1] && !plan.collapsed[i])
-            cursor += gap
+    fun node(node: TileNode<K>, rect: TileRect, path: List<Int>, region: Int?) {
+        when (node) {
+            is TileLeaf -> cards += TileCardRect(node.section, rect, region)
+            is TileSplit -> if (region == null && isScrollingColumn(node, scrolls)) scrollingColumn(node, rect, path) else split(node, rect, path, region)
         }
-        val size = plan.sizes[i]
-        val childRect = if (horizontal) TileRect(cursor, rect.y, size, rect.h) else TileRect(rect.x, cursor, rect.w, size)
-        layoutNode(child, childRect, spec, collapsed, path + i, cards, gaps)
-        cursor += size
+    }
+
+    private fun split(split: TileSplit<K>, rect: TileRect, path: List<Int>, region: Int?) {
+        val horizontal = split.axis == TileAxis.ROW
+        val gap = if (horizontal) spec.gapRowDp else spec.gapColumnDp
+        val total = if (horizontal) rect.w else rect.h
+        val extent = max(0f, total - gap * (split.children.size - 1))
+        val plan = sizePlan(split, extent, spec.minTileDp, spec.collapsedExtentDp, collapsed)
+        var cursor = if (horizontal) rect.x else rect.y
+        split.children.forEachIndexed { i, child ->
+            if (i > 0) {
+                val strip = if (horizontal) TileRect(cursor, rect.y, gap, rect.h) else TileRect(rect.x, cursor, rect.w, gap)
+                gaps += TileGap(path, i, split.axis, strip, extent, resizable = !plan.collapsed[i - 1] && !plan.collapsed[i], scrollRegion = region)
+                cursor += gap
+            }
+            val size = plan.sizes[i]
+            val childRect = if (horizontal) TileRect(cursor, rect.y, size, rect.h) else TileRect(rect.x, cursor, rect.w, size)
+            node(child, childRect, path + i, region)
+            cursor += size
+        }
+    }
+
+    private fun scrollingColumn(split: TileSplit<K>, rect: TileRect, path: List<Int>) {
+        val gap = spec.gapColumnDp
+        val extent = max(0f, rect.h - gap * (split.children.size - 1))
+        val plan = scrollPlan(split, extent, spec.minTileDp, spec.scrollMinDp, spec.collapsedExtentDp, collapsed)
+        val region = regions.size
+        regions += TileScrollRegion(tileLeafSections(split).first(), rect, plan.sizes.sumOf { it.toDouble() }.toFloat() + gap * (split.children.size - 1))
+        var cursor = rect.y
+        split.children.forEachIndexed { i, child ->
+            if (i > 0) {
+                val strip = TileRect(rect.x, cursor, rect.w, gap)
+                gaps += TileGap(path, i, split.axis, strip, extent, resizable = !plan.collapsed[i - 1], scrolling = true, scrollRegion = region)
+                cursor += gap
+            }
+            node(child, TileRect(rect.x, cursor, rect.w, plan.sizes[i]), path + i, region)
+            cursor += plan.sizes[i]
+        }
     }
 }
 
@@ -594,12 +756,6 @@ internal fun <K> stackedTileGeometry(order: List<K>, width: Float, heights: List
         },
         emptyList(),
     )
-}
-
-/** "50% × 62%": [card]'s size as a share of the host. */
-internal fun tileSizeLabel(card: TileRect, hostWidth: Float, hostHeight: Float): String {
-    fun percent(part: Float, whole: Float) = if (whole > 0f) (part / whole * 100).roundToInt() else 0
-    return "${percent(card.w, hostWidth)}% × ${percent(card.h, hostHeight)}%"
 }
 
 // ---------------------------------------------------------------------------------------------------------------

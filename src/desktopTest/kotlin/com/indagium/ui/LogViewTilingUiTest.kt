@@ -17,8 +17,10 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.DpRect
@@ -193,6 +195,52 @@ class LogViewTilingUiTest {
         val original = bounds("tile-card-original")
         val log = bounds("tile-card-log")
         assertTrue(original.bottom <= log.top, "Original is above the log")
+    }
+
+    // The Classic layout with every filter tile given a height of its own: together taller than a short window.
+    private fun tallFilterColumn(): TileNode<LogViewSectionId> {
+        val classic = classicLogViewLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
+        val filters = classic.children.first() as TileSplit<LogViewSectionId>
+        val tall = filters.copy(children = filters.children.map { (it as TileLeaf<LogViewSectionId>).copy(sizeDp = 220f) })
+        return classic.copy(children = listOf(tall) + classic.children.drop(1))
+    }
+
+    @Test
+    fun aFilterColumnTallerThanTheWindowScrollsAndLeavesTheOtherTilesAlone() {
+        setup(height = 600) { it.updateSettings { s -> s.withLogViewLayout(tallFilterColumn()) } }
+        val last = LOG_VIEW_FILTER_TILES.last().key
+        assertTrue(exists("tile-scrollbar-tags"), "the column overflows and shows a scrollbar")
+        val hostBottom = bounds("tile-card-log").bottom
+        assertTrue(rule.onNodeWithTag("tile-card-$last").getUnclippedBoundsInRoot().top > hostBottom, "the last filter tile is below the window")
+        val logBefore = bounds("tile-card-log")
+        val tagsTop = rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top
+        rule.onNodeWithTag("tile-card-tags").performMouseInput {
+            moveTo(center)
+            scroll(300f)
+        }
+        rule.waitForIdle()
+        assertTrue(rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top < tagsTop, "the wheel scrolled the filter column")
+        assertEquals(logBefore, bounds("tile-card-log"), "the log did not move")
+        assertFalse(exists("tile-scrollbar-log"), "only the filter column scrolls")
+        // Scrolling is not a layout edit: the stored layout is what was set. Collapse still shrinks a tile to its header.
+        assertEquals(state.settings.logViewLayout, state.settings.withLogViewLayout(tallFilterColumn()).logViewLayout)
+        // Back to the top, with the pointer over the column wherever the Tags tile is now.
+        rule.onRoot().performMouseInput {
+            moveTo(Offset(100f * rule.density.density, 300f * rule.density.density))
+            scroll(-600f)
+        }
+        rule.waitForIdle()
+        rule.onNodeWithTag("tile-collapse-tags").performClick()
+        rule.waitForIdle()
+        assertEquals(32f, rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().height.value, 0.5f)
+    }
+
+    @Test
+    fun theDefaultFilterColumnStillFitsALargeWindowWithoutAScrollbar() {
+        setup()
+        assertFalse(exists("tile-scrollbar-tags"))
+        val last = LOG_VIEW_FILTER_TILES.last().key
+        assertTrue(bounds("tile-card-$last").bottom <= bounds("tile-card-log").bottom + 1.dp, "the weights fill the window as before")
     }
 
     private fun containsRow(tree: TileNode<LogViewSectionId>, first: LogViewSectionId, second: LogViewSectionId): Boolean = when (tree) {

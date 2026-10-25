@@ -781,7 +781,7 @@ optional header action, body) per section and hands them to `HomeTilingHost` (`u
   (`DEFAULT_HOME_LAYOUT`). Hidden sections live in `homeHiddenSections` and are kept out of the tree until restored. `ui/HomeLayout.kt`
   is UI-free: normalisation (empty splits dropped, single-child splits collapsed, same-axis child splits flattened), `dropHomeSection`,
   `resizeHomeSplit` (the neighbour pair's total weight is constant; clamped to `HOME_MIN_PAIR_SHARE` and `HOME_MIN_SECTION_DP`),
-  `homeGeometry` (the one source of card and gap rectangles for layout, drop overlay, size labels and preset icons),
+  `homeGeometry` (the one source of card and gap rectangles for layout, drop overlay and preset icons),
   `homeDropTargetAt` (page-edge bands win over the card under the pointer), the five `HomeLayoutPreset`s and the `AppSettings.withHome*`
   mutators (`withHomeSectionHidden` refuses to hide the last visible section; `withHomeSectionShown` re-adds at the trailing page
   edge). The settings JSON codec is `ui/HomeLayoutSettingsJson.kt` (§13.4).
@@ -789,8 +789,11 @@ optional header action, body) per section and hands them to `HomeTilingHost` (`u
   (`ui/AppCursors.kt`) and an overlay draws the drop preview, label and the "Full width"/"Full height" page strips. A manual drag never
   reaches the window's file-drop target (`App.kt`), the overlay can follow the pointer live, and a UI test can drive it. A drop is one
   `updateSettings`.
-- **Splitters commit once.** `HDivider`/`VDivider` drags edit only an in-memory `draft` layout and write settings on release
-  (`onDragEnd`), because `AppState.updateSettings` autosaves synchronously. A focused splitter also resizes by 24 dp per arrow key.
+- **Splitters commit once, and are never drawn.** `HDivider`/`VDivider` (with `showLine = false` in tiling surfaces) drags edit only an in-memory
+  `draft` layout and write settings on release (`onDragEnd`), because `AppState.updateSettings` autosaves synchronously. A focused splitter also
+  resizes by 24 dp per arrow key; a double-click resets. The splitter has no line at rest, hovered or dragged (only its hit area, the resize cursor
+  and the keyboard focus ring), and tile headers show no size readout: the gap between the cards is all that separates them. The window chrome's
+  `ChromeSplitter` is invisible the same way.
 - **Fixed composition order.** The host's custom `Layout` receives its children flat, one `key(id)` per section in enum order, each
   measured to its rect. Moving a section changes only its rect, so its remembered state and effects (the device poll, pairing dialogs,
   filters) survive. Nested `Row`/`Column` would recompose it from scratch.
@@ -830,6 +833,25 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   not part of the same hierarchy" inside one (`TileStackedSurface` measures the same way). Below `LOG_VIEW_STACK_BELOW_DP` (720 dp)
   the tiles stack in one scroll (no grips or splitters). Layout edits (a drop, a splitter release, an arrow-key resize) reach
   `AppState.commitLogViewLayout` once, on release.
+- **Scrolling side columns.** A COLUMN split whose visible leaves are all side sections (`logViewScrollsInColumn`: everything but the log tiles, the
+  Originals, Video and the toolbar tile, which must never be scrolled out of reach, so in Classic the filter column, and the Notes / AI column while there is no Video) is not made to fit the window. The surface
+  passes the predicate through `TileChromeSpec.scrolls`; `tileGeometry` then reports a `TileScrollRegion` (viewport, content height) and lays the
+  column's children out by height: a node's own `sizeDp` is its height (at least 80 dp, at most 2000 dp, `LOG_VIEW_PIN_MIN_DP` / `_MAX_DP`), weighted
+  children share what the pinned ones leave exactly as a fitting column does (so an old layout, which has only weights and Log level's pinned 80 dp,
+  looks the same until it is resized; `minTileDp` each between them at the least), a collapsed tile keeps its 32 dp header, and when everything is
+  pinned and shorter than the viewport the last open tile takes the rest. Taller content scrolls: wheel / trackpad over any card, splitter or the thin
+  `TileRegionScrollbar` (`tile-scrollbar-<first tile key>`). A resize in such a column changes only the tile above the gap (`resizeTileSplit(scrolling =
+  true)`; the first resize pins every weighted sibling at the height it has, so nothing else shrinks and the tiles below move down), clamped to
+  80..2000 dp, written once on release; a double-click on the gap puts the tile above it back to its default height or to weighted. No layout field
+  was added: the heights are the leaves' `sizeDp` in the existing `logViewLayout` / `compareLayout` JSON (§13.4), so an old file decodes as before.
+  Compare's side columns use the same spec; the New tab opts out (it always fits). Nested splits inside such a column are laid out normally inside
+  their child's height.
+- **Scrolling mechanics** (`ui/TileScrolling.kt`). The tiles stay children of the surface's one flat `Layout`, so a column cannot be a `verticalScroll`
+  container. `TilingLayout` places each card and splitter of a region shifted by the column's offset (`TileScrollState`, read in the placement phase: a
+  scroll re-places and re-draws, it does not recompose), every one of them carries the column's `ScrollableState` (nested scrolling: an inner list or
+  the Highlighters / Notes scroll takes the wheel first and hands what it cannot use to the column) and a `graphicsLayer` clip with a band shape that
+  cuts drawing and hit-testing to the viewport. A `bringIntoViewResponder` scrolls a focused field into view. Drop targets, the drop preview and the
+  external toolbar drag are hit-tested against `TileGeometry.visibleCards` (shifted and cut), i.e. what is on screen. Scroll offsets are session-only.
 - **Fixed emission order.** The content lambda emits the Toolbar tile (a no-op unless the toolbar is IN_LAYOUT, see "Toolbar tile" below), filters (`BoundFilterPanel` with a `TiledSectionHost`), Original + Log
   (`BoundLogViewer` with `LogViewerTiles`), Notes, Diagram library, AI, Video, and branches only on visibility, never on the layout,
   so a move changes a tile's rect but never its place in the composition: the log's scroll, the notes editor and a playing video survive
@@ -888,8 +910,9 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   entries" count becomes the tooltip of the empty bar space (and the first line of the menu); then Expand all, Collapse all and Unfiltered move
   into a "⋯" menu (`LogToolbarControls.kt`: a focusable `Popup` like the Export menu, focus returned to the log on dismiss or pick), then Δt and
   the filter bar toggle follow. Export, Search, the grip and maximize always stay. In single-view tile widths (no filter bar, Unfiltered closed) the
-  variants start at about 624 dp (labels), 472 dp (icons + count), 352 dp (icons), 272 dp (first overflow) and below that Δt overflows too;
-  compare adds 114 dp to each. `toolbarActions` and its roving keyboard order are unchanged: an action in the menu is still reached (Enter runs it,
+  variants start at about 630 dp (labels), 478 dp (icons + count), 360 dp (icons), 276 dp (first overflow) and below 234 dp Δt overflows too;
+  compare adds 114 dp to each. Every pair of header buttons is one `TILE_HEADER_GAP_DP` (6 dp) apart, the log toolbar's `LOG_TOOLBAR_GAP_DP` included: between
+  the grip and Export, between all its buttons and before the maximize button (which used to sit flush against Unfiltered). `toolbarActions` and its roving keyboard order are unchanged: an action in the menu is still reached (Enter runs it,
   the "⋯" button carries the cursor ring). The untiled toolbar is always the full variant. `LogViewerTiles.logHeaderLeading` receives the file
   name's maximum width (`logToolbarNameMaxDp`).
 - **Filters apply to A | B | Both.** `AppState.compareFilterTarget` (`CompareFilterTarget`) decides what each pane shows, through the pure
@@ -917,8 +940,8 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
 
 - **Pure side** (`ui/TabAppearance.kt`, `TabAppearanceTest`): `tabKind` derives LOG / ZIP / IND / CAPTURE / LIVE / HOME from the
   `LogTab` fields that already say where a tab came from (live = a running capture or a live-tailed file); `tabKindBadge` (LOG, ZIP,
-  IND are the Recent files list's labels), `tabSourceColor`, `tabLabelParts` (FILE_SESSION is exactly `tabDisplayLabel`, SESSION_ONLY is
-  the folder or archive, FILE_ONLY the bare name), `tabStripHeightDp` (Compact 28, Two-line 44, the rest 36) and the FIT-width maths.
+  IND are the Recent files list's labels), `tabSourceColor`, `tabLabelParts` (FILE_SESSION, the default "File (+ folder if same name)", is exactly `tabDisplayLabel`: the file name, plus the folder or archive only when two open tabs share it; SESSION_ONLY, "Folder", is the folder or archive the file lives in; FILE_ONLY, "File only", the bare file name; FILE_FOLDER_ALWAYS, "File — folder" (appended last: the mode is stored by name, an unknown name decodes to the default), always `file — folder`, the disambiguation winning where it is more specific so two tabs never share a label, and a tab with no source path and a unique name is just its file name. The control sits in Settings > Appearance > Tabs with a one-line hint under it that explains the default ("The folder is added when two open tabs have the same file name."); the options use 11 sp text and 8 dp padding so they fit the dialog's content column without clipping),
+  `tabStripHeightDp` (Compact 28, Two-line 44, the rest 36) and the FIT-width maths.
 - **Drawing** (`ui/TabStyles.kt`): `TabShell(..., appearance: TabAppearance = TabAppearance.Default)` keeps one structure for every
   style (stripe overlay + Row of live dot, badge, label, close) and varies only metrics, the chrome behind the Row and the label type.
   Diagram and Tests tabs go through the same shell with their own kinds.
@@ -1627,7 +1650,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `AiSidebar.kt` | The AI panel and the Notes edit lock (the Video / Notes / AI column is now tiles, §6.4) |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
 | `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
-| `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter lines inset by the 8 dp card corner, section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
+| `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter hit areas inset by the 8 dp card corner, section cards with grip/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
+| `TilingHost.kt` / `TileLayout.kt` / `TileScrolling.kt` | The generic tiling surface and its pure engine (§6.3, §6.4): fixed-order flat `Layout`, cards, headers, invisible splitters with a draft layout committed on release, drop overlay; trees, geometry, resize, drops, projection and scrolling columns (`TileScrollRegion`); the scroll offsets, wheel scrollables, viewport clip and scrollbar of those columns |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
 | `LogViewTiling.kt` / `LogViewLayoutState.kt` / `TiledSectionHost.kt` | The single log view on tiles (§6.4): `LogViewTilingHost` (size via `onSizeChanged`, fixed emission order, capture video pin, parked video, maximize), the `AppState` extensions behind the Layout menu, shortcuts and tab-strip toggles (commit/hide/show/preset/reset/lock/collapse/reveal), and the `SectionHost` that turns the filter panel's sections into tiles |
 | `LogToolbarLayout.kt` / `LogToolbarControls.kt` | The log toolbar's width variants (pure) and the buttons / "⋯" overflow menu that draw them (§6.4) |
@@ -3516,6 +3540,9 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | New tab layout: normalise, every drop branch, resize clamps, geometry, hit-testing, presets, hide/show rules | `HomeLayoutTest` |
 | New tab layout settings decode: round trip, defaults for `{}`/legacy, sanitizing of duplicate/unknown ids, bad weights and over-deep trees | `HomeLayoutSettingCodecTest` |
 | Tiling host: default arrangement, hide/restore, last section not hideable, preset click, one settings write per grip drag, splitter commit on release, tip | `HomeTilingUiTest` |
+| Generic tiling surface: collapse, lock, park, maximize, reset, grip drag, multi-emission, invisible splitters (no size readout, no splitter line at rest, hovered or dragged) | `TilingSurfaceUiTest`, `TileLayoutEngineTest` |
+| Scrolling side columns: which splits scroll, heights, last-tile stretch, resize pins siblings and moves the tiles below, min/max, collapse, hidden siblings, reset, visible geometry and drops, scroll offsets | `TileScrollColumnTest`, `LogViewLayoutTest`, `LogViewLayoutSettingCodecTest` |
+| Scrolling columns on a surface: wheel, scrollbar, clip outside the viewport, nested scrolling first, short content fills, resize on release, bring into view, drop onto what is on screen | `TilingScrollUiTest`, `LogViewTilingUiTest` |
 | Condensed Capture section: device and start-hint helpers, options dialog, inline sessions (full list with actions, Open in window…) | `CaptureLauncherTest`, `CaptureOptionsDialogUiTest`, `UnfinishedSessionsInlineUiTest`, `UnfinishedCaptureSessionsPanelUiTest` |
 | New tab Tests section: Run opens the suite with its run dialog, locked suite shows View, usage line only on Free; early-stop latest-run scan | `HomeTestsSectionUiTest`, `TestRunStoreTest` |
 | Case matrix and suite health numbers; bounded, newest-first compact outcomes; "#N" ordinals | `CaseRunMatrixTest`, `TestsSuiteHealthStateTest`, `TestRunStoreTest`, `TestsSuiteScreenStateTest` |

@@ -181,8 +181,9 @@ private fun appearance() = buildList {
     add(
         entry(
             SettingsSection.Appearance, "Tab label",
-            "Show the file name with its session, the session only, or the file name only on a tab.",
-            listOf("tabs", "title", "name", "file", "session", "folder"),
+            "What a tab shows: the file name (plus its folder when two open tabs share a name), the folder only, " +
+                "the file name only, or always the file and its folder.",
+            listOf("tabs", "title", "name", "file", "session", "folder", "same name", "duplicate"),
         ),
     )
     add(

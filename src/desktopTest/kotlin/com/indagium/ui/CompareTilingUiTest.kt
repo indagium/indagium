@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -24,6 +25,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.DpRect
@@ -35,6 +37,8 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.TileLeaf
+import com.indagium.model.TileSplit
 import com.indagium.model.VoiceInputSettings
 import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.voice.VoiceAudio
@@ -179,6 +183,25 @@ class CompareTilingUiTest {
         // The filter tiles stay on the left, Notes on the right, as in the single view.
         assertTrue(bounds("tile-card-tags").right <= originalA.left)
         assertTrue(logB.right <= bounds("tile-card-notes").left)
+    }
+
+    @Test
+    fun theFilterColumnOfTheCompareViewScrollsWhenItsTilesAreTallerThanTheWindow() {
+        val grid = compareGridLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
+        val filters = grid.children.first() as TileSplit<LogViewSectionId>
+        val tall = filters.copy(children = filters.children.map { (it as TileLeaf<LogViewSectionId>).copy(sizeDp = 240f) })
+        setup(height = 560) { it.updateSettings { s -> s.withCompareLayout(grid.copy(children = listOf(tall) + grid.children.drop(1))) } }
+        assertTrue(exists("tile-scrollbar-tags"), "the compare view's filter column overflows and scrolls too")
+        val logBefore = bounds("tile-card-log_a")
+        val tagsTop = rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top
+        rule.onNodeWithTag("tile-card-tags").performMouseInput {
+            moveTo(center)
+            scroll(300f)
+        }
+        rule.waitForIdle()
+        assertTrue(rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top < tagsTop, "the wheel scrolled the filter column")
+        assertEquals(logBefore, bounds("tile-card-log_a"), "the logs did not move")
+        assertFalse(exists("tile-scrollbar-log_a"))
     }
 
     @Test

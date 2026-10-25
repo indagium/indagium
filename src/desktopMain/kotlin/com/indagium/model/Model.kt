@@ -1709,8 +1709,12 @@ enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_ST
 /** [FIXED]: every visible tab gets an equal share of the strip. [FIT]: a tab is as wide as its label. */
 enum class TabSizeMode { FIXED, FIT }
 
-/** What a log tab's label shows: the file name (with the session / folder appended when two tabs share a file name), only the session, or only the file. */
-enum class TabLabelMode { FILE_SESSION, SESSION_ONLY, FILE_ONLY }
+/**
+ * What a log tab's label shows: the file name, with the folder (or archive) appended only when two open tabs share that file name
+ * ([FILE_SESSION], the default; stored by name, the "session" is the folder), only the folder ([SESSION_ONLY]), only the file name
+ * ([FILE_ONLY]), or always `file — folder` ([FILE_FOLDER_ALWAYS]). Stored by name, so new values go last.
+ */
+enum class TabLabelMode { FILE_SESSION, SESSION_ONLY, FILE_ONLY, FILE_FOLDER_ALWAYS }
 
 /** Which window edge the tab strip sits on. */
 enum class TabStripPosition { TOP, LEFT, RIGHT, BOTTOM }

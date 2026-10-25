@@ -44,8 +44,8 @@ const val LOG_TILE_NARROW_DP: Float = 520f
 const val LOG_VIEW_MIN_PAIR_SHARE: Float = 0.1f
 
 // Pinned sizes (dp) are kept within these when a layout is sanitized or derived.
-private const val LOG_VIEW_PIN_MIN_DP: Float = 80f
-private const val LOG_VIEW_PIN_MAX_DP: Float = 2000f
+internal const val LOG_VIEW_PIN_MIN_DP: Float = 80f
+internal const val LOG_VIEW_PIN_MAX_DP: Float = 2000f
 
 // Default pinned widths for the legacy sizes, used when a legacy value is not a usable number.
 private const val DEFAULT_FILTER_WIDTH_DP: Float = 220f
@@ -77,6 +77,18 @@ internal val LOG_VIEW_FILTER_TILES: List<LogViewSectionId> = LogViewSectionId.en
 /** The tiles that hold the log itself: always visible, never hideable. */
 internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
+
+/**
+ * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections. A column that holds the log, an Original or Video
+ * always fits its window: the log tiles want all the height they get, and Video's height is pinned per capture device. The toolbar tile
+ * keeps its column fitting too, so the toolbar can never be scrolled out of reach.
+ */
+internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
+    LogViewSectionId.LOG, LogViewSectionId.ORIGINAL, LogViewSectionId.LOG_A, LogViewSectionId.LOG_B,
+    LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B, LogViewSectionId.VIDEO, LogViewSectionId.TOOLBAR,
+    -> false
+    else -> true
+}
 
 /** The tiles that cannot be hidden: the log tiles and the toolbar tile (the toolbar must always be reachable). */
 internal val LogViewSectionId.neverHidden: Boolean

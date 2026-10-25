@@ -98,9 +98,6 @@ internal fun resizeHomeSplit(
 internal fun homeGeometry(root: HomeLayoutNode, width: Float, height: Float, gap: Float): HomeGeometry =
     tileGeometry(root, width, height, homeSpec(gap))
 
-/** "50% × 62%": [card]'s size as a share of the host. */
-internal fun homeSizeLabel(card: HomeRect, hostWidth: Float, hostHeight: Float): String = tileSizeLabel(card, hostWidth, hostHeight)
-
 /**
  * What a pointer at ([x], [y]) (host dp) would drop [dragged] on. The page bands win; otherwise the card under the
  * pointer, with the edge nearest to it. Null outside the host, over a gap and over the dragged card itself.

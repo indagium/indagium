@@ -98,7 +98,6 @@ class HomeTilingUiTest {
         assertTrue(open.right <= capture.left, "open $open should be left of capture $capture")
         assertTrue(open.bottom <= tests.top && capture.bottom <= tests.top, "open and capture should sit above tests")
         assertTrue(tests.width > open.width, "tests spans the full width")
-        rule.onNodeWithTag("home-size-open").assertExists()
     }
 
     @Test

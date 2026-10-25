@@ -23,7 +23,6 @@ import com.indagium.ui.homeDropTargetAt
 import com.indagium.ui.homeGeometry
 import com.indagium.ui.homeLayoutShapeEquals
 import com.indagium.ui.homeLeafSections
-import com.indagium.ui.homeSizeLabel
 import com.indagium.ui.normalizeHomeLayout
 import com.indagium.ui.removeHomeSection
 import com.indagium.ui.resizeHomeSplit
@@ -285,12 +284,6 @@ class HomeLayoutTest {
         assertTrue(geo.gaps.all { it.rect.w == 0f })
         val tiny = homeGeometry(threeColumns, 4f, 4f, 8f)
         assertTrue(tiny.cards.all { it.rect.w >= 0f && it.rect.h >= 0f })
-    }
-
-    @Test
-    fun sizeLabelIsThePercentageOfTheHost() {
-        assertEquals("50% × 62%", homeSizeLabel(HomeRect(0f, 0f, 500f, 370f), 1000f, 600f))
-        assertEquals("0% × 0%", homeSizeLabel(HomeRect(0f, 0f, 500f, 370f), 0f, 0f))
     }
 
     // ---- hit testing --------------------------------------------------------------------------------------------

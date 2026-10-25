@@ -6,11 +6,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DragIndicator
@@ -58,8 +56,6 @@ private const val DOCK_BORDER_ALPHA = 0.55f
 private const val DOCK_DASH_DP = 5f
 private const val DOCK_VERTICAL_TEXT_DEGREES = -90f
 private const val DOCK_SIDEWAYS_MAX_WIDTH_DP = 48f
-private const val SPLITTER_LINE_ALPHA = 0.5f
-private const val SPLITTER_LINE_DP = 2
 
 internal class ChromeGripCallbacks(
     val onStart: (ChromeSlot) -> Unit,
@@ -133,39 +129,30 @@ internal fun ChromeSplitter(
     onCommit: () -> Unit,
     onReset: () -> Unit,
 ) {
-    val tc = tc()
     val density = LocalDensity.current.density
     val cursor = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
     val currentWidth by rememberUpdatedState(widthNow)
     val currentDraft by rememberUpdatedState(onDraft)
     val currentCommit by rememberUpdatedState(onCommit)
     val currentReset by rememberUpdatedState(onReset)
-    var hovered by remember { mutableStateOf(false) }
-    var dragging by remember { mutableStateOf(false) }
     // Dragging towards the content grows the bar: right for a left bar, left for a right bar.
     val sign = if (edge == ChromeEdge.LEFT) 1f else -1f
+    // Invisible at rest, hovered and dragged alike: only the resize cursor and the hit area tell it is there.
     Box(
         Modifier
             .fillMaxSize()
             .testTag("chrome-splitter-tabs")
             .semantics { contentDescription = "Resize tab bar" }
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerHoverIcon(PointerIcon(cursor))
             .pointerInput(Unit) { detectTapGestures(onDoubleTap = { currentReset() }) }
             .pointerInput(density, sign) {
                 detectDragGestures(
-                    onDragStart = {
-                        dragging = true
-                        dragCursorOverride.value = cursor
-                    },
+                    onDragStart = { dragCursorOverride.value = cursor },
                     onDragEnd = {
-                        dragging = false
                         dragCursorOverride.value = null
                         currentCommit()
                     },
                     onDragCancel = {
-                        dragging = false
                         dragCursorOverride.value = null
                         currentCommit()
                     },
@@ -175,10 +162,7 @@ internal fun ChromeSplitter(
                     },
                 )
             },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (hovered || dragging) Box(Modifier.width(SPLITTER_LINE_DP.dp).fillMaxHeight().background(tc.ac.copy(alpha = SPLITTER_LINE_ALPHA)))
-    }
+    )
 }
 
 // ---------------------------------------------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -13,12 +14,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTouchInput
@@ -41,6 +47,7 @@ private enum class FakeTile(val key: String) { A("a"), B("b"), C("c") }
 private const val HOST_W = 1000
 private const val HOST_H = 600
 private const val HEADER_DP = 32f
+private val HOST_BACKGROUND = Color(0xFF204060)
 
 private val FAKE_SPEC = TileChromeSpec<FakeTile>(
     headerDp = HEADER_DP,
@@ -48,8 +55,6 @@ private val FAKE_SPEC = TileChromeSpec<FakeTile>(
     gapRowDp = 8f,
     gapColumnDp = 8f,
     cornerDp = 6,
-    sizeLabel = TileSizeLabelMode.ON_HOVER_OR_DRAG,
-    sizeLabelMinDp = 0f,
     minTileDp = 60f,
     minPairShare = 0.1f,
     tagPrefix = "t",
@@ -74,7 +79,6 @@ class TilingSurfaceUiTest {
     private var parked by mutableStateOf(emptySet<FakeTile>())
     private var maximized by mutableStateOf<FakeTile?>(null)
     private var locked by mutableStateOf(false)
-    private var sizeMode = TileSizeLabelMode.ON_HOVER_OR_DRAG
     private val commits = mutableListOf<TileNode<FakeTile>>()
 
     private fun slot(id: FakeTile) = TileSlot(
@@ -90,7 +94,7 @@ class TilingSurfaceUiTest {
 
     private fun setHost(content: @Composable TileScope<FakeTile>.() -> Unit = { FakeTile.entries.forEach { Tile(it, slot(it)) } }) {
         rule.setContent {
-            Box(Modifier.size(HOST_W.dp, HOST_H.dp)) {
+            Box(Modifier.size(HOST_W.dp, HOST_H.dp).background(HOST_BACKGROUND)) {
                 TilingSurface(
                     fullLayout = layout,
                     isVisible = { true },
@@ -100,7 +104,7 @@ class TilingSurfaceUiTest {
                     locked = locked,
                     widthDp = HOST_W.toFloat(),
                     heightDp = HOST_H.toFloat(),
-                    spec = FAKE_SPEC.copy(sizeLabel = sizeMode),
+                    spec = FAKE_SPEC,
                     callbacks = TilingCallbacks(
                         onCommitLayout = {
                             commits += it
@@ -133,15 +137,56 @@ class TilingSurfaceUiTest {
     }
 
     @Test
-    fun theSizeReadoutShowsOnlyWhileTheHeaderIsHovered() {
+    fun noTileShowsASizeReadoutHoveredOrDragged() {
         setHost()
-        rule.onNodeWithTag("t-size-a").assertDoesNotExist()
-        rule.onNodeWithTag("t-header-a").performMouseInput { enter(center) }
+        FakeTile.entries.forEach { rule.onNodeWithTag("t-size-${it.key}").assertDoesNotExist() }
+        rule.onNodeWithTag("t-header-a").performMouseInput { moveTo(center) }
         rule.waitForIdle()
-        rule.onNodeWithTag("t-size-a").assertExists()
-        rule.onNodeWithTag("t-header-a").performMouseInput { exit(Offset(-10f, -10f)) }
+        FakeTile.entries.forEach { rule.onNodeWithTag("t-size-${it.key}").assertDoesNotExist() }
+        rule.onNodeWithTag("t-splitter-0").performTouchInput {
+            down(center)
+            moveBy(Offset(30f, 0f))
+        }
         rule.waitForIdle()
-        rule.onNodeWithTag("t-size-a").assertDoesNotExist()
+        FakeTile.entries.forEach { rule.onNodeWithTag("t-size-${it.key}").assertDoesNotExist() }
+        rule.onNodeWithTag("t-splitter-0").performTouchInput { up() }
+    }
+
+    private fun colorsIn(tag: String): Set<Int> {
+        val image = rule.onRoot().captureToImage().toPixelMap()
+        val d = rule.density.density
+        val b = bounds(tag)
+        val colors = HashSet<Int>()
+        for (x in (b.left.value * d).toInt() until (b.right.value * d).toInt()) {
+            for (y in (b.top.value * d).toInt() until (b.bottom.value * d).toInt()) colors += image[x, y].toArgb()
+        }
+        return colors
+    }
+
+    @Test
+    fun splittersDrawNeitherALineNorAFillAtRestHoveredOrDragged() {
+        setHost()
+        // t-splitter-0 is the vertical gap between A and the B / C column, t-splitter-1 the horizontal gap between B and C.
+        listOf("t-splitter-0", "t-splitter-1").forEach { tag ->
+            assertEquals(setOf(HOST_BACKGROUND.toArgb()), colorsIn(tag), "$tag at rest shows only the host behind it")
+            rule.onNodeWithTag(tag).performMouseInput { moveTo(center) }
+            rule.waitForIdle()
+            assertEquals(setOf(HOST_BACKGROUND.toArgb()), colorsIn(tag), "$tag hovered")
+            rule.onNodeWithTag(tag).performMouseInput { moveTo(Offset(-400f, -400f)) }
+        }
+        val splitter = rule.onNodeWithTag("t-splitter-1")
+        val before = bounds("t-card-b").height
+        splitter.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, 40f))
+        }
+        rule.waitForIdle()
+        assertTrue(bounds("t-card-b").height != before, "dragging still resizes")
+        assertEquals(setOf(HOST_BACKGROUND.toArgb()), colorsIn("t-splitter-1"), "dragged")
+        splitter.performTouchInput { up() }
+        // The hit area is the whole gap strip, inset by the corner radius along the strip, and the gap is as wide as the spec says.
+        rule.waitForIdle()
+        assertEquals(8f, bounds("t-splitter-0").width.value, 0.5f)
     }
 
     @Test
