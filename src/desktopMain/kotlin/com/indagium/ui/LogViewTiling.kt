@@ -134,6 +134,15 @@ internal fun LogViewTilingHost(
     inputs: LogViewHostInputs,
     modifier: Modifier = Modifier,
 ) {
+    LogViewTilingFrame(state, modifier) { widthDp, heightDp -> LogViewTileSurface(state, tab, focus, inputs, widthDp, heightDp) }
+}
+
+/**
+ * The padded host both the single log view and the compare view tile into: it measures itself (see [LogViewTilingHost] for why with
+ * onSizeChanged), restores a maximized tile on Esc, and gives [content] its size in dp once there is one.
+ */
+@Composable
+internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @Composable (widthDp: Float, heightDp: Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     var sizePx by remember { mutableStateOf(IntSize.Zero) }
@@ -150,8 +159,52 @@ internal fun LogViewTilingHost(
             val widthDp = sizePx.width / density
             val heightDp = sizePx.height / density
             // Until the first measurement there is nothing to lay out; mounting a surface at 0 x 0 would only be torn down again.
-            if (sizePx.width > 0 && sizePx.height > 0) LogViewTileSurface(state, tab, focus, inputs, widthDp, heightDp)
+            if (sizePx.width > 0 && sizePx.height > 0) content(widthDp, heightDp)
         }
+    }
+}
+
+/**
+ * [TilingSurface] on a wide host, [TileStackedSurface] below [LOG_VIEW_STACK_BELOW_DP]: the one place the log view and the compare view
+ * pick between the two, so both stack at the same width with the same card height.
+ */
+@Composable
+internal fun LogViewSurface(
+    layout: TileNode<LogViewSectionId>,
+    isVisible: (LogViewSectionId) -> Boolean,
+    collapsed: Set<LogViewSectionId>,
+    parked: Set<LogViewSectionId>,
+    locked: Boolean,
+    maximized: LogViewSectionId?,
+    widthDp: Float,
+    heightDp: Float,
+    callbacks: TilingCallbacks<LogViewSectionId>,
+    content: @Composable TileScope<LogViewSectionId>.() -> Unit,
+) {
+    if (widthDp < LOG_VIEW_STACK_BELOW_DP) {
+        TileStackedSurface(
+            fullLayout = layout,
+            isVisible = isVisible,
+            parked = parked,
+            cardHeightDp = (heightDp * LOG_VIEW_STACKED_SHARE).coerceIn(LOG_VIEW_STACKED_MIN_DP, LOG_VIEW_STACKED_MAX_DP),
+            spec = LOG_VIEW_CHROME_SPEC,
+            callbacks = callbacks,
+            content = content,
+        )
+    } else {
+        TilingSurface(
+            fullLayout = layout,
+            isVisible = isVisible,
+            collapsed = collapsed,
+            parked = parked,
+            maximized = maximized,
+            locked = locked,
+            widthDp = widthDp,
+            heightDp = heightDp,
+            spec = LOG_VIEW_CHROME_SPEC,
+            callbacks = callbacks,
+            content = content,
+        )
     }
 }
 
@@ -214,31 +267,7 @@ private fun LogViewTileSurface(
     val content: @Composable TileScope<LogViewSectionId>.() -> Unit = {
         LogViewTiles(state, tab, focus, inputs, isVisible, collapsibleTiles, toggles) { videoExpanded = it }
     }
-    if (widthDp < LOG_VIEW_STACK_BELOW_DP) {
-        TileStackedSurface(
-            fullLayout = layout,
-            isVisible = isVisible,
-            parked = parked,
-            cardHeightDp = (heightDp * LOG_VIEW_STACKED_SHARE).coerceIn(LOG_VIEW_STACKED_MIN_DP, LOG_VIEW_STACKED_MAX_DP),
-            spec = LOG_VIEW_CHROME_SPEC,
-            callbacks = callbacks,
-            content = content,
-        )
-    } else {
-        TilingSurface(
-            fullLayout = layout,
-            isVisible = isVisible,
-            collapsed = collapsedTiles,
-            parked = parked,
-            maximized = state.logViewMaximized,
-            locked = settings.logViewTilesLocked,
-            widthDp = widthDp,
-            heightDp = heightDp,
-            spec = LOG_VIEW_CHROME_SPEC,
-            callbacks = callbacks,
-            content = content,
-        )
-    }
+    LogViewSurface(layout, isVisible, collapsedTiles, parked, settings.logViewTilesLocked, state.logViewMaximized, widthDp, heightDp, callbacks, content)
 }
 
 // The tiles, in the fixed emission order. Every composable here emits only through Tile (the filter panel through its
@@ -287,7 +316,7 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
 }
 
 @Composable
-private fun TileScope<LogViewSectionId>.NotesTile(
+internal fun TileScope<LogViewSectionId>.NotesTile(
     state: AppState,
     tab: LogTab,
     focus: LogViewPanelFocus,
@@ -318,7 +347,7 @@ private fun TileScope<LogViewSectionId>.NotesTile(
 }
 
 @Composable
-private fun TileScope<LogViewSectionId>.DiagramsTile(state: AppState, tab: LogTab, collapsible: Boolean) {
+internal fun TileScope<LogViewSectionId>.DiagramsTile(state: AppState, tab: LogTab, collapsible: Boolean) {
     val diagramCount = state.seq3Sessions.libraryForTab(tab).size
     Tile(
         LogViewSectionId.DIAGRAMS,
@@ -335,7 +364,7 @@ private fun TileScope<LogViewSectionId>.DiagramsTile(state: AppState, tab: LogTa
 }
 
 @Composable
-private fun TileScope<LogViewSectionId>.AiTile(state: AppState, tab: LogTab, focus: LogViewPanelFocus, collapsible: Boolean) {
+internal fun TileScope<LogViewSectionId>.AiTile(state: AppState, tab: LogTab, focus: LogViewPanelFocus, collapsible: Boolean) {
     Tile(
         LogViewSectionId.AI,
         TileSlot(
@@ -356,7 +385,7 @@ private fun TileScope<LogViewSectionId>.AiTile(state: AppState, tab: LogTab, foc
 }
 
 @Composable
-private fun TileScope<LogViewSectionId>.VideoTile(state: AppState, tab: LogTab, collapsible: Boolean, onExpandedChange: (Boolean) -> Unit) {
+internal fun TileScope<LogViewSectionId>.VideoTile(state: AppState, tab: LogTab, collapsible: Boolean, onExpandedChange: (Boolean) -> Unit) {
     Tile(
         LogViewSectionId.VIDEO,
         TileSlot(

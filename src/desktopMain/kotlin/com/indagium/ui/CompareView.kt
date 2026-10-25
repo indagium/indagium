@@ -7,15 +7,12 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -39,6 +36,9 @@ import com.indagium.model.*
 import kotlin.math.roundToInt
 
 // ── CompareView ───────────────────────────────────────────────────────
+// The compare view: a strip ("Filters apply to A | B | Both", scroll link) above one tiling surface (CompareTiling.kt) whose tiles are
+// the filter sections, A and B (each Original over Log), Notes, the Diagram library, AI and Video. This composable owns what is not
+// tile-specific: which tabs are A and B, keyboard focus (F6, requested panels), the displayed filters and the sync scroll.
 @Composable
 internal fun CompareView(
     state: AppState,
@@ -47,17 +47,10 @@ internal fun CompareView(
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusConsumed: () -> Unit = {},
 ) {
-    val leftTab = state.tab(state.activeTabId) ?: state.tabs.firstOrNull() ?: return
-    val rawRightTab = state.tab(state.compareTabId) ?: state.tabs.getOrNull(1) ?: state.tabs.first()
     // Left and right must never resolve to the same tab: both LogViewers key their scroll
     // state by tab id alone, so two panes on the same tab would share one LazyListState and
-    // silently fight over scroll ownership (see LogViewerScrollStateStore).
-    val rightTab = if (rawRightTab.id == leftTab.id) {
-        state.tabs.firstOrNull { it.id != leftTab.id } ?: rawRightTab
-    } else {
-        rawRightTab
-    }
-    val tc = tc()
+    // silently fight over scroll ownership (see LogViewerScrollStateStore). compareTabs() guarantees it.
+    val (leftTab, rightTab) = state.compareTabs() ?: return
     val filterFr = remember { FocusRequester() }
     val leftLogFr = remember { FocusRequester() }
     val rightLogFr = remember { FocusRequester() }
@@ -65,302 +58,84 @@ internal fun CompareView(
     val aiFr = remember { FocusRequester() }
     var focusedPanelIdx by remember { mutableStateOf(0) }
 
+    // The F6 / panel-focus stops of the tiles that are showing, in the layout's reading order. Each side's Original and Log are one stop
+    // (the log viewer has a single requester), as are all the filter tiles.
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
-        if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
-        add(KeyboardPanel.LOG_VIEW to leftLogFr)
-        add(KeyboardPanel.LOG_VIEW to rightLogFr)
-        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
-        if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
+        state.compareVisiblePanels(leftTab, rightTab).forEach { panel ->
+            when (panel) {
+                LogViewFocusPanel.FILTERS -> add(KeyboardPanel.FILTERS to filterFr)
+                LogViewFocusPanel.ORIGINAL_A, LogViewFocusPanel.LOG_A -> if (none { it.second == leftLogFr }) add(KeyboardPanel.LOG_VIEW to leftLogFr)
+                LogViewFocusPanel.ORIGINAL_B, LogViewFocusPanel.LOG_B -> if (none { it.second == rightLogFr }) add(KeyboardPanel.LOG_VIEW to rightLogFr)
+                LogViewFocusPanel.NOTES -> add(KeyboardPanel.NOTES to annotationFr)
+                LogViewFocusPanel.AI -> add(KeyboardPanel.AI to aiFr)
+                else -> Unit
+            }
+        }
     }
 
-    LaunchedEffect(requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, leftTab.id, rightTab.id) {
+    LaunchedEffect(
+        requestedPanelFocus, state.filterVisible, state.annotationVisible, state.aiPanelVisible, state.settings.compareHidden,
+        leftTab.id, rightTab.id,
+    ) {
         val panel = requestedPanelFocus ?: return@LaunchedEffect
         val fr = visiblePanelFrs().firstOrNull { it.first == panel }?.second ?: return@LaunchedEffect
         runCatching { fr.requestFocus() }
         onPanelFocusConsumed()
     }
 
-    // Right side shows all entries when filter is off; mirrors left filter when on.
-    val effectiveRightTab = if (state.compareFilterRight)
-        rightTab.copy(filter = leftTab.filter)
-    else
-        rightTab.copy(filter = Filter())
+    // What each pane displays: the filter on the pane(s) it applies to, everything (plus the other tab's highlighters) on the rest.
+    val (leftShown, rightShown) = compareDisplayedFilters(state.compareFilterTarget, leftTab.filter, rightTab.filter)
+    val shownLeft = if (leftShown === leftTab.filter) leftTab else leftTab.copy(filter = leftShown)
+    val shownRight = if (rightShown === rightTab.filter) rightTab else rightTab.copy(filter = rightShown)
 
-    // AppState.scheduleSearchRecompute mirrors this same effective-filter logic (see its
-    // effectiveSearchFilter) when computing the right panel's Find-bar matches, but nothing on the
-    // AppState side observes compareFilterRight toggling or the left tab's filter changing while
-    // mirrored — neither mutates rightTab's own stored `.filter`, so upTab's own staleness hook
-    // never fires for them. This is the explicit, reactive trigger for exactly that gap: it re-runs
-    // whenever the *effective* filter this panel actually displays changes, for whatever reason.
-    LaunchedEffect(effectiveRightTab.filter, rightTab.id) {
-        state.notifyEffectiveFilterChanged(rightTab.id)
-    }
+    // AppState.scheduleSearchRecompute mirrors this same displayed-filter logic (see its effectiveSearchFilter) when computing a pane's
+    // Find-bar matches, but nothing on the AppState side observes the target switching or the other tab's filter changing while it is
+    // displayed here — neither mutates the pane's own stored `.filter`, so upTab's own staleness hook never fires for them. This is the
+    // explicit, reactive trigger for exactly that gap: it re-runs whenever the *effective* filter a pane actually displays changes.
+    LaunchedEffect(leftShown, leftTab.id) { state.notifyEffectiveFilterChanged(leftTab.id) }
+    LaunchedEffect(rightShown, rightTab.id) { state.notifyEffectiveFilterChanged(rightTab.id) }
 
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val totalWidthDp = maxWidth.value
+    CompareScrollSync(state, leftTab.id, rightTab.id, enabled = state.settings.compareSyncScroll)
 
-        Row(
-            Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
-                if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
-                    val frs = visiblePanelFrs()
-                    if (frs.isNotEmpty()) {
-                        val delta = if (ev.isShiftPressed) -1 else 1
-                        val next = (focusedPanelIdx + delta).mod(frs.size)
-                        state.keyboardFocusVisible = true
-                        runCatching { frs[next].second.requestFocus() }
-                    }
-                    true
-                } else {
-                    false
+    val reclaim = { runCatching { leftLogFr.requestFocus() }; Unit }
+    Column(
+        Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
+            if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
+                val frs = visiblePanelFrs()
+                if (frs.isNotEmpty()) {
+                    val delta = if (ev.isShiftPressed) -1 else 1
+                    val next = (focusedPanelIdx + delta).mod(frs.size)
+                    state.keyboardFocusVisible = true
+                    runCatching { frs[next].second.requestFocus() }
                 }
-            },
-        ) {
-            // ── Left panel ──────────────────────────────────────────
-            // No local tab picker here — the top TabBar already controls activeTabId (the tab
-            // shown on the left), so a second picker for the same state would be redundant.
-            Column(
-                Modifier
-                    .width((totalWidthDp * state.compareSplit).dp)
-                    .fillMaxHeight()
-                    .border(BorderStroke(1.dp, tc.br.copy(.53f)))
-            ) {
-                // Empty bar matching the right panel's header height, so both LogViewers start
-                // at the same vertical offset — this is a side-by-side diff view.
-                Box(Modifier.fillMaxWidth().height(22.dp).background(tc.p2))
-                Row(Modifier.weight(1f).fillMaxWidth()) {
-                    // The left column has no sidebar; the panel only has to leave the log view its
-                    // minimum inside this column. Read live (state.compareSplit) so the divider drag
-                    // and a compare-split change both see the current column width.
-                    fun filterEffectiveMaxNow(): Float =
-                        (totalWidthDp * state.compareSplit - PANEL_DIVIDER_WIDTH - LOG_VIEW_MIN_WIDTH)
-                            .coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
-                    BoundFilterPanel(
-                        state = state,
-                        tab = leftTab,
-                        width = minOf(state.filterPanelWidth, filterEffectiveMaxNow()),
-                        liveMaxWidth = ::filterEffectiveMaxNow,
-                        focusRequester = filterFr,
-                        filterSearchRequest = filterSearchRequest,
-                        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-                        onPanelFocusChanged = { focused ->
-                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
-                        },
-                    )
-                    LogViewer(
-                        tab = leftTab, modifier = Modifier.weight(1f),
-                        settings = state.settings,
-                        onSelRow = { id, m, r -> state.selRow(leftTab.id, id, m, r) },
-                        onSelRowRange = { ids -> state.setSelectedRows(leftTab.id, ids) },
-                        onCtxMenu = { id, x, y, sel, panelSel, capture ->
-                            state.ctx = CtxMenuState(leftTab.id, id, x, y, sel, panelSel, annotationCapture = capture)
-                        },
-                        onToggleGroup = { state.toggleGroup(leftTab.id, it) },
-                        onClearFilter = { state.requestClearFilter(leftTab.id) },
-                        onExpandAll = { state.expandAll(leftTab.id) },
-                        onCollapseAll = { state.collapseAll(leftTab.id) },
-                        onToggleUnfiltered = { state.toggleUnfiltered(leftTab.id) },
-                        onToggleTimeDelta = { state.toggleTimeDelta(leftTab.id) },
-                        onOpenSearch = { if (state.isSearchOpen(leftTab.id)) state.closeSearch(leftTab.id) else state.openSearch(leftTab.id) },
-                        onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
-                        onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
-                        onSetProcessNameMode = { mode -> state.setProcessNameMode(leftTab.id, mode) },
-                        onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(leftTab.id, colorKey) },
-                        onExportTxt = { state.exportFilteredTxt(leftTab.id) },
-                        onExportCsv = { state.exportFilteredCsv(leftTab.id) },
-                        scrollStateStore = state.logViewerScrollStateStore,
-                        annotationNavigationRequest = state.pendingAnnotationNavigation,
-                        onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                        searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
-                            state.searchNavigationFor(leftTab.id, scope)?.let { scope to it }
-                        }.toMap(),
-                        onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
-                        onSelectAll = { state.selectAll(leftTab.id) },
-                        onClearSelection = { state.clearSelection(leftTab.id) },
-                        onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
-                        onAddAnnotation = { capture -> state.requestAddAnn(leftTab.id, capture) },
-                        onCopyText = { text -> state.copyToClipboard(text) },
-                        onLogRowDoubleClick = { id -> state.seekVideoToLogRow(leftTab.id, id) },
-                        onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(leftTab.id) },
-                        onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(leftTab.id) },
-                        navScrollMargin = state.settings.navScrollMargin,
-                        focusRequester = leftLogFr,
-                        onPanelFocusChanged = { focused ->
-                            if (focused) {
-                                focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == leftLogFr }
-                                state.searchFocusTabId = leftTab.id
-                            }
-                        },
-                        keyboardFocusVisible = state.keyboardFocusVisible,
-                        onVisibleItems = { summary -> state.noteVisibleItems(leftTab.id, summary) },
-                        onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                        onSearchQueryChange = { scope, query -> state.setSearchQuery(leftTab.id, query, scope) },
-                        onSearchToggleCase = { scope -> state.toggleSearchCase(leftTab.id, scope) },
-                        onSearchNext = { scope -> state.searchNext(leftTab.id, scope) },
-                        onSearchPrev = { scope -> state.searchPrev(leftTab.id, scope) },
-                        onSearchClose = { scope ->
-                            state.closeSearch(leftTab.id, scope)
-                            runCatching { leftLogFr.requestFocus() }
-                        },
-                        onSearchFocused = { scope -> state.focusSearch(leftTab.id, scope) },
-                    )
-                }
+                true
+            } else {
+                false
             }
-
-            // ── Split divider ────────────────────────────────────────
-            HDivider { delta ->
-                val newFrac = (state.compareSplit * totalWidthDp + delta) / totalWidthDp
-                state.updateCompareSplit(newFrac)
-            }
-
-            // ── Right panel ──────────────────────────────────────────
-            Column(Modifier.weight(1f).fillMaxHeight()) {
-                Row(
-                    Modifier.fillMaxWidth().height(22.dp).background(tc.p2).padding(horizontal = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CompareTabPicker(
-                        state = state,
-                        leftTab = leftTab,
-                        rightTab = rightTab,
-                        modifier = Modifier.weight(1f).fillMaxHeight(),
-                    )
-                    CompareTabPill(
-                        label = "Filter",
-                        icon = Icons.Outlined.FilterList,
-                        active = state.compareFilterRight,
-                        tooltip = "Toggle right-side filtering",
-                        modifier = Modifier.fillMaxHeight(),
-                        onClick = { state.updateCompareFilterRight(!state.compareFilterRight) },
-                    )
-                }
-                Row(Modifier.weight(1f).fillMaxWidth()) {
-                    LogViewer(
-                        tab = effectiveRightTab, modifier = Modifier.weight(1f),
-                        settings = state.settings,
-                        onSelRow = { id, m, r -> state.selRow(rightTab.id, id, m, r) },
-                        onSelRowRange = { ids -> state.setSelectedRows(rightTab.id, ids) },
-                        onCtxMenu = { id, x, y, sel, panelSel, capture ->
-                            state.ctx = CtxMenuState(rightTab.id, id, x, y, sel, panelSel, annotationCapture = capture)
-                        },
-                        onToggleGroup = { state.toggleGroup(rightTab.id, it) },
-                        onClearFilter = { state.requestClearFilter(rightTab.id) },
-                        onExpandAll = { state.expandAll(rightTab.id) },
-                        onCollapseAll = { state.collapseAll(rightTab.id) },
-                        onToggleUnfiltered = { state.toggleUnfiltered(rightTab.id) },
-                        onToggleTimeDelta = { state.toggleTimeDelta(rightTab.id) },
-                        onOpenSearch = { if (state.isSearchOpen(rightTab.id)) state.closeSearch(rightTab.id) else state.openSearch(rightTab.id) },
-                        onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
-                        onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
-                        onSetProcessNameMode = { mode -> state.setProcessNameMode(rightTab.id, mode) },
-                        onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(rightTab.id, colorKey) },
-                        onExportTxt = { state.exportFilteredTxt(rightTab.id) },
-                        onExportCsv = { state.exportFilteredCsv(rightTab.id) },
-                        scrollStateStore = state.logViewerScrollStateStore,
-                        annotationNavigationRequest = state.pendingAnnotationNavigation,
-                        onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                        searchNavigationRequests = SearchScope.entries.mapNotNull { scope ->
-                            state.searchNavigationFor(rightTab.id, scope)?.let { scope to it }
-                        }.toMap(),
-                        onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
-                        onSelectAll = { state.selectAll(rightTab.id) },
-                        onClearSelection = { state.clearSelection(rightTab.id) },
-                        onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
-                        onAddAnnotation = { capture -> state.requestAddAnn(rightTab.id, capture) },
-                        onCopyText = { text -> state.copyToClipboard(text) },
-                        onLogRowDoubleClick = { id -> state.seekVideoToLogRow(rightTab.id, id) },
-                        onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(rightTab.id) },
-                        onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(rightTab.id) },
-                        navScrollMargin = state.settings.navScrollMargin,
-                        focusRequester = rightLogFr,
-                        onPanelFocusChanged = { focused ->
-                            if (focused) {
-                                focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == rightLogFr }
-                                state.searchFocusTabId = rightTab.id
-                            }
-                        },
-                        keyboardFocusVisible = state.keyboardFocusVisible,
-                        // Keyed by rightTab (not effectiveRightTab): the summary reflects what
-                        // this pane displays, which is what selRow/selectAll on rightTab.id need.
-                        onVisibleItems = { summary -> state.noteVisibleItems(rightTab.id, summary) },
-                        onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                        // tab.search lives on rightTab (LogTab.search), unaffected by
-                        // effectiveRightTab's filter override — see AppState.effectiveSearchFilter
-                        // for how the recompute itself accounts for that override.
-                        onSearchQueryChange = { scope, query -> state.setSearchQuery(rightTab.id, query, scope) },
-                        onSearchToggleCase = { scope -> state.toggleSearchCase(rightTab.id, scope) },
-                        onSearchNext = { scope -> state.searchNext(rightTab.id, scope) },
-                        onSearchPrev = { scope -> state.searchPrev(rightTab.id, scope) },
-                        onSearchClose = { scope ->
-                            state.closeSearch(rightTab.id, scope)
-                            runCatching { rightLogFr.requestFocus() }
-                        },
-                        onSearchFocused = { scope -> state.focusSearch(rightTab.id, scope) },
-                    )
-                    // Tied to leftTab, matching RightSidebarPanel's own AnnotationPanel below — the
-                    // top TabBar (not this view) owns which tab is "primary," and there is one
-                    // sidebar/player slot regardless of which side has the attachment.
-                    if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && leftTab.attachedVideo != null)) {
-                        // This row has no filter panel of its own (BoundFilterPanel only appears on
-                        // the left pane above) — the reserved-width guard only needs to account for
-                        // the split divider already subtracted from the right column's share of
-                        // totalWidthDp. See FileView.kt's identical use of
-                        // annotationPanelEffectiveMaxWidth for why ANNOTATION_PANEL_MAX_WIDTH alone
-                        // (now big enough for a wide capture mirror) isn't a safe render width here.
-                        val rightColumnWidthDp = totalWidthDp * (1f - state.compareSplit) - PANEL_DIVIDER_WIDTH
-                        val annotationEffectiveMax = annotationPanelEffectiveMaxWidth(
-                            availableRowWidth = rightColumnWidthDp,
-                            filterVisible = false,
-                            filterPanelWidth = 0f,
-                        )
-                        val annotationRenderedWidth = minOf(state.annotationPanelWidth, annotationEffectiveMax)
-                        HDivider { d ->
-                            // See FileView.kt's identical comment: recompute live instead of
-                            // closing over the rightColumnWidthDp/annotationEffectiveMax/
-                            // annotationRenderedWidth locals above, which are frozen at whatever
-                            // this composable's last recomposition happened to see. Reading
-                            // state.compareSplit/state.annotationPanelWidth at call time picks up
-                            // every prior delta immediately, even ahead of the next recomposition,
-                            // which is what keeps the divider tracking the mouse instead of
-                            // jittering/snapping back to a stale base.
-                            val liveRightColumnWidthDp = totalWidthDp * (1f - state.compareSplit) - PANEL_DIVIDER_WIDTH
-                            val liveEffectiveMax = annotationPanelEffectiveMaxWidth(
-                                availableRowWidth = liveRightColumnWidthDp,
-                                filterVisible = false,
-                                filterPanelWidth = 0f,
-                            )
-                            val liveRenderedWidth = minOf(state.annotationPanelWidth, liveEffectiveMax)
-                            state.updateAnnotationPanelWidth((liveRenderedWidth - d).coerceAtMost(liveEffectiveMax))
-                        }
-                        RightSidebarPanel(
-                            state = state,
-                            tab = leftTab,
-                            width = annotationRenderedWidth,
-                            aiFocusRequester = aiFr,
-                            onAiPanelFocusChanged = { focused ->
-                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
-                            },
-                            notesContent = {
-                                BoundAnnotationPanel(
-                                    state = state,
-                                    tab = leftTab,
-                                    width = annotationRenderedWidth,
-                                    focusRequester = annotationFr,
-                                    onPanelFocusChanged = { focused ->
-                                        if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
-                                    },
-                                )
-                            },
-                            videoContent = if (state.videoPanelVisible && leftTab.attachedVideo != null) {
-                                { BoundVideoPanel(state = state, tab = leftTab, modifier = Modifier.fillMaxSize()) }
-                            } else {
-                                null
-                            },
-                        )
-                    }
-                }
-            }
-        }
+        },
+    ) {
+        CompareFilterStrip(state, onReclaimFocus = reclaim)
+        CompareTilingHost(
+            state = state,
+            left = leftTab,
+            right = rightTab,
+            shownLeft = shownLeft,
+            shownRight = shownRight,
+            focus = ComparePanelFocus(
+                panels = LogViewPanelFocus(
+                    filters = filterFr,
+                    log = leftLogFr,
+                    notes = annotationFr,
+                    ai = aiFr,
+                    onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                    returnToLog = reclaim,
+                ),
+                rightLog = rightLogFr,
+                filterSearchRequest = filterSearchRequest,
+                onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+            ),
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+        )
     }
 }
 
@@ -370,6 +145,9 @@ internal fun CompareTabPicker(
     leftTab: LogTab,
     rightTab: LogTab,
     modifier: Modifier = Modifier,
+    // The tiled compare view hosts the picker inside B's small log header: only the tab being compared shows as a pill and every other
+    // tab is in the "▾ N" list, so the current choice is always visible however narrow the header is.
+    compact: Boolean = false,
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
@@ -390,14 +168,18 @@ internal fun CompareTabPicker(
     LaunchedEffect(state.tabs.map { it.id }) {
         compareOrderIds = orderedTabsForComparePicker(state.tabs, compareOrderIds).map { it.id }
     }
-    val (visibleTabs, overflowTabs) = remember(orderedTabs, containerPx, state.settings.visibleTabLimit) {
-        splitTabsForVisibility(
-            tabs = orderedTabs,
-            containerPx = containerPx,
-            minTabPx = minTabPx,
-            overflowButtonPx = ovBtnPx,
-            visibleTabLimit = state.settings.visibleTabLimit,
-        )
+    val (visibleTabs, overflowTabs) = remember(orderedTabs, containerPx, state.settings.visibleTabLimit, compact, rightTab.id) {
+        if (compact) {
+            orderedTabs.filter { it.id == rightTab.id } to orderedTabs.filter { it.id != rightTab.id }
+        } else {
+            splitTabsForVisibility(
+                tabs = orderedTabs,
+                containerPx = containerPx,
+                minTabPx = minTabPx,
+                overflowButtonPx = ovBtnPx,
+                visibleTabLimit = state.settings.visibleTabLimit,
+            )
+        }
     }
 
     val visibleTabIds = visibleTabs.map { it.id }

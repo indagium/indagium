@@ -9,6 +9,7 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
+import com.indagium.model.CompareFilterTarget
 import com.indagium.model.CopyMaskRule
 import com.indagium.model.CrashCategory
 import com.indagium.model.CtrlFTarget
@@ -9781,6 +9782,87 @@ class AppStateBehaviorTest {
         // The right tab's own stored filter is untouched by any of this (only the search
         // computation used an override, per AppState.effectiveSearchFilter).
         assertEquals(Filter(), state.tab("right")!!.filter)
+    }
+
+    // "Filters apply to B": the filter panel edits B's own filter and B's Find searches it; A shows everything (with B's highlighters),
+    // so A's Find searches everything and A's own stored filter plays no part.
+    @Test
+    fun compareTargetBSearchesBWithItsOwnFilterAndASeesEverything() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "left", "left.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle kept by the stored filter"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "Other", "needle hidden by the stored filter"),
+                ),
+            ).copy(filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("App"))),
+            mkTab(
+                "right", "right.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle in App"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "Other", "needle in Other"),
+                ),
+            ).copy(filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("Other"))),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        state.updateCompareFilterTarget(CompareFilterTarget.B)
+
+        state.openSearch("left")
+        state.setSearchQuery("left", "needle")
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil {
+            state.tab("left")!!.search.matchIds.isNotEmpty() && state.tab("right")!!.search.matchIds.isNotEmpty()
+        }
+
+        assertEquals(listOf(1, 2), state.tab("left")!!.search.matchIds.toList(), "A shows everything, so its stored tag filter is ignored")
+        assertEquals(listOf(2), state.tab("right")!!.search.matchIds.toList(), "B searches its own displayed filter")
+        // Neither tab's stored filter was touched by any of this.
+        assertEquals(setOf("App"), state.tab("left")!!.filter.activeTags)
+        assertEquals(setOf("Other"), state.tab("right")!!.filter.activeTags)
+        state.close()
+    }
+
+    @Test
+    fun switchingTheCompareTargetRecomputesBothTabsActiveSearches() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "left", "left.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "Other", "needle two"),
+                ),
+            ).copy(filter = Filter(mode = FilterMode.TAGS, activeTags = setOf("App"))),
+            mkTab(
+                "right", "right.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle one"),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "Other", "needle two"),
+                ),
+            ),
+        )
+        state.activeTabId = "left"
+        state.compareTabId = "right"
+        state.updateCompareMode(true)
+        state.updateCompareFilterTarget(CompareFilterTarget.BOTH)
+        state.openSearch("left")
+        state.setSearchQuery("left", "needle")
+        state.openSearch("right")
+        state.setSearchQuery("right", "needle")
+        waitUntil { state.tab("left")!!.search.matchIds.size == 1 && state.tab("right")!!.search.matchIds.size == 1 }
+
+        // BOTH mirrors A's filter onto B; switching to B makes A show everything and B show its own (empty) filter.
+        state.updateCompareFilterTarget(CompareFilterTarget.B)
+        waitUntil { state.tab("left")!!.search.matchIds.size == 2 && state.tab("right")!!.search.matchIds.size == 2 }
+
+        // Back to A: A is filtered again, B shows everything.
+        state.updateCompareFilterTarget(CompareFilterTarget.A)
+        waitUntil { state.tab("left")!!.search.matchIds.size == 1 && state.tab("right")!!.search.matchIds.size == 2 }
+        state.close()
     }
 
     private fun controlServerRequestStatus(port: Int, token: String): Int {

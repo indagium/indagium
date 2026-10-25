@@ -225,7 +225,7 @@ fun App(
         ProofreadingUi(proofreadingService, state.settings.proofreading, ignoredProofreadingSuggestions)
     }
     // The runtime revision is the single Compose invalidation source for active AI runs. App-level
-    // dialogs (such as Add Annotation) sit outside RightSidebarPanel, so they observe it here too.
+    // dialogs (such as Add Annotation) sit outside the Notes/AI tiles, so they observe it here too.
     val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
 
     @Suppress("UNUSED_VARIABLE")

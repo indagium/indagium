@@ -2229,7 +2229,7 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     var markerListSpace by remember(tab.id) { mutableStateOf(0.dp) }
     val density = LocalDensity.current
     val detached = state.isEmbeddedMirrorDetached(tab.id)
-    // This card fills RightSidebarPanel's video slot, which is a *weighted* share of the sidebar
+    // This card fills the Video tile, which is a *weighted* share of the sidebar
     // (videoSplit, default 0.42) — a fixed height, not a free-growing column. It therefore must NOT
     // scroll: inside a verticalScroll the incoming max height is infinite, so the mirror kept its
     // full 420dp however small the slot was, overflowed, and got clipped at the slot edge — which
