@@ -51,7 +51,8 @@ import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 
-// The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the four single-view presets as
+// The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the four single-view presets (the two
+// compare presets in compare mode) as
 // thumbnails, a checklist of the panels that currently apply, a "Lock tiles" switch and "Reset to <preset>". The button carries a small
 // badge counting the applicable tiles hidden through the menu or a tile's hide button. Every click and the dismissal hand keyboard focus
 // back to the root (CLAUDE.md: a clickable or a dismissed Popup steals it and never returns it).
@@ -66,18 +67,24 @@ private const val THUMB_LOG_FILL_ALPHA = 0.9f
 private const val BADGE_SIZE_DP = 14
 private const val MENU_GAP_PX = 4
 
-/** The active log tab when the Layout menu applies (a single log view); null on the New tab, a diagram, the tests tab and in compare. */
+/** The active log tab when the Layout menu applies (a single log view or the compare view); null on the New tab, a diagram and the tests tab. */
 internal fun layoutMenuTab(state: AppState): LogTab? {
     val tab = state.activeTab() ?: return null
     val onLogSurface = state.activeSurface.let { it == null || it is ActiveSurface.Log }
-    return tab.takeIf { !it.isCaptureLauncher && !state.compareMode && onLogSurface }
+    return tab.takeIf { !it.isCaptureLauncher && onLogSurface }
 }
 
-/** The tiles the Panels checklist offers for [ctx]: every applicable tile except the log tiles and Original (its tile has its own ×). */
+/** The tile context the menu reads: the compare view's when compare is on (and there are two tabs), else the single view's for [tab]. */
+private fun AppState.layoutMenuContext(tab: LogTab): LogViewTileContext {
+    val pair = compareTabs()?.takeIf { compareMode }
+    return if (pair != null) compareTileContext(pair.first, pair.second) else logViewTileContext(tab)
+}
+
+private val ORIGINAL_TILES = setOf(LogViewSectionId.ORIGINAL, LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B)
+
+/** The tiles the Panels checklist offers for [ctx]: every applicable tile except the log tiles and the Original tiles (each has its own ×). */
 internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
-    LogViewSectionId.entries.filter {
-        !it.isLogTile && it != LogViewSectionId.ORIGINAL && it.scope != LogViewScope.COMPARE && logViewTileApplicable(it, ctx)
-    }
+    LogViewSectionId.entries.filter { !it.isLogTile && it !in ORIGINAL_TILES && logViewTileApplicable(it, ctx) }
 
 /** The toolbar button, with the hidden-tile badge. Draws nothing where the menu does not apply (see [layoutMenuTab]). */
 @Composable
@@ -85,8 +92,8 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit) {
     val tab = layoutMenuTab(state) ?: return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
-    val ctx = state.logViewTileContext(tab)
-    val badge = state.logViewBadgeCount(ctx)
+    val ctx = state.layoutMenuContext(tab)
+    val badge = if (ctx.compare) state.compareBadgeCount(ctx) else state.logViewBadgeCount(ctx)
     Box(Modifier.fillMaxHeight()) {
         ToolbarBtn(
             "",
@@ -132,17 +139,19 @@ private class LayoutMenuPositionProvider : PopupPositionProvider {
 internal fun LayoutMenuPopup(state: AppState, tab: LogTab, onReclaimFocus: () -> Unit, onDismiss: () -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
-    val ctx = state.logViewTileContext(tab)
+    val ctx = state.layoutMenuContext(tab)
+    val compare = ctx.compare
     val settings = state.settings
+    val hidden = if (compare) settings.compareHidden else settings.logViewHidden
     Popup(popupPositionProvider = remember { LayoutMenuPositionProvider() }, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
         Column(
             Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape).padding(vertical = 8.dp).testTag("layout-menu-popup"),
         ) {
             MenuLabel("Layout presets")
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                LogViewLayoutPreset.forScope(LogViewScope.SINGLE).forEach { preset ->
-                    PresetThumb(preset, active = state.logViewPresetActive(preset)) {
-                        state.applyLogViewPreset(preset)
+                LogViewLayoutPreset.forScope(if (compare) LogViewScope.COMPARE else LogViewScope.SINGLE).forEach { preset ->
+                    PresetThumb(preset, active = if (compare) state.comparePresetActive(preset) else state.logViewPresetActive(preset)) {
+                        if (compare) state.applyComparePreset(preset) else state.applyLogViewPreset(preset)
                         onReclaimFocus()
                     }
                 }
@@ -150,7 +159,7 @@ internal fun LayoutMenuPopup(state: AppState, tab: LogTab, onReclaimFocus: () ->
             Divider()
             MenuLabel("Panels")
             layoutMenuPanels(ctx).forEach { id ->
-                val visible = logViewTileVisible(id, ctx, settings.logViewHidden)
+                val visible = logViewTileVisible(id, ctx, hidden)
                 Box(Modifier.testTag("layout-menu-panel-${id.key}")) {
                     CheckRow(visible, {
                         if (visible) state.hideLogViewTile(id) else state.showLogViewTile(id)
@@ -165,12 +174,12 @@ internal fun LayoutMenuPopup(state: AppState, tab: LogTab, onReclaimFocus: () ->
                     onReclaimFocus()
                 }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
             }
-            val resetTo = state.lastLogViewPresetOrClassic()
+            val resetTo = if (compare) state.lastComparePresetOrGrid() else state.lastLogViewPresetOrClassic()
             Row(
                 Modifier
                     .fillMaxWidth()
                     .clickable(role = Role.Button) {
-                        state.resetLogViewLayout()
+                        if (compare) state.resetCompareLayout() else state.resetLogViewLayout()
                         onReclaimFocus()
                     }
                     .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -217,7 +226,7 @@ private fun PresetThumb(preset: LogViewLayoutPreset, active: Boolean, onClick: (
                 geometry?.cards?.forEach { card ->
                     val r = card.rect
                     drawRoundRect(
-                        color = fill.copy(alpha = if (card.section == LogViewSectionId.LOG) THUMB_LOG_FILL_ALPHA else THUMB_FILL_ALPHA),
+                        color = fill.copy(alpha = if (card.section.isLogTile) THUMB_LOG_FILL_ALPHA else THUMB_FILL_ALPHA),
                         topLeft = Offset(r.x * sx + inset, r.y * sy + inset),
                         size = Size((r.w * sx - 2 * inset).coerceAtLeast(1f), (r.h * sy - 2 * inset).coerceAtLeast(1f)),
                         cornerRadius = CornerRadius(1.dp.toPx()),

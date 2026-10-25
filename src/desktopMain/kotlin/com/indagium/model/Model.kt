@@ -1669,6 +1669,13 @@ enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val sc
     }
 }
 
+/**
+ * Which compare pane(s) the filter panel's filters apply to: [A] only the left tab (the right one shows everything, with A's
+ * highlighters), [B] only the right tab (the panel edits B's own filter; A shows B's highlighters), [BOTH] the left tab's filter
+ * on both panes. The legacy `compareFilterRight` flag is `target == BOTH`.
+ */
+enum class CompareFilterTarget { A, B, BOTH }
+
 /** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the last two are for the compare view. */
 enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS }
 

@@ -1082,7 +1082,7 @@ internal fun restoredSettingsFromAutosave(autosaveFile: File): AppSettings {
 internal fun AppState.compareStateToken(): String = tokenFields(
     compareTabId,
     compareMode.toString(),
-    compareFilterRight.toString(),
+    (compareFilterTarget == CompareFilterTarget.BOTH).toString(),
     filterVisible.toString(),
     annotationVisible.toString(),
     filterPanelWidth.toString(),
@@ -1093,6 +1093,9 @@ internal fun AppState.compareStateToken(): String = tokenFields(
     videoPanelVisible.toString(),
     videoPanelWidth.toString(),
     filterBarVisible.toString(),
+    // Appended last (never in the middle, see the versioning note in CLAUDE.md): the compare view's "Filters apply to" target. The
+    // legacy field 2 above keeps being written as "target == BOTH" so an older build still reads a sensible value.
+    compareFilterTarget.name,
 )
 
 internal fun AppState.restoreCompareState(token: String) {
@@ -1100,7 +1103,9 @@ internal fun AppState.restoreCompareState(token: String) {
     if (p.size < 8) return
     compareTabId = p[0]
     compareMode = p[1].toBoolean()
-    compareFilterRight = p[2].toBoolean()
+    // Field 13 (the target) wins; tokens from before it fall back to the legacy on/off flag: on = both panes, off = A only.
+    compareFilterTarget = p.getOrNull(13)?.let { name -> CompareFilterTarget.entries.firstOrNull { it.name == name } }
+        ?: if (p[2].toBoolean()) CompareFilterTarget.BOTH else CompareFilterTarget.A
     filterVisible = p[3].toBoolean()
     annotationVisible = p[4].toBoolean()
     filterPanelWidth = (p[5].toFloatOrNull() ?: filterPanelWidth).coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)

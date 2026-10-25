@@ -73,12 +73,12 @@ internal fun AppState.commitLogViewLayout(tree: TileNode<LogViewSectionId>) {
 /** The × on a tile: puts [id] in the hidden list. The tab-strip group flag is left alone, so the badge counts it. */
 internal fun AppState.hideLogViewTile(id: LogViewSectionId) {
     if (logViewMaximized == id) logViewMaximized = null
-    updateSettings { it.withLogViewTileHidden(id, true) }
+    updateSettings { it.withActiveViewTileHidden(id, true, compareMode) }
 }
 
 /** Shows [id] again and switches its group on, so the tile is really visible whichever of the two had hidden it. */
 internal fun AppState.showLogViewTile(id: LogViewSectionId) {
-    updateSettings { it.withLogViewTileHidden(id, false) }
+    updateSettings { it.withActiveViewTileHidden(id, false, compareMode) }
     setLogViewGroup(id.group, true)
 }
 
@@ -188,9 +188,10 @@ internal fun AppState.revealFilterTiles(sections: Collection<LogViewSectionId> =
     if (sections.isNotEmpty()) {
         updateFilterPanelUiState { sections.forEach { setExpandedFlag(it, true) } }
     }
+    val compare = compareMode
     updateSettings { settings ->
-        val unhidden = sections.fold(settings) { acc, id -> acc.withLogViewTileHidden(id, false).withLogViewTileCollapsed(id, false) }
-        if (anyFilterTileVisible(unhidden)) unhidden else LOG_VIEW_FILTER_TILES.fold(unhidden) { acc, id -> acc.withLogViewTileHidden(id, false) }
+        val unhidden = sections.fold(settings) { acc, id -> acc.withActiveViewTileHidden(id, false, compare).withLogViewTileCollapsed(id, false) }
+        if (anyFilterTileVisible(unhidden)) unhidden else LOG_VIEW_FILTER_TILES.fold(unhidden) { acc, id -> acc.withActiveViewTileHidden(id, false, compare) }
     }
     updateFilterVisible(true)
 }
@@ -198,8 +199,10 @@ internal fun AppState.revealFilterTiles(sections: Collection<LogViewSectionId> =
 // With the group on: does any filter tile apply to the active tab and sit outside the hidden list?
 private fun AppState.anyFilterTileVisible(settings: AppSettings): Boolean {
     val tab = activeTab() ?: return true
-    val ctx = logViewTileContext(tab).copy(groupOn = { true })
-    return LOG_VIEW_FILTER_TILES.any { logViewTileVisible(it, ctx, settings.logViewHidden) }
+    val compare = compareTabs()?.takeIf { compareMode }
+    val ctx = (if (compare != null) compareTileContext(compare.first, compare.second) else logViewTileContext(tab)).copy(groupOn = { true })
+    val hidden = if (compare != null) settings.compareHidden else settings.logViewHidden
+    return LOG_VIEW_FILTER_TILES.any { logViewTileVisible(it, ctx, hidden) }
 }
 
 /** The F6 focus stops of [tab]'s log view in reading order (filter tiles are one stop); empty when no tile is showing. */

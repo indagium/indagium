@@ -186,7 +186,7 @@ internal fun TabBar(state: AppState, onReclaimFocus: () -> Unit = {}) {
             ) { state.toggleRecentFilesMenu() }
         }
         Spacer(Modifier.width(toolbarGap))
-        // The log view's Layout menu (draws nothing outside a single log view), just before Settings.
+        // The log view's Layout menu (single log view and compare; draws nothing elsewhere), just before Settings.
         LayoutMenuButton(state, onReclaimFocus)
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(

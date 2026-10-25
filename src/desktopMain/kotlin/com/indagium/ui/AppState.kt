@@ -528,78 +528,15 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 
 // Raised from 500f so the right sidebar can grow wide enough to show a meaningfully bigger device
 // mirror while capturing (see CaptureCard/EmbeddedMirrorPanel — the mirror sizes itself from the
-// panel's actual measured width). The window-relative guard in annotationPanelEffectiveMaxWidth
-// below is what actually keeps the log view from being squeezed out on a narrow window; this
-// constant is just the stored ceiling, reached on a wide-enough window.
+// panel's actual measured width). The tiling layout (ui/TileLayout.kt) clamps tiles to their minimum
+// size on a narrow window; this constant is just the stored ceiling.
 internal const val ANNOTATION_PANEL_MAX_WIDTH = 1400f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 
 // Raised from 420f so the Filters panel can be dragged as wide as the right sidebar (long tags,
 // message rules and saved-filter names get room instead of ellipsizing). Like
-// ANNOTATION_PANEL_MAX_WIDTH this is only the stored ceiling: filterPanelEffectiveMaxWidth below is
-// the window-relative guard that decides what is actually rendered right now.
+// ANNOTATION_PANEL_MAX_WIDTH this is only the stored ceiling.
 internal const val FILTER_PANEL_MAX_WIDTH = 1400f
-
-// Width reserved for the log view so the right sidebar (and, when visible, the filter panel) can
-// never squeeze it out entirely. Matches the sidebar/filter dividers' own hit width (HDivider,
-// ui/Components.kt) so the arithmetic in annotationPanelEffectiveMaxWidth lines up with what is
-// actually drawn.
-internal const val LOG_VIEW_MIN_WIDTH = 320f
-internal const val PANEL_DIVIDER_WIDTH = 10f
-
-/**
- * The largest the right sidebar (Notes/AI/CaptureCard) is allowed to render at *right now*, given
- * the row's actual measured width. [ANNOTATION_PANEL_MAX_WIDTH] is a generous stored ceiling so a
- * wide window can show a large device mirror; this is the window-relative guard that keeps the log
- * view from being squeezed to nothing on a narrower one. The stored `annotationPanelWidth` itself
- * is never rewritten by this — callers render `min(annotationPanelWidth, this result)` and leave
- * the stored value alone, so widening the window later restores the larger size without the user
- * having to redrag the divider.
- *
- * Never returns less than [ANNOTATION_PANEL_MIN_WIDTH]: on an extremely narrow window the sidebar
- * keeps its own floor even if that leaves the log view narrower than [LOG_VIEW_MIN_WIDTH].
- */
-internal fun annotationPanelEffectiveMaxWidth(
-    availableRowWidth: Float,
-    filterVisible: Boolean,
-    filterPanelWidth: Float,
-    minLogViewWidth: Float = LOG_VIEW_MIN_WIDTH,
-): Float {
-    // One divider between the filter panel and the log view (only drawn while the filter panel
-    // is visible), and one between the log view and the sidebar (this function is only relevant
-    // while the sidebar itself is showing, so that divider is always present).
-    val filterReserved = if (filterVisible) filterPanelWidth + PANEL_DIVIDER_WIDTH else 0f
-    val sidebarDividerReserved = PANEL_DIVIDER_WIDTH
-    val available = availableRowWidth - filterReserved - sidebarDividerReserved - minLogViewWidth
-    return available.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
-}
-
-/**
- * The largest the left Filters panel is allowed to render at *right now*, given the row's actual
- * measured width. The filter-panel counterpart of [annotationPanelEffectiveMaxWidth]; as there, the
- * stored `filterPanelWidth` is never rewritten — callers render `min(filterPanelWidth, this)` so
- * widening the window later restores the larger size without a redrag.
- *
- * The two guards are deliberately asymmetric to avoid a circular dependency: this one reserves only
- * the sidebar's *minimum* width ([ANNOTATION_PANEL_MIN_WIDTH]) when the sidebar is visible, while
- * [annotationPanelEffectiveMaxWidth] is then fed this panel's *rendered* width and shrinks the
- * sidebar into whatever is left. So the filter panel can never push the sidebar below its own
- * floor, and the sidebar can still grow into any space the filter panel isn't using.
- *
- * Never returns less than [FILTER_PANEL_MIN_WIDTH]: on an extremely narrow window the panel keeps
- * its own floor even if that leaves the log view narrower than [LOG_VIEW_MIN_WIDTH].
- */
-internal fun filterPanelEffectiveMaxWidth(
-    availableRowWidth: Float,
-    rightSidebarVisible: Boolean,
-    minLogViewWidth: Float = LOG_VIEW_MIN_WIDTH,
-): Float {
-    // One divider between the filter panel and the log view (always drawn while this panel is
-    // showing), plus — only while the sidebar is showing — its minimum width and its own divider.
-    val sidebarReserved = if (rightSidebarVisible) ANNOTATION_PANEL_MIN_WIDTH + PANEL_DIVIDER_WIDTH else 0f
-    val available = availableRowWidth - PANEL_DIVIDER_WIDTH - sidebarReserved - minLogViewWidth
-    return available.coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
-}
 
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
@@ -3206,8 +3143,8 @@ class AppState(
     var filterBarVisible by mutableStateOf(false)
     var annotationVisible by mutableStateOf(true)
 
-    // Notes and the AI panel are independent visibility toggles sharing one sidebar slot (see
-    // RightSidebarPanel): both on splits it vertically, Notes above AI, sized by rightSidebarSplit.
+    // Notes and the AI panel are independent visibility toggles. rightSidebarSplit is the legacy Notes | AI share that seeds the
+    // tiled layouts (LogViewLegacySizes).
     var aiPanelVisible by mutableStateOf(false)
     var rightSidebarSplit by mutableStateOf(0.5f)
     var filterPanelWidth by mutableStateOf(220f)
@@ -3219,7 +3156,19 @@ class AppState(
     var videoPanelVisible by mutableStateOf(true)
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
-    var compareFilterRight by mutableStateOf(true)
+
+    // Which compare pane(s) the filters apply to (ui/CompareFilters.kt). compareFilterRight is the legacy on/off form of the same
+    // setting: true = BOTH; false = a single pane (A, or B once it was chosen), so older callers and the legacy token field still work.
+    var compareFilterTarget by mutableStateOf(CompareFilterTarget.BOTH)
+    var compareFilterRight: Boolean
+        get() = compareFilterTarget == CompareFilterTarget.BOTH
+        set(value) {
+            if (value) {
+                compareFilterTarget = CompareFilterTarget.BOTH
+            } else if (compareFilterTarget == CompareFilterTarget.BOTH) {
+                compareFilterTarget = CompareFilterTarget.A
+            }
+        }
 
     // The log-view tile shown full-size (Esc restores): session-only, never persisted, global like the layout it temporarily covers.
     // The tiling host and the AppState.reveal*/hide* helpers in LogViewLayoutState.kt read and clear it.
@@ -6140,6 +6089,9 @@ class AppState(
     var visibleItemsVersion by mutableStateOf(0)
         private set
 
+    /** The row ids [tabId]'s log viewer last reported as displayed (display order), or null before one has; the compare sync scroll reads it. */
+    internal fun visibleItemsSummaryOf(tabId: String): ItemsSummary? = visibleItemsByTab[tabId]
+
     fun noteVisibleItems(tabId: String, summary: ItemsSummary) {
         visibleItemsByTab[tabId] = summary
         visibleItemsVersion += 1
@@ -6850,10 +6802,17 @@ class AppState(
 
     fun updateCompareFilterRight(visible: Boolean) {
         if (compareFilterRight == visible) return
-        compareFilterRight = visible
+        updateCompareFilterTarget(if (visible) CompareFilterTarget.BOTH else CompareFilterTarget.A)
+    }
+
+    /** Chooses which compare pane(s) the filters apply to; both panes' Find matches follow the filter they now display. */
+    fun updateCompareFilterTarget(target: CompareFilterTarget) {
+        if (compareFilterTarget == target) return
+        compareFilterTarget = target
         if (compareMode) {
-            tab(compareTabId)?.takeIf { it.searchFor(SearchScope.FILTERED).active }
-                ?.let { scheduleSearchRecompute(it.id, SearchScope.FILTERED) }
+            listOf(activeTabId, compareTabId).distinct()
+                .mapNotNull { id -> tab(id)?.takeIf { it.searchFor(SearchScope.FILTERED).active } }
+                .forEach { scheduleSearchRecompute(it.id, SearchScope.FILTERED) }
         }
         autosaveNow()
     }
@@ -10814,20 +10773,24 @@ class AppState(
         pendingSearchNavigation = request
     }
 
-    // Compare mode's right panel never renders its own stored `.filter` — CompareView.kt's
-    // effectiveRightTab mirrors the left tab's filter when compareFilterRight is on, or shows
-    // everything (Filter()) when it's off. Search must match against that same *displayed* filter.
-    // Compare searches each tab with its Filtered slot only.
+    // Compare mode's panes never render their own stored `.filter` as is — CompareView.kt shows
+    // compareDisplayedFilters(compareFilterTarget, A's filter, B's filter): the filter on the pane(s) it applies
+    // to, everything (plus the other tab's highlighters) on the other. Search must match against that same
+    // *displayed* filter. Compare searches each tab with its Filtered slot only.
     private fun effectiveSearchFilter(tabId: String, stored: LogTab): Filter {
         if (!compareMode) return stored.filter
+        val left = tab(activeTabId) ?: return stored.filter
+        val right = tab(compareTabId) ?: return stored.filter
+        val (leftShown, rightShown) = compareDisplayedFilters(compareFilterTarget, left.filter, right.filter)
         return when (tabId) {
-            compareTabId -> if (compareFilterRight) tab(activeTabId)?.filter ?: stored.filter else Filter()
+            activeTabId -> leftShown
+            compareTabId -> rightShown
             else -> stored.filter
         }
     }
 
-    // CompareView.kt calls this when the right panel's *effective* displayed filter changes without
-    // the right tab's own stored `.filter` changing, which upTab's hook cannot see.
+    // CompareView.kt calls this when a pane's *effective* displayed filter changes without that
+    // tab's own stored `.filter` changing, which upTab's hook cannot see.
     fun notifyEffectiveFilterChanged(tabId: String) = scheduleSearchRecompute(tabId, SearchScope.FILTERED)
 
     /** One cancellable debounced worker per (tab, concrete scope); every call supersedes the one in

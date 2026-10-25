@@ -817,7 +817,7 @@ the closed New tab; closing Tests with nothing else open leaves the empty state 
 The single (non-compare) log view is a tiling surface: the filter panel's eight sections, Original, Log, Notes, the Diagram library,
 AI and Video are tiles of one `TilingSurface` (`ui/TilingHost.kt`, the generic host also behind the New tab, §6.3) laid out by the
 generic engine in `ui/TileLayout.kt` (`TileNode<K>` trees, `tileGeometry`, `dropTile`, `resizeProjected`, `projectTileLayout`).
-The compare view still uses its legacy two-panel layout (its tiles, `LOG_A`/`LOG_B`/`ORIGINAL_A`/`ORIGINAL_B`, are a later phase).
+The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`ORIGINAL_A`/`ORIGINAL_B`, see "Compare on tiles" below).
 
 - **Model.** `LogViewSectionId` (`model/Model.kt`) names every tile with its tab-strip group (`LogViewTileGroup`: filters, notes, AI,
   video, or none for the log tiles) and scope. `ui/LogViewLayout.kt` is UI-free: the presets (`LogViewLayoutPreset` Classic, Review,
@@ -850,7 +850,7 @@ The compare view still uses its legacy two-panel layout (its tiles, `LOG_A`/`LOG
   the tab is active, and resizing Video writes the per-device layout, never the global one.
 - **Maximize** is `AppState.logViewMaximized`, session-only; Esc restores it (handled on the host's preview pass because the log viewer
   consumes every Esc). F6 cycles `logViewFocusOrder` of the visible tiles (all filter tiles are one stop).
-- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `TabBar` (single log views only): four preset
+- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `TabBar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): four preset
   thumbnails drawn from `tileGeometry`, a Panels checklist of the applicable tiles, "Lock tiles" (hides grips) and "Reset to <preset>".
   The badge counts applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the Diagram library
   hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth (workspace profiles
@@ -858,6 +858,30 @@ The compare view still uses its legacy two-panel layout (its tiles, `LOG_A`/`LOG
   Filter group off instead of listing eight hidden tiles (the badge stays meaningful and the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
   switches the group on again. `revealFilterTiles` (Cmd+1, Ctrl+F, the filter bar's residual chip) un-hides, expands and un-maximizes.
+- **Compare on tiles.** `CompareView` (`ui/CompareView.kt`: which tabs are A and B, F6, displayed filters) puts a strip above one `TilingSurface`
+  (`ui/CompareTiling.kt`): "Filters apply to" with an A | B | Both `SegmentedControl` and a "Link scroll" pill (`AppSettings.compareSyncScroll`). The strip is
+  not a tile because tiles move. The tiles are the filter sections, A (Original over Log), B (Original over Log), Notes, Diagram library, AI and
+  Video, emitted in that fixed order; Notes, AI and Video follow the left tab, as they always did. `LogViewTilingFrame` (size, Esc to restore a
+  maximized tile) and `LogViewSurface` (wide `TilingSurface` or `TileStackedSurface` below 720 dp) are shared with the single view. The layout is
+  app-wide: `AppSettings.compareLayout` (null = Compare grid from `compareSplit` and the legacy widths), `compareHidden`, `lastComparePreset`
+  (Compare grid = originals on top, A left; Compare rows = both Originals in one row, both Logs in the next), edited by `commitCompareLayout` /
+  `AppState.hideLogViewTile` (compare-aware) on release. ORIGINAL_A / ORIGINAL_B apply per tab's own `showUnfiltered` (`compareTileContext`).
+  `BoundLogViewer(compare = true)` binds each side without the horizontal filter bar and the Find scope chip (compare searches each tab's Filtered slot
+  only). Each log header starts with an A / B badge (accent while the filter panel edits that side), a kind pill (Log / Live / Capture) and the file name;
+  B's has the compact `CompareTabPicker` (the current tab as a pill, every other tab in the "v N" list). The Layout menu works in compare: the two compare
+  presets, the shared panels, Lock and Reset (`layoutMenuContext` picks the compare context while compare is on).
+- **Filters apply to A | B | Both.** `AppState.compareFilterTarget` (`CompareFilterTarget`) decides what each pane shows, through the pure
+  `compareDisplayedFilters(target, A's filter, B's filter)` (`ui/CompareFilters.kt`): A = A's filter on A, and on B only A's highlighters;
+  B = B's own filter on B, and on A only B's highlighters (the filter panel then edits B's tab, `compareFilterEditTabId`); Both = A's filter on both
+  panes. "Only the highlighters" is `highlightOnly(f)`, a `Filter` that filters nothing. `CompareView` renders `tab.copy(filter = displayed)`, and
+  `AppState.effectiveSearchFilter` uses the same function for either tab, so a pane's Find bar searches exactly what the pane displays; switching the
+  target (`updateCompareFilterTarget`) re-runs every active Filtered search. `compareFilterRight` is a mapped property (`true` = Both, `false` = A, or the
+  single pane already chosen), so older callers and tests keep working. The compare token appends `compareFilterTarget.name` as its LAST field (index
+  13); the legacy field 2 is still written as `target == BOTH`, and a token without field 13 restores Both / A from it.
+- **Sync scroll.** With the link on, `CompareScrollSync` mirrors each pane's `firstVisibleItemIndex` (the `<tabId>:main` `LazyListState` in
+  `logViewerScrollStateStore`) onto the other: the first visible row's time of day, `nearestEntryIndexByTime` (a binary search that steps over rows
+  without a timestamp; a log that crosses midnight gets an approximate answer) over the other tab's displayed rows (`visibleItemsSummaryOf`), then
+  `scrollToItem`. The index a mirror just set is remembered so the echo is not mistaken for a drive; selection is left alone.
 - **Persistence and migration.** `logViewLayout` (nullable), `logViewHidden` (default `[diagrams]`), `logViewCollapsed`,
   `logViewTilesLocked` and `lastLogViewPreset` are JSON-only settings (`ui/LogViewLayoutSettingsJson.kt`, §13.4). A null layout means Classic
   derived from the legacy panel widths, so an old autosave restores into the previous sizes; the legacy token fields keep being
@@ -1476,19 +1500,20 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 |---|---|
 | `AppState.kt` | 12,214 lines. The application's entire mutable state and most of its behaviour. See [§11](#11-state-management) |
 | `App.kt` | Root composable: layout routing, all dialogs, drag-and-drop, global key handling, the autosave debounce |
-| `FileView.kt` / `CompareView.kt` | Single-tab and two-tab layouts; the `Bound*` adapters |
+| `FileView.kt` / `CompareView.kt` | Single-tab and two-tab layouts; the `Bound*` adapters. `CompareView` owns the tab pair, focus and displayed filters; its tiles are `CompareTiling.kt` (§6.4) |
 | `LogViewer.kt` | The log list: `LazyColumn`, horizontal scroll, selection, drag-select, the Original/Filtered split |
 | `FilterPanel.kt` | Left sidebar: levels, tags, message rules, sequences, collapsed ranges, saved filters |
 | `TagProcessPopover.kt` | Shared process picker and PID slot for sidebar and filter-bar tag/package search; package mode identifies current-PID scope rather than advertising dynamic restart following |
 | `HighlighterSection.kt` / `HighlighterCandidates.kt` | The panel's Highlighters section: rows with a Match/Line chip, badges and match counts, the inline editor, and the search-to-add field with its TEXT / TAGS / MESSAGES dropdown. `HighlighterCandidates.kt` is the pure half (query parsing incl. `tag:Name rest`, candidate ranking, row labels/badges) so tests can pin it without composing |
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
 | `Dialogs.kt` / `NoteRewrite.kt` / `NoteRewriteDialog.kt` | Shared Markdown note editor and text-only rewrite preview; selection snapshots are guarded against stale drafts and Apply is one undoable editor change |
-| `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
+| `AiSidebar.kt` | The AI panel and the Notes edit lock (the Video / Notes / AI column is now tiles, §6.4) |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
 | `HomeScreen.kt` | The New tab: builds one `HomeSectionSlot` per section (`HomeOpenZone`, `HomeCaptureSection`, `HomeTestsSection`) and hands them to `HomeTilingHost`; also the Recent-files grid/list, its filter row and the pure helpers behind them (§6.3) |
 | `HomeTiling.kt` | `HomeTilingHost`: the New tab's tiling host. One-row top bar (title, tip, hidden-section chips, preset icons), splitter lines inset by the 8 dp card corner, section cards with grip/size label/hide button, manual-pointer-drag overlay, splitters with a draft layout committed on release, stacked layout below 720 dp (§6.3) |
 | `HomeLayout.kt` / `HomeLayoutSettingsJson.kt` | UI-free half of the tiling: split-tree normalise/drop/resize, `homeGeometry`, drop hit-testing, presets, `sanitizeHomeLayoutState` and the `AppSettings.withHome*` mutators; and the keyed-JSON codec for `homeLayout`, `homeHiddenSections`, `homeLayoutTipDismissed` (kept out of `AutosaveCodec.kt`, which is at detekt's per-file function limit, §13.4) |
 | `LogViewTiling.kt` / `LogViewLayoutState.kt` / `TiledSectionHost.kt` | The single log view on tiles (§6.4): `LogViewTilingHost` (size via `onSizeChanged`, fixed emission order, capture video pin, parked video, maximize), the `AppState` extensions behind the Layout menu, shortcuts and tab-strip toggles (commit/hide/show/preset/reset/lock/collapse/reveal), and the `SectionHost` that turns the filter panel's sections into tiles |
+| `CompareTiling.kt` / `CompareFilters.kt` / `CompareLayoutState.kt` | The compare view on tiles (§6.4): the strip with the A \| B \| Both switch and the scroll link, the host and its fixed emission order, the A / B badges, `CompareScrollSync`; the pure filter-target rules and `nearestEntryIndexByTime`; the `AppState` extensions for the tab pair, tile context, layout commit, presets and badge |
 | `LogViewLayout.kt` / `LayoutMenu.kt` / `BoundLogViewer.kt` | UI-free log-view layout model (presets, legacy derivation, visibility, sanitizer, mutators); the tab-strip Layout menu (preset thumbnails, Panels, Lock, Reset, hidden badge); `LogViewer` bound to `AppState` for the tiled and the legacy view |
 | `HomeTestsSection.kt` | The New tab's Run tests section: suites with their latest finished run, Run/View, + New suite, latest-run line, issue counts and the Free usage line. Reads runs through `AppState.latestTestRunSummaries` and never starts the run coordinator (§26.15) |
 | `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | `HomeCaptureSection` (the condensed Capture section: device row, options summary with "Change…", Start, compact sessions; polls devices only while composed), live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
@@ -2254,7 +2279,8 @@ sanitizer, so settings written by the UI satisfy the same invariants.
 The log view's tiling (§6.4) adds five more JSON-only settings, decoded by the log-view codec in `ui/LogViewLayoutSettingsJson.kt`
 next to the compare view's four: `logViewLayout` (a tree of `{"split":..,"children":[..]}` / `{"section":"<key>","w":..,"dp":..}` nodes, absent while the
 user has not changed the layout), `logViewHidden` (tile keys, default `["diagrams"]`), `logViewCollapsed` (tile keys), `logViewTilesLocked` (boolean) and
-`lastLogViewPreset` (the `LogViewPresetId` name: `CLASSIC`, `REVIEW`, `LOG_FOCUS`, `FILTERS_ON_TOP`). The decoder sanitizes through `sanitizeLogViewLayoutState`, so every tile
+`lastLogViewPreset` (the `LogViewPresetId` name: `CLASSIC`, `REVIEW`, `LOG_FOCUS`, `FILTERS_ON_TOP`); the compare view's `compareLayout`, `compareHidden`,
+`lastComparePreset` (`COMPARE_GRID`, `COMPARE_COLUMNS`) and `compareSyncScroll`. The decoder sanitizes through `sanitizeLogViewLayoutState`, so every tile
 appears exactly once whatever the file says.
 
 ### 13.5 Restore is metadata-only

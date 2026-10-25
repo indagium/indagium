@@ -13,6 +13,8 @@ import com.indagium.model.SearchScope
  * FileView so the tiled log view and the legacy single-column call bind the log the same way. [tiles] non-null emits the Original and
  * Log tiles into the enclosing tiling surface (see LogViewerTiles.kt); null is today's single Column filling [modifier].
  * [onPanelFocusChanged] reports focus entering the log panel; [onExportCaptureRange] is the toolbar's "Export capture range" (null hides it).
+ * [compare] binds the log as one side of the compare view: no horizontal filter bar and no Find scope chip (compare searches each tab's
+ * Filtered slot only); [tab] is then the tab as displayed (its filter replaced, see compareDisplayedFilters), its id the real tab's.
  */
 @Composable
 internal fun BoundLogViewer(
@@ -23,11 +25,13 @@ internal fun BoundLogViewer(
     onExportCaptureRange: (() -> Unit)?,
     modifier: Modifier = Modifier,
     tiles: LogViewerTiles? = null,
+    compare: Boolean = false,
 ) {
     val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
         tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
     }
-    val filterBarModel = if (state.filterBarVisible) {
+    val filterBarShown = state.filterBarVisible && !compare
+    val filterBarModel = if (filterBarShown) {
         FilterBarModel(
             sortedTags = filterBarSortedTags,
             tagUsage = state.tagUsage,
@@ -110,7 +114,7 @@ internal fun BoundLogViewer(
         onSearchNext = { scope -> state.searchNext(tab.id, scope) },
         onSearchPrev = { scope -> state.searchPrev(tab.id, scope) },
         onSearchClose = { scope -> state.closeSearch(tab.id, scope) },
-        showSearchScopeChip = true,
+        showSearchScopeChip = !compare,
         onSearchToggleScope = { mode -> state.setSearchMode(tab.id, mode) },
         onToggleSearchSync = {
             state.updateSettings {
@@ -123,8 +127,8 @@ internal fun BoundLogViewer(
         syncSelectionAndScrollRevision = state.splitSyncRevision,
         filterBar = filterBarModel,
         filterBarActions = filterBarActions,
-        filterBarVisible = state.filterBarVisible,
-        onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
+        filterBarVisible = if (compare) null else state.filterBarVisible,
+        onToggleFilterBar = if (compare) null else ({ state.updateFilterBarVisible(!state.filterBarVisible) }),
         onExportCaptureRange = onExportCaptureRange,
         tiles = tiles,
     )
