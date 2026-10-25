@@ -737,11 +737,14 @@ private fun AnnotatedString.Builder.appendTsPidTid(
     pidFieldWidth: Int,
     foregroundRanges: MutableList<Pair<Int, Int>>,
     cellBg: Color? = null,
+    // false (narrow tiled panes, see pidTidColumnsVisible) omits the pid/tid field entirely — the
+    // ts is followed straight by the level; buildLogLineRender remaps every offset to match.
+    showPidTid: Boolean = true,
 ) {
     appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = tsColor, background = cellBg ?: Color.Unspecified)) {
         append(entry.ts)
     }
-    if (entry.pid > 0) {
+    if (showPidTid && entry.pid > 0) {
         append("  ")
         appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = pidColor, background = cellBg ?: Color.Unspecified)) {
             if (processDisplay != null) {
@@ -796,6 +799,27 @@ internal fun remapPidFieldRange(
         else -> offset + delta
     }
     return remap(range.first, pidFieldStart) to remap(range.second, pidFieldEndRendered)
+}
+
+// The characters visibleLogLineText puts between the timestamp and the level when a row has a pid:
+// "  " + the 5-char pid + " " + the 5-char tid.
+internal const val VISIBLE_PID_TID_SEGMENT_CHARS = 2 + 5 + 1 + 5
+
+// Remaps a [start, end) offset pair computed against visibleLogLineText(entry) onto a row rendered
+// WITHOUT its pid/tid segment (buildLogLineRender's showPidTid = false), where that whole
+// [removedStart, removedStart + VISIBLE_PID_TID_SEGMENT_CHARS) span is gone and everything after it
+// has moved left by its length. An offset inside the removed span collapses to [removedStart], so a
+// range that only covered the pid/tid text becomes empty (and is dropped by the caller) while one
+// that merely overlaps it keeps its surviving part.
+internal fun remapHiddenPidTidRange(range: Pair<Int, Int>, removedStart: Int): Pair<Int, Int> {
+    val removedEnd = removedStart + VISIBLE_PID_TID_SEGMENT_CHARS
+
+    fun remap(offset: Int): Int = when {
+        offset <= removedStart -> offset
+        offset < removedEnd -> removedStart
+        else -> offset - VISIBLE_PID_TID_SEGMENT_CHARS
+    }
+    return remap(range.first) to remap(range.second)
 }
 
 // Change 3 (process-names rework): the uniform pid-FIELD character width for this tab, shared by
@@ -902,6 +926,10 @@ internal fun buildLogLineRender(
     pidFieldWidth: Int = 5,
     cellBg: Color? = null,
     suppressLineTextColor: Boolean = false,
+    // false drops the pid/tid text from the rendered row (narrow tiled panes); every highlighter,
+    // keyword and Find range is still computed against visibleLogLineText and remapped onto the
+    // shorter text (remapHiddenPidTidRange), and processDisplay is ignored (there is no pid field).
+    showPidTid: Boolean = true,
 ): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
     // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
@@ -934,6 +962,7 @@ internal fun buildLogLineRender(
             pidFieldWidth,
             foregroundRanges,
             cellBg,
+            showPidTid,
         )
         append("  ")
         appendTrackedForegroundRange(
@@ -953,8 +982,11 @@ internal fun buildLogLineRender(
         val pidFieldStart = entry.ts.length + 2
         val pidFieldEndVisible = pidFieldStart + 5
 
-        fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
-            if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+        fun remap(range: Pair<Int, Int>): Pair<Int, Int> = when {
+            entry.pid <= 0 -> range
+            !showPidTid -> remapHiddenPidTidRange(range, entry.ts.length)
+            else -> remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+        }
         val renderedLength = length
         val highlighterStyles = lineHighlight.spans.mapNotNull { span ->
             remappedRange(span.start to span.end, renderedLength, ::remap)?.let { range ->
@@ -1577,6 +1609,9 @@ internal fun LogViewer(
             // Fixed Δt column width in characters, passed straight through to every LogRow so selecting
             // an anchor never moves the rest of the log content.
             timeDeltaChars: Int = 1,
+            // Whether rows (and group headers) render their pid/tid text — false in a narrow tiled
+            // pane, matching the column header.
+            showPidTid: Boolean = true,
         ) {
             if (listItems.isEmpty()) {
                 if (itemsLoading) {
@@ -1993,6 +2028,7 @@ internal fun LogViewer(
                                             hasTidMap = effectiveTab.tidMap != null,
                                             processNameMode = tab.processNameMode,
                                             pidFieldChars = pidFieldChars,
+                                            showPidTid = showPidTid,
                                             searchHighlight = if (isSearchMatch) {
                                                 SearchHighlight(
                                                     search.query, search.caseSensitive, isCurrentSearchMatch,
@@ -2015,6 +2051,7 @@ internal fun LogViewer(
                                                 autoWrap = settings.autoLogRowWrap,
                                                 wrapLimitChars = effectiveWrapLimitChars,
                                                 pidFieldChars = pidFieldChars,
+                                                showPidTid = showPidTid,
                                             )
                                         is LogItem.ManualHeader ->
                                             ManualHeaderRow(
@@ -2029,6 +2066,7 @@ internal fun LogViewer(
                                                 autoWrap = settings.autoLogRowWrap,
                                                 wrapLimitChars = effectiveWrapLimitChars,
                                                 pidFieldChars = pidFieldChars,
+                                                showPidTid = showPidTid,
                                             )
                                         is LogItem.StackTraceHeader ->
                                             StackTraceHeaderRow(
@@ -2043,6 +2081,7 @@ internal fun LogViewer(
                                                 autoWrap = settings.autoLogRowWrap,
                                                 wrapLimitChars = effectiveWrapLimitChars,
                                                 pidFieldChars = pidFieldChars,
+                                                showPidTid = showPidTid,
                                             )
                                     }
                                 }
@@ -2640,6 +2679,7 @@ internal fun LogViewer(
                     listState = allLazyState,
                     externalFr = originalFocusRequester,
                     timeDeltaChars = originalTimeDeltaChars,
+                    showPidTid = showPidTid,
                 )
             }
 
@@ -2738,6 +2778,7 @@ internal fun LogViewer(
                     externalFr = focusRequester,
                     onFocusChangedExternal = onPanelFocusChanged,
                     timeDeltaChars = filteredTimeDeltaChars,
+                    showPidTid = showPidTid,
                 )
             }
 
@@ -2973,6 +3014,7 @@ internal fun LogViewer(
                     panelKey = "${tab.id}:main", listState = mainLazyState,
                     externalFr = focusRequester, onFocusChangedExternal = onPanelFocusChanged,
                     timeDeltaChars = mainTimeDeltaChars,
+                    showPidTid = showPidTid,
                 )
             }
 
@@ -3490,6 +3532,9 @@ private fun LogRow(
     // feature existed even before processDisplay is resolved below.
     pidFieldChars: Int = 5,
     searchHighlight: SearchHighlight? = null,
+    // false (a narrow tiled pane, whose column header drops PID/TID — pidTidColumnsVisible) renders
+    // the row without its pid/tid text; copying rows (entry-based) is unaffected.
+    showPidTid: Boolean = true,
 ) {
     val density  = LocalDensity.current.density
     val entry    = item.entry
@@ -3511,9 +3556,11 @@ private fun LogRow(
     // pixel-identical to before this feature existed. entry.pid <= 0 rows (RAW-fallback lines,
     // LogParser's own convention) are never in processNames to begin with, so they fall out of this
     // the same way they already fall out of the pid/tid segment entirely (see buildFullLineAnnotation).
-    val processDisplay = resolveProcessDisplayName(
-        processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, entry.pid,
-    )
+    val processDisplay = if (showPidTid) {
+        resolveProcessDisplayName(processNameMode, tab.analysis.processNames, tab.manualProcessNamePicks, entry.pid)
+    } else {
+        null
+    }
 
     // Whether this row's name is truncated enough that a hover popup has something to reveal (see
     // shouldShowProcessNamePopup's own doc). False for OFF, for every row without a name, and for
@@ -3556,7 +3603,7 @@ private fun LogRow(
     // readable — so the text has to be rebuilt when selection toggles.
     val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars, isSel,
+        searchHighlight, processDisplay, pidFieldChars, isSel, showPidTid,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
@@ -3577,6 +3624,7 @@ private fun LogRow(
             pidFieldWidth = pidFieldChars,
             cellBg = cellBg,
             suppressLineTextColor = isSel || isCrashGroupRow,
+            showPidTid = showPidTid,
         )
         if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
     }
@@ -4300,6 +4348,7 @@ private fun SeqHeaderRow(
     // HeaderPidTidCell's own doc for why this stays a bare-number cell rather than also resolving
     // a process display name.
     pidFieldChars: Int = 5,
+    showPidTid: Boolean = true,
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
@@ -4380,7 +4429,7 @@ private fun SeqHeaderRow(
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
-        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
+        if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         ScopeTidBadge(item.scopeTid, sc, mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
@@ -4411,6 +4460,7 @@ private fun ManualHeaderRow(
     autoWrap: Boolean = false,
     wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
     pidFieldChars: Int = 5,
+    showPidTid: Boolean = true,
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
@@ -4491,7 +4541,7 @@ private fun ManualHeaderRow(
         }
         AppText(label, color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
-        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
+        if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
         HeaderMessageCell(item.entry.msg, sc, mono, tc, autoWrap, wrapLimitChars)
@@ -4523,6 +4573,7 @@ private fun StackTraceHeaderRow(
     autoWrap: Boolean = false,
     wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
     pidFieldChars: Int = 5,
+    showPidTid: Boolean = true,
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
@@ -4603,7 +4654,7 @@ private fun StackTraceHeaderRow(
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
-        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
+        if (showPidTid) HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
         HeaderMessageCell(item.entry.msg, sc, mono, tc, autoWrap, wrapLimitChars)
