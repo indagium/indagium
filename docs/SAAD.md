@@ -836,37 +836,64 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
 - **Scrolling side columns.** A COLUMN split whose visible leaves are all side sections (`logViewScrollsInColumn`: everything but the log tiles, the
   Originals, Video and the toolbar tile, which must never be scrolled out of reach, so in Classic the filter column, and the Notes / AI column while there is no Video) is not made to fit the window. The surface
   passes the predicate through `TileChromeSpec.scrolls`; `tileGeometry` then reports a `TileScrollRegion` (viewport, content height) and lays the
-  column's children out by height: a node's own `sizeDp` is its height (at least 80 dp, at most 2000 dp, `LOG_VIEW_PIN_MIN_DP` / `_MAX_DP`), weighted
-  children share what the pinned ones leave exactly as a fitting column does (so an old layout, which has only weights and Log level's pinned 80 dp,
-  looks the same until it is resized; `minTileDp` each between them at the least), a collapsed tile keeps its 32 dp header, and when everything is
-  pinned and shorter than the viewport the last open tile takes the rest. Taller content scrolls: wheel / trackpad over any card, splitter or the thin
-  `TileRegionScrollbar` (`tile-scrollbar-<first tile key>`). A resize in such a column changes only the tile above the gap (`resizeTileSplit(scrolling =
-  true)`; the first resize pins every weighted sibling at the height it has, so nothing else shrinks and the tiles below move down), clamped to
-  80..2000 dp, written once on release; a double-click on the gap puts the tile above it back to its default height or to weighted. No layout field
-  was added: the heights are the leaves' `sizeDp` in the existing `logViewLayout` / `compareLayout` JSON (§13.4), so an old file decodes as before.
-  Compare's side columns use the same spec; the New tab opts out (it always fits). Nested splits inside such a column are laid out normally inside
-  their child's height.
-- **Scrolling mechanics** (`ui/TileScrolling.kt`). The tiles stay children of the surface's one flat `Layout`, so a column cannot be a `verticalScroll`
-  container. `TilingLayout` places each card and splitter of a region shifted by the column's offset (`TileScrollState`, read in the placement phase: a
-  scroll re-places and re-draws, it does not recompose), every one of them carries the column's `ScrollableState` (nested scrolling: an inner list or
-  the Highlighters / Notes scroll takes the wheel first and hands what it cannot use to the column) and a `graphicsLayer` clip with a band shape that
-  cuts drawing and hit-testing to the viewport. A `bringIntoViewResponder` scrolls a focused field into view. Drop targets, the drop preview and the
-  external toolbar drag are hit-tested against `TileGeometry.visibleCards` (shifted and cut), i.e. what is on screen. Scroll offsets are session-only.
+  column's children out by height. A tile is as tall as its content asks (next bullet); a tile that reports nothing keeps the older rule: its own
+  `sizeDp` is its height (at least 80 dp, at most 2000 dp, `LOG_VIEW_PIN_MIN_DP` / `_MAX_DP`) and weighted children share what the pinned ones leave
+  (`minTileDp` each at the least), so an old layout looks the same until it is resized. A collapsed tile keeps its 32 dp header. Taller content
+  scrolls: wheel / trackpad over any card, splitter or the thin `TileRegionScrollbar` (`tile-scrollbar-<first tile key>`).
+  **The scrollbar has its own strip.** `TileChromeSpec.scrollGutterDp` (`TILE_SCROLL_GUTTER_DP` = 6 dp bar + 2 dp gap, set by the log view) is a strip
+  along the column's right edge that cards and splitters leave free, so the bar never lies over a card, its border or a list's own scrollbar. It is
+  reserved whether or not the column overflows: narrowing the cards only while it overflows would change how their content wraps and so how tall it
+  is, which is what decides the overflow (a loop, and a visible jump). **Every tile can be resized, the last one too.** A resize changes only the
+  tile above the gap (`resizeTileSplit(scrolling = true)`), and `TileChromeSpec.scrollEndHandle` adds a gap of its own (6 dp, `TileGap.index` = the
+  child count) below the column's last tile, inside the scrolled content and so inside the window, with the same invisible splitter, resize cursor,
+  arrow keys and double-click. Only tiles whose height depends on the others are pinned by a first resize (see below); the result is clamped, written
+  once on release, and a double-click gives the tile above the gap its content height back (no stored `sizeDp`). No layout field was added: the heights
+  are the leaves' `sizeDp` in the existing `logViewLayout` / `compareLayout` JSON (§13.4), so an old file decodes as before and a stored size
+  larger than the new maximum is clamped at layout time, never rewritten. Compare's side columns use the same spec; the New tab opts out (it always
+  fits). Nested splits inside such a column are laid out normally inside their child's height.
+- **Content-sized tiles** (`ui/TileFlexRegion.kt`, `ui/TileContentSizing.kt`). In a scrolling column a side section is exactly as tall as it needs, not a
+  share of the window with empty space under its input. A body is a **fixed part** (always shown in full: inputs, segmented controls, editors) and
+  at most one **flex part**, a scrollable list marked with `FlexRegion` (`FlexScrollBox` is the usual form, the successor of `BoundedScrollBoxDp`).
+  `TileSlot.sizing` says which kind of body the tile has: `CONTENT` (fixed part only: exactly header + body, no handle: Log level, the Diagram
+  library with its already bounded list), `FLEX` (fixed part + one region: every other filter section, Notes, AI) or `FILL` (the default: not measured,
+  the stored or weighted height, as before: log, Original, Video, toolbar, the New tab). The card measures a content-sized body at its natural height
+  (unbounded, at the card's width) and reports `TileBodyMeasure` (fixed dp, the region's natural dp and its cap) to the surface's `TileMeasureStore`
+  (snapshot state, so the surface re-lays out); `TileBodyMeasure.toSizing` turns it into the engine's `TileSizing(min, max, default)`:
+  `min` = header + fixed + min(natural, 40 dp), `max` = header + fixed + natural (never above `scrollMaxDp`: no empty space below a list),
+  `default` = header + fixed + min(natural, cap) with the cap being main's (`filterListRows` x row height for tags, rules, highlighters, issues,
+  log composition, sequences; 240 dp for the saved-filter tree; none for Notes and AI, which share the column by weight like before). A `CONTENT` tile
+  and a flex tile whose list is short have `min == max`, so their gap has no splitter at all. The surface hands the height it decided on back to the
+  region (`TileFlexHost.allottedDp` = card height - header - fixed), so resizing a tile changes only its list: the fixed part stays in full and the
+  list grows, shrinks and scrolls inside. The pure rules (`scrollPlan`): a stored `sizeDp` is clamped to [min, max]; an unpinned tile takes its
+  default; "fill" tiles (and tiles that have not been measured yet) share what is left by weight within their bounds; a column shorter than its viewport
+  leaves the rest empty (host background), except that its last open tile may grow into it up to its max when it is unpinned and has a default.
+  Outside a scrolling column nothing of this is active: the body scrolls as a whole (`TileBodyColumn`) and a region is the capped bounded box
+  it was (Notes and AI fill what the card leaves). Rules for bodies: the flex list scrolls with exactly the `ScrollState` passed to
+  `FlexRegion` in a column that does not fill the height, its scrollbar sits in a `matchParentSize()` box, and nothing in the fixed part may need a
+  bounded height (no unbounded `verticalScroll` / `LazyColumn`; caps via `heightIn(max)`).
 - **Fixed emission order.** The content lambda emits the Toolbar tile (a no-op unless the toolbar is IN_LAYOUT, see "Toolbar tile" below), filters (`BoundFilterPanel` with a `TiledSectionHost`), Original + Log
   (`BoundLogViewer` with `LogViewerTiles`), Notes, Diagram library, AI, Video, and branches only on visibility, never on the layout,
   so a move changes a tile's rect but never its place in the composition: the log's scroll, the notes editor and a playing video survive
   drags. Every composable inside the surface emits through a `Tile`; anything else would be measured 0 x 0 and logged once.
 - **Filter panel as tiles.** `FilterPanel` stays one composable. It emits each of its sections through `SectionHost.Section`;
   `TiledSectionHost` (`ui/TiledSectionHost.kt`) turns each into a tile: title/icon/summary, the Tags | Regex switch as the Tags
-  tile's header action, the section's pills next to it, and a scrolling body under the panel's input chain (keys, file drops, focus
-  group). One `FocusRequester` fits one node, so only the first visible filter tile (`focusOwner`) carries it; "the panel has focus"
+  tile's header action, the section's pills next to it, and a body (`TileBodyColumn`: scrolling as a whole outside a scrolling column, a plain
+  column inside one) under the panel's input chain (keys, file drops, focus group). Each section's fixed and flex parts: Tags = input
+  fixed, active-tag chips flex; Message rules = input fixed, the expanded rule chips flex; Log composition = hint, search and pager fixed, the
+  template list flex; Highlighters = add form fixed, highlighter list flex; Log level = content only; Sequences = checkbox, editor and the new-sequence form
+  fixed, the sequence list flex; Issues = category, mapping and retrace row fixed, the issue groups (or the device event rows) flex; Saved
+  filters = search and the Save / Folder / Clear / Export buttons fixed, the folder tree flex.
+  One `FocusRequester` fits one node, so only the first visible filter tile (`focusOwner`) carries it; "the panel has focus"
   is true while any filter tile does, and the keyboard focus border is drawn on the filter tiles. Tag dropdowns anchor at the Tags
   tile's right edge. Collapse maps onto the panel's own flags (`highlightersExpanded`, `lvlExpanded`, `seqExpanded`, `crashExpanded`,
   `sfExpanded`, `logCompositionExpanded`, via the section's own toggle, which also clears editors) and everything else onto
   `AppSettings.logViewCollapsed`. Only tiles in a COLUMN split collapse to their header.
 - **Right-side tiles.** Notes (`BoundAnnotationPanel`, with the Diagram library section left out of it while its own tile is visible),
   Diagram library (`DiagramLibraryTileBody`, its "+ diagram" menu in the tile header), AI (`AiSidebarPanel`) and Video
-  (`VideoTileBody`). Notes and the Diagram library sit under `LocalNotesEditLocked` (`rememberNotesEditLocked`). A detached video player
+  (`VideoTileBody`). Notes and the Diagram library sit under `LocalNotesEditLocked` (`rememberNotesEditLocked`). Notes and AI are `FLEX` tiles
+  with no cap (they share their column by weight and are never taller than their content): in Notes the toolbar and banners above stay fixed and the
+  scrolling note list is the flex region, in AI the conversation is the region and the prompt composer under it stays fixed; the Diagram library is a
+  `CONTENT` tile (its list is bounded at 168 dp by `DiagramLibrarySection`). A detached video player
   keeps its window by staying composed: the host *parks* the Video tile (0 x 0) when the player reports it left the sidebar.
   A capture tab keeps its per-device video height: Video is pinned to `captureMirrorLayouts[device].videoSplit` x the host height while
   the tab is active, and resizing Video writes the per-device layout, never the global one.

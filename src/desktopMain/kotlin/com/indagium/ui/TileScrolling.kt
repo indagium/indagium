@@ -34,8 +34,19 @@ import kotlin.math.max
 // same [ScrollableState] (a wheel over any of them scrolls the column, and a nested scrollable inside that cannot scroll any more
 // hands the rest to it), and a graphicsLayer clip, which clips drawing AND hit-testing, cuts the part outside the viewport.
 
-/** Width (dp) of a scrolling column's scrollbar, drawn over the right edge of the column. */
+/** Width (dp) of a scrolling column's scrollbar, drawn along the right edge of the column. */
 internal const val TILE_SCROLLBAR_DP = 6f
+
+/** Gap (dp) between a scrolling column's cards and its scrollbar. */
+internal const val TILE_SCROLLBAR_GAP_DP = 2f
+
+/**
+ * The strip (dp) along a scrolling column's right edge that its cards and splitters leave free, so the column's scrollbar never lies over a card,
+ * its border or a scrollbar inside it. It is reserved whether or not the column overflows (a surface passes it as `TileChromeSpec.scrollGutterDp`):
+ * narrowing the cards only while it overflows would change their width, and so how their content wraps and how tall it is, which is what decides
+ * whether the column overflows.
+ */
+internal const val TILE_SCROLL_GUTTER_DP = TILE_SCROLLBAR_DP + TILE_SCROLLBAR_GAP_DP
 
 /** The scroll offsets (dp) of one surface's scrolling columns, keyed by [TileScrollRegion.key]. */
 internal class TileScrollState<K> {
@@ -127,7 +138,7 @@ private class TileScrollbarAdapter<K>(
     }
 }
 
-/** The thin scrollbar of a scrolling column that overflows; the surface sizes and places it ([TILE_SCROLLBAR_DP] wide, over the column's right edge). */
+/** The thin scrollbar of a scrolling column that overflows; the surface sizes and places it ([TILE_SCROLLBAR_DP] wide, in the column's right-hand gutter). */
 @Composable
 internal fun <K> TileRegionScrollbar(scroll: TileScrollState<K>, region: TileScrollRegion<K>, tag: String) {
     val tc = tc()

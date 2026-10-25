@@ -55,7 +55,10 @@ private const val DEFAULT_RIGHT_COLUMN_DP = 360f
 private const val DEFAULT_LOG_LEVEL_DP = 80f
 private const val PIN_EPSILON_DP = 0.5f
 
-/** The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]). */
+/**
+ * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]) with a scrollbar
+ * gutter and a splitter under their last tile.
+ */
 internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     headerDp = LOG_VIEW_TILE_HEADER_DP,
     titleSp = LOG_VIEW_TITLE_SP,
@@ -69,6 +72,8 @@ internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     scrollMinDp = LOG_VIEW_PIN_MIN_DP,
     scrollMaxDp = LOG_VIEW_PIN_MAX_DP,
     scrolls = ::logViewScrollsInColumn,
+    scrollGutterDp = TILE_SCROLL_GUTTER_DP,
+    scrollEndHandle = true,
 )
 
 /**
@@ -354,6 +359,8 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
             summary = notesSummary(tab.annotations),
             collapsible = collapsible,
             maximizable = true,
+            // The toolbar above the scrolling note list stays; the list is the flex part (AnnotationPanel).
+            sizing = TileBodySizing.FLEX,
             body = { info ->
                 BoundAnnotationPanel(
                     state = state,
@@ -381,7 +388,9 @@ internal fun TileScope<LogViewSectionId>.DiagramsTile(state: AppState, tab: LogT
             headerAction = { DiagramLibraryHeaderAction(state, tab) },
             collapsible = collapsible,
             maximizable = true,
-            body = { ScrollColumnWithBar(Modifier.fillMaxSize()) { DiagramLibraryTileBody(state, tab) } },
+            // The list is already bounded (DiagramLibrarySection), so the tile is exactly as tall as that.
+            sizing = TileBodySizing.CONTENT,
+            body = { info -> TileBodyColumn(info) { DiagramLibraryTileBody(state, tab) } },
         ),
     )
 }
@@ -395,6 +404,8 @@ internal fun TileScope<LogViewSectionId>.AiTile(state: AppState, tab: LogTab, fo
             title = logViewTileTitle(LogViewSectionId.AI),
             collapsible = collapsible,
             maximizable = true,
+            // The conversation is the flex part; the prompt composer under it stays (AiSidebarPanel).
+            sizing = TileBodySizing.FLEX,
             body = {
                 AiSidebarPanel(
                     state = state,

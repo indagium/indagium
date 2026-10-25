@@ -1342,8 +1342,11 @@ fun AnnotationPanel(
             blockResizeScrollAnchor = null
             scroll.scrollTo((blockStartOffsets[target] ?: 0f).roundToInt())
         }
-        Box(Modifier.fillMaxSize()) {
-            Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(end = 8.dp)) {
+        // The scrolling note list is the tile's flex part (TileFlexRegion.kt): the toolbar above stays, and in a tile sized by its content the
+        // list is as tall as the tile gives it, never taller than its notes. Its column therefore does not fill the height, and the
+        // scrollbar sits in a matchParentSize box so it does not claim the whole height either.
+        FlexRegion(scroll, capDp = null, fill = Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 8.dp)) {
                 // This is intentionally above Issue description: saved diagrams are log-specific
                 // workspace artifacts, while the issue description is private free-form context.
                 // The coordinator has already filtered the list by path + content fingerprint.
@@ -1717,11 +1720,13 @@ fun AnnotationPanel(
                     }
                 }
             }
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(scroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
-                style = appScrollbarStyle(tc),
-            )
+            Box(Modifier.matchParentSize()) {
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(scroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight(),
+                    style = appScrollbarStyle(tc),
+                )
+            }
         }
 
         pendingDiagramLibraryDeleteId?.let { id ->

@@ -306,7 +306,7 @@ internal fun HighlighterSection(
     ) {
         if (fpState.highlightersExpanded && displayedCount > 0 && fpState.hlListExpanded) {
             val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
-            BoundedScrollBoxDp(rows) {
+            FlexScrollBox(rows, Modifier.testTag("filter-highlighters-list")) {
                 if (regexHighlightAvailable) {
                     KeywordHighlightRow(filter, kwPickerOpen, { kwPickerOpen = it }, actions)
                 }

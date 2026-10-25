@@ -1,8 +1,6 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Rule
 import androidx.compose.material.icons.outlined.Analytics
@@ -39,6 +37,14 @@ internal fun filterTileIcon(id: LogViewSectionId): ImageVector = when (id) {
 }
 
 /**
+ * How a filter tile takes part in the height of a scrolling column: Log level is only a row of chips, so its tile is exactly as tall as that
+ * ([TileBodySizing.CONTENT]); every other section is a fixed part (its inputs, editors and buttons) plus at most one scrollable list that
+ * marks itself with [FlexRegion] ([TileBodySizing.FLEX]), and is as tall as its fixed part and that list's content, to a default cap.
+ */
+internal fun filterTileSizing(id: LogViewSectionId): TileBodySizing =
+    if (id == LogViewSectionId.LOG_LEVEL) TileBodySizing.CONTENT else TileBodySizing.FLEX
+
+/**
  * Emits each section of the filter panel as a tile of [scope]. [visibleSections] are the filter tiles that currently take part in the
  * layout; [collapsibleTiles] those that sit in a COLUMN split (only there does a collapsed tile shrink to its header). [toggles]
  * collects each section's own expand/collapse handler (it also clears editors and pickers), which the surface's collapse button calls
@@ -71,6 +77,7 @@ internal class TiledSectionHost(
                 summary = summary,
                 headerAction = headerAction(chrome),
                 collapsible = id in collapsibleTiles,
+                sizing = filterTileSizing(id),
                 body = { info -> SectionTileBody(chrome, info, content) },
             ),
         )
@@ -97,10 +104,9 @@ internal class TiledSectionHost(
     }
 }
 
-// A tile body: the section's content in a scrolling column, under the panel's input chain (keys, drops, focus group, focus border).
+// A tile body: the section's content in a column (scrolling as a whole unless the tile is sized by its content, where the section's own
+// FlexRegion scrolls), under the panel's input chain (keys, drops, focus group, focus border).
 @Composable
 private fun SectionTileBody(chrome: SectionChrome, info: TileBodyInfo, content: @Composable (TileBodyInfo?) -> Unit) {
-    Box(Modifier.fillMaxSize().then(chrome.bodyModifier)) {
-        ScrollColumnWithBar(Modifier.fillMaxSize(), endGutter = 0.dp) { content(info) }
-    }
+    TileBodyColumn(info, chrome.bodyModifier) { content(info) }
 }

@@ -120,7 +120,8 @@ internal const val TILE_HEADER_GAP_DP = 6f
  * `-splitter-line-<i>`, `-scrollbar-<key>`, `-drop-preview`, `-page-strip-<edge>`); [keyOf] gives the stable, unique string a tile's tags use.
  * [scrolls] says which tiles may sit in a scrolling column (a COLUMN split of only such tiles keeps its tiles' heights and scrolls when
  * they add up to more than the window; see TileLayout.kt), with [scrollMinDp] / [scrollMaxDp] bounding a tile's height there; the
- * default is none, a surface that always fits.
+ * default is none, a surface that always fits. [scrollGutterDp] keeps a strip along the right edge of a scrolling column free of cards for
+ * its scrollbar (the log view uses [TILE_SCROLL_GUTTER_DP]), and [scrollEndHandle] adds the splitter below the column's last tile.
  */
 internal data class TileChromeSpec<K>(
     val headerDp: Float,
@@ -135,6 +136,8 @@ internal data class TileChromeSpec<K>(
     val scrollMinDp: Float = minTileDp,
     val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
     val scrolls: (K) -> Boolean = { false },
+    val scrollGutterDp: Float = 0f,
+    val scrollEndHandle: Boolean = false,
 ) {
     internal fun geometrySpec(): TileGeometrySpec = TileGeometrySpec(
         gapRowDp = gapRowDp,
@@ -144,11 +147,17 @@ internal data class TileChromeSpec<K>(
         minPairShare = minPairShare,
         scrollMinDp = scrollMinDp,
         scrollMaxDp = scrollMaxDp,
+        scrollGutterDp = scrollGutterDp,
+        scrollEndHandle = scrollEndHandle,
     )
 }
 
-/** The size (dp) of a tile's body area, passed to [TileSlot.body]; zero while the tile is parked, collapsed or covered by a maximized tile. */
-internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float)
+/**
+ * The size (dp) of a tile's body area, passed to [TileSlot.body]; zero while the tile is parked, collapsed or covered by a maximized tile.
+ * [contentSized] is true while the tile sits in a scrolling column and its slot is [TileBodySizing.CONTENT] or [TileBodySizing.FLEX]: the
+ * body is then measured at its natural height (so it must not scroll as a whole or fill the height) and the tile is as tall as it asks.
+ */
+internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float, val contentSized: Boolean = false)
 
 /**
  * One tile's content: the [icon] and [title] (plus an optional [summary] such as "2 active") in its header, an optional
@@ -156,7 +165,10 @@ internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float)
  * A [headerless] tile draws no header at all: its body brings its own bar and may place [TileScope.Grip] and
  * [TileScope.MaximizeButton] in it. [collapsible] / [hideable] / [maximizable] choose which header buttons show; [canHide] false
  * disables the hide button (the last visible tile). [iconTint] colours the header icon (null = the theme's secondary text colour).
+ * [sizing] says how the body takes part in the height of a scrolling column (see [TileBodySizing] and [FlexRegion]); the default leaves it
+ * to the stored or weighted height.
  */
+@Suppress("LongParameterList") // a slot is a flat description of one tile; every field has a default
 internal class TileSlot(
     val icon: ImageVector,
     val title: String,
@@ -168,6 +180,7 @@ internal class TileSlot(
     val hideable: Boolean = true,
     val canHide: Boolean = true,
     val maximizable: Boolean = false,
+    val sizing: TileBodySizing = TileBodySizing.FILL,
     val body: @Composable (TileBodyInfo) -> Unit,
 )
 
@@ -263,6 +276,7 @@ private class TileDragState<K> {
     var hostRoot by mutableStateOf(Offset.Zero)
     var draft by mutableStateOf<TileNode<K>?>(null)
     val scroll = TileScrollState<K>()
+    val measured = TileMeasureStore<K>()
 }
 
 // What one composition of a surface knows; it is the [TileScope] the content lambda receives. [composed] says which tiles are kept
@@ -365,10 +379,11 @@ internal fun <K> TilingSurface(
     val layout = drag.draft ?: fullLayout
     val shown: (K) -> Boolean = { isVisible(it) && it !in parked }
     val projection = projectTileLayout(layout, shown)
+    val sizingOf: (K) -> TileSizing? = { drag.measured.sizingOf(it, spec.scrollMaxDp) }
     val maximizedId: K? = maximized?.takeIf { id -> projection != null && id in tileLeafSections(projection.root) }
     val geometry: TileGeometry<K> = when {
         maximizedId != null -> maximizedTileGeometry(maximizedId, widthDp, heightDp)
-        projection != null -> tileGeometry(projection.root, widthDp, heightDp, spec.geometrySpec(), collapsed, spec.scrolls)
+        projection != null -> tileGeometry(projection.root, widthDp, heightDp, spec.geometrySpec(), collapsed, spec.scrolls, sizingOf)
         else -> TileGeometry(emptyList(), emptyList())
     }
     val composedIds = tileLeafSections(layout).filterTo(HashSet()) { isVisible(it) } + parked
@@ -411,7 +426,7 @@ internal fun <K> TilingSurface(
                 if (gap.resizable) {
                     key(index) {
                         fun resized(from: TileNode<K>, proj: TileProjection<K>, delta: Float) = resizeProjected(
-                            from, proj, gap, delta, spec.minTileDp, spec.minPairShare, collapsed, spec.headerDp, spec.scrollMinDp, spec.scrollMaxDp,
+                            from, proj, gap, delta, spec.minTileDp, spec.minPairShare, collapsed, spec.headerDp, spec.scrollMinDp, spec.scrollMaxDp, sizingOf,
                         )
                         TileSplitter(
                             index = index,
@@ -437,7 +452,8 @@ internal fun <K> TilingSurface(
                             },
                             onReset = {
                                 projectTileLayout(fullLayout, shown)?.let { proj ->
-                                    val reset = resetProjected(fullLayout, proj, gap, callbacks.defaultDp)
+                                    // A tile of a scrolling column goes back to the height its content asks for (no stored size).
+                                    val reset = resetProjected(fullLayout, proj, gap) { node -> if (gap.scrolling) null else callbacks.defaultDp(node) }
                                     if (reset != fullLayout) callbacks.onCommitLayout(reset)
                                 }
                                 callbacks.onReclaimFocus()
@@ -591,8 +607,20 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val collapsed = rect != null && id in s.collapsed
     val shape = RoundedCornerShape(s.spec.cornerDp.dp)
     val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else 1f
-    val bodyInfo = TileBodyInfo(rect?.w ?: 0f, if (collapsed) 0f else max(0f, (rect?.h ?: 0f) - headerHeight))
     val region = s.regionOf(id)
+    // A tile in a scrolling column whose slot says so is sized by what its body asks for: the body is measured at its natural height.
+    val contentSized = region != null && rect != null && rect.w > 0f && slot.sizing != TileBodySizing.FILL
+    val bodyInfo = TileBodyInfo(rect?.w ?: 0f, if (collapsed) 0f else max(0f, (rect?.h ?: 0f) - headerHeight), contentSized)
+    val chromeDp = if (slot.headerless) 0f else s.spec.headerDp + 1f
+    val flex = remember(id) { TileFlexHost() }
+    val store = s.drag.measured
+    flex.onFlex = { natural, cap ->
+        store.edit(id, TileBodyMeasure(slot.sizing, chromeDp)) { it.copy(flexNaturalDp = natural, flexCapDp = cap) }
+    }
+    // The height the surface wants the body's flex region to show: the card minus its header and the body's fixed part.
+    val fixedDp = store[id]?.fixedDp
+    val allotted = if (contentSized && !collapsed && rect != null && fixedDp != null) max(0f, rect.h - chromeDp - fixedDp) else null
+    SideEffect { flex.allottedDp = allotted }
     Column(
         modifier
             .then(if (region != null && rect != null) Modifier.tileScrollRegion(s.drag.scroll, region, rect) else Modifier)
@@ -607,10 +635,40 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             if (!collapsed) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
         }
         // A collapsed tile keeps its body composed (so it keeps its state) but gives it no height.
-        Box(if (collapsed) Modifier.fillMaxWidth().height(0.dp) else Modifier.weight(1f).fillMaxWidth()) {
-            CompositionLocalProvider(LocalTileTitle provides slot.title) { slot.body(bodyInfo) }
+        TileBodyHost(
+            modifier = if (collapsed) Modifier.fillMaxWidth().height(0.dp) else Modifier.weight(1f).fillMaxWidth(),
+            contentSized = contentSized,
+            onMeasured = { totalPx, density ->
+                val fixed = max(0f, (totalPx - flex.shownPx) / density)
+                store.edit(id, TileBodyMeasure(slot.sizing, chromeDp)) { it.copy(mode = slot.sizing, chromeDp = chromeDp, fixedDp = fixed) }
+            },
+        ) {
+            val provided = flex.takeIf { contentSized && slot.sizing == TileBodySizing.FLEX }
+            CompositionLocalProvider(LocalTileTitle provides slot.title, LocalTileFlex provides provided) { slot.body(bodyInfo) }
         }
     }
+}
+
+// The card's body area. Outside a scrolling column it is a Box (children at most as big as the area). In one, the body is measured at its
+// natural height instead (unbounded, at the card's width) and [onMeasured] hears how tall it came out; the area itself keeps the card's size.
+@Composable
+private fun TileBodyHost(modifier: Modifier, contentSized: Boolean, onMeasured: (totalPx: Int, density: Float) -> Unit, content: @Composable () -> Unit) {
+    val latest = rememberUpdatedState(onMeasured)
+    val policy = remember(contentSized) {
+        MeasurePolicy { measurables, constraints ->
+            val width = constraints.maxWidth
+            if (contentSized) {
+                val natural = Constraints(minWidth = width, maxWidth = width, minHeight = 0, maxHeight = Constraints.Infinity)
+                val placeables = measurables.map { it.measure(natural) }
+                latest.value(placeables.maxOfOrNull { it.height } ?: 0, density)
+                layout(width, constraints.maxHeight) { placeables.forEach { it.place(0, 0) } }
+            } else {
+                val placeables = measurables.map { it.measure(constraints.copy(minWidth = 0, minHeight = 0)) }
+                layout(width, constraints.maxHeight) { placeables.forEach { it.place(0, 0) } }
+            }
+        }
+    }
+    Layout(content = content, modifier = modifier, measurePolicy = policy)
 }
 
 @Composable

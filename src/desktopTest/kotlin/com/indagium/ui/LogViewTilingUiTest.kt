@@ -8,12 +8,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -30,6 +32,7 @@ import androidx.compose.ui.unit.width
 import com.indagium.debug.AppLogger
 import com.indagium.model.ChromeEdge
 import com.indagium.model.FilterMode
+import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogViewSectionId
@@ -236,12 +239,20 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun theDefaultFilterColumnStillFitsALargeWindowWithoutAScrollbar() {
+    fun theDefaultFilterTilesAreAsTallAsTheirContentWithNoEmptySpaceAtTheBottom() {
         setup()
-        assertFalse(exists("tile-scrollbar-tags"))
-        val last = LOG_VIEW_FILTER_TILES.last().key
-        assertTrue(bounds("tile-card-$last").bottom <= bounds("tile-card-log").bottom + 1.dp, "the weights fill the window as before")
+        // Tags with no active tag is its header and the input: the weights that used to stretch it are gone.
+        assertTrue(bounds("tile-card-tags").height.value < 90f, "Tags is ${bounds("tile-card-tags").height}")
+        assertTrue(bounds("tile-card-log_level").height.value < 90f, "Log level is ${bounds("tile-card-log_level").height}")
+        assertTrue(bounds("tile-card-message_rules").height.value < 90f)
+        // The tiles stack with just the 6 dp gap between them, from the top of the column.
+        val cards = listOf("tags", "message_rules", "log_composition", "highlighters", "log_level").map { bounds("tile-card-$it") }
+        assertEquals(bounds("tile-card-log").top, cards.first().top)
+        cards.zipWithNext().forEach { (above, below) -> assertEquals(above.bottom.value + 6f, below.top.value, 0.6f) }
     }
+
+    // True when some splitter of the surface exists (their numbers depend on how many tiles have anything to drag).
+    private fun anySplitter(): Boolean = (0..40).any { exists("tile-splitter-$it") }
 
     private fun containsRow(tree: TileNode<LogViewSectionId>, first: LogViewSectionId, second: LogViewSectionId): Boolean = when (tree) {
         is TileLeaf -> false
@@ -334,7 +345,7 @@ class LogViewTilingUiTest {
         assertFalse(exists("tile-grip-tags"))
         assertFalse(exists("tile-grip-log"))
         assertFalse(exists("tile-grip-notes"))
-        assertTrue(exists("tile-splitter-0"))
+        assertTrue(anySplitter())
     }
 
     @Test
@@ -624,5 +635,123 @@ class LogViewTilingUiTest {
         setup(width = 600, height = 700, chrome = true, configure = ::inLayout)
         assertTrue(exists("tile-card-toolbar"))
         assertEquals(TOOLBAR_STACKED_CARD_DP, bounds("tile-card-toolbar").height.value, 1f)
+    }
+
+    // ---- tiles sized by their content, in the real sections ---------------------------------------------------------
+
+    private fun heightOf(tag: String) = bounds(tag).height.value
+
+    // The splitter (any) whose strip starts where the card [tile] ends: the handle that resizes that tile. Null when there is none.
+    private fun handleUnder(tile: String): androidx.compose.ui.test.SemanticsNodeInteraction? {
+        val bottom = bounds("tile-card-$tile").bottom.value
+        val all = rule.onAllNodesWithContentDescription("Resize sections")
+        return (0 until all.fetchSemanticsNodes().size).map { all[it] }.firstOrNull { kotlin.math.abs(it.getBoundsInRoot().top.value - bottom) < 1f }
+    }
+
+    private fun dragBy(node: androidx.compose.ui.test.SemanticsNodeInteraction, dyDp: Float) {
+        val d = rule.density.density
+        node.performTouchInput {
+            down(center)
+            moveBy(Offset(0f, dyDp / 2 * d))
+            moveBy(Offset(0f, dyDp / 2 * d))
+            up()
+        }
+        rule.waitForIdle()
+    }
+
+    private fun withTags(count: Int): (AppState) -> Unit = { s ->
+        s.upFlt(TAB_ID) { it.copy(activeTags = (0 until count).map { i -> "AAAA$i" }.toSet()) }
+    }
+
+    @Test
+    fun theTagChipListIsTheFlexPartOfTheTagsTileAndResizingItKeepsTheInputInFull() {
+        setup(height = 900, configure = withTags(24))
+        // 24 chips want about 220 dp; the default shows them at the five-row cap (140 dp).
+        val list = heightOf("filter-tags-list")
+        assertEquals(140f, list, 0.7f)
+        val inputHeight = heightOf("filter-panel-tags-input")
+        assertTrue(bounds("filter-panel-tags-input").bottom <= bounds("tile-card-tags").bottom, "the input is inside the card")
+        val handle = assertNotNull(handleUnder("tags"), "Tags has something to drag")
+        dragBy(handle, 60f)
+        val grown = heightOf("filter-tags-list") - list
+        assertTrue(grown > 30f, "the chip list grew by $grown")
+        assertEquals(inputHeight, heightOf("filter-panel-tags-input"), 0.5f)
+        assertTrue(bounds("filter-panel-tags-input").bottom <= bounds("tile-card-tags").bottom, "and the input is still inside the card")
+        // Written once, on release, as the tile's own height.
+        val tags = ((state.settings.logViewLayout as TileSplit<LogViewSectionId>).children.first() as TileSplit<LogViewSectionId>).children.first()
+        assertEquals(LogViewSectionId.TAGS, (tags as TileLeaf<LogViewSectionId>).section)
+        assertEquals(heightOf("tile-card-tags"), tags.sizeDp!!, 1f)
+        // Dragged all the way up: one row of chips and the whole input remain.
+        dragBy(assertNotNull(handleUnder("tags")), -800f)
+        assertEquals(40f, heightOf("filter-tags-list"), 0.7f)
+        assertTrue(bounds("filter-panel-tags-input").bottom <= bounds("tile-card-tags").bottom)
+    }
+
+    @Test
+    fun theHighlighterListIsTheFlexPartAndTheAddFormStaysInFull() {
+        setup(height = 900) { s ->
+            s.upFlt(TAB_ID) { f -> f.copy(highlighters = (1..8).map { Highlighter("h$it", "pattern$it", false, Color(0xFF3366CC), true) }) }
+        }
+        // Eight highlighters, five rows at most by default.
+        val list = heightOf("filter-highlighters-list")
+        assertTrue(list in 100f..160f, "the list is $list")
+        assertTrue(bounds("highlighter-add-pattern").bottom <= bounds("tile-card-highlighters").bottom, "the add form is in the card")
+        dragBy(assertNotNull(handleUnder("highlighters")), -800f)
+        assertEquals(40f, heightOf("filter-highlighters-list"), 0.7f)
+        assertTrue(bounds("highlighter-add-pattern").bottom <= bounds("tile-card-highlighters").bottom, "still in the card when it is smallest")
+    }
+
+    @Test
+    fun aTileThatIsOnlyContentHasNoHandleUnderIt() {
+        setup()
+        // Log level is a row of chips; Highlighters above it has a list and an add form.
+        assertTrue(handleUnder("log_level") == null, "nothing to drag under Log level")
+        assertTrue(handleUnder("tags") == null, "an empty Tags tile is header and input only")
+        // With active tags there is a list to resize.
+        state.upFlt(TAB_ID) { it.copy(activeTags = (0 until 24).map { i -> "AAAA$i" }.toSet()) }
+        rule.waitForIdle()
+        assertNotNull(handleUnder("tags"))
+    }
+
+    @Test
+    fun theColumnScrollbarStaysClearOfTheCardsAndTheirOwnScrollbars() {
+        setup(height = 500)
+        assertTrue(exists("tile-scrollbar-tags"), "the default filter column is taller than 500 dp")
+        val bar = rule.onNodeWithTag("tile-scrollbar-tags").getUnclippedBoundsInRoot()
+        LOG_VIEW_FILTER_TILES.forEach { tile ->
+            val card = rule.onNodeWithTag("tile-card-${tile.key}").getUnclippedBoundsInRoot()
+            assertTrue(card.right.value <= bar.left.value, "$tile ends at ${card.right} and the scrollbar starts at ${bar.left}")
+        }
+        // The right column has no scrollbar and keeps the same strip free anyway, so its cards do not change width when it starts to scroll.
+        assertFalse(exists("tile-scrollbar-notes"))
+        val windowRight = rule.onRoot().getBoundsInRoot().right.value
+        assertEquals(windowRight - LOG_VIEW_HOST_PAD_DP - TILE_SCROLL_GUTTER_DP, bounds("tile-card-notes").right.value, 0.6f)
+    }
+
+    @Test
+    fun theLastTileOfTheRightColumnHasABottomHandleAndResizingItWritesItsSize() {
+        setup(height = 800) { it.aiPanelVisible = true }
+        val handle = assertNotNull(handleUnder("ai"), "a handle under the AI tile, the last of its column")
+        assertTrue(handle.getBoundsInRoot().bottom.value <= 800f, "inside the window")
+        val before = heightOf("tile-card-ai")
+        dragBy(handle, -60f)
+        val shrunk = before - heightOf("tile-card-ai")
+        assertTrue(shrunk > 30f, "AI shrank by $shrunk")
+        val right = (state.settings.logViewLayout as TileSplit<LogViewSectionId>).children.last() as TileSplit<LogViewSectionId>
+        val ai = right.children.single { (it as? TileLeaf)?.section == LogViewSectionId.AI }
+        assertEquals(before - shrunk, ai.sizeDp!!, 1f)
+    }
+
+    @Test
+    fun aStoredHeightLargerThanTheContentIsClampedAtLayoutAndLeftAsStored() {
+        val classic = classicLogViewLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
+        val filters = classic.children.first() as TileSplit<LogViewSectionId>
+        val bloated = filters.copy(
+            children = filters.children.map { if ((it as TileLeaf).section == LogViewSectionId.TAGS) it.copy(sizeDp = 1900f) else it },
+        )
+        val stored = classic.copy(children = listOf(bloated) + classic.children.drop(1))
+        setup(height = 900) { it.updateSettings { s -> s.withLogViewLayout(stored) } }
+        assertTrue(heightOf("tile-card-tags") < 90f, "Tags is ${heightOf("tile-card-tags")} dp, not 1900")
+        assertEquals(stored, state.settings.logViewLayout, "reading an old size does not rewrite it")
     }
 }
