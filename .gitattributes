@@ -1,0 +1,7 @@
+# Governing agreement identities must be identical on every packaging host.
+/EULA.md text eol=lf
+/LICENSE text eol=lf
+/NOTICE text eol=lf
+# Pinned upstream legal texts and source evidence must retain their original bytes.
+/licenses/** -text
+/src/desktopMain/resources/licenses/** -text

@@ -6,6 +6,7 @@ import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
 import java.io.File
 import java.security.MessageDigest
+import java.util.zip.ZipFile
 
 plugins {
     // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
@@ -76,7 +77,18 @@ val zstdJniPlatform: String = run {
 
 val appVersion: String = providers.gradleProperty("app.version").get()
 val appAuthor = "Roman Arnaut"
-val licenseVersion = "2026-07-19"
+val distributionLicenseKind = providers.gradleProperty("indagium.license").getOrElse("polyform").also {
+    require(it in setOf("polyform", "eula")) { "indagium.license must be polyform or eula (was $it)" }
+}
+val licenseDocument = if (distributionLicenseKind == "eula") "EULA.md" else "LICENSE"
+val licenseDocumentVersion = if (distributionLicenseKind == "eula") "1.0.0" else "2026-07-19"
+val licenseTitle = if (distributionLicenseKind == "eula") "Indagium End User License Agreement" else "Indagium Source License Agreement"
+val licenseBody = file(licenseDocument).readText().replace("\r\n", "\n").trimEnd() +
+    if (distributionLicenseKind == "polyform") "\n\n---\n\n" + file("NOTICE").readText().replace("\r\n", "\n").trimEnd() else ""
+val licenseDocumentDigest = MessageDigest.getInstance("SHA-256").digest(licenseBody.toByteArray(Charsets.UTF_8))
+    .joinToString("") { "%02x".format(it) }
+val licenseVersion = "$distributionLicenseKind-$licenseDocumentVersion:$licenseDocumentDigest"
+val renderedLicenseAgreement = "# $licenseTitle\n\nTerms version: $licenseVersion\n\n---\n\n$licenseBody\n"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
@@ -133,6 +145,11 @@ val linuxBundleArchitecture = when (System.getProperty("os.arch").lowercase()) {
 val composeAppDirectory = layout.buildDirectory.dir("compose/binaries/main/app/Indagium")
 val mediaPackageRoot = if (isMacHost) {
     layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app/Contents/app")
+} else {
+    composeAppDirectory
+}
+val distributionImageRoot = if (isMacHost) {
+    layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app")
 } else {
     composeAppDirectory
 }
@@ -344,6 +361,7 @@ val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
     inputs.property("appAuthor", appAuthor)
     inputs.property("licenseVersion", licenseVersion)
+    inputs.property("licenseKind", distributionLicenseKind)
     outputs.dir(generatedBuildInfoDir)
     doLast {
         val outputFile = generatedBuildInfoDir.get().file("com/indagium/generated/BuildInfo.kt").asFile
@@ -356,6 +374,10 @@ val generateBuildInfo by tasks.registering {
                 const val APP_VERSION: String = "$appVersion"
                 const val APP_AUTHOR: String = "$appAuthor"
                 const val LICENSE_VERSION: String = "$licenseVersion"
+                const val LICENSE_KIND: String = "$distributionLicenseKind"
+                const val LICENSE_TITLE: String = "$licenseTitle"
+                const val LICENSE_DOCUMENT_VERSION: String = "$licenseDocumentVersion"
+                const val LICENSE_AGREEMENT_SHA256: String = "${MessageDigest.getInstance("SHA-256").digest(renderedLicenseAgreement.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }}"
             }
             """.trimIndent() + "\n"
         )
@@ -403,6 +425,25 @@ val prepareMediaSources by tasks.registering(Exec::class) {
     )
 }
 
+val validateApplicationSourceInventory by tasks.registering(Exec::class) {
+    group = "verification"
+    inputs.files("scripts/prepare_application_sources.py", "licenses/application/application-source-lock.json", applicationLicenseInventory, "gradle.lockfile")
+    commandLine(pythonExecutable, "scripts/prepare_application_sources.py", "--inventory-only")
+}
+
+tasks.register<Exec>("prepareApplicationSources") {
+    group = "distribution"
+    description = "Builds the pinned Java-library and complete JVM source/build-material archive."
+    dependsOn(validateApplicationSourceInventory)
+    outputs.upToDateWhen { false }
+    commandLine(pythonExecutable, "scripts/prepare_application_sources.py", "--app-version", appVersion, "--fetch-missing")
+}
+
+val testDistributionLicensing by tasks.registering(Exec::class) {
+    group = "verification"
+    commandLine(pythonExecutable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_distribution_licensing.py")
+}
+
 val validateMediaRuntimeArtifacts by tasks.registering(Exec::class) {
     group = "verification"
     description = "Checks the resolved FFmpeg and zstd-jni classifier JARs against the inspected native artifacts."
@@ -447,7 +488,8 @@ val validatePackagedMediaResources by tasks.registering(Exec::class) {
             "--zstd-jni-version", "1.5.7-4",
             "--validate-package",
             "--platform", mediaPlatform,
-            "--package-root", mediaPackageRoot.get().asFile.absolutePath,
+            "--package-root", distributionImageRoot.get().asFile.absolutePath,
+            "--license-kind", distributionLicenseKind,
         )
         if (mediaPlatform == "macos-arm64") {
             val runtimeJars = configurations.getByName("desktopRuntimeClasspath").files
@@ -481,6 +523,11 @@ val validateApplicationLicenseInventory by tasks.registering {
     doLast {
         val inventory = groovy.json.JsonSlurper().parse(applicationLicenseInventory) as Map<*, *>
         val components = (inventory["components"] as List<*>).map { it as Map<*, *> }
+        val graphicsProvenance = groovy.json.JsonSlurper().parse(file("licenses/application/graphics-notice-provenance.json")) as Map<*, *>
+        (graphicsProvenance["packagedTextHashes"] as Map<*, *>).forEach { (path, expected) ->
+            val digest = MessageDigest.getInstance("SHA-256").digest(file("licenses/$path").readBytes()).joinToString("") { "%02x".format(it) }
+            check(digest == expected) { "Pinned native graphics/support notice changed: $path" }
+        }
         val missingTexts = components.flatMap { component ->
             // Paths are resource paths under licenses/: third-party/ and application/ are copied
             // from the repository's licenses/ tree, anything else is a checked-in resource.
@@ -509,30 +556,86 @@ val validateApplicationLicenseInventory by tasks.registering {
             "Runtime modules without a licence entry in licenses/application/application-components.json " +
                 "(review each licence, add its notices, then list it): $uncovered"
         }
+        val sourceLock = groovy.json.JsonSlurper().parse(file("licenses/application/application-source-lock.json")) as Map<*, *>
+        val reviewed = groovy.json.JsonSlurper().parse(file("licenses/application/reviewed-runtime-modules.json")) as Map<*, *>
+        val reviewedModules = (reviewed["modules"] as List<*>).map { it.toString() }.toSet()
+        val sourceEvidence = (sourceLock["sourceArchives"] as List<*>).map { it as Map<*, *> }
+            .filter { it["kind"] == "binary-evidence" }.associateBy { it["coordinate"].toString() }
+        val artifacts = runtimeClasspath.get().resolvedConfiguration.resolvedArtifacts.map { artifact ->
+            check(artifact.moduleVersion.id.toString() in reviewedModules) {
+                "Runtime artifact ${artifact.moduleVersion.id} requires a licence review in reviewed-runtime-modules.json"
+            }
+            val module = "${artifact.moduleVersion.id.group}:${artifact.name}"
+            val matched = components.filter { component ->
+                (component["modules"] as List<*>).any { pattern ->
+                    Regex((pattern as String).split("*").joinToString(".*") { Regex.escape(it) }).matches(module)
+                }
+            }
+            val notices = ZipFile(artifact.file).use { jar ->
+                jar.entries().asSequence().map { it.name }.filter {
+                    it.substringAfterLast('/').contains(Regex("(?i)license|licence|notice|copying|copyright|readme"))
+                }.sorted().toList()
+            }
+            val checksum = MessageDigest.getInstance("SHA-256").digest(artifact.file.readBytes()).joinToString("") { "%02x".format(it) }
+            sourceEvidence[artifact.moduleVersion.id.toString()]?.let { evidence ->
+                check(checksum == evidence["sha256"]) { "Resolved ${artifact.file.name} differs from its application source evidence" }
+            }
+            mapOf(
+                "coordinate" to artifact.moduleVersion.id.toString(), "file" to artifact.file.name,
+                "sha256" to checksum,
+                "componentIds" to matched.map { it["id"] }, "licenseExpressions" to matched.map { it["licenseExpression"] },
+                "embeddedNoticePaths" to notices,
+            )
+        }.sortedBy { it["file"].toString() }
+        val report = layout.buildDirectory.file("reports/licenses/runtime-artifacts-$mediaPlatform.json").get().asFile
+        report.parentFile.mkdirs()
+        report.writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(artifacts)) + "\n")
     }
 }
 
 // Keep the in-app agreement derived from the repository's canonical legal documents. This avoids
 // displaying one set of terms in packaged builds while publishing different terms at the project root.
 val generateLicenseResources by tasks.registering {
-    val licenseDocuments = listOf("LICENSE", "NOTICE")
+    val licenseDocuments = listOf(licenseDocument, "NOTICE")
     inputs.files(licenseDocuments.map(::file))
     inputs.file("THIRD_PARTY_NOTICES.md")
     inputs.file(whisperSourceLicense)
     inputs.dir(mediaLegalDirectory)
     inputs.dir(applicationLegalDirectory)
+    inputs.property("licenseKind", distributionLicenseKind)
+    inputs.property("licenseVersion", licenseVersion)
     outputs.dir(generatedLicenseResourcesDir)
     dependsOn(configureWhisperNative)
     dependsOn(validateMediaLicenseInventory)
     dependsOn(validateApplicationLicenseInventory)
+    dependsOn(validateApplicationSourceInventory)
     doLast {
         val licenseDirectory = generatedLicenseResourcesDir.get().dir("licenses").asFile
+        // Remove stale documents when switching between source and official distribution modes.
+        licenseDirectory.deleteRecursively()
         licenseDirectory.mkdirs()
         val outputFile = File(licenseDirectory, "indagium-license-agreement.md")
-        val agreement = licenseDocuments.joinToString(separator = "\n\n---\n\n") { path ->
-            file(path).readText().trimEnd()
-        }
-        outputFile.writeText("# Indagium License Agreement\n\nTerms version: $licenseVersion\n\n---\n\n$agreement\n")
+        outputFile.writeText(renderedLicenseAgreement, Charsets.UTF_8)
+        File(licenseDirectory, "indagium-license-agreement.txt").writeText(renderedLicenseAgreement, Charsets.UTF_8)
+        file(licenseDocument).copyTo(File(licenseDirectory, licenseDocument), overwrite = true)
+        val metadata = mapOf(
+            "schemaVersion" to 1, "kind" to distributionLicenseKind, "document" to licenseDocument,
+            "documentVersion" to licenseDocumentVersion, "documentSha256" to licenseDocumentDigest,
+            "identity" to licenseVersion,
+            "agreementSha256" to MessageDigest.getInstance("SHA-256").digest(outputFile.readBytes()).joinToString("") { "%02x".format(it) },
+        )
+        File(licenseDirectory, "distribution-license.json").writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(metadata)) + "\n")
+        val releaseUrl = "https://github.com/indagium/indagium/releases"
+        val sourceAcquisition = mapOf(
+            "schemaVersion" to 1, "applicationVersion" to appVersion,
+            "releaseUrl" to "$releaseUrl/tag/v$appVersion",
+            "archives" to listOf("media", "application").map { kind ->
+                val name = "Indagium-$appVersion-$kind-sources.tar.gz"
+                val url = "$releaseUrl/download/v$appVersion/$name"
+                mapOf("name" to name, "url" to url, "checksumUrl" to "$url.sha256", "manifestUrl" to "$url.manifest.json")
+            },
+        )
+        File(licenseDirectory, "source-acquisition.json").writeText(groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(sourceAcquisition)) + "\n")
         whisperSourceLicense.get().asFile.copyTo(File(licenseDirectory, "whisper.cpp-LICENSE.txt"), overwrite = true)
         file("THIRD_PARTY_NOTICES.md").copyTo(File(licenseDirectory, "THIRD_PARTY_NOTICES.md"), overwrite = true)
         file("NOTICE").copyTo(File(licenseDirectory, "NOTICE"), overwrite = true)
@@ -703,6 +806,7 @@ compose.desktop {
             description = "Android logcat analysis tool"
             vendor = appAuthor
             copyright = "Copyright (C) 2026 $appAuthor"
+            licenseFile.set(generatedLicenseResourcesDir.map { it.file("licenses/indagium-license-agreement.txt") })
             fileAssociation("text/plain", "log", "Log file")
             fileAssociation("text/plain", "txt", "Text log file")
             fileAssociation("text/plain", "logcat", "Android logcat file")
@@ -800,6 +904,14 @@ tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.confi
 tasks.matching { it.name == "createRuntimeImage" }.configureEach {
     dependsOn(validateMediaRuntimeArtifacts)
     doFirst {
+        if (distributionLicenseKind == "eula") {
+            val lock = groovy.json.JsonSlurper().parse(file("licenses/application/application-source-lock.json")) as Map<*, *>
+            val runtime = lock["runtime"] as Map<*, *>
+            check(System.getProperty("java.vendor") == runtime["vendor"] && System.getProperty("java.runtime.version") == runtime["runtimeVersion"]) {
+                "Official EULA packages require Temurin ${runtime["runtimeVersion"]}; use scripts/prepare_application_sources.py --install-jdk. " +
+                    "Gradle currently uses ${System.getProperty("java.vendor")} ${System.getProperty("java.runtime.version")}."
+            }
+        }
         check(JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
             "Packaging must be run with Gradle itself on JDK 21+ (currently ${JavaVersion.current()}) — " +
                 "jpackage/jlink bundle whatever JVM launches Gradle, regardless of kotlin.jvmToolchain. " +
@@ -813,10 +925,28 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
 tasks.matching { it.name == "createDistributable" }.configureEach {
     dependsOn(validateMediaRuntimeArtifacts)
     finalizedBy(validatePackagedMediaResources)
+    doLast {
+        val destination = mediaPackageRoot.get().asFile.resolve("legal")
+        destination.deleteRecursively()
+        destination.mkdirs()
+        val source = generatedLicenseResourcesDir.get().dir("licenses").asFile
+        source.copyRecursively(destination, overwrite = true)
+        source.resolve("indagium-license-agreement.md").copyTo(destination.resolve("indagium-license-agreement.txt"), overwrite = true)
+        if (distributionLicenseKind == "eula") {
+            val process = ProcessBuilder(
+                pythonExecutable, file("scripts/prepare_application_sources.py").absolutePath,
+                "--record-runtime", distributionImageRoot.get().asFile.absolutePath,
+                "--jdk-home", System.getProperty("java.home"), "--platform", mediaPlatform,
+                "--manifest", destination.resolve("runtime-license-manifest.json").absolutePath,
+            ).inheritIO().start()
+            check(process.waitFor() == 0) { "Could not record the packaged JVM source mapping and notices" }
+        }
+    }
 }
 
 tasks.matching { it.name == "check" }.configureEach {
     dependsOn(testMediaSourceGenerator)
+    dependsOn(testDistributionLicensing)
 }
 
 // Linux portable packages.  Both scripts deliberately run outside Gradle's configuration phase:

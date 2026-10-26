@@ -1,0 +1,300 @@
+{
+  "schemaVersion": 1,
+  "runtime": {
+    "vendor": "Eclipse Adoptium",
+    "javaVersion": "21.0.9",
+    "runtimeVersion": "21.0.9+10-LTS",
+    "setupJavaVersion": "21.0.9+10",
+    "releaseTag": "jdk-21.0.9+10",
+    "sourceId": "temurin-OpenJDK21U-jdk-sources_21.0.9_10.tar.gz",
+    "buildSourceId": "temurin-build",
+    "platformMetadata": {
+      "linux-x64": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "linux-arm64": "OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "macos-arm64": "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz.json",
+      "windows-x64": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip.json"
+    },
+    "binaries": {
+      "linux-x64": {
+        "id": "temurin-linux-x64",
+        "archive": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz",
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz",
+        "sha256": "810d3773df7e0d6c4394e4e244b264c8b30e0b05a0acf542d065fd78a6b65c2f"
+      },
+      "linux-arm64": {
+        "id": "temurin-linux-arm64",
+        "archive": "OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz",
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz",
+        "sha256": "edf0da4debe7cf475dbe320d174d6eed81479eb363f41e38a2efb740428c603a"
+      },
+      "macos-arm64": {
+        "id": "temurin-macos-arm64",
+        "archive": "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz",
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz",
+        "sha256": "55a40abeb0e174fdc70f769b34b50b70c3967e0b12a643e6a3e23f9a582aac16"
+      },
+      "windows-x64": {
+        "id": "temurin-windows-x64",
+        "archive": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip",
+        "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip",
+        "sha256": "1c67df516e9795c0b09f5714bfe151da2e3cc988082042f5bbb60d75e4e63fb5"
+      }
+    }
+  },
+  "sourceArchives": [
+    {
+      "id": "com.sun.xml.bind:jaxb-core:2.3.0.1:binary-evidence",
+      "coordinate": "com.sun.xml.bind:jaxb-core:2.3.0.1",
+      "kind": "binary-evidence",
+      "archive": "jaxb-core-2.3.0.1.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/sun/xml/bind/jaxb-core/2.3.0.1/jaxb-core-2.3.0.1.jar",
+      "sha256": "d2ecba63615f317a11fb55c6468f6a9480f6411c10951d9881bafd9a9a8d0467"
+    },
+    {
+      "id": "com.sun.xml.bind:jaxb-core:2.3.0.1:build-pom",
+      "coordinate": "com.sun.xml.bind:jaxb-core:2.3.0.1",
+      "kind": "build-pom",
+      "archive": "jaxb-core-2.3.0.1.pom",
+      "url": "https://repo.maven.apache.org/maven2/com/sun/xml/bind/jaxb-core/2.3.0.1/jaxb-core-2.3.0.1.pom",
+      "sha256": "ee7bb74f42fdc4db10e3cc9c68c0e9b5beaf8ebb36cce91d495b479b026c6aab"
+    },
+    {
+      "id": "com.sun.xml.bind:jaxb-core:2.3.0.1:source",
+      "coordinate": "com.sun.xml.bind:jaxb-core:2.3.0.1",
+      "kind": "source",
+      "archive": "jaxb-core-2.3.0.1-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/com/sun/xml/bind/jaxb-core/2.3.0.1/jaxb-core-2.3.0.1-sources.jar",
+      "sha256": "d628f0d4d24e5a89842a81533da9f5eb4dd7c9bd5e2321c3ded3785e3f28a65f"
+    },
+    {
+      "id": "edu.washington.cs.knowitall:openregex:1.1.1:binary-evidence",
+      "coordinate": "edu.washington.cs.knowitall:openregex:1.1.1",
+      "kind": "binary-evidence",
+      "archive": "openregex-1.1.1.jar",
+      "url": "https://repo.maven.apache.org/maven2/edu/washington/cs/knowitall/openregex/1.1.1/openregex-1.1.1.jar",
+      "sha256": "33021c9cca70c6292d53ff7dac5d1832d422e986aba52ec998532a5f47f921f8"
+    },
+    {
+      "id": "edu.washington.cs.knowitall:openregex:1.1.1:build-pom",
+      "coordinate": "edu.washington.cs.knowitall:openregex:1.1.1",
+      "kind": "build-pom",
+      "archive": "openregex-1.1.1.pom",
+      "url": "https://repo.maven.apache.org/maven2/edu/washington/cs/knowitall/openregex/1.1.1/openregex-1.1.1.pom",
+      "sha256": "874f4733def9b1f4d54821f5173e41d31e25935358a7e82189e1f21c60a99347"
+    },
+    {
+      "id": "edu.washington.cs.knowitall:openregex:1.1.1:source",
+      "coordinate": "edu.washington.cs.knowitall:openregex:1.1.1",
+      "kind": "source",
+      "archive": "openregex-1.1.1-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/edu/washington/cs/knowitall/openregex/1.1.1/openregex-1.1.1-sources.jar",
+      "sha256": "aacc5c8b962b78fa2a5b758daa7403313af006afb6e1c6f9e02dd42538190157"
+    },
+    {
+      "id": "english-pos-dict-source",
+      "kind": "project-source",
+      "upstreamRef": "2c68994244eba9f54a0b561b9213c60c6cbf9c6c",
+      "archive": "english-pos-dict-source-2c68994244eb.tar.gz",
+      "url": "https://codeload.github.com/languagetool-org/english-pos-dict/tar.gz/2c68994244eba9f54a0b561b9213c60c6cbf9c6c",
+      "sha256": "cf2ea1d0d4c3832c3636fb760368979e01601ac21666ffc6c15b5685907f05fd"
+    },
+    {
+      "id": "javax.activation:javax.activation-api:1.2.0:binary-evidence",
+      "coordinate": "javax.activation:javax.activation-api:1.2.0",
+      "kind": "binary-evidence",
+      "archive": "javax.activation-api-1.2.0.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.jar",
+      "sha256": "43fdef0b5b6ceb31b0424b208b930c74ab58fac2ceeb7b3f6fd3aeb8b5ca4393"
+    },
+    {
+      "id": "javax.activation:javax.activation-api:1.2.0:build-pom",
+      "coordinate": "javax.activation:javax.activation-api:1.2.0",
+      "kind": "build-pom",
+      "archive": "javax.activation-api-1.2.0.pom",
+      "url": "https://repo.maven.apache.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0.pom",
+      "sha256": "da2926f3c8be898643cc10acdec6de0b0351a57fb2735770fa0177b06ade71b9"
+    },
+    {
+      "id": "javax.activation:javax.activation-api:1.2.0:source",
+      "coordinate": "javax.activation:javax.activation-api:1.2.0",
+      "kind": "source",
+      "archive": "javax.activation-api-1.2.0-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/activation/javax.activation-api/1.2.0/javax.activation-api-1.2.0-sources.jar",
+      "sha256": "d7411fb29089cafa4b77493f10bfb52832cd1976948903d0b039e12b0bd70334"
+    },
+    {
+      "id": "javax.annotation:javax.annotation-api:1.3.2:binary-evidence",
+      "coordinate": "javax.annotation:javax.annotation-api:1.3.2",
+      "kind": "binary-evidence",
+      "archive": "javax.annotation-api-1.3.2.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/annotation/javax.annotation-api/1.3.2/javax.annotation-api-1.3.2.jar",
+      "sha256": "e04ba5195bcd555dc95650f7cc614d151e4bcd52d29a10b8aa2197f3ab89ab9b"
+    },
+    {
+      "id": "javax.annotation:javax.annotation-api:1.3.2:build-pom",
+      "coordinate": "javax.annotation:javax.annotation-api:1.3.2",
+      "kind": "build-pom",
+      "archive": "javax.annotation-api-1.3.2.pom",
+      "url": "https://repo.maven.apache.org/maven2/javax/annotation/javax.annotation-api/1.3.2/javax.annotation-api-1.3.2.pom",
+      "sha256": "46a4a251ca406e78e4853d7a2bae83282844a4992851439ee9a1f23716f06b97"
+    },
+    {
+      "id": "javax.annotation:javax.annotation-api:1.3.2:source",
+      "coordinate": "javax.annotation:javax.annotation-api:1.3.2",
+      "kind": "source",
+      "archive": "javax.annotation-api-1.3.2-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/annotation/javax.annotation-api/1.3.2/javax.annotation-api-1.3.2-sources.jar",
+      "sha256": "128971e52e0d84a66e3b6e049dab8ad7b2c58b7e1ad37fa2debd3d40c2947b95"
+    },
+    {
+      "id": "javax.xml.bind:jaxb-api:2.3.1:binary-evidence",
+      "coordinate": "javax.xml.bind:jaxb-api:2.3.1",
+      "kind": "binary-evidence",
+      "archive": "jaxb-api-2.3.1.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.jar",
+      "sha256": "88b955a0df57880a26a74708bc34f74dcaf8ebf4e78843a28b50eae945732b06"
+    },
+    {
+      "id": "javax.xml.bind:jaxb-api:2.3.1:build-pom",
+      "coordinate": "javax.xml.bind:jaxb-api:2.3.1",
+      "kind": "build-pom",
+      "archive": "jaxb-api-2.3.1.pom",
+      "url": "https://repo.maven.apache.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1.pom",
+      "sha256": "12b20cf922773445c3445c2883cbf671fa982111e9bf9f875020f9313b3814b1"
+    },
+    {
+      "id": "javax.xml.bind:jaxb-api:2.3.1:source",
+      "coordinate": "javax.xml.bind:jaxb-api:2.3.1",
+      "kind": "source",
+      "archive": "jaxb-api-2.3.1-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/javax/xml/bind/jaxb-api/2.3.1/jaxb-api-2.3.1-sources.jar",
+      "sha256": "d69dc2c28833df5fb6e916efae01477ae936326b342d479a43539b0131c96b9d"
+    },
+    {
+      "id": "languagetool-source",
+      "kind": "project-source",
+      "upstreamRef": "e807fcde6a6506191e1470744d2345da28c26be6",
+      "archive": "languagetool-source-e807fcde6a65.tar.gz",
+      "url": "https://codeload.github.com/languagetool-org/languagetool/tar.gz/e807fcde6a6506191e1470744d2345da28c26be6",
+      "sha256": "eaf862c46fa3c90bb06a44ddbb0ba3d6d3a0c3ceb3d5fe17767543bc726a0785"
+    },
+    {
+      "id": "openregex-source",
+      "kind": "project-source",
+      "upstreamRef": "3a54ed670449ac75d54d65d318c0814e39ff7ba9",
+      "archive": "openregex-source-3a54ed670449.tar.gz",
+      "url": "https://codeload.github.com/knowitall/openregex/tar.gz/3a54ed670449ac75d54d65d318c0814e39ff7ba9",
+      "sha256": "7463b83dc1bf34a97d1debfe8e91aa28edbf031c294f9f246c0d2264ecca0a3e"
+    },
+    {
+      "id": "org.languagetool:english-pos-dict:0.6:binary-evidence",
+      "coordinate": "org.languagetool:english-pos-dict:0.6",
+      "kind": "binary-evidence",
+      "archive": "english-pos-dict-0.6.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/english-pos-dict/0.6/english-pos-dict-0.6.jar",
+      "sha256": "2a3e96b49854e5275f8eb7a1bb5b3b85b82f687fed272f3043882ccc0b1634b1"
+    },
+    {
+      "id": "org.languagetool:english-pos-dict:0.6:build-pom",
+      "coordinate": "org.languagetool:english-pos-dict:0.6",
+      "kind": "build-pom",
+      "archive": "english-pos-dict-0.6.pom",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/english-pos-dict/0.6/english-pos-dict-0.6.pom",
+      "sha256": "1b26ceb5339d4917d9c3c59fd45651f1007f8c0fda0c3f926dae10056b622552"
+    },
+    {
+      "id": "org.languagetool:language-en:6.8:binary-evidence",
+      "coordinate": "org.languagetool:language-en:6.8",
+      "kind": "binary-evidence",
+      "archive": "language-en-6.8.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/language-en/6.8/language-en-6.8.jar",
+      "sha256": "69d3fa1020dea45ad38266e3d54c81969f3ba7eef5efd0a83a8b3fd778acddd0"
+    },
+    {
+      "id": "org.languagetool:language-en:6.8:build-pom",
+      "coordinate": "org.languagetool:language-en:6.8",
+      "kind": "build-pom",
+      "archive": "language-en-6.8.pom",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/language-en/6.8/language-en-6.8.pom",
+      "sha256": "f64b4a2c9fdc6c661decc0f312d0ee9a7455cd334333f23249345aaf40c4d147"
+    },
+    {
+      "id": "org.languagetool:language-en:6.8:source",
+      "coordinate": "org.languagetool:language-en:6.8",
+      "kind": "source",
+      "archive": "language-en-6.8-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/language-en/6.8/language-en-6.8-sources.jar",
+      "sha256": "a5e6eeb8e521acd3e08fe159f01b3d585ebe612e77072f9b301474ebb2161941"
+    },
+    {
+      "id": "org.languagetool:languagetool-core:6.8:binary-evidence",
+      "coordinate": "org.languagetool:languagetool-core:6.8",
+      "kind": "binary-evidence",
+      "archive": "languagetool-core-6.8.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/languagetool-core/6.8/languagetool-core-6.8.jar",
+      "sha256": "c441918b1cf2de5491756772cd4bce2a408c3b9eb08e4ab84d843b2cd50f1d2b"
+    },
+    {
+      "id": "org.languagetool:languagetool-core:6.8:build-pom",
+      "coordinate": "org.languagetool:languagetool-core:6.8",
+      "kind": "build-pom",
+      "archive": "languagetool-core-6.8.pom",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/languagetool-core/6.8/languagetool-core-6.8.pom",
+      "sha256": "4d238fef3189bc129eb81833e46faa92569daa4d2e8961df1820cef89a6f3e44"
+    },
+    {
+      "id": "org.languagetool:languagetool-core:6.8:source",
+      "coordinate": "org.languagetool:languagetool-core:6.8",
+      "kind": "source",
+      "archive": "languagetool-core-6.8-sources.jar",
+      "url": "https://repo.maven.apache.org/maven2/org/languagetool/languagetool-core/6.8/languagetool-core-6.8-sources.jar",
+      "sha256": "67cf55314626fd397f0618057caeb88a2a12cfdd8f6cea288a7e420f8d7fc764"
+    },
+    {
+      "id": "temurin-OpenJDK21U-jdk-sources_21.0.9_10.tar.gz",
+      "kind": "jdk-source",
+      "archive": "OpenJDK21U-jdk-sources_21.0.9_10.tar.gz",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk-sources_21.0.9_10.tar.gz",
+      "sha256": "b32690c35a59c1d11928bab7dc3ec205f4a09a49c0d67daff27aed09e9208f2b"
+    },
+    {
+      "id": "temurin-OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "kind": "jdk-build-evidence",
+      "archive": "OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_aarch64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "sha256": "9b84610c97a117a7873bf2613aacaad766d399d0a3e32212c56a8a87c520007e"
+    },
+    {
+      "id": "temurin-OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz.json",
+      "kind": "jdk-build-evidence",
+      "archive": "OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz.json",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.9_10.tar.gz.json",
+      "sha256": "0997c67908f1a0c85e1876f0e864d17e6df2469000995b8cbcf27579c9a7aefb"
+    },
+    {
+      "id": "temurin-OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "kind": "jdk-build-evidence",
+      "archive": "OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_x64_linux_hotspot_21.0.9_10.tar.gz.json",
+      "sha256": "dd3e307254e72b6688d3127835b8002c81974d3853d04100155b832cc4a32d70"
+    },
+    {
+      "id": "temurin-OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip.json",
+      "kind": "jdk-build-evidence",
+      "archive": "OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip.json",
+      "url": "https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.9%2B10/OpenJDK21U-jdk_x64_windows_hotspot_21.0.9_10.zip.json",
+      "sha256": "6ee6ccca61e13bffe0aca6a9f7aae4274296a8ead4745084440fbd7369151f27"
+    },
+    {
+      "id": "temurin-build",
+      "kind": "project-source",
+      "upstreamRef": "839fa0b45d809157cffd3dc8515aad262a4a1776",
+      "archive": "temurin-build-839fa0b45d80.tar.gz",
+      "url": "https://codeload.github.com/adoptium/temurin-build/tar.gz/839fa0b45d809157cffd3dc8515aad262a4a1776",
+      "sha256": "5c089f5b5563afe34ace9d2d54e0196dfa4de44366148291e09f5ddb256e5bb3"
+    }
+  ],
+  "preferredSourceNotes": {
+    "english-pos-dict": "Maven 0.6 has no sources JAR. The preferred text inputs, build scripts and POM are included from commit 2c68994244eba9f54a0b561b9213c60c6cbf9c6c, the latest upstream commit before the published JAR build timestamp 2025-01-31 15:18:49 UTC. Its POM is version 0.6. The unmodified Maven JAR and POM are pinned as binary/build evidence. This does not claim byte-for-byte reproducibility."
+  }
+}

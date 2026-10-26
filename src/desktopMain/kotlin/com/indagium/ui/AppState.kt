@@ -7076,6 +7076,7 @@ class AppState(
         get() = settings.acceptedLicenseVersion != LICENSE_VERSION
 
     fun acceptLicenseAgreement() {
+        if (loadLicenseAgreement() == null) return
         updateSettings { it.copy(acceptedLicenseVersion = LICENSE_VERSION) }
     }
 

@@ -1,0 +1,321 @@
+{
+  "schemaVersion": 1,
+  "skikoVersion": "0.144.6",
+  "skiaBuild": "m144-22f58c9fd4",
+  "skikoPropertiesUrl": "https://github.com/JetBrains/skiko/blob/v0.144.6/skiko/gradle.properties",
+  "nativeBuilds": [
+    {
+      "platform": "macos-arm64",
+      "url": "https://github.com/JetBrains/skia/releases/download/m144-22f58c9fd4/Skia-m144-22f58c9fd4-macos-Release-arm64.zip",
+      "sha256": "70db9854ea0eda41ce2ad44a73b2f50e7140695bc4f24fa2f2aea70ef68b88d5",
+      "staticLibraries": [
+        "out/Release-macos-arm64/libskresources.a",
+        "out/Release-macos-arm64/libskparagraph.a",
+        "out/Release-macos-arm64/libskia.a",
+        "out/Release-macos-arm64/libicu.a",
+        "out/Release-macos-arm64/libskottie.a",
+        "out/Release-macos-arm64/libjsonreader.a",
+        "out/Release-macos-arm64/libsvg.a",
+        "out/Release-macos-arm64/libpng.a",
+        "out/Release-macos-arm64/libwebp_sse41.a",
+        "out/Release-macos-arm64/libsksg.a",
+        "out/Release-macos-arm64/libjpeg16.a",
+        "out/Release-macos-arm64/libjpeg12.a",
+        "out/Release-macos-arm64/libwebp.a",
+        "out/Release-macos-arm64/libdng_sdk.a",
+        "out/Release-macos-arm64/libbentleyottmann.a",
+        "out/Release-macos-arm64/libpiex.a",
+        "out/Release-macos-arm64/libharfbuzz.a",
+        "out/Release-macos-arm64/libexpat.a",
+        "out/Release-macos-arm64/libzlib.a",
+        "out/Release-macos-arm64/libwuffs.a",
+        "out/Release-macos-arm64/libskcms.a",
+        "out/Release-macos-arm64/libjpeg.a",
+        "out/Release-macos-arm64/libskshaper.a",
+        "out/Release-macos-arm64/libskunicode_icu.a",
+        "out/Release-macos-arm64/libskunicode_core.a"
+      ],
+      "notices": [
+        {
+          "member": "include/third_party/vulkan/LICENSE",
+          "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36"
+        },
+        {
+          "member": "third_party/externals/angle2/LICENSE",
+          "sha256": "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a"
+        },
+        {
+          "member": "third_party/externals/libpng/LICENSE",
+          "sha256": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a"
+        },
+        {
+          "member": "third_party/externals/libwebp/COPYING",
+          "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+        },
+        {
+          "member": "third_party/externals/harfbuzz/COPYING",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+        },
+        {
+          "member": "third_party/externals/swiftshader/LICENSE.txt",
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "member": "third_party/externals/zlib/LICENSE",
+          "sha256": "e1cfcc55c325b3f78cf55df9664abaa066e2271dffe8213347d9fccdfbac8f2c"
+        }
+      ]
+    },
+    {
+      "platform": "linux-x64",
+      "url": "https://github.com/JetBrains/skia/releases/download/m144-22f58c9fd4/Skia-m144-22f58c9fd4-linux-Release-x64.zip",
+      "sha256": "d36046e308dc8ea2e7d4f87fb8f44533dad1e252e49b5bd222d7d00538a82722",
+      "staticLibraries": [
+        "out/Release-linux-x64/libjpeg.a",
+        "out/Release-linux-x64/libsvg.a",
+        "out/Release-linux-x64/libwebp_sse41.a",
+        "out/Release-linux-x64/libbentleyottmann.a",
+        "out/Release-linux-x64/libzlib.a",
+        "out/Release-linux-x64/libsksg.a",
+        "out/Release-linux-x64/libharfbuzz.a",
+        "out/Release-linux-x64/libskunicode_icu.a",
+        "out/Release-linux-x64/libskshaper.a",
+        "out/Release-linux-x64/libskresources.a",
+        "out/Release-linux-x64/libjpeg12.a",
+        "out/Release-linux-x64/libexpat.a",
+        "out/Release-linux-x64/libpng.a",
+        "out/Release-linux-x64/libwebp.a",
+        "out/Release-linux-x64/libskparagraph.a",
+        "out/Release-linux-x64/libfreetype2.a",
+        "out/Release-linux-x64/libskcms.a",
+        "out/Release-linux-x64/libjpeg16.a",
+        "out/Release-linux-x64/libwuffs.a",
+        "out/Release-linux-x64/libskunicode_core.a",
+        "out/Release-linux-x64/libjsonreader.a",
+        "out/Release-linux-x64/libskia.a",
+        "out/Release-linux-x64/libpiex.a",
+        "out/Release-linux-x64/libicu.a",
+        "out/Release-linux-x64/libskottie.a",
+        "out/Release-linux-x64/libdng_sdk.a"
+      ],
+      "notices": [
+        {
+          "member": "include/third_party/vulkan/LICENSE",
+          "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36"
+        },
+        {
+          "member": "third_party/externals/angle2/LICENSE",
+          "sha256": "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a"
+        },
+        {
+          "member": "third_party/externals/libpng/LICENSE",
+          "sha256": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a"
+        },
+        {
+          "member": "third_party/externals/libwebp/COPYING",
+          "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+        },
+        {
+          "member": "third_party/externals/harfbuzz/COPYING",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+        },
+        {
+          "member": "third_party/externals/swiftshader/LICENSE.txt",
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "member": "third_party/externals/zlib/LICENSE",
+          "sha256": "e1cfcc55c325b3f78cf55df9664abaa066e2271dffe8213347d9fccdfbac8f2c"
+        }
+      ]
+    },
+    {
+      "platform": "linux-arm64",
+      "url": "https://github.com/JetBrains/skia/releases/download/m144-22f58c9fd4/Skia-m144-22f58c9fd4-linux-Release-arm64.zip",
+      "sha256": "c98826b8c8b04860ade257e56a5f3f5627aee9124f1ffaecd7bfb94053063bf6",
+      "staticLibraries": [
+        "out/Release-linux-arm64/libskshaper.a",
+        "out/Release-linux-arm64/libsksg.a",
+        "out/Release-linux-arm64/libpiex.a",
+        "out/Release-linux-arm64/libjsonreader.a",
+        "out/Release-linux-arm64/libskparagraph.a",
+        "out/Release-linux-arm64/libjpeg.a",
+        "out/Release-linux-arm64/libjpeg12.a",
+        "out/Release-linux-arm64/libicu.a",
+        "out/Release-linux-arm64/libwebp_sse41.a",
+        "out/Release-linux-arm64/libdng_sdk.a",
+        "out/Release-linux-arm64/libwebp.a",
+        "out/Release-linux-arm64/libjpeg16.a",
+        "out/Release-linux-arm64/libsvg.a",
+        "out/Release-linux-arm64/libskcms.a",
+        "out/Release-linux-arm64/libpng.a",
+        "out/Release-linux-arm64/libfreetype2.a",
+        "out/Release-linux-arm64/libwuffs.a",
+        "out/Release-linux-arm64/libskresources.a",
+        "out/Release-linux-arm64/libskottie.a",
+        "out/Release-linux-arm64/libskunicode_core.a",
+        "out/Release-linux-arm64/libzlib.a",
+        "out/Release-linux-arm64/libskia.a",
+        "out/Release-linux-arm64/libexpat.a",
+        "out/Release-linux-arm64/libbentleyottmann.a",
+        "out/Release-linux-arm64/libharfbuzz.a",
+        "out/Release-linux-arm64/libskunicode_icu.a"
+      ],
+      "notices": [
+        {
+          "member": "include/third_party/vulkan/LICENSE",
+          "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36"
+        },
+        {
+          "member": "third_party/externals/angle2/LICENSE",
+          "sha256": "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a"
+        },
+        {
+          "member": "third_party/externals/libpng/LICENSE",
+          "sha256": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a"
+        },
+        {
+          "member": "third_party/externals/libwebp/COPYING",
+          "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+        },
+        {
+          "member": "third_party/externals/harfbuzz/COPYING",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+        },
+        {
+          "member": "third_party/externals/swiftshader/LICENSE.txt",
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "member": "third_party/externals/zlib/LICENSE",
+          "sha256": "e1cfcc55c325b3f78cf55df9664abaa066e2271dffe8213347d9fccdfbac8f2c"
+        }
+      ]
+    },
+    {
+      "platform": "windows-x64",
+      "url": "https://github.com/JetBrains/skia/releases/download/m144-22f58c9fd4/Skia-m144-22f58c9fd4-windows-Release-x64.zip",
+      "sha256": "7b71f474037e5f71215a28483d8909d234d4bd130220db760eab953b98653a4f",
+      "staticLibraries": [
+        "out/Release-windows-x64/bentleyottmann.lib",
+        "out/Release-windows-x64/d3d12allocator.lib",
+        "out/Release-windows-x64/expat.lib",
+        "out/Release-windows-x64/harfbuzz.lib",
+        "out/Release-windows-x64/icu.lib",
+        "out/Release-windows-x64/jsonreader.lib",
+        "out/Release-windows-x64/libjpeg.lib",
+        "out/Release-windows-x64/libjpeg12.lib",
+        "out/Release-windows-x64/libjpeg16.lib",
+        "out/Release-windows-x64/libpng.lib",
+        "out/Release-windows-x64/libwebp.lib",
+        "out/Release-windows-x64/libwebp_sse41.lib",
+        "out/Release-windows-x64/skcms.lib",
+        "out/Release-windows-x64/skia.lib",
+        "out/Release-windows-x64/skottie.lib",
+        "out/Release-windows-x64/skparagraph.lib",
+        "out/Release-windows-x64/skresources.lib",
+        "out/Release-windows-x64/sksg.lib",
+        "out/Release-windows-x64/skshaper.lib",
+        "out/Release-windows-x64/skunicode_core.lib",
+        "out/Release-windows-x64/skunicode_icu.lib",
+        "out/Release-windows-x64/spirv_cross.lib",
+        "out/Release-windows-x64/svg.lib",
+        "out/Release-windows-x64/wuffs.lib",
+        "out/Release-windows-x64/zlib.lib"
+      ],
+      "notices": [
+        {
+          "member": "include/third_party/vulkan/LICENSE",
+          "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36"
+        },
+        {
+          "member": "third_party/externals/angle2/LICENSE",
+          "sha256": "bf4da21bd20bcfb5b60b7ecc67fa864a79be049e21d6178076887f178dd6c71a"
+        },
+        {
+          "member": "third_party/externals/libpng/LICENSE",
+          "sha256": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a"
+        },
+        {
+          "member": "third_party/externals/libwebp/COPYING",
+          "sha256": "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+        },
+        {
+          "member": "third_party/externals/harfbuzz/COPYING",
+          "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+        },
+        {
+          "member": "third_party/externals/swiftshader/LICENSE.txt",
+          "sha256": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5"
+        },
+        {
+          "member": "third_party/externals/zlib/LICENSE",
+          "sha256": "e1cfcc55c325b3f78cf55df9664abaa066e2271dffe8213347d9fccdfbac8f2c"
+        }
+      ]
+    }
+  ],
+  "directTexts": [
+    {
+      "id": "skiko-notice",
+      "url": "https://raw.githubusercontent.com/JetBrains/skiko/v0.144.6/NOTICE",
+      "sha256": "35dd077c24768b53625101cfcc0ad853ae7e2abc08bd2a111a0267760d1406d8"
+    },
+    {
+      "id": "skia-license",
+      "url": "https://raw.githubusercontent.com/JetBrains/skia/m144-22f58c9fd4/LICENSE",
+      "sha256": "5f787c1dee3c56547f09ccc2906ab5f5293c4d8dd6c8654e573216c38e908dbd"
+    },
+    {
+      "id": "skia-expat",
+      "url": "https://chromium.googlesource.com/external/github.com/libexpat/libexpat.git/+/8e49998f003d693213b538ef765814c7d21abada/expat/COPYING?format=TEXT",
+      "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+    },
+    {
+      "id": "skia-dng",
+      "url": "https://android.googlesource.com/platform/external/dng_sdk.git/+/dbe0a676450d9b8c71bf00688bb306409b779e90/LICENSE?format=TEXT",
+      "sha256": "012e875468ac2f9a2070ee25a950588afa2735b4b2d961f491e3d72c8f572306"
+    },
+    {
+      "id": "skia-piex",
+      "url": "https://android.googlesource.com/platform/external/piex.git/+/bb217acdca1cc0c16b704669dd6f91a1b509c406/LICENSE?format=TEXT",
+      "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd"
+    },
+    {
+      "id": "skia-freetype",
+      "url": "https://chromium.googlesource.com/chromium/src/third_party/freetype2.git/+/1518bc83d26b434031bd12c706ac3c7dab3902fd/docs/FTL.TXT?format=TEXT",
+      "sha256": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f"
+    },
+    {
+      "id": "skia-icu",
+      "url": "https://chromium.googlesource.com/chromium/deps/icu.git/+/364118a1d9da24bb5b770ac3d762ac144d6da5a4/LICENSE?format=TEXT",
+      "sha256": "17510cf7a58b4879b887ec05a45d72cf1b73544dd9ec7e72f20110ed104229ee"
+    },
+    {
+      "id": "skia-libjpeg",
+      "url": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+/e14cbfaa85529d47f9f55b0f104a579c1061f9ad/LICENSE.md?format=TEXT",
+      "sha256": "96f5b328adbb78eeaaec6980d73fd558cb1e4d62560ed615646bc3cf5e532430"
+    },
+    {
+      "id": "skia-wuffs",
+      "url": "https://skia.googlesource.com/external/github.com/google/wuffs-mirror-release-c.git/+/e3f919ccfe3ef542cfc983a82146070258fb57f8/LICENSE?format=TEXT",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "id": "skia-libjpeg-ijg",
+      "url": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+/e14cbfaa85529d47f9f55b0f104a579c1061f9ad/README.ijg?format=TEXT",
+      "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6"
+    },
+    {
+      "id": "jna-libffi",
+      "url": "https://raw.githubusercontent.com/java-native-access/jna/5.12.1/native/libffi/LICENSE",
+      "sha256": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde"
+    }
+  ],
+  "packagedTextHashes": {
+    "application/texts/skia-native-notices.txt": "b42fb4d12d723f13ca95deae44536dd7690ecefb7a111f0b7b96f509f6cef7b5",
+    "application/texts/skiko-NOTICE.txt": "35dd077c24768b53625101cfcc0ad853ae7e2abc08bd2a111a0267760d1406d8",
+    "application/texts/jna-libffi-license.txt": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde"
+  },
+  "scopeNotes": "Skia release archives contain linked static libraries plus development/header inputs; including their notices does not assert every optional feature is active. The macOS Skiko binary contains dng_info, SkRawCodec and dng_negative, confirming the DNG decoder is present. ICU config.guess is build-only. JNA remains Apache-2.0 for its own code; libffi retains MIT."
+}

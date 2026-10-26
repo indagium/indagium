@@ -1,12 +1,16 @@
 # Third-Party Notices
 
-Indagium ships third-party software under the separate terms shown here. These licences apply to their components and are not replaced or restricted by the Indagium agreement.
+Indagium ships third-party software under the separate terms shown here. These licences apply to their components and are not replaced or restricted by the EULA for official binaries or the PolyForm licence for public source. Third-party rights take precedence for their components. Neither EULA acceptance nor payment is required to obtain their published sources.
+
+For new official binary releases, matching native sources are in `Indagium-<version>-media-sources.tar.gz` and Java/JVM sources and build materials in `Indagium-<version>-application-sources.tar.gz`, supplied alongside the installers with checksums and manifests. See [application/JVM source instructions](licenses/application/SOURCE-BUNDLE.md) and [media source instructions](licenses/third-party/SOURCE-BUNDLE.md). Existing published binaries retain their original terms; these instructions do not relicense them.
 
 Paths in the application table are relative to `licenses/` in the repository and in the app's bundled resources (the LanguageTool text is checked in as `src/desktopMain/resources/licenses/languagetool-LGPL-2.1.txt`); paths in the media table are relative to `licenses/third-party/`. The application components are kept in [`licenses/application/application-components.json`](licenses/application/application-components.json), and `./gradlew validateApplicationLicenseInventory` fails when a runtime module is not covered by it. Where a component offers a choice of licences, Indagium uses JNA under Apache-2.0 and the legacy Java EE APIs under CDDL-1.1. The LGPL libraries (LanguageTool, OpenRegex) are used unmodified as separate JARs in the app's `app/` directory and may be replaced by compatible builds.
 
 | Application component | Version | Scope | SPDX/custom identifier | Full texts and notices |
 | --- | --- | --- | --- | --- |
 | Kotlin, Compose Multiplatform, Skiko and AndroidX | Kotlin 2.4.0, Compose 1.11.1, Skiko 0.144.6 | Application runtime and UI toolkit | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
+| Skia native graphics closure | Skiko 0.144.6 / JetBrains Skia m144-22f58c9fd4 | Native rendering, fonts and image codecs; separate from FFmpeg | `LicenseRef-Skia-Native-Notices` (BSD, Apache, MIT, Unicode, FTL, IJG, libpng, Zlib and Adobe DNG terms) | `application/texts/skia-native-notices.txt`, `application/texts/skiko-NOTICE.txt`; provenance in `application/graphics-notice-provenance.json` |
+| libffi in JNA | As pinned by JNA 5.12.1 | Native dispatch support; JNA itself is used under Apache-2.0 | `MIT` | `application/texts/jna-libffi-license.txt` |
 | Ktor | 3.4.3 | Loopback control server and HTTP clients | `Apache-2.0` | `third-party/texts/apache-2.0.txt` |
 | Model Context Protocol Kotlin SDK | 0.14.0 | MCP server and client | `MIT AND Apache-2.0` | `application/texts/mcp-kotlin-sdk-license.txt` |
 | SLF4J | 2.0.17 | Logging facade (no-op binding) | `MIT` | `application/texts/slf4j-license.txt` |
@@ -33,9 +37,11 @@ Paths in the application table are relative to `licenses/` in the repository and
 | AppImage type 2 runtime | As embedded by the pinned appimagetool | Linux AppImage packages only | `MIT` | `application/texts/appimage-type2-runtime-license.txt` |
 | `whisper.cpp` | 1.9.5 | Statically linked into the generated native voice bridge | `MIT` | `whisper.cpp-LICENSE.txt` (upstream `LICENSE`, generated at build time) |
 | OpenAI Whisper model weights distributed through `ggerganov/whisper.cpp` | Pinned Hugging Face model repository | Downloaded only after an explicit user action | `MIT` | Model repository licence |
-| Temurin/OpenJDK bundled runtime | 21 in release CI | Supplied with native packages | `GPL-2.0-only WITH Classpath-exception-2.0` | Runtime `legal/` directory |
+| Temurin/OpenJDK bundled runtime | 21.0.9+10-LTS in new official release CI | Supplied with native packages; complete source and build recipes pinned in the application source lock | `GPL-2.0-only WITH Classpath-exception-2.0` | Runtime `legal/` directory and packaged runtime manifest |
 
 The FFmpeg native libraries use the shared LGPL 3.0-or-later build of FFmpeg 8.0.1 (`org.bytedeco:ffmpeg` 8.0.1-1.5.13). The inspected four platform configurations include `--enable-version3`, omit `--enable-gpl` and `--enable-nonfree`, and do not link x264 or x265. FFmpeg is distributed as replaceable classifier JARs. LGPL-covered modifications and reverse engineering to debug those modifications remain permitted under the applicable licence terms. See [the source instructions](licenses/third-party/SOURCE-BUNDLE.md), which describe the replacement layout and source archive preparation task.
+
+The separate Skia native graphics stack retains its upstream notices, including the Skiko AOSP notice, FreeType Project (https://www.freetype.org/) terms and libjpeg-turbo/IJG notices. This software is based in part on the work of the Independent JPEG Group. This product includes DNG technology under license by Adobe Systems Incorporated. The Adobe DNG SDK terms include commercial-distribution indemnification conditions; they are preserved in full and are not replaced by the EULA. ICU's complete licence text also contains terms for the build-only `config.guess` script with an Autoconf exception; that inclusion does not put Indagium under GPL.
 
 OpenH264 2.6.0 is built from its source release. Indagium does not include the separately distributed Cisco OpenH264 binary. The inventory also records target-specific runtime libraries and GCC/MinGW notices found inside or linked by the inspected classifiers.
 

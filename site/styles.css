@@ -153,3 +153,9 @@ video { background:var(--paper); }
   .guide-links a, .guide-links a + a { border-left:0; padding:24px 0; }
   .guide-steps li { gap:15px; grid-template-columns:52px 1fr; padding:25px 16px 25px 24px; }
 }
+
+/* Readable legal documents share the site typography without hero-sized headings. */
+.eula-document { max-width:850px; margin:40px auto 0; line-height:1.75; overflow-wrap:anywhere; }
+.eula-document h1 { font-size:clamp(2rem,4vw,3rem); }
+.eula-document h2 { font-size:1.35rem; margin-top:2rem; }
+.eula-document p { font-size:1rem; color:var(--copy); }

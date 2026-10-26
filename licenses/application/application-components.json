@@ -266,7 +266,7 @@
       "summary": "Listed individually in the media inventory with every linked native library.",
       "licenseFiles": [],
       "viewer": false,
-      "modules": ["org.bytedeco:*", "com.github.luben:*"]
+      "modules": ["org.bytedeco:javacv", "org.bytedeco:javacpp", "org.bytedeco:ffmpeg", "com.github.luben:zstd-jni"]
     },
     {
       "id": "scrcpy-server",
@@ -289,6 +289,37 @@
       "summary": "Copyright (c) 2004-23 probonopd. The runtime executable prepended to each AppImage is built by https://github.com/AppImage/type2-runtime, which statically links squashfuse, libfuse, zstd, zlib and musl; their licences are listed in that repository.",
       "licenseFiles": ["application/texts/appimage-type2-runtime-license.txt"],
       "modules": []
+    },
+    {
+      "id": "skia-native",
+      "name": "Skia native graphics, fonts and image codecs",
+      "version": "Skiko 0.144.6 / Skia m144-22f58c9fd4",
+      "scope": "Native graphics closure bundled by Skiko; separate from the FFmpeg codec closure",
+      "license": "BSD, Apache, MIT, Unicode, FTL, IJG, libpng, Zlib and Adobe DNG terms; see full notices",
+      "licenseExpression": "LicenseRef-Skia-Native-Notices",
+      "summary": "Skiko wrapper code remains Apache-2.0. Its native Skia libraries and codecs retain the upstream notices collected from all four pinned builds and DEPS revisions, including Adobe DNG commercial-distribution conditions. See graphics-notice-provenance.json.",
+      "licenseFiles": [
+        "application/texts/skia-native-notices.txt",
+        "application/texts/skiko-NOTICE.txt"
+      ],
+      "modules": [
+        "org.jetbrains.skiko:skiko-awt-runtime-*"
+      ]
+    },
+    {
+      "id": "jna-libffi",
+      "name": "libffi in JNA native dispatch",
+      "version": "As pinned by JNA 5.12.1",
+      "scope": "Native support in the JNA JAR; JNA itself is used under Apache-2.0",
+      "license": "MIT",
+      "licenseExpression": "MIT",
+      "summary": "libffi copyright 1996-2021 Anthony Green, Red Hat, Inc and others. Source of the preserved notice: JNA 5.12.1 native/libffi/LICENSE.",
+      "licenseFiles": [
+        "application/texts/jna-libffi-license.txt"
+      ],
+      "modules": [
+        "net.java.dev.jna:jna"
+      ]
     }
   ]
 }

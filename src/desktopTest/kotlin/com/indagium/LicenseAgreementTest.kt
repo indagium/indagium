@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.generated.BuildInfo
 import com.indagium.ui.AppState
 import com.indagium.ui.LICENSE_VERSION
 import com.indagium.ui.loadLicenseAgreement
@@ -12,6 +13,8 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class LicenseAgreementTest {
@@ -53,14 +56,60 @@ class LicenseAgreementTest {
 
     @Test
     fun packagedAgreementContainsTheRequiredTerms() {
-        val agreement = loadLicenseAgreement()
-
-        assertContains(agreement, "PolyForm Perimeter License 1.0.0")
-        assertContains(agreement, "Any purpose is a permitted purpose, except for providing to others any product that competes with the software.")
-        assertContains(agreement, "Required Notice: Copyright 2026 Roman Arnaut")
-        assertContains(agreement, "The Indagium name, logo, icon, and branding")
+        val agreement = assertNotNull(loadLicenseAgreement())
+        if (BuildInfo.LICENSE_KIND == "eula") {
+            assertContains(agreement, "Indagium End User License Agreement")
+            assertContains(agreement, "commercial and non-commercial purposes")
+            assertContains(agreement, "optional premium functionality")
+            assertContains(agreement, "Third-party components are not relicensed under this EULA")
+            assertFalse(agreement.contains("## Noncompete"))
+            assertFalse(agreement.contains("Required Notice: Copyright 2026 Roman Arnaut"))
+        } else {
+            assertContains(agreement, "PolyForm Perimeter License 1.0.0")
+            assertContains(agreement, "Any purpose is a permitted purpose, except for providing to others any product that competes with the software.")
+            assertContains(agreement, "Required Notice: Copyright 2026 Roman Arnaut")
+        }
         assertFalse(agreement.contains("PolyForm Noncommercial License"))
         assertFalse(agreement.contains("separate written commercial license"))
+    }
+
+    @Test
+    fun absentCorruptOrUnreadableAgreementCannotBeAccepted() {
+        assertNull(loadLicenseAgreement { null })
+        assertNull(loadLicenseAgreement { "Accept this error instead of the agreement" })
+        assertNull(loadLicenseAgreement { error("Unreadable resource") })
+    }
+
+    @Test
+    fun stateCannotPersistAcceptanceWhenTheAgreementResourceIsMissing() {
+        val state = AppState()
+        val thread = Thread.currentThread()
+        val previousLoader = thread.contextClassLoader
+        try {
+            thread.contextClassLoader = object : ClassLoader(previousLoader) {
+                override fun getResourceAsStream(name: String): java.io.InputStream? =
+                    if (name == "licenses/indagium-license-agreement.md") null else super.getResourceAsStream(name)
+            }
+            state.acceptLicenseAgreement()
+            assertTrue(state.needsLicenseAcceptance)
+            assertNull(state.settings.acceptedLicenseVersion)
+        } finally {
+            thread.contextClassLoader = previousLoader
+            state.close()
+        }
+    }
+
+    @Test
+    fun legacyPolyformAcceptanceDoesNotAcceptTheNewAgreementIdentity() {
+        val state = AppState()
+        try {
+            state.updateSettings { it.copy(acceptedLicenseVersion = "2026-07-19") }
+            assertTrue(state.needsLicenseAcceptance)
+            assertTrue(LICENSE_VERSION.startsWith("${BuildInfo.LICENSE_KIND}-"))
+            assertEquals(64, LICENSE_VERSION.substringAfter(':').length)
+        } finally {
+            state.close()
+        }
     }
 
     @Test

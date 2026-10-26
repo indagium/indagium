@@ -10,4 +10,6 @@ You retain ownership of your Contribution. You grant Roman Arnaut and any succes
 
 This grant allows Contributions accepted into Indagium to be used with the project's current licence and in future Indagium editions, including proprietary or commercial editions.
 
+Public source remains under PolyForm Perimeter. Future official binary distributions may be supplied under the separate Indagium EULA. This grant permits that licensing for contributions to which the contributor has actually agreed. Its presence in this file does not establish consent for historical contributions submitted without accepting the grant; preserve each contributor's acknowledgement and verify historical rights separately.
+
 Do not submit third-party material unless you have the right to grant this licence. Identify all third-party material and its licence in the pull request description.

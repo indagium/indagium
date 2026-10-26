@@ -1,7 +1,9 @@
 Indagium
 Copyright 2026 Roman Arnaut
 
-The Indagium name, logo, icon, and branding are owned by Roman Arnaut. No trademark or branding license is granted by the project license or by any other repository document. Use, distribution, or promotion must not imply endorsement by Roman Arnaut or use the Indagium branding except as separately agreed in writing.
+Official Indagium binary releases that include EULA.md are licensed under that EULA. Public source code is separately licensed under the root LICENSE (PolyForm Perimeter). Earlier releases retain the terms originally supplied with them. Acceptance of PolyForm is not required to use official binaries supplied under the EULA.
+
+The Indagium name, logo, icon, and branding are owned by Roman Arnaut. Ordinary display and accurate identification of the official application are permitted as described in its EULA. No right is granted to brand another product or imply endorsement by Roman Arnaut. Independently applicable statutory and third-party rights remain unaffected.
 
 Third-party bundled asset
 
@@ -29,4 +31,8 @@ and notice resources supplied by its dependency JARs.
 
 Third-party software licence rights
 
-This project includes third-party libraries and native components under the separate licences listed in THIRD_PARTY_NOTICES.md and the full inventories under licenses/application/ and licenses/third-party/. The Indagium project licence and agreement cover Indagium's own code; they do not replace or restrict rights granted by any third-party licence. In particular, FFmpeg is distributed under LGPL version 3 or later. The LGPL permissions and conditions apply to the covered FFmpeg code, including the right to modify it and the right to reverse engineer it to debug modifications under LGPLv3 section 4. The bundled FFmpeg classifier is replaceable by a compatible build as described in licenses/third-party/SOURCE-BUNDLE.md. The same applies to the LGPL-licensed LanguageTool and OpenRegex JARs, which are used unmodified and may be replaced by compatible builds. Users and redistributors must follow the applicable third-party licence terms and preserve their required notices.
+This project includes third-party libraries and native components under the separate licences listed in THIRD_PARTY_NOTICES.md and the full inventories under licenses/application/ and licenses/third-party/. Neither the official binary EULA nor the public source licence replaces or restricts rights granted by a third-party licence. In particular, FFmpeg is distributed under LGPL version 3 or later. The applicable LGPL permissions and conditions preserve library modification, replacement, recombination and relinking, modification of the combined work for the user's own use, and reverse engineering of the application to debug those modifications. The bundled FFmpeg classifier is replaceable by a compatible build as described in licenses/third-party/SOURCE-BUNDLE.md. The same applies to the unmodified LGPL LanguageTool and OpenRegex JARs. No EULA restriction on distribution, modification, reverse engineering or premium entitlement controls overrides these rights. Terminating the EULA does not itself terminate independent upstream rights. Users and redistributors must follow the applicable third-party licence terms and preserve their required notices.
+
+Matching source acquisition
+
+New official binary releases provide Indagium-<version>-media-sources.tar.gz and Indagium-<version>-application-sources.tar.gz, with checksums and manifests, alongside the binaries. Their sources remain under their upstream licences and may be obtained without accepting the EULA or buying a subscription. See licenses/third-party/SOURCE-BUNDLE.md and licenses/application/SOURCE-BUNDLE.md for version-specific acquisition, build and replacement instructions. Downloadable CI packages must carry these archives too; a short-lived CI artifact is not the durable public source location for a published release.

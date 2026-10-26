@@ -1077,6 +1077,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ffmpeg-jar", type=Path)
     parser.add_argument("--zstd-jar", type=Path)
     parser.add_argument("--package-root", type=Path)
+    parser.add_argument("--license-kind", choices=["polyform", "eula"])
     args = parser.parse_args(argv)
     runtime_versions = {
         "ffmpeg": args.ffmpeg_version,
@@ -1103,6 +1104,9 @@ def main(argv: list[str] | None = None) -> int:
                 app_version=args.app_version, runtime_versions=runtime_versions, platform=args.platform,
                 package_root=args.package_root, original_ffmpeg_jar=args.ffmpeg_jar, original_zstd_jar=args.zstd_jar,
             )
+            if args.license_kind:
+                from distribution_legal import validate_package
+                validate_package(args.package_root, args.license_kind)
             print("Packaged media classifiers and legal resources validate.")
         elif args.validate_only:
             validate_only(

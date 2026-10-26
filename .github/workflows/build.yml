@@ -78,7 +78,7 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
-          java-version: '21'
+          java-version: '21.0.9+10'
           distribution: 'temurin'
 
       - name: Restore Gradle cache
@@ -100,8 +100,11 @@ jobs:
       - name: Validate portable smoke-test compatibility
         run: bash scripts/test-validate-flatpak-install.sh
 
+      - name: Verify the source-build agreement before switching to EULA
+        run: ./gradlew -Pindagium.license=polyform desktopTest --tests 'com.indagium.LicenseAgreement*'
+
       - name: Build, test, and lint
-        run: ./gradlew build
+        run: ./gradlew -Pindagium.license=eula build
 
       # testLogging (build.gradle.kts) already prints the full assertion message and stack trace
       # to the console log above on failure, but the HTML/XML report additionally shows per-test
@@ -123,16 +126,23 @@ jobs:
       # for the four inspected native targets. Packaging jobs validate their final app images on
       # each target; this separate archive is retained for verification and release attachment.
       - name: Prepare native media source archive
-        run: ./gradlew prepareMediaSources
+        run: |
+          ./gradlew -Pindagium.license=eula prepareMediaSources prepareApplicationSources
+          mkdir -p build/legal-release
+          cp EULA.md NOTICE THIRD_PARTY_NOTICES.md build/legal-release/
 
       - name: Upload native media source archive
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: Indagium-media-sources
+          name: Indagium-third-party-sources
           path: |
             build/Indagium-*-media-sources.tar.gz
             build/Indagium-*-media-sources.tar.gz.sha256
             build/Indagium-*-media-sources.tar.gz.manifest.json
+            build/Indagium-*-application-sources.tar.gz
+            build/Indagium-*-application-sources.tar.gz.sha256
+            build/Indagium-*-application-sources.tar.gz.manifest.json
+            build/legal-release/
           retention-days: 7
 
       # Resolved dependency report in place of a full SBOM (small dependency footprint here
@@ -140,7 +150,7 @@ jobs:
       # versions this release actually resolved, alongside Dependabot's advisory scanning
       # (.github/dependabot.yml) for the vulnerability-alerting half.
       - name: Generate dependency report
-        run: ./gradlew dependencies --configuration desktopRuntimeClasspath > dependency-report.txt
+        run: ./gradlew -Pindagium.license=eula dependencies --configuration desktopRuntimeClasspath > dependency-report.txt
 
       - name: Upload dependency report
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -172,10 +182,16 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Download matching third-party sources and legal documents
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: Indagium-third-party-sources
+          path: build
+
       - name: Set up JDK 21
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
-          java-version: '21'
+          java-version: '21.0.9+10'
           distribution: 'temurin'
 
       # Restore-only: this workflow triggers on tag pushes, and GitHub scopes a *saved* cache to
@@ -225,22 +241,22 @@ jobs:
 
       - name: Compile Linux VAAPI/EGL mirror bridge
         if: matrix.linux
-        run: ./gradlew compileLinuxMirrorNative
+        run: ./gradlew -Pindagium.license=eula compileLinuxMirrorNative
 
       - name: Compile Windows D3D11 mirror bridge
         if: startsWith(matrix.os, 'windows')
-        run: ./gradlew compileWindowsMirrorNative
+        run: ./gradlew -Pindagium.license=eula compileWindowsMirrorNative
 
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.
       # This focused native suite covers headerless containers and raw streams without repeating
       # the whole desktop test suite four times before packaging.
       - name: Verify native video duration recovery
-        run: ./gradlew desktopTest --tests 'com.indagium.VideoDurationScanTest'
+        run: ./gradlew -Pindagium.license=eula desktopTest --tests 'com.indagium.VideoDurationScanTest'
 
       - name: Verify microphone and Opus pipeline tests
         run: >-
-          ./gradlew desktopTest
+          ./gradlew -Pindagium.license=eula desktopTest
           --tests 'com.indagium.capture.DesktopMicrophoneTest'
           --tests 'com.indagium.capture.TimelinePcmMixerTest'
           --tests 'com.indagium.capture.OpusPcmEncoderTest'
@@ -251,7 +267,7 @@ jobs:
       # test skips itself when a platform's bytedeco FFmpeg build lacks the encoder.
       - name: Verify Compact archive natives and file semantics
         run: >-
-          ./gradlew desktopTest
+          ./gradlew -Pindagium.license=eula desktopTest
           --tests 'com.indagium.CaptureZstdTest'
           --tests 'com.indagium.capture.CaptureArchiveZipWriterTest'
           --tests 'com.indagium.capture.CaptureExtractionLeaseTest'
@@ -261,7 +277,7 @@ jobs:
 
       - name: Smoke-test native mirror library load and Canvas handle
         if: matrix.linux || startsWith(matrix.os, 'windows')
-        run: ./gradlew desktopTest --tests 'com.indagium.capture.mirror.NativeMirrorBridgeSmokeTest'
+        run: ./gradlew -Pindagium.license=eula desktopTest --tests 'com.indagium.capture.mirror.NativeMirrorBridgeSmokeTest'
 
       # See the matching step in the verify job: testLogging already puts the full failure in the
       # console log above, this is the report tree backup. Name suffixed with artifact_name since
@@ -283,7 +299,7 @@ jobs:
         # when the repository has a transient network failure.
         run: |
           for attempt in 1 2 3; do
-            if ./gradlew ${{ matrix.tasks }}; then
+            if ./gradlew -Pindagium.license=eula ${{ matrix.tasks }}; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
@@ -305,7 +321,7 @@ jobs:
           curl --fail --location --retry 3 \
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.bin" \
             --output "$INDAGIUM_VOICE_MODEL"
-          ./gradlew --no-daemon desktopTest --tests 'com.indagium.voice.WhisperNativeSmokeTest.baseModelLoadsFromUnicodePathAndTranscribesAutomaticLanguageFixtureWhenConfigured'
+          ./gradlew -Pindagium.license=eula --no-daemon desktopTest --tests 'com.indagium.voice.WhisperNativeSmokeTest.baseModelLoadsFromUnicodePathAndTranscribesAutomaticLanguageFixtureWhenConfigured'
 
       - name: Validate packaged Windows D3D11 mirror bridge
         if: startsWith(matrix.os, 'windows')
@@ -332,7 +348,7 @@ jobs:
           }
           if (-not $found) { throw "The packaged MSI is missing $resource." }
           $appVersion = (Select-String -Path 'gradle.properties' -Pattern '^app\.version=(.+)$').Matches[0].Groups[1].Value
-          python scripts/prepare_media_sources.py --app-version $appVersion --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform ${{ matrix.media_platform }} --package-root $expanded
+          python scripts/prepare_media_sources.py --app-version $appVersion --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform ${{ matrix.media_platform }} --package-root $expanded
 
       - name: Validate final macOS DMG media binaries and legal resources
         if: startsWith(matrix.os, 'macos')
@@ -350,11 +366,13 @@ jobs:
             rm -rf "$mountpoint"
           }
           trap cleanup EXIT
-          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint" -quiet
+          # Answer only the test mount's embedded installer agreement prompt. The app's
+          # mandatory first-launch acceptance remains unset and is tested separately.
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint" <<< 'Y'
           app=$(find "$mountpoint" -maxdepth 2 -type d -name 'Indagium.app' -print -quit)
           test -n "$app"
           app_version=$(sed -n 's/^app.version=//p' gradle.properties)
-          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform macos-arm64 --package-root "$app/Contents/app" --ffmpeg-jar "$ffmpeg_jar" --zstd-jar "$zstd_jar"
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform macos-arm64 --package-root "$app" --ffmpeg-jar "$ffmpeg_jar" --zstd-jar "$zstd_jar"
 
       # jpackage doesn't emit StartupWMClass in the .desktop file it generates (no Gradle DSL
       # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
@@ -432,7 +450,7 @@ jobs:
           grep -q '^Exec=.* %F$' "$desktop_file"
           bash scripts/validate-native-mirror-package.sh "$workdir" native/linux/libindagium_mirror.so
           app_version=$(sed -n 's/^app.version=//p' gradle.properties)
-          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root "$workdir"
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform '${{ matrix.media_platform }}' --package-root "$workdir"
           rm -rf "$workdir"
 
       # Verify every Linux artifact has the architecture suffix required by its packaging format
@@ -474,7 +492,7 @@ jobs:
             xmllint --noout "$mimeinfo_file"
             bash "$GITHUB_WORKSPACE/scripts/validate-native-mirror-package.sh" squashfs-root native/linux/libindagium_mirror.so
             app_version=$(sed -n 's/^app.version=//p' "$GITHUB_WORKSPACE/gradle.properties")
-            python3 "$GITHUB_WORKSPACE/scripts/prepare_media_sources.py" --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root squashfs-root
+            python3 "$GITHUB_WORKSPACE/scripts/prepare_media_sources.py" --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform '${{ matrix.media_platform }}' --package-root squashfs-root
           )
           rm -rf "$appimage_workdir"
 
@@ -493,15 +511,25 @@ jobs:
           deployment_dir=$(flatpak info --user --show-location com.indagium.Indagium)
           bash scripts/validate-native-mirror-package.sh "$deployment_dir/files" native/linux/libindagium_mirror.so
           app_version=$(sed -n 's/^app.version=//p' gradle.properties)
-          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --platform '${{ matrix.media_platform }}' --package-root "$deployment_dir/files"
+          python3 scripts/prepare_media_sources.py --app-version "$app_version" --ffmpeg-version 8.0.1-1.5.13 --javacv-version 1.5.13 --javacpp-version 1.5.13 --zstd-jni-version 1.5.7-4 --validate-package --license-kind eula --platform '${{ matrix.media_platform }}' --package-root "$deployment_dir/files"
           bash scripts/validate-flatpak-install.sh
           flatpak uninstall --user -y com.indagium.Indagium
+
+      - name: Verify compatible LGPL replacements in a copied image
+        run: |
+          image=build/compose/binaries/main/app/Indagium
+          if [[ "$RUNNER_OS" == macOS ]]; then image="$image.app"; fi
+          python scripts/verify_lgpl_replacement.py --image "$image" --jdk-home "$JAVA_HOME"
 
       - name: Upload artifact
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_path }}
+          path: |
+            ${{ matrix.artifact_path }}
+            build/Indagium-*-sources.tar.gz*
+            build/legal-release/
+            build/reports/licenses/*.json
           # Default retention is 90 days; these only need to survive long enough for the release
           # job below to download and republish them as GitHub Release assets (minutes, not
           # months) — the prior default was the other half of what exhausted the account's 500MB
@@ -536,20 +564,22 @@ jobs:
       # suffix rather than expecting people to infer compatibility from the filenames. The in-app
       # updater selects the matching release asset for .deb/AppImage launches; Flatpak updates are
       # intentionally delegated to Flatpak itself.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Refuse historical release changes and validate complete assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/prepare_release_assets.py --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" --check-existing
+          python3 scripts/prepare_release_assets.py --tag "$RELEASE_TAG" --artifacts artifacts --output release-assets
+
       - name: Create GitHub Release
+        id: draft_release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           # Package types only, as a second guard on top of the download filter above.
-          files: |
-            artifacts/**/*.deb
-            artifacts/**/*.AppImage
-            artifacts/**/*.flatpak
-            artifacts/**/*.msi
-            artifacts/**/*.dmg
-            artifacts/**/*.tar.gz
-            artifacts/**/*.tar.gz.sha256
-            artifacts/**/*.tar.gz.manifest.json
-            artifacts/**/dependency-report.txt
+          files: release-assets/*
+          draft: true
           fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
@@ -562,7 +592,15 @@ jobs:
             | Windows | `Indagium-*.msi` |
             | macOS — Apple Silicon | `Indagium-*.dmg` |
 
-            The `Indagium-*-media-sources.tar.gz` archive contains pinned media-library sources,
+            Official binaries in this release use the Indagium EULA (attached as `EULA.md`);
+            public source remains under PolyForm. Free functionality is available for commercial
+            and non-commercial use; paid premium functionality is optional. Third-party licences
+            remain separate. Source downloads do not require EULA acceptance or payment.
+            The matching source assets are on [this version's release page](https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}),
+            and exact acquisition links are included in the installed `legal/source-acquisition.json`.
+
+            The `Indagium-*-application-sources.tar.gz` archive contains matching Java-library and
+            complete JVM source/build materials. The `Indagium-*-media-sources.tar.gz` archive contains pinned media-library sources,
             build inputs, licence texts, a SHA-256 file, and a manifest. It supports inspection and
             rebuilding; it is not a bit-for-bit reproducibility claim or patent clearance.
 
@@ -570,3 +608,12 @@ jobs:
             `chmod +x <file>`, or use `flatpak install --user <file>` for a Flatpak bundle. The
             macOS build is unsigned, so Gatekeeper warns on first launch — see the README's
             Installation section for the workaround.
+
+      - name: Verify uploaded assets and publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
+        run: |
+          python3 scripts/prepare_release_assets.py --tag "$RELEASE_TAG" --repository "$GITHUB_REPOSITORY" --release-id "$RELEASE_ID" --output release-assets
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

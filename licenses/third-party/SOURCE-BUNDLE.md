@@ -16,7 +16,7 @@ The task downloads only HTTPS archives and Maven artifacts listed in `media-sour
 - `Indagium-1.8.15-media-sources.tar.gz.sha256`
 - `Indagium-1.8.15-media-sources.tar.gz.manifest.json`
 
-Verify an archive with `sha256sum -c Indagium-1.8.15-media-sources.tar.gz.sha256`. Its manifest records every included file, byte size, and SHA-256. Source archives are preserved as downloaded; the lock records their URLs, versions or immutable references, and hashes. The task creates a local build artifact. It is not currently represented as a published download. Release automation is configured to attach it only after CI validation succeeds.
+Verify an archive with `sha256sum -c Indagium-1.8.15-media-sources.tar.gz.sha256`. Its manifest records every included file, byte size, and SHA-256. Source archives are preserved as downloaded; the lock records their URLs, versions or immutable references, and hashes. The task creates a local artifact. New official EULA releases must publish it, its checksum and manifest alongside the corresponding installers, together with the application/JVM source archive described in licenses/application/SOURCE-BUNDLE.md. Obtain the exact version from https://github.com/indagium/indagium/releases without accepting the EULA or paying. Downloadable CI packages must include the same sources. This procedure does not change old releases or assert that their missing source assets have been supplied.
 
 ## Rebuild the FFmpeg classifiers
 
@@ -47,7 +47,7 @@ The bundled FFmpeg shared libraries reside in the classifier JAR for the target 
 
 Rebuild the matching classifier and retain the original JAR naming pattern, native library names, and compatible interfaces. Keep all applicable legal resources and update notices when the replacement changes the covered components. Repackage the application image after replacement. Modifying a signed installer or app bundle can invalidate its signature; sign a redistributed modified package as required by the platform.
 
-The Indagium agreement covers Indagium's own code. It does not replace or restrict rights granted by third-party licences. In particular, LGPL terms for FFmpeg preserve rights to modify the LGPL-covered code and permit reverse engineering to debug those modifications, subject to the licence conditions. See `legal/texts/ffmpeg-lgpl-3.0.txt`, `legal/media-components.json`, and `legal/THIRD_PARTY_NOTICES.md`.
+The EULA governs new official Indagium binaries; public source code remains under PolyForm. Neither replaces or restricts rights granted by third-party licences. Third-party sources are supplied under their original licences, not the EULA. The EULA does not restrict compatible replacement, recombination, relinking, modification of the combined work for your own use, or reverse engineering to debug LGPL modifications as allowed by the applicable licence. In particular, LGPL terms for FFmpeg preserve rights to modify the LGPL-covered code and permit reverse engineering to debug those modifications, subject to the licence conditions. See `legal/texts/ffmpeg-lgpl-3.0.txt`, `legal/media-components.json`, and `legal/THIRD_PARTY_NOTICES.md`.
 
 ## Scope and limitations
 

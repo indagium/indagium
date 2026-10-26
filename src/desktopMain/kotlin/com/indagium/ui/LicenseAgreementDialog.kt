@@ -23,15 +23,17 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.security.MessageDigest
 
 internal val LICENSE_VERSION: String = BuildInfo.LICENSE_VERSION
 
-internal fun loadLicenseAgreement(): String =
-    Thread.currentThread().contextClassLoader
-        .getResourceAsStream("licenses/indagium-license-agreement.md")
-        ?.bufferedReader()
-        ?.use { it.readText() }
-        ?: "The Indagium license agreement could not be loaded. Please reinstall Indagium."
+internal fun loadLicenseAgreement(readResource: (String) -> String? = ::readLicenseResource): String? = runCatching {
+    readResource("licenses/indagium-license-agreement.md")?.takeIf { text ->
+        val digest = MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        digest == BuildInfo.LICENSE_AGREEMENT_SHA256
+    }
+}.getOrNull()
 
 internal data class ThirdPartyLicenseEntry(
     val id: String,
@@ -78,6 +80,18 @@ internal fun loadThirdPartyLicenseEntries(): List<ThirdPartyLicenseEntry> = runC
     val mediaEntries = loadLicenseInventory("licenses/third-party/media-components.json", "licenses/third-party/")
     val applicationEntries = loadLicenseInventory("licenses/application/application-components.json", "licenses/")
     val existingNotices = listOf(
+        ThirdPartyLicenseEntry(
+            id = "application-source-delivery",
+            name = "Application and JVM source instructions",
+            version = "Current application dependencies",
+            scope = "Matching Java-library and complete JVM source/build materials",
+            license = "Sources retain their upstream licences",
+            licenseExpression = "LicenseRef-Indagium-Source-Instructions",
+            platforms = emptyList(),
+            summary = "Source acquisition without EULA acceptance or payment, and compatible LGPL library replacement.",
+            licenseFiles = listOf("application/SOURCE-BUNDLE.md"),
+            resourceRoot = "licenses/",
+        ),
         ThirdPartyLicenseEntry(
             id = "third-party-notices",
             name = "Application and runtime notices",
@@ -143,12 +157,12 @@ internal fun LicenseAgreementDialog(
                 .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            AppText("Indagium License Agreement", color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-            AppText("Terms version $LICENSE_VERSION", color = colors.td, fontSize = 10.sp, fontFamily = MONO)
+            AppText(BuildInfo.LICENSE_TITLE, color = colors.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Terms version ${BuildInfo.LICENSE_DOCUMENT_VERSION}", color = colors.td, fontSize = 10.sp, fontFamily = MONO)
             Box(Modifier.weight(1f).fillMaxWidth().border(1.dp, colors.br, shape)) {
                 SelectionContainer {
                     AppText(
-                        agreement,
+                        agreement ?: "The governing agreement is missing or damaged. Acceptance is disabled. Please reinstall Indagium.",
                         color = colors.ts,
                         fontSize = 10.sp,
                         fontFamily = MONO,
@@ -166,6 +180,7 @@ internal fun LicenseAgreementDialog(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(
                         checked = accepted,
+                        enabled = agreement != null,
                         onCheckedChange = { accepted = it },
                         colors = CheckboxDefaults.colors(
                             checkedColor = colors.ac,
@@ -185,7 +200,7 @@ internal fun LicenseAgreementDialog(
                 Spacer(Modifier.weight(1f))
                 if (mandatory) {
                     AppButton("Decline & Exit", onClick = onDecline, variant = ButtonVariant.Secondary, isDanger = true)
-                    AppButton("Accept", onClick = onAccept, variant = ButtonVariant.Primary, enabled = accepted)
+                    AppButton("Accept", onClick = onAccept, variant = ButtonVariant.Primary, enabled = accepted && agreement != null)
                 } else {
                     AppButton("Close", onClick = onDismiss, variant = ButtonVariant.Primary)
                 }

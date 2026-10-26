@@ -435,7 +435,7 @@
     {
       "path": "licenses/third-party/SOURCE-BUNDLE.md",
       "upstreamRef": "Indagium matching-source and library replacement instructions",
-      "sha256": "2a513706dae8b38883fcf6200c9325897afa20536963c0a3b3e979fbca5e4262"
+      "sha256": "a7d1a58eb9972772128cd98d9d3092aa43a30c5e968861ba9a295c9bf551ec66"
     },
     {
       "path": "licenses/third-party/recipe-inputs/classifier-binary-evidence.json",

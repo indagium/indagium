@@ -788,7 +788,7 @@
         "windows-x64"
       ],
       "copyrightAndAttribution": [
-        "Copyright © 2010-2022 Google, Inc.; © 2015-2020 Ebrahim Byagowi; © 2019-2020 Facebook, Inc.; additional copyright notices are in COPYING."
+        "Copyright \u00a9 2010-2022 Google, Inc.; \u00a9 2015-2020 Ebrahim Byagowi; \u00a9 2019-2020 Facebook, Inc.; additional copyright notices are in COPYING."
       ],
       "sourceIds": [
         "harfbuzz"
@@ -1513,7 +1513,7 @@
     "zstdJni": "com.github.luben:zstd-jni:1.5.7-4"
   },
   "licenseTextHashes": {
-    "SOURCE-BUNDLE.md": "2a513706dae8b38883fcf6200c9325897afa20536963c0a3b3e979fbca5e4262",
+    "SOURCE-BUNDLE.md": "a7d1a58eb9972772128cd98d9d3092aa43a30c5e968861ba9a295c9bf551ec66",
     "texts/alsa-lib-license.txt": "32434afcc8666ba060e111d715bfdb6c2d5dd8a35fa4d3ab8ad67d8f850d2f2b",
     "texts/aom-patent-license.txt": "661fb8e504744e95587b556b94a58343448300606a41bea8c7a9b97125696e61",
     "texts/apache-2.0.txt": "8b3f1762349248d444ab9acbafe73941254e36e1064954da56bb9ddbd5873ddb",

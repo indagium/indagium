@@ -36,7 +36,7 @@
         <div>
           <p class="eyebrow">Project <span>/</span> Third-party software</p>
           <h1 id="page-title">Third-party licences and notices.</h1>
-          <p class="page-lede">Indagium includes open-source Java and native components under their own licences. This page summarizes the bundled media and application libraries and points to the full notices, legal texts, and pinned source inputs. These terms are separate from Indagium's own <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/LICENSE">PolyForm Perimeter License</a>.</p>
+          <p class="page-lede">Indagium includes open-source Java and native components under their own licences. This page summarizes the bundled media and application libraries and points to the full notices, legal texts, and pinned source inputs. New official binaries that include the <a class="inline-link" href="/eula/">Indagium EULA</a> use that agreement; <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/LICENSE">public source remains under PolyForm</a>. Third-party terms govern their components independently and prevail over conflicting application terms. Earlier binaries retain their original terms.</p>
         </div>
       </section>
 
@@ -70,7 +70,8 @@
             <thead><tr><th scope="col">Licence</th><th scope="col">Components</th></tr></thead>
             <tbody>
               <tr><th scope="row">Apache-2.0</th><td>Kotlin, Compose Multiplatform, Skiko, AndroidX, Ktor, Apache Commons, Multiplatform Markdown Renderer, ZXing, Guava, gRPC, Lucene, OpenNLP, Jackson, JNA (chosen from its LGPL/Apache dual licence), and the scrcpy 4.1 server</td></tr>
-              <tr><th scope="row">MIT</th><td>Model Context Protocol Kotlin SDK (moving to Apache-2.0 upstream), SLF4J, Segment, whisper.cpp 1.9.5, and the runtime inside Linux AppImage packages</td></tr>
+              <tr><th scope="row">Native graphics notices</th><td>Skiko’s Skia rendering, font and image stack retains BSD, Apache, MIT, Unicode, FreeType, IJG, libpng, Zlib and Adobe DNG terms. The full notices and pinned build provenance are included in the app; DNG terms include commercial-distribution indemnification conditions. This is separate from FFmpeg.</td></tr>
+              <tr><th scope="row">MIT</th><td>Model Context Protocol Kotlin SDK (moving to Apache-2.0 upstream), SLF4J, Segment, libffi in JNA, whisper.cpp 1.9.5, and the runtime inside Linux AppImage packages</td></tr>
               <tr><th scope="row">BSD-style</th><td>R8 Retrace (BSD-3-Clause; its bundled libraries are listed in its licence), Protocol Buffers, Morfologik, Units of Measurement, Jakarta XML Binding (Eclipse Distribution License 1.0), and XZ for Java (0BSD)</td></tr>
               <tr><th scope="row">LGPL</th><td>LanguageTool 6.8 (LGPL-2.1-or-later) and OpenRegex 1.1.1 (LGPL-3.0), used unmodified as replaceable JARs</td></tr>
               <tr><th scope="row">CDDL-1.1</th><td>Legacy Java EE APIs (JAXB API, jaxb-core, Annotation, Activation), chosen from their CDDL/GPL-2.0-with-Classpath-Exception dual licence</td></tr>
@@ -78,21 +79,22 @@
             </tbody>
           </table>
         </div>
-        <p>Native packages also bundle a Temurin/OpenJDK runtime (21 in release builds) under GPL-2.0 with the Classpath Exception; its notices stay in the runtime's <code>legal/</code> directory. Versions and licence-text paths for each component are in the <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/THIRD_PARTY_NOTICES.md">third-party notices</a> and the <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/licenses/application/application-components.json">application inventory</a>.</p>
+        <p>Native packages also bundle a Temurin/OpenJDK runtime (21.0.9+10-LTS in new official builds) under GPL-2.0 with the Classpath Exception; its notices stay in the runtime's <code>legal/</code> directory. Versions and licence-text paths for each component are in the <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/THIRD_PARTY_NOTICES.md">third-party notices</a> and the <a class="inline-link" href="https://github.com/indagium/indagium/blob/master/licenses/application/application-components.json">application inventory</a>.</p>
       </section>
 
       <section class="section split-callout" aria-labelledby="source-bundle-title">
         <div>
           <p class="eyebrow">Source inputs <span>/</span> pinned and verifiable</p>
           <h2 id="source-bundle-title">Prepare the matching source archive.</h2>
-          <p class="section-lede">The repository records source archives, recipe trees, patches, platform configuration evidence, legal texts, and checksums for the inspected classifiers. Run <code>./gradlew prepareMediaSources</code> in a checkout to validate these inputs and produce the archive, SHA-256 file, and manifest under <code>build/</code>.</p>
-          <p>The source archive is not currently published as a standalone download. The build workflow is configured to retain it and attach it to a release after CI validation. The archive documents source inputs; it does not claim bit-for-bit reproducibility or patent clearance.</p>
+          <p class="section-lede">The repository records source archives, recipe trees, patches, platform configuration evidence, legal texts, and checksums for the inspected classifiers. Run <code>./gradlew prepareMediaSources prepareApplicationSources</code> in a checkout to validate these inputs and produce the archive, SHA-256 file, and manifest under <code>build/</code>.</p>
+          <p>New official releases must provide both <code>Indagium-&lt;version&gt;-media-sources.tar.gz</code> and <code>Indagium-&lt;version&gt;-application-sources.tar.gz</code>, checksums and manifests alongside their installers. Obtain the exact version from the <a class="inline-link" href="https://github.com/indagium/indagium/releases">release downloads</a> without accepting the EULA or paying. The application archive includes Java-library sources and complete matching JVM source/build materials. These archives do not claim bit-for-bit reproducibility or patent clearance; historical missing source assets remain a separate issue.</p>
           <p><a class="inline-link" href="https://github.com/indagium/indagium/blob/master/licenses/third-party/SOURCE-BUNDLE.md">Read rebuild, replacement, and source-scope instructions →</a></p>
         </div>
         <div class="evidence-card">
           <h3>Rights for LGPL-covered FFmpeg</h3>
-          <p>The bundled classifier JARs can be replaced with a compatible build in an extracted application image. The project notice and source instructions describe the platform-specific app folders and preserve LGPL rights, including modification and reverse engineering to debug those modifications under the licence conditions.</p>
+          <p>The bundled classifier JARs can be replaced with a compatible build in an extracted application image. The project notice and source instructions describe the platform-specific app folders and preserve LGPL rights, including compatible replacement, recombination, relinking, modification for your own use and reverse engineering of the application to debug library modifications under the licence conditions.</p>
           <p><a class="inline-link" href="https://github.com/indagium/indagium/blob/master/licenses/third-party/texts/ffmpeg-lgpl-3.0.txt">Read the full LGPL 3.0 text →</a></p>
+        <p><a class="inline-link" href="https://github.com/indagium/indagium/blob/master/licenses/application/SOURCE-BUNDLE.md">Java-library and JVM source acquisition and replacement instructions →</a></p>
         </div>
       </section>
 
@@ -106,6 +108,6 @@
         </div>
       </section>
     </main>
-    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/licenses/" aria-current="page">Third-party licences</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="/ai-tests/">AI tests</a><a href="/eula/">Binary EULA</a><a href="/licenses/" aria-current="page">Third-party licences</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
   </body>
 </html>
