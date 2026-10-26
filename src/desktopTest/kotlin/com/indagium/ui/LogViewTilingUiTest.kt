@@ -907,21 +907,20 @@ class LogViewTilingUiTest {
             val b = notesBarButton(id).getBoundsInRoot()
             assertTrue(b.top.value >= header.top.value - 0.6f && b.bottom.value <= header.bottom.value + 0.6f, "$id is inside the header row: $b in $header")
         }
-        // Grip, icon, title, summary, then the buttons in order, then the header icons.
+        // Grip, icon, title (no note count), then the buttons in order, then the header icons.
         val title = rule.onAllNodes(hasText("Notes") and hasAnyAncestor(hasTestTag("tile-header-notes")))[0].getBoundsInRoot()
-        val summary = rule.onAllNodes(hasText("3 notes") and hasAnyAncestor(hasTestTag("tile-header-notes")))[0].getBoundsInRoot()
+        assertFalse(headerHas("3 notes"), "the header shows no note count")
         val preview = notesBarButton("preview").getBoundsInRoot()
         val open = notesBarButton("open").getBoundsInRoot()
         assertTrue(bounds("tile-grip-notes").right <= title.left)
-        assertTrue(title.right <= summary.left)
-        assertTrue(summary.right <= preview.left)
+        assertTrue(title.right <= preview.left)
         allFive.zipWithNext().forEach { (a, b) ->
             assertTrue(notesBarButton(a).getBoundsInRoot().right <= notesBarButton(b).getBoundsInRoot().left + 0.6f.dp, "$a is before $b")
         }
         assertTrue(open.right.value <= headerIconsLeft(), "the buttons come before the header icons")
-        // Text labels, centred in the room between the summary and the header icons (the Row keeps a header gap before the icons).
+        // Text labels, centred in the room between the title and the header icons (the Row keeps a header gap before the icons).
         assertTrue(headerHas("Save") && headerHas("Preview") && headerHas("Open"), "the buttons are text")
-        val roomCentre = (summary.right.value + headerIconsLeft() - TILE_HEADER_GAP_DP) / 2f
+        val roomCentre = (title.right.value + headerIconsLeft() - TILE_HEADER_GAP_DP) / 2f
         assertEquals(roomCentre, (preview.left.value + open.right.value) / 2f, 2f, "the buttons are centred in the free room of the header")
         // The buttons are the log toolbar's AppButtons at their natural height, TILE_HEADER_GAP_DP apart.
         val export = bounds(logToolbarTag(LogToolbarItem.EXPORT.id))
@@ -935,7 +934,7 @@ class LogViewTilingUiTest {
     @Test
     fun theNotesButtonsMoveToACentredTextBarUnderTheHeaderAtTheDefaultRightColumnWidth() {
         // The default right column is 360 dp (classic sizes) and 350 dp when dragged a little narrower: the labelled buttons do not fit next to the
-        // title there, so they are in the panel's bar directly under the header, centred, and the header keeps the title and the summary.
+        // title there, so they are in the panel's bar directly under the header, centred, and the header keeps the title.
         listOf(360f, 350f).forEach { column ->
             setup(width = 1000, height = 700, configure = wideNotes(column))
             val header = bounds("tile-header-notes")
@@ -943,7 +942,7 @@ class LogViewTilingUiTest {
             assertTrue(exists("notes-toolbar"), "$column dp: the bar is there")
             val bar = bounds("notes-toolbar")
             assertTrue(bar.top.value in (header.bottom.value - 0.6f)..(header.bottom.value + 3f), "$column dp: the bar is directly under the header: $bar")
-            assertTrue(headerHas("Notes") && headerHas("3 notes"), "$column dp: the header keeps its title and summary")
+            assertTrue(headerHas("Notes") && !headerHas("3 notes"), "$column dp: the header keeps its title and shows no count")
             assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"), "$column dp: grip and icons stay")
             allFive.forEach { id ->
                 assertEquals(1, rule.onAllNodesWithTag("notes-button-$id").fetchSemanticsNodes().size, "$column dp: $id is drawn once")
@@ -967,7 +966,7 @@ class LogViewTilingUiTest {
             val card = bounds("tile-card-notes").width.value
             val expected = notesHeaderLayout(card, hasLocate = false, hasRecent = false, headerIcons = 3)
             assertTrue(headerHas("Notes"), "$column dp: the title text stays")
-            assertEquals(expected.showSummary, headerHas("3 notes"), "$column dp: the summary")
+            assertFalse(headerHas("3 notes"), "$column dp: no note count")
             assertEquals(!expected.actionsInHeader, exists("notes-toolbar"), "$column dp: the bar")
             assertEquals(32f, bounds("tile-header-notes").height.value, 0.6f, "$column dp: the header is one row")
             assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"), "$column dp: grip and icons stay")

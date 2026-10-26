@@ -145,6 +145,9 @@ internal data class TileChromeSpec<K>(
     val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
 ) {
+    /** [loneColumn] together with [scrolls], as the layout edits (drop, remove, normalize) take them. */
+    val loneColumns: TileLoneColumns<K> get() = TileLoneColumns(loneColumn, scrolls)
+
     internal fun geometrySpec(): TileGeometrySpec = TileGeometrySpec(
         gapRowDp = gapRowDp,
         gapColumnDp = gapColumnDp,
@@ -349,7 +352,7 @@ private class TileScopeImpl<K>(
         val handled = drag.pointerRoot?.let { callbacks.takeDrop(id, it) } == true
         val drop = if (handled) null else drag.pointer?.let { tileDropTargetAt(visibleGeometry(), host.w, host.h, it.x, it.y, id) }
         gripCancel()
-        if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop, spec.loneColumn))
+        if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop, spec.loneColumns))
     }
 
     fun gripCancel() {

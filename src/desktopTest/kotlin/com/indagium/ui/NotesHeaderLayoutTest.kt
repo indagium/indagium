@@ -12,8 +12,7 @@ class NotesHeaderLayoutTest {
     private fun layoutAt(width: Float, hasLocate: Boolean = false, hasRecent: Boolean = false, icons: Int = 3) =
         notesHeaderLayout(width, hasLocate, hasRecent, icons)
 
-    private fun layout(summary: Boolean, inHeader: Boolean, look: NotesButtonLook = NotesButtonLook.LABELS) =
-        NotesHeaderLayout(summary, inHeader, look)
+    private fun layout(inHeader: Boolean, look: NotesButtonLook = NotesButtonLook.LABELS) = NotesHeaderLayout(inHeader, look)
 
     // The card widths (dp) at which each layout starts, walking down: the first element holds from its width up, each next one from its own width.
     private fun startsOf(hasLocate: Boolean = false, hasRecent: Boolean = false, icons: Int = 3): List<Pair<Int, NotesHeaderLayout>> {
@@ -26,23 +25,21 @@ class NotesHeaderLayoutTest {
     }
 
     @Test
-    fun aWideHeaderKeepsTheButtonsAsTextAndTheSummary() {
+    fun aWideHeaderKeepsTheButtonsAsText() {
         assertEquals(NotesHeaderLayout.Full, layoutAt(1000f))
-        assertEquals(layout(summary = true, inHeader = true), layoutAt(1000f))
+        assertEquals(layout(inHeader = true), layoutAt(1000f))
     }
 
     @Test
-    fun theSummaryGivesWayFirstThenTheButtonsLeaveTheHeaderForTheBarWhichGoesCompactAndLosesTheSummaryLast() {
+    fun theButtonsLeaveTheHeaderForTheBarWhichGoesCompactAsTheCardNarrows() {
         val l = NotesButtonLook.LABELS
         val c = NotesButtonLook.COMPACT
         // Each pair: the widest card (dp) at which the layout is drawn, and the layout (then it holds down to the next pair's width + 1).
         assertEquals(
             listOf(
-                WIDEST_DP to layout(summary = true, inHeader = true),
-                566 to layout(summary = false, inHeader = true),
-                508 to layout(summary = true, inHeader = false, l),
-                323 to layout(summary = true, inHeader = false, c),
-                254 to layout(summary = false, inHeader = false, c),
+                WIDEST_DP to layout(inHeader = true),
+                508 to layout(inHeader = false, l),
+                323 to layout(inHeader = false, c),
             ),
             startsOf(),
         )
@@ -72,21 +69,11 @@ class NotesHeaderLayoutTest {
     }
 
     @Test
-    fun theSummaryIsTheFirstThingToGoAndTheButtonsStayInTheHeaderWhenItIsGone() {
-        val stages = startsOf().map { it.second }
-        assertTrue(stages[0].showSummary && stages[0].actionsInHeader)
-        assertFalse(stages[1].showSummary)
-        assertTrue(stages[1].actionsInHeader, "dropping the summary is enough to keep the buttons in the header")
-        assertFalse(stages[2].actionsInHeader)
-        assertTrue(stages[2].showSummary, "with the buttons out of the header there is room for the summary again")
-    }
-
-    @Test
     fun theDefaultRightColumnPutsTheLabelledButtonsInTheBarUnderTheHeader() {
         // The default right column is 350 to 360 dp; its card is a few dp less.
         for (w in 340..360) {
             val layout = layoutAt(w.toFloat())
-            assertEquals(layout(summary = true, inHeader = false, NotesButtonLook.LABELS), layout, "$w dp")
+            assertEquals(layout(inHeader = false, NotesButtonLook.LABELS), layout, "$w dp")
         }
     }
 
@@ -117,14 +104,15 @@ class NotesHeaderLayoutTest {
     }
 
     @Test
-    fun theHeaderPartsKeepTheIconDownToTheGenericThresholdTheTitleAlwaysAndFollowTheSummary() {
-        val withoutSummary = layout(summary = false, inHeader = false, NotesButtonLook.COMPACT)
-        val parts = notesHeaderParts(TILE_HEADER_ICON_MIN_DP, withoutSummary)
+    fun theHeaderPartsKeepTheIconDownToTheGenericThresholdTheTitleAlwaysAndHaveNoSummary() {
+        val parts = notesHeaderParts(TILE_HEADER_ICON_MIN_DP)
         assertTrue(parts.showIcon)
         assertTrue(parts.showTitle)
         assertFalse(parts.showSummary)
-        assertFalse(notesHeaderParts(TILE_HEADER_ICON_MIN_DP - 1f, withoutSummary).showIcon)
-        assertTrue(notesHeaderParts(1000f, NotesHeaderLayout.Full).showSummary)
-        for (w in 0..WIDEST_DP) assertTrue(notesHeaderParts(w.toFloat(), layoutAt(w.toFloat())).showTitle, "$w: the title stays")
+        assertFalse(notesHeaderParts(TILE_HEADER_ICON_MIN_DP - 1f).showIcon)
+        for (w in 0..WIDEST_DP) {
+            assertTrue(notesHeaderParts(w.toFloat()).showTitle, "$w: the title stays")
+            assertFalse(notesHeaderParts(w.toFloat()).showSummary, "$w: no summary")
+        }
     }
 }

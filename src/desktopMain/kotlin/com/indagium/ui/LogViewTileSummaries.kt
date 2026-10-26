@@ -1,7 +1,5 @@
 package com.indagium.ui
 
-import com.indagium.model.AnnBlock
-import com.indagium.model.Annotations
 import com.indagium.model.CrashKind
 import com.indagium.model.CrashSite
 import com.indagium.model.Filter
@@ -86,10 +84,6 @@ internal fun issuesSummary(analysis: LogAnalysis): String? {
 
 /** How many saved filters exist: "3 saved". */
 internal fun savedFiltersSummary(count: Int): String? = count.takeIf { it > 0 }?.let { "$it saved" }
-
-/** The note blocks that have text: "1 note", "2 notes". */
-internal fun notesSummary(annotations: Annotations): String? =
-    annotations.blocks.count { it is AnnBlock.Note && it.text.isNotBlank() }.takeIf { it > 0 }?.let { plural(it, "note") }
 
 /** The unfiltered log's size: "1999 lines" (no thousands separator). */
 internal fun originalSummary(totalLines: Int): String? = totalLines.takeIf { it > 0 }?.let { plural(it, "line") }

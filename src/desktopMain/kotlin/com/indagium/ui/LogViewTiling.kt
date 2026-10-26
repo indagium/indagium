@@ -248,7 +248,7 @@ private fun LogViewTileSurface(
     val currentBase by rememberUpdatedState(baseLayout)
     DisposableEffect(bridge, state) {
         bridge?.dropInLayout = { target ->
-            state.updateSettings { it.withToolbarDroppedInLayout(dropTile(currentBase, LogViewSectionId.TOOLBAR, target, ::logViewLoneColumn)) }
+            state.updateSettings { it.withToolbarDroppedInLayout(dropTile(currentBase, LogViewSectionId.TOOLBAR, target, LOG_VIEW_LONE_COLUMNS)) }
         }
         onDispose { bridge?.dropInLayout = null }
     }
@@ -391,11 +391,10 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
         TileSlot(
             icon = Icons.AutoMirrored.Outlined.StickyNote2,
             title = logViewTileTitle(LogViewSectionId.NOTES),
-            summary = notesSummary(tab.annotations),
             headerAction = {
                 if (layoutAt(LocalTileHeaderWidthDp.current).actionsInHeader) NotesActionButtons(actions)
             },
-            headerParts = { width -> notesHeaderParts(width, layoutAt(width)) },
+            headerParts = { width -> notesHeaderParts(width) },
             actionsCentered = true,
             collapsible = collapsible,
             maximizable = true,

@@ -30,6 +30,9 @@ import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
 import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.LOG_VIEW_FILTER_TILES
+import com.indagium.ui.LOG_VIEW_LONE_COLUMNS
+import com.indagium.ui.LOG_VIEW_PIN_MAX_DP
+import com.indagium.ui.LOG_VIEW_PIN_MIN_DP
 import com.indagium.ui.LOG_VIEW_TILE_SPEC
 import com.indagium.ui.LogViewFocusPanel
 import com.indagium.ui.LogViewLayoutPreset
@@ -39,6 +42,7 @@ import com.indagium.ui.TOOLBAR_TILE_COLUMN_DP
 import com.indagium.ui.TOOLBAR_TILE_ROW_DP
 import com.indagium.ui.TileDropTarget
 import com.indagium.ui.TileEdge
+import com.indagium.ui.TileSizing
 import com.indagium.ui.classicLogViewLayout
 import com.indagium.ui.compareColumnsLayout
 import com.indagium.ui.compareGridLayout
@@ -57,6 +61,7 @@ import com.indagium.ui.logViewTileApplicable
 import com.indagium.ui.logViewTileTitle
 import com.indagium.ui.logViewTileVisible
 import com.indagium.ui.neverHidden
+import com.indagium.ui.normalizeTileLayout
 import com.indagium.ui.pinToolbarTile
 import com.indagium.ui.projectTileLayout
 import com.indagium.ui.removeTile
@@ -82,6 +87,15 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+
+private const val FILTER_COLUMN_DP = 369.5f
+private const val RIGHT_COLUMN_DP = 293.9f
+private const val SIDE_MIN_DP = 120f
+private const val SIDE_MAX_DP = 400f
+private const val SIDE_FIT_DP = 200f
+private const val HOST_WIDTH_DP = 1500f
+private const val HOST_HEIGHT_DP = 800f
+private const val EPS = 0.01f
 
 class LogViewLayoutTest {
     private val sizes = LogViewLegacySizes(filterPanelWidth = 300f, annotationPanelWidth = 420f, rightSidebarSplit = 0.3f, compareSplit = 0.4f)
@@ -376,8 +390,9 @@ class LogViewLayoutTest {
             assertComplete(sanitized, preset.scope)
             assertEquals(preset.hidden, hidden.toSet(), preset.label)
 
+            // The arrangement without the one-tile columns that lone tiles are kept in (Review's Sequences, say), as the Layout menu compares it.
             fun shown(tree: TileNode<LogViewSectionId>) =
-                preset.hidden.fold(tree as TileNode<LogViewSectionId>?) { acc, id -> acc?.let { removeTile(it, id) } }
+                preset.hidden.fold(normalizeTileLayout(tree)) { acc, id -> acc?.let { removeTile(it, id) } }
             assertTrue(tileLayoutShapeEquals(shown(sanitized)!!, shown(layout)!!), "${preset.label}: sanitizing changed the arrangement")
         }
     }
@@ -765,12 +780,12 @@ class LogViewLayoutTest {
         assertEquals(333f, height(sized))
         // An unrelated drop (AI above the log), hiding another tile and a repeated store.
         val storedSized = assertNotNull(sized.logViewLayout)
-        val moved = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(LOG, TileEdge.TOP), ::logViewLoneColumn))
+        val moved = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(LOG, TileEdge.TOP), LOG_VIEW_LONE_COLUMNS))
         assertEquals(333f, height(moved))
         assertEquals(333f, height(moved.withLogViewTileHidden(TAGS, true).withLogViewLayout(assertNotNull(moved.logViewLayout))))
         assertEquals(sized.logViewLayout, sized.withLogViewLayout(assertNotNull(sized.logViewLayout)).logViewLayout)
         // Dropping a tile at its left puts it beside the column; the height stays.
-        val beside = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(SAVED_FILTERS, TileEdge.LEFT), ::logViewLoneColumn))
+        val beside = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(SAVED_FILTERS, TileEdge.LEFT), LOG_VIEW_LONE_COLUMNS))
         assertEquals(333f, height(beside))
         assertEquals(listOf(AI, SAVED_FILTERS), leafIds(beside.logViewLayout!!).filter { it == AI || it == SAVED_FILTERS })
     }
@@ -786,6 +801,145 @@ class LogViewLayoutTest {
         val last = children(tree).last()
         assertEquals(column(leaf(SAVED_FILTERS)).copy(sizeDp = 200f), last, "its width pin moves to the column")
         assertEquals(tree, sanitizeLogViewLayoutState(tree, emptyList(), LogViewScope.SINGLE).first)
+    }
+
+    // ---- a tile alone inside a column that holds the log ---------------------------------------------------------------
+
+    // The user's stored layout: hidden tiles keep their place, so the log's column is [Original, Log] even with Original hidden.
+    private fun userLayout(): TileNode<LogViewSectionId> = TileSplit(
+        TileAxis.ROW,
+        listOf(
+            TileSplit(
+                TileAxis.COLUMN,
+                listOf(TAGS, MESSAGE_RULES, LOG_COMPOSITION, HIGHLIGHTERS, LOG_LEVEL, SEQUENCES, ISSUES, SAVED_FILTERS).map { leaf(it) },
+                1f,
+                FILTER_COLUMN_DP,
+            ),
+            column(leaf(ORIGINAL), leaf(LOG)),
+            TileSplit(TileAxis.COLUMN, listOf(VIDEO, NOTES, AI, DIAGRAMS).map { leaf(it) }, 1f, RIGHT_COLUMN_DP),
+        ),
+    )
+
+    private fun dropOnUserLayout(id: LogViewSectionId, target: TileDropTarget<LogViewSectionId>) =
+        dropTile(userLayout(), id, target, LOG_VIEW_LONE_COLUMNS)
+
+    private val sideSizing = TileSizing(minDp = SIDE_MIN_DP, maxDp = SIDE_MAX_DP, defaultDp = SIDE_FIT_DP, fitDp = SIDE_FIT_DP)
+
+    // The projected tree's geometry with Original hidden (and Video not applicable), a content-sized side tile everywhere.
+    private fun shownGeometry(tree: TileNode<LogViewSectionId>, hidden: Set<LogViewSectionId> = setOf(ORIGINAL, VIDEO)) = tileGeometry(
+        assertNotNull(projectTileLayout(tree) { it !in hidden }).root,
+        HOST_WIDTH_DP,
+        HOST_HEIGHT_DP,
+        LOG_VIEW_TILE_SPEC.copy(scrollEndHandle = true),
+        emptySet(),
+        ::logViewScrollsInColumn,
+    ) { if (logViewScrollsInColumn(it)) sideSizing else null }
+
+    private fun assertOwnScrollingColumn(tree: TileNode<LogViewSectionId>, id: LogViewSectionId) {
+        val geometry = shownGeometry(tree)
+        assertTrue(id in geometry.scrollRegions.map { it.key }, "$id is the first tile of a scrolling column of its own")
+        assertEquals(SIDE_FIT_DP, geometry.cardOf(id)!!.h, EPS, "$id is as tall as its content")
+        val card = geometry.cardOf(id)!!
+        val handle = geometry.gaps.single { it.scrolling && it.rect.y >= card.bottom - EPS && it.rect.x == card.x }
+        assertTrue(handle.resizable, "$id has a resize handle under it")
+    }
+
+    @Test
+    fun aTileDroppedBesideTheLogInsideItsColumnIsAColumnOfItsOwn() {
+        listOf(TileEdge.LEFT, TileEdge.RIGHT).forEach { edge ->
+            val dropped = dropOnUserLayout(SAVED_FILTERS, TileDropTarget.OnSection(LOG, edge))
+            assertComplete(dropped, LogViewScope.SINGLE)
+            val logColumn = children(dropped)[1] as TileSplit
+            val besideLog = logColumn.children.last() as TileSplit
+            assertEquals(TileAxis.ROW, besideLog.axis)
+            val wrapper = besideLog.children[if (edge == TileEdge.LEFT) 0 else 1]
+            assertTrue(wrapper is TileSplit && wrapper.axis == TileAxis.COLUMN && leafIds(wrapper) == listOf(SAVED_FILTERS), "$edge: $wrapper")
+            assertOwnScrollingColumn(dropped, SAVED_FILTERS)
+        }
+    }
+
+    @Test
+    fun aTileDroppedBesideATileOfTheRightColumnIsAColumnOfItsOwnToo() {
+        // The right column holds Video, so it does not scroll as a whole: the dropped tile is a lone tile there as well.
+        val dropped = dropOnUserLayout(SAVED_FILTERS, TileDropTarget.OnSection(AI, TileEdge.LEFT))
+        val right = children(dropped).last() as TileSplit
+        val row = right.children.single { it is TileSplit && it.axis == TileAxis.ROW } as TileSplit
+        assertEquals(listOf(SAVED_FILTERS, AI), leafIds(row))
+        assertTrue(row.children.first().let { it is TileSplit && it.axis == TileAxis.COLUMN })
+        // Without Video it is a row of a scrolling column: laid out as one row, as tall as its tallest tile asks, not clipped or collapsed.
+        val geometry = shownGeometry(dropped)
+        val saved = geometry.cardOf(SAVED_FILTERS)!!
+        val ai = geometry.cardOf(AI)!!
+        assertEquals(saved.y, ai.y, 0.01f)
+        assertEquals(saved.h, ai.h, 0.01f)
+        assertEquals(SIDE_FIT_DP, saved.h, EPS)
+        assertTrue(saved.w > 0f && ai.w > 0f)
+    }
+
+    @Test
+    fun aTileDroppedBesideATileOfAScrollingColumnStaysBare() {
+        // The filter column holds side tiles only, so a row in it is one of its rows and its tiles are not wrapped.
+        val dropped = dropOnUserLayout(NOTES, TileDropTarget.OnSection(ISSUES, TileEdge.RIGHT))
+        val filters = children(dropped).first() as TileSplit
+        val row = filters.children.single { it is TileSplit } as TileSplit
+        assertEquals(TileAxis.ROW, row.axis)
+        assertTrue(row.children.all { it is TileLeaf }, "$row")
+        assertEquals(listOf(ISSUES, NOTES), leafIds(row))
+        // And a wrapper that an older layout kept there is dissolved when the layout is read.
+        val wrapped = TileSplit(TileAxis.ROW, listOf(column(leaf(ISSUES)), leaf(NOTES)))
+        val old = (userLayout() as TileSplit).let { root ->
+            val filterColumn = root.children.first() as TileSplit
+            val withoutIssues = filterColumn.children.filterNot { it is TileLeaf && it.section == ISSUES }
+            root.copy(children = listOf(filterColumn.copy(children = withoutIssues + wrapped)) + root.children.drop(1))
+        }
+        val (tree, _) = sanitizeLogViewLayoutState(old, emptyList(), LogViewScope.SINGLE)
+        val rowAgain = (children(tree).first() as TileSplit).children.last() as TileSplit
+        assertEquals(listOf(ISSUES, NOTES), leafIds(rowAgain))
+        assertTrue(rowAgain.children.all { it is TileLeaf }, "$rowAgain")
+    }
+
+    @Test
+    fun aTileBesideTheLogInsideItsColumnKeepsItsHeightAndAColumnWhenOriginalComesAndGoes() {
+        val dropped = dropOnUserLayout(SAVED_FILTERS, TileDropTarget.OnSection(LOG, TileEdge.LEFT))
+        val (stored, _) = sanitizeLogViewLayoutState(dropped, emptyList(), LogViewScope.SINGLE)
+        assertEquals(dropped, stored, "storing it changes nothing")
+        // Resize it through the handle, as the user would.
+        val projection = assertNotNull(projectTileLayout(stored) { it != ORIGINAL && it != VIDEO })
+        val handle = shownGeometry(stored).gaps.first { it.scrolling && it.resizable && it.path == listOf(1, 0, 0) }
+        val sizing = { id: LogViewSectionId -> if (logViewScrollsInColumn(id)) sideSizing else null }
+        val resized = com.indagium.ui.resizeProjected(
+            stored, projection, handle, 90f, LOG_VIEW_TILE_SPEC.minTileDp, LOG_VIEW_TILE_SPEC.minPairShare,
+            emptySet(), LOG_VIEW_TILE_SPEC.collapsedExtentDp, LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP, sizing,
+        )
+        assertEquals(290f, shownGeometry(resized).cardOf(SAVED_FILTERS)!!.h, 0.01f)
+        assertEquals(290f, findLeaf(resized, SAVED_FILTERS).sizeDp)
+        // An unrelated drop, showing Original again and hiding it once more, and a repeated store.
+        val moved = dropTile(resized, AI, TileDropTarget.OnSection(LOG, TileEdge.BOTTOM), LOG_VIEW_LONE_COLUMNS)
+        assertEquals(290f, findLeaf(moved, SAVED_FILTERS).sizeDp)
+        assertEquals(290f, shownGeometry(moved).cardOf(SAVED_FILTERS)!!.h, 0.01f)
+        assertEquals(290f, shownGeometry(resized, setOf(VIDEO)).cardOf(SAVED_FILTERS)!!.h, 0.01f, "with Original showing")
+        assertEquals(resized, sanitizeLogViewLayoutState(resized, emptyList(), LogViewScope.SINGLE).first)
+        assertEquals(290f, findLeaf(AppSettings().withLogViewLayout(resized).logViewLayout!!, SAVED_FILTERS).sizeDp)
+    }
+
+    @Test
+    fun theFiltersOnTopPresetStaysActiveAndEachFilterTileIsAColumnOfItsOwn() {
+        val settings = AppSettings().withLogViewPreset(LogViewLayoutPreset.FILTERS_ON_TOP, sizes)
+        assertTrue(logViewPresetIsActive(LogViewLayoutPreset.FILTERS_ON_TOP, settings, sizes))
+        assertFalse(logViewPresetIsActive(LogViewLayoutPreset.CLASSIC, settings, sizes))
+        val strip = children(assertNotNull(settings.logViewLayout)).first() as TileSplit
+        assertEquals(TileAxis.ROW, strip.axis)
+        assertEquals(220f, strip.sizeDp, "the strip keeps its height")
+        assertTrue(strip.children.all { it is TileSplit && it.axis == TileAxis.COLUMN && it.children.size == 1 }, "$strip")
+        // Its tiles keep the weights the preset gave them, on the columns now (Log level's is the lighter one).
+        val weights = strip.children.associate { leafIds(it).single() to it.weight }
+        assertEquals(2.2f, weights.getValue(TAGS))
+        assertEquals(0.8f, weights.getValue(LOG_LEVEL))
+        // The Layout menu's mini icons draw every preset.
+        LogViewLayoutPreset.entries.forEach { preset ->
+            val shown = preset.hidden.fold(preset.layout(sizes) as TileNode<LogViewSectionId>?) { acc, id -> acc?.let { removeTile(it, id) } }
+            assertNotNull(shown, preset.label)
+        }
     }
 
     private fun dropToolbar(tree: TileNode<LogViewSectionId>, target: TileDropTarget<LogViewSectionId>) =

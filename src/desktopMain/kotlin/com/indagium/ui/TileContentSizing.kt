@@ -84,11 +84,12 @@ internal fun <K> scrollPlan(
 
 // What a child of a scrolling column asks of its height: a leaf's own sizing; for a row nested in the column (a tile dropped beside another one) the
 // tallest of what its tiles ask, so the row is as tall as its tallest tile needs instead of sharing the column's leftover room by weight, and is
-// resizable between the least and the most any of them allows. Null when any tile in it has not reported (or is not content sized).
+// resizable between the least and the most any of them allows. Null when any tile in it has not reported (or is not content sized). A tile
+// alone in a one-child column inside the row (a lone tile kept as a column of its own, see normalizeTileLayout) asks what the tile asks.
 private fun <K> nodeSizing(node: TileNode<K>, sizingOf: (K) -> TileSizing?): TileSizing? = when (node) {
     is TileLeaf -> sizingOf(node.section)
     is TileSplit -> if (node.axis != TileAxis.ROW) {
-        null
+        node.children.singleOrNull()?.let { nodeSizing(it, sizingOf) }
     } else {
         node.children.map { nodeSizing(it, sizingOf) }.takeIf { all -> all.isNotEmpty() && all.none { it == null } }?.filterNotNull()?.let { all ->
             TileSizing(

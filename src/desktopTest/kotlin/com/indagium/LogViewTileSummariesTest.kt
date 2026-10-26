@@ -1,8 +1,6 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
-import com.indagium.model.AnnBlock
-import com.indagium.model.Annotations
 import com.indagium.model.CrashKind
 import com.indagium.model.CrashSite
 import com.indagium.model.CustomIssueSite
@@ -20,7 +18,6 @@ import com.indagium.ui.highlightersSummary
 import com.indagium.ui.issuesSummary
 import com.indagium.ui.logLevelSummary
 import com.indagium.ui.messageRulesSummary
-import com.indagium.ui.notesSummary
 import com.indagium.ui.originalSummary
 import com.indagium.ui.savedFiltersSummary
 import com.indagium.ui.sequencesSummary
@@ -118,13 +115,9 @@ class LogViewTileSummariesTest {
     }
 
     @Test
-    fun savedFiltersNotesAndOriginalSummaries() {
+    fun savedFiltersAndOriginalSummaries() {
         assertNull(savedFiltersSummary(0))
         assertEquals("3 saved", savedFiltersSummary(3))
-        assertNull(notesSummary(Annotations()))
-        assertNull(notesSummary(Annotations(blocks = listOf(AnnBlock.Note("n", "  ")))))
-        assertEquals("1 note", notesSummary(Annotations(blocks = listOf(AnnBlock.Note("n", "hello")))))
-        assertEquals("2 notes", notesSummary(Annotations(blocks = listOf(AnnBlock.Note("a", "x"), AnnBlock.Note("b", "y")))))
         assertNull(originalSummary(0))
         assertEquals("1 line", originalSummary(1))
         assertEquals("1999 lines", originalSummary(1999))

@@ -27,10 +27,12 @@ import kotlin.math.min
 // last tile has a gap of its own below it (TileGeometrySpec.scrollEndHandle), so it can be resized too. When the tiles report what their
 // content needs (a TileSizing, see TileContentSizing.kt) they are as tall as that, within bounds, instead of sharing by weight.
 //
-// A tile alone where a column would be. A tile that sits directly in the top-level ROW (the root, or a ROW nested in it) has no column
-// around it, so it would be laid out full height with the card stretched over empty space and no handle to size it. The caller names such
-// tiles with `loneColumn` (the log view: the side sections); normalizeTileLayout then keeps each of them in a one-child COLUMN, the same
-// shape a column has when its other tiles are hidden, and that column scrolls and resizes like any other. The leaf's own sizeDp is
+// A tile alone where a column would be. A tile that is a direct child of a ROW (or the root) has no column around it, so it would be laid
+// out full height with the card stretched over empty space and no handle to size it. The caller names such tiles with TileLoneColumns
+// (the log view: the side sections); normalizeTileLayout then keeps each of them in a one-child COLUMN, the same shape a column has when
+// its other tiles are hidden, and that column scrolls and resizes like any other. That holds at any depth (a tile dropped beside the log
+// inside the log's column is as much a column of its own as one dropped beside the top-level columns) except inside a scrolling column: a
+// ROW there is one of that column's rows, sized from its tiles (TileContentSizing.kt), and its tiles stay bare. The leaf's own sizeDp is
 // along its parent's axis, so a lone leaf could not store a height: the wrapper takes the leaf's weight and width pin, and the leaf inside
 // keeps the height.
 
@@ -193,34 +195,66 @@ internal fun <K> tileLayoutShapeEquals(a: TileNode<K>, b: TileNode<K>): Boolean 
 }
 
 /**
+ * Which tiles are kept in a one-tile column of their own when they end up alone where a column would be (see the header comment):
+ * [tiles] names them, [scrolls] is the geometry's predicate for which columns scroll (a ROW inside such a column keeps its tiles bare).
+ * The default names no tile.
+ */
+internal class TileLoneColumns<K>(val tiles: (K) -> Boolean = { false }, val scrolls: (K) -> Boolean = tiles)
+
+// Where a node sits as far as a lone tile is concerned: the axis of its parent split (null at the root) and whether it is inside a scrolling column.
+private class LoneSite(val parentAxis: TileAxis?, val inScrollingColumn: Boolean) {
+    /** True where a lone tile is a column of its own: beside other tiles of a ROW (or on its own at the root) outside any scrolling column. */
+    val columnPlace: Boolean get() = !inScrollingColumn && parentAxis != TileAxis.COLUMN
+
+    fun <K> below(split: TileSplit<K>, scrolls: (K) -> Boolean) = LoneSite(split.axis, inScrollingColumn || isScrollingColumn(split, scrolls))
+}
+
+/**
  * Tidies a tree: drops empty splits, collapses a single-child split into that child (which takes over the split's weight and
  * pinned size, being the one that sits in the parent's slot) and flattens a child split that has the same axis as its parent,
  * rescaling so the parent's shares are unchanged. A child split with a pinned size is never flattened: the pin would be lost.
  * Returns null when nothing is left.
  *
- * Tiles for which [loneColumn] holds are the exception to the single-child rule: wherever one sits alone where a column would be (a
- * direct child of the top-level ROW, or the root itself) it is kept in a one-child COLUMN split, which is created when it is missing, so
- * the tile behaves as a one-tile scrolling column and its height (a pin on the leaf inside) outlives later edits. The default holds for no tile.
+ * The tiles [lone] names are the exception to the single-child rule: wherever one sits alone where a column would be (a direct child of
+ * a ROW, or the root itself, outside any scrolling column) it is kept in a one-child COLUMN split, which is created when it is missing, so
+ * the tile behaves as a one-tile scrolling column and its height (a pin on the leaf inside) outlives later edits. Inside a scrolling column
+ * such a wrapper is dissolved again. The default names no tile.
  */
-internal fun <K> normalizeTileLayout(node: TileNode<K>, loneColumn: (K) -> Boolean = { false }): TileNode<K>? =
-    normalizeNode(node, loneColumn, top = true)?.let { wrapLoneTiles(it, loneColumn) }
-
-// [top] is true while [node] is the root or a child of a ROW that is itself top: the places where a lone tile is a column of its own.
-private fun <K> normalizeNode(node: TileNode<K>, loneColumn: (K) -> Boolean, top: Boolean): TileNode<K>? = when (node) {
-    is TileLeaf -> node
-    is TileSplit -> normalizeSplit(node, loneColumn, top)
+internal fun <K> normalizeTileLayout(node: TileNode<K>, lone: TileLoneColumns<K> = TileLoneColumns()): TileNode<K>? {
+    // One pass can leave a wrapper in a place that only the finished shape shows to be wrong (a row collapsed into its column, say), so go on
+    // until nothing changes; it takes two passes at most in practice.
+    var tree = normalizeOnce(node, lone)
+    repeat(NORMALIZE_MAX_PASSES) {
+        val next = tree?.let { normalizeOnce(it, lone) }
+        if (next == tree) return tree
+        tree = next
+    }
+    return tree
 }
 
-private fun <K> normalizeSplit(split: TileSplit<K>, loneColumn: (K) -> Boolean, top: Boolean): TileNode<K>? {
-    val children = split.children.mapNotNull { normalizeNode(it, loneColumn, top && split.axis == TileAxis.ROW) }
+private const val NORMALIZE_MAX_PASSES = 4
+
+private fun <K> normalizeOnce(node: TileNode<K>, lone: TileLoneColumns<K>): TileNode<K>? =
+    normalizeNode(node, lone, LoneSite(null, false))?.let { wrapLoneTiles(it, lone, LoneSite(null, false)) }
+
+private fun <K> normalizeNode(node: TileNode<K>, lone: TileLoneColumns<K>, site: LoneSite): TileNode<K>? = when (node) {
+    is TileLeaf -> node
+    is TileSplit -> normalizeSplit(node, lone, site)
+}
+
+private fun <K> normalizeSplit(split: TileSplit<K>, lone: TileLoneColumns<K>, site: LoneSite): TileNode<K>? {
+    val below = site.below(split, lone.scrolls)
+    val children = split.children.mapNotNull { normalizeNode(it, lone, below) }
     return when {
         children.isEmpty() -> null
         children.size == 1 -> {
             val only = children.single()
-            if (top && split.axis == TileAxis.COLUMN && only is TileLeaf && loneColumn(only.section)) {
-                split.copy(children = children)
-            } else {
-                only.withTileSlot(split.weight, split.sizeDp)
+            val isLone = split.axis == TileAxis.COLUMN && only is TileLeaf && lone.tiles(only.section)
+            when {
+                isLone && site.columnPlace -> split.copy(children = children)
+                // A wrapper that has to go from a column: the tile's height is its size along the column, so it stays when the wrapper has none.
+                isLone && site.parentAxis == TileAxis.COLUMN -> only.withTileSlot(split.weight, split.sizeDp ?: only.sizeDp)
+                else -> only.withTileSlot(split.weight, split.sizeDp)
             }
         }
         else -> split.copy(
@@ -230,10 +264,14 @@ private fun <K> normalizeSplit(split: TileSplit<K>, loneColumn: (K) -> Boolean, 
 }
 
 // Puts every lone tile (see normalizeTileLayout) that is not in a column yet into one: the column takes the leaf's weight and its pin
-// (both along the parent's axis), the leaf inside is weighted. A COLUMN is left alone: its tiles share it.
-private fun <K> wrapLoneTiles(node: TileNode<K>, loneColumn: (K) -> Boolean): TileNode<K> = when {
-    node is TileLeaf && loneColumn(node.section) -> TileSplit(TileAxis.COLUMN, listOf(node.withTileSlot(1f, null)), node.weight, node.sizeDp)
-    node is TileSplit && node.axis == TileAxis.ROW -> node.copy(children = node.children.map { wrapLoneTiles(it, loneColumn) })
+// (both along the parent's axis), the leaf inside is weighted. A COLUMN's own tiles are not lone: they share it.
+private fun <K> wrapLoneTiles(node: TileNode<K>, lone: TileLoneColumns<K>, site: LoneSite): TileNode<K> = when {
+    node is TileLeaf && site.columnPlace && lone.tiles(node.section) ->
+        TileSplit(TileAxis.COLUMN, listOf(node.withTileSlot(1f, null)), node.weight, node.sizeDp)
+    node is TileSplit -> {
+        val below = site.below(node, lone.scrolls)
+        node.copy(children = node.children.map { wrapLoneTiles(it, lone, below) })
+    }
     else -> node
 }
 
@@ -250,9 +288,9 @@ private fun <K> flattenedChildren(child: TileSplit<K>): List<TileNode<K>> {
     }
 }
 
-/** The tree without [section], normalized (see [normalizeTileLayout] for [loneColumn]); null when [section] was the last one. */
-internal fun <K> removeTile(root: TileNode<K>, section: K, loneColumn: (K) -> Boolean = { false }): TileNode<K>? =
-    removeLeaf(root, section)?.let { normalizeTileLayout(it, loneColumn) }
+/** The tree without [section], normalized (see [normalizeTileLayout] for [lone]); null when [section] was the last one. */
+internal fun <K> removeTile(root: TileNode<K>, section: K, lone: TileLoneColumns<K> = TileLoneColumns()): TileNode<K>? =
+    removeLeaf(root, section)?.let { normalizeTileLayout(it, lone) }
 
 private fun <K> removeLeaf(node: TileNode<K>, section: K): TileNode<K>? = when (node) {
     is TileLeaf -> if (node.section == section) null else node
@@ -272,17 +310,17 @@ private fun <K> removeLeaf(node: TileNode<K>, section: K): TileNode<K>? = when (
  *   otherwise a new root [old root 1.6, dragged 1] in edge order.
  * A tile that sits alone in a one-child column (see [normalizeTileLayout]) counts as that column when something is dropped on its left or
  * right: the dragged tile goes beside the column, not into it.
- * Dropping on itself, or onto a tile that is not in the tree, returns [root] unchanged. The result is normalized with [loneColumn].
+ * Dropping on itself, or onto a tile that is not in the tree, returns [root] unchanged. The result is normalized with [lone].
  */
-internal fun <K> dropTile(root: TileNode<K>, dragged: K, target: TileDropTarget<K>, loneColumn: (K) -> Boolean = { false }): TileNode<K> {
+internal fun <K> dropTile(root: TileNode<K>, dragged: K, target: TileDropTarget<K>, lone: TileLoneColumns<K> = TileLoneColumns()): TileNode<K> {
     if (target is TileDropTarget.OnSection && target.section == dragged) return root
-    val rest = removeTile(root, dragged, loneColumn) ?: return root
+    val rest = removeTile(root, dragged, lone) ?: return root
     val placed = when (target) {
         is TileDropTarget.OnSection ->
             if (target.section in tileLeafSections(rest)) insertAtSection(rest, target.section, dragged, target.edge) else return root
         is TileDropTarget.OnPage -> insertAtPageEdge(rest, dragged, target.edge)
     }
-    return normalizeTileLayout(placed, loneColumn) ?: root
+    return normalizeTileLayout(placed, lone) ?: root
 }
 
 private fun <K> ordered(edge: TileEdge, dragged: TileNode<K>, other: TileNode<K>): List<TileNode<K>> =
@@ -329,9 +367,9 @@ private fun <K> insertAtPageEdge(rest: TileNode<K>, dragged: K, edge: TileEdge):
 }
 
 /** Adds [section] at the trailing page edge: right of a ROW root or a single tile, below a COLUMN root. */
-internal fun <K> appendTile(root: TileNode<K>, section: K, loneColumn: (K) -> Boolean = { false }): TileNode<K> {
+internal fun <K> appendTile(root: TileNode<K>, section: K, lone: TileLoneColumns<K> = TileLoneColumns()): TileNode<K> {
     val edge = if (root is TileSplit && root.axis == TileAxis.COLUMN) TileEdge.BOTTOM else TileEdge.RIGHT
-    return dropTile(root, section, TileDropTarget.OnPage(edge), loneColumn)
+    return dropTile(root, section, TileDropTarget.OnPage(edge), lone)
 }
 
 // ---------------------------------------------------------------------------------------------------------------
