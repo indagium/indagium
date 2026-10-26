@@ -136,6 +136,22 @@
       "modules": ["com.google.guava:*", "com.google.code.gson:*", "com.google.code.findbugs:*", "com.google.errorprone:*", "com.google.j2objc:*", "com.google.android:annotations", "com.google.api.grpc:*", "io.grpc:*", "io.perfmark:*", "io.opentelemetry:*", "org.jspecify:*"]
     },
     {
+      "id": "grpc-netty-native",
+      "name": "Netty tcnative and BoringSSL in grpc-netty-shaded",
+      "version": "As shaded by grpc-netty-shaded 1.75.0",
+      "scope": "Native TLS support in a LanguageTool transitive JAR; gRPC and Netty themselves are Apache-2.0",
+      "license": "Apache License 2.0, OpenSSL/SSLeay, ISC and MIT",
+      "licenseExpression": "Apache-2.0 AND OpenSSL AND ISC AND MIT",
+      "summary": "The JAR's native netty-tcnative libraries statically link BoringSSL (OpenSSL and SSLeay licences for code from OpenSSL, ISC for new Google code, MIT for third_party/fiat) and a forked Tomcat Native (Apache-2.0). This product includes software developed by the OpenSSL Project for use in the OpenSSL Toolkit (http://www.openssl.org/), and cryptographic software written by Eric Young (eay@cryptsoft.com). Texts are copied verbatim from the JAR's META-INF.",
+      "licenseFiles": [
+        "application/texts/grpc-netty-NOTICE.txt",
+        "application/texts/grpc-netty-boringssl-license.txt",
+        "application/texts/grpc-netty-aix-netbsd-license.txt",
+        "third-party/texts/apache-2.0.txt"
+      ],
+      "modules": ["io.grpc:grpc-netty-shaded"]
+    },
+    {
       "id": "protobuf-java",
       "name": "Protocol Buffers for Java",
       "version": "3.25.8",
@@ -160,13 +176,13 @@
     {
       "id": "languagetool-apache-deps",
       "name": "LanguageTool Apache-licensed dependencies",
-      "version": "Lucene 5.5.5, OpenNLP 1.9.4, Jackson 2.18.0, JNA 5.12.1 and others",
+      "version": "Lucene 5.5.5, OpenNLP 1.9.4, Jackson 2.18.0 and others",
       "scope": "Transitive dependencies of LanguageTool",
       "license": "Apache License 2.0",
       "licenseExpression": "Apache-2.0",
-      "summary": "Apache Lucene, Apache OpenNLP and the knowitall OpenNLP models, Jackson, HPPC, fastutil, Vavr, java-diff-utils, Resilience4j, Micrometer, Prometheus simpleclient, Typesafe Config, JSONIC, Optimaize language-detector, hunspell bindings and the Aho-Corasick double-array trie. JNA is dual-licensed LGPL-2.1-or-later or Apache-2.0; Indagium uses it under Apache-2.0. Each JAR keeps its own NOTICE file where upstream ships one.",
+      "summary": "Apache Lucene, Apache OpenNLP and the knowitall OpenNLP models, Jackson, HPPC, fastutil, Vavr, java-diff-utils, Resilience4j, Micrometer, Prometheus simpleclient, Typesafe Config, JSONIC, Optimaize language-detector and the Aho-Corasick double-array trie. Each JAR keeps its own NOTICE file where upstream ships one.",
       "licenseFiles": ["third-party/texts/apache-2.0.txt"],
-      "modules": ["org.apache.lucene:*", "org.apache.opennlp:*", "edu.washington.cs.knowitall:opennlp-*", "com.fasterxml.jackson*:*", "com.carrotsearch:*", "it.unimi.dsi:*", "io.vavr:*", "io.github.java-diff-utils:*", "io.github.resilience4j:*", "io.micrometer:*", "io.prometheus:*", "com.typesafe:*", "net.arnx:*", "com.optimaize.languagedetector:*", "com.gitlab.dumonts:*", "com.hankcs:*", "net.java.dev.jna:*"]
+      "modules": ["org.apache.lucene:*", "org.apache.opennlp:*", "edu.washington.cs.knowitall:opennlp-*", "com.fasterxml.jackson*:*", "com.carrotsearch:*", "it.unimi.dsi:*", "io.vavr:*", "io.github.java-diff-utils:*", "io.github.resilience4j:*", "io.micrometer:*", "io.prometheus:*", "com.typesafe:*", "net.arnx:*", "com.optimaize.languagedetector:*", "com.hankcs:*"]
     },
     {
       "id": "morfologik",
@@ -304,21 +320,6 @@
       ],
       "modules": [
         "org.jetbrains.skiko:skiko-awt-runtime-*"
-      ]
-    },
-    {
-      "id": "jna-libffi",
-      "name": "libffi in JNA native dispatch",
-      "version": "As pinned by JNA 5.12.1",
-      "scope": "Native support in the JNA JAR; JNA itself is used under Apache-2.0",
-      "license": "MIT",
-      "licenseExpression": "MIT",
-      "summary": "libffi copyright 1996-2021 Anthony Green, Red Hat, Inc and others. Source of the preserved notice: JNA 5.12.1 native/libffi/LICENSE.",
-      "licenseFiles": [
-        "application/texts/jna-libffi-license.txt"
-      ],
-      "modules": [
-        "net.java.dev.jna:jna"
       ]
     }
   ]

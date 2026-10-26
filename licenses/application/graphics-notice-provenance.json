@@ -305,17 +305,11 @@
       "id": "skia-libjpeg-ijg",
       "url": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+/e14cbfaa85529d47f9f55b0f104a579c1061f9ad/README.ijg?format=TEXT",
       "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6"
-    },
-    {
-      "id": "jna-libffi",
-      "url": "https://raw.githubusercontent.com/java-native-access/jna/5.12.1/native/libffi/LICENSE",
-      "sha256": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde"
     }
   ],
   "packagedTextHashes": {
     "application/texts/skia-native-notices.txt": "b42fb4d12d723f13ca95deae44536dd7690ecefb7a111f0b7b96f509f6cef7b5",
-    "application/texts/skiko-NOTICE.txt": "35dd077c24768b53625101cfcc0ad853ae7e2abc08bd2a111a0267760d1406d8",
-    "application/texts/jna-libffi-license.txt": "a61d06e8f7be57928e71e800eb9273b05cb8868c484108afe41e4305bb320dde"
+    "application/texts/skiko-NOTICE.txt": "35dd077c24768b53625101cfcc0ad853ae7e2abc08bd2a111a0267760d1406d8"
   },
-  "scopeNotes": "Skia release archives contain linked static libraries plus development/header inputs; including their notices does not assert every optional feature is active. The macOS Skiko binary contains dng_info, SkRawCodec and dng_negative, confirming the DNG decoder is present. ICU config.guess is build-only. JNA remains Apache-2.0 for its own code; libffi retains MIT."
+  "scopeNotes": "Skia release archives contain linked static libraries plus development/header inputs; including their notices does not assert every optional feature is active. The macOS Skiko binary contains dng_info, SkRawCodec and dng_negative, confirming the DNG decoder is present. ICU config.guess is build-only."
 }

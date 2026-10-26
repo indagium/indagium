@@ -700,7 +700,12 @@ kotlin {
                 // Whisper and GGML are statically linked into an app-owned native bridge at build
                 // time; the multilingual model is downloaded only after an explicit user action.
                 // Embedded offline note proofreading: English resources only, no server or remote rules.
-                implementation("org.languagetool:language-en:6.8")
+                implementation("org.languagetool:language-en:6.8") {
+                    // English spelling uses Morfologik; Hunspell is only for languages not bundled
+                    // here. Its JAR carries native libhunspell (MPL/GPL/LGPL tri-licence), so leave
+                    // it out rather than ship unused copyleft natives without their source.
+                    exclude(group = "com.gitlab.dumonts", module = "hunspell")
+                }
                 // Streaming AI answers are Markdown. This Compose Multiplatform renderer supports
                 // the app's Material 3 stack without adding a web view or a second UI toolkit.
                 implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")

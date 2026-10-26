@@ -12,7 +12,7 @@ The two inventories below are grouped records, not a count of physical libraries
 
 Media evidence maps the four actual classifier configurations and checksums, linked/runtime libraries, legal-text provenance and full source closure. It rejects GPL/nonfree FFmpeg configurations and unexpected classifier bytes. The existing source generator verifies all four classifiers; final native package validation runs separately on each target. Application package validation verifies the exact selected governing agreement, metadata, readable installed files, all inventoried texts and the JVM source mapping/notices. Build failures prevent release preparation. Inventory matching and embedded filenames alone are not a legal certification; review a dependency's upstream terms before changing its approved entry.
 
-The current macOS resolution contains 188 runtime artifacts. Their embedded notice paths and hashes are inspected directly; 116 have no filename identifying a licence/notice and rely on the separately bundled inventory texts. Windows/Linux final packages and replacement smoke tests must pass the configured target CI before a release. No test running on macOS is represented as Windows/Linux execution. Native code signing may change permitted binary metadata; existing media validation keeps its explicit macOS signing rules.
+The current macOS resolution contains 185 runtime artifacts. Their embedded notice paths and hashes are inspected directly; 115 have no filename identifying a licence/notice and rely on the separately bundled inventory texts. Windows/Linux final packages and replacement smoke tests must pass the configured target CI before a release. No test running on macOS is represented as Windows/Linux execution. Native code signing may change permitted binary metadata; existing media validation keeps its explicit macOS signing rules.
 
 ## Copyleft and EULA compatibility
 
@@ -20,12 +20,12 @@ The current macOS resolution contains 188 runtime artifacts. Their embedded noti
 - MPL: SRT retains MPL-covered source availability and notices. The EULA does not restrict source rights. Sources are in the media archive.
 - CDDL: keep the explicit CDDL-1.1 choice for legacy Java EE APIs, full texts, matching source JARs and POMs. Do not silently change that selection to bare GPL. Differing application obligations are undertaken by Roman Arnaut alone, not upstream contributors.
 - JVM/GCC: the Classpath Exception and GCC Runtime Library Exception permit applicable combinations with differently licensed application code; they do not eliminate upstream source/notices obligations. The media archive includes the relevant GCC source/recipe evidence. The application archive includes the complete OpenJDK tree, native HotSpot/build inputs, exact Temurin recipe revision and platform build metadata, not merely `src.zip`.
-- Apache/MIT/BSD/FTL/Zlib/public-domain components retain their full notices and selected licences. JNA stays Apache-2.0; FreeType stays under the FTL choice, not GPL. Preserve shaded R8 notices, dictionary/WordNet/Moby notices, scrcpy Apache notices and JVM module-specific legal files.
+- Apache/MIT/BSD/FTL/Zlib/public-domain components retain their full notices and selected licences. FreeType stays under the FTL choice, not GPL. Preserve shaded R8 notices, the BoringSSL/OpenSSL/Tomcat Native notices of grpc-netty-shaded, dictionary/WordNet/Moby notices, scrcpy Apache notices and JVM module-specific legal files.
 - Codec patent grants/notices are retained verbatim. The inventory does not establish worldwide patent clearance. No codec-patent guarantee or upstream indemnity is created by the EULA.
 
 ## Native graphics audit findings
 
-Skiko 0.144.6's upstream build properties pin JetBrains Skia `m144-22f58c9fd4`. All four native release archives were inspected for linked static libraries and supplied notices. Their hashes, member paths and notice provenance are in `licenses/application/graphics-notice-provenance.json`; the missing Skiko/AOSP notice, Skia BSD licence, image/font/Unicode notices and JNA libffi MIT notice are now bundled and checked by SHA-256. This closure is separate from the FFmpeg inventory. Skia's root BSD terms cover its own skcms/bentleyottmann modules; external Expat, FreeType (FTL choice), ICU, libjpeg-turbo/IJG, DNG, Piex and Wuffs notices come from the exact upstream DEPS revisions. Native-package development/header notices are retained conservatively without asserting that every optional module is active on each platform.
+Skiko 0.144.6's upstream build properties pin JetBrains Skia `m144-22f58c9fd4`. All four native release archives were inspected for linked static libraries and supplied notices. Their hashes, member paths and notice provenance are in `licenses/application/graphics-notice-provenance.json`; the missing Skiko/AOSP notice, Skia BSD licence, image/font/Unicode notices are now bundled and checked by SHA-256. This closure is separate from the FFmpeg inventory. Skia's root BSD terms cover its own skcms/bentleyottmann modules; external Expat, FreeType (FTL choice), ICU, libjpeg-turbo/IJG, DNG, Piex and Wuffs notices come from the exact upstream DEPS revisions. Native-package development/header notices are retained conservatively without asserting that every optional module is active on each platform.
 
 **Material existing dependency condition:** the macOS Skiko binary contains `dng_info`, `SkRawCodec` and `dng_negative`, confirming compiled DNG support. The Adobe DNG SDK licence, section 5, requires commercial distributors to defend/indemnify Adobe for claims arising from distribution. EULA wording cannot remove this upstream condition. The product owner must assess that condition before commercial distribution; removing DNG would require a separate native rebuild and compatibility review. This implementation preserves and discloses the terms; it does not claim that a legal assessment or negotiation has occurred. It does not add an indemnity from the customer to Indagium. ICU's full notice includes GPL/Autoconf-exception terms for a build-only script; those are not a bare-GPL runtime dependency.
 
@@ -61,6 +61,7 @@ Run `python3 scripts/verify_lgpl_replacement.py --image <extracted-image> --jdk-
 | Application | `xz-java` | `0BSD` |
 | Application | `r8` | `BSD-3-Clause AND Apache-2.0 AND MIT` |
 | Application | `google-libraries` | `Apache-2.0` |
+| Application | `grpc-netty-native` | `Apache-2.0 AND OpenSSL AND ISC AND MIT` |
 | Application | `protobuf-java` | `BSD-3-Clause` |
 | Application | `languagetool` | `LGPL-2.1-or-later` |
 | Application | `languagetool-apache-deps` | `Apache-2.0` |
@@ -113,4 +114,3 @@ Run `python3 scripts/verify_lgpl_replacement.py --image <extracted-image> --jdk-
 | Media | `nv-codec-headers` | `MIT` |
 | Media | `source-delivery` | `LicenseRef-Indagium-Source-Instructions` |
 | Application | `skia-native` | `LicenseRef-Skia-Native-Notices` |
-| Application | `jna-libffi` | `MIT` |
