@@ -32,11 +32,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -123,6 +126,17 @@ private fun raisedShape(position: TabStripPosition): RoundedCornerShape = when (
     TabStripPosition.RIGHT -> RoundedCornerShape(topEnd = RAISED_RADIUS, bottomEnd = RAISED_RADIUS)
 }
 
+/**
+ * The outline of one tab in [style] on a strip at [position]: the raised card's open-sided rounded shape, the segmented item's pill, and a plain
+ * rectangle for every other style. Everything that belongs to the tab follows it: its fill, its hover highlight, and the press and focus
+ * highlights that [Modifier.clickable] draws, which are cut to this shape instead of lighting up the whole rectangle around it.
+ */
+internal fun tabShape(style: TabStripStyle, position: TabStripPosition): Shape = when (style) {
+    TabStripStyle.RAISED -> raisedShape(position)
+    TabStripStyle.SEGMENTED -> RoundedCornerShape(SEGMENT_RADIUS)
+    else -> RectangleShape
+}
+
 private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition): Modifier {
     val shape = raisedShape(position)
     return background(tc.bg, shape).drawBehind {
@@ -170,11 +184,12 @@ private fun Modifier.tabChrome(
     val accent = tc.ac
     val lit = hovered || dragging
     return when (style) {
+        // The hovered raised tab is the card's own shape (open towards the content), not a differently rounded pill.
         TabStripStyle.RAISED ->
-            if (isActive) raisedCard(tc, position) else background(if (lit) tc.hv else Color.Transparent, RoundedCornerShape(SEGMENT_RADIUS))
+            if (isActive) raisedCard(tc, position) else background(if (lit) tc.hv else Color.Transparent, tabShape(style, position))
 
         TabStripStyle.SEGMENTED -> {
-            val shape = RoundedCornerShape(SEGMENT_RADIUS)
+            val shape = tabShape(style, position)
             when {
                 isActive -> background(tc.p, shape).border(0.5.dp, tc.br, shape)
                 lit -> background(tc.hv, shape)
@@ -251,6 +266,7 @@ internal fun TabShell(
     val style = appearance.style
     val position = appearance.position
     val metrics = tabMetrics(style, position)
+    val shape = tabShape(style, position)
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc)
     Box(Modifier.fillMaxWidth()) {
@@ -259,6 +275,9 @@ internal fun TabShell(
                 .padding(metrics.inset)
                 .testTag("tab-$pointerKey")
                 .tabChrome(style, isActive, hov, dragging, tc, position)
+                // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
+                // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.
+                .then(if (shape == RectangleShape) Modifier else Modifier.clip(shape))
                 .onGloballyPositioned { rowRoot = it.positionInRoot() }
                 .onPointerEvent(PointerEventType.Enter) { hov = true }
                 .onPointerEvent(PointerEventType.Exit) { hov = false }

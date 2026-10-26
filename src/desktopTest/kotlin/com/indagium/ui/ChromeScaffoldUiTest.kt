@@ -600,8 +600,9 @@ class ChromeScaffoldUiTest {
         val newTab = rule.onNodeWithContentDescription("New tab").getBoundsInRoot()
         val filter = rule.onNodeWithContentDescription("Toggle filter panel").getBoundsInRoot()
         val notes = rule.onNodeWithContentDescription("Toggle notes panel").getBoundsInRoot()
-        assertNear(newTab.top.value, filter.top.value, "buttons share a line, not a column")
-        assertTrue(newTab.left < filter.left && filter.left < notes.left)
+        // The groups wrap whole: the joined toggles may drop to the line under New tab, but they share a line with each other, not a column.
+        assertNear(filter.top.value, notes.top.value, "buttons share a line, not a column")
+        assertTrue(newTab.top <= filter.top && newTab.left <= filter.left && filter.left < notes.left)
         val strip = bounds("tab-strip")
         assertTrue(bounds("main-toolbar").left >= strip.left && bounds("main-toolbar").right <= strip.right, "inside the bar")
         assertTrue(bounds("main-toolbar").bottom <= bounds("tab-short").top, "at the top of the tab column")

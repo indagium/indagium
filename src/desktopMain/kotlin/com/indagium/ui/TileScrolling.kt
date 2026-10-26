@@ -5,27 +5,22 @@ package com.indagium.ui
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.gestures.scrollable
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.relocation.BringIntoViewResponder
 import androidx.compose.foundation.relocation.bringIntoViewResponder
-import androidx.compose.foundation.v2.ScrollbarAdapter
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import kotlin.math.max
+import kotlin.math.min
 
 // The scrolling columns of a TilingSurface (the geometry side is TileLayout.kt's TileScrollRegion): the offsets, the wheel/trackpad
-// scrollables, the clip that cuts a card or splitter to its column's viewport, and the thin scrollbar.
+// scrollables and the clip that cuts a card or splitter to its column's viewport (the scrollbar is TileScrollbar.kt).
 //
 // The tiles stay children of the surface's one flat Layout (that is what keeps their composition when they move), so a scrolling
 // column cannot be a verticalScroll container. Instead the surface places each card/splitter of a region shifted by the column's
@@ -33,17 +28,18 @@ import kotlin.math.max
 // same [ScrollableState] (a wheel over any of them scrolls the column, and a nested scrollable inside that cannot scroll any more
 // hands the rest to it), and a graphicsLayer clip, which clips drawing AND hit-testing, cuts the part outside the viewport.
 
-/** Width (dp) of a scrolling column's scrollbar, drawn along the right edge of the column: the app's thin side-section bar ([ThinVerticalScrollbar]). */
+/** Width (dp) of a scrolling column's scrollbar: the app's thin side-section bar ([ThinVerticalScrollbar]). */
 internal const val TILE_SCROLLBAR_DP = THIN_SCROLLBAR_DP
 
-/** Gap (dp) between a scrolling column's cards and its scrollbar. */
+/** Least clearance (dp) between a column's scrollbar and the card (or the host's edge) beside it. */
+internal const val TILE_SCROLLBAR_CLEARANCE_DP = 1f
+
+/** Gap (dp) an inner list (a flex region, the AI conversation) keeps between its content and its own thin scrollbar. */
 internal const val TILE_SCROLLBAR_GAP_DP = 2f
 
 /**
- * The strip (dp) along a scrolling column's right edge that its cards and splitters leave free, so the column's scrollbar never lies over a card,
- * its border or a scrollbar inside it. It is reserved whether or not the column overflows (a surface passes it as `TileChromeSpec.scrollGutterDp`):
- * narrowing the cards only while it overflows would change their width, and so how their content wraps and how tall it is, which is what decides
- * whether the column overflows.
+ * The room (dp) a list inside a card leaves at its right edge for its own thin scrollbar and the gap to its content. This is no longer
+ * reserved by the scrolling column itself: a column's own scrollbar is drawn in the gap beside the column ([tileScrollbarRect]).
  */
 internal const val TILE_SCROLL_GUTTER_DP = TILE_SCROLLBAR_DP + TILE_SCROLLBAR_GAP_DP
 
@@ -123,24 +119,18 @@ private class TileRegionBringIntoView<K>(
     }
 }
 
-// The scrollbar's view of a column, in dp.
-private class TileScrollbarAdapter<K>(
-    private val scroll: TileScrollState<K>,
-    private val region: () -> TileScrollRegion<K>,
-) : ScrollbarAdapter {
-    override val scrollOffset: Double get() = scroll.offsetOf(region()).toDouble()
-    override val contentSize: Double get() = region().contentHeight.toDouble()
-    override val viewportSize: Double get() = region().viewport.h.toDouble()
-
-    override suspend fun scrollTo(scrollOffset: Double) {
-        scroll.scrollTo(region().key, scrollOffset.toFloat())
-    }
+/**
+ * Where the scrollbar of [region] is drawn: [TILE_SCROLLBAR_DP] wide and centred in the room beyond the column's right edge (the gap to its
+ * neighbour, or the room the surface keeps at the host's edge), so it sits between two cards with [TILE_SCROLLBAR_CLEARANCE_DP] to spare on
+ * each side and the cards themselves never narrow for it. A room too small for the full bar gets a narrower one; a surface that keeps no room
+ * at all (the bar's strip would be under 3 dp) draws it over the column's own right edge instead.
+ */
+internal fun <K> tileScrollbarRect(region: TileScrollRegion<K>): TileRect {
+    val room = region.roomRightDp
+    val view = region.viewport
+    val width = min(TILE_SCROLLBAR_DP, room - 2 * TILE_SCROLLBAR_CLEARANCE_DP)
+    if (width < TILE_SCROLLBAR_MIN_DP) return TileRect(view.right - TILE_SCROLLBAR_DP, view.y, TILE_SCROLLBAR_DP, view.h)
+    return TileRect(view.right + (room - width) / 2, view.y, width, view.h)
 }
 
-/** The thin scrollbar of a scrolling column that overflows; the surface sizes and places it ([TILE_SCROLLBAR_DP] wide, in the column's right-hand gutter). */
-@Composable
-internal fun <K> TileRegionScrollbar(scroll: TileScrollState<K>, region: TileScrollRegion<K>, tag: String) {
-    val latest = rememberUpdatedState(region)
-    val adapter = remember(scroll) { TileScrollbarAdapter(scroll) { latest.value } }
-    ThinVerticalScrollbar(adapter, Modifier.fillMaxHeight().testTag(tag))
-}
+private const val TILE_SCROLLBAR_MIN_DP = 3f

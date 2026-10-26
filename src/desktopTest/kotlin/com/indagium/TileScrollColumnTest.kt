@@ -4,6 +4,7 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.ui.TILE_SCROLLBAR_CLEARANCE_DP
 import com.indagium.ui.TileBodyMeasure
 import com.indagium.ui.TileBodySizing
 import com.indagium.ui.TileDropTarget
@@ -21,6 +22,7 @@ import com.indagium.ui.resizeProjected
 import com.indagium.ui.tileDropTargetAt
 import com.indagium.ui.tileGeometry
 import com.indagium.ui.tileLeafSections
+import com.indagium.ui.tileScrollbarRect
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -342,8 +344,8 @@ class TileScrollColumnTest {
 
     // ---- content-sized tiles ---------------------------------------------------------------------------------------
 
-    // The log view's setup: a gutter for the scrollbar and a splitter under the last tile.
-    private val sizedSpec = SPEC.copy(scrollGutterDp = 8f, scrollEndHandle = true)
+    // The log view's setup: room beyond the host's right edge for a scrollbar there, and a splitter under the last tile.
+    private val sizedSpec = SPEC.copy(scrollEdgeRoomDp = 8f, scrollEndHandle = true)
 
     private fun sizedGeometry(root: TileNode<S>, sizing: Map<S, TileSizing>, collapsed: Set<S> = emptySet(), spec: TileGeometrySpec = sizedSpec) =
         tileGeometry(root, HOST_W, HOST_H, spec, collapsed, scrolls) { sizing[it] }
@@ -468,17 +470,70 @@ class TileScrollColumnTest {
     }
 
     @Test
-    fun theCardsLeaveTheScrollbarGutterFree() {
+    fun aRowNestedInAScrollingColumnIsAsTallAsItsTallestTileAsksAndResizesLikeATile() {
+        // A tile dropped beside another one makes a row inside the column. The column is full (E alone is 500 of 600 dp), so the row used to get
+        // the 88 dp that were left over and was squeezed; now it asks for what its tiles ask for: the flex tile's 200 dp by default.
+        val sizing = mapOf(S.E to TileSizing(500f, 500f, 500f), S.C to flex120to400, S.D to content100)
+        val root = row(leaf(S.LOG), column(leaf(S.E), row(leaf(S.C), leaf(S.D)), dp = 250f))
+        val geo = sizedGeometry(root, sizing)
+        assertEquals(500f, geo.rect(S.E).h, EPS)
+        assertEquals(200f, geo.rect(S.C).h, EPS)
+        assertEquals(200f, geo.rect(S.D).h, EPS)
+        assertEquals(geo.rect(S.C).y, geo.rect(S.D).y, EPS, "side by side")
+        // The gap under the row is its handle: it resizes the row between the least and the most its tiles allow, and writes it as the row's size.
+        val handle = geo.gaps.filter { it.scrolling }.last()
+        assertTrue(handle.resizable)
+        val resized = resizeSized(root, sizing, 2, 30f)
+        val nested = ((resized as TileSplit<S>).children.last() as TileSplit<S>).children.last()
+        assertEquals(230f, nested.sizeDp!!, EPS)
+        val least = resizeSized(root, sizing, 2, -1000f)
+        assertEquals(120f, (((least as TileSplit<S>).children.last() as TileSplit<S>).children.last()).sizeDp!!, EPS)
+    }
+
+    @Test
+    fun theCardsUseTheWholeColumnAndTheScrollbarLivesInTheGapBesideIt() {
         val sizing = mapOf(S.B to flex120to400, S.C to flex120to400)
         val geo = sizedGeometry(sideColumn(leaf(S.B, dp = 400f), leaf(S.C, dp = 400f)), sizing)
         val region = geo.scrollRegions.single()
-        geo.cards.filter { it.section != S.LOG }.forEach { assertEquals(region.viewport.w - 8f, it.rect.w, EPS, "${it.section} is narrowed") }
-        geo.gaps.filter { it.scrolling }.forEach { assertEquals(region.viewport.w - 8f, it.rect.w, EPS) }
-        assertTrue(geo.cards.filter { it.section != S.LOG }.all { it.rect.right <= region.viewport.right - 8f + EPS })
-        // Whether the column overflows or not (here: it does not), the cards keep the same width.
+        // No width is given up for the bar, overflowing or not.
+        geo.cards.filter { it.section != S.LOG }.forEach { assertEquals(region.viewport.w, it.rect.w, EPS, "${it.section} is narrowed") }
+        geo.gaps.filter { it.scrolling }.forEach { assertEquals(region.viewport.w, it.rect.w, EPS) }
         val short = sizedGeometry(sideColumn(leaf(S.B, dp = 150f)), mapOf(S.B to flex120to400))
-        assertEquals(region.viewport.w - 8f, short.rect(S.B).w, EPS)
+        assertEquals(region.viewport.w, short.rect(S.B).w, EPS)
         assertFalse(short.scrollRegions.single().scrolls)
+        // The column in these tests is the last one of the row, so the room beyond it is the surface's edge room.
+        assertEquals(8f, region.roomRightDp, EPS)
+    }
+
+    @Test
+    fun aColumnWithANeighbourHasTheRowGapBesideItAndOneAtTheEdgeHasTheEdgeRoom() {
+        val sizing = mapOf(S.B to flex120to400, S.C to flex120to400)
+        val side = TileSplit(TileAxis.COLUMN, listOf(leaf(S.B, dp = 400f), leaf(S.C, dp = 400f)), 1f, 300f)
+        val both = TileSplit(TileAxis.ROW, listOf(side, leaf(S.LOG), side.copy(children = listOf(leaf(S.D, dp = 400f), leaf(S.E, dp = 400f)))))
+        val geo = tileGeometry(both, HOST_W, HOST_H, sizedSpec.copy(scrollEdgeRoomDp = 6f), emptySet(), scrolls) { sizing[it] ?: flex120to400 }
+        val rooms = geo.scrollRegions.map { it.roomRightDp }
+        assertEquals(listOf(SPEC.gapRowDp, 6f), rooms, "left column: the 8 dp gap to the log; right column: the room at the host's edge")
+    }
+
+    @Test
+    fun theScrollbarIsCentredInTheRoomWithAClearanceAndNarrowerWhenTheRoomIsSmall() {
+        val viewport = TileRect(10f, 20f, 200f, 300f)
+
+        fun bar(room: Float) = tileScrollbarRect(TileScrollRegion(S.B, viewport, 900f, room))
+        // The 8 dp gap holds the 6 dp bar with a dp on each side.
+        assertEquals(TileRect(211f, 20f, 6f, 300f), bar(8f))
+        // A 6 dp room (the host padding) gets a 4 dp bar with a dp on each side, never touching a card or the edge.
+        assertEquals(TileRect(211f, 20f, 4f, 300f), bar(6f))
+        // A roomier gap centres the full bar.
+        assertEquals(TileRect(213f, 20f, 6f, 300f), bar(12f))
+        // A surface that keeps no room at all draws the bar over the column's own right edge.
+        assertEquals(TileRect(204f, 20f, 6f, 300f), bar(0f))
+        // Whatever the room, the bar is between the card and what is beyond.
+        listOf(6f, 7f, 8f, 10f, 14f).forEach { room ->
+            val rect = bar(room)
+            val clear = TILE_SCROLLBAR_CLEARANCE_DP - EPS
+            assertTrue(rect.x >= viewport.right + clear && rect.right <= viewport.right + room - clear, "room $room: $rect")
+        }
     }
 
     @Test

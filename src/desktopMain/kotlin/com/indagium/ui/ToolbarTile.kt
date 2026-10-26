@@ -111,12 +111,15 @@ internal fun TileScope<LogViewSectionId>.ToolbarTile(state: AppState, onReclaimF
             title = logViewTileTitle(LogViewSectionId.TOOLBAR),
             headerless = true,
             hideable = false,
+            // In a scrolling column (the filter column, say) the tile is exactly as tall as its wrapped rows of buttons, with no handle.
+            sizing = TileBodySizing.CONTENT,
             body = { info -> ToolbarTileBody(state, info, scope, onReclaimFocus, anchors) },
         ),
     )
 }
 
-// A tile wider than tall is a wrapping row with the grip before it; a tile narrower than tall is a column with the grip above it.
+// A tile wider than tall is a wrapping row with the grip before it; a tile narrower than tall is a column with the grip above it. A tile sized
+// by its content (in a scrolling column) has no height to compare with its width: it is always the wrapping row, as tall as its rows.
 @Composable
 private fun ToolbarTileBody(
     state: AppState,
@@ -125,7 +128,7 @@ private fun ToolbarTileBody(
     onReclaimFocus: () -> Unit,
     anchors: ChromeAnchors?,
 ) {
-    val vertical = info.heightDp > info.widthDp
+    val vertical = !info.contentSized && info.heightDp > info.widthDp
     val onRecentAnchor: (TileRect) -> Unit = { anchors?.recentButton = it }
     if (vertical) {
         Column(Modifier.fillMaxSize().padding(TOOLBAR_TILE_PAD_DP.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -141,16 +144,17 @@ private fun ToolbarTileBody(
             )
         }
     } else {
-        Row(Modifier.fillMaxSize().padding(TOOLBAR_TILE_PAD_DP.dp)) {
+        Row(Modifier.then(if (info.contentSized) Modifier.fillMaxWidth() else Modifier.fillMaxSize()).padding(TOOLBAR_TILE_PAD_DP.dp)) {
             scope.Grip(LogViewSectionId.TOOLBAR)
             MainToolbar(
                 state = state,
                 orientation = ChromeOrientation.HORIZONTAL,
                 onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f).fillMaxHeight(),
+                modifier = Modifier.weight(1f).then(if (info.contentSized) Modifier else Modifier.fillMaxHeight()),
                 onRecentAnchor = onRecentAnchor,
                 wrap = true,
                 popupsBeside = false,
+                scrolls = !info.contentSized,
             )
         }
     }

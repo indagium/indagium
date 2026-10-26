@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -120,8 +121,9 @@ internal const val TILE_HEADER_GAP_DP = 6f
  * `-splitter-line-<i>`, `-scrollbar-<key>`, `-drop-preview`, `-page-strip-<edge>`); [keyOf] gives the stable, unique string a tile's tags use.
  * [scrolls] says which tiles may sit in a scrolling column (a COLUMN split of only such tiles keeps its tiles' heights and scrolls when
  * they add up to more than the window; see TileLayout.kt), with [scrollMinDp] / [scrollMaxDp] bounding a tile's height there; the
- * default is none, a surface that always fits. [scrollGutterDp] keeps a strip along the right edge of a scrolling column free of cards for
- * its scrollbar (the log view uses [TILE_SCROLL_GUTTER_DP]), and [scrollEndHandle] adds the splitter below the column's last tile.
+ * default is none, a surface that always fits. A scrolling column's scrollbar is drawn in the gap beside the column ([tileScrollbarRect]), never
+ * over a card; a column that ends at the host's right edge has [scrollEdgeRoomDp] there (the caller gives the surface that much more width than
+ * the cards use, the log view its host padding). [scrollEndHandle] adds the splitter below the column's last tile.
  */
 internal data class TileChromeSpec<K>(
     val headerDp: Float,
@@ -136,7 +138,7 @@ internal data class TileChromeSpec<K>(
     val scrollMinDp: Float = minTileDp,
     val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
     val scrolls: (K) -> Boolean = { false },
-    val scrollGutterDp: Float = 0f,
+    val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
 ) {
     internal fun geometrySpec(): TileGeometrySpec = TileGeometrySpec(
@@ -147,7 +149,7 @@ internal data class TileChromeSpec<K>(
         minPairShare = minPairShare,
         scrollMinDp = scrollMinDp,
         scrollMaxDp = scrollMaxDp,
-        scrollGutterDp = scrollGutterDp,
+        scrollEdgeRoomDp = scrollEdgeRoomDp,
         scrollEndHandle = scrollEndHandle,
     )
 }
@@ -166,7 +168,9 @@ internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float, val co
  * [TileScope.MaximizeButton] in it. [collapsible] / [hideable] / [maximizable] choose which header buttons show; [canHide] false
  * disables the hide button (the last visible tile). [iconTint] colours the header icon (null = the theme's secondary text colour).
  * [sizing] says how the body takes part in the height of a scrolling column (see [TileBodySizing] and [FlexRegion]); the default leaves it
- * to the stored or weighted height.
+ * to the stored or weighted height. [headerParts] replaces the default rule for which header parts fit a card of a given width (summary, then
+ * icon, see [tileHeaderParts]); [actionsFollowTitle] puts the [headerAction] straight after the title instead of at the right edge, as the log
+ * toolbar follows its grip (the buttons then sit before the header icons, with the free room after them).
  */
 @Suppress("LongParameterList") // a slot is a flat description of one tile; every field has a default
 internal class TileSlot(
@@ -181,6 +185,8 @@ internal class TileSlot(
     val canHide: Boolean = true,
     val maximizable: Boolean = false,
     val sizing: TileBodySizing = TileBodySizing.FILL,
+    val headerParts: ((widthDp: Float) -> TileHeaderParts)? = null,
+    val actionsFollowTitle: Boolean = false,
     val body: @Composable (TileBodyInfo) -> Unit,
 )
 
@@ -233,8 +239,11 @@ internal interface TileScope<K> {
     fun MaximizeButton(id: K)
 }
 
-/** Which header parts fit [widthDp]; see [tileHeaderParts]. */
-internal data class TileHeaderParts(val showIcon: Boolean, val showSummary: Boolean)
+/** Which header parts fit [widthDp]; see [tileHeaderParts]. The title is only ever dropped by a slot's own [TileSlot.headerParts]. */
+internal data class TileHeaderParts(val showIcon: Boolean, val showSummary: Boolean, val showTitle: Boolean = true)
+
+/** The width (dp) of the card whose header is being composed, for a [TileSlot.headerAction] that adapts to it; 0 outside a header. */
+internal val LocalTileHeaderWidthDp = compositionLocalOf { 0f }
 
 /** The header parts that fit a card [widthDp] wide: the summary goes first, then the icon; the grip and the buttons always stay. */
 internal fun tileHeaderParts(widthDp: Float): TileHeaderParts =
@@ -353,7 +362,9 @@ private class TileScopeImpl<K>(
 // ---------------------------------------------------------------------------------------------------------------
 
 /**
- * Lays [fullLayout] out in a [widthDp] x [heightDp] dp host and runs [content] to emit the tiles.
+ * Lays [fullLayout] out in a [widthDp] x [heightDp] dp host and runs [content] to emit the tiles. The tiles use [widthDp] less the spec's
+ * `scrollEdgeRoomDp`: that strip at the right edge belongs to the surface (so a scrolling column that ends there can draw its scrollbar in it)
+ * but holds no tile.
  *
  * [isVisible] and [parked] decide which leaves take part in the geometry (the layout is projected onto the visible,
  * non-parked ones); [collapsed] tiles shrink to their header; a [parked] tile stays composed but measured 0 x 0, so its body keeps
@@ -381,9 +392,10 @@ internal fun <K> TilingSurface(
     val projection = projectTileLayout(layout, shown)
     val sizingOf: (K) -> TileSizing? = { drag.measured.sizingOf(it, spec.scrollMaxDp) }
     val maximizedId: K? = maximized?.takeIf { id -> projection != null && id in tileLeafSections(projection.root) }
+    val tilesWidthDp = max(0f, widthDp - spec.scrollEdgeRoomDp)
     val geometry: TileGeometry<K> = when {
-        maximizedId != null -> maximizedTileGeometry(maximizedId, widthDp, heightDp)
-        projection != null -> tileGeometry(projection.root, widthDp, heightDp, spec.geometrySpec(), collapsed, spec.scrolls, sizingOf)
+        maximizedId != null -> maximizedTileGeometry(maximizedId, tilesWidthDp, heightDp)
+        projection != null -> tileGeometry(projection.root, tilesWidthDp, heightDp, spec.geometrySpec(), collapsed, spec.scrolls, sizingOf)
         else -> TileGeometry(emptyList(), emptyList())
     }
     val composedIds = tileLeafSections(layout).filterTo(HashSet()) { isVisible(it) } + parked
@@ -391,7 +403,7 @@ internal fun <K> TilingSurface(
         spec = spec,
         callbacks = callbacks,
         geometry = geometry,
-        host = TileRect(0f, 0f, widthDp, heightDp),
+        host = TileRect(0f, 0f, tilesWidthDp, heightDp),
         fullLayout = fullLayout,
         composed = { it in composedIds },
         collapsed = collapsed,
@@ -407,12 +419,12 @@ internal fun <K> TilingSurface(
     // Drops are hit-tested against what is on screen, which differs from the geometry inside a scrolled column.
     val suppressed = drag.dragged?.let(callbacks.suppressDrop) == true
     val target = drag.dragged?.takeIf { !suppressed }?.let { dragged ->
-        drag.pointer?.let { tileDropTargetAt(scope.visibleGeometry(), widthDp, heightDp, it.x, it.y, dragged) }
+        drag.pointer?.let { tileDropTargetAt(scope.visibleGeometry(), tilesWidthDp, heightDp, it.x, it.y, dragged) }
     }
     // A drag from outside answers to the same maths: the resolver turns a window pixel into the target a release there would drop on.
     val resolveExternal: (Offset) -> TileDropTarget<K>? = { root ->
         external?.let {
-            tileDropTargetAt(scope.visibleGeometry(), widthDp, heightDp, (root.x - drag.hostRoot.x) / density, (root.y - drag.hostRoot.y) / density, it.id)
+            tileDropTargetAt(scope.visibleGeometry(), tilesWidthDp, heightDp, (root.x - drag.hostRoot.x) / density, (root.y - drag.hostRoot.y) / density, it.id)
         }
     }
     SideEffect { external?.resolver = resolveExternal }
@@ -559,7 +571,7 @@ private fun <K> TilingLayout(
                 when (val id = measurable.layoutId) {
                     is TileCardKey -> placeAt(measurable, cards[id.key]?.rect, density, cards[id.key]?.scrollRegion)
                     is TileGapKey -> placeAt(measurable, gaps.getOrNull(id.index)?.rect, density, gaps.getOrNull(id.index)?.scrollRegion)
-                    is TileScrollbarKey -> placeAt(measurable, regions.getOrNull(id.index)?.let(::scrollbarRect), density, null)
+                    is TileScrollbarKey -> placeAt(measurable, regions.getOrNull(id.index)?.let { tileScrollbarRect(it) }, density, null)
                     else -> {
                         if (!warned[0]) {
                             warned[0] = true
@@ -579,10 +591,6 @@ private fun <K> TilingLayout(
     }
     Layout(content = content, modifier = modifier, measurePolicy = policy)
 }
-
-// The scrollbar's strip: the right edge of the column's viewport.
-private fun <K> scrollbarRect(region: TileScrollRegion<K>): TileRect =
-    TileRect(region.viewport.right - TILE_SCROLLBAR_DP, region.viewport.y, TILE_SCROLLBAR_DP, region.viewport.h)
 
 private class PlacedTile(val placeable: Placeable, val x: Int, val y: Int, val region: Int?)
 
@@ -677,7 +685,7 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
     val tc = tc()
     val prefix = s.spec.tagPrefix
     val key = s.spec.keyOf(id)
-    val parts = tileHeaderParts(rect?.w ?: 0f)
+    val parts = slot.headerParts?.invoke(rect?.w ?: 0f) ?: tileHeaderParts(rect?.w ?: 0f)
     val callbacks = s.callbacks
     Row(
         Modifier.fillMaxWidth().height(s.spec.headerDp.dp).padding(horizontal = 8.dp).testTag("$prefix-header-$key"),
@@ -697,23 +705,41 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
                 modifier = titleModifier,
             )
         }
-        if (parts.showSummary && slot.summary != null) {
-            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
-                title(Modifier.weight(1f, fill = false))
-                AppText(
-                    slot.summary,
-                    color = tc.td,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+        // The title (and summary) take the free room, which puts the header action at the right edge. With [TileSlot.actionsFollowTitle] the
+        // title and the action share one weighted group instead: the title takes what it needs (it shortens first when the room is short), the
+        // action follows it, and the free room is after the group, before the header icons.
+        val titleGroup: @Composable (Modifier) -> Unit = { groupModifier ->
+            if (parts.showSummary && slot.summary != null) {
+                Row(groupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
+                    title(Modifier.weight(1f, fill = false))
+                    AppText(
+                        slot.summary,
+                        color = tc.td,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                }
+            } else {
+                title(groupModifier)
             }
-        } else {
-            title(Modifier.weight(1f))
         }
         // The header actions may place TileScope.MaximizeButton, which names its tile after this local (as in a headerless body).
-        slot.headerAction?.let { action -> CompositionLocalProvider(LocalTileTitle provides slot.title) { action(this@Row) } }
+        val actions: @Composable RowScope.() -> Unit = {
+            slot.headerAction?.let { action ->
+                CompositionLocalProvider(LocalTileTitle provides slot.title, LocalTileHeaderWidthDp provides (rect?.w ?: 0f)) { action(this) }
+            }
+        }
+        if (slot.actionsFollowTitle) {
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
+                if (parts.showTitle) titleGroup(Modifier.weight(1f, fill = false))
+                actions()
+            }
+        } else {
+            if (parts.showTitle) titleGroup(Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
+            actions()
+        }
         if (slot.collapsible && !s.stacked) {
             val label = if (collapsed) "Expand" else "Collapse"
             TileIconButton(

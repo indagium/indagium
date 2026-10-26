@@ -26,6 +26,8 @@ internal fun BoundAnnotationPanel(
     onPanelFocusChanged: (Boolean) -> Unit,
     showDiagramLibrary: Boolean = true,
     modifier: Modifier = Modifier.fillMaxSize(),
+    actionsInHeader: Boolean = false,
+    copyFeedbackState: CopyFeedbackState? = null,
 ) {
     AnnotationPanel(
         tab = tab,
@@ -99,6 +101,8 @@ internal fun BoundAnnotationPanel(
         highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
         modifier = modifier,
         showDiagramLibrary = showDiagramLibrary,
+        actionsInHeader = actionsInHeader,
+        copyFeedbackState = copyFeedbackState,
     )
 }
 

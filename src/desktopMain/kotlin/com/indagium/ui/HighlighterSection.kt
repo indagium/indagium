@@ -370,6 +370,9 @@ internal fun HighlighterSection(
                     }
                 }
             }
+        } else if (fpState.highlightersExpanded) {
+            // No highlighters (or the list folded): the empty list is still the flex part, so the add form sits at the bottom of a taller tile.
+            EmptyFlexRegion(Modifier.testTag("filter-highlighters-list"))
         }
         if (fpState.highlightersExpanded) {
             HighlighterAddForm(

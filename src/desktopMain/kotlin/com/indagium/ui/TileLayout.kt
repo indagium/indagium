@@ -106,9 +106,11 @@ data class TileGap(
 /**
  * A scrolling column: [key] is its first leaf (stable while the column is), [viewport] the rect it shows and [contentHeight] the
  * height of its children plus gaps. Rects of the cards and gaps inside are in unscrolled content coordinates (the viewport's top is
- * content offset 0); the host shifts them by the scroll offset.
+ * content offset 0); the host shifts them by the scroll offset. [roomRightDp] is the width of the gap beyond the viewport's right edge
+ * (the column gap to its neighbour, or the room the surface keeps at the host's edge): the column's scrollbar is drawn there, so
+ * the cards themselves never give up any width for it.
  */
-data class TileScrollRegion<K>(val key: K, val viewport: TileRect, val contentHeight: Float) {
+data class TileScrollRegion<K>(val key: K, val viewport: TileRect, val contentHeight: Float, val roomRightDp: Float = 0f) {
     /** How far the content can scroll (dp); 0 while it fits. */
     val maxOffset: Float get() = if (contentHeight - viewport.h > TILE_SCROLL_EPSILON_DP) contentHeight - viewport.h else 0f
 
@@ -139,9 +141,10 @@ data class TileGeometry<K>(val cards: List<TileCardRect<K>>, val gaps: List<Tile
  * What [tileGeometry] needs besides the tree. [gapRowDp] separates side-by-side children (a ROW split), [gapColumnDp]
  * stacked ones (a COLUMN split). [minTileDp] is the least a weighted child is squeezed to by pinned siblings and the least a
  * resize leaves a tile along the split axis; [minPairShare] is the least share of a pair's total weight a resize leaves.
- * [scrollMinDp] / [scrollMaxDp] bound the height of a pinned tile in a scrolling column. [scrollGutterDp] is the strip along a scrolling
- * column's right edge the cards leave free (for the column's scrollbar), and [scrollEndHandle] adds a gap below its last tile, the splitter
- * that resizes that tile.
+ * [scrollMinDp] / [scrollMaxDp] bound the height of a pinned tile in a scrolling column. [scrollEdgeRoomDp] is the room the surface keeps
+ * beyond the host's right edge (outside the width the geometry is laid out in): a scrolling column that ends at that edge draws its scrollbar
+ * there, one that has a neighbour draws it in the [gapRowDp] gap, so the cards of a column are the same width whether or not it overflows.
+ * [scrollEndHandle] adds a gap below its last tile, the splitter that resizes that tile.
  */
 data class TileGeometrySpec(
     val gapRowDp: Float,
@@ -151,7 +154,7 @@ data class TileGeometrySpec(
     val minPairShare: Float,
     val scrollMinDp: Float = minTileDp,
     val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
-    val scrollGutterDp: Float = 0f,
+    val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
 )
 
@@ -660,13 +663,19 @@ internal fun <K> tileGeometry(
     scrolls: (K) -> Boolean = { false },
     sizing: (K) -> TileSizing? = { null },
 ): TileGeometry<K> {
-    val layout = TileLayoutRun(spec, collapsed, scrolls, sizing)
+    val layout = TileLayoutRun(spec, collapsed, scrolls, sizing, width)
     layout.node(root, TileRect(0f, 0f, width, height), emptyList(), null)
     return TileGeometry(layout.cards, layout.gaps, layout.regions)
 }
 
 // One geometry computation: the settings it runs with and the lists it fills. [region] is the scrolling column a node sits in, if any.
-private class TileLayoutRun<K>(val spec: TileGeometrySpec, val collapsed: Set<K>, val scrolls: (K) -> Boolean, val sizing: (K) -> TileSizing?) {
+private class TileLayoutRun<K>(
+    val spec: TileGeometrySpec,
+    val collapsed: Set<K>,
+    val scrolls: (K) -> Boolean,
+    val sizing: (K) -> TileSizing?,
+    val hostWidth: Float,
+) {
     val cards = mutableListOf<TileCardRect<K>>()
     val gaps = mutableListOf<TileGap>()
     val regions = mutableListOf<TileScrollRegion<K>>()
@@ -705,9 +714,10 @@ private class TileLayoutRun<K>(val spec: TileGeometrySpec, val collapsed: Set<K>
         val extent = max(0f, rect.h - gapTotal)
         val plan = scrollPlan(split, extent, spec.minTileDp, spec.scrollMinDp, spec.collapsedExtentDp, collapsed, sizing)
         val region = regions.size
-        regions += TileScrollRegion(tileLeafSections(split).first(), rect, plan.sizes.sumOf { it.toDouble() }.toFloat() + gapTotal)
-        // The cards and gaps leave the column's right-hand gutter free for its scrollbar.
-        val width = max(0f, rect.w - spec.scrollGutterDp)
+        // The scrollbar lives beyond the column's right edge: in the gap to the next column, or at the host's edge in the room kept there.
+        val room = if (rect.right >= hostWidth - TILE_SCROLL_EPSILON_DP) spec.scrollEdgeRoomDp else spec.gapRowDp
+        regions += TileScrollRegion(tileLeafSections(split).first(), rect, plan.sizes.sumOf { it.toDouble() }.toFloat() + gapTotal, room)
+        val width = rect.w
 
         fun resizable(tile: Int): Boolean = !plan.collapsed[tile] && plan.sizing[tile]?.resizable != false
 

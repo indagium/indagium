@@ -79,13 +79,14 @@ internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
 
 /**
- * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections. A column that holds the log, an Original or Video
- * always fits its window: the log tiles want all the height they get, and Video's height is pinned per capture device. The toolbar tile
- * keeps its column fitting too, so the toolbar can never be scrolled out of reach.
+ * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections and the toolbar tile (a content-sized one, as tall as its
+ * wrapped rows of buttons). A column that holds the log, an Original or Video always fits its window: the log tiles want all the height they
+ * get, and Video's height is pinned per capture device. A column with the toolbar tile in it scrolls like any other, so the toolbar may scroll
+ * out of view there; moving it somewhere else is the user's choice.
  */
 internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
     LogViewSectionId.LOG, LogViewSectionId.ORIGINAL, LogViewSectionId.LOG_A, LogViewSectionId.LOG_B,
-    LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B, LogViewSectionId.VIDEO, LogViewSectionId.TOOLBAR,
+    LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B, LogViewSectionId.VIDEO,
     -> false
     else -> true
 }

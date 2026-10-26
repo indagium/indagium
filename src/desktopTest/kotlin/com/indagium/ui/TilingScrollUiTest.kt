@@ -58,6 +58,7 @@ private const val HOST_H = 400
 private const val GAP_DP = 8f
 private const val COLUMN_WIDTH_DP = 300f
 private const val COLUMN_CENTER_FROM_RIGHT_DP = 150f
+private const val EDGE_ROOM_DP = 8f
 private const val OUTER_EXTRA_DP = 400
 private const val WHEEL_TURNS_TO_END = 40
 private const val WHEEL_TURN = 200f
@@ -405,9 +406,9 @@ class TilingScrollUiTest {
         splitter.performTouchInput { up() }
     }
 
-    // ---- content-sized tiles (the log view's setup: gutter, end handle, bodies that report what they need) ----------
+    // ---- content-sized tiles (the log view's setup: edge room, end handle, bodies that report what they need) ----------
 
-    private val sizedSpec = SCROLL_SPEC.copy(scrollGutterDp = TILE_SCROLL_GUTTER_DP, scrollEndHandle = true)
+    private val sizedSpec = SCROLL_SPEC.copy(scrollEdgeRoomDp = EDGE_ROOM_DP, scrollEndHandle = true)
 
     // B: 50 dp of content. C: 50 dp that always shows and a list of 20 rows of 24 dp (480 dp). D: the same list with 3 rows (72 dp).
     // E: content again.
@@ -451,13 +452,13 @@ class TilingScrollUiTest {
         }
         // The list scrollbars inside the cards are inside the cards, so they are clear of it too.
         assertTrue(bounds("t-card-c").right.value <= bar.left.value)
-        // The strip is kept whether the column overflows or not: the card is just as wide with nothing to scroll.
+        // The column gives up no width for the bar: the card is just as wide with nothing to scroll, and ends where the host's edge room starts.
         val wide = bounds("t-card-b").width.value
         layout = layoutOf(ScrollTile.B to null)
         rule.waitForIdle()
         assertTrue(!exists("t-scrollbar-b"))
         assertEquals(wide, bounds("t-card-b").width.value, 0.5f)
-        assertEquals(HOST_W - TILE_SCROLL_GUTTER_DP, bounds("t-card-b").right.value, 0.5f)
+        assertEquals(HOST_W - EDGE_ROOM_DP, bounds("t-card-b").right.value, 0.5f)
     }
 
     @Test
@@ -642,10 +643,9 @@ class TilingScrollUiTest {
         // The shared thin bar is THIN_SCROLLBAR_DP wide; a list's scrollbar in a card (the flex region's) is the same helper.
         assertEquals(THIN_SCROLLBAR_DP, bounds("t-scrollbar-b").width.value, 0.1f)
         assertEquals(TILE_SCROLLBAR_DP, THIN_SCROLLBAR_DP)
-        // And the strip the cards leave for it is that bar plus a small gap, no more.
-        assertEquals(THIN_SCROLLBAR_DP + TILE_SCROLLBAR_GAP_DP, TILE_SCROLL_GUTTER_DP, 0.01f)
-        assertTrue(TILE_SCROLL_GUTTER_DP <= 8f)
-        assertEquals(HOST_W - TILE_SCROLL_GUTTER_DP, bounds("t-card-b").right.value, 0.5f)
-        assertEquals(HOST_W.toFloat(), bounds("t-scrollbar-b").right.value, 0.5f)
+        // The cards use all of the column; the bar sits in the room beyond it, centred, with a dp to spare on each side.
+        assertEquals(HOST_W - EDGE_ROOM_DP, bounds("t-card-b").right.value, 0.5f)
+        assertEquals(HOST_W - EDGE_ROOM_DP + TILE_SCROLLBAR_CLEARANCE_DP, bounds("t-scrollbar-b").left.value, 0.5f)
+        assertEquals(HOST_W - TILE_SCROLLBAR_CLEARANCE_DP, bounds("t-scrollbar-b").right.value, 0.5f)
     }
 }

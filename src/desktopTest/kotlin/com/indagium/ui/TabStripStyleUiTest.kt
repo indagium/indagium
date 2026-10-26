@@ -13,12 +13,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
@@ -32,9 +38,12 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.DpRect
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.sp
@@ -42,6 +51,7 @@ import androidx.compose.ui.unit.width
 import com.indagium.model.LogTab
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
+import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import org.junit.After
 import org.junit.Rule
@@ -414,6 +424,82 @@ class TabStripStyleUiTest {
             rule.onNodeWithText("File (+ folder if same name)").performClick()
             rule.waitForIdle()
             assertEquals(TabLabelMode.FILE_SESSION, state.settings.tabLabelMode)
+        }
+    }
+
+    // ---- the selection, hover and focus highlights follow the tab's own shape -------------------------------------------------------------------
+
+    private fun roundedCorners(shape: Shape, width: Float, height: Float): Set<String> {
+        val outline = shape.createOutline(Size(width, height), LayoutDirection.Ltr, Density(1f))
+        val r = (outline as? Outline.Rounded)?.roundRect ?: return emptySet()
+        return buildSet {
+            if (r.topLeftCornerRadius.x > 0f) add("tl")
+            if (r.topRightCornerRadius.x > 0f) add("tr")
+            if (r.bottomLeftCornerRadius.x > 0f) add("bl")
+            if (r.bottomRightCornerRadius.x > 0f) add("br")
+        }
+    }
+
+    @Test
+    fun theTabShapesAreTheCardsOpenSidedShapeThePillAndARectangleForTheRest() {
+        assertEquals(RectangleShape, tabShape(TabStripStyle.CURRENT, TabStripPosition.TOP))
+        val raised = mapOf(
+            TabStripPosition.TOP to RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp),
+            TabStripPosition.BOTTOM to RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp),
+            TabStripPosition.LEFT to RoundedCornerShape(topStart = 8.dp, bottomStart = 8.dp),
+            TabStripPosition.RIGHT to RoundedCornerShape(topEnd = 8.dp, bottomEnd = 8.dp),
+        )
+        raised.forEach { (position, shape) -> assertEquals(shape, tabShape(TabStripStyle.RAISED, position), "raised on $position") }
+        TabStripPosition.entries.forEach { assertEquals(RoundedCornerShape(6.dp), tabShape(TabStripStyle.SEGMENTED, it)) }
+        listOf(TabStripStyle.TYPED, TabStripStyle.COMPACT, TabStripStyle.SOURCE_STRIPE, TabStripStyle.TWO_LINE, TabStripStyle.QUIET).forEach { style ->
+            TabStripPosition.entries.forEach { assertEquals(RectangleShape, tabShape(style, it), "$style") }
+        }
+    }
+
+    // A tab under the mouse (the hover highlight of its click), selected or not, in every style on every edge: the rounded corners of its shape
+    // stay the strip's own colour, so nothing lights up as a rectangle behind the card or the pill.
+    @Test
+    fun hoveringATabNeverTintsTheCornersItsShapeCutsOffInAnyStyleOrPosition() {
+        directory = createTempDirectory("tab-strip-style-shape").toFile()
+        TabStripPosition.entries.forEach { position ->
+            listOf(true, false).forEach { active ->
+                rule.setContent {
+                    CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                        Column(Modifier.width(300.dp)) {
+                            TabStripStyle.entries.forEach { style ->
+                                Box(Modifier.width(240.dp).background(tabStripBackground(style, LIGHT_THEME))) {
+                                    TabShell(
+                                        pointerKey = style.name, label = "shape.log", tooltip = "t", isActive = active, showClose = true,
+                                        onClick = {}, onClose = {}, appearance = TabAppearance(style = style, position = position),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+                rule.waitForIdle()
+                TabStripStyle.entries.forEach { style ->
+                    val node = rule.onNodeWithTag("tab-${style.name}")
+                    node.performMouseInput { moveTo(center) }
+                    rule.waitForIdle()
+                    val image = node.captureToImage().toPixelMap()
+                    val behind = tabStripBackground(style, LIGHT_THEME).toArgb()
+                    val corners = mapOf(
+                        "tl" to (0 to 0), "tr" to (image.width - 1 to 0),
+                        "bl" to (0 to image.height - 1), "br" to (image.width - 1 to image.height - 1),
+                    )
+                    val rounded = roundedCorners(tabShape(style, position), image.width.toFloat(), image.height.toFloat())
+                    corners.filterKeys { it in rounded }.forEach { (name, at) ->
+                        assertEquals(
+                            behind, image[at.first, at.second].toArgb(),
+                            "$style on $position (selected=$active): the $name corner outside the tab's shape is the strip's colour",
+                        )
+                    }
+                    // The shapes that are not plain rectangles really do cut corners, and the open side of a raised card does not.
+                    if (style == TabStripStyle.SEGMENTED) assertEquals(setOf("tl", "tr", "bl", "br"), rounded)
+                    if (style == TabStripStyle.RAISED) assertEquals(2, rounded.size, "raised on $position: the open side stays square")
+                }
+            }
         }
     }
 }

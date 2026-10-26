@@ -56,8 +56,9 @@ private const val DEFAULT_LOG_LEVEL_DP = 80f
 private const val PIN_EPSILON_DP = 0.5f
 
 /**
- * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]) with a scrollbar
- * gutter and a splitter under their last tile.
+ * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]) with a splitter
+ * under their last tile. A column's scrollbar is drawn in the 8 dp gap beside it (1 dp, the 6 dp bar, 1 dp), or, for a column at the right edge, in the
+ * 6 dp host padding (1 dp, a 4 dp bar, 1 dp), which is therefore given to the surface (the edge room of [LOG_VIEW_CHROME_SPEC]) rather than left outside it.
  */
 internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     headerDp = LOG_VIEW_TILE_HEADER_DP,
@@ -72,7 +73,7 @@ internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     scrollMinDp = LOG_VIEW_PIN_MIN_DP,
     scrollMaxDp = LOG_VIEW_PIN_MAX_DP,
     scrolls = ::logViewScrollsInColumn,
-    scrollGutterDp = TILE_SCROLL_GUTTER_DP,
+    scrollEdgeRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
 )
 
@@ -164,7 +165,12 @@ internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @C
             restoring
         },
     ) {
-        Box(Modifier.fillMaxSize().padding(LOG_VIEW_HOST_PAD_DP.dp).onSizeChanged { sizePx = it }) {
+        // No padding at the right: that strip belongs to the surface (LOG_VIEW_CHROME_SPEC's edge room), where a scrolling column's scrollbar goes.
+        Box(
+            Modifier.fillMaxSize()
+                .padding(start = LOG_VIEW_HOST_PAD_DP.dp, top = LOG_VIEW_HOST_PAD_DP.dp, bottom = LOG_VIEW_HOST_PAD_DP.dp)
+                .onSizeChanged { sizePx = it },
+        ) {
             val widthDp = sizePx.width / density
             val heightDp = sizePx.height / density
             // Until the first measurement there is nothing to lay out; mounting a surface at 0 x 0 would only be torn down again.
@@ -201,6 +207,7 @@ internal fun LogViewSurface(
             callbacks = callbacks,
             // The toolbar's card is a slim one, not a screenful.
             heightOf = { id -> TOOLBAR_STACKED_CARD_DP.takeIf { id == LogViewSectionId.TOOLBAR } },
+            modifier = Modifier.padding(end = LOG_VIEW_HOST_PAD_DP.dp),
             content = content,
         )
     } else {
@@ -351,15 +358,42 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     collapsible: Boolean,
     diagramsShown: Boolean,
 ) {
+    // The Notes actions are part of the tile's header row (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy feedback they and the
+    // panel's preview dialog and shortcut share.
+    val copyFeedback = rememberCopyFeedback(tab.id) { format, done -> state.copyAnnotationFormatAsync(tab.id, format, done) }
+    val actions = NotesActionModel(
+        tab = tab,
+        defaultFormat = state.settings.annotationCopyFormat,
+        feedback = copyFeedback,
+        locked = LocalNotesEditLocked.current,
+        recentNotes = state.recentNotesForTab(tab),
+        recentMenuOpen = state.recentNotesMenuOpen,
+        activeNotePath = state.activeNoteFilePath(tab),
+        onToggleMd = { state.toggleMd(tab.id) },
+        onSave = { state.saveAnalysis(tab.id) },
+        onNewAnalysis = { state.newAnalysis(tab.id) },
+        onToggleRecentNotes = { state.toggleRecentNotesMenu() },
+        onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+        onLocateLog = { state.locateLogForTab(tab.id, it) },
+        onReclaimFocus = { runCatching { focus.notes.requestFocus() } },
+    )
+    // Collapse (when it is in a column), maximize and hide are the header icons the buttons must leave room for.
+    val headerIcons = (if (collapsible) 1 else 0) + 2
     Tile(
         LogViewSectionId.NOTES,
         TileSlot(
             icon = Icons.AutoMirrored.Outlined.StickyNote2,
             title = logViewTileTitle(LogViewSectionId.NOTES),
             summary = notesSummary(tab.annotations),
+            headerAction = {
+                val layout = notesHeaderLayout(LocalTileHeaderWidthDp.current, actions.hasLocate, actions.hasRecent, headerIcons)
+                NotesActionButtons(actions, layout)
+            },
+            headerParts = { width -> notesHeaderParts(width, notesHeaderLayout(width, actions.hasLocate, actions.hasRecent, headerIcons)) },
+            actionsFollowTitle = true,
             collapsible = collapsible,
             maximizable = true,
-            // The toolbar above the scrolling note list stays; the list is the flex part (AnnotationPanel).
+            // The note list below the header is the flex part (AnnotationPanel).
             sizing = TileBodySizing.FLEX,
             body = { info ->
                 BoundAnnotationPanel(
@@ -370,6 +404,8 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
                     onPanelFocusChanged = { focused -> if (focused) focus.onPanelFocused(focus.notes) },
                     // With the Diagram library as its own tile the Notes panel leaves its built-in section out.
                     showDiagramLibrary = !diagramsShown,
+                    actionsInHeader = true,
+                    copyFeedbackState = copyFeedback,
                 )
             },
         ),
@@ -406,12 +442,13 @@ internal fun TileScope<LogViewSectionId>.AiTile(state: AppState, tab: LogTab, fo
             maximizable = true,
             // The conversation is the flex part; the prompt composer under it stays (AiSidebarPanel).
             sizing = TileBodySizing.FLEX,
-            body = {
+            body = { info ->
                 AiSidebarPanel(
                     state = state,
                     tab = tab,
                     focusRequester = focus.ai,
                     onPanelFocusChanged = { focused -> if (focused) focus.onPanelFocused(focus.ai) },
+                    bodyHeightDp = info.heightDp,
                 )
             },
         ),

@@ -13,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,11 +64,13 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
@@ -193,6 +196,8 @@ internal fun AiSidebarPanel(
     tab: LogTab,
     focusRequester: FocusRequester,
     onPanelFocusChanged: (Boolean) -> Unit,
+    // The height (dp) of the tile body the panel fills, which caps how tall the message box can be made; null where there is no such tile.
+    bodyHeightDp: Float? = null,
 ) {
     val colors = tc()
     val runtime = state.aiSidebarRuntime
@@ -212,6 +217,9 @@ internal fun AiSidebarPanel(
     val scroll = rememberScrollState()
     var panelFocused by remember { mutableStateOf(false) }
     var prompt by remember(tab.id) { mutableStateOf("") }
+    // How tall the message box is (dp); session-only, like it was before the tile: dragging the handle on its top edge changes it.
+    var promptEditorDp by remember { mutableStateOf(COMPOSER_EDITOR_HEIGHT_DP.toFloat()) }
+    val promptEditorMaxDp = composerEditorMaxDp(bodyHeightDp)
     var modelDraft by remember(profile.id, profile.model) { mutableStateOf(profile.model) }
     var reasoningEffortDraft by remember(profile.id, profile.reasoningEffort) { mutableStateOf(profile.reasoningEffort) }
     var keyDraft by remember(profile.id) { mutableStateOf(state.aiProviderApiKey(profile.id)) }
@@ -468,6 +476,8 @@ internal fun AiSidebarPanel(
         AiPromptComposer(
             tabId = tab.id,
             prompt = prompt,
+            editorHeightDp = promptEditorDp.coerceIn(COMPOSER_EDITOR_HEIGHT_DP.toFloat(), promptEditorMaxDp),
+            onEditorHeightChange = { promptEditorDp = it.coerceIn(COMPOSER_EDITOR_HEIGHT_DP.toFloat(), promptEditorMaxDp) },
             running = session.activeRun,
             retryAvailable = session.activeRun == null && session.lastPrompt != null,
             customCommands = state.customAiCommands,
@@ -1430,6 +1440,8 @@ private fun AiConfirmationCard(
 private fun AiPromptComposer(
     tabId: String,
     prompt: String,
+    editorHeightDp: Float,
+    onEditorHeightChange: (Float) -> Unit,
     running: AiRun?,
     retryAvailable: Boolean,
     customCommands: List<CustomAiCommand>,
@@ -1561,7 +1573,7 @@ private fun AiPromptComposer(
             }
         }
         Box(
-            Modifier.fillMaxWidth().height(COMPOSER_EDITOR_HEIGHT_DP.dp).testTag("ai-prompt-field")
+            Modifier.fillMaxWidth().height(editorHeightDp.dp).testTag("ai-prompt-field")
                 .onGloballyPositioned { fieldWidthPx = it.size.width }
                 .onSizeChanged { promptViewportHeightPx = it.height },
         ) {
@@ -1630,6 +1642,18 @@ private fun AiPromptComposer(
                     size = 16.dp,
                 )
             }
+            // The handle on the field's top edge: an invisible strip with the vertical-resize cursor, like the tile splitters. Dragging up makes the
+            // field taller (the conversation above it gives way), double-click puts it back to its starting height. It stops short of the clear button.
+            val currentHeight = rememberUpdatedState(editorHeightDp)
+            val currentChange = rememberUpdatedState(onEditorHeightChange)
+            Box(
+                Modifier.align(Alignment.TopStart).fillMaxWidth().padding(end = 28.dp).height(COMPOSER_HANDLE_DP.dp)
+                    .testTag("ai-prompt-resize")
+                    .semantics { contentDescription = "Resize message box" }
+                    .pointerInput(Unit) { detectTapGestures(onDoubleTap = { currentChange.value(COMPOSER_EDITOR_HEIGHT_DP.toFloat()) }) },
+            ) {
+                VDivider(showLine = false) { delta -> currentChange.value(currentHeight.value - delta) }
+            }
             if (suggestions.isNotEmpty()) {
                 Popup(
                     alignment = Alignment.TopStart,
@@ -1694,8 +1718,19 @@ private fun AiPromptComposer(
     }
 }
 
-/** The composer's text field is this tall (dp) in every tile: the conversation above it takes whatever the tile gives. */
+/** The composer's text field starts this tall (dp) in every tile, and is never shorter: the conversation above it takes whatever the tile gives. */
 private const val COMPOSER_EDITOR_HEIGHT_DP = 60
+
+// The most the field is made tall: this share of the tile body (the conversation keeps the rest, with the buttons under the field).
+private const val COMPOSER_MAX_BODY_SHARE = 0.6f
+private const val COMPOSER_FALLBACK_BODY_DP = 440f
+
+// The resize handle's height on the field's top edge.
+private const val COMPOSER_HANDLE_DP = 8
+
+/** The tallest (dp) the message box may be made in a tile body [bodyHeightDp] tall (a fixed body where there is no tile), never under its starting height. */
+internal fun composerEditorMaxDp(bodyHeightDp: Float?): Float =
+    ((bodyHeightDp?.takeIf { it > 0f } ?: COMPOSER_FALLBACK_BODY_DP) * COMPOSER_MAX_BODY_SHARE).coerceAtLeast(COMPOSER_EDITOR_HEIGHT_DP.toFloat())
 
 // As tall as the buttons beside it (an AppButton is 24 dp: 12 sp text + 5 dp padding above and below).
 private val COMPOSER_MIC_SIZE = 24.dp
