@@ -42,6 +42,7 @@ import com.indagium.ui.TileEdge
 import com.indagium.ui.classicLogViewLayout
 import com.indagium.ui.compareColumnsLayout
 import com.indagium.ui.compareGridLayout
+import com.indagium.ui.dropTile
 import com.indagium.ui.effectiveCompareLayout
 import com.indagium.ui.effectiveLogViewLayout
 import com.indagium.ui.isLogTile
@@ -49,6 +50,7 @@ import com.indagium.ui.layoutMenuPanels
 import com.indagium.ui.logViewDropLabel
 import com.indagium.ui.logViewFocusOrder
 import com.indagium.ui.logViewHiddenBadgeCount
+import com.indagium.ui.logViewLoneColumn
 import com.indagium.ui.logViewPresetIsActive
 import com.indagium.ui.logViewScrollsInColumn
 import com.indagium.ui.logViewTileApplicable
@@ -334,7 +336,8 @@ class LogViewLayoutTest {
         val all = nodes(sanitized)
         assertTrue(all.all { it.weight.isFinite() && it.weight > 0f })
         assertTrue(all.mapNotNull { it.sizeDp }.all { it in 80f..2000f })
-        val diagrams = all.first { it is TileLeaf && it.section == DIAGRAMS }
+        // Diagrams sits alone as a column of the row, so its width pin is on the one-tile column around it.
+        val diagrams = all.first { it is TileSplit && it.children.singleOrNull().let { only -> only is TileLeaf && only.section == DIAGRAMS } }
         assertEquals(80f, diagrams.sizeDp)
         assertTrue(all.any { it.sizeDp == 2000f })
     }
@@ -706,6 +709,83 @@ class LogViewLayoutTest {
         val back = ((stored as TileSplit).children[0] as TileSplit).children
         assertEquals(640f, back[0].sizeDp)
         assertEquals(80f, back[1].sizeDp, "a height under the minimum is raised to it")
+    }
+
+    // ---- a tile alone where a column would be ------------------------------------------------------------------
+
+    // The root row's last child after Saved filters was dropped on the page's right edge, i.e. on its own to the right of every column.
+    private fun droppedAlone(id: LogViewSectionId, toolbar: Boolean = false): Pair<AppSettings, TileNode<LogViewSectionId>> {
+        val settings = AppSettings(toolbarPlacement = if (toolbar) ToolbarPlacement.IN_LAYOUT else ToolbarPlacement.OWN_EDGE)
+        val base = assertNotNull(settings.withLogViewLayout(classicLogViewLayout(sizes)).logViewLayout)
+        // Dropped without telling dropTile about lone tiles: storing the tree is what has to make it a column.
+        val stored = settings.withLogViewLayout(dropTile(base, id, TileDropTarget.OnPage(TileEdge.RIGHT)))
+        return stored to children(assertNotNull(stored.logViewLayout)).last()
+    }
+
+    @Test
+    fun aSideTileDroppedAloneBesideTheColumnsIsStoredInAOneTileColumn() {
+        val (stored, last) = droppedAlone(SAVED_FILTERS)
+        assertEquals(TileAxis.COLUMN, (last as TileSplit).axis)
+        assertEquals(listOf(SAVED_FILTERS), leafIds(last))
+        assertEquals(1, last.children.size)
+        // It is a scrolling column with a handle under it, and not a card stretched over the window.
+        val projection = assertNotNull(projectTileLayout(assertNotNull(stored.logViewLayout)) { true })
+        val geometry = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC.copy(scrollEndHandle = true), emptySet(), ::logViewScrollsInColumn)
+        assertTrue(SAVED_FILTERS in geometry.scrollRegions.map { it.key })
+        assertTrue(geometry.gaps.any { it.scrolling && it.path.size == 1 && it.index == 1 })
+        // The tile is not in the filter column any more and the layout is complete.
+        assertComplete(assertNotNull(stored.logViewLayout), LogViewScope.SINGLE)
+    }
+
+    @Test
+    fun onlyTheSideSectionsAreKeptInAColumnWhenAlone() {
+        LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE && it != TOOLBAR }.forEach { id ->
+            val last = droppedAlone(id).second
+            if (logViewLoneColumn(id)) {
+                assertEquals(listOf(id), leafIds(last), "$id")
+                assertTrue(last is TileSplit && last.axis == TileAxis.COLUMN, "$id is in a column")
+            } else {
+                assertTrue(last is TileLeaf && last.section == id, "$id stays a bare tile")
+            }
+        }
+        // The toolbar tile alone stays a tile of the row, so it can still be the tall narrow toolbar.
+        assertFalse(logViewLoneColumn(TOOLBAR))
+        val toolbar = droppedAlone(TOOLBAR, toolbar = true).second
+        assertTrue(toolbar is TileLeaf && toolbar.section == TOOLBAR)
+    }
+
+    @Test
+    fun aLoneTilesHeightSurvivesLaterEditsSanitizingAndRestarts() {
+        val (stored, last) = droppedAlone(SAVED_FILTERS)
+        val tall = (last as TileSplit).copy(children = listOf(leaf(SAVED_FILTERS, 1f, 333f)))
+        val root = assertNotNull(stored.logViewLayout) as TileSplit
+        val sized = stored.withLogViewLayout(root.copy(children = root.children.dropLast(1) + tall))
+
+        fun height(settings: AppSettings) = findLeaf(assertNotNull(settings.logViewLayout), SAVED_FILTERS).sizeDp
+        assertEquals(333f, height(sized))
+        // An unrelated drop (AI above the log), hiding another tile and a repeated store.
+        val storedSized = assertNotNull(sized.logViewLayout)
+        val moved = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(LOG, TileEdge.TOP), ::logViewLoneColumn))
+        assertEquals(333f, height(moved))
+        assertEquals(333f, height(moved.withLogViewTileHidden(TAGS, true).withLogViewLayout(assertNotNull(moved.logViewLayout))))
+        assertEquals(sized.logViewLayout, sized.withLogViewLayout(assertNotNull(sized.logViewLayout)).logViewLayout)
+        // Dropping a tile at its left puts it beside the column; the height stays.
+        val beside = sized.withLogViewLayout(dropTile(storedSized, AI, TileDropTarget.OnSection(SAVED_FILTERS, TileEdge.LEFT), ::logViewLoneColumn))
+        assertEquals(333f, height(beside))
+        assertEquals(listOf(AI, SAVED_FILTERS), leafIds(beside.logViewLayout!!).filter { it == AI || it == SAVED_FILTERS })
+    }
+
+    @Test
+    fun anOldStoredLayoutWithABareLoneTileIsWrappedWhenItIsRead() {
+        // What an earlier version stored: Saved filters on its own at the right of the other columns.
+        val old = (classicLogViewLayout(sizes) as TileSplit).let { classic ->
+            val withoutSaved = assertNotNull(removeTile(classic, SAVED_FILTERS))
+            (withoutSaved as TileSplit).copy(children = withoutSaved.children + leaf(SAVED_FILTERS, 1f, 200f))
+        }
+        val (tree, _) = sanitizeLogViewLayoutState(old, emptyList(), LogViewScope.SINGLE)
+        val last = children(tree).last()
+        assertEquals(column(leaf(SAVED_FILTERS)).copy(sizeDp = 200f), last, "its width pin moves to the column")
+        assertEquals(tree, sanitizeLogViewLayoutState(tree, emptyList(), LogViewScope.SINGLE).first)
     }
 
     private fun dropToolbar(tree: TileNode<LogViewSectionId>, target: TileDropTarget<LogViewSectionId>) =

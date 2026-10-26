@@ -642,8 +642,8 @@ internal fun AnnotationPanel(
     modifier: Modifier = Modifier.fillMaxHeight(),
     // False when the Diagram library is its own tile (DiagramLibraryTileBody) instead of the top section of this panel.
     showDiagramLibrary: Boolean = true,
-    // True when the Notes tile draws the action buttons (Preview, Copy, Save, New, Open) in its own header row (NotesTile); the panel then leaves
-    // its button bar out. The tile owns the Copy feedback in that case, so the header, the preview dialog and the shortcut share one.
+    // True when the Notes tile draws the action buttons (Preview, Copy, Save, New, Open) in its own header row (NotesTile decides that from the card's
+    // width); the panel then leaves its button bar out. The tile owns the Copy feedback, so the header, the preview dialog and the shortcut share one.
     actionsInHeader: Boolean = false,
     copyFeedbackState: CopyFeedbackState? = null,
 ) {
@@ -1099,9 +1099,9 @@ internal fun AnnotationPanel(
                 modifier = Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 12.dp, vertical = 5.dp),
             )
         }
-        // Without a tile header to hold them (the panel used on its own) the actions get a bar of their own: on the card, no band or border, buttons
-        // TILE_HEADER_GAP_DP apart, left-aligned, a hairline under it, wrapping to a second line at narrow widths instead of clipping. In the Notes tile
-        // they are part of the tile's header row instead (NotesTile).
+        // Without a tile header to hold them (the panel used on its own, or a Notes card too narrow for them next to its title) the actions get a bar
+        // of their own: on the card, no band or border, buttons TILE_HEADER_GAP_DP apart and centred, a hairline under it. The buttons keep their labels
+        // while those fit on one line, then get compact ones, and wrap to a second centred line when even those do not fit, instead of clipping.
         if (!actionsInHeader) {
             val actions = NotesActionModel(
                 tab = tab,
@@ -1122,12 +1122,13 @@ internal fun AnnotationPanel(
             Box(
                 Modifier.fillMaxWidth().heightIn(min = TILE_TOOLBAR_HEIGHT_DP.dp).testTag("notes-toolbar").tileToolbarDivider(tc.br)
                     .padding(horizontal = TILE_TOOLBAR_PADDING_DP.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 FlowRow(
-                    Modifier.align(Alignment.CenterStart),
+                    Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
-                    horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
-                ) { NotesActionButtons(actions) }
+                    horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp, Alignment.CenterHorizontally),
+                ) { NotesActionButtons(actions, notesBarLook(width, actions.hasLocate, actions.hasRecent)) }
             }
         }
         // "Locate log…" landed on this tab but couldn't be checked against anything (Change 2c's

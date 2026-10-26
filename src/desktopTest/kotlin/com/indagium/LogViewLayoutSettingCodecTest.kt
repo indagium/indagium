@@ -22,6 +22,7 @@ import com.indagium.ui.settingsFromToken
 import com.indagium.ui.settingsJson
 import com.indagium.ui.tileLeafSections
 import com.indagium.ui.withComparePreset
+import com.indagium.ui.withLogViewLayout
 import com.indagium.ui.withLogViewPreset
 import com.indagium.ui.withLogViewTileCollapsed
 import com.indagium.ui.withLogViewTileHidden
@@ -53,6 +54,21 @@ class LogViewLayoutSettingCodecTest {
     }
 
     private fun parse(raw: String) = Json.parseToJsonElement(raw)
+
+    @Test
+    fun aLoneTilesColumnAndItsHeightRoundTripThroughSettingsJson() {
+        val classic = LogViewLayoutPreset.CLASSIC.layout(sizes) as TileSplit<LogViewSectionId>
+        val withoutSaved = (classic.children.first() as TileSplit).children
+            .filterNot { c -> c is TileLeaf && c.section == LogViewSectionId.SAVED_FILTERS }
+        val lone = TileSplit(TileAxis.COLUMN, listOf(TileLeaf(LogViewSectionId.SAVED_FILTERS, 1f, 321f)), 1f, 240f)
+        val tree = classic.copy(children = listOf((classic.children.first() as TileSplit).copy(children = withoutSaved)) + classic.children.drop(1) + lone)
+        val stored = AppSettings().withLogViewLayout(tree)
+        val back = decode(stored.settingsJson())
+        assertEquals(stored.logViewLayout, back.logViewLayout)
+        val last = (back.logViewLayout as TileSplit).children.last() as TileSplit
+        assertEquals(240f, last.sizeDp)
+        assertEquals(321f, (last.children.single() as TileLeaf).sizeDp)
+    }
 
     @Test
     fun fullStateRoundTripsThroughKeyedSettingsJson() {

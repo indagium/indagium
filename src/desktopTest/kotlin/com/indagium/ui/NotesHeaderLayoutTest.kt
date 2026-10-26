@@ -7,161 +7,124 @@ import kotlin.test.assertTrue
 
 private const val WIDEST_DP = 1400
 
-/** The pure rules that decide what the Notes tile's one-row header draws at a given card width. */
+/** The pure rules that decide where the Notes tile's action buttons are, and how they look, at a given card width. */
 class NotesHeaderLayoutTest {
     private fun layoutAt(width: Float, hasLocate: Boolean = false, hasRecent: Boolean = false, icons: Int = 3) =
         notesHeaderLayout(width, hasLocate, hasRecent, icons)
 
-    // The distinct layouts met walking the card width down from [from] to 0, widest first.
-    private fun stages(from: Int = WIDEST_DP, hasLocate: Boolean = false, hasRecent: Boolean = false): List<NotesHeaderLayout> =
-        (from downTo 0).map { layoutAt(it.toFloat(), hasLocate, hasRecent) }.distinct()
-
-    private fun layout(summary: Boolean, title: Boolean, look: NotesButtonLook, vararg folded: NotesAction) =
-        NotesHeaderLayout(summary, title, look, folded.toList())
-
-    @Test
-    fun aWideHeaderKeepsTheButtonsTheTitleAndTheSummary() {
-        assertEquals(NotesHeaderLayout.Full, layoutAt(1000f))
-        assertEquals(layout(summary = true, title = true, NotesButtonLook.LABELS), layoutAt(1000f))
-    }
+    private fun layout(summary: Boolean, inHeader: Boolean, look: NotesButtonLook = NotesButtonLook.LABELS) =
+        NotesHeaderLayout(summary, inHeader, look)
 
     // The card widths (dp) at which each layout starts, walking down: the first element holds from its width up, each next one from its own width.
-    private fun startsOf(hasLocate: Boolean = false, hasRecent: Boolean = false): List<Pair<Int, NotesHeaderLayout>> {
+    private fun startsOf(hasLocate: Boolean = false, hasRecent: Boolean = false, icons: Int = 3): List<Pair<Int, NotesHeaderLayout>> {
         val result = mutableListOf<Pair<Int, NotesHeaderLayout>>()
         for (w in WIDEST_DP downTo 0) {
-            val l = layoutAt(w.toFloat(), hasLocate, hasRecent)
+            val l = layoutAt(w.toFloat(), hasLocate, hasRecent, icons)
             if (result.lastOrNull()?.second != l) result += w to l
         }
         return result
     }
 
     @Test
-    fun theHeaderDropsTheTextThenShrinksTheButtonsThenFoldsTheLeastNeededOnesBeforeAnythingElse() {
-        val l = NotesButtonLook.LABELS
-        val i = NotesButtonLook.ICONS
-        val open = NotesAction.OPEN
-        val new = NotesAction.NEW
-        val save = NotesAction.SAVE
-        assertEquals(
-            listOf(
-                layout(summary = true, title = true, l),
-                layout(summary = false, title = true, l),
-                layout(summary = false, title = false, l),
-                layout(summary = false, title = false, NotesButtonLook.COMPACT),
-                layout(summary = false, title = false, i),
-                layout(summary = false, title = false, i, open, new),
-                layout(summary = false, title = false, i, open, new, save),
-            ),
-            stages().take(7),
-        )
-        // With the recent-notes arrow on Open, folding Open alone already saves room, so it is the first fold.
-        assertEquals(listOf(open), stages(hasRecent = true).first { it.overflow }.folded)
+    fun aWideHeaderKeepsTheButtonsAsTextAndTheSummary() {
+        assertEquals(NotesHeaderLayout.Full, layoutAt(1000f))
+        assertEquals(layout(summary = true, inHeader = true), layoutAt(1000f))
     }
 
     @Test
-    fun theStepsHappenAtTheseCardWidths() {
+    fun theSummaryGivesWayFirstThenTheButtonsLeaveTheHeaderForTheBarWhichGoesCompactAndLosesTheSummaryLast() {
         val l = NotesButtonLook.LABELS
-        val i = NotesButtonLook.ICONS
-        val open = NotesAction.OPEN
-        val new = NotesAction.NEW
-        val save = NotesAction.SAVE
-        val locate = NotesAction.LOCATE
+        val c = NotesButtonLook.COMPACT
         // Each pair: the widest card (dp) at which the layout is drawn, and the layout (then it holds down to the next pair's width + 1).
         assertEquals(
             listOf(
-                WIDEST_DP to layout(summary = true, title = true, l),
-                566 to layout(summary = false, title = true, l),
-                508 to layout(summary = false, title = false, l),
-                462 to layout(summary = false, title = false, NotesButtonLook.COMPACT),
-                425 to layout(summary = false, title = false, i),
-                333 to layout(summary = false, title = false, i, open, new),
-                300 to layout(summary = false, title = false, i, open, new, save),
+                WIDEST_DP to layout(summary = true, inHeader = true),
+                566 to layout(summary = false, inHeader = true),
+                508 to layout(summary = true, inHeader = false, l),
+                323 to layout(summary = true, inHeader = false, c),
+                254 to layout(summary = false, inHeader = false, c),
             ),
-            startsOf().take(7),
-        )
-        assertEquals(
-            listOf(443 to layout(summary = false, title = false, i), 351 to layout(summary = false, title = false, i, open)),
-            startsOf(hasRecent = true).filter { it.second.look == NotesButtonLook.ICONS }.take(2),
-        )
-        assertEquals(
-            listOf(533 to layout(summary = false, title = false, i), 384 to layout(summary = false, title = false, i, locate, open)),
-            startsOf(hasLocate = true, hasRecent = true).filter { it.second.look == NotesButtonLook.ICONS }.take(2),
+            startsOf(),
         )
     }
 
     @Test
-    fun noButtonIsFoldedWhileSmallerButtonsStillFit() {
-        for (w in 0..WIDEST_DP) {
-            val layout = layoutAt(w.toFloat())
-            if (layout.look != NotesButtonLook.ICONS) assertFalse(layout.overflow, "$w: folded before the buttons were as small as they get")
-            if (layout.overflow) assertTrue(layout.look == NotesButtonLook.ICONS, "$w: a folded button next to labelled ones")
+    fun theButtonsAreInTheHeaderOrInTheBarAtEveryWidthNeverIcons() {
+        listOf(false, true).forEach { hasLocate ->
+            listOf(false, true).forEach { hasRecent ->
+                var leftHeader = false
+                var wentCompact = false
+                // Walking down from the widest card: the buttons leave the header once and never come back, and the bar's labels give way to compact
+                // ones once and never come back: no width flaps between two looks.
+                for (w in WIDEST_DP downTo 0) {
+                    val layout = layoutAt(w.toFloat(), hasLocate, hasRecent)
+                    if (layout.actionsInHeader) {
+                        assertFalse(leftHeader, "$w: the buttons came back to the header")
+                        assertEquals(NotesButtonLook.LABELS, layout.look, "$w: header buttons are labelled")
+                    } else {
+                        leftHeader = true
+                        if (layout.look == NotesButtonLook.COMPACT) wentCompact = true else assertFalse(wentCompact, "$w: labels came back")
+                    }
+                }
+                assertTrue(leftHeader && wentCompact)
+            }
         }
     }
 
     @Test
-    fun theTextGivesWayBeforeAnyButtonChangesAndNothingIsFoldedUntilTheyAreIcons() {
-        // Walking down, the first button change comes after both texts are gone.
-        val textless = stages().first { !it.showSummary && !it.showTitle }
-        val firstButtonChange = stages().first { it.look != NotesButtonLook.LABELS || it.overflow }
-        assertEquals(NotesButtonLook.LABELS, textless.look)
-        assertFalse(firstButtonChange.showSummary || firstButtonChange.showTitle)
+    fun theSummaryIsTheFirstThingToGoAndTheButtonsStayInTheHeaderWhenItIsGone() {
+        val stages = startsOf().map { it.second }
+        assertTrue(stages[0].showSummary && stages[0].actionsInHeader)
+        assertFalse(stages[1].showSummary)
+        assertTrue(stages[1].actionsInHeader, "dropping the summary is enough to keep the buttons in the header")
+        assertFalse(stages[2].actionsInHeader)
+        assertTrue(stages[2].showSummary, "with the buttons out of the header there is room for the summary again")
     }
 
     @Test
-    fun theFoldOrderIsLocateOpenNewSaveAndPreviewAndCopyStayOnTheRowLongest() {
-        val order = listOf(NotesAction.LOCATE, NotesAction.OPEN, NotesAction.NEW, NotesAction.SAVE)
-        stages(hasLocate = true, hasRecent = true).map { it.folded }.filter { it.isNotEmpty() && it.size < 5 }.forEach { folded ->
-            assertEquals(order.take(folded.size), folded, "folded in the order of importance")
-        }
-        // Preview and Copy are on the row at every width down to the narrowest one that still leaves room for them, the menu and the header icons.
-        val narrowest = (0..WIDEST_DP).first { layoutAt(it.toFloat()).let { l -> NotesAction.PREVIEW !in l.folded && NotesAction.COPY !in l.folded } }
-        assertTrue(narrowest <= 268, "Preview and Copy stay visible down to a ${narrowest}dp card")
-    }
-
-    @Test
-    fun theDefaultRightColumnShowsAllFiveButtons() {
-        // The default right column is 350 to 360 dp; its card is a few dp less. All of Preview, Copy, Save, New and Open are visible there.
+    fun theDefaultRightColumnPutsTheLabelledButtonsInTheBarUnderTheHeader() {
+        // The default right column is 350 to 360 dp; its card is a few dp less.
         for (w in 340..360) {
             val layout = layoutAt(w.toFloat())
-            assertTrue(layout.folded.isEmpty(), "$w dp: nothing folded, got ${layout.folded}")
-            assertFalse(layout.showSummary || layout.showTitle, "$w dp: the text is gone, the icon stays")
+            assertEquals(layout(summary = true, inHeader = false, NotesButtonLook.LABELS), layout, "$w dp")
         }
     }
 
     @Test
-    fun withLocateLogAndRecentNotesTheDefaultWidthFoldsAtWorstOpen() {
-        for (w in 350..360) {
-            val layout = layoutAt(w.toFloat(), hasLocate = true, hasRecent = true)
-            assertTrue(layout.folded.all { it == NotesAction.LOCATE || it == NotesAction.OPEN }, "$w dp: folded ${layout.folded}")
-            for (kept in listOf(NotesAction.PREVIEW, NotesAction.COPY, NotesAction.SAVE, NotesAction.NEW)) assertFalse(kept in layout.folded)
+    fun theBarLooksFollowTheWidthTheButtonsNeedOnOneLine() {
+        assertEquals(NotesButtonLook.LABELS, notesBarLook(324f, hasLocate = false, hasRecent = false))
+        assertEquals(NotesButtonLook.COMPACT, notesBarLook(323f, hasLocate = false, hasRecent = false))
+        assertEquals(NotesButtonLook.COMPACT, notesBarLook(0f, hasLocate = true, hasRecent = true), "a bar too narrow even for compact buttons wraps")
+        // Locate log… and Open's arrow make the buttons wider.
+        val plain = (0..WIDEST_DP).first { notesBarLook(it.toFloat(), false, false) == NotesButtonLook.LABELS }
+        assertTrue((0..WIDEST_DP).first { notesBarLook(it.toFloat(), true, false) == NotesButtonLook.LABELS } > plain)
+        assertTrue((0..WIDEST_DP).first { notesBarLook(it.toFloat(), false, true) == NotesButtonLook.LABELS } > plain)
+        // The look in the layout is the bar's.
+        for (w in 0..WIDEST_DP) {
+            val layout = layoutAt(w.toFloat())
+            if (!layout.actionsInHeader) assertEquals(notesBarLook(w.toFloat(), false, false), layout.look, "$w")
         }
     }
 
     @Test
     fun theThresholdsGrowWithTheExtraButtonsAndWithFewerHeaderIcons() {
-        fun firstFullWidth(hasLocate: Boolean, hasRecent: Boolean, icons: Int): Int =
-            (0..2000).first { layoutAt(it.toFloat(), hasLocate, hasRecent, icons) == NotesHeaderLayout.Full }
-        val plain = firstFullWidth(false, false, 3)
-        assertTrue(firstFullWidth(true, false, 3) > plain, "Locate log… needs room")
-        assertTrue(firstFullWidth(false, true, 3) > plain, "Open's arrow needs room")
-        assertTrue(firstFullWidth(false, false, 2) < plain, "a tile without a collapse button has more room")
+        fun firstInHeader(hasLocate: Boolean, hasRecent: Boolean, icons: Int): Int =
+            (0..2000).first { layoutAt(it.toFloat(), hasLocate, hasRecent, icons).actionsInHeader }
+        val plain = firstInHeader(false, false, 3)
+        assertTrue(firstInHeader(true, false, 3) > plain, "Locate log… needs room")
+        assertTrue(firstInHeader(false, true, 3) > plain, "Open's arrow needs room")
+        assertTrue(firstInHeader(false, false, 2) < plain, "a tile without a collapse button has more room")
     }
 
     @Test
-    fun theTitleOutlivesTheSummaryAtEveryWidth() {
-        for (w in 0..WIDEST_DP) {
-            val layout = layoutAt(w.toFloat())
-            if (layout.showSummary) assertTrue(layout.showTitle, "$w: a summary without its title")
-        }
-    }
-
-    @Test
-    fun theHeaderPartsKeepTheIconDownToTheGenericThresholdAndFollowTheLayout() {
-        val layout = layout(summary = false, title = false, NotesButtonLook.ICONS, NotesAction.OPEN)
-        val parts = notesHeaderParts(TILE_HEADER_ICON_MIN_DP, layout)
+    fun theHeaderPartsKeepTheIconDownToTheGenericThresholdTheTitleAlwaysAndFollowTheSummary() {
+        val withoutSummary = layout(summary = false, inHeader = false, NotesButtonLook.COMPACT)
+        val parts = notesHeaderParts(TILE_HEADER_ICON_MIN_DP, withoutSummary)
         assertTrue(parts.showIcon)
-        assertFalse(parts.showTitle)
+        assertTrue(parts.showTitle)
         assertFalse(parts.showSummary)
-        assertFalse(notesHeaderParts(TILE_HEADER_ICON_MIN_DP - 1f, layout).showIcon)
+        assertFalse(notesHeaderParts(TILE_HEADER_ICON_MIN_DP - 1f, withoutSummary).showIcon)
+        assertTrue(notesHeaderParts(1000f, NotesHeaderLayout.Full).showSummary)
+        for (w in 0..WIDEST_DP) assertTrue(notesHeaderParts(w.toFloat(), layoutAt(w.toFloat())).showTitle, "$w: the title stays")
     }
 }

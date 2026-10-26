@@ -73,6 +73,7 @@ internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     scrollMinDp = LOG_VIEW_PIN_MIN_DP,
     scrollMaxDp = LOG_VIEW_PIN_MAX_DP,
     scrolls = ::logViewScrollsInColumn,
+    loneColumn = ::logViewLoneColumn,
     scrollEdgeRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
 )
@@ -246,7 +247,9 @@ private fun LogViewTileSurface(
     val bridge = LocalToolbarDock.current
     val currentBase by rememberUpdatedState(baseLayout)
     DisposableEffect(bridge, state) {
-        bridge?.dropInLayout = { target -> state.updateSettings { it.withToolbarDroppedInLayout(dropTile(currentBase, LogViewSectionId.TOOLBAR, target)) } }
+        bridge?.dropInLayout = { target ->
+            state.updateSettings { it.withToolbarDroppedInLayout(dropTile(currentBase, LogViewSectionId.TOOLBAR, target, ::logViewLoneColumn)) }
+        }
         onDispose { bridge?.dropInLayout = null }
     }
 
@@ -358,8 +361,8 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     collapsible: Boolean,
     diagramsShown: Boolean,
 ) {
-    // The Notes actions are part of the tile's header row (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy feedback they and the
-    // panel's preview dialog and shortcut share.
+    // The Notes actions are part of the tile's header row while they fit there (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy
+    // feedback they and the panel's preview dialog and shortcut share.
     val copyFeedback = rememberCopyFeedback(tab.id) { format, done -> state.copyAnnotationFormatAsync(tab.id, format, done) }
     val actions = NotesActionModel(
         tab = tab,
@@ -379,6 +382,10 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     )
     // Collapse (when it is in a column), maximize and hide are the header icons the buttons must leave room for.
     val headerIcons = (if (collapsible) 1 else 0) + 2
+
+    // One decision for the card's width, asked by the header and by the body (they are the same width): the buttons are in the header row while
+    // they fit next to the title, otherwise in the panel's bar under it, never in both and never in neither (NotesHeaderLayout.kt).
+    fun layoutAt(width: Float) = notesHeaderLayout(width, actions.hasLocate, actions.hasRecent, headerIcons)
     Tile(
         LogViewSectionId.NOTES,
         TileSlot(
@@ -386,11 +393,10 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
             title = logViewTileTitle(LogViewSectionId.NOTES),
             summary = notesSummary(tab.annotations),
             headerAction = {
-                val layout = notesHeaderLayout(LocalTileHeaderWidthDp.current, actions.hasLocate, actions.hasRecent, headerIcons)
-                NotesActionButtons(actions, layout)
+                if (layoutAt(LocalTileHeaderWidthDp.current).actionsInHeader) NotesActionButtons(actions)
             },
-            headerParts = { width -> notesHeaderParts(width, notesHeaderLayout(width, actions.hasLocate, actions.hasRecent, headerIcons)) },
-            actionsFollowTitle = true,
+            headerParts = { width -> notesHeaderParts(width, layoutAt(width)) },
+            actionsCentered = true,
             collapsible = collapsible,
             maximizable = true,
             // The note list below the header is the flex part (AnnotationPanel).
@@ -404,7 +410,7 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
                     onPanelFocusChanged = { focused -> if (focused) focus.onPanelFocused(focus.notes) },
                     // With the Diagram library as its own tile the Notes panel leaves its built-in section out.
                     showDiagramLibrary = !diagramsShown,
-                    actionsInHeader = true,
+                    actionsInHeader = layoutAt(info.widthDp).actionsInHeader,
                     copyFeedbackState = copyFeedback,
                 )
             },

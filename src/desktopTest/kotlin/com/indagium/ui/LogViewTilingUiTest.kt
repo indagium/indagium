@@ -871,8 +871,6 @@ class LogViewTilingUiTest {
     // A button of the Notes tile's header row by action id (its look may be labelled, compact or an icon, so the test tag names it).
     private fun notesBarButton(id: String) = rule.onNodeWithTag("notes-button-$id")
 
-    private fun notesButtonExists(id: String): Boolean = exists("notes-button-$id")
-
     private fun headerHas(text: String): Boolean =
         rule.onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("tile-header-notes"))).fetchSemanticsNodes().isNotEmpty()
 
@@ -890,8 +888,17 @@ class LogViewTilingUiTest {
         rule.waitForIdle()
     }
 
+    // The left edge of the header icons (collapse when the tile has it, else maximize).
+    private fun headerIconsLeft(): Float =
+        listOf("tile-collapse-notes", "tile-maximize-notes").filter { exists(it) }.minOf { bounds(it).left.value }
+
+    private fun insideBar(b: DpRect, bar: DpRect, rightLimit: Float = bar.right.value): Boolean =
+        b.top >= bar.top && b.bottom <= bar.bottom && b.left >= bar.left && b.right.value <= rightLimit
+
+    private fun centreOf(b: DpRect): Float = (b.left.value + b.right.value) / 2f
+
     @Test
-    fun theNotesTileHasOneHeaderRowThatHoldsTheActionButtonsAfterItsTitle() {
+    fun theNotesTileKeepsTheTextButtonsInItsHeaderRowCentredBetweenItsTitleAndItsIconsWhileTheyFit() {
         setup(width = 1000, height = 700, configure = wideNotes(780f))
         assertFalse(exists("notes-toolbar"), "no second row of buttons below the header")
         val header = bounds("tile-header-notes")
@@ -911,101 +918,95 @@ class LogViewTilingUiTest {
         allFive.zipWithNext().forEach { (a, b) ->
             assertTrue(notesBarButton(a).getBoundsInRoot().right <= notesBarButton(b).getBoundsInRoot().left + 0.6f.dp, "$a is before $b")
         }
-        assertTrue(open.right <= bounds("tile-maximize-notes").left, "the buttons come before the header icons")
+        assertTrue(open.right.value <= headerIconsLeft(), "the buttons come before the header icons")
+        // Text labels, centred in the room between the summary and the header icons (the Row keeps a header gap before the icons).
+        assertTrue(headerHas("Save") && headerHas("Preview") && headerHas("Open"), "the buttons are text")
+        val roomCentre = (summary.right.value + headerIconsLeft() - TILE_HEADER_GAP_DP) / 2f
+        assertEquals(roomCentre, (preview.left.value + open.right.value) / 2f, 2f, "the buttons are centred in the free room of the header")
         // The buttons are the log toolbar's AppButtons at their natural height, TILE_HEADER_GAP_DP apart.
         val export = bounds(logToolbarTag(LogToolbarItem.EXPORT.id))
         assertEquals(export.height.value, notesBarButton("save").getBoundsInRoot().height.value, 0.6f)
         assertEquals(TILE_HEADER_GAP_DP, notesBarButton("new").getBoundsInRoot().left.value - notesBarButton("save").getBoundsInRoot().right.value, 0.6f)
     }
 
+    private fun toolbarHas(text: String): Boolean =
+        rule.onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("notes-toolbar"))).fetchSemanticsNodes().isNotEmpty()
+
     @Test
-    fun theNotesButtonsAreAllVisibleInTheHeaderAtTheDefaultRightColumnWidth() {
-        // The default right column is 360 dp (classic sizes) and 350 dp when dragged a little narrower: the buttons are there, as icons, in one row.
+    fun theNotesButtonsMoveToACentredTextBarUnderTheHeaderAtTheDefaultRightColumnWidth() {
+        // The default right column is 360 dp (classic sizes) and 350 dp when dragged a little narrower: the labelled buttons do not fit next to the
+        // title there, so they are in the panel's bar directly under the header, centred, and the header keeps the title and the summary.
         listOf(360f, 350f).forEach { column ->
             setup(width = 1000, height = 700, configure = wideNotes(column))
             val header = bounds("tile-header-notes")
-            assertEquals(32f, header.height.value, 0.6f, "$column dp: one row")
+            assertEquals(32f, header.height.value, 0.6f, "$column dp: the header is one row")
+            assertTrue(exists("notes-toolbar"), "$column dp: the bar is there")
+            val bar = bounds("notes-toolbar")
+            assertTrue(bar.top.value in (header.bottom.value - 0.6f)..(header.bottom.value + 3f), "$column dp: the bar is directly under the header: $bar")
+            assertTrue(headerHas("Notes") && headerHas("3 notes"), "$column dp: the header keeps its title and summary")
+            assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"), "$column dp: grip and icons stay")
             allFive.forEach { id ->
-                assertTrue(notesButtonExists(id), "$column dp: $id is on the row")
+                assertEquals(1, rule.onAllNodesWithTag("notes-button-$id").fetchSemanticsNodes().size, "$column dp: $id is drawn once")
                 val b = notesBarButton(id).getBoundsInRoot()
-                assertTrue(b.left >= header.left && b.right <= bounds("tile-maximize-notes").left, "$column dp: $id is in the row before the icons: $b")
+                assertTrue(insideBar(b, bar), "$column dp: $id is in the bar: $b in $bar")
             }
-            assertFalse(exists(NOTES_ACTIONS_OVERFLOW_TAG), "$column dp: nothing needed the menu")
-            assertFalse(headerHas("Notes") || headerHas("3 notes"), "$column dp: the text gave way, the icon stays")
-            assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"))
+            assertFalse(headerHas("Save") || headerHas("Preview"), "$column dp: no button text in the header")
+            assertTrue(toolbarHas("Save") && toolbarHas("Preview") && toolbarHas("Open"), "$column dp: full labels while they fit on one line")
+            val first = notesBarButton("preview").getBoundsInRoot()
+            val last = notesBarButton("open").getBoundsInRoot()
+            assertEquals(first.top.value, last.top.value, 0.6f, "$column dp: one line")
+            assertEquals(centreOf(bar), (first.left.value + last.right.value) / 2f, 2f, "$column dp: centred")
         }
     }
 
     @Test
-    fun theNotesHeaderDropsTheTextThenShrinksTheButtonsThenFoldsOpenNewAndSaveAndStaysOneRow() {
+    fun theNotesActionsAreInTheHeaderOrTheBarAtEveryWidthAsTheLayoutSaysAndTheTitleStays() {
         setup(width = 1000, height = 700, configure = wideNotes(780f))
-        listOf(780f, 560f, 500f, 440f, 400f, 350f, 300f, 260f, 220f, 190f).forEach { column ->
+        listOf(780f, 580f, 540f, 500f, 440f, 400f, 360f, 330f, 300f, 260f, 220f, 190f).forEach { column ->
             setNotesColumn(column)
             val card = bounds("tile-card-notes").width.value
             val expected = notesHeaderLayout(card, hasLocate = false, hasRecent = false, headerIcons = 3)
+            assertTrue(headerHas("Notes"), "$column dp: the title text stays")
             assertEquals(expected.showSummary, headerHas("3 notes"), "$column dp: the summary")
-            assertEquals(expected.showTitle, headerHas("Notes"), "$column dp: the title text")
-            assertEquals(expected.overflow, exists(NOTES_ACTIONS_OVERFLOW_TAG), "$column dp: the actions menu")
-            NotesAction.entries.filter { it != NotesAction.LOCATE }.forEach { a ->
-                assertEquals(a !in expected.folded, notesButtonExists(a.id), "$column dp: the ${a.id} button")
-            }
-            // Labelled buttons show their text; icon buttons do not.
-            assertEquals(expected.look != NotesButtonLook.ICONS && NotesAction.SAVE !in expected.folded, headerHas("Save"), "$column dp: Save's label")
-            assertEquals(32f, bounds("tile-header-notes").height.value, 0.6f, "$column dp: still one row")
+            assertEquals(!expected.actionsInHeader, exists("notes-toolbar"), "$column dp: the bar")
+            assertEquals(32f, bounds("tile-header-notes").height.value, 0.6f, "$column dp: the header is one row")
             assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"), "$column dp: grip and icons stay")
-            // Everything in the row is inside the card, before the header icons.
-            val limit = bounds("tile-maximize-notes").left
-            val last = if (expected.overflow) bounds(NOTES_ACTIONS_OVERFLOW_TAG).right else
-                NotesAction.entries.last { it != NotesAction.LOCATE && it !in expected.folded }.let { notesBarButton(it.id).getBoundsInRoot().right }
-            assertTrue(last <= limit, "$column dp: the buttons end at $last, the header icons start at $limit")
+            val header = bounds("tile-header-notes")
+            allFive.forEach { id ->
+                assertEquals(1, rule.onAllNodesWithTag("notes-button-$id").fetchSemanticsNodes().size, "$column dp: $id is drawn once")
+                val b = notesBarButton(id).getBoundsInRoot()
+                if (expected.actionsInHeader) {
+                    assertTrue(insideBar(b, header, rightLimit = headerIconsLeft()), "$column dp: $id is in the header row: $b")
+                } else {
+                    val bar = bounds("notes-toolbar")
+                    assertTrue(insideBar(b, bar), "$column dp: $id is in the bar: $b in $bar")
+                }
+            }
+            // Always text: the labels are there, in the header or in the bar.
+            assertTrue((headerHas("Save") || toolbarHas("Save")) && (headerHas("Preview") || toolbarHas("Preview")), "$column dp: text buttons")
+            assertEquals(expected.actionsInHeader, headerHas("Save"), "$column dp: Save's label is in the header only while the buttons are")
         }
     }
 
     @Test
-    fun theNotesHeaderKeepsPreviewAndCopyWhenOpenNewAndSaveAreFolded() {
-        setup(width = 1000, height = 700, configure = wideNotes(780f))
-        // Walk the column down until the header folds Open, New and Save (and nothing more).
-        val folded = layoutFoldingThree()
-        val width = (400 downTo 150).first { column ->
-            setNotesColumn(column.toFloat())
-            notesHeaderLayout(bounds("tile-card-notes").width.value, hasLocate = false, hasRecent = false, headerIcons = 3) == folded
+    fun aBarTooNarrowForOneLineWrapsItsCompactButtonsOntoCentredLines() {
+        setup(width = 1000, height = 700, configure = wideNotes(200f))
+        val bar = bounds("notes-toolbar")
+        val tops = allFive.map { notesBarButton(it).getBoundsInRoot().top.value }.map { (it * 2).toInt() }.distinct()
+        assertTrue(tops.size >= 2, "the buttons wrap onto a second line")
+        assertTrue(bar.height.value > TILE_TOOLBAR_HEIGHT_DP + 6f, "the bar grows with its lines: ${bar.height}")
+        allFive.forEach { id ->
+            val b = notesBarButton(id).getBoundsInRoot()
+            assertTrue(b.left >= bar.left && b.right <= bar.right, "$id is inside the bar: $b in $bar")
         }
-        assertTrue(exists(NOTES_ACTIONS_OVERFLOW_TAG), "$width dp: the menu holds the folded buttons")
-        listOf("preview", "copy").forEach { assertTrue(notesButtonExists(it), "$it stays on the row") }
-        listOf("save", "new", "open").forEach { assertFalse(notesButtonExists(it), "$it is in the menu") }
-        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
-        rule.waitForIdle()
-        listOf("save", "new", "open").forEach { assertTrue(exists(notesActionTag(it)), "menu item $it") }
-        assertFalse(exists(notesActionTag("preview")), "Preview is not duplicated into the menu")
-    }
-
-    private fun layoutFoldingThree() = NotesHeaderLayout(
-        showSummary = false,
-        showTitle = false,
-        look = NotesButtonLook.ICONS,
-        folded = listOf(NotesAction.OPEN, NotesAction.NEW, NotesAction.SAVE),
-    )
-
-    @Test
-    fun theNotesMenuHoldsEveryActionAndItsItemsWork() {
-        setup(width = 1000, height = 700, configure = wideNotes(150f))
-        assertTrue(exists(NOTES_ACTIONS_OVERFLOW_TAG), "a 150 dp Notes tile folds its buttons into the menu")
-        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
-        rule.waitForIdle()
-        listOf("preview", "save", "new", "open").forEach { assertTrue(exists(notesActionTag(it)), "menu item $it") }
-        AnnotationCopyFormat.entries.forEach { assertTrue(exists(notesActionTag("copy-${it.name.lowercase()}")), "copy as ${it.label}") }
-        // Preview opens the preview of the three notes; the menu closes with the pick.
-        rule.onNodeWithTag(notesActionTag("preview")).performClick()
-        rule.waitForIdle()
-        assertTrue(state.tab(TAB_ID)!!.showAnnMd, "Preview toggled the preview")
-        assertFalse(exists(notesActionTag("preview")), "the menu closed")
-        state.toggleMd(TAB_ID)
-        rule.waitForIdle()
-        // New clears the notes to a blank analysis, like the button.
-        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
-        rule.onNodeWithTag(notesActionTag("new")).performClick()
-        rule.waitForIdle()
-        assertTrue(state.tab(TAB_ID)!!.annotations.blocks.isEmpty(), "New started a blank analysis")
+        // Each line is centred in the bar.
+        allFive.groupBy { (notesBarButton(it).getBoundsInRoot().top.value * 2).toInt() }.values.forEach { line ->
+            val left = line.minOf { notesBarButton(it).getBoundsInRoot().left.value }
+            val right = line.maxOf { notesBarButton(it).getBoundsInRoot().right.value }
+            assertEquals(centreOf(bar), (left + right) / 2f, 3f, "a line of $line is centred")
+        }
+        // Compact buttons: narrower than the labelled ones (Preview is about 67 dp with its label's padding, 59 compact).
+        assertTrue(notesBarButton("preview").getBoundsInRoot().width.value < 64f, "compact padding")
     }
 
     @Test
@@ -1026,16 +1027,40 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun theIconButtonsOfANarrowNotesHeaderStillWork() {
+    fun theButtonsOfTheNotesBarWorkToo() {
         setup(width = 1000, height = 700, configure = wideNotes(350f))
+        assertTrue(exists("notes-toolbar"), "a 350 dp Notes card has its buttons in the bar")
         notesBarButton("preview").performClick()
         rule.waitForIdle()
-        assertTrue(state.tab(TAB_ID)!!.showAnnMd, "Preview toggled the preview from its icon")
+        assertTrue(state.tab(TAB_ID)!!.showAnnMd, "Preview toggled the preview from the bar")
         state.toggleMd(TAB_ID)
         rule.waitForIdle()
         notesBarButton("new").performClick()
         rule.waitForIdle()
-        assertTrue(state.tab(TAB_ID)!!.annotations.blocks.isEmpty(), "New started a blank analysis from its icon")
+        assertTrue(state.tab(TAB_ID)!!.annotations.blocks.isEmpty(), "New started a blank analysis from the bar")
+    }
+
+    @Test
+    fun movingTheNotesButtonsBetweenTheHeaderAndTheBarMakesTheContentSizedTileOneBarTallerAndItIsStable() {
+        // Notes is alone in its column here, so it is as tall as its content: header, the fixed part, the notes. With the buttons in the bar the
+        // fixed part has the bar in it, so the card is one bar taller, and it stays that way (no jumping while the width is not changing).
+        setup(width = 1000, height = 700, configure = wideNotes(780f))
+
+        fun card(column: Float): Float {
+            setNotesColumn(column)
+            val first = bounds("tile-card-notes").height.value
+            rule.waitForIdle()
+            assertEquals(first, bounds("tile-card-notes").height.value, 0.6f, "$column dp: stable")
+            assertTrue(exists("annotation-note-field"), "$column dp: the notes show")
+            return first
+        }
+        val inHeader = card(540f)
+        val inBar = card(480f)
+        assertFalse(notesHeaderLayout(bounds("tile-card-notes").width.value, hasLocate = false, hasRecent = false, headerIcons = 3).actionsInHeader)
+        assertTrue(exists("notes-toolbar"))
+        assertEquals(TILE_TOOLBAR_HEIGHT_DP, inBar - inHeader, 8f, "the card is one bar taller")
+        // And back: the same height as before.
+        assertEquals(inHeader, card(540f), 0.6f)
     }
 
     @Test
@@ -1176,7 +1201,9 @@ class LogViewTilingUiTest {
     @Test
     fun draggingTheTopEdgeOfTheMessageBoxMakesItTallerAndTheConversationShorterWithinLimits() {
         setup(width = 1300, height = 900) { it.aiPanelVisible = true }
-        growBy("ai", 220f)
+        // 34 dp less than it used to be: the Notes card above has its buttons in a bar of its own at this width, which is one bar taller, and the
+        // message box's handle has to stay inside the window.
+        growBy("ai", 186f)
         val card = bounds("tile-card-ai")
         val field = bounds("ai-prompt-field").height.value
         val conversation = bounds("ai-conversation").height.value

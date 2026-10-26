@@ -84,6 +84,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 // The generic tiling host behind the New tab and (in later phases) the log and compare views: one composable surface that
@@ -123,7 +124,9 @@ internal const val TILE_HEADER_GAP_DP = 6f
  * they add up to more than the window; see TileLayout.kt), with [scrollMinDp] / [scrollMaxDp] bounding a tile's height there; the
  * default is none, a surface that always fits. A scrolling column's scrollbar is drawn in the gap beside the column ([tileScrollbarRect]), never
  * over a card; a column that ends at the host's right edge has [scrollEdgeRoomDp] there (the caller gives the surface that much more width than
- * the cards use, the log view its host padding). [scrollEndHandle] adds the splitter below the column's last tile.
+ * the cards use, the log view its host padding). [scrollEndHandle] adds the splitter below the column's last tile. [loneColumn] says which tiles
+ * are kept in a one-tile column of their own when they end up alone where a column would be, so they size and scroll like a column's tiles
+ * (see normalizeTileLayout); the default is none.
  */
 internal data class TileChromeSpec<K>(
     val headerDp: Float,
@@ -138,6 +141,7 @@ internal data class TileChromeSpec<K>(
     val scrollMinDp: Float = minTileDp,
     val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
     val scrolls: (K) -> Boolean = { false },
+    val loneColumn: (K) -> Boolean = { false },
     val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
 ) {
@@ -169,8 +173,8 @@ internal data class TileBodyInfo(val widthDp: Float, val heightDp: Float, val co
  * disables the hide button (the last visible tile). [iconTint] colours the header icon (null = the theme's secondary text colour).
  * [sizing] says how the body takes part in the height of a scrolling column (see [TileBodySizing] and [FlexRegion]); the default leaves it
  * to the stored or weighted height. [headerParts] replaces the default rule for which header parts fit a card of a given width (summary, then
- * icon, see [tileHeaderParts]); [actionsFollowTitle] puts the [headerAction] straight after the title instead of at the right edge, as the log
- * toolbar follows its grip (the buttons then sit before the header icons, with the free room after them).
+ * icon, see [tileHeaderParts]); [actionsCentered] puts the [headerAction] in the middle of the room between the title part and the header icons
+ * instead of at the right edge (the title shortens first when the room is short).
  */
 @Suppress("LongParameterList") // a slot is a flat description of one tile; every field has a default
 internal class TileSlot(
@@ -186,7 +190,7 @@ internal class TileSlot(
     val maximizable: Boolean = false,
     val sizing: TileBodySizing = TileBodySizing.FILL,
     val headerParts: ((widthDp: Float) -> TileHeaderParts)? = null,
-    val actionsFollowTitle: Boolean = false,
+    val actionsCentered: Boolean = false,
     val body: @Composable (TileBodyInfo) -> Unit,
 )
 
@@ -345,7 +349,7 @@ private class TileScopeImpl<K>(
         val handled = drag.pointerRoot?.let { callbacks.takeDrop(id, it) } == true
         val drop = if (handled) null else drag.pointer?.let { tileDropTargetAt(visibleGeometry(), host.w, host.h, it.x, it.y, id) }
         gripCancel()
-        if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop))
+        if (drop != null) callbacks.onCommitLayout(dropTile(fullLayout, id, drop, spec.loneColumn))
     }
 
     fun gripCancel() {
@@ -705,9 +709,9 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
                 modifier = titleModifier,
             )
         }
-        // The title (and summary) take the free room, which puts the header action at the right edge. With [TileSlot.actionsFollowTitle] the
-        // title and the action share one weighted group instead: the title takes what it needs (it shortens first when the room is short), the
-        // action follows it, and the free room is after the group, before the header icons.
+        // The title (and summary) take the free room, which puts the header action at the right edge. With [TileSlot.actionsCentered] the title
+        // part and the action share one group instead: the title takes what it needs (it shortens first when the room is short) and the action
+        // is centred in the room that is left, before the header icons.
         val titleGroup: @Composable (Modifier) -> Unit = { groupModifier ->
             if (parts.showSummary && slot.summary != null) {
                 Row(groupModifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
@@ -731,11 +735,14 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
                 CompositionLocalProvider(LocalTileTitle provides slot.title, LocalTileHeaderWidthDp provides (rect?.w ?: 0f)) { action(this) }
             }
         }
-        if (slot.actionsFollowTitle) {
-            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) {
-                if (parts.showTitle) titleGroup(Modifier.weight(1f, fill = false))
-                actions()
-            }
+        if (slot.actionsCentered) {
+            TitleWithCenteredActions(
+                Modifier.weight(1f),
+                title = { if (parts.showTitle) titleGroup(Modifier) },
+                actions = {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp)) { actions() }
+                },
+            )
         } else {
             if (parts.showTitle) titleGroup(Modifier.weight(1f)) else Spacer(Modifier.weight(1f))
             actions()
@@ -758,6 +765,27 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
                 callbacks.onHide(id)
                 callbacks.onReclaimFocus()
             }
+        }
+    }
+}
+
+// The header's title part at the start and the actions centred in what is left of the width, at their natural width. When the two do not fit
+// the title shortens first; the actions never sit closer than a header gap after it (or touching it when even that does not fit).
+@Composable
+private fun TitleWithCenteredActions(modifier: Modifier, title: @Composable () -> Unit, actions: @Composable () -> Unit) {
+    Layout(content = { Box { title() }; Box { actions() } }, modifier = modifier) { measurables, constraints ->
+        val gap = TILE_HEADER_GAP_DP.dp.roundToPx()
+        val total = constraints.maxWidth
+        val loose = constraints.copy(minWidth = 0, minHeight = 0)
+        val actionsPlaceable = measurables[1].measure(loose)
+        val titleRoom = if (actionsPlaceable.width > 0) max(0, total - actionsPlaceable.width - gap) else total
+        val titlePlaceable = measurables[0].measure(loose.copy(maxWidth = titleRoom))
+        val height = max(titlePlaceable.height, actionsPlaceable.height)
+        val free = max(0, total - titlePlaceable.width - actionsPlaceable.width)
+        layout(total, height) {
+            titlePlaceable.place(0, (height - titlePlaceable.height) / 2)
+            val x = titlePlaceable.width + max(free / 2, min(gap, free))
+            actionsPlaceable.place(x, (height - actionsPlaceable.height) / 2)
         }
     }
 }

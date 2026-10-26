@@ -109,9 +109,9 @@ internal fun AppState.applyLogViewPreset(preset: LogViewLayoutPreset) {
 // them where Classic has them instead, in a pinned column at the left, so switching the Filter group on again looks right.
 private fun AppSettings.withFiltersKeptAtTheLeft(sizes: LogViewLegacySizes): AppSettings {
     val tree = logViewLayout ?: return copy(logViewHidden = logViewHidden - LOG_VIEW_FILTER_TILES.toSet())
-    val rest = LOG_VIEW_FILTER_TILES.fold(tree as TileNode<LogViewSectionId>?) { acc, id -> acc?.let { removeTile(it, id) } }
+    val rest = LOG_VIEW_FILTER_TILES.fold(tree as TileNode<LogViewSectionId>?) { acc, id -> acc?.let { removeTile(it, id, ::logViewLoneColumn) } }
     val filterColumn = (classicLogViewLayout(sizes) as TileSplit<LogViewSectionId>).children.first()
-    val rebuilt = rest?.let { normalizeTileLayout(TileSplit(TileAxis.ROW, listOf(filterColumn, it))) } ?: tree
+    val rebuilt = rest?.let { normalizeTileLayout(TileSplit(TileAxis.ROW, listOf(filterColumn, it)), ::logViewLoneColumn) } ?: tree
     return copy(logViewHidden = logViewHidden - LOG_VIEW_FILTER_TILES.toSet()).withLogViewLayout(rebuilt)
 }
 

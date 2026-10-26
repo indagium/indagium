@@ -10,17 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.NoteAdd
-import androidx.compose.material.icons.outlined.Check
-import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material.icons.outlined.ErrorOutline
-import androidx.compose.material.icons.outlined.FindInPage
-import androidx.compose.material.icons.outlined.FolderOpen
-import androidx.compose.material.icons.outlined.HourglassEmpty
-import androidx.compose.material.icons.outlined.MoreHoriz
-import androidx.compose.material.icons.outlined.Save
-import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
@@ -32,11 +21,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -51,9 +37,9 @@ import java.io.File
 import kotlin.math.roundToInt
 
 // The Notes actions (Preview, Copy ▾, Save, New, Locate log…, Open ▾) and the Copy feedback they share. In the Notes TILE they are part of the
-// tile's one header row (NotesTile in LogViewTiling.kt, laid out by NotesHeaderLayout.kt), as the log toolbar is the Log tile's header; wherever the
-// panel is used without a tile it draws them in a bar of its own (AnnotationPanel.kt). Either way they are the same buttons, and every click or
-// dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
+// tile's one header row while they fit there, and in the panel's bar under it when they do not (NotesTile in LogViewTiling.kt, decided by
+// NotesHeaderLayout.kt); wherever the panel is used without a tile it draws them in that bar (AnnotationPanel.kt). Either way they are the same text
+// buttons, and every click or dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
 
 /** The Notes actions' inputs; the values and callbacks are those the panel has always been given (see BoundAnnotationPanel). */
 @Suppress("LongParameterList") // a flat bundle of the values and callbacks the panel always took one by one
@@ -118,98 +104,67 @@ private val COMPACT_PADDING = 6.dp
 /** Test tag of an action's button on the row: `notes-button-<id>` (the Copy and Open split buttons carry it on their main half). */
 internal fun notesButtonTag(action: NotesAction): String = "notes-button-${action.id}"
 
-// One plain action button in [look]: its label with the log toolbar's padding or less of it, or an icon with a tooltip (the log toolbar's narrow form).
+// One plain action button in [look]: its label with the log toolbar's padding, or less of it.
 @Composable
 private fun NotesButton(
     action: NotesAction,
     label: String,
-    icon: ImageVector,
     look: NotesButtonLook,
     enabled: Boolean,
     shape: Shape = CORNER_MD,
     onClick: () -> Unit,
 ) {
-    val tag = Modifier.testTag(notesButtonTag(action))
-    if (look == NotesButtonLook.ICONS) {
-        AppButton(
-            "",
-            onClick = onClick,
-            enabled = enabled,
-            leadingIcon = icon,
-            horizontalPadding = COMPACT_PADDING,
-            shape = shape,
-            tooltip = label,
-            modifier = tag.semantics { contentDescription = label },
-        )
-    } else {
-        AppButton(
-            label,
-            onClick = onClick,
-            enabled = enabled,
-            horizontalPadding = if (look == NotesButtonLook.COMPACT) COMPACT_PADDING else LABEL_PADDING,
-            shape = shape,
-            modifier = tag,
-        )
-    }
+    AppButton(
+        label,
+        onClick = onClick,
+        enabled = enabled,
+        horizontalPadding = if (look == NotesButtonLook.COMPACT) COMPACT_PADDING else LABEL_PADDING,
+        shape = shape,
+        modifier = Modifier.testTag(notesButtonTag(action)),
+    )
 }
 
 /**
- * The buttons of [layout] (the [NotesHeaderLayout.folded] ones are left out and live in the "⋯" menu instead), emitted straight into the caller's layout
- * (a header row, or the panel's own wrapping bar). Disabled states are as they always were: Preview needs notes, Save / New / Locate / Open need the
- * notes to be unlocked.
+ * The buttons in [look], emitted straight into the caller's layout (the tile's header row, or the panel's own wrapping bar). Disabled states are as
+ * they always were: Preview needs notes, Save / New / Locate / Open need the notes to be unlocked.
  */
 @Composable
-internal fun NotesActionButtons(model: NotesActionModel, layout: NotesHeaderLayout = NotesHeaderLayout.Full) {
+internal fun NotesActionButtons(model: NotesActionModel, look: NotesButtonLook = NotesButtonLook.LABELS) {
     val tc = tc()
-    val look = layout.look
-
-    fun shown(action: NotesAction) = action !in layout.folded
-    if (shown(NotesAction.PREVIEW)) {
-        NotesButton(NotesAction.PREVIEW, "Preview", Icons.Outlined.Visibility, look, model.hasBlocks) { model.tap(model.onToggleMd) }
-    }
-    if (shown(NotesAction.COPY)) {
-        CopyFormatSplitButton(
-            defaultFormat = model.defaultFormat,
-            feedback = model.feedback,
-            onReclaimFocus = model.onReclaimFocus,
-            look = look,
-            modifier = Modifier.testTag(notesButtonTag(NotesAction.COPY)),
-        )
-    }
-    if (shown(NotesAction.SAVE)) {
-        NotesButton(NotesAction.SAVE, "Save", Icons.Outlined.Save, look, !model.locked) { model.tap { model.mutate(model.onSave) } }
-    }
-    if (shown(NotesAction.NEW)) {
-        NotesButton(NotesAction.NEW, "New", Icons.AutoMirrored.Outlined.NoteAdd, look, !model.locked) { model.tap { model.mutate(model.onNewAnalysis) } }
-    }
+    NotesButton(NotesAction.PREVIEW, "Preview", look, model.hasBlocks) { model.tap(model.onToggleMd) }
+    CopyFormatSplitButton(
+        defaultFormat = model.defaultFormat,
+        feedback = model.feedback,
+        onReclaimFocus = model.onReclaimFocus,
+        look = look,
+        modifier = Modifier.testTag(notesButtonTag(NotesAction.COPY)),
+    )
+    NotesButton(NotesAction.SAVE, "Save", look, !model.locked) { model.tap { model.mutate(model.onSave) } }
+    NotesButton(NotesAction.NEW, "New", look, !model.locked) { model.tap { model.mutate(model.onNewAnalysis) } }
     // Only when this tab has no log at all (opened via Case Library's "Open notes only," a blank new tab, or its own log going missing): the guided
     // reconnect path for the "note opened without its log" hazard. See AppState.locateLogForTab.
-    if (model.hasLocate && shown(NotesAction.LOCATE)) {
-        NotesButton(NotesAction.LOCATE, "Locate log…", Icons.Outlined.FindInPage, look, !model.locked) { model.tap { model.mutate(model::locateLog) } }
+    if (model.hasLocate) {
+        NotesButton(NotesAction.LOCATE, "Locate log…", look, !model.locked) { model.tap { model.mutate(model::locateLog) } }
     }
     // Open+▾ is one unit (zero spacing between the halves), so a wrap point never splits the pair.
-    if (shown(NotesAction.OPEN)) {
-        Row {
-            NotesButton(
-                NotesAction.OPEN, "Open", Icons.Outlined.FolderOpen, look, !model.locked,
-                shape = if (model.hasRecent) OPEN_JOINED_SHAPE else CORNER_MD,
-            ) { model.tap { model.mutate(model::openNote) } }
-            // Hidden (not disabled) when there's no history: a dropdown arrow with nothing behind it is dead chrome.
-            if (model.hasRecent) {
-                Box {
-                    AppButton(
-                        "▾",
-                        modifier = Modifier.width(18.dp),
-                        horizontalPadding = 0.dp,
-                        shape = RECENT_DROPDOWN_SHAPE,
-                        onClick = { model.tap(model.onToggleRecentNotes) },
-                    )
-                    if (model.recentMenuOpen) RecentNotes(model, tc)
-                }
+    Row {
+        NotesButton(NotesAction.OPEN, "Open", look, !model.locked, shape = if (model.hasRecent) OPEN_JOINED_SHAPE else CORNER_MD) {
+            model.tap { model.mutate(model::openNote) }
+        }
+        // Hidden (not disabled) when there's no history: a dropdown arrow with nothing behind it is dead chrome.
+        if (model.hasRecent) {
+            Box {
+                AppButton(
+                    "▾",
+                    modifier = Modifier.width(18.dp),
+                    horizontalPadding = 0.dp,
+                    shape = RECENT_DROPDOWN_SHAPE,
+                    onClick = { model.tap(model.onToggleRecentNotes) },
+                )
+                if (model.recentMenuOpen) RecentNotes(model, tc)
             }
         }
     }
-    if (layout.overflow) NotesActionsOverflow(model, layout.folded)
 }
 
 @Composable
@@ -223,90 +178,8 @@ private fun RecentNotes(model: NotesActionModel, tc: ThemeColors) {
     )
 }
 
-/** Test tag of the ▾ half of the Copy split button (its main half carries the caller's tag, `notes-button-copy` on the Notes header). */
+/** Test tag of the ▾ half of the Copy split button (its main half carries the caller's tag, `notes-button-copy` on the Notes buttons). */
 internal const val NOTES_COPY_FORMATS_TAG = "notes-copy-formats"
-
-/** Test tag of the "⋯" button that holds the folded Notes actions in a narrow header. */
-internal const val NOTES_ACTIONS_OVERFLOW_TAG = "notes-actions-overflow"
-
-/** Test tag of an entry of that menu: `notes-action-<id>`. */
-internal fun notesActionTag(id: String): String = "notes-action-$id"
-
-// The "⋯" button and its menu: the [folded] actions (each copy format for Copy, the recent notes for Open), in the order of the buttons.
-@Composable
-private fun NotesActionsOverflow(model: NotesActionModel, folded: List<NotesAction>) {
-    val tc = tc()
-    val density = LocalDensity.current.density
-    var open by remember { mutableStateOf(false) }
-    Box {
-        AppButton(
-            "",
-            onClick = { open = !open; model.onReclaimFocus() },
-            variant = if (open) ButtonVariant.Primary else ButtonVariant.Secondary,
-            leadingIcon = Icons.Outlined.MoreHoriz,
-            horizontalPadding = COMPACT_PADDING,
-            tooltip = "Notes actions",
-            modifier = Modifier.testTag(NOTES_ACTIONS_OVERFLOW_TAG).semantics { contentDescription = "Notes actions" },
-        )
-        if (open) {
-            val dismiss = { open = false; model.onReclaimFocus() }
-            Popup(
-                alignment = Alignment.TopEnd,
-                offset = IntOffset(0, (TILE_TOOLBAR_HEIGHT_DP * density).roundToInt()),
-                onDismissRequest = dismiss,
-                properties = PopupProperties(focusable = true),
-            ) {
-                Column(
-                    Modifier.width(OVERFLOW_MENU_WIDTH_DP.dp)
-                        .background(tc.p, RoundedCornerShape(7.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                        .padding(vertical = 4.dp),
-                ) {
-                    NotesAction.entries.filter { it in folded }.forEach { action -> OverflowEntries(model, action, folded, dismiss) }
-                }
-            }
-        }
-        // The recent notes list opens at the menu's button, like Open's arrow does at its own.
-        if (model.recentMenuOpen && NotesAction.OPEN in folded) RecentNotes(model, tc)
-    }
-}
-
-@Composable
-private fun OverflowEntries(model: NotesActionModel, action: NotesAction, folded: List<NotesAction>, dismiss: () -> Unit) {
-    when (action) {
-        NotesAction.PREVIEW -> MenuRow("preview", "Preview", model.hasBlocks, dismiss) { model.onToggleMd() }
-        NotesAction.COPY -> AnnotationCopyFormat.entries.forEach { format ->
-            val label = "Copy as ${format.label}" + if (format == model.defaultFormat) " (default)" else ""
-            MenuRow("copy-${format.name.lowercase()}", label, model.feedback.phase != CopyPhase.Copying, dismiss) { model.feedback.start(format) }
-        }
-        NotesAction.SAVE -> MenuRow("save", "Save", !model.locked, dismiss) { model.mutate(model.onSave) }
-        NotesAction.NEW -> MenuRow("new", "New", !model.locked, dismiss) { model.mutate(model.onNewAnalysis) }
-        NotesAction.LOCATE -> MenuRow("locate", "Locate log…", !model.locked, dismiss) { model.mutate(model::locateLog) }
-        NotesAction.OPEN -> {
-            MenuRow("open", "Open…", !model.locked, dismiss) { model.mutate(model::openNote) }
-            if (model.hasRecent && NotesAction.OPEN in folded) MenuRow("recent", "Recent notes…", !model.locked, dismiss) { model.onToggleRecentNotes() }
-        }
-    }
-}
-
-private const val OVERFLOW_MENU_WIDTH_DP = 200
-
-@Composable
-private fun MenuRow(id: String, label: String, enabled: Boolean, dismiss: () -> Unit, action: () -> Unit) {
-    val tc = tc()
-    HoverBox(
-        modifier = Modifier.fillMaxWidth().testTag(notesActionTag(id)),
-        hoverEnabled = enabled,
-        onClick = if (enabled) ({ dismiss(); action() }) else null,
-    ) {
-        AppText(
-            label,
-            color = if (enabled) tc.tx else tc.td.copy(.5f),
-            fontSize = 11.sp,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
-        )
-    }
-}
 
 internal enum class CopyPhase(val label: String) {
     Idle("Copy"),
@@ -368,33 +241,14 @@ internal fun CopyFormatSplitButton(
     var expanded by remember { mutableStateOf(false) }
     Box {
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-            if (look == NotesButtonLook.ICONS) {
-                // The icon follows the Idle → Copying… → Copied! cycle (a wider label would push the row's other buttons around).
-                AppButton(
-                    "",
-                    onClick = { feedback.start(defaultFormat); onReclaimFocus() },
-                    enabled = feedback.phase != CopyPhase.Copying,
-                    leadingIcon = when (feedback.phase) {
-                        CopyPhase.Idle -> Icons.Outlined.ContentCopy
-                        CopyPhase.Copying -> Icons.Outlined.HourglassEmpty
-                        CopyPhase.Copied -> Icons.Outlined.Check
-                        CopyPhase.Failed -> Icons.Outlined.ErrorOutline
-                    },
-                    horizontalPadding = COMPACT_PADDING,
-                    shape = leftShape,
-                    tooltip = feedback.phase.label,
-                    modifier = modifier.semantics { contentDescription = feedback.phase.label },
-                )
-            } else {
-                AppButton(
-                    feedback.phase.label,
-                    onClick = { feedback.start(defaultFormat); onReclaimFocus() },
-                    enabled = feedback.phase != CopyPhase.Copying,
-                    modifier = modifier,
-                    horizontalPadding = if (look == NotesButtonLook.COMPACT) COMPACT_PADDING else 8.dp,
-                    shape = leftShape,
-                )
-            }
+            AppButton(
+                feedback.phase.label,
+                onClick = { feedback.start(defaultFormat); onReclaimFocus() },
+                enabled = feedback.phase != CopyPhase.Copying,
+                modifier = modifier,
+                horizontalPadding = if (look == NotesButtonLook.COMPACT) COMPACT_PADDING else 8.dp,
+                shape = leftShape,
+            )
             AppButton(
                 "▾",
                 onClick = { expanded = !expanded; onReclaimFocus() },

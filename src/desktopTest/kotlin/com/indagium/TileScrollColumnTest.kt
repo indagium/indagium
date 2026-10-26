@@ -16,7 +16,9 @@ import com.indagium.ui.TileScrollRegion
 import com.indagium.ui.TileScrollState
 import com.indagium.ui.TileSizing
 import com.indagium.ui.dropTile
+import com.indagium.ui.normalizeTileLayout
 import com.indagium.ui.projectTileLayout
+import com.indagium.ui.removeTile
 import com.indagium.ui.resetProjected
 import com.indagium.ui.resizeProjected
 import com.indagium.ui.tileDropTargetAt
@@ -606,5 +608,113 @@ class TileScrollColumnTest {
         assertEquals(540f, sizedGeometry(resized, sizing).rect(S.C).h, EPS)
         // A stored size past the content is honoured as it is.
         assertEquals(500f, sizedGeometry(sideColumn(leaf(S.B), leaf(S.C, dp = 500f)), sizing).rect(S.C).h, EPS)
+    }
+
+    // ---- a tile alone where a column would be -------------------------------------------------------------------------------------------------
+
+    private fun lone(root: TileNode<S>) = assertNotNull(normalizeTileLayout(root, scrolls))
+
+    private fun TileNode<S>.rootChildren(): List<TileNode<S>> = (this as TileSplit<S>).children
+
+    // A lone tile's one-tile column: the column's own slot is the tile's width, the tile inside holds the height.
+    private fun TileNode<S>.onlyTile(): TileLeaf<S> = (this as TileSplit<S>).children.single() as TileLeaf<S>
+
+    private fun TileNode<S>.leafOf(id: S): TileLeaf<S> = when (this) {
+        is TileLeaf -> takeIf { it.section == id } ?: error("no $id")
+        is TileSplit -> children.firstNotNullOf { runCatching { it.leafOf(id) }.getOrNull() }
+    }
+
+    // A tile whose content is 200 dp tall and that can be resized up to 400.
+    private val fit200 = TileSizing(120f, 400f, 200f, fitDp = 200f)
+
+    @Test
+    fun aScrollableTileAloneInTheRowIsKeptInAOneTileColumnAndTheOthersAreNot() {
+        val bare = row(leaf(S.LOG), leaf(S.B, 2f, dp = 250f), leaf(S.C, 3f))
+        val root = lone(bare)
+        // The column takes the tile's weight and its width pin; the tile inside is weighted. The log stays a bare leaf.
+        assertEquals(row(leaf(S.LOG), column(leaf(S.B), weight = 2f, dp = 250f), column(leaf(S.C), weight = 3f)), root)
+        // Normalizing again changes nothing, and without the predicate (the New tab) a lone tile stays a bare leaf.
+        assertEquals(root, lone(root))
+        assertEquals(bare, normalizeTileLayout(bare))
+        // A one-tile column around a tile that does not scroll is just the tile; one below another column's tiles is a tile of it.
+        assertEquals(row(leaf(S.LOG), column(leaf(S.B))), lone(row(column(leaf(S.LOG)), leaf(S.B))))
+        assertEquals(column(leaf(S.B), leaf(S.C)), lone(column(leaf(S.B), column(leaf(S.C)))))
+        // The root alone counts too.
+        assertEquals(column(leaf(S.B)), lone(leaf(S.B)))
+    }
+
+    @Test
+    fun aLoneTileIsFoundInRowsNestedAtTheTopButNotInARowOfAColumn() {
+        // A pinned ROW inside the root ROW is still the top level...
+        assertEquals(
+            row(leaf(S.LOG), row(column(leaf(S.B)), column(leaf(S.C)), dp = 300f)),
+            lone(row(leaf(S.LOG), row(leaf(S.B), leaf(S.C), dp = 300f))),
+        )
+        // ... a ROW inside a COLUMN is a row of that column, whose tiles stay bare.
+        val inColumn = row(leaf(S.LOG), column(leaf(S.B), row(leaf(S.C), leaf(S.D))))
+        assertEquals(inColumn, lone(inColumn))
+    }
+
+    @Test
+    fun aLoneTileIsLaidOutAsAScrollingColumnWithAnEndHandle() {
+        val sizing = mapOf(S.B to fit200, S.C to content100)
+        val geo = sizedGeometry(lone(row(leaf(S.LOG), leaf(S.B), leaf(S.C))), sizing)
+        // One scrolling region per lone tile; the card is as tall as its content and the space below it is empty, not part of the card.
+        assertEquals(2, geo.scrollRegions.size)
+        assertEquals(200f, geo.rect(S.B).h, EPS)
+        assertEquals(100f, geo.rect(S.C).h, EPS)
+        assertEquals(0f, geo.rect(S.B).y, EPS)
+        assertTrue(geo.rect(S.B).bottom < HOST_H - 100f)
+        // Each has the handle under it (the only gap of its column): resizable for the flex tile, not for the content one. The log is a plain card.
+        val handles = geo.gaps.filter { it.scrolling }
+        assertEquals(listOf(1, 1), handles.map { it.index })
+        assertEquals(listOf(true, false), handles.map { it.resizable })
+        assertEquals(geo.rect(S.B).bottom, handles.first().rect.y, EPS)
+        assertEquals(HOST_H, geo.rect(S.LOG).h, EPS)
+        assertNull(geo.cards.single { it.section == S.LOG }.scrollRegion)
+        // Bare, as before, the card stretched over the whole window.
+        assertEquals(HOST_H, sizedGeometry(row(leaf(S.LOG), leaf(S.B), leaf(S.C)), sizing).rect(S.B).h, EPS)
+    }
+
+    @Test
+    fun aLoneTilesHeightIsKeptByResizingAndByLaterUnrelatedEdits() {
+        val sizing = mapOf(S.B to fit200, S.C to fit200, S.D to fit200)
+        val root = lone(row(leaf(S.LOG), leaf(S.B), leaf(S.C)))
+        val projection = assertNotNull(projectTileLayout(root) { true })
+        val handle = sizedGeometry(projection.root, sizing).gaps.first { it.scrolling && it.path == listOf(1) }
+        val resized = resizeProjected(root, projection, handle, 90f, MIN, MIN_SHARE, emptySet(), HEADER, SCROLL_MIN, SCROLL_MAX) { sizing[it] }
+        assertEquals(290f, sizedGeometry(resized, sizing).rect(S.B).h, EPS)
+        // The height is on the tile inside the column; the column's own (width) slot is untouched.
+        assertEquals(290f, resized.rootChildren()[1].onlyTile().sizeDp!!, EPS)
+        assertNull(resized.rootChildren()[1].sizeDp)
+        // Normalizing (what every commit does) keeps the column and the height.
+        assertEquals(resized, lone(resized))
+        // So do dropping another tile somewhere else, removing one and hiding one.
+        val dropped = dropTile(resized, S.C, TileDropTarget.OnSection(S.LOG, TileEdge.TOP), scrolls)
+        assertEquals(290f, dropped.leafOf(S.B).sizeDp!!, EPS)
+        assertEquals(290f, sizedGeometry(dropped, sizing).rect(S.B).h, EPS)
+        val removed = assertNotNull(removeTile(resized, S.C, scrolls))
+        assertEquals(290f, sizedGeometry(removed, sizing).rect(S.B).h, EPS)
+        val hidden = assertNotNull(projectTileLayout(resized) { it != S.C })
+        assertEquals(290f, sizedGeometry(hidden.root, sizing).rect(S.B).h, EPS)
+        // A tile dropped at the lone one's left goes beside its column, which keeps its height; the new tile is a lone column too.
+        val beside = dropTile(resized, S.D, TileDropTarget.OnSection(S.B, TileEdge.LEFT), scrolls)
+        val besideGeo = sizedGeometry(beside, sizing)
+        assertEquals(listOf(S.LOG, S.D, S.B, S.C), tileLeafSections(beside))
+        assertEquals(3, besideGeo.scrollRegions.size, "D, B and C are each a column of their own")
+        assertEquals(290f, besideGeo.rect(S.B).h, EPS)
+        assertEquals(200f, besideGeo.rect(S.D).h, EPS)
+        // Dropped under it, a tile joins its column and the lone tile keeps its height.
+        val below = dropTile(resized, S.D, TileDropTarget.OnSection(S.B, TileEdge.BOTTOM), scrolls)
+        assertEquals(column(leaf(S.B, dp = 290f), leaf(S.D)), below.rootChildren()[1])
+    }
+
+    @Test
+    fun theLogIsNeverWrappedAndJoinsALoneTilesColumnWhenDroppedBelowIt() {
+        val root = lone(row(leaf(S.LOG), leaf(S.B)))
+        assertEquals(leaf(S.LOG), root.rootChildren()[0])
+        val joined = dropTile(root, S.LOG, TileDropTarget.OnSection(S.B, TileEdge.BOTTOM), scrolls)
+        assertEquals(listOf(S.B, S.LOG), tileLeafSections(joined))
+        assertEquals(TileAxis.COLUMN, (joined as TileSplit<S>).axis)
     }
 }

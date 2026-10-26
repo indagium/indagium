@@ -20,7 +20,8 @@ import com.indagium.model.ToolbarPlacement
 // A stored tree always holds EVERY tile of its scope exactly once. A tile the user hides stays in the tree (so it comes back
 // where it was) and is named in the hidden list; invisible tiles (hidden, wrong group, not applicable) are pruned only for
 // layout, with projectTileLayout. Presets list the tiles they hide separately; sanitizing re-inserts those at their default
-// anchors.
+// anchors. A side section that ends up alone where a column would be (a direct child of the top-level row) is stored inside a
+// one-tile column, which is what gives it a content-sized card, a resize handle and a place for its height (logViewLoneColumn).
 
 /** Gap (dp) between side-by-side tiles. */
 const val LOG_VIEW_GAP_ROW_DP: Float = 8f
@@ -90,6 +91,13 @@ internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
     -> false
     else -> true
 }
+
+/**
+ * The tiles that are kept in a one-tile scrolling column of their own when they end up alone where a column would be (dropped beside the other
+ * columns, say): the side sections, so such a tile is as tall as its content, can be resized and scrolls, like in a column of several. Not the
+ * toolbar tile: alone it may be the tall narrow toolbar, which is not content sized.
+ */
+internal fun logViewLoneColumn(id: LogViewSectionId): Boolean = id != LogViewSectionId.TOOLBAR && logViewScrollsInColumn(id)
 
 /** The tiles that cannot be hidden: the log tiles and the toolbar tile (the toolbar must always be reachable). */
 internal val LogViewSectionId.neverHidden: Boolean
@@ -437,7 +445,8 @@ private fun insertAlongside(node: LogViewNode, anchor: LogViewSectionId, id: Log
 }
 
 private fun insertAt(tree: LogViewNode, id: LogViewSectionId, anchor: Pair<LogViewSectionId, TileEdge>): LogViewNode =
-    insertAlongside(tree, anchor.first, id, anchor.second) ?: dropTile(tree, id, TileDropTarget.OnSection(anchor.first, anchor.second))
+    insertAlongside(tree, anchor.first, id, anchor.second)
+        ?: dropTile(tree, id, TileDropTarget.OnSection(anchor.first, anchor.second), ::logViewLoneColumn)
 
 private fun defaultPreset(scope: LogViewScope): LogViewLayoutPreset =
     if (scope == LogViewScope.COMPARE) LogViewLayoutPreset.COMPARE_GRID else LogViewLayoutPreset.CLASSIC
@@ -463,16 +472,16 @@ internal fun sanitizeLogViewLayoutState(
 ): Pair<LogViewNode, List<LogViewSectionId>> {
     val wanted = LogViewSectionId.entries.filter { it.inScope(scope) && (it != LogViewSectionId.TOOLBAR || toolbarInLayout) }
     val seen = mutableSetOf<LogViewSectionId>()
-    val cleaned = tree?.let { keepScope(it, scope) }?.let { sanitizeTileTree(it, seen) }?.let { normalizeTileLayout(it) }
+    val cleaned = tree?.let { keepScope(it, scope) }?.let { sanitizeTileTree(it, seen) }?.let { normalizeTileLayout(it, ::logViewLoneColumn) }
         ?.let { clampPins(it) }
-        ?.let { if (toolbarInLayout) it else removeTile(it, LogViewSectionId.TOOLBAR) }
+        ?.let { if (toolbarInLayout) it else removeTile(it, LogViewSectionId.TOOLBAR, ::logViewLoneColumn) }
     val start = cleaned ?: defaultPreset(scope).layout(LogViewLegacySizes())
     val present = tileLeafSections(start).toMutableSet()
     val complete = wanted.filter { it !in present }.fold(start) { acc, id ->
         val placed = if (id == LogViewSectionId.TOOLBAR) {
             withToolbarTile(acc, true)
         } else {
-            anchorFor(id, present)?.let { insertAt(acc, id, it) } ?: appendTile(acc, id)
+            anchorFor(id, present)?.let { insertAt(acc, id, it) } ?: appendTile(acc, id, ::logViewLoneColumn)
         }
         present += id
         placed
@@ -509,10 +518,14 @@ internal fun withToolbarTile(tree: LogViewNode, present: Boolean): LogViewNode {
     val has = LogViewSectionId.TOOLBAR in tileLeafSections(tree)
     return when {
         present == has -> tree
-        !present -> removeTile(tree, LogViewSectionId.TOOLBAR) ?: tree
+        !present -> removeTile(tree, LogViewSectionId.TOOLBAR, ::logViewLoneColumn) ?: tree
         else -> {
             val first = tileLeafSections(tree).firstOrNull()
-            val inserted = if (first != null) insertAt(tree, LogViewSectionId.TOOLBAR, first to TileEdge.TOP) else appendTile(tree, LogViewSectionId.TOOLBAR)
+            val inserted = if (first != null) {
+                insertAt(tree, LogViewSectionId.TOOLBAR, first to TileEdge.TOP)
+            } else {
+                appendTile(tree, LogViewSectionId.TOOLBAR, ::logViewLoneColumn)
+            }
             pinToolbarTile(inserted)
         }
     }
