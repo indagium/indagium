@@ -28,9 +28,7 @@ class CaptureLauncherTest {
         fun ready(codec: CaptureVideoCodec, acceleration: CaptureEncoderAcceleration) = CaptureVideoEncoderProbeState.Ready(
             CaptureVideoEncoderCapabilities(listOf(CaptureVideoEncoder(codec, "enc.${codec.scrcpyName}", acceleration))),
         )
-        val h265 = captureVideoCodecSupportText(CaptureVideoCodec.H265, ready(CaptureVideoCodec.H265, CaptureEncoderAcceleration.HARDWARE), "PHONE")
         val av1 = captureVideoCodecSupportText(CaptureVideoCodec.AV1, ready(CaptureVideoCodec.AV1, CaptureEncoderAcceleration.HARDWARE), "PHONE")
-        assertTrue("portable decoder" in h265 && "software-only" !in h265, h265)
         assertTrue("portable decoder" in av1 && "AV1 decoding is software-only" in av1, av1)
 
         val fallback = captureVideoCodecSupportText(CaptureVideoCodec.AV1, ready(CaptureVideoCodec.AV1, CaptureEncoderAcceleration.SOFTWARE), "PHONE")
@@ -43,7 +41,6 @@ class CaptureLauncherTest {
         val online = CaptureDevice("PHONE", "device")
         val offline = CaptureDevice("PHONE", "offline")
         assertFalse(shouldAutoProbeVideoEncoders(CaptureVideoCodec.H264, online), "H.264 never touches the device")
-        assertTrue(shouldAutoProbeVideoEncoders(CaptureVideoCodec.H265, online))
         assertTrue(shouldAutoProbeVideoEncoders(CaptureVideoCodec.AV1, online))
         assertFalse(shouldAutoProbeVideoEncoders(CaptureVideoCodec.AV1, offline), "an unavailable device is not probed")
     }
@@ -219,10 +216,10 @@ class CaptureLauncherTest {
             includeBufferedLogs = true,
             bufferMode = CaptureBufferMode.CUSTOM,
             buffers = listOf("main", "events"),
-            videoCodec = CaptureVideoCodec.H265,
+            videoCodec = CaptureVideoCodec.AV1,
         ).withMirrorMode(CaptureMirrorMode.DISABLED)
         assertEquals(
-            "Balanced · Mirror off · H.265 · no audio · earlier logs · buffers: main, events",
+            "Balanced · Mirror off · AV1 · no audio · earlier logs · buffers: main, events",
             captureSettingsSummary(settings),
         )
         assertTrue(captureSettingsSummary(CaptureSettings(bufferMode = CaptureBufferMode.ALL)).endsWith("· all buffers"))

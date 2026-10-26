@@ -200,12 +200,11 @@ private fun CaptureVideoCodecControl(
 
 /**
  * What recording in [codec] costs on the host once the device really uses it (null for H.264, which
- * keeps the native/GPU mirror): H.265/AV1 go through the portable decoder, and AV1 decoding is
+ * keeps the native/GPU mirror): AV1 goes through the portable decoder, and AV1 decoding is
  * software-only. Only shown where the codec is in effect, never for an H.264 fallback.
  */
 internal fun captureVideoCodecHostNote(codec: CaptureVideoCodec): String? = when (codec) {
     CaptureVideoCodec.H264 -> null
-    CaptureVideoCodec.H265 -> "The mirror uses the portable decoder, not the native GPU mirror."
     CaptureVideoCodec.AV1 -> "The mirror uses the portable decoder, not the native GPU mirror; AV1 decoding is software-only."
 }
 

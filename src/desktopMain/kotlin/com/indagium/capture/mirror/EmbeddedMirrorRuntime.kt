@@ -673,7 +673,8 @@ internal class JavaCvH264Decoder : H264Decoder {
         FFmpegFrameGrabber(input, 0).use { grabber ->
             grabber.format = when (codecId) {
                 CaptureVideoCodec.H264.scrcpyId -> "h264"
-                CaptureVideoCodec.H265.scrcpyId -> "hevc"
+                // Capture no longer requests H.265; kept so an HEVC stream still decodes.
+                ScrcpyCodecIds.H265 -> "hevc"
                 // scrcpy emits AV1 low-overhead OBUs; FFmpeg's `obu` demuxer reads that format,
                 // while `av1` expects Annex-B and can report no sequence header/dimensions.
                 CaptureVideoCodec.AV1.scrcpyId -> "obu"

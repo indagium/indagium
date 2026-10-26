@@ -1,10 +1,11 @@
 package com.indagium.capture
 
 /** Video codec requested from the bundled scrcpy server for a new capture. H.264 remains the
- * persisted default so existing settings and devices keep their previous behavior. */
+ * persisted default so existing settings and devices keep their previous behavior. H.265 is no
+ * longer offered (every Android device encodes H.264); a saved `H265` decodes to the default, and
+ * HEVC recordings still play through `ScrcpyCodecIds.H265`. */
 enum class CaptureVideoCodec(val label: String, val scrcpyName: String, val scrcpyId: Int) {
     H264("H.264", "h264", 0x68_32_36_34),
-    H265("H.265", "h265", 0x68_32_36_35),
     AV1("AV1", "av1", 0x00_61_76_31),
 }
 
@@ -43,6 +44,7 @@ fun parseCaptureVideoEncoders(output: String): List<CaptureVideoEncoder> {
     val entries = mutableListOf<CaptureVideoEncoder>()
     output.lineSequence().forEach { line ->
         val match = VIDEO_ENCODER_LINE.find(line) ?: return@forEach
+        // The server still lists its h265 encoders; codecs not offered for capture are skipped.
         val codec = CaptureVideoCodec.entries.firstOrNull { it.scrcpyName == match.groupValues[1] }
             ?: return@forEach
         val acceleration = when (match.groupValues[3].lowercase()) {

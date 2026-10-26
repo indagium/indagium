@@ -457,7 +457,7 @@ card (`ui/EmbeddedMirrorPanel.kt`, `capture/mirror/EmbeddedMirrorRuntime.kt`).
 `CaptureRecorder` owns `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the checksum-pinned
 scrcpy server over `adb forward` and parses its frame-meta stream. `ScrcpyPacketReader` preserves
 presentation timestamps, configuration packets, and key-frame boundaries; `StreamingMkvWriter`
-remuxes H.264 (default), H.265, or AV1 and optional Opus packets into the growing session MKV using FFmpeg. A cancellable reconnect
+remuxes H.264 (default) or AV1 and optional Opus packets into the growing session MKV using FFmpeg. A cancellable reconnect
 path maintains the video timeline across device interruptions, while resize/rotation parameter sets
 are inserted before the next key frame.
 
@@ -476,13 +476,14 @@ bundled scrcpy server to a UUID path, runs `list_encoders=true` without opening 
 cleans the host/device copies. Bounded adb calls run off the UI thread. The launcher displays
 device-specific hardware/software/unknown acceleration and supports refreshing the result; capture
 startup probes again before resolving an advanced request. Only an explicit hardware encoder is
-accepted for H.265/AV1. Missing, software-only, or unconfirmed support falls back to H.264 with a
+accepted for AV1. H.265 is no longer offered (every Android device encodes H.264); a saved
+`H265` setting decodes to H.264. Missing, software-only, or unconfirmed support falls back to H.264 with a
 diagnostic. Successful discovery is a candidate check, not a guarantee that the requested dimensions
 and profile can initialize. Advanced startup disables automatic downsizing and retries H.264 on
 initial failure while preserving configured size, frame-rate limit, and bitrate.
 
-The stream's actual codec selects the MKV codec ID and portable mirror decoder. H.265 uses HEVC
-elementary-stream demuxing; Android AV1 frames use the low-overhead OBU demuxer, not AV1 Annex B.
+The stream's actual codec selects the MKV codec ID and portable mirror decoder. HEVC streams (older
+recordings) still use HEVC elementary-stream demuxing; Android AV1 frames use the low-overhead OBU demuxer, not AV1 Annex B.
 AV1 configuration packets can contain an `av1C` record rather than OBUs: they configure container
 extradata and must not be prepended to video frames or passed intact into the raw OBU decoder.
 Decoder feeds extract any configuration OBUs after the four-byte record header; header-only

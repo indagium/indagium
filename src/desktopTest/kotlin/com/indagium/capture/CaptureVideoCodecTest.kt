@@ -20,6 +20,10 @@ class CaptureVideoCodecTest {
             CaptureVideoCodec.H264,
             assertNotNull(captureSettingsFromJson("""{"formatVersion":1,"videoCodec":"FUTURE"}""")).videoCodec,
         )
+        assertEquals(listOf(CaptureVideoCodec.H264, CaptureVideoCodec.AV1), CaptureVideoCodec.entries, "H.265 is not offered")
+        val retired = assertNotNull(captureSettingsFromJson("""{"formatVersion":1,"videoCodec":"H265","maxFps":15}"""))
+        assertEquals(CaptureVideoCodec.H264, retired.videoCodec, "a saved H.265 choice migrates to H.264")
+        assertEquals(15, retired.maxFps, "other capture preferences survive the migration")
     }
 
     @Test
@@ -32,11 +36,11 @@ class CaptureVideoCodecTest {
             --video-codec=av1 --video-encoder=legacy.av1.encoder
             """.trimIndent(),
         )
-        assertEquals(4, encoders.size)
+        assertEquals(3, encoders.size, "h265 encoders are listed by the server but not offered")
         assertEquals(CaptureEncoderAcceleration.HARDWARE, encoders[0].acceleration)
-        assertEquals(CaptureEncoderAcceleration.SOFTWARE, encoders[1].acceleration)
-        assertEquals(CaptureEncoderAcceleration.HYBRID, encoders[2].acceleration)
-        assertEquals(CaptureEncoderAcceleration.UNKNOWN, encoders[3].acceleration)
+        assertEquals(CaptureEncoderAcceleration.HYBRID, encoders[1].acceleration)
+        assertEquals(CaptureEncoderAcceleration.UNKNOWN, encoders[2].acceleration)
+        assertTrue(encoders.none { it.name == "c2.android.hevc.encoder" })
     }
 
     @Test
@@ -52,7 +56,7 @@ class CaptureVideoCodecTest {
             listOf(CaptureVideoEncoder(CaptureVideoCodec.AV1, "android.av1", CaptureEncoderAcceleration.SOFTWARE)),
         )
         assertTrue(advancedCodecFallbackReason(CaptureVideoCodec.AV1, softwareOnly).orEmpty().contains("software"))
-        assertTrue(advancedCodecFallbackReason(CaptureVideoCodec.H265, softwareOnly).orEmpty().contains("does not list"))
+        assertTrue(advancedCodecFallbackReason(CaptureVideoCodec.AV1, CaptureVideoEncoderCapabilities(emptyList())).orEmpty().contains("does not list"))
         assertTrue(advancedCodecFallbackReason(CaptureVideoCodec.AV1, null).orEmpty().contains("unknown"))
         assertFalse(softwareOnly.encoders(CaptureVideoCodec.AV1).isEmpty())
     }
@@ -73,7 +77,7 @@ class CaptureVideoCodecTest {
         assertEquals(known, resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.AV1), known, probe))
         assertEquals(0, probes, "an already-known result is reused")
 
-        assertEquals(fresh, resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.H265), null, probe))
+        assertEquals(fresh, resolveVideoEncoderCapabilities(CaptureSettings(videoCodec = CaptureVideoCodec.AV1), null, probe))
         assertEquals(1, probes, "without a known result the recorder probes once")
     }
 

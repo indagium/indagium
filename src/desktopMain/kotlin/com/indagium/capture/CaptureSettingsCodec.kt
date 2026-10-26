@@ -130,7 +130,8 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         ),
         showUnavailableFrames = root.optional("showUnavailableFrames", defaults.showUnavailableFrames, ::booleanValue),
         // Video codec selection is additive. Older settings preserve the H.264 default, and a
-        // future codec value falls back without discarding unrelated capture preferences.
+        // future codec value falls back without discarding unrelated capture preferences. The
+        // retired "H265" value falls back the same way, to H.264.
         videoCodec = root.videoCodecOrDefault("videoCodec", defaults.videoCodec),
     )
 }.getOrNull()

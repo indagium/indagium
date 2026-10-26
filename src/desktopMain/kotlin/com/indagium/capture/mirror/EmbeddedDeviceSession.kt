@@ -1377,7 +1377,7 @@ internal class EmbeddedDeviceSession(
 
 private fun ffmpegVideoCodecId(scrcpyCodecId: Int): Int = when (scrcpyCodecId) {
     CaptureVideoCodec.H264.scrcpyId -> AV_CODEC_ID_H264
-    CaptureVideoCodec.H265.scrcpyId -> AV_CODEC_ID_HEVC
+    ScrcpyCodecIds.H265 -> AV_CODEC_ID_HEVC
     CaptureVideoCodec.AV1.scrcpyId -> AV_CODEC_ID_AV1
     else -> error("unsupported scrcpy codec id 0x${scrcpyCodecId.toUInt().toString(16)}")
 }

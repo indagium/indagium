@@ -16,8 +16,6 @@ import com.indagium.capture.CaptureVideoCodec
 import com.indagium.capture.ProcessBuilderCaptureRunner
 import com.indagium.capture.StreamingMkvWriter
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_AV1
-import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
-import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_HEVC
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.junit.Assume.assumeTrue
 import java.io.File
@@ -30,68 +28,6 @@ import kotlin.test.assertTrue
 
 /** Opt-in device plumbing test. Set INDAGIUM_DIRECT_CODEC_SMOKE=1 to deploy the bundled server. */
 class EmbeddedAv1DeviceSmokeTest {
-    @Test
-    fun recordsDeviceHevcAndFallsBackWhenItsRequestedSizeIsUnsupported() {
-        assumeTrue(
-            "Set INDAGIUM_DIRECT_CODEC_SMOKE=1 to run against the emulator",
-            System.getenv("INDAGIUM_DIRECT_CODEC_SMOKE") == "1"
-        )
-        val serial = System.getenv("INDAGIUM_DIRECT_CODEC_SERIAL") ?: "emulator-5554"
-        assumeTrue("This fixture requires the Android software encoders on an emulator", serial.startsWith("emulator-"))
-        recordHevcSample(serial, 512, AV_CODEC_ID_HEVC)
-        recordHevcSample(serial, 1280, AV_CODEC_ID_H264)
-    }
-
-    private fun recordHevcSample(serial: String, maxSize: Int, expectedCodec: Int) {
-        val root =
-            File("build/verification/direct-codec/embedded-hevc-$maxSize-${System.currentTimeMillis()}").absoluteFile
-        root.mkdirs()
-        val runner = ProcessBuilderCaptureRunner()
-        val tools = CaptureTools(CaptureExecutable(System.getenv("ADB") ?: "/opt/homebrew/bin/adb"), null, runner)
-        val diagnostics = CopyOnWriteArrayList<String>()
-        val decodedFrames = AtomicInteger()
-        val startedAt = System.nanoTime()
-        val video = File(root, "screen.mkv")
-        val recorder = EmbeddedDeviceSession(
-            AdbScrcpyTransport(tools, runner, localRoot = File(root, "server")),
-            StreamingMkvWriter(video),
-            elapsedMillis = { (System.nanoTime() - startedAt) / NANOS_PER_MILLISECOND },
-            maxReconnectAttempts = 0,
-            onDiagnostic = diagnostics::add,
-        )
-        try {
-            recorder.start(
-                serial,
-                MirrorStreamOptions(
-                    maxSize = maxSize,
-                    videoCodec = CaptureVideoCodec.H265,
-                    videoEncoder = "c2.android.hevc.encoder"
-                ),
-            )
-            recorder.attachDecoder(JavaCvH264Decoder()) { decodedFrames.incrementAndGet() }
-            waitUntil(STARTUP_TIMEOUT_MS) { recorder.hasStartedVideo() || recorder.connectionSnapshot().state == EmbeddedMirrorState.FAILED }
-            assertTrue(recorder.hasStartedVideo(), diagnostics.joinToString(" | "))
-            Thread.sleep(RECORDING_SAMPLE_MS)
-        } finally {
-            recorder.close()
-            File(root, "diagnostics.txt").writeText(diagnostics.joinToString("\n"))
-        }
-        FFmpegFrameGrabber(video).use { grabber ->
-            grabber.start()
-            assertEquals(expectedCodec, grabber.videoCodec)
-            assertNotNull(grabber.grabImage())
-            if (expectedCodec == AV_CODEC_ID_H264) {
-                assertTrue(
-                    maxOf(grabber.imageWidth, grabber.imageHeight) > 512,
-                    "Fallback must keep the requested size"
-                )
-                assertTrue(diagnostics.any { it.contains("retrying with H.264") })
-            }
-        }
-        assertTrue(decodedFrames.get() > 0, "Shared preview must decode the selected/fallback codec")
-        println("HEVC/fallback evidence: $root; decoded preview frames=${decodedFrames.get()}")
-    }
-
     @Test
     fun recordsDecodesAndExportsExistingDeviceAv1WithoutReencoding() {
         assumeTrue(
