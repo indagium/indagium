@@ -190,6 +190,16 @@ internal fun FlexScrollBox(
 }
 
 /**
+ * A [FlexRegion] with nothing in it: the flex part of a body whose list is empty at the moment. In a tile of a scrolling column it takes
+ * whatever height the surface allots, so a tile made taller than its content leaves the room here and the fixed parts after the list (an
+ * input, a form) sit at the bottom of the tile, exactly as they do once the list has rows; elsewhere it is no height at all.
+ */
+@Composable
+internal fun EmptyFlexRegion(modifier: Modifier = Modifier) {
+    FlexRegion(rememberScrollState(), modifier, capDp = 0) {}
+}
+
+/**
  * A tile body's column: scrolls (with the app scrollbar) while the tile gives it a fixed height, and is just a column that wraps its content
  * when the tile is sized by its content ([TileBodyInfo.contentSized]), so the card measures it at its natural height. One call site for both,
  * so a tile dragged between a scrolling column and another place keeps its composition.

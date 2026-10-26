@@ -112,8 +112,6 @@ import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import java.awt.FileDialog
-import java.awt.Frame
 import java.awt.Toolkit
 import java.io.File
 import java.util.UUID
@@ -550,7 +548,7 @@ internal fun logExcerptVisibleRowCount(total: Int, expanded: Boolean, cap: Int =
     if (expanded || total <= cap) total else cap
 
 @Composable
-fun AnnotationPanel(
+internal fun AnnotationPanel(
     tab: LogTab,
     settings: AppSettings,
     recentNotes: List<String> = emptyList(),
@@ -644,10 +642,14 @@ fun AnnotationPanel(
     modifier: Modifier = Modifier.fillMaxHeight(),
     // False when the Diagram library is its own tile (DiagramLibraryTileBody) instead of the top section of this panel.
     showDiagramLibrary: Boolean = true,
+    // True when the Notes tile draws the action buttons (Preview, Copy, Save, New, Open) in its own header row (NotesTile); the panel then leaves
+    // its button bar out. The tile owns the Copy feedback in that case, so the header, the preview dialog and the shortcut share one.
+    actionsInHeader: Boolean = false,
+    copyFeedbackState: CopyFeedbackState? = null,
 ) {
     val tc = tc()
     val notesLocked = LocalNotesEditLocked.current
-    val copyFeedback = rememberCopyFeedback(tab.id, onCopyFormat)
+    val copyFeedback = copyFeedbackState ?: rememberCopyFeedback(tab.id, onCopyFormat)
 
     fun mutate(action: () -> Unit) {
         if (notesMutationAllowed(notesLocked)) action()
@@ -657,23 +659,12 @@ fun AnnotationPanel(
     val ann = tab.annotations
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
-    // The buttons are the log toolbar's own AppButtons at their natural height (TileToolbarStyle.kt), so there is no modifier of their own;
-    // a click or a dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
-    val headerButtonModifier = Modifier
 
+    // A click or a dismissed popup hands the keyboard back to the panel (a clickable takes focus, and the panel's shortcuts need it).
     fun reclaimFocus() {
         runCatching { focusRequester?.requestFocus() }
     }
 
-    fun tap(action: () -> Unit) {
-        action()
-        reclaimFocus()
-    }
-    // Open+▾ split-button shapes — same joined-pair idea as TabBar's log-file Open/▾ precedent
-    // (TabBar.kt's leftShape/middleShape/rightShape), just built off CORNER_MD's 4.dp radius
-    // instead of the toolbar's 7.dp so the corners match every other AppButton in this header.
-    val openJoinedShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
-    val recentNotesDropdownShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
     var panelFocused by remember { mutableStateOf(false) }
     var prefixFocused by remember { mutableStateOf(false) }
     var issueDescFocused by remember { mutableStateOf(false) }
@@ -829,21 +820,7 @@ fun AnnotationPanel(
     val currentBlockStartOffsets = rememberUpdatedState(blockStartOffsets)
     val totalBlockHeightPx = blockIds.sumOf { blockHeightOf(it).toDouble() }.toFloat()
 
-    fun openNotePicker() {
-        val fd = FileDialog(null as Frame?, "Open Note File", FileDialog.LOAD)
-        fd.setFilenameFilter { _, n -> n.endsWith(".md") || n.endsWith(".txt") || n.endsWith(".ann") }
-        fd.isVisible = true
-        fd.file?.let { onOpenNote(File(fd.directory, it)) }
-    }
-
-    // No extension filter, unlike openNotePicker above — this picks a LOG file, and platform
-    // pickers don't reliably invoke setFilenameFilter (see TabBar's own "Open Log File" picker's
-    // comment); AppState.locateLogForTab validates the pick itself.
-    fun openLocateLogPicker() {
-        val fd = FileDialog(null as Frame?, "Locate Log File", FileDialog.LOAD)
-        fd.isVisible = true
-        fd.file?.let { onLocateLog(File(fd.directory, it)) }
-    }
+    fun openNotePicker() = pickNoteFile(onOpenNote)
 
     fun moveNoteFocus(delta: Int) {
         navIndex = rovingMove(noteTargets.map { it.asRovingItem() }, navIndex, delta)
@@ -1114,14 +1091,6 @@ fun AnnotationPanel(
                 }
             },
     ) {
-        // These controls (up to six, depending on whether a "Locate log…" reconnect is showing)
-        // keep the established workflow visible rather than making note opening/history
-        // discoverable only through a responsive overflow menu. Rich HTML copying belongs with
-        // the rendered Preview below. FlowRow wraps to a second line at narrow panel widths
-        // instead of clipping/overflowing the header (see the "Locate log…" clipping report).
-        // Five controls at the common width — Preview/Copy/Save/New fit on one line with the
-        // Open+▾ split button trailing them, mirroring TabBar's log-file Open/▾ pair so opening a
-        // note and opening a log read as the same gesture.
         if (notesLocked) {
             AppText(
                 NOTES_EDIT_LOCK_MESSAGE,
@@ -1130,71 +1099,35 @@ fun AnnotationPanel(
                 modifier = Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 12.dp, vertical = 5.dp),
             )
         }
-        // The Notes tile's button bar looks like the log toolbar above the log (TileToolbarStyle.kt): on the card, no band or border, buttons
-        // TILE_HEADER_GAP_DP apart, left-aligned, a hairline under it. It is part of the tile's fixed part.
-        Box(
-            Modifier.fillMaxWidth().heightIn(min = TILE_TOOLBAR_HEIGHT_DP.dp).testTag("notes-toolbar").tileToolbarDivider(tc.br)
-                .padding(horizontal = TILE_TOOLBAR_PADDING_DP.dp, vertical = 4.dp),
-        ) {
-            FlowRow(
-                Modifier.align(Alignment.CenterStart),
-                verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
-                horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
+        // Without a tile header to hold them (the panel used on its own) the actions get a bar of their own: on the card, no band or border, buttons
+        // TILE_HEADER_GAP_DP apart, left-aligned, a hairline under it, wrapping to a second line at narrow widths instead of clipping. In the Notes tile
+        // they are part of the tile's header row instead (NotesTile).
+        if (!actionsInHeader) {
+            val actions = NotesActionModel(
+                tab = tab,
+                defaultFormat = settings.annotationCopyFormat,
+                feedback = copyFeedback,
+                locked = notesLocked,
+                recentNotes = recentNotes,
+                recentMenuOpen = recentNotesMenuOpen,
+                activeNotePath = activeNotePath,
+                onToggleMd = onToggleMd,
+                onSave = onSave,
+                onNewAnalysis = onNewAnalysis,
+                onToggleRecentNotes = onToggleRecentNotes,
+                onOpenNote = onOpenNote,
+                onLocateLog = onLocateLog,
+                onReclaimFocus = ::reclaimFocus,
+            )
+            Box(
+                Modifier.fillMaxWidth().heightIn(min = TILE_TOOLBAR_HEIGHT_DP.dp).testTag("notes-toolbar").tileToolbarDivider(tc.br)
+                    .padding(horizontal = TILE_TOOLBAR_PADDING_DP.dp, vertical = 4.dp),
             ) {
-                AppButton("Preview", onClick = { tap(onToggleMd) }, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
-                CopyFormatSplitButton(
-                    defaultFormat = settings.annotationCopyFormat,
-                    feedback = copyFeedback,
-                    modifier = headerButtonModifier,
-                    onReclaimFocus = ::reclaimFocus,
-                )
-                AppButton("Save", onClick = { tap { mutate(onSave) } }, enabled = !notesLocked, modifier = headerButtonModifier)
-                AppButton("New", onClick = { tap { mutate(onNewAnalysis) } }, enabled = !notesLocked, modifier = headerButtonModifier)
-                // Only when this tab has no log at all (opened via Case Library's "Open notes
-                // only," a blank new tab, or its own log going missing) — the guided reconnect
-                // path for Change 2's "note opened without its log" hazard. See
-                // openLocateLogPicker/AppState.locateLogForTab. Placed next to Open/▾ (its nearest
-                // relative in purpose) rather than earlier in the row; it's a rare state and, per
-                // the FlowRow comment above, is allowed to be the thing that wraps to its own line.
-                if (tab.logData.isEmpty()) {
-                    AppButton("Locate log…", onClick = { tap { mutate(::openLocateLogPicker) } }, enabled = !notesLocked, modifier = headerButtonModifier)
-                }
-                // Wrapped in its own zero-spacing Row so FlowRow's 4.dp horizontalArrangement gap
-                // treats Open+▾ as one atomic child instead of prying them apart — same reason
-                // TabBar never lets its own Open/▾ pair split across a wrap point.
-                Row {
-                    AppButton(
-                        "Open",
-                        onClick = { tap { mutate(::openNotePicker) } },
-                        enabled = !notesLocked,
-                        modifier = headerButtonModifier,
-                        shape = if (hasRecentNotes) openJoinedShape else CORNER_MD,
-                    )
-                    // Hidden (not disabled) when there's no history — matches TabBar's own
-                    // `if (hasRecentFiles) ToolbarBtn("▾", …)` for the log-file Open button: a
-                    // dropdown arrow with nothing behind it is dead chrome, not a legitimate
-                    // disabled state, so it shouldn't render at all.
-                    if (hasRecentNotes) {
-                        Box {
-                            AppButton(
-                                "▾",
-                                modifier = headerButtonModifier.width(18.dp),
-                                horizontalPadding = 0.dp,
-                                shape = recentNotesDropdownShape,
-                                onClick = { tap(onToggleRecentNotes) },
-                            )
-                            if (recentNotesMenuOpen) {
-                                RecentNotesPopup(
-                                    recentNotes = recentNotes,
-                                    activeNotePath = activeNotePath,
-                                    onOpenNote = { file -> tap { mutate { onOpenNote(file) } } },
-                                    onDismiss = { tap(onToggleRecentNotes) },
-                                    tc = tc,
-                                )
-                            }
-                        }
-                    }
-                }
+                FlowRow(
+                    Modifier.align(Alignment.CenterStart),
+                    verticalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
+                    horizontalArrangement = Arrangement.spacedBy(TILE_HEADER_GAP_DP.dp),
+                ) { NotesActionButtons(actions) }
             }
         }
         // "Locate log…" landed on this tab but couldn't be checked against anything (Change 2c's
@@ -2021,7 +1954,7 @@ internal fun DiagramLibraryDeleteDialog(title: String, onConfirm: () -> Unit, on
 }
 
 @Composable
-private fun RecentNotesPopup(
+internal fun RecentNotesPopup(
     recentNotes: List<String>,
     // Full absolute path of the note THIS tab is pinned to (AppState.activeNoteFilePath), or null.
     // Compared by exact path equality, not by File(path).name — see activeNoteFilePath's own
@@ -2221,119 +2154,6 @@ private fun MdPreviewDialog(
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp).width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
-            }
-        }
-    }
-}
-
-private enum class CopyPhase(val label: String) {
-    Idle("Copy"),
-    Copying("Copying…"),
-    Copied("Copied!"),
-    Failed("Copy failed"),
-}
-
-/** The Copy button's Idle → Copying… → Copied!/Copy failed → Idle cycle for one tab's notes. One
- * instance serves every copy surface of the panel, so a keyboard copy lights the same button up. */
-@Stable
-private class CopyFeedbackState(
-    private val request: (AnnotationCopyFormat, (Boolean) -> Unit) -> Unit,
-) {
-    var phase by mutableStateOf(CopyPhase.Idle)
-        private set
-
-    // Ignored while a copy is in flight: a second build of the same (possibly large) payload would
-    // only queue behind the first and race it onto the clipboard.
-    fun start(format: AnnotationCopyFormat) {
-        if (phase == CopyPhase.Copying) return
-        phase = CopyPhase.Copying
-        request(format) { ok -> phase = if (ok) CopyPhase.Copied else CopyPhase.Failed }
-    }
-
-    fun reset() {
-        if (phase != CopyPhase.Copying) phase = CopyPhase.Idle
-    }
-}
-
-@Composable
-private fun rememberCopyFeedback(
-    tabId: String,
-    onCopyFormat: (AnnotationCopyFormat, (Boolean) -> Unit) -> Unit,
-): CopyFeedbackState {
-    val latestRequest by rememberUpdatedState(onCopyFormat)
-    val state = remember(tabId) { CopyFeedbackState { format, done -> latestRequest(format, done) } }
-    LaunchedEffect(state.phase) {
-        if (state.phase == CopyPhase.Copied || state.phase == CopyPhase.Failed) {
-            delay(COPIED_FEEDBACK_MS)
-            state.reset()
-        }
-    }
-    return state
-}
-
-@Composable
-private fun CopyFormatSplitButton(
-    defaultFormat: AnnotationCopyFormat,
-    feedback: CopyFeedbackState,
-    modifier: Modifier = Modifier,
-    onReclaimFocus: () -> Unit = {},
-) {
-    val tc = tc()
-    val density = LocalDensity.current.density
-    val leftShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
-    val rightShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-            AppButton(
-                feedback.phase.label,
-                onClick = { feedback.start(defaultFormat); onReclaimFocus() },
-                enabled = feedback.phase != CopyPhase.Copying,
-                modifier = modifier,
-                horizontalPadding = 8.dp,
-                shape = leftShape,
-            )
-            AppButton(
-                "▾",
-                onClick = { expanded = !expanded; onReclaimFocus() },
-                enabled = feedback.phase != CopyPhase.Copying,
-                modifier = modifier.width(18.dp),
-                horizontalPadding = 0.dp,
-                shape = rightShape,
-            )
-        }
-        if (expanded) {
-            Popup(
-                alignment = Alignment.TopEnd,
-                offset = IntOffset(0, (34 * density).roundToInt()),
-                onDismissRequest = { expanded = false; onReclaimFocus() },
-                properties = PopupProperties(focusable = true),
-            ) {
-                Column(
-                    Modifier.width(176.dp)
-                        .background(tc.p, RoundedCornerShape(7.dp))
-                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
-                        .padding(vertical = 4.dp),
-                ) {
-                    AnnotationCopyFormat.entries.forEach { format ->
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = {
-                                expanded = false
-                                feedback.start(format)
-                                onReclaimFocus()
-                            },
-                        ) {
-                            Row(
-                                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                AppText(format.label, color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f))
-                                if (format == defaultFormat) AppText("default", color = tc.td, fontSize = 9.sp)
-                            }
-                        }
-                    }
-                }
             }
         }
     }

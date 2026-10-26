@@ -656,8 +656,9 @@ class LogViewLayoutTest {
     // ---- scrolling side columns --------------------------------------------------------------------------------
 
     @Test
-    fun onlyTheLogTilesVideoAndTheToolbarKeepTheirColumnFromScrolling() {
-        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, VIDEO, TOOLBAR)
+    fun onlyTheLogTilesAndVideoKeepTheirColumnFromScrolling() {
+        // The toolbar tile is a content-sized tile of a scrolling column like any side section (it may scroll out of view there).
+        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, VIDEO)
         LogViewSectionId.entries.forEach { assertEquals(it !in fixed, logViewScrollsInColumn(it), "scrolls($it)") }
     }
 

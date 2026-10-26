@@ -1303,9 +1303,11 @@ internal fun FilterPanel(
                 ),
             ) {
                 if (filter.mode == FilterMode.TAGS) {
-                    // Combined pills for pkg prefixes + included/excluded tags
-                    if (totalActive > 0 && fpState.incPillsExpanded) {
-                        FlexScrollBox(minOf(totalActive, filterListRows) * 28, Modifier.testTag("filter-tags-list")) {
+                    // Combined pills for pkg prefixes + included/excluded tags. The list is the section's flex part whether or not it has chips (an
+                    // empty one is just room), so the input under it sits at the bottom of a tile made taller than its content.
+                    val chipsShown = totalActive > 0 && fpState.incPillsExpanded
+                    FlexScrollBox(if (chipsShown) minOf(totalActive, filterListRows) * 28 else 0, Modifier.testTag("filter-tags-list")) {
+                        if (chipsShown) {
                             FlowRow(
                                 Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1652,26 +1654,25 @@ internal fun FilterPanel(
                     // The rule chips are the section's one flex part: included and excluded rules share one list (a tile has one scrolling list).
                     val shownInc = msgInc.takeIf { fpState.incMsgPillsExpanded }.orEmpty()
                     val shownExc = msgExc.takeIf { fpState.excMsgPillsExpanded }.orEmpty()
-                    if (shownInc.isNotEmpty() || shownExc.isNotEmpty()) {
-                        val rows = minOf(shownInc.size, filterListRows) + minOf(shownExc.size, filterListRows)
-                        FlexScrollBox(rows * 28, Modifier.testTag("filter-message-rules-list")) {
-                            if (shownInc.isNotEmpty()) {
-                                FlowRow(
-                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    shownInc.forEach { rule -> TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) } }
-                                }
+                    // Always present, empty or not: it takes the extra height of a tile made taller than its content, so the input row stays at the bottom.
+                    val rows = minOf(shownInc.size, filterListRows) + minOf(shownExc.size, filterListRows)
+                    FlexScrollBox(rows * 28, Modifier.testTag("filter-message-rules-list")) {
+                        if (shownInc.isNotEmpty()) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                shownInc.forEach { rule -> TagPill(messageRulePillLabel(rule), tc.ac) { onRemoveMessageRule(rule.id) } }
                             }
-                            if (shownExc.isNotEmpty()) {
-                                FlowRow(
-                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                                ) {
-                                    shownExc.forEach { rule -> TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) } }
-                                }
+                        }
+                        if (shownExc.isNotEmpty()) {
+                            FlowRow(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                shownExc.forEach { rule -> TagPill(messageRulePillLabel(rule), msgExNeg) { onRemoveMessageRule(rule.id) } }
                             }
                         }
                     }
@@ -2385,6 +2386,9 @@ internal fun FilterPanel(
                     tab.filter.sequences.firstOrNull { it.id == editingSeqId }?.let { def ->
                         SequenceEditor(def, onUpdateSeq, onCancel = { editingSeqId = null })
                     }
+                } else {
+                    // No sequences yet: the (empty) list is still the flex part, so the forms under it sit at the bottom of a taller tile.
+                    EmptyFlexRegion()
                 }
                 // Task 4: "these two sequences interleave on different threads — scope them?" —
                 // reuses computeItems' OWN crossing-resolution pass (cachedCrossingThreadHintsFor,
@@ -3985,7 +3989,10 @@ private fun LogCompositionResults(
         }
         val matched = logCompositionSearchMatches(templates, fpState.logCompositionSearch)
         if (matched.isEmpty()) {
-            LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
+            // The hint is the list's (empty) content: the list stays the flex part, so a taller tile keeps the room above nothing else.
+            FlexScrollBox(0, Modifier.testTag("filter-log-composition-list")) {
+                LogCompositionHint("◆", "No messages match “${fpState.logCompositionSearch.trim()}”", tc)
+            }
         } else {
             val pageCount = logCompositionPageCount(matched.size)
             val page = logCompositionClampPage(fpState.logCompositionPage, pageCount)

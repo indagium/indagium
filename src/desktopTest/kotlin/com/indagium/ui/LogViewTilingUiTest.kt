@@ -15,9 +15,11 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -506,9 +508,10 @@ class LogViewTilingUiTest {
         assertFalse(exists("main-toolbar-bar") && bounds("main-toolbar-bar").width.value > 0f, "the chrome draws no toolbar bar")
         rule.onNodeWithTag("tile-card-toolbar").assertExists()
         rule.onNodeWithContentDescription("New tab").assertExists()
-        // Slim, at the top of the left column, above Tags; its own bar, no header; nothing to hide, collapse or maximize.
+        // At the top of the left column, above Tags; its own bar, no header; nothing to hide, collapse or maximize. As tall as its buttons (in the
+        // filter column they wrap onto several lines) and its padding.
         assertTrue(bounds("tile-card-toolbar").bottom <= bounds("tile-card-tags").top)
-        assertEquals(80f, bounds("tile-card-toolbar").height.value, 1f)
+        assertEquals(bounds("main-toolbar").height.value + 2 * 3f, bounds("tile-card-toolbar").height.value, 1.5f)
         assertEquals(bounds("tile-card-tags").left, bounds("tile-card-toolbar").left)
         listOf("header", "hide", "collapse", "maximize", "size").forEach { assertFalse(exists("tile-$it-toolbar"), "no $it on the toolbar tile") }
         // Its buttons work: New tab opens the home tab.
@@ -806,18 +809,20 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun theColumnScrollbarStaysClearOfTheCardsAndTheirOwnScrollbars() {
+    fun theColumnScrollbarSitsInTheGapBesideItsColumnAndNeverOverlapsACard() {
         setup(height = 500)
         assertTrue(exists("tile-scrollbar-tags"), "the default filter column is taller than 500 dp")
         val bar = rule.onNodeWithTag("tile-scrollbar-tags").getUnclippedBoundsInRoot()
+        val log = bounds("tile-card-log")
         LOG_VIEW_FILTER_TILES.forEach { tile ->
             val card = rule.onNodeWithTag("tile-card-${tile.key}").getUnclippedBoundsInRoot()
-            assertTrue(card.right.value <= bar.left.value, "$tile ends at ${card.right} and the scrollbar starts at ${bar.left}")
+            val clear = card.right.value + TILE_SCROLLBAR_CLEARANCE_DP <= bar.left.value + 0.1f
+            assertTrue(clear, "$tile ends at ${card.right}, the scrollbar starts at ${bar.left}")
         }
-        // The right column has no scrollbar and keeps the same strip free anyway, so its cards do not change width when it starts to scroll.
-        assertFalse(exists("tile-scrollbar-notes"))
-        val windowRight = rule.onRoot().getBoundsInRoot().right.value
-        assertEquals(windowRight - LOG_VIEW_HOST_PAD_DP - TILE_SCROLL_GUTTER_DP, bounds("tile-card-notes").right.value, 0.6f)
+        // In the gap to the log, centred: a dp of clearance on each side, and the bar as thin as the app's other side-section bars.
+        assertEquals(THIN_SCROLLBAR_DP, bar.width.value, 0.1f)
+        assertEquals(TILE_SCROLLBAR_CLEARANCE_DP, bar.left.value - bounds("tile-card-tags").right.value, 0.6f)
+        assertEquals(TILE_SCROLLBAR_CLEARANCE_DP, log.left.value - bar.right.value, 0.6f)
     }
 
     @Test
@@ -863,40 +868,174 @@ class LogViewTilingUiTest {
         return image[(xDp * d).toInt(), (yDp * d).toInt()].toArgb()
     }
 
-    // A button of the Notes bar by its label ("Preview" alone also names a highlighter sample elsewhere in the window).
-    private fun notesBarButton(label: String) = rule.onAllNodes(hasText(label) and hasAnyAncestor(hasTestTag("notes-toolbar")))[0]
+    // A button of the Notes tile's header row by action id (its look may be labelled, compact or an icon, so the test tag names it).
+    private fun notesBarButton(id: String) = rule.onNodeWithTag("notes-button-$id")
 
-    @Test
-    fun theNotesButtonBarUsesTheLogToolbarsButtonsOnTheCardBackgroundWithNoBand() {
-        setup(width = 1300, height = 800)
-        val bar = bounds("notes-toolbar")
-        val save = notesBarButton("Save").getBoundsInRoot()
-        val new = notesBarButton("New").getBoundsInRoot()
-        val export = bounds(logToolbarTag(LogToolbarItem.EXPORT.id))
-        // The same AppButton at its natural height as the log toolbar's Export, not a taller button of the bar's own.
-        assertEquals(export.height.value, save.height.value, 0.6f, "Notes buttons are as tall as the log toolbar's")
-        // The same gap between buttons as the toolbar and the tile header (Copy's ▾ and Open's ▾ halves are joined, so use two plain buttons).
-        assertEquals(TILE_HEADER_GAP_DP, new.left.value - save.right.value, 0.6f)
-        // The tile header's side padding, and the toolbar's height.
-        // (Preview is disabled with no notes, so its node is the label inside the button: 10 dp of AppButton padding further in.)
-        val preview = notesBarButton("Preview").getBoundsInRoot()
-        assertEquals(TILE_TOOLBAR_PADDING_DP + 10f, preview.left.value - bar.left.value, 0.6f)
-        assertEquals(TILE_TOOLBAR_HEIGHT_DP, bar.height.value, 0.6f)
-        // No tinted band: the bar is the card's own colour (it used to be the panel's second background, with a border all round).
-        val card = LIGHT_THEME.p.toArgb()
-        assertEquals(card, pixelAt("notes-toolbar", bar.width.value - 20f, 6f))
-        assertEquals(card, pixelAt("notes-toolbar", bar.width.value - 20f, bar.height.value / 2f))
-        assertTrue(LIGHT_THEME.p2.toArgb() != card, "the band colour is not the card colour, so the check means something")
+    private fun notesButtonExists(id: String): Boolean = exists("notes-button-$id")
+
+    private fun headerHas(text: String): Boolean =
+        rule.onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("tile-header-notes"))).fetchSemanticsNodes().isNotEmpty()
+
+    private val allFive = listOf("preview", "copy", "save", "new", "open")
+
+    // The Classic layout with the right column [widthDp] wide (the Notes card is as wide), and three notes in the tab.
+    private fun wideNotes(widthDp: Float): (AppState) -> Unit = { s ->
+        s.updateFilterVisible(false)
+        s.updateSettings { it.withLogViewLayout(classicLogViewLayout(LogViewLegacySizes(annotationPanelWidth = widthDp))) }
+        repeat(3) { i -> s.addNoteBlock(TAB_ID, text = "note $i") }
+    }
+
+    private fun setNotesColumn(widthDp: Float) {
+        state.updateSettings { it.withLogViewLayout(classicLogViewLayout(LogViewLegacySizes(annotationPanelWidth = widthDp))) }
+        rule.waitForIdle()
     }
 
     @Test
-    fun theNotesBarKeepsItsActionsAndTheCopyDropdown() {
-        setup(width = 1300, height = 800)
-        listOf("Preview", "Copy", "Save", "New", "Open").forEach { notesBarButton(it).assertExists() }
-        notesBarButton("▾").assertExists()
-        notesBarButton("▾").performClick()
+    fun theNotesTileHasOneHeaderRowThatHoldsTheActionButtonsAfterItsTitle() {
+        setup(width = 1000, height = 700, configure = wideNotes(780f))
+        assertFalse(exists("notes-toolbar"), "no second row of buttons below the header")
+        val header = bounds("tile-header-notes")
+        assertEquals(32f, header.height.value, 0.6f, "the header is the usual one row")
+        allFive.forEach { id ->
+            val b = notesBarButton(id).getBoundsInRoot()
+            assertTrue(b.top.value >= header.top.value - 0.6f && b.bottom.value <= header.bottom.value + 0.6f, "$id is inside the header row: $b in $header")
+        }
+        // Grip, icon, title, summary, then the buttons in order, then the header icons.
+        val title = rule.onAllNodes(hasText("Notes") and hasAnyAncestor(hasTestTag("tile-header-notes")))[0].getBoundsInRoot()
+        val summary = rule.onAllNodes(hasText("3 notes") and hasAnyAncestor(hasTestTag("tile-header-notes")))[0].getBoundsInRoot()
+        val preview = notesBarButton("preview").getBoundsInRoot()
+        val open = notesBarButton("open").getBoundsInRoot()
+        assertTrue(bounds("tile-grip-notes").right <= title.left)
+        assertTrue(title.right <= summary.left)
+        assertTrue(summary.right <= preview.left)
+        allFive.zipWithNext().forEach { (a, b) ->
+            assertTrue(notesBarButton(a).getBoundsInRoot().right <= notesBarButton(b).getBoundsInRoot().left + 0.6f.dp, "$a is before $b")
+        }
+        assertTrue(open.right <= bounds("tile-maximize-notes").left, "the buttons come before the header icons")
+        // The buttons are the log toolbar's AppButtons at their natural height, TILE_HEADER_GAP_DP apart.
+        val export = bounds(logToolbarTag(LogToolbarItem.EXPORT.id))
+        assertEquals(export.height.value, notesBarButton("save").getBoundsInRoot().height.value, 0.6f)
+        assertEquals(TILE_HEADER_GAP_DP, notesBarButton("new").getBoundsInRoot().left.value - notesBarButton("save").getBoundsInRoot().right.value, 0.6f)
+    }
+
+    @Test
+    fun theNotesButtonsAreAllVisibleInTheHeaderAtTheDefaultRightColumnWidth() {
+        // The default right column is 360 dp (classic sizes) and 350 dp when dragged a little narrower: the buttons are there, as icons, in one row.
+        listOf(360f, 350f).forEach { column ->
+            setup(width = 1000, height = 700, configure = wideNotes(column))
+            val header = bounds("tile-header-notes")
+            assertEquals(32f, header.height.value, 0.6f, "$column dp: one row")
+            allFive.forEach { id ->
+                assertTrue(notesButtonExists(id), "$column dp: $id is on the row")
+                val b = notesBarButton(id).getBoundsInRoot()
+                assertTrue(b.left >= header.left && b.right <= bounds("tile-maximize-notes").left, "$column dp: $id is in the row before the icons: $b")
+            }
+            assertFalse(exists(NOTES_ACTIONS_OVERFLOW_TAG), "$column dp: nothing needed the menu")
+            assertFalse(headerHas("Notes") || headerHas("3 notes"), "$column dp: the text gave way, the icon stays")
+            assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"))
+        }
+    }
+
+    @Test
+    fun theNotesHeaderDropsTheTextThenShrinksTheButtonsThenFoldsOpenNewAndSaveAndStaysOneRow() {
+        setup(width = 1000, height = 700, configure = wideNotes(780f))
+        listOf(780f, 560f, 500f, 440f, 400f, 350f, 300f, 260f, 220f, 190f).forEach { column ->
+            setNotesColumn(column)
+            val card = bounds("tile-card-notes").width.value
+            val expected = notesHeaderLayout(card, hasLocate = false, hasRecent = false, headerIcons = 3)
+            assertEquals(expected.showSummary, headerHas("3 notes"), "$column dp: the summary")
+            assertEquals(expected.showTitle, headerHas("Notes"), "$column dp: the title text")
+            assertEquals(expected.overflow, exists(NOTES_ACTIONS_OVERFLOW_TAG), "$column dp: the actions menu")
+            NotesAction.entries.filter { it != NotesAction.LOCATE }.forEach { a ->
+                assertEquals(a !in expected.folded, notesButtonExists(a.id), "$column dp: the ${a.id} button")
+            }
+            // Labelled buttons show their text; icon buttons do not.
+            assertEquals(expected.look != NotesButtonLook.ICONS && NotesAction.SAVE !in expected.folded, headerHas("Save"), "$column dp: Save's label")
+            assertEquals(32f, bounds("tile-header-notes").height.value, 0.6f, "$column dp: still one row")
+            assertTrue(exists("tile-grip-notes") && exists("tile-maximize-notes") && exists("tile-hide-notes"), "$column dp: grip and icons stay")
+            // Everything in the row is inside the card, before the header icons.
+            val limit = bounds("tile-maximize-notes").left
+            val last = if (expected.overflow) bounds(NOTES_ACTIONS_OVERFLOW_TAG).right else
+                NotesAction.entries.last { it != NotesAction.LOCATE && it !in expected.folded }.let { notesBarButton(it.id).getBoundsInRoot().right }
+            assertTrue(last <= limit, "$column dp: the buttons end at $last, the header icons start at $limit")
+        }
+    }
+
+    @Test
+    fun theNotesHeaderKeepsPreviewAndCopyWhenOpenNewAndSaveAreFolded() {
+        setup(width = 1000, height = 700, configure = wideNotes(780f))
+        // Walk the column down until the header folds Open, New and Save (and nothing more).
+        val folded = layoutFoldingThree()
+        val width = (400 downTo 150).first { column ->
+            setNotesColumn(column.toFloat())
+            notesHeaderLayout(bounds("tile-card-notes").width.value, hasLocate = false, hasRecent = false, headerIcons = 3) == folded
+        }
+        assertTrue(exists(NOTES_ACTIONS_OVERFLOW_TAG), "$width dp: the menu holds the folded buttons")
+        listOf("preview", "copy").forEach { assertTrue(notesButtonExists(it), "$it stays on the row") }
+        listOf("save", "new", "open").forEach { assertFalse(notesButtonExists(it), "$it is in the menu") }
+        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
+        rule.waitForIdle()
+        listOf("save", "new", "open").forEach { assertTrue(exists(notesActionTag(it)), "menu item $it") }
+        assertFalse(exists(notesActionTag("preview")), "Preview is not duplicated into the menu")
+    }
+
+    private fun layoutFoldingThree() = NotesHeaderLayout(
+        showSummary = false,
+        showTitle = false,
+        look = NotesButtonLook.ICONS,
+        folded = listOf(NotesAction.OPEN, NotesAction.NEW, NotesAction.SAVE),
+    )
+
+    @Test
+    fun theNotesMenuHoldsEveryActionAndItsItemsWork() {
+        setup(width = 1000, height = 700, configure = wideNotes(150f))
+        assertTrue(exists(NOTES_ACTIONS_OVERFLOW_TAG), "a 150 dp Notes tile folds its buttons into the menu")
+        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
+        rule.waitForIdle()
+        listOf("preview", "save", "new", "open").forEach { assertTrue(exists(notesActionTag(it)), "menu item $it") }
+        AnnotationCopyFormat.entries.forEach { assertTrue(exists(notesActionTag("copy-${it.name.lowercase()}")), "copy as ${it.label}") }
+        // Preview opens the preview of the three notes; the menu closes with the pick.
+        rule.onNodeWithTag(notesActionTag("preview")).performClick()
+        rule.waitForIdle()
+        assertTrue(state.tab(TAB_ID)!!.showAnnMd, "Preview toggled the preview")
+        assertFalse(exists(notesActionTag("preview")), "the menu closed")
+        state.toggleMd(TAB_ID)
+        rule.waitForIdle()
+        // New clears the notes to a blank analysis, like the button.
+        rule.onNodeWithTag(NOTES_ACTIONS_OVERFLOW_TAG).performClick()
+        rule.onNodeWithTag(notesActionTag("new")).performClick()
+        rule.waitForIdle()
+        assertTrue(state.tab(TAB_ID)!!.annotations.blocks.isEmpty(), "New started a blank analysis")
+    }
+
+    @Test
+    fun theNotesButtonsKeepWorkingInTheHeaderAndTheCopyDropdownStillOpens() {
+        setup(width = 1000, height = 700, configure = wideNotes(780f))
+        allFive.forEach { notesBarButton(it).assertExists() }
+        // Preview works from the header: it toggles the preview dialog of the three notes.
+        notesBarButton("preview").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tab(TAB_ID)!!.showAnnMd)
+        state.toggleMd(TAB_ID)
+        rule.waitForIdle()
+        val arrow = rule.onNodeWithTag(NOTES_COPY_FORMATS_TAG)
+        arrow.assertExists()
+        arrow.performClick()
         rule.waitForIdle()
         AnnotationCopyFormat.entries.forEach { rule.onNodeWithText(it.label).assertExists() }
+    }
+
+    @Test
+    fun theIconButtonsOfANarrowNotesHeaderStillWork() {
+        setup(width = 1000, height = 700, configure = wideNotes(350f))
+        notesBarButton("preview").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tab(TAB_ID)!!.showAnnMd, "Preview toggled the preview from its icon")
+        state.toggleMd(TAB_ID)
+        rule.waitForIdle()
+        notesBarButton("new").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tab(TAB_ID)!!.annotations.blocks.isEmpty(), "New started a blank analysis from its icon")
     }
 
     @Test
@@ -935,5 +1074,345 @@ class LogViewTilingUiTest {
         assertTrue(card.bottom.value - composer.bottom.value < 12f, "the composer is still at the bottom: $composer in $card")
         assertEquals(bounds("ai-conversation").bottom.value, composer.top.value, 0.6f)
         assertEquals(60f, bounds("ai-prompt-field").height.value, 0.6f, "the field kept its fixed height")
+    }
+
+    // ---- a tile moved out of its column can still be resized ---------------------------------------------------------------------------------
+
+    // Drops the tile whose grip is [grip] at the window point ([x], [y]) dp.
+    private fun moveTileTo(grip: String, x: Float, y: Float) {
+        dragGripTo(grip, x, y)
+        rule.onNodeWithTag(grip).performTouchInput { up() }
+        rule.waitForIdle()
+    }
+
+    private val allTileKeys = LogViewSectionId.entries.map { it.key }
+
+    private fun cardsNow(): Map<String, DpRect> =
+        allTileKeys.filter { exists("tile-card-$it") }.associateWith { bounds("tile-card-$it") }
+
+    // The splitters touching a side of the card [tile], as (handle, vertical strip?) pairs.
+    @Suppress("MagicNumber")
+    private fun handlesAround(tile: String): Map<String, Pair<androidx.compose.ui.test.SemanticsNodeInteraction, Boolean>> {
+        val card = bounds("tile-card-$tile")
+        val all = rule.onAllNodesWithContentDescription("Resize sections")
+        return (0 until all.fetchSemanticsNodes().size).map { all[it] }.mapNotNull { h ->
+            val b = h.getBoundsInRoot()
+            val overlapY = minOf(b.bottom.value, card.bottom.value) - maxOf(b.top.value, card.top.value)
+            val overlapX = minOf(b.right.value, card.right.value) - maxOf(b.left.value, card.left.value)
+            when {
+                kotlin.math.abs(b.right.value - card.left.value) < 1.5f && overlapY > 20f -> "left" to (h to true)
+                kotlin.math.abs(b.left.value - card.right.value) < 1.5f && overlapY > 20f -> "right" to (h to true)
+                kotlin.math.abs(b.bottom.value - card.top.value) < 1.5f && overlapX > 20f -> "top" to (h to false)
+                kotlin.math.abs(b.top.value - card.bottom.value) < 1.5f && overlapX > 20f -> "bottom" to (h to false)
+                else -> null
+            }
+        }.toMap()
+    }
+
+    // Drags the handle one way and, when nothing moved (it was at its limit), the other: true when some card changed.
+    private fun handleMovesSomething(handle: androidx.compose.ui.test.SemanticsNodeInteraction, vertical: Boolean): Boolean {
+        val d = rule.density.density
+        for (sign in listOf(1f, -1f)) {
+            val before = cardsNow()
+            val delta = 40f * sign * d
+            handle.performTouchInput {
+                // A vertical strip is pressed near its bottom: a scrolling column's scrollbar thumb (at the top while unscrolled) owns the strip behind it.
+                down(if (vertical) Offset(center.x, height - minOf(14f * d, height / 4f)) else center)
+                moveBy(if (vertical) Offset(delta / 2, 0f) else Offset(0f, delta / 2))
+                moveBy(if (vertical) Offset(delta / 2, 0f) else Offset(0f, delta / 2))
+                up()
+            }
+            rule.waitForIdle()
+            if (cardsNow() != before) return true
+        }
+        return false
+    }
+
+    // Where each arrangement drops the tile: a point of the target card, as fractions of its size, or an absolute offset in dp from its top left.
+    private data class Drop(val target: String, val fx: Float, val fy: Float, val dxDp: Float = 0f, val dyDp: Float = 0f, val sides: Set<String>)
+
+    @Test
+    fun aTileMovedOutOfItsColumnKeepsAWorkingHandleOnEverySideThatHasANeighbour() {
+        val drops = listOf(
+            // Between the filter column and the log, as its own column.
+            Drop("log", 0f, 0.5f, dxDp = 10f, sides = setOf("left", "right")),
+            // Above the log, in the same column (below the page's top band).
+            Drop("log", 0.5f, 0f, dyDp = 40f, sides = setOf("bottom")),
+            // Beside a filter tile: a row inside the (scrolling) filter column.
+            Drop("tags", 1f, 0.5f, dxDp = -10f, sides = setOf("left", "bottom")),
+        )
+        listOf(false, true).forEach { toolbarInLayout ->
+            listOf("highlighters", "notes", "ai").forEach { tile ->
+                drops.forEach { drop ->
+                    if (::state.isInitialized) {
+                        state.close()
+                        directory.deleteRecursively()
+                    }
+                    // The filter column overflows here: its scrollbar sits in the gap but leaves the splitter to the track around the thumb.
+                    setup(width = 1000, height = 700, showUnfiltered = toolbarInLayout, chrome = toolbarInLayout) { s ->
+                        s.aiPanelVisible = true
+                        if (toolbarInLayout) inLayout(s)
+                    }
+                    val target = bounds("tile-card-${drop.target}")
+                    moveTileTo(
+                        "tile-grip-$tile",
+                        target.left.value + target.width.value * drop.fx + drop.dxDp,
+                        target.top.value + target.height.value * drop.fy + drop.dyDp,
+                    )
+                    val label = "$tile onto ${drop.target} (${drop.fx}, ${drop.fy}), toolbar tile in the layout: $toolbarInLayout"
+                    assertNotNull(state.settings.logViewLayout, "$label: the drop was stored")
+                    val around = handlesAround(tile)
+                    drop.sides.forEach { side ->
+                        val (handle, vertical) = assertNotNull(around[side], "$label: a handle on the $side of $tile (has ${around.keys})")
+                        assertTrue(handleMovesSomething(handle, vertical), "$label: the $side handle of $tile moves something")
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- the AI message box can be made taller again ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun draggingTheTopEdgeOfTheMessageBoxMakesItTallerAndTheConversationShorterWithinLimits() {
+        setup(width = 1300, height = 900) { it.aiPanelVisible = true }
+        growBy("ai", 220f)
+        val card = bounds("tile-card-ai")
+        val field = bounds("ai-prompt-field").height.value
+        val conversation = bounds("ai-conversation").height.value
+        assertEquals(60f, field, 0.6f)
+        val handle = bounds("ai-prompt-resize")
+        assertEquals(bounds("ai-prompt-field").top.value, handle.top.value, 0.6f, "the handle is on the field's top edge")
+        dragBy(rule.onNodeWithTag("ai-prompt-resize"), -60f)
+        val grown = bounds("ai-prompt-field").height.value - field
+        assertTrue(grown > 30f, "the field grew by $grown")
+        assertEquals(grown, conversation - bounds("ai-conversation").height.value, 1f, "and the conversation gave exactly that much way")
+        assertEquals(card, bounds("tile-card-ai"), "the tile itself did not change size")
+        // The bottom row (Send, mic, hint) stays under the field, at the bottom of the tile.
+        assertTrue(bounds("ai-composer").bottom.value - bounds("tile-card-ai").bottom.value in -12f..0f)
+        assertTrue(rule.onNodeWithText("Send").getBoundsInRoot().top.value >= bounds("ai-prompt-field").bottom.value)
+        // Never past 60% of the tile's body.
+        dragBy(rule.onNodeWithTag("ai-prompt-resize"), -2000f)
+        val body = card.height.value - 33f
+        assertTrue(bounds("ai-prompt-field").height.value <= body * 0.6f + 1f, "${bounds("ai-prompt-field").height} of a $body dp body")
+        assertTrue(bounds("ai-prompt-field").height.value > body * 0.5f, "and it did reach the cap")
+        // Dragging back down never goes under the starting height.
+        dragBy(rule.onNodeWithTag("ai-prompt-resize"), 3000f)
+        assertEquals(60f, bounds("ai-prompt-field").height.value, 0.6f)
+        // A double-click puts it back from wherever it is.
+        dragBy(rule.onNodeWithTag("ai-prompt-resize"), -80f)
+        assertTrue(bounds("ai-prompt-field").height.value > 90f)
+        rule.onNodeWithTag("ai-prompt-resize").performTouchInput { doubleClick(center) }
+        rule.waitForIdle()
+        assertEquals(60f, bounds("ai-prompt-field").height.value, 0.6f)
+    }
+
+    // ---- the toolbar tile among the filter tiles ---------------------------------------------------------------------------------------------
+
+    // The toolbar button whose tooltip / description is [description] (the buttons are icon-only by default).
+    private fun toolbarButton(description: String) =
+        rule.onAllNodes(hasContentDescription(description) and hasAnyAncestor(hasTestTag("main-toolbar")))[0]
+
+    private fun buttonBounds(description: String): DpRect = toolbarButton(description).getBoundsInRoot()
+
+    @Test
+    fun theToolbarTileInTheFilterColumnIsAsTallAsItsWrappedButtonsAndHasNoHandle() {
+        setup(height = 800, chrome = true, configure = ::inLayout)
+        val card = bounds("tile-card-toolbar")
+        val toolbar = bounds("main-toolbar")
+        // In the 220 dp column the groups wrap onto several lines; the tile is those lines and its padding, not a fixed slim height.
+        assertTrue(toolbar.height.value > 2 * 32f, "the buttons wrap: ${toolbar.height}")
+        assertEquals(toolbar.height.value + 2 * 3f, card.height.value, 1.5f)
+        assertEquals(bounds("tile-card-tags").top.value, card.bottom.value + 6f, 0.6f, "the next tile follows after the normal gap")
+        assertTrue(handleUnder("toolbar") == null, "no handle under the toolbar tile")
+        // Wider, the same tile is fewer lines and so shorter: it follows its content.
+        state.updateSettings { it.withLogViewLayout(classicLogViewLayout(LogViewLegacySizes(filterPanelWidth = 520f))) }
+        rule.waitForIdle()
+        assertTrue(bounds("tile-card-toolbar").height.value < card.height.value, "a wider tile needs fewer lines")
+        assertEquals(bounds("main-toolbar").height.value + 2 * 3f, bounds("tile-card-toolbar").height.value, 1.5f)
+    }
+
+    @Test
+    fun theToolbarTilesButtonsAreGroupedLikeTheDefaultBar() {
+        // On the full-width top row the whole joined group fits one line: Filter | Notes | AI | Compare | Cases | Open are one segmented run.
+        setup(width = 1000, height = 700, chrome = true) { s ->
+            s.tabs = s.tabs + mkTab("other", "other.log", rows())
+            inLayout(s)
+            val onTop = dropTile(classicLogViewLayout(LogViewLegacySizes()), LogViewSectionId.TOOLBAR, TileDropTarget.OnPage(TileEdge.TOP))
+            s.updateSettings { it.withToolbarDroppedInLayout(onTop) }
+        }
+        val run = listOf("Toggle filter panel", "Toggle notes panel", "Toggle AI panel", "Toggle compare view", "Search past analyses", "Open log file")
+        run.zipWithNext().forEach { (a, b) ->
+            assertEquals(buttonBounds(a).right.value, buttonBounds(b).left.value, 0.6f, "$a and $b are joined")
+        }
+        val gap = 4f
+        val beforeRun = buttonBounds("Toggle filter panel").left.value - buttonBounds("New tab").right.value
+        assertEquals(gap, beforeRun, 0.6f, "New tab is a group of its own, a bar gap before the run")
+        assertEquals(gap, buttonBounds("Layout").left.value - buttonBounds("Open log file").right.value, 0.6f, "Layout is a group of its own")
+        // Icon-only buttons are narrow enough to keep the joined group on one line even in the 220 dp filter column; with labels the group is about
+        // 520 dp, so in a 330 dp column it falls apart into its three chunks, which wrap whole: the toggles stay one run, Compare / Cases another.
+        val column = classicLogViewLayout(LogViewLegacySizes(filterPanelWidth = 330f))
+        state.updateSettings { it.withLogViewLayout(withToolbarTile(column, true)).copy(toolbarIconOnlyButtons = false) }
+        rule.waitForIdle()
+
+        fun labelled(text: String) = rule.onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("main-toolbar")))[0].getBoundsInRoot()
+        val ai = labelled("AI")
+        assertEquals(labelled("Filter").right.value, labelled("Notes").left.value, 0.6f, "the toggles are still joined")
+        assertEquals(labelled("Notes").right.value, ai.left.value, 0.6f)
+        assertEquals(labelled("Compare").right.value, labelled("Cases").left.value, 0.6f, "Compare and Cases are one run")
+        val compareAside = labelled("Compare").left.value - ai.right.value >= gap - 0.6f
+        assertTrue(labelled("Compare").top.value >= ai.bottom.value || compareAside, "the chunks do not touch")
+        val openAside = labelled("Open").left.value - labelled("Cases").right.value >= gap - 0.6f
+        assertTrue(labelled("Open").top.value >= labelled("Cases").bottom.value || openAside, "Open is its own run")
+        val card = bounds("tile-card-toolbar")
+        listOf("Filter", "Notes", "AI", "Compare", "Cases", "Open").forEach {
+            assertTrue(labelled(it).right.value <= card.right.value + 0.6f, "$it is inside the tile")
+        }
+    }
+
+    @Test
+    fun aToolbarChunkTooWideForTheTileIsSplitIntoItsButtonsSoNothingIsClipped() {
+        setup(width = 1000, height = 700, chrome = true) { s ->
+            inLayout(s)
+            s.updateSettings { it.copy(toolbarIconOnlyButtons = false) }
+        }
+
+        fun labelled(text: String) = rule.onAllNodes(hasText(text) and hasAnyAncestor(hasTestTag("main-toolbar")))[0].getBoundsInRoot()
+        val card = bounds("tile-card-toolbar")
+        // The 214 dp card cannot hold Filter + Notes + AI side by side: each button is its own unit now, none squeezed or cut off.
+        listOf("Filter", "Notes", "AI", "Compare", "Cases", "Open").forEach {
+            assertTrue(labelled(it).right.value <= card.right.value + 0.6f, "$it is inside the tile")
+            assertTrue(labelled(it).width.value >= 45f, "$it keeps its full width: ${labelled(it).width}")
+        }
+        assertTrue(labelled("Notes").left.value - labelled("Filter").right.value >= 3.4f || labelled("Notes").top.value > labelled("Filter").top.value)
+    }
+
+    @Test
+    fun aFilterColumnWithTheToolbarTileScrollsAndItsOtherTilesStillResize() {
+        setup(height = 520, chrome = true, configure = ::inLayout)
+        assertTrue(exists("tile-scrollbar-toolbar"), "the column with the toolbar overflows and shows its scrollbar")
+        val tagsTop = rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top
+        rule.onNodeWithTag("tile-card-tags").performMouseInput {
+            moveTo(center)
+            scroll(150f)
+        }
+        rule.waitForIdle()
+        assertTrue(rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().top < tagsTop, "the wheel scrolled the column")
+        rule.onNodeWithTag("tile-card-tags").performMouseInput {
+            moveTo(center)
+            scroll(-600f)
+        }
+        rule.waitForIdle()
+        // Resizing one tile changes that tile only; the tiles below simply move down.
+        val before = listOf("message_rules", "log_composition").associateWith { heightOf("tile-card-$it") }
+        val tagsBefore = heightOf("tile-card-tags")
+        val grown = growBy("tags", 80f)
+        assertTrue(grown > 50f, "Tags grew by $grown")
+        assertEquals(tagsBefore + grown, storedHeight(LogViewSectionId.TAGS)!!, 1f)
+        before.forEach { (tile, height) -> assertEquals(height, heightOf("tile-card-$tile"), 0.6f, "$tile kept its height") }
+        // The toolbar tile is a content tile of the column: no stored size, and still on top.
+        assertEquals(null, storedHeight(LogViewSectionId.TOOLBAR).takeIf { it != TOOLBAR_TILE_COLUMN_DP })
+    }
+
+    // ---- a flex tile's fixed parts after its list go to the bottom, empty list or not ------------------------------------------------------------
+
+    @Test
+    fun theTagsInputSitsAtTheBottomOfATallerTileWhetherOrNotThereAreChips() {
+        setup(height = 900)
+        growBy("tags", 150f)
+
+        fun inputAtBottom(label: String) {
+            val card = bounds("tile-card-tags")
+            val input = bounds("filter-panel-tags-input")
+            assertTrue(card.bottom.value - input.bottom.value in 0f..12f, "$label: the input is at the bottom of the tile: $input in $card")
+            assertTrue(input.top.value - card.top.value > 150f, "$label: and the room is above it")
+        }
+        inputAtBottom("no tags")
+        state.upFlt(TAB_ID) { it.copy(activeTags = setOf("AAAA1", "AAAA2")) }
+        rule.waitForIdle()
+        inputAtBottom("two chips")
+        // Resizing it back to its content brings the input up under the (empty) list again; dragging taller takes it down again.
+        state.upFlt(TAB_ID) { it.copy(activeTags = emptySet()) }
+        rule.waitForIdle()
+        val before = bounds("filter-panel-tags-input").top.value
+        growBy("tags", 60f)
+        assertTrue(bounds("filter-panel-tags-input").top.value > before + 30f, "taller again: the input moved down with the bottom edge")
+        inputAtBottom("no tags, taller still")
+    }
+
+    @Test
+    fun everyFlexTileKeepsItsFormsAtTheBottomWithAnEmptyList() {
+        setup(height = 1100)
+        growBy("message_rules", 120f)
+        val rules = bounds("tile-card-message_rules")
+        val rulesInput = rule.onNodeWithText("search in messages…").getBoundsInRoot()
+        assertTrue(rules.bottom.value - rulesInput.bottom.value in 0f..14f, "Message rules: the input row is at the bottom: $rulesInput in $rules")
+        // Highlighters: the (empty) list is above the add form, and the room the tile was made taller by went to the list, not under the form.
+        val tailBefore = bounds("tile-card-highlighters").bottom.value - bounds("highlighter-add-submit").bottom.value
+        val grown = growBy("highlighters", 120f)
+        val highlighters = bounds("tile-card-highlighters")
+        val list = bounds("filter-highlighters-list")
+        assertEquals(grown, list.height.value, 1f, "the empty list took all the extra room: $list in $highlighters")
+        val tailAfter = highlighters.bottom.value - bounds("highlighter-add-submit").bottom.value
+        assertEquals(tailBefore, tailAfter, 1f, "and the add form is still at the bottom, as it was")
+        assertTrue(bounds("highlighter-add-pattern").top.value >= list.bottom.value - 0.6f, "the form follows the list")
+        // The first form of the Sequences tile ("+ New sequence…") is under the empty list as well.
+        rule.onNodeWithText("Group sequences").assertExists()
+        growBy("sequences", 120f)
+        val sequences = bounds("tile-card-sequences")
+        val newSequenceBottom = rule.onNodeWithText("+ New sequence…").getBoundsInRoot().bottom.value
+        assertTrue(sequences.bottom.value - newSequenceBottom in 0f..14f, "Sequences: the new-sequence row is at the bottom")
+    }
+
+    // ---- equal gaps, with or without a scrollbar ---------------------------------------------------------------------------------------------
+
+    private fun overlaps(a: DpRect, b: DpRect): Boolean =
+        a.left.value < b.right.value && b.left.value < a.right.value && a.top.value < b.bottom.value && b.top.value < a.bottom.value
+
+    @Test
+    fun theGapsOnBothSidesOfTheLogAreEqualWithAndWithoutAScrollbarAndTheBarStaysInsideTheGap() {
+        // Few enough filter tiles that the left column fits the window.
+        setup(height = 700, width = 1000) { s ->
+            listOf(LogViewSectionId.HIGHLIGHTERS, LogViewSectionId.SEQUENCES, LogViewSectionId.ISSUES, LogViewSectionId.SAVED_FILTERS)
+                .forEach(s::hideLogViewTile)
+        }
+        val windowRight = rule.onRoot().getBoundsInRoot().right.value
+
+        fun leftGap() = bounds("tile-card-log").left.value - bounds("tile-card-tags").right.value
+
+        fun rightGap() = bounds("tile-card-notes").left.value - bounds("tile-card-log").right.value
+        assertFalse(exists("tile-scrollbar-tags") || exists("tile-scrollbar-notes"), "nothing overflows with four filter tiles")
+        assertEquals(LOG_VIEW_GAP_ROW_DP, leftGap(), 0.6f)
+        assertEquals(LOG_VIEW_GAP_ROW_DP, rightGap(), 0.6f)
+        assertEquals(LOG_VIEW_HOST_PAD_DP.toFloat(), windowRight - bounds("tile-card-notes").right.value, 0.6f, "the margin at the window's right edge")
+        assertEquals(LOG_VIEW_HOST_PAD_DP.toFloat(), bounds("tile-card-tags").left.value, 0.6f, "and at its left edge")
+        // Now both side columns overflow: the cards keep their widths, the gaps stay equal, the bars are in them.
+        val classic = classicLogViewLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
+
+        fun pinAll(node: TileNode<LogViewSectionId>): TileNode<LogViewSectionId> = (node as TileSplit<LogViewSectionId>).copy(
+            children = node.children.map { (it as TileLeaf<LogViewSectionId>).copy(sizeDp = 400f) },
+        )
+        val tall = classic.copy(children = listOf(pinAll(classic.children[0]), classic.children[1], pinAll(classic.children[2])))
+        val widthBefore = bounds("tile-card-tags").width.value to bounds("tile-card-notes").width.value
+        state.aiPanelVisible = true
+        state.updateSettings { it.withLogViewLayout(tall) }
+        rule.waitForIdle()
+        assertTrue(exists("tile-scrollbar-tags") && exists("tile-scrollbar-notes"), "both side columns overflow now")
+        assertEquals(widthBefore.first, bounds("tile-card-tags").width.value, 0.6f, "the left cards are as wide as without a bar")
+        assertEquals(widthBefore.second, bounds("tile-card-notes").width.value, 0.6f, "the right cards are as wide as without a bar")
+        assertEquals(LOG_VIEW_GAP_ROW_DP, leftGap(), 0.6f)
+        assertEquals(LOG_VIEW_GAP_ROW_DP, rightGap(), 0.6f)
+        val leftBar = rule.onNodeWithTag("tile-scrollbar-tags").getUnclippedBoundsInRoot()
+        val rightBar = rule.onNodeWithTag("tile-scrollbar-notes").getUnclippedBoundsInRoot()
+        assertTrue(leftBar.left.value >= bounds("tile-card-tags").right.value + TILE_SCROLLBAR_CLEARANCE_DP - 0.1f)
+        assertTrue(leftBar.right.value <= bounds("tile-card-log").left.value - TILE_SCROLLBAR_CLEARANCE_DP + 0.1f)
+        assertTrue(rightBar.left.value >= bounds("tile-card-notes").right.value + TILE_SCROLLBAR_CLEARANCE_DP - 0.1f)
+        assertTrue(rightBar.right.value <= windowRight - TILE_SCROLLBAR_CLEARANCE_DP + 0.1f, "the right column's bar is inside the window: $rightBar")
+        // No bar touches any card.
+        val cards = (LOG_VIEW_FILTER_TILES.map { it.key } + listOf("log", "notes", "ai")).filter { exists("tile-card-$it") }
+        cards.forEach { key ->
+            val card = rule.onNodeWithTag("tile-card-$key").getUnclippedBoundsInRoot()
+            assertFalse(overlaps(card, leftBar) || overlaps(card, rightBar), "$key does not touch a column scrollbar: $card")
+        }
     }
 }

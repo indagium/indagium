@@ -1,5 +1,6 @@
 package com.indagium.ui
 
+import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
@@ -73,11 +74,30 @@ internal fun <K> scrollPlan(
     val children = split.children
     val isCollapsed = children.map { it is TileLeaf && it.section in collapsedSet }
     val isPinned = children.mapIndexed { i, c -> !isCollapsed[i] && c.pinnedDp() != null }
-    val sizing = children.mapIndexed { i, c -> if (isCollapsed[i]) null else (c as? TileLeaf<K>)?.let { sizingOf(it.section) } }
+    val sizing = children.mapIndexed { i, c -> if (isCollapsed[i]) null else nodeSizing(c, sizingOf) }
     return if (sizing.any { it != null }) {
         sizedPlan(split, extent, minTileDp, scrollMinDp, collapsedExtentDp, isCollapsed, isPinned, sizing)
     } else {
         legacyPlan(split, extent, minTileDp, scrollMinDp, collapsedExtentDp, isCollapsed, isPinned)
+    }
+}
+
+// What a child of a scrolling column asks of its height: a leaf's own sizing; for a row nested in the column (a tile dropped beside another one) the
+// tallest of what its tiles ask, so the row is as tall as its tallest tile needs instead of sharing the column's leftover room by weight, and is
+// resizable between the least and the most any of them allows. Null when any tile in it has not reported (or is not content sized).
+private fun <K> nodeSizing(node: TileNode<K>, sizingOf: (K) -> TileSizing?): TileSizing? = when (node) {
+    is TileLeaf -> sizingOf(node.section)
+    is TileSplit -> if (node.axis != TileAxis.ROW) {
+        null
+    } else {
+        node.children.map { nodeSizing(it, sizingOf) }.takeIf { all -> all.isNotEmpty() && all.none { it == null } }?.filterNotNull()?.let { all ->
+            TileSizing(
+                minDp = all.maxOf { it.minDp },
+                maxDp = all.maxOf { it.maxDp },
+                defaultDp = all.map { it.defaultDp }.takeIf { defaults -> defaults.none { it == null } }?.maxOfOrNull { it!! },
+                fitDp = all.maxOf { it.fitDp },
+            )
+        }
     }
 }
 
