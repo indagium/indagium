@@ -427,8 +427,10 @@ Pushing a `v*.*.*` tag there builds the Linux `.deb` automatically; Windows `.ms
 
 ## License
 
-Indagium is source-available under the [PolyForm Perimeter License 1.0.0](LICENSE). It is free to use for commercial and non-commercial purposes.
+Indagium is source-available under the [PolyForm Perimeter License 1.0.0](LICENSE). It is free to use for commercial and non-commercial purposes, subject to the license terms.
 
-You may not provide a product that competes with Indagium, including a free or paid substitute distributed under different branding. See the [license](LICENSE) for the complete terms.
+You may not use Indagium or its code to provide others with a product or service that competes with Indagium, whether free or paid and regardless of branding. This includes distributing a competing version that removes subscription restrictions to offer paid features for free.
+
+Modifications and redistribution are permitted only within the license terms. If you redistribute any part of the software, you must include the license terms or a link to them, together with the required notices. This is a summary; the [license](LICENSE) governs.
 
 The Indagium name, logo, icon, and branding are reserved; see [NOTICE](NOTICE). Third-party component notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and the [public licence index](https://indagium.com/licenses/) summarizes the media and application libraries. The app includes an offline third-party licence viewer. To assemble the pinned native media sources and legal texts with checksums, run `./gradlew prepareMediaSources`; see [source instructions](licenses/third-party/SOURCE-BUNDLE.md). The generated archive is a local build artifact, not a published download.
