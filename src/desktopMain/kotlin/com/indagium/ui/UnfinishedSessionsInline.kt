@@ -21,35 +21,49 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.capture.CaptureSession
 
-/** Tallest the inline sessions list grows (dp) in the New tab's Capture card before it scrolls on its own. */
+/** Fallback cap for the inline list (dp); a tall Capture card can pass a larger measured viewport. */
 internal const val HOME_UNFINISHED_LIST_MAX_HEIGHT_DP = 320
+internal const val HOME_UNFINISHED_PANEL_CHROME_HEIGHT_DP = 84
+
+/** List height that fills [panelHeightDp] after the panel's header, padding, and selection controls. */
+internal fun homeUnfinishedListMinHeightDp(panelHeightDp: Int): Int =
+    (panelHeightDp - HOME_UNFINISHED_PANEL_CHROME_HEIGHT_DP).coerceAtLeast(0)
 
 private const val WINDOW_DIALOG_WIDTH_DP = 640
 private const val WINDOW_DIALOG_MAX_HEIGHT_DP = 560
 
 /**
  * The Capture card's "Unfinished sessions · N" block: today's full [UnfinishedSessionsSection] (select all, delete selected, and per
- * row Open / Save ZIP / Save Compact / Open folder / Discard) inline, its rows scrolling inside [HOME_UNFINISHED_LIST_MAX_HEIGHT_DP],
- * plus an "Open in window…" link in the header that shows the same panel in a dialog as an additional place to manage them. The count
- * and the rows read the same [retained] snapshot ([UnfinishedCaptureSessionsPanel]).
+ * row Open / Save ZIP / Save Compact / Open folder / Discard) inline, with the list filling its available viewport and scrolling when
+ * needed. The "Open in window…" header link shows the same panel in a dialog as an additional place to manage them. The count and
+ * rows read the same [retained] snapshot ([UnfinishedCaptureSessionsPanel]).
  */
 @Composable
 internal fun UnfinishedSessionsInline(
     state: AppState,
     retained: List<CaptureSession>,
     onReclaimFocus: () -> Unit,
+    minPanelHeightDp: Int = 0,
+    listMinHeightDp: Int = 0,
+    listMaxHeightDp: Int = HOME_UNFINISHED_LIST_MAX_HEIGHT_DP,
 ) {
     var windowOpen by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth().testTag("unfinished-inline")) {
         UnfinishedCaptureSessionsPanel(
             retained = retained,
+            modifier = Modifier.heightIn(min = minPanelHeightDp.coerceAtLeast(0).dp),
             headerAction = if (retained.isEmpty()) {
                 null
             } else {
                 { AccentLink("Open in window…", { windowOpen = true }, Modifier.testTag("unfinished-open-window")) }
             },
         ) { sessions ->
-            UnfinishedSessionsSection(state = state, retained = sessions, listMaxHeightDp = HOME_UNFINISHED_LIST_MAX_HEIGHT_DP)
+            UnfinishedSessionsSection(
+                state = state,
+                retained = sessions,
+                listMaxHeightDp = maxOf(listMaxHeightDp, listMinHeightDp),
+                listMinHeightDp = listMinHeightDp,
+            )
         }
     }
     if (windowOpen) {

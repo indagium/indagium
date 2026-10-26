@@ -48,6 +48,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP
+import com.indagium.model.HomeSectionId
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -100,11 +102,20 @@ internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
  */
 @Composable
 internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, vertical: Boolean = false, wrap: Boolean = false, menuBeside: Boolean = vertical) {
-    val tab = layoutMenuTab(state) ?: return
+    val activeTab = state.activeTab() ?: return
+    val onLogSurface = state.activeSurface.let { it == null || it is ActiveSurface.Log }
+    val home = activeTab.isCaptureLauncher && onLogSurface
+    val tab = if (home) null else layoutMenuTab(state)
+    if (!home && tab == null) return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
-    val ctx = state.layoutMenuContext(tab)
-    val badge = if (ctx.compare) state.compareBadgeCount(ctx) else state.logViewBadgeCount(ctx)
+    val ctx = tab?.let(state::layoutMenuContext)
+    val badge = when {
+        home -> state.settings.homeHiddenSections.size
+        ctx?.compare == true -> state.compareBadgeCount(ctx)
+        ctx != null -> state.logViewBadgeCount(ctx)
+        else -> 0
+    }
     Box(if (vertical) Modifier.fillMaxWidth() else if (wrap) Modifier else Modifier.fillMaxHeight()) {
         ToolbarBtn(
             "",
@@ -132,10 +143,15 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
             ) { AppText(badge.toString(), color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
         }
         if (open) {
-            LayoutMenuPopup(state, tab, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = {
+            val dismiss = {
                 open = false
                 onReclaimFocus()
-            })
+            }
+            if (home) {
+                HomeLayoutMenuPopup(state, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
+            } else {
+                LayoutMenuPopup(state, requireNotNull(tab), vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
+            }
         }
     }
 }
@@ -157,6 +173,111 @@ private class LayoutMenuPositionProvider(private val vertical: Boolean) : PopupP
         // Above the button when the toolbar is on the bottom edge and there is no room below.
         val y = if (below > maxY && above >= 0) above else below.coerceIn(0, maxY)
         return IntOffset(x, y)
+    }
+}
+
+/** Home/New tab version of the toolbar Layout menu: presets and the section visibility checklist. */
+@Composable
+private fun HomeLayoutMenuPopup(
+    state: AppState,
+    onReclaimFocus: () -> Unit,
+    onDismiss: () -> Unit,
+    vertical: Boolean = false,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(8.dp)
+    val settings = state.settings
+    val visible = homeLeafSections(settings.homeLayout).toSet()
+    Popup(
+        popupPositionProvider = remember(vertical) { LayoutMenuPositionProvider(vertical) },
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape)
+                .padding(vertical = 8.dp).testTag("layout-menu-popup"),
+        ) {
+            MenuLabel("Layout presets")
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                HomeLayoutPreset.entries.chunked(3).forEach { rowPresets ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rowPresets.forEach { preset ->
+                            HomePresetThumb(preset, active = preset.isActiveIn(settings)) {
+                                state.updateSettings { it.withHomeLayoutPreset(preset) }
+                                onReclaimFocus()
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            MenuLabel("Panels")
+            HomeSectionId.entries.forEach { id ->
+                val isVisible = id in visible
+                CheckRow(
+                    checked = isVisible,
+                    onToggle = {
+                        state.updateSettings {
+                            if (isVisible) it.withHomeSectionHidden(id) else it.withHomeSectionShown(id)
+                        }
+                        onReclaimFocus()
+                    },
+                    modifier = Modifier.testTag("home-layout-menu-panel-${id.key}"),
+                    enabled = !isVisible || visible.size > 1,
+                ) {
+                    AppText(homeSectionTitle(id), color = tc.tx, fontSize = 12.sp)
+                }
+            }
+            Divider()
+            Row(
+                Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                    state.updateSettings {
+                        it.withHomeLayoutPreset(HomeLayoutPreset.DEFAULT)
+                            .withHomeOpenActionsHeightDp(DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP)
+                    }
+                    onReclaimFocus()
+                }.padding(horizontal = 12.dp, vertical = 8.dp).testTag("home-layout-menu-reset"),
+            ) {
+                AppText("Reset to Default", color = tc.ac, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomePresetThumb(preset: HomeLayoutPreset, active: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val fill = if (active) tc.ac else tc.td
+    val geometry = remember(preset) { homeGeometry(preset.layout, THUMB_VIRTUAL_WIDTH, THUMB_VIRTUAL_HEIGHT, 8f) }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(THUMB_WIDTH_DP.dp, THUMB_HEIGHT_DP.dp)
+                .clip(CORNER_MD)
+                .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
+                .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                .testTag("home-preset-${preset.name}")
+                .semantics {
+                    contentDescription = preset.label
+                    selected = active
+                }
+                .clickable(role = Role.Button, onClick = onClick)
+                .padding(3.dp),
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val sx = size.width / THUMB_VIRTUAL_WIDTH
+                val sy = size.height / THUMB_VIRTUAL_HEIGHT
+                geometry.cards.forEach { card ->
+                    drawRoundRect(
+                        color = fill,
+                        topLeft = Offset(card.rect.x * sx, card.rect.y * sy),
+                        size = Size(card.rect.w * sx, card.rect.h * sy),
+                        cornerRadius = CornerRadius(1.5.dp.toPx()),
+                    )
+                }
+            }
+        }
+        AppText(preset.label, color = tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

@@ -1615,6 +1615,9 @@ data class AppSettings(
     val toolbarAlign: ToolbarAlign = ToolbarAlign.START,
     val verticalTabBarWidthDp: Float = DEFAULT_VERTICAL_TAB_BAR_DP,
     val toolbarFallbackPlacement: ToolbarPlacement = ToolbarPlacement.WITH_TABS_END,
+    // The New tab's Open section action-area height, in dp; the splitter above Recent files changes it and the
+    // available height clamps it at render time. JSON-only so the frozen positional settings token stays compatible.
+    val homeOpenActionsHeightDp: Int = DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1788,6 +1791,9 @@ data class CustomWorkspaceProfile(val id: String, val name: String, val spec: Pr
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4
 const val MIN_HOME_RECENT_GRID_COLUMNS: Int = 3
 const val MAX_HOME_RECENT_GRID_COLUMNS: Int = 8
+const val DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP: Int = 180
+const val MIN_HOME_OPEN_ACTIONS_HEIGHT_DP: Int = 80
+const val MAX_HOME_OPEN_ACTIONS_HEIGHT_DP: Int = 600
 
 enum class ThemePreset(val label: String) {
     LIGHT("Light"),

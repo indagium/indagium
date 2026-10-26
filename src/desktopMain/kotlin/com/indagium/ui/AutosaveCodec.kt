@@ -699,6 +699,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("homeLayout", homeLayoutJson(homeLayout))
     put("homeHiddenSections", homeHiddenSectionsJson(homeHiddenSections))
     put("homeLayoutTipDismissed", homeLayoutTipDismissed)
+    put("homeOpenActionsHeightDp", homeOpenActionsHeightDp)
     // Log view / compare view tiling layout, JSON form only (see LogViewLayoutSettingsJson.kt).
     putLogViewLayoutSettings(this@settingsJson)
     // Tab strip appearance and chrome placement, JSON form only (see ChromeSettingsJson.kt).
@@ -1057,6 +1058,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeLayout = home.layout,
         homeHiddenSections = home.hidden,
         homeLayoutTipDismissed = home.tipDismissed,
+        homeOpenActionsHeightDp = o.intOrDefault("homeOpenActionsHeightDp", DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP)
+            .coerceIn(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, MAX_HOME_OPEN_ACTIONS_HEIGHT_DP),
     ).withLogViewLayoutSettingsFrom(o).withChromeSettingsFrom(o)
 }.getOrNull()
 

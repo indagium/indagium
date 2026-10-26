@@ -26,7 +26,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -54,8 +53,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -419,33 +421,53 @@ internal val HOME_SECTION_BODY_PADDING = PaddingValues(horizontal = 16.dp, verti
 private const val HOME_ACTION_HEIGHT_DP = 44
 private const val HOME_ACTION_GAP_DP = 8
 
-// The square tiles (as before the tiling New tab) are used while the section is big enough for them; a small section gets the
-// compact buttons so the recent files stay visible.
-private const val HOME_TILE_MAX_SIZE_DP = 128
-private const val HOME_TILE_MIN_SIZE_DP = 88
+// Large action cards are used while the section is big enough; a small section gets compact buttons so Recent files stay visible.
+private const val HOME_TILE_MIN_WIDTH_DP = 88
 private const val HOME_TILE_GAP_DP = 12
 private const val HOME_TILE_COUNT = 4
+private const val HOME_COMPACT_ONE_COLUMN_BELOW_DP = 320f
+private const val HOME_COMPACT_TWO_COLUMNS_BELOW_DP = 560f
+private const val HOME_COMPACT_BUTTON_ROW_HEIGHT_DP = HOME_ACTION_HEIGHT_DP + HOME_ACTION_GAP_DP
+private const val HOME_ACTION_HINT_DEFAULT_HEIGHT_DP = 16f
+private const val HOME_ACTION_HEADER_GAP_DP = 16f
 
-// Height the hint, the gaps and a usable recent-files list need below the tiles.
-private const val HOME_TILES_MIN_REST_HEIGHT_DP = 260
+/** Height of the wide Open action cards, or null when the card width/height needs compact buttons. */
+internal fun homeOpenActionCardHeightDp(widthDp: Float, actionRowHeightDp: Float): Float? {
+    val cardWidth = (widthDp - HOME_TILE_GAP_DP * (HOME_TILE_COUNT - 1)) / HOME_TILE_COUNT
+    return actionRowHeightDp.takeIf { cardWidth >= HOME_TILE_MIN_WIDTH_DP && it >= HOME_TILE_MIN_WIDTH_DP }
+}
 
-/** True when the Open section's body ([widthDp] x [heightDp], inside its padding) fits the four square tiles at a readable size and
- *  still leaves room for the recent files; otherwise the compact buttons are used. */
-internal fun homeOpenUsesSquareTiles(widthDp: Float, heightDp: Float): Boolean {
-    val tile = minOf(HOME_TILE_MAX_SIZE_DP.toFloat(), (widthDp - HOME_TILE_GAP_DP * (HOME_TILE_COUNT - 1)) / HOME_TILE_COUNT)
-    return tile >= HOME_TILE_MIN_SIZE_DP && heightDp >= tile + HOME_TILES_MIN_REST_HEIGHT_DP
+/** Whether the Open section should show large action cards or compact buttons. */
+internal fun homeOpenUsesLargeCards(widthDp: Float, actionRowHeightDp: Float): Boolean =
+    homeOpenActionCardHeightDp(widthDp, actionRowHeightDp) != null
+
+/** Minimum height that keeps every compact action visible when the buttons wrap at [widthDp]. */
+internal fun homeOpenMinimumActionHeightDp(widthDp: Float, hintHeightDp: Float = HOME_ACTION_HINT_DEFAULT_HEIGHT_DP): Float {
+    val columns = when {
+        widthDp < HOME_COMPACT_ONE_COLUMN_BELOW_DP -> 1
+        widthDp < HOME_COMPACT_TWO_COLUMNS_BELOW_DP -> 2
+        else -> HOME_TILE_COUNT
+    }
+    val rows = (HOME_TILE_COUNT + columns - 1) / columns
+    return maxOf(
+        HOME_OPEN_ACTIONS_MIN_HEIGHT_DP,
+        hintHeightDp + HOME_ACTION_HEADER_GAP_DP + rows * HOME_COMPACT_BUTTON_ROW_HEIGHT_DP +
+            (rows - 1) * HOME_ACTION_GAP_DP,
+    )
 }
 
 private class HomeOpenAction(val label: String, val icon: ImageVector, val onClick: () -> Unit)
 
 @Composable
-private fun HomeOpenZone(
+internal fun HomeOpenZone(
     state: AppState,
     tab: LogTab,
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
+    var draftActionHeightDp by remember { mutableStateOf<Float?>(null) }
+    var actionHintHeightPx by remember { mutableStateOf(0) }
     val actions = listOf(
         HomeOpenAction("Open file…", Icons.Outlined.FolderOpen) { pickLogFileAndOpen(state, "Open Log File") },
         HomeOpenAction("Bug report / archive", Icons.Outlined.FolderZip) { pickLogFileAndOpen(state, "Open Bug Report or Archive") },
@@ -453,37 +475,103 @@ private fun HomeOpenZone(
         HomeOpenAction("Past cases", Icons.AutoMirrored.Outlined.ManageSearch) { state.openCaseLibrary(tab.id) },
     )
     BoxWithConstraints(modifier.padding(HOME_SECTION_BODY_PADDING)) {
-        val squareTiles = homeOpenUsesSquareTiles(maxWidth.value, maxHeight.value)
-        Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            // The section card's header already says "Open a log"; only the hint stays.
-            AppText(
-                "Start from a file, a bug report or archive, saved notes, or a past case.",
-                color = tc.td,
-                fontSize = 12.sp,
-            )
-            if (squareTiles) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(HOME_TILE_GAP_DP.dp)) {
-                    actions.forEach { action ->
-                        HomeTile(action.label, action.icon, onReclaimFocus, Modifier.weight(1f).testTag("home-open-tile"), action.onClick)
-                    }
-                }
-            } else {
-                FlowRow(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
-                    verticalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
-                ) {
-                    actions.forEach { action ->
-                        HomeActionButton(action.label, action.icon, onReclaimFocus, Modifier.testTag("home-open-button"), action.onClick)
+        val availableHeightDp = maxHeight.value
+        val density = LocalDensity.current.density
+        val hintHeightDp = if (actionHintHeightPx > 0) actionHintHeightPx / density else HOME_ACTION_HINT_DEFAULT_HEIGHT_DP
+        val minActionHeightDp = homeOpenMinimumActionHeightDp(maxWidth.value, hintHeightDp)
+        val canResize = availableHeightDp >= minActionHeightDp + HOME_OPEN_RECENTS_MIN_HEIGHT_DP + HOME_OPEN_SPLITTER_HEIGHT_DP
+        val storedActionHeight = homeOpenActionAreaHeightDp(availableHeightDp, state.settings.homeOpenActionsHeightDp)
+            .coerceAtLeast(minActionHeightDp)
+        val actionHeightDp = if (canResize) {
+            (draftActionHeightDp ?: storedActionHeight)
+                .coerceIn(minActionHeightDp, maxOf(minActionHeightDp, availableHeightDp - HOME_OPEN_RECENTS_MIN_HEIGHT_DP - HOME_OPEN_SPLITTER_HEIGHT_DP))
+        } else {
+            minOf(draftActionHeightDp ?: storedActionHeight, availableHeightDp.coerceAtLeast(0f))
+        }
+        Column(Modifier.fillMaxSize()) {
+            Column(
+                Modifier.fillMaxWidth().height(actionHeightDp.dp).testTag("home-open-action-area"),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                // The section card's header already says "Open a log"; only the hint stays.
+                AppText(
+                    "Start from a file, a bug report or archive, saved notes, or a past case.",
+                    color = tc.td,
+                    fontSize = 12.sp,
+                    modifier = Modifier.testTag("home-open-hint").onSizeChanged { actionHintHeightPx = it.height },
+                )
+                BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
+                    val actionCardHeightDp = homeOpenActionCardHeightDp(maxWidth.value, maxHeight.value)
+                    if (actionCardHeightDp != null) {
+                        Row(
+                            Modifier.fillMaxSize(),
+                            horizontalArrangement = Arrangement.spacedBy(HOME_TILE_GAP_DP.dp, Alignment.CenterHorizontally),
+                        ) {
+                            actions.forEachIndexed { index, action ->
+                                HomeTile(
+                                    action.label,
+                                    action.icon,
+                                    onReclaimFocus,
+                                    Modifier.weight(1f).fillMaxHeight().testTag("home-open-tile-$index"),
+                                    action.onClick,
+                                )
+                            }
+                        }
+                    } else {
+                        FlowRow(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+                            verticalArrangement = Arrangement.spacedBy(HOME_ACTION_GAP_DP.dp),
+                        ) {
+                            actions.forEachIndexed { index, action ->
+                                HomeActionButton(
+                                    action.label,
+                                    action.icon,
+                                    onReclaimFocus,
+                                    Modifier.testTag("home-open-button-$index"),
+                                    action.onClick,
+                                )
+                            }
+                        }
                     }
                 }
             }
-            HomeRecentSection(state = state, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxWidth())
+            if (canResize) {
+                Box(
+                    Modifier.fillMaxWidth().height(HOME_OPEN_SPLITTER_HEIGHT_DP.dp)
+                        .testTag("home-open-actions-splitter")
+                        .semantics { contentDescription = "Resize actions and recent files" },
+                ) {
+                    VDivider(
+                        onDragEnd = {
+                            draftActionHeightDp?.let { resized ->
+                                state.updateSettings { it.withHomeOpenActionsHeightDp(resized.roundToInt()) }
+                            }
+                            draftActionHeightDp = null
+                        },
+                        onDragCancel = { draftActionHeightDp = null },
+                    ) { delta ->
+                        val current = draftActionHeightDp ?: actionHeightDp
+                        draftActionHeightDp = homeOpenActionAreaHeightDp(
+                            availableHeightDp,
+                            (current + delta).roundToInt(),
+                        ).coerceIn(
+                            minActionHeightDp,
+                            maxOf(minActionHeightDp, availableHeightDp - HOME_OPEN_RECENTS_MIN_HEIGHT_DP - HOME_OPEN_SPLITTER_HEIGHT_DP),
+                        )
+                    }
+                }
+            }
+            HomeRecentSection(
+                state = state,
+                onReclaimFocus = onReclaimFocus,
+                modifier = Modifier.weight(1f).fillMaxWidth().testTag("home-recent-section"),
+            )
         }
     }
 }
 
-/** One of the four square "Open a log" tiles, used while the section has room for them (see [homeOpenUsesSquareTiles]). Reclaims
+/** One of the four large "Open a log" cards, used while the section has room for them (see [homeOpenUsesLargeCards]). Reclaims
  *  root keyboard focus on click (see CLAUDE.md's clickable-steals-focus gotcha). */
 @Composable
 private fun HomeTile(
@@ -496,8 +584,6 @@ private fun HomeTile(
     val tc = tc()
     HoverBox(
         modifier = modifier
-            .aspectRatio(1f)
-            .widthIn(max = HOME_TILE_MAX_SIZE_DP.dp)
             .border(1.dp, tc.br, CORNER_MD)
             .clip(CORNER_MD),
         onClick = {

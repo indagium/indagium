@@ -1,10 +1,22 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
+import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureStatus
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -28,6 +40,17 @@ class CaptureOptionsDialogUiTest {
         customCommandsDir = File(tempDir, "commands"),
         filterBackupsDir = File(tempDir, "filter-backups"),
     )
+
+    private fun retainedSessions(count: Int): List<CaptureSession> = (1..count).map { index ->
+        CaptureSession(
+            id = "retained-$index",
+            directory = File(tempDir, "retained-$index"),
+            device = CaptureDevice(serial = "serial-$index", state = "device", model = "Phone $index"),
+            settings = CaptureSettings(),
+            startedEpochMs = index.toLong(),
+            status = CaptureStatus.INTERRUPTED,
+        )
+    }
 
     @After
     fun tearDown() {
@@ -69,5 +92,36 @@ class CaptureOptionsDialogUiTest {
         rule.onNodeWithText("Done").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Recording options").assertDoesNotExist()
+    }
+
+    @Test
+    fun unfinishedListUsesTheRemainingCaptureHeightAndScrollsInsideAtBothSizes() {
+        val retained = retainedSessions(24)
+        val listHeights = mutableListOf<Float>()
+        for (heightDp in listOf(450, 900)) {
+            rule.setContent {
+                Box(Modifier.requiredSize(900.dp, heightDp.dp).testTag("capture-test-host")) {
+                    HomeCaptureSection(
+                        state = state,
+                        launcherTabId = "home",
+                        onReclaimFocus = {},
+                        modifier = Modifier.fillMaxSize(),
+                        pollDevices = false,
+                        retainedSessions = retained,
+                    )
+                }
+            }
+            rule.waitForIdle()
+            val panel = rule.onNodeWithTag("unfinished-inline").getBoundsInRoot()
+            val host = rule.onNodeWithTag("capture-test-host").getBoundsInRoot()
+            val list = rule.onNodeWithTag("unfinished-session-list").getBoundsInRoot()
+            assertTrue(
+                kotlin.math.abs(panel.bottom.value - (host.bottom.value - 12f)) <= 2f,
+                "panel bottom ${panel.bottom} should track card bottom ${host.bottom}",
+            )
+            assertTrue(list.height.value > 0f)
+            listHeights += list.height.value
+        }
+        assertTrue(listHeights[1] > listHeights[0], "the taller card gives the unfinished list more room: $listHeights")
     }
 }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -28,6 +29,7 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -35,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -130,6 +133,7 @@ internal fun HomeCaptureSection(
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     pollDevices: Boolean = true,
+    retainedSessions: List<CaptureSession>? = null,
 ) {
     val service = state.captureService
     val draft = state.captureLaunchSettings(launcherTabId)
@@ -176,96 +180,122 @@ internal fun HomeCaptureSection(
     // invalid/missing adb, or any error, keeps the full panel below exactly as before: that's the one
     // state where this needs its old prominence.
     val toolsFoldedIntoDeviceRow = service.toolStatus != null && service.adbAvailable && service.error == null
-    ScrollColumnWithBar(
-        modifier.fillMaxSize(),
-        contentPadding = contentPadding,
-        endGutter = 0.dp,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        AppText(
-            "Choose an Android device. The capture opens as a normal streaming log tab.",
-            color = tc().td,
-            fontSize = 12.sp,
-            maxLines = 2,
-        )
-        if (!toolsFoldedIntoDeviceRow) {
-            service.toolStatus?.let { status ->
-                LauncherPanel("Capture tools") {
-                    AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AppButton("Recheck tools", { service.recheckToolsFromSettings() }, enabled = !service.discovering)
-                        AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+    var fixedControlsHeightPx by remember { mutableIntStateOf(0) }
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        val density = LocalDensity.current.density
+        val viewportHeightDp = maxHeight.value
+        val paddingHeightDp = contentPadding.calculateTopPadding().value + contentPadding.calculateBottomPadding().value
+        val fixedControlsHeightDp = fixedControlsHeightPx / density
+        val panelMinHeightDp = if (fixedControlsHeightPx > 0 && viewportHeightDp.isFinite()) {
+            (viewportHeightDp - paddingHeightDp - fixedControlsHeightDp - 10f).roundToInt().coerceAtLeast(0)
+        } else {
+            0
+        }
+        val listMinHeightDp = homeUnfinishedListMinHeightDp(panelMinHeightDp)
+        ScrollColumnWithBar(
+            Modifier.fillMaxSize(),
+            contentPadding = contentPadding,
+            endGutter = 0.dp,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Column(
+                Modifier.fillMaxWidth().onSizeChanged { fixedControlsHeightPx = it.height }.testTag("capture-fixed-content"),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                AppText(
+                    "Choose an Android device. The capture opens as a normal streaming log tab.",
+                    color = tc().td,
+                    fontSize = 12.sp,
+                    maxLines = 2,
+                )
+                if (!toolsFoldedIntoDeviceRow) {
+                    service.toolStatus?.let { status ->
+                        LauncherPanel("Capture tools") {
+                            AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                            service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                AppButton("Recheck tools", { service.recheckToolsFromSettings() }, enabled = !service.discovering)
+                                AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+                            }
+                        }
                     }
                 }
+                CaptureDeviceSummaryPanel(
+                    service = service,
+                    selected = selectedDevice,
+                    toolsFolded = toolsFoldedIntoDeviceRow,
+                    onSelect = { selectedSerial = it },
+                    onPairWifi = { qrPairingOpen = true },
+                    onPairCode = { codePairingAddress = it },
+                    onReclaimFocus = onReclaimFocus,
+                )
+                if (qrPairingOpen) {
+                    QrPairingDialog(
+                        service = service,
+                        onConnected = { serial -> selectedSerial = serial },
+                        onUseCode = {
+                            qrPairingOpen = false
+                            codePairingAddress = ""
+                        },
+                        onDismiss = {
+                            qrPairingOpen = false
+                            onReclaimFocus()
+                        },
+                    )
+                }
+                codePairingAddress?.let { address ->
+                    CodePairingDialog(
+                        service = service,
+                        initialAddress = address,
+                        onConnected = { serial -> selectedSerial = serial },
+                        onDismiss = {
+                            codePairingAddress = null
+                            onReclaimFocus()
+                        },
+                    )
+                }
+                CaptureSettingsSummaryRow(draft, onChange = { optionsOpen = true })
+                if (optionsOpen) {
+                    CaptureOptionsDialog(
+                        state = state,
+                        launcherTabId = launcherTabId,
+                        deviceSerial = selectedDevice?.serial,
+                        onDismiss = {
+                            optionsOpen = false
+                            onReclaimFocus()
+                        },
+                    )
+                }
+                selectedDevice?.let { device ->
+                    DeviceLoggingPanel(
+                        state = state,
+                        service = service,
+                        device = device,
+                        noLiveCapture = state.liveCaptureTabId == null,
+                        onReclaimFocus = onReclaimFocus,
+                    )
+                }
+                val startBlockedHint = captureStartBlockedHint(selectedDevice, state.liveCaptureTabId, state.captureStartInProgress)
+                AppButton(
+                    "Start capture",
+                    { selectedDevice?.let { state.startCaptureTab(it) }; onReclaimFocus() },
+                    ButtonVariant.Primary,
+                    enabled = startBlockedHint == null,
+                    modifier = Modifier.fillMaxWidth().testTag("capture-start"),
+                )
+                startBlockedHint?.let { AppText(it, color = tc().td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.testTag("capture-start-hint")) }
             }
-        }
-        CaptureDeviceSummaryPanel(
-            service = service,
-            selected = selectedDevice,
-            toolsFolded = toolsFoldedIntoDeviceRow,
-            onSelect = { selectedSerial = it },
-            onPairWifi = { qrPairingOpen = true },
-            onPairCode = { codePairingAddress = it },
-            onReclaimFocus = onReclaimFocus,
-        )
-        if (qrPairingOpen) {
-            QrPairingDialog(
-                service = service,
-                onConnected = { serial -> selectedSerial = serial },
-                onUseCode = {
-                    qrPairingOpen = false
-                    codePairingAddress = ""
-                },
-                onDismiss = {
-                    qrPairingOpen = false
-                    onReclaimFocus()
-                },
-            )
-        }
-        codePairingAddress?.let { address ->
-            CodePairingDialog(
-                service = service,
-                initialAddress = address,
-                onConnected = { serial -> selectedSerial = serial },
-                onDismiss = {
-                    codePairingAddress = null
-                    onReclaimFocus()
-                },
-            )
-        }
-        CaptureSettingsSummaryRow(draft, onChange = { optionsOpen = true })
-        if (optionsOpen) {
-            CaptureOptionsDialog(
+            // The count and the rows close over the same snapshot. In a tall card, its list uses the
+            // space below the fixed controls; in a short one the entire launcher still scrolls.
+            UnfinishedSessionsInline(
                 state = state,
-                launcherTabId = launcherTabId,
-                deviceSerial = selectedDevice?.serial,
-                onDismiss = {
-                    optionsOpen = false
-                    onReclaimFocus()
-                },
-            )
-        }
-        selectedDevice?.let { device ->
-            DeviceLoggingPanel(
-                state = state,
-                service = service,
-                device = device,
-                noLiveCapture = state.liveCaptureTabId == null,
+                retained = retainedSessions ?: service.sessions.filter { it.status != CaptureStatus.RECORDING },
                 onReclaimFocus = onReclaimFocus,
+                minPanelHeightDp = panelMinHeightDp,
+                listMinHeightDp = listMinHeightDp,
+                listMaxHeightDp = if (listMinHeightDp > 0) listMinHeightDp else HOME_UNFINISHED_LIST_MAX_HEIGHT_DP,
             )
         }
-        val startBlockedHint = captureStartBlockedHint(selectedDevice, state.liveCaptureTabId, state.captureStartInProgress)
-        AppButton(
-            "Start capture",
-            { selectedDevice?.let { state.startCaptureTab(it) }; onReclaimFocus() },
-            ButtonVariant.Primary,
-            enabled = startBlockedHint == null,
-            modifier = Modifier.fillMaxWidth().testTag("capture-start"),
-        )
-        startBlockedHint?.let { AppText(it, color = tc().td, fontSize = 10.sp, maxLines = 2, modifier = Modifier.testTag("capture-start-hint")) }
-        // The count and the rows must close over the same snapshot of service.sessions (see UnfinishedCaptureSessionsPanel).
-        UnfinishedSessionsInline(state, service.sessions.filter { it.status != CaptureStatus.RECORDING }, onReclaimFocus)
     }
 }
 
@@ -534,9 +564,13 @@ private fun LauncherPanel(title: String, content: @Composable () -> Unit) {
  *  a muted adb status line and its Recheck/Install actions in next to the title (item 2 of the
  *  "make it compact" pass). */
 @Composable
-private fun LauncherPanel(header: @Composable () -> Unit, content: @Composable () -> Unit) {
+private fun LauncherPanel(
+    header: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
     Column(
-        Modifier.fillMaxWidth().border(BorderStroke(1.dp, tc().br), CORNER_MD).padding(12.dp),
+        modifier.fillMaxWidth().border(BorderStroke(1.dp, tc().br), CORNER_MD).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         header()
@@ -549,6 +583,7 @@ private fun LauncherPanel(header: @Composable () -> Unit, content: @Composable (
 @Composable
 internal fun UnfinishedCaptureSessionsPanel(
     retained: List<CaptureSession>,
+    modifier: Modifier = Modifier,
     headerAction: (@Composable () -> Unit)? = null,
     content: @Composable (List<CaptureSession>) -> Unit,
 ) {
@@ -559,6 +594,7 @@ internal fun UnfinishedCaptureSessionsPanel(
                 headerAction?.invoke()
             }
         },
+        modifier = modifier,
     ) {
         content(retained)
     }
@@ -840,6 +876,7 @@ internal fun UnfinishedSessionsSection(
     state: AppState,
     retained: List<CaptureSession>,
     listMaxHeightDp: Int = UNFINISHED_LIST_DEFAULT_MAX_HEIGHT_DP,
+    listMinHeightDp: Int = 0,
 ) {
     var discardId by remember { mutableStateOf<String?>(null) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -867,7 +904,11 @@ internal fun UnfinishedSessionsSection(
     // off-screen, crowding out the rest of the capture zone. The default (15 rows of ~44dp: the
     // two-line (12sp + 10sp) text column plus the 8dp gap to the next row) is for the roomy dialog;
     // the New tab's card passes a smaller cap. BoundedScrollBox draws the scrollbar.
-    BoundedScrollBoxDp(maxHeightDp = listMaxHeightDp) {
+    BoundedScrollBoxDp(
+        maxHeightDp = listMaxHeightDp,
+        modifier = Modifier.testTag("unfinished-session-list"),
+        minHeightDp = listMinHeightDp,
+    ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             retained.forEach { session ->
                 UnfinishedSessionRow(

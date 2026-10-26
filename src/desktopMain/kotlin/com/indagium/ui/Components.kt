@@ -238,7 +238,12 @@ fun HDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Flo
 }
 
 @Composable
-fun VDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Float) -> Unit) {
+fun VDivider(
+    onDragEnd: () -> Unit = {},
+    onDragCancel: () -> Unit = {},
+    showLine: Boolean = true,
+    onDelta: (Float) -> Unit,
+) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
@@ -249,6 +254,7 @@ fun VDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Flo
     // [onDragEnd] fires once when a drag is released (not per pixel) — for persisting the final size.
     val currentOnDelta by rememberUpdatedState(onDelta)
     val currentOnDragEnd by rememberUpdatedState(onDragEnd)
+    val currentOnDragCancel by rememberUpdatedState(onDragCancel)
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -261,7 +267,12 @@ fun VDivider(onDragEnd: () -> Unit = {}, showLine: Boolean = true, onDelta: (Flo
                         dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor()
                         currentOnDragEnd()
                     },
-                    onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragCancel = {
+                        dragging = false
+                        dragCursorOverride.value = null
+                        activeWindow()?.cursor = AwtCursor.getDefaultCursor()
+                        currentOnDragCancel()
+                    },
                     onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.y / density) },
                 )
             }
@@ -478,6 +489,7 @@ internal fun BoundedScrollBox(
 internal fun BoundedScrollBoxDp(
     maxHeightDp: Int,
     modifier: Modifier = Modifier,
+    minHeightDp: Int = 0,
     // Stage 5 task 4: a caller that needs to programmatically scroll this box (e.g. scrolling a
     // manual-message row into view on canvas click) can hoist and pass its own ScrollState;
     // every other call site keeps getting a private one via this default, exactly as before.
@@ -489,7 +501,12 @@ internal fun BoundedScrollBoxDp(
     // message line). heightIn(max) makes it a cap for many rows while letting fewer/shorter rows
     // size to their own content instead of being stretched-then-clipped to it.
     val h = maxHeightDp.dp
-    Box(modifier.fillMaxWidth().heightIn(max = h)) {
+    Box(
+        modifier.fillMaxWidth().heightIn(
+            min = minHeightDp.coerceAtLeast(0).coerceAtMost(maxHeightDp).dp,
+            max = h,
+        ),
+    ) {
         // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
         // actual content height, forcing the Box back to a fixed size and defeating heightIn above.
         Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)

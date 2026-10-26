@@ -2,11 +2,14 @@ package com.indagium
 
 import com.indagium.model.AppSettings
 import com.indagium.model.DEFAULT_HOME_LAYOUT
+import com.indagium.model.DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP
 import com.indagium.model.HomeLayoutLeaf
 import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeLayoutSplit
 import com.indagium.model.HomeSectionId
 import com.indagium.model.HomeSplitAxis
+import com.indagium.model.MAX_HOME_OPEN_ACTIONS_HEIGHT_DP
+import com.indagium.model.MIN_HOME_OPEN_ACTIONS_HEIGHT_DP
 import com.indagium.ui.HOME_MAX_WEIGHT
 import com.indagium.ui.HOME_MIN_WEIGHT
 import com.indagium.ui.HomeLayoutPreset
@@ -41,7 +44,7 @@ class HomeLayoutSettingCodecTest {
     }
 
     @Test
-    fun layoutHiddenSectionsAndTipRoundTripThroughKeyedSettingsJson() {
+    fun homeLayoutAndActionAreaRoundTripThroughKeyedSettingsJson() {
         val custom = AppSettings(
             homeLayout = HomeLayoutSplit(
                 HomeSplitAxis.ROW,
@@ -55,9 +58,11 @@ class HomeLayoutSettingCodecTest {
                 ),
             ),
             homeLayoutTipDismissed = true,
+            homeOpenActionsHeightDp = 248,
         )
         assertEquals(custom.homeLayout, decode(custom.settingsJson()).homeLayout)
         assertTrue(decode(custom.settingsJson()).homeLayoutTipDismissed)
+        assertEquals(248, decode(custom.settingsJson()).homeOpenActionsHeightDp)
 
         val hiddenCase = AppSettings(
             homeLayout = HomeLayoutLeaf(HomeSectionId.OPEN),
@@ -74,6 +79,13 @@ class HomeLayoutSettingCodecTest {
             assertEquals(preset.layout, back.homeLayout, preset.name)
             assertEquals(preset.hidden, back.homeHiddenSections, preset.name)
         }
+    }
+
+    @Test
+    fun openActionHeightDefaultsAndClampsWhenRestoredFromJson() {
+        assertEquals(DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP, decode("{}").homeOpenActionsHeightDp)
+        assertEquals(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, decode("""{"homeOpenActionsHeightDp":1}""").homeOpenActionsHeightDp)
+        assertEquals(MAX_HOME_OPEN_ACTIONS_HEIGHT_DP, decode("""{"homeOpenActionsHeightDp":9000}""").homeOpenActionsHeightDp)
     }
 
     @Test

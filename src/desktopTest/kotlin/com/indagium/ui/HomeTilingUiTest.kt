@@ -1,7 +1,12 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
@@ -14,13 +19,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performSemanticsAction
@@ -36,8 +46,10 @@ import com.indagium.model.HomeSplitAxis
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
+import java.awt.image.BufferedImage
 import java.io.File
 import java.nio.file.Files
+import javax.imageio.ImageIO
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -78,9 +90,18 @@ class HomeTilingUiTest {
     )
 
     private fun setHost(width: Int = 1000, height: Int = 700) {
+        state.openHomeTab()
         rule.setContent {
-            Box(Modifier.size(width.dp, height.dp)) {
-                HomeTilingHost(state = state, slots = fakeSlots(), onReclaimFocus = {})
+            Column(Modifier.size(width.dp, height.dp).testTag("home-test-root")) {
+                Row(Modifier.fillMaxWidth().height(36.dp), horizontalArrangement = Arrangement.End) {
+                    LayoutMenuButton(state, onReclaimFocus = {}, wrap = true, menuBeside = false)
+                }
+                HomeTilingHost(
+                    state = state,
+                    slots = fakeSlots(),
+                    onReclaimFocus = {},
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                )
             }
         }
     }
@@ -89,9 +110,20 @@ class HomeTilingUiTest {
 
     private fun density(): Float = rule.density.density
 
+    private fun saveEvidenceScreenshot(name: String, image: ImageBitmap) {
+        val directory = File("build/home-layout-qa").apply { mkdirs() }
+        val pixels = image.toPixelMap()
+        val rendered = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until image.height) {
+            for (x in 0 until image.width) rendered.setRGB(x, y, pixels[x, y].toArgb())
+        }
+        check(ImageIO.write(rendered, "png", File(directory, name)))
+    }
+
     @Test
     fun defaultLayoutShowsOpenLeftOfCaptureAndBothAboveTests() {
         setHost()
+        saveEvidenceScreenshot("home-wide-open.png", rule.onNodeWithTag("home-test-root").captureToImage())
         val open = bounds("home-card-open")
         val capture = bounds("home-card-capture")
         val tests = bounds("home-card-tests")
@@ -101,33 +133,49 @@ class HomeTilingUiTest {
     }
 
     @Test
-    fun hidingASectionAddsAChipAndTheChipRestoresIt() {
+    fun sectionGapsMatchTheLogViewTilingSpec() {
+        setHost()
+        val open = bounds("home-card-open")
+        val capture = bounds("home-card-capture")
+        val tests = bounds("home-card-tests")
+        assertEquals(LOG_VIEW_GAP_ROW_DP, capture.left.value - open.right.value)
+        assertEquals(LOG_VIEW_GAP_COLUMN_DP, tests.top.value - maxOf(open.bottom.value, capture.bottom.value))
+        assertEquals(LOG_VIEW_HOST_PAD_DP.toFloat(), open.left.value)
+    }
+
+    @Test
+    fun hidingAndRestoringASectionWorksThroughTheToolbarLayoutMenu() {
         setHost()
         rule.onNodeWithTag("home-hide-tests").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-tests").assertDoesNotExist()
-        rule.onNodeWithTag("home-hidden-chip-tests").assertExists()
         assertEquals(listOf(HomeSectionId.TESTS), state.settings.homeHiddenSections)
-        rule.onNodeWithTag("home-hidden-chip-tests").performClick()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("home-layout-menu-panel-tests").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-tests").assertExists()
-        rule.onNodeWithTag("home-hidden-chip-tests").assertDoesNotExist()
         assertTrue(state.settings.homeHiddenSections.isEmpty())
     }
 
     @Test
-    fun hiddenChipsShareTheTopBarRowAndDoNotMoveTheCards() {
+    fun theNewTabHasNoStartHeadingOrDragTipAndLayoutControlsLiveInTheToolbarMenu() {
         setHost()
-        val title = bounds("home-tip")
-        val openTopBefore = bounds("home-card-open").top
-        rule.onNodeWithTag("home-hide-tests").performClick()
+        rule.onNodeWithText("Start", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithText("Tip: drag", substring = true, useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithTag("home-preset-DEFAULT").assertDoesNotExist()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("layout-menu-popup").assertExists()
+        rule.onNodeWithTag("home-preset-DEFAULT").assertExists()
+        rule.onNodeWithTag("home-layout-menu-panel-tests").assertExists()
+        saveEvidenceScreenshot("home-layout-menu.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
+    }
+
+    @Test
+    fun layoutMenuIsHiddenOnTheTestsSurface() {
+        setHost()
+        rule.runOnIdle { state.activeSurface = ActiveSurface.Tests }
         rule.waitForIdle()
-        val chip = bounds("home-hidden-chip-tests")
-        val preset = bounds("home-preset-DEFAULT")
-        assertTrue(chip.top < preset.bottom && chip.bottom > preset.top, "chip $chip shares the row of the presets $preset")
-        assertTrue(chip.top < title.bottom && chip.bottom > title.top, "chip $chip shares the row of the tip $title")
-        assertTrue(chip.right <= bounds("home-preset-THREE_COLUMNS").left, "chip sits before the Layout presets")
-        assertEquals(openTopBefore, bounds("home-card-open").top, "hiding a section must not push the cards down")
+        rule.onNodeWithTag("layout-menu-button").assertDoesNotExist()
     }
 
     @Test
@@ -154,8 +202,9 @@ class HomeTilingUiTest {
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-capture").assertDoesNotExist()
         rule.onNodeWithTag("home-hide-open").assertIsNotEnabled()
-        rule.onNodeWithTag("home-hidden-chip-capture").assertExists()
-        rule.onNodeWithTag("home-hidden-chip-tests").assertExists()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("home-layout-menu-panel-capture").assertExists()
+        rule.onNodeWithTag("home-layout-menu-panel-tests").assertExists()
         rule.onNodeWithTag("home-hide-open").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-open").assertExists()
@@ -165,6 +214,7 @@ class HomeTilingUiTest {
     fun clickingAPresetChangesTheStoredLayout() {
         setHost()
         val before = state.settings.homeLayout
+        rule.onNodeWithTag("layout-menu-button").performClick()
         rule.onNodeWithTag("home-preset-THREE_COLUMNS").performClick()
         rule.waitForIdle()
         assertNotEquals(before, state.settings.homeLayout)
@@ -270,22 +320,6 @@ class HomeTilingUiTest {
     }
 
     @Test
-    fun dismissingTheTipPersistsAndLeavesAHelpIcon() {
-        setHost()
-        rule.onNodeWithTag("home-tip").assertExists()
-        rule.onNodeWithTag("home-tip-help").assertDoesNotExist()
-        rule.onNodeWithTag("home-tip-dismiss").performClick()
-        rule.waitForIdle()
-        assertTrue(state.settings.homeLayoutTipDismissed)
-        rule.onNodeWithTag("home-tip").assertDoesNotExist()
-        rule.onNodeWithTag("home-tip-help").assertExists()
-        rule.onNodeWithTag("home-tip-help").performClick()
-        rule.waitForIdle()
-        rule.onNodeWithTag("home-tip").assertExists()
-        assertTrue(state.settings.homeLayoutTipDismissed, "showing it again is not persisted as un-dismissed")
-    }
-
-    @Test
     fun narrowHostStacksTheCardsWithoutGripsOrSplitters() {
         setHost(width = 600, height = 800)
         val open = bounds("home-card-open")
@@ -297,6 +331,6 @@ class HomeTilingUiTest {
         rule.onNodeWithTag("home-grip-open").assertDoesNotExist()
         rule.onNodeWithTag("home-splitter-0").assertDoesNotExist()
         rule.onNodeWithTag("home-hide-open").assertExists()
-        rule.onNodeWithTag("home-preset-DEFAULT").assertExists()
+        rule.onNodeWithTag("layout-menu-button").assertExists()
     }
 }

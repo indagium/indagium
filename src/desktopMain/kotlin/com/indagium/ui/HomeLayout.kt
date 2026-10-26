@@ -7,6 +7,8 @@ import com.indagium.model.HomeLayoutNode
 import com.indagium.model.HomeLayoutSplit
 import com.indagium.model.HomeSectionId
 import com.indagium.model.HomeSplitAxis
+import com.indagium.model.MAX_HOME_OPEN_ACTIONS_HEIGHT_DP
+import com.indagium.model.MIN_HOME_OPEN_ACTIONS_HEIGHT_DP
 
 // The New tab's tiling layout. The pure engine (tree operations, geometry, drop hit-testing, sanitizing) is the generic
 // TileLayout.kt; this file binds it to HomeSectionId, keeps the New tab's names as thin delegates, and holds what is specific
@@ -243,3 +245,18 @@ internal fun AppSettings.withHomeLayoutPreset(preset: HomeLayoutPreset): AppSett
 
 internal fun AppSettings.withHomeLayoutTipDismissed(dismissed: Boolean): AppSettings =
     if (homeLayoutTipDismissed == dismissed) this else copy(homeLayoutTipDismissed = dismissed)
+
+/** Stores the Open section's action area height, clamped to the persisted range. */
+internal fun AppSettings.withHomeOpenActionsHeightDp(heightDp: Int): AppSettings =
+    copy(homeOpenActionsHeightDp = heightDp.coerceIn(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, MAX_HOME_OPEN_ACTIONS_HEIGHT_DP))
+
+/** The action area height in a host of [availableHeightDp], preserving room for Recent files and the splitter. */
+internal fun homeOpenActionAreaHeightDp(availableHeightDp: Float, requestedHeightDp: Int): Float {
+    val maxByViewport = (availableHeightDp - HOME_OPEN_RECENTS_MIN_HEIGHT_DP - HOME_OPEN_SPLITTER_HEIGHT_DP).coerceAtLeast(HOME_OPEN_ACTIONS_MIN_HEIGHT_DP)
+    return requestedHeightDp.toFloat().coerceIn(HOME_OPEN_ACTIONS_MIN_HEIGHT_DP, minOf(HOME_OPEN_ACTIONS_MAX_HEIGHT_DP, maxByViewport))
+}
+
+internal const val HOME_OPEN_ACTIONS_MIN_HEIGHT_DP = MIN_HOME_OPEN_ACTIONS_HEIGHT_DP.toFloat()
+internal const val HOME_OPEN_ACTIONS_MAX_HEIGHT_DP = MAX_HOME_OPEN_ACTIONS_HEIGHT_DP.toFloat()
+internal const val HOME_OPEN_RECENTS_MIN_HEIGHT_DP = 150f
+internal const val HOME_OPEN_SPLITTER_HEIGHT_DP = 10f
