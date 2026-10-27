@@ -4,7 +4,7 @@
     "vendor": "Eclipse Adoptium",
     "javaVersion": "21.0.9",
     "runtimeVersion": "21.0.9+10-LTS",
-    "setupJavaVersion": "21.0.9+10",
+    "setupJavaVersion": "21.0.9+10.0.LTS",
     "releaseTag": "jdk-21.0.9+10",
     "sourceId": "temurin-OpenJDK21U-jdk-sources_21.0.9_10.tar.gz",
     "buildSourceId": "temurin-build",
