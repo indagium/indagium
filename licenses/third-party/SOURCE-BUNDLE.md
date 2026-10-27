@@ -1,6 +1,6 @@
 # Indagium media source bundle
 
-This repository records the source inputs for media and compression libraries distributed with Indagium 1.8.15. The inspected versions are FFmpeg 8.0.1-1.5.13, JavaCV and JavaCPP 1.5.13, and zstd-jni 1.5.7-4. The pinned FFmpeg classifier libraries cover macOS arm64, Windows x64, Linux x64, and Linux arm64. The lock includes native source archives, the complete Bytedeco recipe tree and patches, relevant compiler/runtime sources, target configurations, legal notices, and checksums.
+This repository records the source inputs for media and compression libraries distributed with Indagium 1.9.0. The inspected versions are FFmpeg 8.0.1-1.5.13, JavaCV and JavaCPP 1.5.13, and zstd-jni 1.5.7-4. The pinned FFmpeg classifier libraries cover macOS arm64, Windows x64, Linux x64, and Linux arm64. The lock includes native source archives, the complete Bytedeco recipe tree and patches, relevant compiler/runtime sources, target configurations, legal notices, and checksums.
 
 ## Prepare and verify the source archive
 
@@ -12,11 +12,11 @@ From the repository root, run:
 
 The task downloads only HTTPS archives and Maven artifacts listed in `media-source-lock.json`, checks each SHA-256, validates the inventory and all four FFmpeg configurations, and writes these local build artifacts under `build/`:
 
-- `Indagium-1.8.15-media-sources.tar.gz`
-- `Indagium-1.8.15-media-sources.tar.gz.sha256`
-- `Indagium-1.8.15-media-sources.tar.gz.manifest.json`
+- `Indagium-1.9.0-media-sources.tar.gz`
+- `Indagium-1.9.0-media-sources.tar.gz.sha256`
+- `Indagium-1.9.0-media-sources.tar.gz.manifest.json`
 
-Verify an archive with `sha256sum -c Indagium-1.8.15-media-sources.tar.gz.sha256`. Its manifest records every included file, byte size, and SHA-256. Source archives are preserved as downloaded; the lock records their URLs, versions or immutable references, and hashes. The task creates a local artifact. New official EULA releases must publish it, its checksum and manifest alongside the corresponding installers, together with the application/JVM source archive described in licenses/application/SOURCE-BUNDLE.md. Obtain the exact version from https://github.com/indagium/indagium/releases without accepting the EULA or paying. Downloadable CI packages must include the same sources. This procedure does not change old releases or assert that their missing source assets have been supplied.
+Verify an archive with `sha256sum -c Indagium-1.9.0-media-sources.tar.gz.sha256`. Its manifest records every included file, byte size, and SHA-256. Source archives are preserved as downloaded; the lock records their URLs, versions or immutable references, and hashes. The task creates a local artifact. New official EULA releases must publish it, its checksum and manifest alongside the corresponding installers, together with the application/JVM source archive described in licenses/application/SOURCE-BUNDLE.md. Obtain the exact version from https://github.com/indagium/indagium/releases without accepting the EULA or paying. Downloadable CI packages must include the same sources. This procedure does not change old releases or assert that their missing source assets have been supplied.
 
 ## Rebuild the FFmpeg classifiers
 
