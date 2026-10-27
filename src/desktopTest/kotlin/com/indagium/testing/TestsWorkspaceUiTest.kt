@@ -3,6 +3,7 @@ package com.indagium.testing
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
@@ -12,6 +13,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -103,7 +105,7 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("Steps (1)").assertExists()
         rule.onNodeWithText("Expected result").assertExists()
         // Adding a step puts the cursor in its Action field, which may scroll the page (the inspector stacks under the list here).
-        rule.onNodeWithContentDescription("Back to suite Smoke").performScrollTo().performClick()
+        rule.onNodeWithContentDescription("Back to suite Smoke").performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Cases (1)").assertExists()
     }
@@ -113,27 +115,27 @@ class TestsWorkspaceUiTest {
         state.createTestScript(TestScript("", "reset_app", commandTemplate = "echo hi"))
         rule.setContent { TestsWorkspace(state) }
 
-        rule.onNodeWithText("Scripts").performClick()
+        clickNav("Scripts")
         rule.waitForIdle()
         assertEquals(TestsNav.Scripts, state.testsView.nav)
         rule.onNodeWithContentDescription("Tool name").assertExists()
         rule.onNodeWithText("Try it").assertExists()
 
-        rule.onNodeWithText("Shared steps").performClick()
+        clickNav("Shared steps")
         rule.waitForIdle()
         rule.onNodeWithText("+ New shared step").assertExists()
 
         // Runs and Issues are real screens now (the run list and the issue list).
-        rule.onNodeWithText("Runs").performClick()
+        clickNav("Runs")
         rule.waitForIdle()
         assertEquals(TestsNav.Runs, state.testsView.nav)
         rule.waitUntilAtLeastOneExists(hasText("No runs yet. Start one with Run suite."), timeoutMillis = 10_000)
-        rule.onNodeWithText("Issues").performClick()
+        clickNav("Issues")
         rule.waitForIdle()
         assertEquals(TestsNav.Issues, state.testsView.nav)
         rule.waitUntilAtLeastOneExists(hasText("No issues yet."), timeoutMillis = 10_000)
 
-        rule.onNodeWithText("Examples for agents").performClick()
+        clickNav("Examples for agents")
         rule.waitForIdle()
         assertEquals(TestsNav.AgentExamples, state.testsView.nav)
         rule.onNodeWithText("No step examples yet. Add a golden screenshot or reference log in a step editor.").assertExists()
@@ -248,11 +250,42 @@ class TestsWorkspaceUiTest {
     }
 
     /** The nodes with [text] inside the nav column (the centre screen can show the same names, e.g. a suite's case table). */
+    private fun suiteTreeBounds(): Rect? =
+        rule.onAllNodesWithTag("tests-tile-card-suites").fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+            ?: rule.onAllNodesWithTag("tests-navigation-overlay").fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+
+    private fun navContainerBounds(): Rect? {
+        val tileBounds = listOf("suites", "library", "activity").mapNotNull { key ->
+            rule.onAllNodesWithTag("tests-tile-card-$key").fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+        }
+        if (tileBounds.isNotEmpty()) {
+            return Rect(
+                left = tileBounds.minOf { it.left },
+                top = tileBounds.minOf { it.top },
+                right = tileBounds.maxOf { it.right },
+                bottom = tileBounds.maxOf { it.bottom },
+            )
+        }
+        return rule.onAllNodesWithTag("tests-navigation-overlay").fetchSemanticsNodes().firstOrNull()?.boundsInRoot
+    }
+
+    private fun isInsideNavigation(bounds: Rect): Boolean {
+        val container = navContainerBounds() ?: return false
+        return bounds.left >= container.left && bounds.right <= container.right &&
+            bounds.top >= container.top && bounds.bottom <= container.bottom
+    }
+
+    private fun isInsideSuiteTree(bounds: Rect): Boolean {
+        val container = suiteTreeBounds() ?: return false
+        return bounds.left >= container.left && bounds.right <= container.right &&
+            bounds.top >= container.top && bounds.bottom <= container.bottom
+    }
+
     private fun navNodes(text: String) =
-        rule.onAllNodesWithText(text).fetchSemanticsNodes().filter { it.boundsInRoot.right <= state.testsView.navWidthDp }
+        rule.onAllNodesWithText(text).fetchSemanticsNodes().filter { isInsideSuiteTree(it.boundsInRoot) }
 
     private fun clickNav(text: String) {
-        val index = rule.onAllNodesWithText(text).fetchSemanticsNodes().indexOfFirst { it.boundsInRoot.right <= state.testsView.navWidthDp }
+        val index = rule.onAllNodesWithText(text).fetchSemanticsNodes().indexOfFirst { isInsideNavigation(it.boundsInRoot) }
         assertTrue(index >= 0, "$text should be in the nav")
         rule.onAllNodesWithText(text)[index].performClick()
     }
@@ -384,7 +417,7 @@ class TestsWorkspaceUiTest {
 
     /** The reorder grips in the nav column, top to bottom (the suite's own grip comes first, then one per listed case). */
     private fun navGrips(description: String = "Drag to reorder") = rule.onAllNodesWithContentDescription(description).let { all ->
-        all.fetchSemanticsNodes().indices.filter { all.fetchSemanticsNodes()[it].boundsInRoot.right <= state.testsView.navWidthDp }
+        all.fetchSemanticsNodes().indices.filter { isInsideSuiteTree(all.fetchSemanticsNodes()[it].boundsInRoot) }
             .sortedBy { all.fetchSemanticsNodes()[it].boundsInRoot.top }.map { all[it] }
     }
 
@@ -427,7 +460,7 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
 
         // A press on the row focuses it (the click that follows would hand the focus back to the workspace root).
-        val row = rule.onAllNodesWithText("Checkout").fetchSemanticsNodes().indexOfFirst { it.boundsInRoot.right <= state.testsView.navWidthDp }
+        val row = rule.onAllNodesWithText("Checkout").fetchSemanticsNodes().indexOfFirst { isInsideSuiteTree(it.boundsInRoot) }
         rule.onAllNodesWithText("Checkout")[row].performTouchInput { down(center) }
         rule.onRoot().performKeyInput {
             keyDown(androidx.compose.ui.input.key.Key.AltLeft)

@@ -80,14 +80,14 @@ internal val LogViewSectionId.isLogTile: Boolean
     get() = this == LogViewSectionId.LOG || this == LogViewSectionId.LOG_A || this == LogViewSectionId.LOG_B
 
 /**
- * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections and the toolbar tile (a content-sized one, as tall as its
- * wrapped rows of buttons). A column that holds the log, an Original or Video always fits its window: the log tiles want all the height they
- * get, and Video's height is pinned per capture device. A column with the toolbar tile in it scrolls like any other, so the toolbar may scroll
- * out of view there; moving it somewhere else is the user's choice.
+ * The tiles that may sit in a scrolling column (TileLayout.kt): the side sections and Video, plus the toolbar tile (content-sized to its wrapped
+ * rows of buttons). A column that holds the log or an Original always fits its window. Video keeps its per-device height in capture tabs and can
+ * resize independently in the sidebar; only the whole column scrolls, so its body stays bounded by the tile. A column with the toolbar tile in it
+ * scrolls like any other, so the toolbar may scroll out of view there; moving it somewhere else is the user's choice.
  */
 internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
     LogViewSectionId.LOG, LogViewSectionId.ORIGINAL, LogViewSectionId.LOG_A, LogViewSectionId.LOG_B,
-    LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B, LogViewSectionId.VIDEO,
+    LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B,
     -> false
     else -> true
 }
@@ -97,7 +97,8 @@ internal fun logViewScrollsInColumn(id: LogViewSectionId): Boolean = when (id) {
  * columns, say): the side sections, so such a tile is as tall as its content, can be resized and scrolls, like in a column of several. Not the
  * toolbar tile: alone it may be the tall narrow toolbar, which is not content sized.
  */
-internal fun logViewLoneColumn(id: LogViewSectionId): Boolean = id != LogViewSectionId.TOOLBAR && logViewScrollsInColumn(id)
+internal fun logViewLoneColumn(id: LogViewSectionId): Boolean =
+    id != LogViewSectionId.TOOLBAR && id != LogViewSectionId.VIDEO && logViewScrollsInColumn(id)
 
 /** The log view's lone tiles (above) and its scrolling columns, as the normalizing, dropping and removing of tiles take them. */
 internal val LOG_VIEW_LONE_COLUMNS: TileLoneColumns<LogViewSectionId> = TileLoneColumns(::logViewLoneColumn, ::logViewScrollsInColumn)

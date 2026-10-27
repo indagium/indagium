@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isPopup
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -17,6 +18,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
 import com.indagium.testing.model.CaseResult
@@ -101,11 +103,16 @@ class TestsRunsScreenUiTest {
 
     private fun openRuns() {
         state.testsView.nav = TestsNav.Runs
+        rule.setTestsViewport(1200, 800)
         rule.setContent { Box(Modifier.size(1200.dp, 800.dp)) { TestsWorkspace(state) } }
         rule.waitForIdle()
     }
 
     private fun centre(text: String) = rule.onAllNodesWithText(text).fetchSemanticsNodes().filter { it.boundsInRoot.left >= state.testsView.navWidthDp }
+
+    private fun inWorkspace(text: String) = rule.onAllNodes(
+        hasText(text) and hasAnyAncestor(hasTestTag("tests-tile-card-workspace")),
+    ).fetchSemanticsNodes()
 
     private fun clickCentre(text: String) {
         val nodes = rule.onAllNodesWithText(text).fetchSemanticsNodes()
@@ -130,14 +137,16 @@ class TestsRunsScreenUiTest {
         seed()
         state.testsView.nav = TestsNav.Runs
         rule.mainClock.autoAdvance = false
+        rule.setTestsViewport(1200, 800)
         rule.setContent { Box(Modifier.size(1200.dp, 800.dp)) { TestsWorkspace(state) } }
         rule.mainClock.advanceTimeByFrame()
 
         // On fast CI workers the disk read can complete in the first rendered frame. In either
         // state the screen must never briefly show the empty-state copy while persisted runs load.
+        // The tile surface may still be measuring on this first manually advanced frame, so the
+        // loaded Today state is asserted after automatic clock advancement below.
         val loading = rule.onAllNodesWithText("Loading runs…").fetchSemanticsNodes()
         if (loading.isNotEmpty()) rule.onNodeWithText("Loading runs…").assertExists()
-        else rule.onNodeWithText("Today").assertExists()
         assertTrue(rule.onAllNodesWithText("No runs yet.", substring = true).fetchSemanticsNodes().isEmpty())
 
         rule.mainClock.autoAdvance = true
@@ -161,12 +170,12 @@ class TestsRunsScreenUiTest {
         rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
         rule.onNodeWithText("Yesterday").assertExists()
         // Each row is one node (chip, suite, bar, meta and clock merge): three Smoke runs, one Regression run.
-        assertEquals(3, centre("Smoke").size, "three Smoke runs, one row each")
-        assertEquals(1, centre("Regression").size)
+        assertEquals(3, inWorkspace("Smoke").size, "three Smoke runs, one row each")
+        assertEquals(1, inWorkspace("Regression").size)
         // A passed run's pass bar reads 1/1, a failed one 0/1; all carry "1 case · 1 lane".
-        assertEquals(1, centre("1/1").size)
-        assertEquals(3, centre("0/1").size)
-        assertEquals(4, centre("1 case · 1 lane").size)
+        assertEquals(1, inWorkspace("1/1").size)
+        assertEquals(3, inWorkspace("0/1").size)
+        assertEquals(4, inWorkspace("1 case · 1 lane").size)
     }
 
     @Test
@@ -263,13 +272,21 @@ class TestsRunsScreenUiTest {
         openRuns()
         rule.waitUntilAtLeastOneExists(hasText("Today"), timeoutMillis = 10_000)
 
-        val bars = nodesTagged("run-pass-bar")
-        val labels = nodesTagged("run-pass-steps")
-        assertEquals(4, bars.size)
-        assertEquals(1, bars.map { it.left }.distinct().size, "all bars start at one x (also across the day groups): $bars")
-        assertEquals(1, bars.map { it.right }.distinct().size, "all bars end at one x: $bars")
-        assertEquals(1, labels.map { it.left }.distinct().size, "the a/b slots line up: $labels")
-        assertEquals(1, labels.map { it.right }.distinct().size, "the a/b slots line up on the right: $labels")
+        val bars = rule.onAllNodesWithTag("run-pass-bar", useUnmergedTree = true)
+        val labels = rule.onAllNodesWithTag("run-pass-steps", useUnmergedTree = true)
+        assertEquals(4, bars.fetchSemanticsNodes().size)
+        val barBounds = (0 until bars.fetchSemanticsNodes().size).map { index ->
+            bars[index].performScrollTo()
+            bars[index].fetchSemanticsNode().boundsInRoot
+        }
+        val labelBounds = (0 until labels.fetchSemanticsNodes().size).map { index ->
+            labels[index].performScrollTo()
+            labels[index].fetchSemanticsNode().boundsInRoot
+        }
+        assertEquals(1, barBounds.map { it.left }.distinct().size, "all bars start at one x (also across the day groups): $barBounds")
+        assertEquals(1, barBounds.map { it.right }.distinct().size, "all bars end at one x: $barBounds")
+        assertEquals(1, labelBounds.map { it.left }.distinct().size, "the a/b slots line up: $labelBounds")
+        assertEquals(1, labelBounds.map { it.right }.distinct().size, "the a/b slots line up on the right: $labelBounds")
         assertTrue(rule.onAllNodesWithText("10/11").fetchSemanticsNodes().isNotEmpty() && rule.onAllNodesWithText("4/10").fetchSemanticsNodes().isNotEmpty())
     }
 
@@ -282,6 +299,7 @@ class TestsRunsScreenUiTest {
         state.testsView.nav = TestsNav.Suites
         state.testsView.selectedSuiteId = smoke.id
         state.testsView.selectedSuiteTab = com.indagium.ui.SuiteTab.Runs
+        rule.setTestsViewport(1200, 800)
         rule.setContent { Box(Modifier.size(1200.dp, 800.dp)) { TestsWorkspace(state) } }
         rule.waitUntilAtLeastOneExists(hasText("10/11"), timeoutMillis = 10_000)
 

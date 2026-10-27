@@ -3,6 +3,7 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -55,10 +56,8 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 
-// The two library screens: scripts (shell commands exposed to agents as tools) and shared steps (reusable step
-// sequences that suite and case hooks run). Both are a TestsSplitScreen: the centre column holds the list at the top and the
-// selected item's editor under it; the inspector holds the secondary panel (a script's Try it / Tool schema / Used in, a
-// shared step's selected-step editor). A narrow window stacks the inspector under the centre column.
+// Scripts and reusable shared-step sequences use the same persistent Tests tile shell as suite authoring.
+// Creation actions stay in the fixed Workspace header. The selected editor is in Details; output and previews use Evidence.
 
 private val LIBRARY_ROW_HEIGHT = 34.dp
 private val LIBRARY_ROW_MENU_SLOT = 26.dp
@@ -166,47 +165,61 @@ internal fun TestsScriptsScreen() {
     val access = libraryEditAccess(library)
     val selected = library.scripts.firstOrNull { it.id == ui.view.selectedScriptId } ?: library.scripts.firstOrNull()
     var importError by remember { mutableStateOf<String?>(null) }
+    var tryOutput by remember(selected?.id) { mutableStateOf("") }
     var deleteScriptId by remember { mutableStateOf<String?>(null) }
     var generateOpen by remember { mutableStateOf(false) }
     var regenerateScriptId by remember { mutableStateOf<String?>(null) }
-    TestsScreenScaffold(inspector = selected?.let { script -> { key(script.id) { ScriptInspector(script) } } }) {
+    TestsScreenScaffold(
+        header = {
+            Column(Modifier.weight(1f)) {
+                LibraryListHeader("Scripts (${library.scripts.size})") {
+                    HintedButton(
+                        "+ New script",
+                        onClick = { createScriptAndSelect(ui) },
+                        enabled = access.editable,
+                        disabledHint = access.reason,
+                        variant = ButtonVariant.Ghost,
+                    )
+                    HintedButton(
+                        "Generate with AI…",
+                        onClick = { generateOpen = true },
+                        enabled = access.editable,
+                        disabledHint = access.reason,
+                        variant = ButtonVariant.Ghost,
+                    )
+                    TestsOverflowMenu(
+                        listOf(
+                            TestsMenuItem(
+                                "Import JSON…",
+                                onClick = {
+                                    importError = null
+                                    importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { importError = it })
+                                },
+                                enabled = access.editable,
+                                disabledHint = access.reason,
+                            ),
+                        ),
+                        contentDescription = "Script list actions",
+                    )
+                }
+                if (ui.view.scriptReturn != null) ScriptReturnBar(ui)
+            }
+        },
+        inspector = {
+            if (selected == null) TestsHint("Create a script to edit it here.")
+            else key(selected.id) { ScriptInspector(selected, onOutput = { tryOutput = it }) }
+        },
+        evidence = {
+            when {
+                selected == null -> TestsHint("Select a script to see its evidence.")
+                tryOutput.isBlank() -> TestsHint("Run Try it to see the script's output here.")
+                else -> ScriptTryEvidence(tryOutput)
+            }
+        },
+    ) {
         access.reason?.let {
             TestsLockedNotice(it)
             Spacer(Modifier.height(HEADER_GAP))
-        }
-        if (ui.view.scriptReturn != null) {
-            ScriptReturnBar(ui)
-            Spacer(Modifier.height(HEADER_GAP))
-        }
-        LibraryListHeader("Scripts (${library.scripts.size})") {
-            HintedButton(
-                "+ New script",
-                onClick = { createScriptAndSelect(ui) },
-                enabled = access.editable,
-                disabledHint = access.reason,
-                variant = ButtonVariant.Ghost,
-            )
-            HintedButton(
-                "Generate with AI…",
-                onClick = { generateOpen = true },
-                enabled = access.editable,
-                disabledHint = access.reason,
-                variant = ButtonVariant.Ghost,
-            )
-            TestsOverflowMenu(
-                listOf(
-                    TestsMenuItem(
-                        "Import JSON…",
-                        onClick = {
-                            importError = null
-                            importTestScriptJson(ui, onImported = { ui.view.selectedScriptId = it.id }, onError = { importError = it })
-                        },
-                        enabled = access.editable,
-                        disabledHint = access.reason,
-                    ),
-                ),
-                contentDescription = "Script list actions",
-            )
         }
         importError?.let { TestsErrorText(it) }
         if (library.scripts.isEmpty()) TestsHint("No scripts yet. A script is a shell command an agent can call as a tool.")
@@ -397,13 +410,24 @@ private fun ScriptFields(script: TestScript, editable: Boolean, update: ((TestSc
 
 // ── Script inspector ─────────────────────────────────────────────────
 
-/** The selected script's secondary panels: Try it, the Tool schema the agent sees, and where the script is used. */
+/** The selected script's controls and reference panels; the last Try it output is shown in the Evidence tile. */
 @Composable
-private fun ScriptInspector(script: TestScript) {
+private fun ScriptInspector(script: TestScript, onOutput: (String) -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(HEADER_GAP)) {
-        TryItPanel(script)
+        TryItPanel(script, onOutput = onOutput)
         ScriptSchemaPanel(script)
         ScriptUsagePanel(script)
+    }
+}
+
+@Composable
+private fun ScriptTryEvidence(output: String) {
+    val tc = tc()
+    TestsScrollColumn(
+        Modifier.fillMaxWidth().heightIn(max = 280.dp).background(tc.p2, CORNER_MD).border(1.dp, tc.br, CORNER_MD),
+        contentModifier = Modifier.padding(10.dp),
+    ) {
+        AppText(output, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
     }
 }
 
@@ -542,38 +566,72 @@ internal fun TestsSharedStepsScreen() {
     val access = libraryEditAccess(library)
     val selected = library.sharedSteps.firstOrNull { it.id == ui.view.selectedSharedStepId } ?: library.sharedSteps.firstOrNull()
     if (selected == null) {
-        TestsEmptyState(
-            glyph = "⧉",
-            title = "No shared steps yet",
-            text = "A shared step is a reusable sequence of steps. Suite and case hooks can run it before or after a case.",
-            modifier = Modifier.fillMaxSize(),
+        TestsScreenScaffold(
+            header = {
+                TestsPageHeader(
+                    title = "Shared steps",
+                    primary = {
+                        HintedButton(
+                            "+ New shared step",
+                            onClick = { createSharedStepAndSelect(ui) },
+                            enabled = access.editable,
+                            disabledHint = access.reason,
+                            variant = ButtonVariant.Primary,
+                        )
+                    },
+                )
+            },
         ) {
-            HintedButton(
-                "+ New shared step",
-                onClick = { createSharedStepAndSelect(ui) },
-                enabled = access.editable,
-                disabledHint = access.reason,
-                variant = ButtonVariant.Primary,
+            TestsEmptyState(
+                glyph = "⧉",
+                title = "No shared steps yet",
+                text = "A shared step is a reusable sequence of steps. Suite and case hooks can run it before or after a case.",
+                modifier = Modifier.fillMaxSize(),
             )
         }
         return
     }
     val update: ((SharedStep) -> SharedStep) -> StoreResult<*> = { transform -> ui.state.updateSharedStep(selected.id, transform) }
     val stepOps = sharedStepOps(selected, access.editable, update)
-    TestsScreenScaffold(inspector = { key(selected.id) { SelectedStepInspector(stepOps) } }) {
+    var confirmDelete by remember(selected.id) { mutableStateOf(false) }
+    TestsScreenScaffold(
+        header = {
+            TestsPageHeader(
+                title = selected.name,
+                onTitleCommit = { t -> update { it.copy(name = t.trim()) } },
+                titleEditable = access.editable,
+                titleDescription = "Shared step name",
+                proseTargetId = "shared-step:${selected.id}:title",
+                titlePlaceholder = "Log in",
+                primary = {
+                    HintedButton(
+                        "+ New shared step",
+                        onClick = { createSharedStepAndSelect(ui) },
+                        enabled = access.editable,
+                        disabledHint = access.reason,
+                        variant = ButtonVariant.Ghost,
+                    )
+                },
+                overflowDescription = "More shared step actions",
+                overflowItems = listOf(
+                    TestsMenuItem(
+                        "Delete…",
+                        onClick = { confirmDelete = true },
+                        danger = true,
+                        enabled = access.editable,
+                        disabledHint = LIBRARY_READ_ONLY_MESSAGE,
+                    ),
+                ),
+            )
+        },
+        inspector = { key(selected.id) { SelectedStepInspector(stepOps) } },
+        evidence = { key(selected.id) { SelectedStepEvidence(stepOps) } },
+    ) {
         access.reason?.let {
             TestsLockedNotice(it)
             Spacer(Modifier.height(HEADER_GAP))
         }
-        LibraryListHeader("Shared steps (${library.sharedSteps.size})") {
-            HintedButton(
-                "+ New shared step",
-                onClick = { createSharedStepAndSelect(ui) },
-                enabled = access.editable,
-                disabledHint = access.reason,
-                variant = ButtonVariant.Ghost,
-            )
-        }
+        TestsSectionTitle("Shared steps (${library.sharedSteps.size})")
         ReorderableColumn(
             items = library.sharedSteps,
             idOf = { it.id },
@@ -589,7 +647,7 @@ internal fun TestsSharedStepsScreen() {
         Spacer(Modifier.height(12.dp))
         Divider()
         Spacer(Modifier.height(12.dp))
-        key(selected.id) { SharedStepEditor(selected, access.editable, stepOps, update) }
+        key(selected.id) { SharedStepEditor(selected, access.editable, stepOps, update, confirmDelete, { confirmDelete = it }) }
     }
 }
 
@@ -610,22 +668,10 @@ private fun SharedStepEditor(
     editable: Boolean,
     stepOps: StepListOps,
     update: ((SharedStep) -> SharedStep) -> StoreResult<*>,
+    confirmDelete: Boolean,
+    onConfirmDelete: (Boolean) -> Unit,
 ) {
     val ui = LocalTestsUi.current
-    var confirmDelete by remember { mutableStateOf(false) }
-    TestsPageHeader(
-        title = shared.name,
-        onTitleCommit = { t -> update { it.copy(name = t.trim()) } },
-        titleEditable = editable,
-        titleDescription = "Shared step name",
-        proseTargetId = "shared-step:${shared.id}:title",
-        titlePlaceholder = "Log in",
-        overflowDescription = "More shared step actions",
-        overflowItems = listOf(
-            TestsMenuItem("Delete…", onClick = { confirmDelete = true }, danger = true, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE),
-        ),
-    )
-    Spacer(Modifier.height(HEADER_GAP))
     TestsLabeled("Description") {
         CommitTextField(
             shared.description, { t -> update { it.copy(description = t) } },
@@ -644,7 +690,7 @@ private fun SharedStepEditor(
             onConfirm = {
                 if (ui.report(ui.state.deleteSharedStep(shared.id)) is StoreResult.Ok) ui.view.selectedSharedStepId = null
             },
-            onDismiss = { confirmDelete = false },
+            onDismiss = { onConfirmDelete(false) },
         )
     }
 }

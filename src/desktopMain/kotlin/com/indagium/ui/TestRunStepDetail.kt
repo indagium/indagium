@@ -70,34 +70,74 @@ private val SIDE_BY_SIDE_MIN_WIDTH = 440.dp
 internal data class StepSelection(val rowKey: String, val laneId: String)
 
 /**
- * The inspector content for one selected step: its header (step number and case, the action) and the evidence below. Everything
- * wraps or stacks so it fits the narrowest inspector (300dp).
+ * The Details tile for one selected run step. Evidence is rendered independently by [RunStepEvidenceFor].
  */
 @Composable
-internal fun StepDetailFor(run: TestRun, runDir: File, selection: StepSelection) {
+internal fun StepDetailFor(run: TestRun, selection: StepSelection) {
     val row = remember(run, selection.rowKey) { buildMatrix(run).filterIsInstance<MatrixRow.Step>().firstOrNull { it.key == selection.rowKey } }
     val result = row?.cells?.firstOrNull { it.laneId == selection.laneId }?.result
     val lane = run.lane(selection.laneId)
     if (row == null || result == null || lane == null) {
-        TestsHint("This step has no result yet.")
+        TestsHint("This step has no details yet.")
         return
     }
     val laneIndex = run.lanes.indexOfFirst { it.laneId == lane.laneId }
-    val eyebrow = listOfNotNull(
+    val context = listOfNotNull(
         (if (row.setup) "Setup step ${result.stepNumber}" else "Step ${result.stepNumber}") +
             " · " + matrixCaseName(run, row.caseId) + if (row.iteration > 1) " (run ${row.iteration})" else "",
         "Lane ${laneIndex + 1}".takeIf { run.lanes.size > 1 },
     ).joinToString(" · ")
-    TestsInspectorHeader(eyebrow, result.action.ifBlank { row.action })
-    StepDetail(run, row, result, lane, runDir)
+    val tc = tc()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        AppText(context, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        AppText(result.action.ifBlank { row.action }, color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+    }
+    StepDetail(run, row, result, lane)
+}
+
+/** Evidence artifacts for the currently selected run step, with no cached content when the selection changes. */
+@Composable
+internal fun RunStepEvidenceFor(run: TestRun, runDir: File, selection: StepSelection?) {
+    if (selection == null) {
+        TestsHint("Select a step to see its evidence.")
+        return
+    }
+    val row = remember(run, selection.rowKey) { buildMatrix(run).filterIsInstance<MatrixRow.Step>().firstOrNull { it.key == selection.rowKey } }
+    val result = row?.cells?.firstOrNull { it.laneId == selection.laneId }?.result
+    val lane = run.lane(selection.laneId)
+    if (row == null || result == null || lane == null) {
+        TestsHint("This step has no evidence yet.")
+        return
+    }
+    val definition = run.suite.cases.firstOrNull { it.id == row.caseId }?.steps?.firstOrNull { it.id == row.stepId }
+    val hasReference = goldenExampleFor(definition) != null
+    val hasScreenshot = result.screenshotFile(runDir)?.isFile == true
+    val hasLog = lane.logPath?.let { File(runDir, it).isFile } == true
+    val hasTranscript = lane.transcriptPath?.let { File(runDir, it).isFile } == true
+    val earlierAttempts = lane.cases.firstOrNull { it.caseId == row.caseId && it.iteration == row.iteration }?.priorAttempts.orEmpty()
+    val hasEarlierScreenshots = earlierAttempts.any { attempt ->
+        attempt.steps.any { failed ->
+            listOfNotNull(failed.startScreenshotPath, failed.screenshotPath).plus(failed.sampleScreenshotPaths).any { File(runDir, it).isFile }
+        }
+    }
+    val hasEvidence = listOf(hasReference, hasScreenshot, hasLog, hasTranscript, hasEarlierScreenshots).any { it }
+    if (!hasEvidence) {
+        TestsHint("No screenshot, log excerpt, or transcript was captured for this step.")
+        return
+    }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        ExpectedVersusActual(run, row, result, runDir)
+        StepEvidence(result, lane, runDir)
+        EarlierAttemptEvidence(earlierAttempts, runDir)
+    }
 }
 
 @Composable
-private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane: LaneResult, runDir: File) {
+private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane: LaneResult) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().padding(top = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         lane.cases.firstOrNull { it.caseId == row.caseId && it.iteration == row.iteration }
-            ?.priorAttempts?.takeIf { it.isNotEmpty() }?.let { attempts -> EarlierCaseAttempts(attempts, lane, runDir) }
+            ?.priorAttempts?.takeIf { it.isNotEmpty() }?.let { attempts -> EarlierCaseAttempts(attempts) }
         FlowRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
@@ -172,14 +212,12 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
         }
         run.comparisons.filter { it.stepId == row.stepId && it.iteration == row.iteration && it.caseId == row.caseId }
             .forEach { ComparisonSection(run, row, it) }
-        ExpectedVersusActual(run, row, step, runDir)
-        StepEvidence(step, lane, runDir)
         StepActions(run, row, lane, step)
     }
 }
 
 @Composable
-private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneResult, runDir: File) {
+private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>) {
     val tc = tc()
     Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         AppText("Other case attempts", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
@@ -206,26 +244,7 @@ private fun EarlierCaseAttempts(attempts: List<CaseAttemptRecord>, lane: LaneRes
                             maxLines = 3,
                         )
                     }
-                    val evidencePaths = listOfNotNull(failed.startScreenshotPath, failed.screenshotPath) + failed.sampleScreenshotPaths
-                    if (evidencePaths.isNotEmpty()) {
-                        val testsUi = LocalTestsUi.current
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            evidencePaths.distinct().forEachIndexed { index, path ->
-                                val file = File(runDir, path)
-                                if (file.isFile) {
-                                    AppButton("Open evidence ${index + 1}", onClick = { testsUi.openFileReportingFailure(file, "the evidence screenshot") })
-                                }
-                            }
-                        }
-                    }
                 }
-            }
-        }
-        lane.transcriptPath?.let { path ->
-            val transcript = File(runDir, path)
-            if (transcript.isFile) {
-                val testsUi = LocalTestsUi.current
-                AppButton("Open lane transcript", onClick = { testsUi.openFileReportingFailure(transcript, "the lane transcript") })
             }
         }
     }
@@ -433,6 +452,23 @@ private fun StepEvidence(step: StepResult, lane: LaneResult, runDir: File) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), itemVerticalAlignment = Alignment.CenterVertically) {
             AppText("Transcript bytes ${step.transcriptStartOffset ?: 0}–${step.transcriptEndOffset ?: 0}", color = tc.td, fontSize = 10.sp)
             AppButton("Open transcript", onClick = { testsUi.openFileReportingFailure(transcript, "the transcript") })
+        }
+    }
+}
+
+@Composable
+private fun EarlierAttemptEvidence(attempts: List<CaseAttemptRecord>, runDir: File) {
+    val testsUi = LocalTestsUi.current
+    val files = attempts.flatMap { attempt ->
+        attempt.steps.flatMap { failed -> listOfNotNull(failed.startScreenshotPath, failed.screenshotPath) + failed.sampleScreenshotPaths }
+    }.distinct().mapNotNull { path -> File(runDir, path).takeIf { it.isFile } }
+    if (files.isEmpty()) return
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        TestsPanelTitle("Earlier attempt screenshots")
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            files.forEachIndexed { index, file ->
+                AppButton("Open screenshot ${index + 1}", onClick = { testsUi.openFileReportingFailure(file, "the evidence screenshot") })
+            }
         }
     }
 }

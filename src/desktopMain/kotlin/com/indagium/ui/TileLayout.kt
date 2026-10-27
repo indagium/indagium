@@ -18,10 +18,10 @@ import kotlin.math.min
 //   pinned sizes scale down together. When no weighted child is left, the pinned sizes act as weights over what remains;
 // - weighted: the rest share what remains by weight.
 //
-// Scrolling columns. A COLUMN split whose leaves all satisfy the caller's `scrolls` predicate (the log view: the side sections, never
-// the log or Video) does not have to fit its viewport. Its children's heights are their sizeDp (pinned: at least scrollMinDp), the
-// weighted ones share what the pinned ones leave (minTileDp each at the least), and when everything is pinned and shorter than the
-// viewport the last tile that is not collapsed takes the rest. The column's content (the heights plus the gaps) may be taller than
+// Scrolling columns. A COLUMN split whose leaves all satisfy the caller's `scrolls` predicate (the log view: sidebar sections including Video,
+// never the log or Originals) does not have to fit its viewport. Its children's heights are their sizeDp (pinned: at least scrollMinDp), the
+// weighted ones share what the pinned ones leave (minTileDp each at the least), and when everything is pinned with several open tiles,
+// the last open tile takes the rest. A lone open pinned tile keeps its height. The column's content (the heights plus the gaps) may be taller than
 // the viewport; the host then scrolls it, and TileGeometry says so through a TileScrollRegion. A resize there changes only the tile
 // above the gap (the weighted siblings are first pinned at the height they have), so nothing else shrinks and the tiles below move. The
 // last tile has a gap of its own below it (TileGeometrySpec.scrollEndHandle), so it can be resized too. A caller may place that handle in a

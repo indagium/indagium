@@ -13,7 +13,6 @@ import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -118,7 +117,6 @@ private val PILL_SHAPE = RoundedCornerShape(50)
 private val SUMMARY_CHIP_MAX_WIDTH = 280.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
 private val TITLE_FONT_SIZE = 14.sp
-private val INSPECTOR_PADDING = 14.dp
 private val ICON_BUTTON_SIZE = 22.dp
 private val FILLED_FIELD_HEIGHT = 28.dp
 private val DIALOG_LABEL_WIDTH = 60.dp
@@ -296,44 +294,18 @@ internal fun TestsScrollColumn(
 }
 
 /**
- * The frame every centre screen sits in: the [main] content, and optionally an [inspector] beside it. Each pane scrolls on
- * its own ([TestsScrollColumn]). Wide: `main | divider | inspector`, the inspector [TestsViewState.inspectorWidthDp] wide
- * (drag the divider to resize). When the two together are narrower than [TESTS_INSPECTOR_STACK_BELOW_DP] the inspector
- * stacks under [main] inside one scroll column. Without an inspector [main] fills the space.
+ * Compatibility entry point for centre screens. It places the screen body, optional fixed [header], [inspector] and
+ * [evidence] into the stable Workspace, Details and Evidence tiles.
  */
 @Composable
 internal fun TestsSplitScreen(
     main: @Composable () -> Unit,
+    header: (@Composable RowScope.() -> Unit)? = null,
     inspector: (@Composable () -> Unit)?,
+    evidence: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val tc = tc()
-    val view = LocalTestsUi.current.view
-    // Hoisted so a screen that gains or loses its inspector (the suite's case detail panel) keeps its scroll position.
-    val mainScroll = rememberScrollState()
-    if (inspector == null) {
-        TestsScrollColumn(modifier.fillMaxSize(), scrollState = mainScroll) { main() }
-        return
-    }
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        if (testsInspectorStacked(maxWidth.value)) {
-            TestsScrollColumn(Modifier.fillMaxSize(), scrollState = mainScroll) {
-                main()
-                Divider()
-                Column(Modifier.fillMaxWidth().background(tc.p).padding(INSPECTOR_PADDING)) { inspector() }
-            }
-        } else {
-            Row(Modifier.fillMaxSize()) {
-                TestsScrollColumn(Modifier.weight(1f).fillMaxHeight(), scrollState = mainScroll) { main() }
-                // The divider sits left of the inspector, so dragging it right makes the inspector narrower.
-                HDivider { delta -> view.inspectorWidthDp = clampTestsInspectorWidth(view.inspectorWidthDp, -delta) }
-                TestsScrollColumn(
-                    Modifier.width(view.inspectorWidthDp.dp).fillMaxHeight().background(tc.p),
-                    contentModifier = Modifier.padding(INSPECTOR_PADDING),
-                ) { inspector() }
-            }
-        }
-    }
+    TestsWorkspaceTilingHost(main = main, header = header, inspector = inspector, evidence = evidence, modifier = modifier)
 }
 
 // ── Rows ─────────────────────────────────────────────────────────────
@@ -1319,10 +1291,17 @@ internal fun TestsDisclosureButton(label: String, open: Boolean, onClick: () -> 
 
 /** A one-line summary with a "Change ▸" / "Done" link that expands the details under it in place. */
 @Composable
-internal fun TestsSummaryRow(summary: String, open: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+internal fun TestsSummaryRow(
+    summary: String,
+    open: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    toggleDescription: String? = null,
+) {
     Row(modifier.fillMaxWidth().padding(top = 5.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
         AppText(summary, color = tc().ts, fontSize = FIELD_FONT_SIZE, maxLines = 3, modifier = Modifier.weight(1f, fill = false))
-        TestsBreadcrumbLink(if (open) "Done" else "Change ▸", onToggle, Modifier.padding(top = 1.dp))
+        val label = if (open) "Done" else "Change ▸"
+        TestsBreadcrumbLink(label, onToggle, Modifier.padding(top = 1.dp), contentDescription = toggleDescription ?: label)
     }
 }
 

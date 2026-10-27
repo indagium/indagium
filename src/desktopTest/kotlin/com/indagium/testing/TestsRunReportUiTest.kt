@@ -8,11 +8,14 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
@@ -47,7 +50,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** The run report (verdict, tabs, filter pills, matrix and the step inspector) composed against a real AppState and stored runs. */
+/** The run report across Workspace, Details and Evidence, composed against a real AppState and stored runs. */
 @OptIn(ExperimentalTestApi::class)
 class TestsRunReportUiTest {
     @get:Rule
@@ -118,6 +121,7 @@ class TestsRunReportUiTest {
         state.testsView.nav = TestsNav.Runs
         state.testsView.selectedRunId = run.id
         state.testsView.reportTab = tab
+        rule.setTestsViewport(width, 800)
         rule.setContent { Box(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).requiredSize(width.dp, 800.dp)) { TestsWorkspace(state) } }
         rule.waitUntilAtLeastOneExists(hasContentDescription("Back to runs"), timeoutMillis = 10_000)
         rule.waitUntilAtLeastOneExists(hasContentDescription("More report actions"), timeoutMillis = 10_000)
@@ -127,6 +131,10 @@ class TestsRunReportUiTest {
     /** The nodes with [text] right of the nav (the nav tree carries some of the same words). */
     private fun centre(text: String, substring: Boolean = false) =
         rule.onAllNodesWithText(text, substring = substring).fetchSemanticsNodes().filter { it.boundsInRoot.left >= state.testsView.navWidthDp }
+
+    private fun inTile(tile: String, text: String) = rule.onAllNodes(
+        hasText(text) and hasAnyAncestor(hasTestTag("tests-tile-card-$tile")),
+    )
 
     private fun clickCentre(text: String) {
         val nodes = rule.onAllNodesWithText(text).fetchSemanticsNodes()
@@ -147,7 +155,7 @@ class TestsRunReportUiTest {
         rule.onNodeWithText("1 case", substring = true).assertExists()
         listOf("Results", "Compare", "Activity", "Usage").forEach { assertTrue(centre(it).isNotEmpty(), "tab $it") }
         rule.onNodeWithText("Re-run failed (1)").assertExists()
-        // The first non-passing step is already selected: its evidence is in the inspector.
+        // The first non-passing step is already selected in Details and Evidence.
         rule.onNodeWithText("Step 2 · Login").assertExists()
         rule.onNodeWithText("The Sign in button was not found").assertExists()
         rule.onNodeWithText("Select a step to see its evidence.").assertDoesNotExist()
@@ -158,7 +166,7 @@ class TestsRunReportUiTest {
     }
 
     @Test
-    fun selectingAnotherRowShowsThatStepsDetailInTheInspector() {
+    fun selectingAnotherRowUpdatesDetailsForThatStep() {
         val run = failedRun()
         openReport(run)
 
@@ -174,14 +182,14 @@ class TestsRunReportUiTest {
     }
 
     @Test
-    fun theInspectorFitsItsNarrowestWidthAndStacksUnderTheResultsInASmallWindow() {
+    fun detailsStayInsideTheirTileAndStackUnderTheResultsInASmallWindow() {
         val run = failedRun()
-        state.testsView.inspectorWidthDp = 300f
         openReport(run)
         rule.onNodeWithText("Step 2 · Login").assertExists()
         rule.onNodeWithText("The Sign in button was not found").assertExists()
         val inspector = rule.onNodeWithText("Step 2 · Login").fetchSemanticsNode().boundsInRoot
-        assertTrue(inspector.right <= 1400f && inspector.left >= 1400f - 300f - 1f, "the header sits inside the 300dp inspector column: $inspector")
+        val details = rule.onNodeWithTag("tests-tile-card-details").fetchSemanticsNode().boundsInRoot
+        assertTrue(inspector.left >= details.left && inspector.right <= details.right, "the selected step header belongs inside Details: $inspector vs $details")
     }
 
     @Test
@@ -199,8 +207,9 @@ class TestsRunReportUiTest {
         val run = saveRun(RunStatus.PASSED, StepStatus.PASS, StepStatus.PASS, StepStatus.PASS, createdAt = System.currentTimeMillis() - 60_000L)
         openReport(run)
 
-        rule.onNodeWithText("Passed — all 3 steps passed").assertExists()
-        rule.onNodeWithText("Select a step to see its evidence.").assertExists()
+        assertTrue(inTile("details", "Passed — all 3 steps passed").fetchSemanticsNodes().isNotEmpty(), "Details summarizes a run with no selected step")
+        assertTrue(inTile("details", "Run scope").fetchSemanticsNodes().isNotEmpty(), "Details keeps the run scope available")
+        assertTrue(inTile("evidence", "Select a step to see its evidence.").fetchSemanticsNodes().isNotEmpty(), "Evidence has no stale step content")
         assertTrue(rule.onAllNodesWithText("Re-run failed", substring = true).fetchSemanticsNodes().isEmpty())
     }
 

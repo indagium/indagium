@@ -108,15 +108,18 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
     val activeTab = state.activeTab()
     val onLogSurface = state.activeSurface.let { it == null || it is ActiveSurface.Log }
     val home = activeTab?.isCaptureLauncher == true && onLogSurface
+    val tests = state.activeSurface is ActiveSurface.Tests && state.testsTabOpen
     val tab = if (home) null else layoutMenuTab(state)
     val diagramSessionId = state.layoutMenuDiagramSessionId()
     val diagramView = diagramSessionId?.let(state.seq3Sessions::viewState)
-    if (!home && tab == null && diagramView == null) return
+    if (!home && !tests && tab == null && diagramView == null) return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val ctx = tab?.let(state::layoutMenuContext)
+    val testsLayout = if (tests) state.settings.currentTestsWorkspaceLayout() else null
     val badge = when {
         home -> state.settings.homeHiddenSections.size
+        testsLayout != null -> testsLayout.hidden.size
         diagramView != null -> diagramView.diagramHiddenTiles.size
         ctx?.compare == true -> state.compareBadgeCount(ctx)
         ctx != null -> state.logViewBadgeCount(ctx)
@@ -155,12 +158,129 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
             }
             if (home) {
                 HomeLayoutMenuPopup(state, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
+            } else if (testsLayout != null) {
+                TestsWorkspaceLayoutMenuPopup(state, testsLayout, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
             } else if (diagramView != null) {
                 DiagramLayoutMenuPopup(state, diagramView, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
             } else {
                 tab?.let { LayoutMenuPopup(state, it, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss) }
             }
         }
+    }
+}
+
+/** Tests workspace version of the Layout menu: native tile presets, visibility, lock and reset controls. */
+@Composable
+private fun TestsWorkspaceLayoutMenuPopup(
+    state: AppState,
+    layout: TestsWorkspaceLayoutState,
+    onReclaimFocus: () -> Unit,
+    onDismiss: () -> Unit,
+    vertical: Boolean = false,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(8.dp)
+    val visible = testsWorkspaceVisibleTiles(layout)
+    Popup(
+        popupPositionProvider = remember(vertical) { LayoutMenuPositionProvider(vertical) },
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape)
+                .padding(vertical = 8.dp).testTag("layout-menu-popup"),
+        ) {
+            MenuLabel("Layout presets")
+            Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                TestsWorkspacePreset.entries.chunked(2).forEach { rowPresets ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rowPresets.forEach { preset ->
+                            TestsWorkspacePresetThumb(preset, active = testsWorkspacePresetActive(layout, preset)) {
+                                state.updateSettings { it.withTestsWorkspaceLayout(applyTestsWorkspacePreset(preset)) }
+                                state.testsView.maximizedTile = null
+                                onReclaimFocus()
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            MenuLabel("Panels")
+            TestsWorkspaceTileId.entries.forEach { id ->
+                val isVisible = id in visible
+                CheckRow(
+                    checked = isVisible,
+                    onToggle = {
+                        state.updateSettings { settings ->
+                            settings.withTestsWorkspaceLayout(settings.currentTestsWorkspaceLayout().withTileVisible(id, !isVisible))
+                        }
+                        if (isVisible && state.testsView.maximizedTile == id) state.testsView.maximizedTile = null
+                        onReclaimFocus()
+                    },
+                    modifier = Modifier.testTag("tests-layout-menu-panel-${id.key}"),
+                    enabled = id != TestsWorkspaceTileId.WORKSPACE && (!isVisible || visible.size > 1),
+                ) {
+                    AppText(testsWorkspaceTileTitle(id), color = tc.tx, fontSize = 12.sp)
+                }
+            }
+            CheckRow(
+                checked = layout.locked,
+                onToggle = {
+                    state.updateSettings { it.withTestsWorkspaceLayout(layout.copy(locked = !layout.locked)) }
+                    onReclaimFocus()
+                },
+                modifier = Modifier.testTag("tests-layout-menu-lock"),
+            ) { AppText("Lock tile dragging", color = tc.tx, fontSize = 12.sp) }
+            Divider()
+            Row(
+                Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                    state.updateSettings { it.withTestsWorkspaceLayout(testsWorkspaceDefaultState()) }
+                    state.testsView.maximizedTile = null
+                    onReclaimFocus()
+                }.padding(horizontal = 12.dp, vertical = 8.dp).testTag("tests-layout-menu-reset"),
+            ) {
+                AppText("Reset to Standard", color = tc.ac, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TestsWorkspacePresetThumb(preset: TestsWorkspacePreset, active: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val fill = if (active) tc.ac else tc.td
+    val geometry = remember(preset) {
+        tileGeometry(preset.layout, THUMB_VIRTUAL_WIDTH, THUMB_VIRTUAL_HEIGHT, TESTS_WORKSPACE_CHROME_SPEC.geometrySpec())
+    }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(THUMB_WIDTH_DP.dp, THUMB_HEIGHT_DP.dp)
+                .clip(CORNER_MD)
+                .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
+                .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                .testTag("tests-workspace-preset-${preset.name}")
+                .semantics {
+                    contentDescription = preset.label
+                    selected = active
+                }
+                .clickable(role = Role.Button, onClick = onClick)
+                .padding(3.dp),
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val sx = size.width / THUMB_VIRTUAL_WIDTH
+                val sy = size.height / THUMB_VIRTUAL_HEIGHT
+                geometry.cards.forEach { card ->
+                    drawRoundRect(
+                        color = fill,
+                        topLeft = Offset(card.rect.x * sx, card.rect.y * sy),
+                        size = Size(card.rect.w * sx, card.rect.h * sy),
+                        cornerRadius = CornerRadius(1.5.dp.toPx()),
+                    )
+                }
+            }
+        }
+        AppText(preset.label, color = tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

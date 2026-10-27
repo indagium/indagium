@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -80,9 +81,14 @@ class TestsSuiteSelectionUiTest {
 
     private fun open(suite: TestSuite, width: Dp = 1500.dp) {
         state.testsView.selectedSuiteId = suite.id
+        rule.setTestsViewport(width.value.toInt(), 900)
         rule.setContent { Box(Modifier.size(width, 900.dp)) { TestsWorkspace(state) } }
         rule.waitForIdle()
     }
+
+    /** Text in the Test Suites tile; the suite's Details tile can repeat the same case-count chip. */
+    private fun navNodes(text: String) =
+        rule.onAllNodesWithText(text).fetchSemanticsNodes().filter { it.boundsInRoot.left < state.testsView.navWidthDp }
 
     private fun press(key: Key) {
         rule.onRoot().performKeyInput { pressKey(key) }
@@ -178,7 +184,7 @@ class TestsSuiteSelectionUiTest {
 
         assertTrue(rule.onAllNodesWithText("read-only on", substring = true).fetchSemanticsNodes().isEmpty())
         rule.onNodeWithText(state.editionService.current.value.label).assertExists()
-        rule.onNodeWithText("7 cases").assertExists()
+        assertEquals(1, navNodes("7 cases").size, "the Test Suites tile footer shows the aggregate case count")
         assertTrue(rule.onAllNodesWithText("of 5 cases", substring = true).fetchSemanticsNodes().isEmpty())
     }
 
@@ -190,7 +196,7 @@ class TestsSuiteSelectionUiTest {
 
         rule.onNodeWithText("Free · 1 of 1 suite · 5 of 5 cases").assertExists()
         rule.onNodeWithText("2 cases read-only").assertExists()
-        rule.onNodeWithText("7 cases").assertDoesNotExist()
+        assertTrue(navNodes("7 cases").isEmpty(), "Free replaces the Test Suites footer count with its usage meter")
     }
 
     @Test
@@ -202,7 +208,8 @@ class TestsSuiteSelectionUiTest {
 
         rule.waitUntilAtLeastOneExists(hasContentDescription("#2 failed"), timeoutMillis = 10_000)
         rule.onNodeWithText("Last 6 runs").assertExists()
-        assertTrue(rule.onAllNodes(hasContentDescription("#1 passed")).fetchSemanticsNodes().isNotEmpty())
+        rule.onAllNodes(hasContentDescription("#1 passed")).assertCountEquals(1)
+        rule.onAllNodes(hasContentDescription("#2 failed")).assertCountEquals(1)
 
         state.testsView.previewCaseId = suite.cases.single().id
         rule.waitForIdle()

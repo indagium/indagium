@@ -695,9 +695,9 @@ class LogViewLayoutTest {
     // ---- scrolling side columns --------------------------------------------------------------------------------
 
     @Test
-    fun onlyTheLogTilesAndVideoKeepTheirColumnFromScrolling() {
+    fun onlyTheLogAndOriginalTilesKeepTheirColumnFromScrolling() {
         // The toolbar tile is a content-sized tile of a scrolling column like any side section (it may scroll out of view there).
-        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B, VIDEO)
+        val fixed = setOf(LOG, ORIGINAL, LOG_A, LOG_B, ORIGINAL_A, ORIGINAL_B)
         LogViewSectionId.entries.forEach { assertEquals(it !in fixed, logViewScrollsInColumn(it), "scrolls($it)") }
     }
 
@@ -725,13 +725,63 @@ class LogViewLayoutTest {
     }
 
     @Test
-    fun theFilterColumnOfTheClassicLayoutIsAScrollingColumnAndTheRightOneIsNotWhileVideoShows() {
+    fun theFilterAndRightSidebarColumnsOfTheClassicLayoutScroll() {
         val projection = assertNotNull(projectTileLayout(classicLogViewLayout(sizes)) { it != DIAGRAMS })
         val geometry = tileGeometry(projection.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
-        assertEquals(listOf(TAGS), geometry.scrollRegions.map { it.key })
+        assertEquals(listOf(TAGS, VIDEO), geometry.scrollRegions.map { it.key })
         val noVideo = assertNotNull(projectTileLayout(classicLogViewLayout(sizes)) { it != DIAGRAMS && it != VIDEO })
         val withoutVideo = tileGeometry(noVideo.root, 1500f, 800f, LOG_VIEW_TILE_SPEC, emptySet(), ::logViewScrollsInColumn)
         assertEquals(listOf(TAGS, NOTES), withoutVideo.scrollRegions.map { it.key })
+    }
+
+    @Test
+    fun videoKeepsItsMainViewHeightAndExpandedSidebarTilesStillShareTheColumn() {
+        assertTrue(logViewScrollsInColumn(VIDEO))
+        assertFalse(logViewLoneColumn(VIDEO), "Video alone beside the log must not be wrapped in a scrolling column")
+
+        val mainView = TileSplit(TileAxis.ROW, listOf(TileLeaf(LOG), TileLeaf(VIDEO)))
+        val mainGeometry = tileGeometry(mainView, HOST_WIDTH_DP, HOST_HEIGHT_DP, LOG_VIEW_TILE_SPEC, scrolls = ::logViewScrollsInColumn)
+        assertEquals(HOST_HEIGHT_DP, mainGeometry.cardOf(VIDEO)!!.h, EPS)
+        assertTrue(mainGeometry.scrollRegions.isEmpty())
+
+        val expandedSidebar = tileGeometry(classicLogViewLayout(sizes), HOST_WIDTH_DP, HOST_HEIGHT_DP, LOG_VIEW_TILE_SPEC, scrolls = ::logViewScrollsInColumn)
+        listOf(DIAGRAMS, VIDEO, NOTES, AI).forEach { id ->
+            assertTrue(expandedSidebar.cardOf(id)!!.h > LOG_VIEW_TILE_SPEC.collapsedExtentDp, "$id remains expanded")
+        }
+
+        val maximized = com.indagium.ui.maximizedTileGeometry(VIDEO, HOST_WIDTH_DP, HOST_HEIGHT_DP)
+        assertEquals(HOST_WIDTH_DP, maximized.cardOf(VIDEO)!!.w, EPS)
+        assertEquals(HOST_HEIGHT_DP, maximized.cardOf(VIDEO)!!.h, EPS)
+    }
+
+    @Test
+    fun videoResizesWhenTheOtherClassicSidebarTilesAreCollapsed() {
+        val root = classicLogViewLayout(sizes)
+        val projection = assertNotNull(projectTileLayout(root) { true })
+        val collapsed = setOf(DIAGRAMS, NOTES, AI)
+        val before = tileGeometry(projection.root, HOST_WIDTH_DP, HOST_HEIGHT_DP, LOG_VIEW_TILE_SPEC, collapsed, ::logViewScrollsInColumn)
+        val video = assertNotNull(before.cardOf(VIDEO))
+        val gap = assertNotNull(before.gaps.singleOrNull { it.path == listOf(2) && it.index == 2 })
+
+        assertTrue(gap.scrolling, "the actual Video sidebar column scrolls")
+        assertTrue(gap.resizable, "the splitter below Video remains active when Notes is collapsed")
+        val resized = com.indagium.ui.resizeProjected(
+            root,
+            projection,
+            gap,
+            -100f,
+            LOG_VIEW_TILE_SPEC.minTileDp,
+            LOG_VIEW_TILE_SPEC.minPairShare,
+            collapsed,
+            LOG_VIEW_TILE_SPEC.collapsedExtentDp,
+            LOG_VIEW_PIN_MIN_DP,
+            LOG_VIEW_PIN_MAX_DP,
+        )
+        val after = tileGeometry(resized, HOST_WIDTH_DP, HOST_HEIGHT_DP, LOG_VIEW_TILE_SPEC, collapsed, ::logViewScrollsInColumn)
+
+        assertEquals(video.h - 100f, after.cardOf(VIDEO)!!.h, EPS, "the resized height persists with one open sidebar tile")
+        assertEquals(LOG_VIEW_TILE_SPEC.collapsedExtentDp, after.cardOf(NOTES)!!.h, EPS)
+        assertFalse(logViewLoneColumn(VIDEO), "a standalone Video beside the main view still fills its parent")
     }
 
     @Test
@@ -880,14 +930,14 @@ class LogViewLayoutTest {
     }
 
     @Test
-    fun aTileDroppedBesideATileOfTheRightColumnIsAColumnOfItsOwnToo() {
-        // The right column holds Video, so it does not scroll as a whole: the dropped tile is a lone tile there as well.
+    fun aTileDroppedBesideARightSidebarTileStaysInItsScrollingColumn() {
+        // Video and the side tiles share one scrolling column, so a new side tile beside AI stays bare in that column's row.
         val dropped = dropOnUserLayout(SAVED_FILTERS, TileDropTarget.OnSection(AI, TileEdge.LEFT))
         val right = children(dropped).last() as TileSplit
         val row = right.children.single { it is TileSplit && it.axis == TileAxis.ROW } as TileSplit
         assertEquals(listOf(SAVED_FILTERS, AI), leafIds(row))
-        assertTrue(row.children.first().let { it is TileSplit && it.axis == TileAxis.COLUMN })
-        // Without Video it is a row of a scrolling column: laid out as one row, as tall as its tallest tile asks, not clipped or collapsed.
+        assertTrue(row.children.all { it is TileLeaf })
+        // Once Video is pruned from this view, the remaining side row is sized to its tallest content-sized tile.
         val geometry = shownGeometry(dropped)
         val saved = geometry.cardOf(SAVED_FILTERS)!!
         val ai = geometry.cardOf(AI)!!

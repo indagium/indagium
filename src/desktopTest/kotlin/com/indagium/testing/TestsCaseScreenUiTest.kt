@@ -2,8 +2,10 @@ package com.indagium.testing
 
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -264,7 +266,7 @@ class TestsCaseScreenUiTest {
         chip("Examples").performClick()
         rule.waitForIdle()
         assertEquals(CaseField.Examples, state.testsView.caseInspectorField)
-        rule.onNodeWithText("Boot log").assertExists()
+        rule.onNode(hasText("Boot log") and hasAnyAncestor(hasTestTag("tests-tile-card-details"))).assertExists()
 
         // The same chip again closes its editor and the step comes back.
         rule.onAllNodes(hasText("Examples") and hasClickAction())[0].performClick()
@@ -353,7 +355,7 @@ class TestsCaseScreenUiTest {
         rule.onNodeWithContentDescription("+ Add step options").assertDoesNotExist()
         rule.onNodeWithContentDescription("More step actions").assertDoesNotExist()
         rule.onNodeWithText("Draft steps with AI…").assertExists()
-        rule.onNodeWithText("Record from device…").assertExists()
+        rule.onNodeWithText("Record").assertExists()
         rule.onNodeWithText("Paste log lines as checks…").assertExists()
         rule.onNodeWithText("Improve steps with AI…").assertExists()
         rule.onNodeWithText("Insert shared sequence…").assertDoesNotExist()
@@ -397,7 +399,7 @@ class TestsCaseScreenUiTest {
         assertTrue(rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText("Paste log lines as checks…"))).fetchSemanticsNodes().isNotEmpty())
         assertTrue(rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText("Improve steps with AI…"))).fetchSemanticsNodes().isNotEmpty())
         rule.onNodeWithText("Draft steps with AI…").assertExists()
-        rule.onNodeWithText("Record from device…").assertExists()
+        rule.onNodeWithText("Record").assertExists()
     }
 
     @Test
@@ -408,7 +410,7 @@ class TestsCaseScreenUiTest {
         assertTrue(state.editionService.setForDev(Edition.FREE))
         open(lockedSuiteId, caseId)
 
-        listOf("+ Add step", "Draft steps with AI…", "Record from device…", "Paste log lines as checks…", "Improve steps with AI…").forEach { label ->
+        listOf("+ Add step", "Draft steps with AI…", "Record", "Paste log lines as checks…", "Improve steps with AI…").forEach { label ->
             assertTrue(
                 rule.onAllNodes(isNotEnabled() and hasAnyDescendant(hasText(label))).fetchSemanticsNodes().isNotEmpty(),
                 "$label should be disabled for a read-only case",

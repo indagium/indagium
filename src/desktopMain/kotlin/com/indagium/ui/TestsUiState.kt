@@ -123,6 +123,18 @@ internal class TestsViewState {
     /** Non-null while the run dialog is open. */
     var runDialog: RunDialogTarget? by mutableStateOf(null)
 
+    /** The suite or case whose recording setup was opened; remains fixed while the user browses elsewhere. */
+    var recordDialogTarget: TestsOperationTarget? by mutableStateOf(null)
+
+    /** Opens the review for the recording held by AppState, whose target is fixed at session creation. */
+    var recordingReviewOpen: Boolean by mutableStateOf(false)
+
+    /** The selected draft row while review is active; separate from the selected persisted case step. */
+    var recordingSelectedRowId: String? by mutableStateOf(null)
+
+    /** Replay choices made in draft review; keyed by row id so reordering does not change them. */
+    var recordingReplayRowIds: Set<String> by mutableStateOf(emptySet())
+
     /** Non-null while the "Improve steps with AI" dialog is open. */
     var improveDialog: ImproveStepsTarget? by mutableStateOf(null)
 
@@ -151,6 +163,9 @@ internal class TestsViewState {
     /** Width of the right inspector column in dp (wide windows only); clamped by [clampTestsInspectorWidth]. */
     var inspectorWidthDp: Float by mutableStateOf(TESTS_INSPECTOR_WIDTH_DEFAULT_DP)
 
+    /** The one tile temporarily maximized on the Tests surface; not persisted across app restarts. */
+    var maximizedTile: TestsWorkspaceTileId? by mutableStateOf(null)
+
     /** The suites whose cases the navigation tree lists. The selected suite is added when it is selected. */
     var expandedSuiteIds: Set<String> by mutableStateOf(emptySet())
 }
@@ -162,6 +177,7 @@ internal fun TestsViewState.expandSuite(suiteId: String) {
 
 /** Shows [suiteId]'s Cases tab on the Suites screen: no case open, the suite selected and expanded in the navigation tree. */
 internal fun TestsViewState.showSuite(suiteId: String) {
+    recordingReviewOpen = false
     nav = TestsNav.Suites
     selectedSuiteId = suiteId
     selectedCaseId = null
@@ -176,6 +192,7 @@ internal fun TestsViewState.toggleSuiteExpanded(suiteId: String) {
 
 /** Selects [stepId] in the step list and closes any case-field editor, so the inspector shows that step. */
 internal fun TestsViewState.selectStep(stepId: String) {
+    recordingReviewOpen = false
     selectedStepId = stepId
     caseInspectorField = null
 }

@@ -2229,13 +2229,11 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     var markerListSpace by remember(tab.id) { mutableStateOf(0.dp) }
     val density = LocalDensity.current
     val detached = state.isEmbeddedMirrorDetached(tab.id)
-    // This card fills the Video tile, which is a *weighted* share of the sidebar
-    // (videoSplit, default 0.42) — a fixed height, not a free-growing column. It therefore must NOT
-    // scroll: inside a verticalScroll the incoming max height is infinite, so the mirror kept its
-    // full 420dp however small the slot was, overflowed, and got clipped at the slot edge — which
-    // reads as "Notes is drawn on top of the video". Laying it out as a plain Column instead lets
-    // the surface take exactly the space left over, with no guess about how much the rows below it
-    // need. Resizing is the sidebar's own video/notes divider, one level up.
+    // This card fills the Video tile, which has a fixed height in the sidebar (videoSplit, default
+    // 0.42). Keep this body bounded to the tile; do not add an inner verticalScroll, which gives
+    // children an infinite max height and made the mirror keep its full 420dp even when the slot
+    // was smaller. The tiling surface may scroll the whole sidebar column, while this card keeps
+    // its measured height. Resizing is the sidebar's video divider, one level up.
     // The live mirror goes through MirrorAboveMarkersLayout so opening the bar's text row pushes
     // the markers down instead of shrinking the picture.
     if (mirrorMode == CaptureMirrorMode.EMBEDDED && !detached) {

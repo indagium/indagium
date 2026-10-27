@@ -11,13 +11,14 @@ import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.isPopup
 import androidx.compose.ui.test.junit4.v2.createComposeRule
-import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
@@ -44,6 +45,11 @@ private const val MENU_REOPEN_WAIT_MS = 300L
 /** The Issues screen and the issue dialog composed against a real AppState. */
 @OptIn(ExperimentalTestApi::class)
 class IssuesUiTest {
+    private companion object {
+        const val WIDE_VIEWPORT_WIDTH = 1300
+        const val WIDE_VIEWPORT_HEIGHT = 800
+    }
+
     @get:Rule
     val rule = createComposeRule()
 
@@ -81,6 +87,7 @@ class IssuesUiTest {
     private fun openIssues(wide: Boolean = false) {
         state.testsView.nav = TestsNav.Issues
         if (wide) {
+            rule.setTestsViewport(WIDE_VIEWPORT_WIDTH, WIDE_VIEWPORT_HEIGHT)
             rule.setContent { Box(Modifier.wrapContentSize(Alignment.TopStart, unbounded = true).requiredSize(1300.dp, 800.dp)) { TestsWorkspace(state) } }
         } else {
             rule.setContent { TestsWorkspace(state) }
@@ -95,7 +102,9 @@ class IssuesUiTest {
 
     private fun openIssueMenu() {
         Thread.sleep(MENU_REOPEN_WAIT_MS)
-        rule.onNodeWithContentDescription("More actions").performClick()
+        rule.onNode(
+            hasContentDescription("Issue actions") and hasAnyAncestor(hasTestTag("tests-tile-card-details")),
+        ).performClick()
         rule.waitForIdle()
     }
 
@@ -108,26 +117,29 @@ class IssuesUiTest {
         assertTrue(inList("Login · step 2 · run").isNotEmpty(), "the origin line names the case, the step and the run's moment")
         assertTrue(rule.onAllNodesWithText(runUuid, substring = true).fetchSemanticsNodes().isEmpty(), "the raw run id is never shown")
         rule.waitUntil(WAIT_MS) { state.testsView.selectedIssueId == issue.id }
-        // Preselected: its detail is already in the inspector beside the list.
+        // Preselected: its Details tile is already populated.
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
         rule.onNodeWithText("Markdown").assertExists()
     }
 
     @Test
-    fun inAWideWindowTheInspectorSitsBesideTheListAndFitsItsWidth() {
+    fun inAWideWindowDetailsAndTheIssueListUseTheirOwnTiles() {
         storeIssue("Login crashes")
-        state.testsView.inspectorWidthDp = 300f
         openIssues(wide = true)
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
 
         val edit = rule.onNodeWithText("Edit…").fetchSemanticsNode().boundsInRoot
-        val row = rule.onAllNodesWithText("Login crashes")[0].fetchSemanticsNode().boundsInRoot
-        assertTrue(edit.left >= 1300f - 300f - 1f && edit.right <= 1300f, "the Edit… button sits inside the 300dp inspector column: $edit")
-        assertTrue(row.right <= edit.left + 1f, "the list row ends where the inspector starts: $row vs $edit")
+        val row = rule.onNode(
+            hasText("Login crashes") and hasAnyAncestor(hasTestTag("tests-tile-card-workspace")),
+        ).fetchSemanticsNode().boundsInRoot
+        val details = rule.onNodeWithTag("tests-tile-card-details").fetchSemanticsNode().boundsInRoot
+        val workspace = rule.onNodeWithTag("tests-tile-card-workspace").fetchSemanticsNode().boundsInRoot
+        assertTrue(edit.left >= details.left && edit.right <= details.right, "Edit… belongs inside Details: $edit vs $details")
+        assertTrue(row.left >= workspace.left && row.right <= workspace.right, "the issue row belongs inside Workspace: $row vs $workspace")
     }
 
     @Test
-    fun selectingARowShowsItsDetailInTheInspectorWhileTheListStaysVisible() {
+    fun selectingARowUpdatesDetailsWhileTheIssueListStaysVisible() {
         val first = storeIssue("Login crashes")
         val second = storeIssue("Checkout hangs")
         openIssues()
@@ -140,7 +152,7 @@ class IssuesUiTest {
         rule.waitForIdle()
 
         assertEquals(other.id, state.testsView.selectedIssueId)
-        // The title is now in the list row and in the inspector header; the list is still there.
+        // The title is now in the list row and in Details; the list remains visible.
         rule.waitUntil(WAIT_MS) { rule.onAllNodesWithText(otherTitle).fetchSemanticsNodes().size >= 2 }
         assertTrue(inList("Login crashes").isNotEmpty() && inList("Checkout hangs").isNotEmpty())
         rule.onNodeWithText("‹ Issues").assertDoesNotExist()
@@ -209,7 +221,10 @@ class IssuesUiTest {
         rule.onNodeWithText("Edit…").assertExists()
         val edit = rule.onNodeWithText("Edit…").fetchSemanticsNode().boundsInRoot
         val delete = rule.onNodeWithText("Delete…").fetchSemanticsNode().boundsInRoot
-        assertTrue(delete.left > edit.left && kotlin.math.abs(delete.top - edit.top) < 2f, "Delete… sits in the same action row, after Edit…: $edit vs $delete")
+        assertTrue(
+            delete.left > edit.left && kotlin.math.abs(delete.top - edit.top) < 2f,
+            "Delete… sits in the same action row, after Edit…: $edit vs $delete",
+        )
     }
 
     @Test
@@ -220,7 +235,9 @@ class IssuesUiTest {
         openIssues()
         rule.waitUntilAtLeastOneExists(hasText("Edit…"), WAIT_MS)
 
-        val rowMenus = rule.onAllNodesWithContentDescription("Issue actions")
+        val rowMenus = rule.onAllNodes(
+            hasContentDescription("Issue actions") and hasAnyAncestor(hasTestTag("tests-tile-card-workspace")),
+        )
         assertEquals(2, rowMenus.fetchSemanticsNodes().size, "every row has a ⋯")
         // Both fixtures can share the same createdAt millisecond, so select the action attached
         // to the row title instead of assuming the store's tie order matches insertion order.

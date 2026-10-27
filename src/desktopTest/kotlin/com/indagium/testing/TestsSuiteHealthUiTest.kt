@@ -15,6 +15,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import androidx.compose.ui.unit.dp
 import com.indagium.edition.Edition
@@ -113,6 +114,7 @@ class TestsSuiteHealthUiTest {
     private fun openHealth(suite: TestSuite) {
         state.testsView.selectedSuiteId = suite.id
         state.testsView.selectedSuiteTab = SuiteTab.Health
+        rule.setTestsViewport(1500, 900)
         rule.setContent { Box(Modifier.size(1500.dp, 900.dp)) { TestsWorkspace(state) } }
         rule.waitForIdle()
     }
@@ -160,7 +162,7 @@ class TestsSuiteHealthUiTest {
         rule.onNodeWithText("The button did nothing.").assertExists()
         rule.onNodeWithText("Open run log").assertExists()
 
-        rule.onNodeWithText("Draft issue…").performClick()
+        rule.onNodeWithText("Draft issue…").performScrollTo().performClick()
         rule.waitForIdle()
 
         val target = state.testsView.issueDialog
@@ -176,7 +178,7 @@ class TestsSuiteHealthUiTest {
         openHealth(suite)
 
         rule.waitUntilAtLeastOneExists(hasText("Open run log"), timeoutMillis = 10_000)
-        rule.onNodeWithText("Open run log").performClick()
+        rule.onNodeWithText("Open run log").performScrollTo().performClick()
         rule.waitForIdle()
 
         assertEquals(failing.id, state.testsView.selectedRunId)
@@ -188,7 +190,7 @@ class TestsSuiteHealthUiTest {
         openHealth(suite)
         rule.waitUntilAtLeastOneExists(hasContentDescription("Run case Checkout"), timeoutMillis = 10_000)
 
-        rule.onNodeWithContentDescription("Run case Checkout").performClick()
+        rule.onNodeWithContentDescription("Run case Checkout").performScrollTo().performClick()
         rule.waitForIdle()
 
         assertEquals(RunDialogTarget(suite.id, suite.cases[1].id), state.testsView.runDialog)

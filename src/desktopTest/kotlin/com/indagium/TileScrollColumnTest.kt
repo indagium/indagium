@@ -285,6 +285,23 @@ class TileScrollColumnTest {
     }
 
     @Test
+    fun aLoneOpenTileCanKeepItsResizedHeightAmongCollapsedSiblings() {
+        val root = sideColumn(leaf(S.B, dp = 200f), leaf(S.C), leaf(S.D, dp = 200f), leaf(S.E, dp = 200f))
+        val collapsed = setOf(S.B, S.D, S.E)
+        val before = geometry(root, collapsed)
+        val video = before.rect(S.C)
+        val splitterBelowVideo = before.gaps.filter { it.scrolling }[1]
+
+        assertTrue(splitterBelowVideo.resizable, "a collapsed tile below does not disable the splitter above it")
+        val resized = resize(root, gapIndex = 2, delta = -100f, collapsed = collapsed)
+        val after = geometry(resized, collapsed)
+
+        assertEquals(video.h - 100f, after.rect(S.C).h, EPS, "the lone open tile keeps the height set by its splitter")
+        assertEquals(HEADER, after.rect(S.D).h, EPS)
+        assertEquals(HEADER, after.rect(S.E).h, EPS)
+    }
+
+    @Test
     fun hiddenTilesKeepTheirSlotWhenAVisibleGapIsResized() {
         // C is hidden: the gap the user sees is B | D, and C's own slot is untouched.
         val root = sideColumn(leaf(S.B, 1f), leaf(S.C, 5f, dp = 123f), leaf(S.D, 1f))

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -305,56 +306,74 @@ internal fun SelectedStepInspector(ops: StepListOps) {
                 step.action.ifBlank { UNTITLED_STEP },
                 overflowItems = stepMenuItems(ui, ops, step),
             )
-            StepScreenshotStrip(step, ops)
-            RecordedScreensPanel(step, ops)
             StepEditor(step, ops)
+        }
+    }
+}
+
+/** Read-only context artifacts for the selected library step. Editing controls remain in [SelectedStepInspector]. */
+@Composable
+internal fun SelectedStepEvidence(ops: StepListOps) {
+    val ui = LocalTestsUi.current
+    val selectedId = effectiveSelectedStepId(ops.steps, ui.view.selectedStepId)
+    val step = ops.steps.firstOrNull { it.id == selectedId }
+    if (step == null) {
+        TestsHint("Select a step to see its evidence.")
+        return
+    }
+    val screenshots = step.examples.filterIsInstance<StepExample.GoldenScreenshot>()
+    val referenceLogs = step.examples.filterIsInstance<StepExample.ReferenceLog>()
+    if (screenshots.isEmpty() && referenceLogs.isEmpty() && step.recordingRef == null) {
+        TestsHint("No screenshots, reference logs, or recorded screens for this step.")
+        return
+    }
+    val view = ui.view
+    key(step.id) {
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (screenshots.isNotEmpty()) TestsPanelTitle("Screens")
+            referenceLogs.forEachIndexed { index, log ->
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    TestsPanelTitle(log.caption.ifBlank { "Reference log ${index + 1}" })
+                    if (log.text.isBlank()) {
+                        TestsHint("This reference log is empty.")
+                    } else {
+                        TestsScrollColumn(
+                            Modifier.fillMaxWidth().heightIn(max = 240.dp).background(tc().p2, CORNER_MD).border(1.dp, tc().br, CORNER_MD),
+                            contentModifier = Modifier.padding(8.dp),
+                        ) {
+                            AppText(log.text, color = tc().ts, fontSize = 10.sp, fontFamily = MONO, maxLines = Int.MAX_VALUE)
+                        }
+                    }
+                }
+            }
+            screenshots.forEachIndexed { index, shot ->
+                val file = ops.assetSuiteId?.let { suiteId -> ui.state.testGoldenImageFile(suiteId, shot.assetPath) }
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    TestsPanelTitle(shot.caption.ifBlank { "Screenshot ${index + 1}" })
+                    GoldenThumbnail(
+                        file,
+                        size = EVIDENCE_THUMB_SIZE,
+                        modifier = Modifier.clip(CORNER_SM).clickable {
+                            view.setExamplesExpanded(step.id, true)
+                            view.examplesRevealStepId = step.id
+                            ui.reclaimFocus()
+                        }.semantics {
+                            contentDescription = "Screenshot ${index + 1} of ${screenshots.size}. Show in Examples"
+                        },
+                    )
+                    AppText(shot.assetPath, color = tc().td, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (file == null || !file.isFile) TestsErrorText("The image file is missing from this suite's assets.")
+                }
+            }
+            if (ops.assetSuiteId != null && step.recordingRef != null) RecordedScreensPanel(step, ops)
         }
     }
 }
 
 // ── Screenshots shown without opening anything ───────────────────────
 
-private val STRIP_THUMB_SIZE = 48.dp
+private val EVIDENCE_THUMB_SIZE = 240.dp
 private val RECORDED_THUMB_SIZE = 96.dp
-private const val STRIP_MAX_THUMBS = 8
-
-/**
- * A row of small thumbnails of the step's golden screenshots, under the inspector title, so the screenshots are visible
- * without opening the Examples section. Clicking one opens that section and scrolls it into view.
- */
-@Composable
-private fun StepScreenshotStrip(step: TestStep, ops: StepListOps) {
-    val ui = LocalTestsUi.current
-    val suiteId = ops.assetSuiteId ?: return
-    val shots = step.examples.filterIsInstance<StepExample.GoldenScreenshot>()
-    if (shots.isEmpty()) return
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        itemVerticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("Screens", color = tc().td, fontSize = 10.sp)
-        shots.take(STRIP_MAX_THUMBS).forEachIndexed { index, shot ->
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                GoldenThumbnail(
-                    ui.state.testGoldenImageFile(suiteId, shot.assetPath),
-                    size = STRIP_THUMB_SIZE,
-                    modifier = Modifier.clip(CORNER_SM).clickable {
-                        ui.view.setExamplesExpanded(step.id, true)
-                        ui.view.examplesRevealStepId = step.id
-                        ui.reclaimFocus()
-                    }.semantics { contentDescription = "Screenshot ${index + 1} of ${shots.size}. Show in Examples" },
-                )
-                AppText(when (shot.role) {
-                    com.indagium.testing.model.ScreenshotRole.EXPECTED -> "Expected"
-                    com.indagium.testing.model.ScreenshotRole.RECORDED_BEFORE -> "Before ref"
-                    com.indagium.testing.model.ScreenshotRole.RECORDED_AFTER -> "After ref"
-                }, color = tc().td, fontSize = 9.sp)
-            }
-        }
-        if (shots.size > STRIP_MAX_THUMBS) TestsHint("+${shots.size - STRIP_MAX_THUMBS} more")
-    }
-}
 
 /** A recorded screen read off the disk: its caption and the decoded image (null while it cannot be decoded). */
 private class RecordedScreenImage(val caption: String, val bitmap: ImageBitmap?)
@@ -928,7 +947,6 @@ private fun GoldenScreenshotBody(example: StepExample.GoldenScreenshot, ops: Ste
         )
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        GoldenThumbnail(file)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText(example.assetPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis)
             if (file == null || !file.isFile) TestsErrorText("The image file is missing from this suite's assets.")

@@ -5,15 +5,18 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
 import com.indagium.model.AiProviderKind
@@ -36,7 +39,6 @@ import com.indagium.ui.LocalTestsUi
 import com.indagium.ui.ReportExportDialog
 import com.indagium.ui.RunDialogTarget
 import com.indagium.ui.TestRunOverrides
-import com.indagium.ui.TestsNav
 import com.indagium.ui.TestsUi
 import com.indagium.ui.TestsWorkspace
 import com.indagium.ui.reportExportFileName
@@ -97,8 +99,8 @@ class TestRunDialogUiTest {
         rule.waitUntilAtLeastOneExists(hasText("Start"), WAIT_MS)
     }
 
-    private fun clickChange(index: Int = 0) {
-        rule.onAllNodesWithText("Change ▸")[index].performScrollTo().performClick()
+    private fun clickChange(description: String) {
+        rule.onNodeWithContentDescription(description).performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
         rule.waitForIdle()
     }
 
@@ -135,12 +137,12 @@ class TestRunDialogUiTest {
         rule.waitUntilAtLeastOneExists(hasText("Judgment schedule"), WAIT_MS)
 
         rule.onNodeWithText("Open a live tab per lane").assertDoesNotExist()
-        clickChange(0)
+        clickChange("Configure run recording")
         rule.onNodeWithText("Open a live tab per lane").assertExists()
         rule.onNodeWithText("Done").assertExists()
         rule.onNodeWithText("Additional case attempts").assertDoesNotExist()
 
-        clickChange(0)
+        clickChange("Configure run options")
         rule.onNodeWithText("Additional case attempts").assertExists()
         rule.onNodeWithText("Step retries").assertExists()
         rule.onNodeWithText("Tool calls per case").assertExists()
@@ -158,14 +160,15 @@ class TestRunDialogUiTest {
         )
         val lane = LaneConfig(kind = LaneKind.EXTERNAL, profileId = null, deviceSerial = FIXTURE_SERIAL)
         openDialog(RunDialogTarget(suiteId, initialConfig = RunConfig(suiteId, null, listOf(lane))))
+        val navigationBeforeStart = state.testsView.nav
 
         rule.onNodeWithText("Every step").performClick()
-        clickChange(1)
+        clickChange("Configure run options")
         rule.onNodeWithText("3×").performScrollTo().performClick()
         rule.onNodeWithText("Start").performClick()
 
         rule.waitUntil(WAIT_MS) { state.testsView.selectedRunId != null }
-        assertEquals(TestsNav.Runs, state.testsView.nav)
+        assertEquals(navigationBeforeStart, state.testsView.nav, "Starting a run keeps the current authoring screen open")
         val run = assertNotNull(state.testRunCoordinator.run(state.testsView.selectedRunId!!))
         assertEquals(3, run.config.repeat)
         assertEquals("every_step", run.config.judgeMode)

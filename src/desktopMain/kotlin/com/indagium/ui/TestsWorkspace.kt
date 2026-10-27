@@ -9,7 +9,6 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -42,7 +41,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -60,11 +67,10 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 
-// The AI test-suites workspace: a single full-width, non-log surface (ActiveSurface.Tests) shown in its own tab.
-// Left: a navigation tree (searchable suites with their cases, then the library and activity screens, and a footer with
-// the edition). Centre: the screen of the selected item, optionally with an inspector beside it (TestsSplitScreen).
-// Below ~600dp the tree collapses to a ☰ toggle. Selection lives in AppState.testsView so it survives switching tabs.
-// Edits go straight through the AppState delegates (which return StoreResult); failures show inline or in the banner.
+// The singleton Tests surface routes real authoring, library and report screens into the shared tile shell.
+// Navigation is split into Test Suites, Test Library and Activity; Workspace actions stay above its scrolling body.
+// Details and Evidence follow selection, while the execution tile retains independently owned operation targets.
+// Below 600dp the navigation opens as an overlay. Library/store failures remain explicit in the workspace banners.
 
 private val NAV_ITEM_SHAPE = RoundedCornerShape(8.dp)
 private val NAV_ITEM_MIN_HEIGHT = 28.dp
@@ -95,41 +101,39 @@ internal fun TestsWorkspace(state: AppState) {
     val library = state.testLibrary
     val limits = remember(library, edition) { testsLimitsUiState(library, edition.limits) }
     LaunchedEffect(Unit) { ui.reclaimFocus() }
+    // Draft-row selection has its own state. Selecting any ordinary item returns the context tiles to that item,
+    // while the AppState-owned recording and its apply target remain untouched.
+    val selection = listOf(
+        view.nav, view.selectedSuiteId, view.selectedCaseId, view.previewCaseId, view.selectedStepId,
+        view.caseInspectorField, view.selectedScriptId, view.selectedSharedStepId, view.selectedExampleKey,
+        view.selectedRunId, view.selectedIssueId,
+    )
+    var previousSelection by remember { mutableStateOf(selection) }
+    LaunchedEffect(selection) {
+        if (selection != previousSelection) {
+            view.recordingReviewOpen = false
+            previousSelection = selection
+        }
+    }
     CompositionLocalProvider(LocalTestsUi provides ui, LocalTestsLimits provides limits, LocalTextInputFocusTracker provides ui.textFocus) {
         Column(
             Modifier.fillMaxSize().background(tc.bg)
                 // Bare keys (arrows, Esc) go to the current screen, but never while a text input has focus (see TestsUi.routeKey).
                 .onPreviewKeyEvent { ui.routeKey(it) }
+                .onKeyEvent { event ->
+                    if (
+                        event.type == KeyEventType.KeyDown && event.key == Key.Escape &&
+                        !ui.textFocus.anyFocused && ui.view.maximizedTile != null
+                    ) {
+                        ui.view.maximizedTile = null
+                        ui.reclaimFocus()
+                        true
+                    } else {
+                        false
+                    }
+                }
                 .focusRequester(rootFocus).focusable(),
         ) {
-            state.testStepRecordingSession?.let { session ->
-                val recording by session.snapshot.collectAsState()
-                Row(
-                    Modifier.fillMaxWidth().background(tc.warnBg).padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    AppText(
-                        if (recording.active) "Recording accepted input from ${session.deviceSerial} · ${recording.steps.size} step(s)"
-                        else "Recorded draft ready · ${recording.steps.size} step(s)",
-                        color = tc.tx, fontSize = 10.sp, modifier = Modifier.weight(1f),
-                    )
-                    if (recording.active) AppButton("Stop recording", onClick = { state.stopTestStepRecording() }, variant = ButtonVariant.Secondary)
-                    state.testStepRecordingTarget?.let { (suiteId, caseId) ->
-                        AppButton("Review", onClick = {
-                            view.selectedSuiteId = suiteId
-                            view.selectedCaseId = caseId
-                            view.nav = TestsNav.Suites
-                        }, variant = ButtonVariant.Primary)
-                    }
-                    AppButton(
-                        "Discard",
-                        onClick = { state.clearTestStepRecording(session.id) },
-                        enabled = !state.isTestStepRecordingApplying(session.id),
-                        variant = ButtonVariant.Ghost,
-                    )
-                }
-            }
             ui.banner?.let { TestsBannerView(it) { ui.banner = null } }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             state.testLibraryLoadIssues.forEach { issue ->
@@ -137,17 +141,18 @@ internal fun TestsWorkspace(state: AppState) {
             }
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true), dismissible = false) { } }
             state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false), dismissible = false) { } }
-            view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
-            view.improveDialog?.let { target -> TestStepImproveDialog(target) { view.improveDialog = null } }
+            TestsOperationDialogs()
             view.issueDialog?.let { target -> IssueDraftDialog(target) { view.issueDialog = null } }
-            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                if (testsNavCollapsed(maxWidth.value)) {
-                    TestsNarrowLayout(maxWidth)
+            var workspaceWidthPx by remember { mutableStateOf(0) }
+            val workspaceWidthDp = with(LocalDensity.current) { workspaceWidthPx.toDp().value }
+            Box(Modifier.weight(1f).fillMaxWidth().onSizeChanged { workspaceWidthPx = it.width }) {
+                if (testsNavCollapsed(workspaceWidthDp)) {
+                    TestsNarrowLayout(workspaceWidthDp.dp)
                 } else {
-                    Row(Modifier.fillMaxSize()) {
-                        TestsNavPane(Modifier.width(view.navWidthDp.dp).fillMaxHeight())
-                        HDivider { delta -> view.navWidthDp = clampTestsNavWidth(view.navWidthDp, delta) }
-                        TestsCenter(Modifier.weight(1f).fillMaxHeight())
+                    CompositionLocalProvider(
+                        LocalTestsCompactWorkspace provides (workspaceWidthDp < TESTS_WORKSPACE_COMPACT_NAV_BELOW_DP),
+                    ) {
+                        TestsCenter(Modifier.fillMaxSize())
                     }
                 }
             }
@@ -170,11 +175,17 @@ private fun TestsNarrowLayout(totalWidth: Dp) {
         }
         Divider()
         Box(Modifier.weight(1f).fillMaxWidth()) {
-            TestsCenter(Modifier.fillMaxSize())
+            CompositionLocalProvider(
+                LocalTestsCompactWorkspace provides true,
+                LocalTestsNavigationOverlay provides true,
+            ) {
+                TestsCenter(Modifier.fillMaxSize())
+            }
             if (navOpen) {
                 Row(Modifier.fillMaxSize()) {
                     TestsNavPane(
-                        Modifier.width(minOf(totalWidth * NAV_OVERLAY_WIDTH_FRACTION, NAV_OVERLAY_MAX_WIDTH)).fillMaxHeight(),
+                        Modifier.width(minOf(totalWidth * NAV_OVERLAY_WIDTH_FRACTION, NAV_OVERLAY_MAX_WIDTH, ui.view.navWidthDp.dp))
+                            .fillMaxHeight().testTag("tests-navigation-overlay"),
                         onNavigate = { navOpen = false },
                     )
                     Box(
@@ -240,18 +251,22 @@ private fun TestsNoSuites() {
 }
 
 /**
- * The common frame of a centre screen: scrolls, padded, content capped to a readable width. With an [inspector] the
- * screen becomes a [TestsSplitScreen] (inspector beside the content, or under it in a narrow window).
+ * The common frame of a centre screen: [header] actions stay above the scrolling [content], while the optional [inspector]
+ * and [evidence] occupy the Details and Evidence tiles.
  */
 @Composable
 internal fun TestsScreenScaffold(
     modifier: Modifier = Modifier,
+    header: (@Composable RowScope.() -> Unit)? = null,
     inspector: (@Composable () -> Unit)? = null,
+    evidence: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     TestsSplitScreen(
         main = { Column(Modifier.fillMaxWidth().widthIn(max = TESTS_CONTENT_MAX_WIDTH).padding(16.dp)) { content() } },
+        header = header,
         inspector = inspector,
+        evidence = evidence,
         modifier = modifier,
     )
 }
@@ -340,6 +355,7 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
                             ui.reclaimFocus()
                         },
                     ) {
+                        view.recordingReviewOpen = false
                         view.selectedSuiteId = suite.id
                         view.selectedCaseId = null
                         view.nav = TestsNav.Suites
@@ -361,6 +377,7 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
                                 selected = view.nav == TestsNav.Suites && suite.id == selectedSuite?.id && case.id == activeCaseId,
                                 locked = limits.isCaseLocked(case.id),
                             ) {
+                                view.recordingReviewOpen = false
                                 view.selectedSuiteId = suite.id
                                 view.selectedCaseId = case.id
                                 view.nav = TestsNav.Suites
@@ -374,6 +391,7 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
             NavSectionHeader("Library")
 
             fun go(nav: TestsNav, also: () -> Unit = {}) {
+                view.recordingReviewOpen = false
                 view.nav = nav
                 also()
                 ui.reclaimFocus()
@@ -403,6 +421,173 @@ private fun TestsNavPane(modifier: Modifier, onNavigate: () -> Unit = {}) {
                 TestsBadge(edition.label)
                 AppText(navCaseCountLabel(library.suites.sumOf { it.cases.size }), color = tc.td, fontSize = NAV_SMALL_FONT_SP.sp)
             }
+        }
+    }
+}
+
+/** Fixed actions in the Test Suites tile chrome, so suite creation/import remain available while the tree scrolls. */
+@Composable
+internal fun TestsSuitesTileHeaderAction() {
+    val ui = LocalTestsUi.current
+    val limits = LocalTestsLimits.current
+    TestsIconButton(
+        "+",
+        "New suite",
+        onClick = {
+            ui.view.recordingReviewOpen = false
+            createSuiteAndSelect(ui)
+            ui.reclaimFocus()
+        },
+        enabled = limits.canCreateSuite && !ui.library.readOnly,
+        disabledHint = if (ui.library.readOnly) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
+    )
+    TestsOverflowMenu(
+        listOf(
+            TestsMenuItem(
+                "Import suite…",
+                onClick = { importSuiteFromChosenFile(ui) },
+                enabled = !ui.library.readOnly,
+                disabledHint = LIBRARY_READ_ONLY_MESSAGE,
+            ),
+            TestsMenuItem("Agent profiles…", onClick = { ui.state.openAiProviderSettings() }),
+        ),
+        contentDescription = "More suite actions",
+    )
+}
+
+/** Searchable suite/case tree for the independent Test Suites tile. */
+@Composable
+internal fun TestsSuitesTileContent() {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val limits = LocalTestsLimits.current
+    val view = ui.view
+    val library = ui.library
+    val edition by ui.state.editionService.current.collectAsState()
+    val searching = view.search.isNotBlank()
+    val tree = remember(library.suites, view.search) { filterNavTree(library.suites, view.search) }
+    val selectedSuite = library.selectedSuiteOrFirst(view.selectedSuiteId)
+    val activeCaseId = selectedSuite?.cases?.firstOrNull { it.id == view.selectedCaseId }?.id
+    LaunchedEffect(selectedSuite?.id) { selectedSuite?.id?.let(view::expandSuite) }
+    Column(Modifier.fillMaxSize().background(tc.p)) {
+        TestsScrollColumn(Modifier.weight(1f), contentModifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)) {
+            InlineField(
+                value = view.search,
+                onValue = { view.search = it },
+                placeholder = "Search suites and cases…",
+                modifier = Modifier.fillMaxWidth(),
+                fontSize = NAV_ITEM_FONT_SP.sp,
+                onClear = { view.search = "" },
+            )
+            if (tree.isEmpty()) {
+                TestsHint(
+                    if (library.suites.isEmpty()) "No suites yet." else "No suite or case matches the search.",
+                    Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+            ReorderableColumn(
+                items = tree,
+                idOf = { it.suite.id },
+                onMove = { id, to -> ui.report(ui.state.moveTestSuite(id, to)) },
+                reorderEnabled = !searching && !library.readOnly,
+            ) { entry, row ->
+                val suite = entry.suite
+                val expanded = entry.forceExpanded || suite.id in view.expandedSuiteIds
+                Column(Modifier.fillMaxWidth()) {
+                    SuiteNavRow(
+                        suite = suite,
+                        row = row,
+                        selected = view.nav == TestsNav.Suites && suite.id == selectedSuite?.id && activeCaseId == null,
+                        expanded = expanded,
+                        locked = limits.isSuiteLocked(suite.id),
+                        onToggle = {
+                            view.toggleSuiteExpanded(suite.id)
+                            ui.reclaimFocus()
+                        },
+                    ) {
+                        view.recordingReviewOpen = false
+                        view.selectedSuiteId = suite.id
+                        view.selectedCaseId = null
+                        view.nav = TestsNav.Suites
+                        view.expandSuite(suite.id)
+                        ui.reclaimFocus()
+                    }
+                    if (expanded) {
+                        ReorderableColumn(
+                            items = entry.cases,
+                            idOf = { it.id },
+                            onMove = { id, to -> ui.report(ui.state.moveTestCase(id, to)) },
+                            reorderEnabled = !searching && !library.readOnly && !suite.readOnly,
+                        ) { case, caseRow ->
+                            CaseNavRow(
+                                name = case.name.ifBlank { "Untitled case" },
+                                row = caseRow,
+                                selected = view.nav == TestsNav.Suites && suite.id == selectedSuite?.id && case.id == activeCaseId,
+                                locked = limits.isCaseLocked(case.id),
+                            ) {
+                                view.recordingReviewOpen = false
+                                view.selectedSuiteId = suite.id
+                                view.selectedCaseId = case.id
+                                view.nav = TestsNav.Suites
+                                ui.reclaimFocus()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Divider()
+        val usage = remember(library, edition) { testsEditionUsage(library, edition.limits) }
+        if (usage != null) {
+            TestsUsageMeter(editionUsageLine(edition.label, usage), usage, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp))
+        } else {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                TestsBadge(edition.label)
+                AppText(navCaseCountLabel(library.suites.sumOf { it.cases.size }), color = tc.td, fontSize = NAV_SMALL_FONT_SP.sp)
+            }
+        }
+    }
+}
+
+@Composable
+internal fun TestsLibraryTileContent() {
+    val ui = LocalTestsUi.current
+    val library = ui.library
+    TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)) {
+        fun go(nav: TestsNav) {
+            ui.view.recordingReviewOpen = false
+            ui.view.nav = nav
+            ui.reclaimFocus()
+        }
+        NavItem("Shared steps", library.sharedSteps.size.toString(), ui.view.nav == TestsNav.SharedSteps) { go(TestsNav.SharedSteps) }
+        NavItem("Scripts", library.scripts.size.toString(), ui.view.nav == TestsNav.Scripts) { go(TestsNav.Scripts) }
+        NavItem("Examples for agents", null, ui.view.nav == TestsNav.AgentExamples) { go(TestsNav.AgentExamples) }
+    }
+}
+
+@Composable
+internal fun TestsActivityTileContent() {
+    val ui = LocalTestsUi.current
+    val view = ui.view
+    val issueRevision by ui.state.issueStore.revision.collectAsState()
+    val issueCount by produceState<Int?>(null, issueRevision) { value = withContext(Dispatchers.IO) { ui.state.issueStore.list().size } }
+    val runCount = ui.state.testRuns.size
+    TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)) {
+        NavItem("Runs", runCount.takeIf { it > 0 }?.toString(), view.nav == TestsNav.Runs) {
+            view.recordingReviewOpen = false
+            view.nav = TestsNav.Runs
+            view.selectedRunId = null
+            ui.reclaimFocus()
+        }
+        NavItem("Issues", issueCount?.takeIf { it > 0 }?.toString(), view.nav == TestsNav.Issues) {
+            view.recordingReviewOpen = false
+            view.nav = TestsNav.Issues
+            view.selectedIssueId = null
+            ui.reclaimFocus()
         }
     }
 }
@@ -556,6 +741,7 @@ internal fun AppState.createNewTestSuite(): StoreResult<TestSuite> =
     createTestSuite(uniqueName(NEW_SUITE_NAME, testLibrary.suites.map { it.name }))
 
 internal fun createSuiteAndSelect(ui: TestsUi) {
+    ui.view.recordingReviewOpen = false
     val result = ui.report(ui.state.createNewTestSuite())
     if (result is StoreResult.Ok) {
         ui.view.selectedSuiteId = result.value.id
@@ -571,6 +757,7 @@ internal fun importSuiteFromChosenFile(ui: TestsUi) {
     ui.scope.launch(Dispatchers.IO) {
         val result = ui.report(ui.state.importTestSuiteFromFile(file))
         if (result is StoreResult.Ok) {
+            ui.view.recordingReviewOpen = false
             ui.view.selectedSuiteId = result.value.id
             ui.view.selectedCaseId = null
             ui.view.nav = TestsNav.Suites

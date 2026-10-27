@@ -2,12 +2,12 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -28,12 +28,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.ai.normalizeAiProviderProfiles
-import com.indagium.capture.CaptureDevice
 import com.indagium.model.AiUsageStats
 import com.indagium.model.WorkflowAiSelection
 import com.indagium.model.summaryLabel
@@ -47,7 +47,6 @@ import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.contextHint
 import com.indagium.testing.authoring.isExternalEvent
 import com.indagium.testing.authoring.isSoftReviewWarning
-import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepKind
@@ -70,72 +69,17 @@ private val LOG_DIALOG_MAX_HEIGHT = 760.dp
 private val AI_FIELD_WIDTH = 200.dp
 private val AUTHORING_BUTTON_PADDING = 8.dp
 
-/**
- * The header of a case's step list: the "Steps (N)" title over a wrapping row of visible buttons ("+ Add step" ([onAddStep]), Draft
- * steps with AI…, Record from device…, Paste log lines as checks…, Insert shared sequence… when shared steps exist, Improve steps with
- * AI…, Rewrite with AI from saved recording when stored recordings exist). Under it, while they apply: the recording device picker,
- * the connection progress with Cancel, the last error and
- * the recording review panel. The dialogs these actions open are composed here too.
- */
+/** Fixed authoring actions for the case's step list. Run and record setup live in the stable execution tile. */
 @Composable
 internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean, onAddStep: () -> Unit) {
     val ui = LocalTestsUi.current
-    val tc = tc()
     val step = case.steps.firstOrNull { it.id == ui.view.selectedStepId } ?: case.steps.firstOrNull()
     var draftOpen by remember { mutableStateOf(false) }
     var logOpen by remember { mutableStateOf(false) }
     var insertSharedOpen by remember { mutableStateOf(false) }
-    var recordError by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
-    var authoringDevices by remember(suiteId, case.id) { mutableStateOf<List<CaptureDevice>>(emptyList()) }
-    var selectedAuthoringSerial by remember(suiteId, case.id) { mutableStateOf<String?>(null) }
-    var preparingRecording by remember(suiteId, case.id) { mutableStateOf(false) }
-    var recordingPreparationJob by remember(suiteId, case.id) { mutableStateOf<Job?>(null) }
-
-    DisposableEffect(suiteId, case.id) {
-        onDispose { recordingPreparationJob?.cancel() }
-    }
-    // Recordings whose evidence is kept on disk ("Keep recording evidence with recorded cases"); the check is a file lookup, so off the UI thread.
-    val storedRecordings by produceState(emptyList<String>(), case.id, case.steps.map { it.recordingRef }) {
-        value = withContext(Dispatchers.IO) { ui.state.storedRecordingIds(case.id) }
-    }
-    var reopening by remember(suiteId, case.id) { mutableStateOf(false) }
-
-    fun beginRecording() {
-        if (preparingRecording) return
-        recordingPreparationJob = ui.scope.launch {
-            preparingRecording = true
-            try {
-                handleAuthoringPreparationFailure({ recordError = it }) {
-                    authoringDevices = withContext(Dispatchers.IO) { ui.state.discoverTestStepRecordingDevices() }
-                    val preferredSerial = ui.state.liveCaptureSerial()
-                    val serial = selectedAuthoringSerial?.takeIf { selected -> authoringDevices.any { it.serial == selected } }
-                        ?: authoringDevices.firstOrNull { it.serial == preferredSerial }?.serial
-                        ?: authoringDevices.singleOrNull()?.serial
-                    selectedAuthoringSerial = serial
-                    if (authoringDevices.isEmpty()) {
-                        recordError = "No connected Android devices are available. Connect or authorize a device, then try again."
-                    } else if (serial == null) {
-                        recordError = "Choose the device to record. The Tests workspace will stay open while the recording prepares."
-                    } else {
-                        startAuthoringRecording(serial, ui, suiteId, case.id) { recordError = it }
-                    }
-                }
-            } finally {
-                preparingRecording = false
-                recordingPreparationJob = null
-            }
-        }
-    }
-
     val readOnlyHint = "This case is read-only."
     val addActions = buildList {
         add(TestsMenuItem("Draft steps with AI…", onClick = { draftOpen = true }, enabled = editable, disabledHint = readOnlyHint))
-        add(
-            TestsMenuItem(
-                if (preparingRecording) "Connecting…" else "Record from device…", onClick = ::beginRecording,
-                enabled = editable && !preparingRecording, disabledHint = if (!editable) readOnlyHint else "Preparing the recording.",
-            ),
-        )
         add(
             TestsMenuItem(
                 "Paste log lines as checks…", onClick = { logOpen = true },
@@ -151,41 +95,12 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
             )
         }
     }
-    val moreActions = buildList {
-        add(
-            TestsMenuItem(
-                "Improve steps with AI…", onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
-                enabled = improveBlockedReason(case, editable) == null, disabledHint = improveBlockedReason(case, editable),
-            ),
-        )
-        storedRecordings.forEachIndexed { position, recordingId ->
-            val busy = ui.state.testStepRecordingSession != null
-            add(
-                TestsMenuItem(
-                    if (storedRecordings.size == 1) "Rewrite with AI from saved recording" else "Rewrite with AI from saved recording ${position + 1}",
-                    onClick = {
-                        if (!reopening) {
-                            reopening = true
-                            ui.scope.launch {
-                                try {
-                                    recordError = ui.state.reopenTestStepRecording(case.id, recordingId).takeIf { it !is StoreResult.Ok }?.userMessage()
-                                } finally {
-                                    reopening = false
-                                }
-                            }
-                        }
-                    },
-                    enabled = editable && !reopening && !busy && !preparingRecording,
-                    disabledHint = when {
-                        !editable -> readOnlyHint
-                        busy -> "Finish or discard the open recording first."
-                        else -> "Opening the saved recording."
-                    },
-                    dividerBefore = position == 0,
-                ),
-            )
-        }
-    }
+    val moreActions = listOf(
+        TestsMenuItem(
+            "Improve steps with AI…", onClick = { ui.view.improveDialog = ImproveStepsTarget(suiteId, case.id) },
+            enabled = improveBlockedReason(case, editable) == null, disabledHint = improveBlockedReason(case, editable),
+        ),
+    )
 
     TestsSectionTitle("Steps (${case.steps.size})")
     // Every authoring action is a visible compact button; the row wraps at narrow widths. A disabled one keeps its reason as a tooltip.
@@ -217,36 +132,9 @@ internal fun CaseStepsHeader(suiteId: String, case: TestCase, editable: Boolean,
             )
         }
     }
-    if (authoringDevices.size > 1 || preparingRecording) {
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (authoringDevices.size > 1) {
-                TestsDropdown(
-                    selectedLabel = authoringDevices.firstOrNull { it.serial == selectedAuthoringSerial }?.let(::recordingDeviceLabel)
-                        ?: "Choose device",
-                    options = authoringDevices,
-                    optionLabel = ::recordingDeviceLabel,
-                    onSelect = { selectedAuthoringSerial = it.serial },
-                    enabled = editable && !preparingRecording,
-                    isSelected = { it.serial == selectedAuthoringSerial },
-                    menuWidth = 240.dp,
-                )
-            }
-            if (preparingRecording) {
-                AppText("Connecting to the device…", color = tc.ts, fontSize = 11.sp, modifier = Modifier.padding(vertical = 5.dp))
-                AppButton("Cancel", onClick = { recordingPreparationJob?.cancel() }, variant = ButtonVariant.Ghost)
-            }
-        }
-    }
-    recordError?.let { TestsErrorText(it) }
     if (draftOpen) TestStepDraftDialog(suiteId, case, onDismiss = { draftOpen = false; ui.reclaimFocus() })
     if (logOpen && step != null) LogChecksDialog(step.id, onDismiss = { logOpen = false; ui.reclaimFocus() })
     if (insertSharedOpen) InsertSharedDialog(case, step, onDismiss = { insertSharedOpen = false })
-    val recordingTarget = ui.state.testStepRecordingTarget
-    if (recordingTarget == (suiteId to case.id)) {
-        ui.state.testStepRecordingSession?.let { session ->
-            TestStepRecordingPanel(session, case, onDismiss = { ui.state.clearTestStepRecording(session.id) })
-        }
-    }
 }
 
 /** Inserts a library shared sequence into [case]: which sequence, and where (after the selected step by default). */
@@ -304,38 +192,6 @@ private fun InsertSharedDialog(case: TestCase, selectedStep: TestStep?, onDismis
                 DialogActionButton("Cancel", active = false) { dismiss() }
             },
         )
-    }
-}
-
-private fun recordingDeviceLabel(device: CaptureDevice): String =
-    if (device.model == device.serial) device.serial else "${device.model} (${device.serial})"
-
-/** ADB/scrcpy setup failures have several platform-specific wrappers; cancellation still propagates to the UI job. */
-@Suppress("TooGenericExceptionCaught")
-private suspend fun handleAuthoringPreparationFailure(onFailure: (String) -> Unit, action: suspend () -> Unit) {
-    try {
-        action()
-    } catch (cancelled: kotlinx.coroutines.CancellationException) {
-        throw cancelled
-    } catch (failure: Exception) {
-        onFailure("Could not prepare recording: ${failure.message ?: failure::class.simpleName}")
-    }
-}
-
-private suspend fun startAuthoringRecording(
-    serial: String?,
-    ui: TestsUi,
-    suiteId: String,
-    caseId: String,
-    onError: (String?) -> Unit,
-) {
-    if (serial == null) {
-        onError("Choose the device to record.")
-        return
-    }
-    when (val started = ui.state.prepareTestStepRecording(serial, suiteId, caseId)) {
-        is StoreResult.Ok -> onError(null)
-        else -> onError(started.userMessage())
     }
 }
 
@@ -599,266 +455,6 @@ private fun LogChecksDialog(stepId: String, onDismiss: () -> Unit) {
     }
 }
 
-@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
-@Composable
-private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: TestCase, onDismiss: () -> Unit) {
-    val ui = LocalTestsUi.current
-    val tc = tc()
-    val snapshot by session.snapshot.collectAsState()
-    var working by remember { mutableStateOf(false) }
-    var error by remember { mutableStateOf<String?>(null) }
-    val rewriting = ui.state.isTestStepRecordingRewriting(session.id)
-    val applying = working || ui.state.isTestStepRecordingApplying(session.id)
-    val editable = !snapshot.active && !applying && !rewriting
-    // Moving, adding and removing rows also wait for the screen snapshots, like Remove always did.
-    val reviewEditable = editable && snapshot.pendingSnapshots == 0
-    val applyBlockedReason = recordingApplyBlockedReason(snapshot)
-    val reopened = snapshot.reopened
-    // What applying a reopened recording does to the steps it made earlier; recomputed whenever the case changes.
-    val replacement = remember(case.steps.map { it.id }, session.id) { ui.state.reopenedReplacementPlan(session.id) }
-    val keepEvidence = ui.state.settings.testing.keepRecordingEvidence && reopened == null
-    // AI is the default; a reviewer can select individual stable gestures for replay or opt into replaying every eligible row.
-    var selectedReplayRowIds by remember(session.id) { mutableStateOf(emptySet<String>()) }
-    val replayableRowIds = remember(snapshot.steps, snapshot.active) { if (snapshot.active) emptySet() else session.replayableRowIds() }
-    val replayRows = selectedReplayRowIds.intersect(replayableRowIds)
-    LaunchedEffect(replayableRowIds) { selectedReplayRowIds = selectedReplayRowIds.intersect(replayableRowIds) }
-
-    fun applyRecorded(insertAsNew: Boolean) {
-        working = true
-        ui.scope.launch {
-            try {
-                val reviewed = session.snapshot.value.steps
-                when (val result = ui.state.applyTestStepRecording(
-                    session.id,
-                    reviewed.map { it.action to it.expected },
-                    case.steps.indexOfFirst { it.id == ui.view.selectedStepId }.takeIf { it >= 0 }?.plus(1),
-                    reviewed.filter { it.useScreenshotAsExpected }.map { it.id }.toSet(),
-                    reviewed.map { it.id },
-                    reviewed.associate { it.id to (it.optional to it.condition) },
-                    insertAsNew,
-                    replayRowIds = replayRows,
-                )) {
-                    is StoreResult.Ok -> { ui.report(result); onDismiss() }
-                    else -> error = result.userMessage()
-                }
-            } finally {
-                working = false
-            }
-        }
-    }
-
-    fun addRecordedStep(at: Int) {
-        error = ui.state.insertTestRecordingRow(session.id, at, RecordedTestStep(action = "")).takeIf { it !is StoreResult.Ok }?.userMessage()
-        ui.reclaimFocus()
-    }
-    TestsScrollColumn(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).heightIn(max = 600.dp), contentModifier = Modifier.padding(14.dp)) {
-        AppText(
-            when {
-                snapshot.active -> "Recording device input…"
-                reopened != null -> "Review saved recording"
-                else -> "Review recorded steps"
-            },
-            color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-        )
-        Spacer(Modifier.height(5.dp))
-        if (reopened != null) {
-            ReopenedRecordingNotes(reopened, replacement)
-        } else {
-            TestsHint(
-                "Device ${session.deviceSerial}. Use the device or emulator window directly, or the Indagium mirror. " +
-                    "Taps, swipes, buttons, panels, rotation and typing are observed, and so are changes to USB, Bluetooth, power and the like; " +
-                    "this recorder never sends input to the device.",
-            )
-            if (keepEvidence) {
-                TestsHint(
-                    "Keep recording evidence is on: applying also saves this recording's screenshots and screen readings beside the case, " +
-                        "and its video unless a password was typed (Settings > Testing).",
-                )
-            }
-        }
-        if (snapshot.active) {
-            Spacer(Modifier.height(8.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                AppButton("Cancel recording", onClick = { session.stop(); onDismiss() }, variant = ButtonVariant.Ghost)
-                AppButton("Stop and review", onClick = { session.stop() }, variant = ButtonVariant.Primary)
-            }
-        }
-        if (snapshot.steps.isEmpty()) {
-            TestsHint(
-                if (snapshot.excludedSourceInputIds.isNotEmpty()) {
-                    "No steps remain in review. Restore removed inputs to bring the original recording back."
-                } else {
-                    "No input recorded yet."
-                },
-            )
-            if (!snapshot.active) AppButton("+ Add step", onClick = { addRecordedStep(0) }, enabled = reviewEditable, variant = ButtonVariant.Ghost)
-        }
-        if (!snapshot.active && snapshot.pendingSnapshots > 0) {
-            TestsHint("Wait for the recorded screen snapshots to finish before removing or restoring inputs.")
-        }
-        if (!snapshot.active) RecordingRewriteSection(session, case, snapshot, locked = applying)
-        if (!snapshot.active && snapshot.steps.isNotEmpty()) {
-            AppButton("+ Add step at start", onClick = { addRecordedStep(0) }, enabled = reviewEditable, variant = ButtonVariant.Ghost)
-        }
-        ReorderableColumn(
-            items = snapshot.steps,
-            idOf = { it.id },
-            onMove = { id, to -> error = ui.state.moveTestRecordingRow(session.id, id, to).takeIf { it !is StoreResult.Ok }?.userMessage() },
-            reorderEnabled = reviewEditable,
-            rowGap = 6.dp,
-        ) { row, scope ->
-            Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ReorderGrip(scope)
-                    AppText("Step ${scope.index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                    if (row.authorAdded) TestsBadge("ADDED BY YOU")
-                    if (row.isExternalEvent) TestsBadge("Detected on the device")
-                    Spacer(Modifier.weight(1f))
-                    ReorderMoveButtons(scope)
-                    AppButton(
-                        "+ Add step below",
-                        onClick = { addRecordedStep(scope.index + 1) },
-                        enabled = reviewEditable,
-                        variant = ButtonVariant.Ghost,
-                    )
-                    AppButton(
-                        "Remove",
-                        onClick = {
-                            when (val result = ui.state.removeTestRecordingRows(session.id, setOf(row.id))) {
-                                is StoreResult.Ok -> error = null
-                                else -> error = result.userMessage()
-                            }
-                        },
-                        enabled = reviewEditable,
-                        variant = ButtonVariant.Ghost,
-                    )
-                }
-                if (row.authorAdded) RecordedRowKindEditor(session, row, editable)
-                if (row.isExternalEvent) ExternalEventRowEditor(session, row, editable)
-                if (row.stepKind == StepKind.AGENT && !row.authorAdded) {
-                    val replayAvailable = row.id in replayableRowIds
-                    CheckRow(checked = row.id in replayRows, onToggle = {
-                        selectedReplayRowIds = if (row.id in selectedReplayRowIds) selectedReplayRowIds - row.id else selectedReplayRowIds + row.id
-                    }, enabled = editable && replayAvailable) {
-                        AppText("Replay this step", color = tc.ts, fontSize = 10.sp)
-                    }
-                    if (replayAvailable) {
-                        TestsHint(if (row.id in replayRows) {
-                            "Uses the recorded input on a similar layout. Turn off to let AI adapt this step to the current screen."
-                        } else {
-                            "AI uses the recording as guidance and can adapt to the current screen."
-                        })
-                    } else if (!snapshot.active) {
-                        TestsHint("Replay needs eligible recorded input and cannot evaluate optional conditions or establish a precondition.")
-                    }
-                }
-                TestsLabeled(if (row.stepKind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
-                    CommitTextField(
-                        row.action,
-                        { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) },
-                        enabled = editable,
-                        placeholder = when {
-                            row.stepKind == StepKind.MANUAL -> "What the tester should do, such as plug in the USB stick"
-                            row.stepKind == StepKind.SCRIPT -> "What the script does (shown in the report)"
-                            row.authorAdded -> "What the AI agent should do"
-                            else -> "Recorded action"
-                        },
-                        proseTargetId = "recorded-step:${row.id}:action",
-                    )
-                }
-                TestsLabeled("Expected result") {
-                    CommitTextField(
-                        row.expected,
-                        { text ->
-                            updateRecorded(session, row.id) { it.copy(expected = text) }
-                            StoreResult.Ok(Unit)
-                        },
-                        enabled = editable,
-                        multiline = true,
-                        placeholder = when {
-                            row.stepKind != StepKind.AGENT -> "Optional for a manual or script step"
-                            row.optional -> "May be blank for an optional action"
-                            else -> "Required before applying"
-                        },
-                        proseTargetId = "recorded-step:${row.id}:expected",
-                    )
-                }
-                if (row.stepKind == StepKind.AGENT) {
-                    CheckRow(checked = row.optional, onToggle = {
-                        updateRecorded(session, row.id) {
-                            if (it.optional) it.copy(optional = false, condition = null)
-                            else it.copy(optional = true)
-                        }
-                    }, enabled = editable) {
-                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 10.sp)
-                    }
-                }
-                if (row.optional) {
-                    TestsLabeled("Perform only when") {
-                        CommitTextField(
-                            row.condition.orEmpty(),
-                            { text ->
-                                updateRecorded(session, row.id) { it.copy(condition = text) }
-                                StoreResult.Ok(Unit)
-                            },
-                            enabled = editable,
-                            multiline = true,
-                            placeholder = "Describe the visible condition, such as an ad is playing",
-                            proseTargetId = "recorded-step:${row.id}:condition",
-                        )
-                    }
-                }
-                if (row.sourceInputIds.isNotEmpty()) {
-                    RecordedInputsList(row, snapshot.rawSteps.orEmpty())
-                    if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
-                }
-                if (row.stepKind == StepKind.AGENT && row.stateChanges.isNotEmpty() && row.sourceInputIds.isEmpty()) {
-                    RecordedStateChangesHint(session, row, editable)
-                }
-                row.contextHint()?.let { TestsHint("UI/activity context: $it") }
-                row.screenContext?.let { TestsHint(it) }
-                row.reviewReason?.let {
-                    when {
-                        row.expected.isBlank() -> TestsErrorText("Review required: $it")
-                        isSoftReviewWarning(it) -> AppText(it, color = tc.warn, fontSize = 10.sp)
-                        else -> TestsHint("Recording note: $it")
-                    }
-                }
-                RecordedEvidencePreview(session, row, editable)
-            }
-        }
-        snapshot.warnings.forEach { TestsErrorText(it) }
-        error?.let { TestsErrorText(it) }
-        if (!snapshot.active) {
-            if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
-            if (snapshot.steps.isNotEmpty()) {
-                CheckRow(checked = replayableRowIds.isNotEmpty() && replayRows.size == replayableRowIds.size, onToggle = {
-                    selectedReplayRowIds = if (replayRows.size == replayableRowIds.size) emptySet() else replayableRowIds
-                }, enabled = editable && replayableRowIds.isNotEmpty()) {
-                    AppText(APPLY_AS_REPLAY_LABEL, color = tc.ts, fontSize = 10.sp)
-                }
-                TestsHint(replayOptionHint(replayableRowIds.size, snapshot.steps.size, replayRows.size))
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-                AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id) && !rewriting, variant = ButtonVariant.Ghost)
-                val insertInstead = reopened != null && replacement is ReplacementPlan.Ambiguous
-                HintedButton(
-                    when {
-                        working -> "Applying…"
-                        insertInstead -> "Insert as new steps"
-                        reopened != null -> "Apply and replace steps"
-                        else -> "Apply recorded steps"
-                    },
-                    onClick = { applyRecorded(insertAsNew = insertInstead) },
-                    enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && !rewriting && applyBlockedReason == null,
-                    disabledHint = applyBlockedReason ?: if (rewriting) "The recording is being rewritten." else "This recording is being applied.",
-                    variant = ButtonVariant.Primary,
-                )
-            }
-        }
-    }
-}
-
 internal const val APPLY_AS_REPLAY_LABEL = "Replay all eligible steps"
 
 /** What the replay option does for this recording, in one sentence. */
@@ -889,7 +485,7 @@ private fun ReopenedRecordingNotes(info: ReopenedRecordingInfo, replacement: Rep
 }
 
 @Composable
-private fun RecordedEvidencePreview(session: TestStepRecordingSession, row: RecordedTestStep, editable: Boolean) {
+internal fun RecordedEvidencePreview(session: TestStepRecordingSession, row: RecordedTestStep, editable: Boolean) {
     val tc = tc()
     val selected by produceState<RecordingPreviewEvidence?>(null, session.id, row) {
         value = withContext(Dispatchers.IO) { session.previewEvidenceFor(row.id) }
@@ -899,7 +495,7 @@ private fun RecordedEvidencePreview(session: TestStepRecordingSession, row: Reco
         return
     }
     TestsHint(evidence.uiContextMessage)
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         evidence.before?.let { PreviewFrameColumn("Before", it) }
         evidence.after?.let { PreviewFrameColumn("After", it) }
         evidence.rawInput?.let { PreviewFrameColumn("Input preview", it) }
@@ -919,6 +515,169 @@ private fun RecordedEvidencePreview(session: TestStepRecordingSession, row: Reco
             }
         }, enabled = editable) {
             AppText("Use this eligible after image as an expected screenshot (review first)", color = tc.ts, fontSize = 10.sp)
+        }
+    }
+}
+
+/** The selected in-memory recording row shown in the Details tile while recording review is explicitly active. */
+@Composable
+internal fun TestsRecordingReviewDetails() {
+    val ui = LocalTestsUi.current
+    val session = ui.state.testStepRecordingSession
+    TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(12.dp)) {
+        if (!ui.view.recordingReviewOpen || session == null) {
+            TestsHint("Select a recorded step to review its action and expected result.")
+        } else {
+            RecordingReviewDetailsContent(session)
+        }
+    }
+}
+
+@Composable
+private fun RecordingReviewDetailsContent(session: TestStepRecordingSession) {
+    val ui = LocalTestsUi.current
+    val tc = tc()
+    val snapshot by session.snapshot.collectAsState()
+    val rowIndex = snapshot.steps.indexOfFirst { it.id == ui.view.recordingSelectedRowId }.takeIf { it >= 0 }
+        ?: snapshot.steps.indices.firstOrNull()
+    val row = rowIndex?.let(snapshot.steps::getOrNull)
+    LaunchedEffect(session.id, snapshot.steps.map { it.id }, row?.id) {
+        if (row?.id != ui.view.recordingSelectedRowId) ui.view.recordingSelectedRowId = row?.id
+    }
+    if (row == null) {
+        TestsInspectorHeader("Recording draft", "No steps to review", Modifier.fillMaxWidth())
+        TestsHint(if (snapshot.excludedSourceInputIds.isNotEmpty()) "Restore removed inputs from the Execution tile." else "No input has been recorded yet.")
+        return
+    }
+    val target = ui.state.testStepRecordingTarget
+    val case = target?.second?.let(ui.library::findCase)?.case
+    val editable = !snapshot.active && snapshot.pendingSnapshots == 0 &&
+        !ui.state.isTestStepRecordingApplying(session.id) && !ui.state.isTestStepRecordingRewriting(session.id)
+    val replacement = remember(case?.steps?.map { it.id }, session.id) { ui.state.reopenedReplacementPlan(session.id) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TestsInspectorHeader("Recorded draft", "Step ${rowIndex + 1}", Modifier.weight(1f))
+            AppButton("Close review", onClick = { ui.view.recordingReviewOpen = false; ui.reclaimFocus() }, variant = ButtonVariant.Ghost)
+        }
+        if (target != null) {
+            AppText(
+                ui.library.operationTargetLabel(TestsOperationTarget(target.first, target.second)),
+                color = tc.td, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (snapshot.active) TestsHint("Stop the recording before editing the draft.")
+        if (snapshot.pendingSnapshots > 0) TestsHint("Wait for the recorded screen snapshots to finish before editing the draft.")
+        case?.let { currentCase ->
+            snapshot.reopened?.let { ReopenedRecordingNotes(it, replacement) }
+            val replayable = remember(snapshot.steps, snapshot.active) { if (snapshot.active) emptySet() else session.replayableRowIds() }
+            if (row.authorAdded) RecordedRowKindEditor(session, row, editable)
+            if (row.isExternalEvent) {
+                TestsBadge("Detected on the device")
+                ExternalEventRowEditor(session, row, editable)
+            }
+            if (row.stepKind == StepKind.AGENT && !row.authorAdded) {
+                val canReplay = row.id in replayable
+                CheckRow(
+                    checked = row.id in ui.view.recordingReplayRowIds,
+                    onToggle = {
+                        ui.view.recordingReplayRowIds = if (row.id in ui.view.recordingReplayRowIds) {
+                            ui.view.recordingReplayRowIds - row.id
+                        } else {
+                            ui.view.recordingReplayRowIds + row.id
+                        }
+                    },
+                    enabled = editable && canReplay,
+                ) { AppText("Replay this recorded step", color = tc.ts, fontSize = 10.sp) }
+                TestsHint(
+                    if (canReplay) {
+                        "Replay uses the recorded gesture on a similar layout; turn it off to let AI adapt."
+                    } else {
+                        "This input cannot be replayed; AI will adapt it to the current screen."
+                    },
+                )
+            }
+            TestsLabeled(if (row.stepKind == StepKind.MANUAL) "Instructions for the tester" else "Action") {
+                CommitTextField(
+                    row.action,
+                    { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) },
+                    enabled = editable,
+                    placeholder = if (row.stepKind == StepKind.MANUAL) "What the tester should do" else "What the agent should do",
+                    proseTargetId = "recorded-step:${row.id}:action",
+                )
+            }
+            TestsLabeled("Expected result") {
+                CommitTextField(
+                    row.expected,
+                    { text -> updateRecorded(session, row.id) { it.copy(expected = text) }; StoreResult.Ok(Unit) },
+                    enabled = editable,
+                    multiline = true,
+                    placeholder = if (row.optional) "May be blank for an optional action" else "What should happen",
+                    proseTargetId = "recorded-step:${row.id}:expected",
+                )
+            }
+            if (row.stepKind == StepKind.AGENT) {
+                CheckRow(checked = row.optional, onToggle = {
+                    updateRecorded(session, row.id) { if (it.optional) it.copy(optional = false, condition = null) else it.copy(optional = true) }
+                }, enabled = editable) {
+                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 10.sp)
+                }
+            }
+            if (row.optional) {
+                TestsLabeled("Perform only when") {
+                    CommitTextField(
+                        row.condition.orEmpty(),
+                        { text -> updateRecorded(session, row.id) { it.copy(condition = text) }; StoreResult.Ok(Unit) },
+                        enabled = editable,
+                        multiline = true,
+                        placeholder = "Describe the visible condition",
+                        proseTargetId = "recorded-step:${row.id}:condition",
+                    )
+                }
+            }
+            if (row.sourceInputIds.isNotEmpty()) {
+                RecordedInputsList(row, snapshot.rawSteps.orEmpty())
+                if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by AI will be added to this step.")
+            }
+            if (row.stateChanges.isNotEmpty() && row.sourceInputIds.isEmpty()) RecordedStateChangesHint(session, row, editable)
+            row.contextHint()?.let { TestsHint("UI/activity context: $it") }
+            row.screenContext?.let { TestsHint(it) }
+            row.reviewReason?.let {
+                when {
+                    row.expected.isBlank() -> TestsErrorText("Review required: $it")
+                    isSoftReviewWarning(it) -> AppText(it, color = tc.warn, fontSize = 10.sp)
+                    else -> TestsHint("Recording note: $it")
+                }
+            }
+            if (currentCase.steps.isEmpty()) TestsHint("This draft will add steps to ${currentCase.name} when you apply it.")
+        } ?: TestsErrorText("The case this recording belongs to was deleted. This draft remains pinned to that target.")
+        if (snapshot.warnings.isNotEmpty()) snapshot.warnings.forEach { TestsErrorText(it) }
+    }
+}
+
+/** The selected draft row's bounded images and expected-screenshot choice, shown in the Evidence tile during review. */
+@Composable
+internal fun TestsRecordingReviewEvidence() {
+    val ui = LocalTestsUi.current
+    val session = ui.state.testStepRecordingSession
+    TestsScrollColumn(Modifier.fillMaxSize(), contentModifier = Modifier.padding(12.dp)) {
+        if (!ui.view.recordingReviewOpen || session == null) {
+            TestsHint("Recorded evidence appears here while a draft step is selected.")
+        } else {
+            val snapshot by session.snapshot.collectAsState()
+            val row = snapshot.steps.firstOrNull { it.id == ui.view.recordingSelectedRowId } ?: snapshot.steps.firstOrNull()
+            if (row == null) {
+                TestsHint("No recorded evidence is available for this draft yet.")
+            } else {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TestsInspectorHeader("Recorded evidence", row.action.ifBlank { "Step ${snapshot.steps.indexOf(row) + 1}" }, Modifier.fillMaxWidth())
+                    RecordedEvidencePreview(
+                        session,
+                        row,
+                        editable = !snapshot.active && snapshot.pendingSnapshots == 0 &&
+                            !ui.state.isTestStepRecordingApplying(session.id) && !ui.state.isTestStepRecordingRewriting(session.id),
+                    )
+                }
+            }
         }
     }
 }

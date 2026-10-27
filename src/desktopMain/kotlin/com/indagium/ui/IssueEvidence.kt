@@ -76,10 +76,15 @@ internal fun issueEvidenceRows(attachments: List<IssueAttachment>, resolve: (Iss
 
 /** The "Evidence" section of the issue inspector. Shows nothing when the issue kept no evidence. */
 @Composable
-internal fun IssueEvidenceSection(rows: List<EvidenceRow>, onOpen: (IssueAttachment, File) -> Unit, onReveal: (File) -> Unit) {
+internal fun IssueEvidenceSection(
+    rows: List<EvidenceRow>,
+    onOpen: (IssueAttachment, File) -> Unit,
+    onReveal: (File) -> Unit,
+    showTitle: Boolean = true,
+) {
     if (rows.isEmpty()) return
     val tc = tc()
-    TestsSectionTitle("Evidence")
+    if (showTitle) TestsSectionTitle("Evidence")
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(horizontal = 10.dp, vertical = 4.dp)) {
         rows.forEachIndexed { index, row ->
             val attachment = row.attachment

@@ -834,9 +834,12 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   not part of the same hierarchy" inside one (`TileStackedSurface` measures the same way). Below `LOG_VIEW_STACK_BELOW_DP` (720 dp)
   the tiles stack in one scroll (no grips or splitters). Layout edits (a drop, a splitter release, an arrow-key resize) reach
   `AppState.commitLogViewLayout` once, on release.
-- **Scrolling side columns.** A COLUMN split whose visible leaves all satisfy `logViewScrollsInColumn` (the side sections and the toolbar tile; not the log tiles,
-  the Originals and Video, whose column always fits), so in Classic the filter column, and the Notes / AI column while there is no Video, is not made to fit the
-  window. The toolbar tile is a `CONTENT` tile there (next bullets), so a column that holds it scrolls like any other and the toolbar may scroll out of view in it,
+- **Scrolling side columns.** A COLUMN split whose visible leaves all satisfy `logViewScrollsInColumn` (the side sections, Video, and the toolbar tile; not the log tiles
+  or Originals) is not made to fit the window. Both Classic sidebars can therefore scroll, including the right sidebar with Video present.
+  The Video body remains `FILL` and receives its card's bounded height; scrolling the outer column does not introduce an inner player scroll.
+  A lone expanded, explicitly sized tile keeps its chosen height when its neighbors are collapsed, so Video's splitter remains effective in that state.
+  A Video tile dropped alone beside the main view stays a fitting tile (`logViewLoneColumn(VIDEO)` is false); maximizing it also fills the viewport.
+  The toolbar tile is a `CONTENT` tile there (next bullets), so a column that holds it scrolls like any other and the toolbar may scroll out of view in it,
   which is the user's choice; excluding it used to turn that column into a fit column, where pinned sizes and minimum heights left tiles that could not be
   resized. The surface passes the predicate through `TileChromeSpec.scrolls`; `tileGeometry` then reports a `TileScrollRegion` (viewport, content height) and lays the
   column's children out by height. A tile is as tall as its content asks (next bullet); a tile that reports nothing keeps the older rule: its own
@@ -5496,39 +5499,40 @@ before / after screenshot or, for a recorded row, the images of its `before` / `
 
 ### 26.15 The Tests workspace UI
 
-The workspace (`ui/TestsWorkspace.kt:88`, `TestsWorkspace`) is a full-tab surface (`ActiveSurface.Tests`), opened from the New tab's Run tests section
-(`AppState.openTestsSuite(suiteId, openRunDialog)`, which sets the view state before `openTestsTab()`, because Tests is a singleton surface that
-composes from that state as soon as it is active) and from its tab chip in the tab strip; the main toolbar has no Tests button. Its only state is
-`TestsViewState` (`ui/TestsUiState.kt`, owned by `AppState`, in memory, never autosaved, so there is no `AutosaveCodec` change); the library
-itself lives in `TestLibraryStore` (§26.3). Every screen reads the shared `TestsUi` (`ui/TestsWidgets.kt:134`: the `AppState`, the view
-state, the root `FocusRequester`, the banner and the key target) through `LocalTestsUi`.
+The workspace (`ui/TestsWorkspace.kt`, `TestsWorkspace`) is a full-tab surface (`ActiveSurface.Tests`), opened from the New tab's Run tests section
+(`AppState.openTestsSuite(suiteId, openRunDialog)`) and its tab chip. Selection and editor preferences live in `TestsViewState`
+(`ui/TestsUiState.kt`, owned by `AppState`) for the session; the library lives in `TestLibraryStore` (§26.3). The tile arrangement,
+hidden/collapsed panels and layout lock are persisted separately in the JSON-only `AppSettings.testsWorkspaceLayout` field through
+`TestsLayoutSettingsJson.kt`; legacy positional settings are unchanged. Every screen reads the shared `TestsUi` (`ui/TestsWidgets.kt`:
+the `AppState`, view state, root `FocusRequester`, banner and key target) through `LocalTestsUi`.
 
-**Shell.** The root `Column` has no header strip: a recording banner (while `testStepRecordingSession` is set), the dismissible error/info
-banner, the library read-only notice (`TestsLockedNotice`), then the navigation pane beside the centre. There is no full-width edition
-banner: edition limits show as the nav footer's usage meter and, per suite, the slim locked-cases notice (suite screen below). The pane is a tree
-(`TestsNavPane`): a **Suites** header with a count, `+` (New suite) and ⋯ (Import suite…, Agent profiles…); each suite row has a caret
-and lists its cases when expanded (`TestsViewState.expandedSuiteIds`; the selected suite expands itself; `filterNavTree` makes the
-search box filter suites and cases, a case match expanding its suite); a **Library** group (Shared steps, Scripts, Examples for agents);
-an **Activity** group (Runs, Issues, with counts). The pane footer shows, on a limited edition, `TestsUsageMeter` (`testsEditionUsage(library, limits)`, null when unlimited; the line from
-`editionUsageLine`, e.g. "Free · 1 of 1 suite · 5 of 5 cases", over a thin bar), otherwise the edition badge and the case count. No Upgrade link is
-shown anywhere; `AppState.openEditionUpgrade()` is an empty hook, called from nowhere, that marks where one will go. Dragging a suite row's
-grip reorders suites and dragging a case row's grip reorders the cases of that suite (`ReorderableColumn`, the case column nested in the
-suite's row; `moveTestCase`; both off while searching, in a read-only library and, for cases, in a read-only suite). Alt+↑/↓ on a
-focused nav row moves that row (a nested column consumes the key, so a case never moves its suite). Cases also reorder in the suite's table.
-Every reorder grip in the Tests UI (`ReorderGrip`) is **always visible**: muted at rest, accent while hovered or dragged, dimmed (and
-described "Reordering is off") when reordering is disabled. Pane width is `navWidthDp`, dragged
-through the shared `HDivider`. Below `TESTS_NAV_COLLAPSE_BELOW_DP` (600 dp, `testsNavCollapsed`) the pane collapses to a ☰ button that
-opens it as an overlay over a scrim (`TestsNarrowLayout`). `TestsCenter` picks the screen from `TestsViewState.nav` (`TestsNav`) and,
-for `Suites`, from the selected suite and case.
+**Tile shell.** `TestsWorkspaceTiling.kt` uses the same generic `TilingSurface` as the log and diagram workspaces: rounded cards,
+32 dp headers, 8 dp horizontal / 6 dp vertical gaps, drag grips, invisible resize splitters and shared scrollbars. The default arrangement is
+**Test Suites**, **Test Library**, **Activity** on the left; **Workspace** and **Execution & recording** in the centre; **Details** and
+**Evidence** on the right. The toolbar Layout menu offers presets, panel visibility, lock and reset. Maximize is reserved for panels that
+benefit from a focused view. Stable tile keys and fixed composition order preserve panel state during layout changes; selecting another
+suite, case or library item changes the contents, not the set of panels. There is no extra selection breadcrumb strip under the app chrome.
+`TestsScreenScaffold` supplies Workspace content and a fixed top action row, contextual Details through its `inspector` slot, and a separate
+Evidence slot. Creation and run controls remain above scrolling lists. Empty context panes explicitly clear previous evidence.
 
-**Split screen and inspector.** Every centre screen is built with `TestsScreenScaffold`, which is `TestsSplitScreen`
-(`ui/TestsWidgets.kt:305`): `main | HDivider | inspector`, the inspector `inspectorWidthDp` wide (default 380, clamped 300–560 by
-`clampTestsInspectorWidth`). When the centre plus inspector are narrower than `TESTS_INSPECTOR_STACK_BELOW_DP` (900 dp,
-`testsInspectorStacked`) the inspector stacks under the main content in one scroll column. A screen without an inspector passes `null`.
-Scrolling is `TestsScrollColumn` (`:279`: `verticalScroll` plus a `VerticalScrollbar` in the app's `appScrollbarStyle`, laid out like
-`BoundedScrollBoxDp` so the scrollbar never takes part in sizing); no Tests screen uses a bare `verticalScroll`. Selectable rows are
-`TestsListRow` (`:346`, `HoverBox`-based, accent background while selected), screen titles `TestsPageHeader` (`:681`: title field, one
-primary button, ⋯ `TestsOverflowMenu`, optional breadcrumb), the inspector's top `TestsInspectorHeader` (`:752`).
+**Navigation.** Test Suites contains the searchable suite/case tree, with New suite and import/profile actions at the top. The selected suite
+expands itself; `filterNavTree` makes case matches expand their suites. Test Library opens Shared steps, Scripts and Examples for agents;
+Activity opens Runs and Issues. Edition limits remain in the suite navigation footer and local read-only notices. Suite/case reordering
+retains `ReorderableColumn`, store delegates and edition/read-only checks. On narrow windows navigation is available through the existing
+Show navigation overlay, while the remaining tiles stack. Layout edits persist independently of the current selection.
+
+**Execution and recording.** The Execution & recording tile remains available while browsing. Idle controls resolve the selected suite or
+case; suite recording allows a new case or an existing editable case. Recording sessions retain their original `(suiteId, caseId)` target,
+and review/apply acts on that target even after navigation. A successful run setup leaves the current authoring screen open; the operation
+tile offers an explicit route to its report. Run setup still uses the existing dialog and coordinator validation (providers, lanes/devices,
+judge, capture settings and budgets). Recorded draft review uses a compact list in Execution and puts the selected draft row in Details and Evidence; closing review or choosing
+another normal item restores its context without retargeting the recording. AI rewrite retains its existing validation and explicit apply operation.
+
+**Details and Evidence.** Context follows the selected suite/case/step, script/shared step/example, run result or issue. Step editing stays
+in Details; screenshots, recording images, reference logs and result/issue attachments have their own Evidence tile. Each pane scrolls
+independently using `TestsScrollColumn` and the shared scrollbar style. A selection without evidence shows an empty state rather than
+retaining images from the previous selection. Screen headings and actions use the existing `TestsPageHeader`, `TestsOverflowMenu` and
+`TestsInspectorHeader` widgets.
 
 **Keyboard routing.** The root `Column` has `onPreviewKeyEvent { ui.routeKey(it) }` (`TestsWorkspace.kt:102`). `TestsUi.routeKey`
 (`TestsWidgets.kt:155`) offers a key-down to the one current `TestsKeyTarget` and only when **no text input has focus**: the shared
@@ -5542,7 +5546,7 @@ row on the Results tab, `reportSelectionMovedBy`). Every popup, menu and clickab
 it closes (the CLAUDE.md focus gotcha), or the root handler stops receiving keys. The help dialog lists the keys under **Tests**
 (`ui/Shortcuts.kt`, `KeyboardPanel.TESTS`).
 
-**Case screen** (`TestsCaseScreen.kt:42`). Header: a breadcrumb link back to the suite, the case name as a `TestsTitleField`,
+**Case screen** (`TestsCaseScreen.kt`). Fixed action area: a compact back control, the case name as a `TestsTitleField`,
 **▶ Run case**, and ⋯ (Duplicate, Delete…); the read-only notice sits directly under it. Then the Goal field, a row of summary chips
 (Preconditions, Instructions, Hooks `setup · teardown`, Tools, Examples; `TestsSummaryChip`, `CaseField`), then the steps. Clicking a chip
 sets `TestsViewState.caseInspectorField`, which replaces the step editor in the inspector with that field's editor (`CaseFieldInspector`);
@@ -5553,11 +5557,9 @@ from saved recording** (stored recording evidence exists). A disabled button kee
 (`StepRow` in a `ReorderableColumn` with `fixedRowHeight`: grip on hover, number, action, kind badge, check summary, last-result dot, ⋯)
 and keeps one step selected while there are steps (`TestsViewState.selectedStepId`, per case or shared step), so the inspector is never
 empty. The inspector is `SelectedStepInspector` (`:292`): `TestsInspectorHeader` ("Step N of M") over `StepEditor` (Performed by, kind fields,
-Action, Expected, Checks, then collapsible Examples and **Advanced** with a one-line summary when closed). The inspector also shows, under the title, a strip of
-thumbnails of the step's golden screenshots (`StepScreenshotStrip`; a click opens Examples and scrolls to it) and, for a step that came from
-a recording whose evidence is stored, **Recorded screens** (`RecordedScreensPanel`: the stored before / after image, read off the UI thread
-by `loadRecordedStepScreens`, which decodes `recording.json` with a store that returns image references and reads only that row's image
-files; it needs no model change). The Examples section is open when the step has examples unless the user closed it for that step
+Action, Expected, Checks, then collapsible Examples and **Advanced** with a one-line summary when closed). The Evidence tile shows the selected step's reference logs, golden screenshots (with a shortcut to their editable Examples section), and,
+for a step with stored recording evidence, **Recorded screens** (`RecordedScreensPanel`: before/after images loaded off the UI thread by
+`loadRecordedStepScreens`, reading only that row's image files; no model format change). The Examples section is open when the step has examples unless the user closed it for that step
 (`TestsViewState.examplesExpanded` / `setExamplesExpanded`, per step id, in memory). Shared steps reuse the same list
 and inspector (`TestsSharedStepsScreen`); the Scripts screen is a master list over a script editor with Try it and the tool schema in its
 inspector. Each script row's ⋯ menu includes **Delete…** beside Move up/down, so a newly created script can be removed directly

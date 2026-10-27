@@ -10,8 +10,8 @@ import kotlin.math.min
 // How the tiles of a scrolling column are sized, pure (TileLayout.kt's geometry and resize call it). Two ways, chosen per column:
 //
 // - Legacy (no tile of the column has a TileSizing): a child's sizeDp is its height (at least scrollMinDp), weighted children share what the
-//   pinned ones leave exactly as a fitting column does (minTileDp each at the least), and when everything is pinned and shorter than the
-//   viewport the last open tile takes the rest.
+//   pinned ones leave exactly as a fitting column does (minTileDp each at the least); when all are pinned and several remain open, the last
+//   one takes the rest. A lone open tile keeps its pinned height so it can be resized with collapsed siblings around it.
 // - Sized (at least one leaf has a TileSizing, i.e. its body reported what its content needs): a tile is as tall as its content wants.
 //   A stored sizeDp is clamped to [min, max] at layout time (never rewritten); an unpinned tile with a default takes it; an unpinned "fill"
 //   tile (default null: Notes, AI) and any child without a TileSizing share what is left by weight, each within [min, fit]. A column that
@@ -127,8 +127,8 @@ private fun <K> legacyPlan(
             else -> weightedExtent / weighted.size
         }
     }.toMutableList()
-    if (weighted.isEmpty()) {
-        // Everything is pinned or collapsed: when that is shorter than the viewport the last open tile takes the rest.
+    if (weighted.isEmpty() && isCollapsed.count { !it } > 1) {
+        // With several open tiles the last one fills any slack; a lone open pinned tile keeps its explicit height so its splitter can resize it.
         val slack = extent - sizes.sumOf { it.toDouble() }.toFloat()
         val last = children.indices.lastOrNull { !isCollapsed[it] }
         if (slack > 0f && last != null) sizes[last] = sizes[last] + slack

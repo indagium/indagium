@@ -14,6 +14,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
@@ -119,6 +120,7 @@ class TestsSuiteScreenUiTest {
     private fun open(suite: TestSuite, tab: SuiteTab = SuiteTab.Cases, width: Dp = 1100.dp) {
         state.testsView.selectedSuiteId = suite.id
         state.testsView.selectedSuiteTab = tab
+        rule.setTestsViewport(width.value.toInt(), 800)
         rule.setContent { Box(Modifier.size(width, 800.dp)) { TestsWorkspace(state) } }
         rule.waitForIdle()
     }
@@ -214,15 +216,20 @@ class TestsSuiteScreenUiTest {
         val suite = suiteWithCases("Login", "Checkout")
         saveRun(suite, RunStatus.PASSED, listOf(external("lane-a", "pixel-8") to CaseStatus.PASS))
         state.testsView.selectedSuiteId = suite.id
+        rule.setTestsViewport(1100, 800)
         rule.mainClock.autoAdvance = false
         rule.setContent { TestsWorkspace(state) }
-        // No frame has run, so the history read (launched by an effect on the paused clock) cannot have started or finished:
-        // advancing a frame here would race the real disk read on a slow machine and could already show the loaded state.
+        // The seven-tile host waits for its first measured size before composing the workspace. Advance one frame to let it
+        // establish that size; on a fast disk the load may also finish in this frame, so accept either real state.
+        rule.mainClock.advanceTimeByFrame()
 
-        rule.onNodeWithText("Loading runs…").assertExists()
-        rule.onNodeWithText("Not run yet").assertDoesNotExist()
-        assertTrue(centre("Runs").isNotEmpty(), "the Runs tab shows no count while loading")
-        assertTrue(centre("Runs (0)").isEmpty())
+        val loading = rule.onAllNodesWithText("Loading runs…").fetchSemanticsNodes()
+        if (loading.isNotEmpty()) {
+            rule.onNodeWithText("Loading runs…").assertExists()
+            rule.onNodeWithText("Not run yet").assertDoesNotExist()
+            assertTrue(centre("Runs").isNotEmpty(), "the Runs tab shows no count while loading")
+            assertTrue(centre("Runs (0)").isEmpty())
+        }
 
         rule.mainClock.autoAdvance = true
         rule.waitUntilAtLeastOneExists(hasText("Open report →"), timeoutMillis = 10_000)
@@ -280,9 +287,9 @@ class TestsSuiteScreenUiTest {
         rule.waitUntilAtLeastOneExists(hasContentDescription("External · pixel-8 · Pass · 48s"), timeoutMillis = 10_000)
         assertEquals(3, rule.onAllNodesWithContentDescription("External · pixel-8 · Pass · 48s").fetchSemanticsNodes().size)
         assertEquals(3, rule.onAllNodesWithContentDescription("External · galaxy-s · Fail · 48s").fetchSemanticsNodes().size)
-        // A row is 34dp plus its 1dp separator however many lanes ran; the old table grew 18dp per lane.
+        // A compact row is 44dp plus its 1dp separator however many lanes ran; the old table grew 18dp per lane.
         val tops = listOf("Alpha", "Bravo", "Charlie").map { name -> centre(name).single().boundsInRoot.top }
-        val rowPx = with(rule.density) { 36.dp.toPx() }
+        val rowPx = with(rule.density) { 45.dp.toPx() }
         assertTrue(tops[1] - tops[0] <= rowPx && tops[2] - tops[1] <= rowPx, "rows grew: $tops")
     }
 
@@ -380,11 +387,17 @@ class TestsSuiteScreenUiTest {
     @Test
     fun theWideLayoutShowsTheColumnHeaderAndTheGoalLine() {
         val suite = suiteWithCases("Login", goal = "Signing in works")
-        open(suite, width = 1400.dp)
+        open(suite, width = 1600.dp)
 
-        assertTrue(centre("Latest").isNotEmpty(), "the table header names the latest-result column")
-        assertTrue(centre("Issues").isNotEmpty(), "the table header names the issues column")
-        assertTrue(centre("Signing in works").isNotEmpty(), "the goal line shows under the name")
+        val workspace = rule.onNodeWithTag("tests-tile-card-workspace").fetchSemanticsNode().boundsInRoot
+
+        fun withinWorkspace(text: String) = rule.onAllNodesWithText(text).fetchSemanticsNodes().any { node ->
+            val bounds = node.boundsInRoot
+            bounds.left >= workspace.left && bounds.right <= workspace.right
+        }
+        assertTrue(withinWorkspace("Latest"), "the wide Workspace tile shows the latest-result column")
+        assertTrue(withinWorkspace("Issues"), "the wide Workspace tile shows the issues column")
+        assertTrue(withinWorkspace("Signing in works"), "the wide Workspace tile shows the goal line under the case name")
     }
 
     @Test
@@ -394,8 +407,8 @@ class TestsSuiteScreenUiTest {
         open(suite, width = 500.dp)
 
         rule.waitUntilAtLeastOneExists(hasText("Pass"), timeoutMillis = 10_000)
-        assertTrue(centre("Latest").isEmpty(), "the narrow table has no header")
-        // The narrow window hides the nav, so these can only be the centre screen's row.
+        rule.onNodeWithText("Latest").assertDoesNotExist()
+        // The narrow window hides the nav, so these can only be the workspace tile's row.
         rule.onNodeWithText("0 steps ·").assertExists()
         rule.onNodeWithText("Login").assertExists()
     }

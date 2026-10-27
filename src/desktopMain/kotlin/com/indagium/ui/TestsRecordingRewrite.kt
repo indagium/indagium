@@ -161,16 +161,6 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
                 variant = ButtonVariant.Ghost,
             )
         }
-        if (snapshot.excludedSourceInputIds.isNotEmpty()) {
-            AppButton(
-                "Restore removed inputs",
-                onClick = {
-                    error = ui.state.restoreRemovedTestRecordingInputs(session.id).takeIf { it !is StoreResult.Ok }?.userMessage()
-                },
-                enabled = !busy && snapshot.pendingSnapshots == 0,
-                variant = ButtonVariant.Ghost,
-            )
-        }
         if (rewriting) AppButton("Cancel", onClick = { job?.cancel() }, variant = ButtonVariant.Ghost)
         val ready = !busy && !blocked && snapshot.steps.isNotEmpty() && profile != null
         val notReadyHint = when {

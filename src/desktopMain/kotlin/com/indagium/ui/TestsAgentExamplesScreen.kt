@@ -38,8 +38,17 @@ internal fun TestsAgentExamplesScreen() {
     val grouped = examples.groupBy { it.ownerName }
     // A selection that is gone (its example was deleted) falls back to the first example, so the inspector is never an empty pane.
     val selected = examples.firstOrNull { it.key == ui.view.selectedExampleKey } ?: examples.firstOrNull()
-    TestsScreenScaffold(inspector = selected?.let { item -> { key(item.key) { ExampleInspector(item) } } }) {
-        TestsPageHeader("Examples for agents")
+    TestsScreenScaffold(
+        header = { TestsPageHeader("Examples for agents") },
+        inspector = {
+            if (selected == null) TestsHint("Select an example to see its details.")
+            else key(selected.key) { ExampleDetails(selected) }
+        },
+        evidence = {
+            if (selected == null) TestsHint("No example evidence is available.")
+            else key(selected.key) { ExampleEvidence(selected) }
+        },
+    ) {
         Spacer(Modifier.height(6.dp))
         TestsHint("Examples are reference material already attached to steps. Select one to see it in full and open its step.")
         Spacer(Modifier.height(10.dp))
@@ -86,42 +95,47 @@ private fun ExampleRow(item: AgentExampleRow, selected: Boolean, onClick: () -> 
     }
 }
 
-/** The selected example in full: where it is, its caption, the whole log (scrolling) or the image, and Open step. */
+/** Context and navigation for the selected example; its actual contents live in Evidence. */
 @Composable
-private fun ExampleInspector(item: AgentExampleRow) {
+private fun ExampleDetails(item: AgentExampleRow) {
     val tc = tc()
     val ui = LocalTestsUi.current
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        TestsInspectorHeader("${item.example.kindLabel()} · ${item.ownerShortName}", item.step.action.ifBlank { "Untitled step" })
+        AppText("${item.example.kindLabel()} · ${item.ownerShortName}", color = tc.td, fontSize = 10.sp)
+        AppText(item.step.action.ifBlank { "Untitled step" }, color = tc.tx, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        AppText(item.ownerName, color = tc.ts, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         if (item.example.caption.isNotBlank()) {
             TestsLabeled("Caption") { AppText(item.example.caption, color = tc.tx, fontSize = 12.sp, maxLines = 3, overflow = TextOverflow.Ellipsis) }
         }
-        when (val example = item.example) {
-            is StepExample.ReferenceLog -> TestsLabeled("Content") {
-                if (example.text.isBlank()) {
-                    TestsHint("This log is empty.")
-                } else {
-                    TestsScrollColumn(
-                        Modifier.fillMaxWidth().heightIn(max = EXAMPLE_FULL_MAX_HEIGHT).background(tc.p2, CORNER_MD).border(1.dp, tc.br, CORNER_MD),
-                        contentModifier = Modifier.padding(10.dp),
-                    ) {
-                        AppText(example.text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = FULL_TEXT_MAX_LINES)
-                    }
-                }
-            }
-            is StepExample.GoldenScreenshot -> {
-                val file = item.suiteId?.let { ui.state.testGoldenImageFile(it, example.assetPath) }
-                TestsLabeled("Screenshot") {
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        GoldenThumbnail(file, EXAMPLE_IMAGE_SIZE)
-                        AppText(example.assetPath, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        if (file == null || !file.isFile) TestsErrorText("The image file is missing from this suite's assets.")
-                    }
+        AppButton("Open step", onClick = { openExampleStep(ui, item) }, variant = ButtonVariant.Primary)
+    }
+}
+
+/** Read-only example content. A changed selection replaces this content immediately. */
+@Composable
+private fun ExampleEvidence(item: AgentExampleRow) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    when (val example = item.example) {
+        is StepExample.ReferenceLog -> {
+            if (example.text.isBlank()) {
+                TestsHint("This reference log is empty.")
+            } else {
+                TestsScrollColumn(
+                    Modifier.fillMaxWidth().heightIn(max = EXAMPLE_FULL_MAX_HEIGHT).background(tc.p2, CORNER_MD).border(1.dp, tc.br, CORNER_MD),
+                    contentModifier = Modifier.padding(10.dp),
+                ) {
+                    AppText(example.text, color = tc.tx, fontSize = 11.sp, fontFamily = MONO, maxLines = FULL_TEXT_MAX_LINES)
                 }
             }
         }
-        Row {
-            AppButton("Open step", onClick = { openExampleStep(ui, item) }, variant = ButtonVariant.Primary)
+        is StepExample.GoldenScreenshot -> {
+            val file = item.suiteId?.let { ui.state.testGoldenImageFile(it, example.assetPath) }
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                GoldenThumbnail(file, EXAMPLE_IMAGE_SIZE)
+                AppText(example.assetPath, color = tc.ts, fontSize = 10.sp, fontFamily = MONO, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                if (file == null || !file.isFile) TestsErrorText("The image file is missing from this suite's assets.")
+            }
         }
     }
 }

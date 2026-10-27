@@ -61,7 +61,7 @@ internal val LocalLogViewSearchFieldFocusChanged =
     staticCompositionLocalOf<(owner: Any, focused: Boolean) -> Unit> { { _, _ -> } }
 
 /**
- * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]) with a splitter
+ * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling sidebar columns ([logViewScrollsInColumn]) with a splitter
  * under their last tile. A column's scrollbar is drawn in the 8 dp gap beside it (1 dp, the 6 dp bar, 1 dp), or, for a column at the right edge, in the
  * 6 dp host padding (1 dp, a 4 dp bar, 1 dp), which is therefore given to the surface (the edge room of [LOG_VIEW_CHROME_SPEC]) rather than left outside it.
  */
@@ -486,6 +486,8 @@ internal fun TileScope<LogViewSectionId>.VideoTile(state: AppState, tab: LogTab,
             title = logViewTileTitle(LogViewSectionId.VIDEO),
             collapsible = collapsible,
             maximizable = true,
+            // The surface may scroll the whole sidebar column; the player itself stays bounded to this card's height.
+            sizing = TileBodySizing.FILL,
             // The player reports "detached" through this local; the host then parks the tile at 0 x 0 instead of removing it.
             body = { CompositionLocalProvider(LocalVideoSidebarExpandedChange provides onExpandedChange) { VideoTileBody(state, tab) } },
         ),

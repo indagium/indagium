@@ -4,6 +4,10 @@ package com.indagium.testing
 
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performSemanticsAction
@@ -78,9 +82,22 @@ class ExternalEventRowUiTest {
 
     private fun external() = session.snapshot.value.steps[1]
 
+    private fun selectExternalDraftForReview() {
+        rule.onNodeWithText("Review draft").performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+        rule.onNode(
+            hasText(external().action) and
+                hasContentDescription("Drag to reorder", substring = true) and
+                hasAnyAncestor(hasTestTag("tests-tile-card-execution")),
+        )
+            .performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+    }
+
     @Test
     fun anExternalEventShowsTheChooserAndStaysAManualStepThatWaitsForATester() {
         openReview()
+        selectExternalDraftForReview()
 
         rule.onNodeWithText("Detected on the device").assertExists()
         rule.onNodeWithText("Instructions for the tester").assertExists()
@@ -95,6 +112,7 @@ class ExternalEventRowUiTest {
     @Test
     fun aNewScriptIsNamedAfterTheEventHasACommandThatFailsUntilWrittenAndBecomesTheRowsScript() {
         openReview()
+        selectExternalDraftForReview()
 
         rule.onNodeWithText("+ New script").performSemanticsAction(SemanticsActions.OnClick)
         rule.waitForIdle()
@@ -120,6 +138,7 @@ class ExternalEventRowUiTest {
         val row = external()
         val scripted = session.snapshot.value.steps.map { if (it.id == row.id) it.copy(stepKind = StepKind.SCRIPT, script = ScriptCall(hub.id)) else it }
         assertTrue(session.replaceSteps(scripted))
+        selectExternalDraftForReview()
         rule.waitForIdle()
         rule.onNodeWithText("Keep manual fallback: wait for a tester when the script does not do it").assertExists()
 
@@ -149,6 +168,8 @@ class ExternalEventRowUiTest {
         rule.setContent { TestsWorkspace(state) }
         state.testsView.selectedSuiteId = suiteId
         state.testsView.selectedCaseId = caseId
+        rule.waitForIdle()
+        rule.onNodeWithText("Review draft").performSemanticsAction(SemanticsActions.OnClick)
         rule.waitForIdle()
 
         rule.onNodeWithText("On the device after this step: Wi-Fi turned off.").assertExists()

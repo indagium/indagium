@@ -34,15 +34,13 @@ import kotlinx.coroutines.launch
 // "it worked here" means the script and its parameters are right. Closing the screen or pressing Stop kills it.
 
 private val TRY_PANEL_PADDING = 10.dp
-private const val OUTPUT_MIN_HEIGHT_DP = 70
-private const val OUTPUT_MAX_HEIGHT_DP = 260
 private const val BOOL_TRUE = "true"
 private const val BOOL_FALSE = "false"
 private const val NO_DEVICE_LABEL = "No device"
 private const val CHOOSE_DEVICE_LABEL = "Choose a device"
 
 @Composable
-internal fun TryItPanel(script: TestScript) {
+internal fun TryItPanel(script: TestScript, onOutput: (String) -> Unit) {
     val tc = tc()
     val ui = LocalTestsUi.current
     val devices = ui.state.captureService.devices.filter { it.available }
@@ -51,7 +49,6 @@ internal fun TryItPanel(script: TestScript) {
         mutableStateMapOf<String, String>().apply { script.params.forEach { put(it.name, it.defaultValue.orEmpty()) } }
     }
     var running by remember(script.id) { mutableStateOf(false) }
-    var output by remember(script.id) { mutableStateOf("") }
     var job by remember(script.id) { mutableStateOf<Job?>(null) }
     val needsDevice = script.target == ScriptTarget.ADB_SHELL
     LaunchedEffect(script.id) { ui.state.captureService.refreshDevices() }
@@ -85,13 +82,13 @@ internal fun TryItPanel(script: TestScript) {
                 "Run",
                 onClick = {
                     running = true
-                    output = "Running…"
+                    onOutput("Running…")
                     val arguments = values.filterValues { it.isNotEmpty() }.toMap()
                     job = ui.scope.launch {
                         try {
-                            output = describeOutcome(ui.state.tryTestScript(script, arguments, device?.serial))
+                            onOutput(describeOutcome(ui.state.tryTestScript(script, arguments, device?.serial)))
                         } catch (cancelled: CancellationException) {
-                            output = "Stopped."
+                            onOutput("Stopped.")
                             throw cancelled
                         } finally {
                             running = false
@@ -103,16 +100,6 @@ internal fun TryItPanel(script: TestScript) {
                 variant = ButtonVariant.Primary,
             )
             if (running) HintedButton("Stop", onClick = { job?.cancel() }, isDanger = true)
-        }
-        if (output.isNotEmpty()) {
-            ScrollableTextArea(
-                value = output,
-                onValue = {},
-                modifier = Modifier.fillMaxWidth(),
-                minHeight = OUTPUT_MIN_HEIGHT_DP.dp,
-                maxHeight = OUTPUT_MAX_HEIGHT_DP.dp,
-                enabled = false,
-            )
         }
     }
 }

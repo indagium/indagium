@@ -1,12 +1,14 @@
 package com.indagium.testing
 
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import com.indagium.testing.authoring.testScriptUsageReferences
@@ -30,7 +32,7 @@ import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** The Scripts, Shared steps and Examples-for-agents screens: list on top, editor under it, secondary panels in the inspector. */
+/** Scripts, shared steps and examples for agents across the Workspace, Details and Evidence tiles. */
 @OptIn(ExperimentalTestApi::class)
 class TestsLibraryScreensUiTest {
     private companion object {
@@ -64,11 +66,9 @@ class TestsLibraryScreensUiTest {
         rule.waitForIdle()
     }
 
-    /** The nodes with exactly [text] in the centre area; the navigation column has entries of the same names ("Settings", "Examples for agents"). */
-    private fun centreTexts(text: String) = rule.onAllNodes(hasText(text)).fetchSemanticsNodes()
-        .filter { it.boundsInRoot.left >= state.testsView.navWidthDp }
-
-    private fun assertInCentre(text: String) = assertEquals(1, centreTexts(text).size, "$text should be in the centre column")
+    private fun inTile(tile: String, text: String) = rule.onAllNodes(
+        hasText(text) and hasAnyAncestor(hasTestTag("tests-tile-card-$tile")),
+    ).fetchSemanticsNodes()
 
     /** A closed menu ignores a click on its anchor for a moment (the click that dismissed it also lands there). */
     private fun reopenMenu(description: String) {
@@ -96,7 +96,7 @@ class TestsLibraryScreensUiTest {
         rule.onNodeWithText("Description (shown to the agent)").assertExists()
         rule.onNodeWithText("Parameters").assertExists()
         rule.onNodeWithText("Command").assertExists()
-        assertInCentre("Settings")
+        assertTrue(inTile("workspace", "Settings").isNotEmpty(), "the script editor stays in Workspace")
         rule.onNodeWithText("Runs on").assertExists()
         rule.onNodeWithText("Who may start it").assertExists()
         rule.onNodeWithText("Timeout (ms)").assertExists()
@@ -104,7 +104,7 @@ class TestsLibraryScreensUiTest {
         rule.onNodeWithText("Working directory (optional)").assertExists()
         // The old stand-alone buttons are in the header menu now.
         rule.onNodeWithText("Delete script").assertDoesNotExist()
-        // The inspector: Try it, Tool schema (collapsed) and Used in N, each with its title inside its card.
+        // Details keeps Try it, Tool schema (collapsed) and Used in N, each with its title inside its card.
         rule.onNodeWithText("Try it").assertExists()
         rule.onNodeWithText("Tool schema").assertExists()
         rule.onNodeWithText("Used in $uses").assertExists()
@@ -217,13 +217,21 @@ class TestsLibraryScreensUiTest {
     fun anEmptySharedStepsLibraryShowsACentredEmptyStateWithTheNewButton() {
         open(TestsNav.SharedSteps)
 
+        listOf("suites", "library", "activity", "workspace", "execution", "details", "evidence").forEach { key ->
+            rule.onNodeWithTag("tests-tile-card-$key").assertExists()
+        }
         rule.onNodeWithText("No shared steps yet").assertExists()
         rule.onNodeWithText("A shared step is a reusable sequence of steps. Suite and case hooks can run it before or after a case.").assertExists()
-        val rootWidth = rule.onRoot().fetchSemanticsNode().boundsInRoot.width
+        val workspace = rule.onNodeWithTag("tests-tile-card-workspace").fetchSemanticsNode().boundsInRoot
         val title = rule.onNodeWithText("No shared steps yet").fetchSemanticsNode().boundsInRoot
-        // Centred in the area right of the navigation column.
-        val areaCentre = (state.testsView.navWidthDp + rootWidth) / 2f
-        assertTrue(abs(title.center.x - areaCentre) < rootWidth * 0.1f, "title centre ${title.center.x} vs area centre $areaCentre")
+        val actions = rule.onNodeWithTag("tests-workspace-actions").fetchSemanticsNode().boundsInRoot
+        val create = rule.onNodeWithText("+ New shared step").fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            abs(title.center.x - workspace.center.x) < workspace.width * 0.1f,
+            "empty state is centred inside Workspace: ${title.center.x} vs ${workspace.center.x}",
+        )
+        assertTrue(create.top >= actions.top && create.bottom <= actions.bottom, "creation stays in the fixed Workspace header: $create vs $actions")
+        assertEquals(1, rule.onAllNodesWithText("+ New shared step").fetchSemanticsNodes().size, "one create action is shown")
 
         rule.onNodeWithText("+ New shared step").performClick()
         rule.waitForIdle()
@@ -241,7 +249,7 @@ class TestsLibraryScreensUiTest {
         rule.onNodeWithText("Shared steps (1)").assertExists()
         rule.onNodeWithText("Steps (2)").assertExists()
         rule.onNodeWithText("Step 1 of 2").assertExists()
-        // Selecting another step switches the inspector's editor to it.
+        // Selecting another step switches the selected step in Details.
         rule.onNodeWithText("Confirm", useUnmergedTree = false).performScrollTo().performClick()
         rule.waitForIdle()
         assertEquals(created.steps[1].id, state.testsView.selectedStepId)
@@ -282,23 +290,30 @@ class TestsLibraryScreensUiTest {
         seedExamples()
         open(TestsNav.AgentExamples)
 
-        assertInCentre("Examples for agents")
-        rule.onNodeWithText("Shop › Checkout").assertExists()
+        assertTrue(inTile("workspace", "Examples for agents").isNotEmpty())
+        rule.onNode(hasText("Shop › Checkout") and hasAnyAncestor(hasTestTag("tests-tile-card-workspace"))).assertExists()
         rule.onNodeWithText("No step examples yet. Add a golden screenshot or reference log in a step editor.").assertDoesNotExist()
-        // The first example is preselected: its full text is in the inspector, its row shows a clamped preview of the same text.
-        val shown = rule.onAllNodes(hasText("line 1 of the reference log", substring = true)).fetchSemanticsNodes()
-        assertEquals(2, shown.size, "the row preview and the inspector")
-        val heights = shown.map { it.boundsInRoot.height }
-        assertTrue(heights.min() < heights.max(), "the row preview is clamped to two lines: $heights")
-        assertEquals(2, rule.onAllNodesWithText("Cart opened").fetchSemanticsNodes().size, "the row's caption and the inspector's")
-        rule.onNodeWithText("Open step").assertExists()
+        // The row preview remains in Workspace; the full log is in Evidence, and the caption is in Details.
+        val preview = rule.onNode(
+            hasText("line 1 of the reference log", substring = true) and hasAnyAncestor(hasTestTag("tests-tile-card-workspace")),
+        ).fetchSemanticsNode().boundsInRoot
+        val evidence = rule.onNode(
+            hasText("line 1 of the reference log", substring = true) and hasAnyAncestor(hasTestTag("tests-tile-card-evidence")),
+        ).fetchSemanticsNode().boundsInRoot
+        assertTrue(preview.height < evidence.height, "the Workspace preview is clamped while Evidence shows the full log: $preview vs $evidence")
+        assertTrue(inTile("workspace", "Cart opened").isNotEmpty())
+        assertTrue(inTile("details", "Cart opened").isNotEmpty())
+        rule.onNode(hasText("Open step") and hasAnyAncestor(hasTestTag("tests-tile-card-details"))).assertExists()
 
-        // Selecting the second example shows it in the inspector; with no caption its row falls back to the step's action.
+        // Selecting the second example updates Details and Evidence; with no caption, its row uses the step's action.
         rule.onNodeWithText("Pay").assertExists()
-        rule.onAllNodesWithText("payment accepted")[0].performClick()
+        rule.onNode(
+            hasText("payment accepted") and hasAnyAncestor(hasTestTag("tests-tile-card-workspace")),
+        ).performClick()
         rule.waitForIdle()
-        assertEquals(2, rule.onAllNodesWithText("payment accepted").fetchSemanticsNodes().size)
-        rule.onAllNodes(hasText("line 1 of the reference log", substring = true)).fetchSemanticsNodes().let { assertEquals(1, it.size) }
+        assertTrue(inTile("workspace", "payment accepted").isNotEmpty())
+        assertTrue(inTile("evidence", "payment accepted").isNotEmpty())
+        assertTrue(inTile("evidence", "line 1 of the reference log").isEmpty(), "selection clears the prior Evidence content")
     }
 
     @Test
@@ -320,7 +335,7 @@ class TestsLibraryScreensUiTest {
     fun withNoExamplesTheScreenKeepsItsEmptyText() {
         open(TestsNav.AgentExamples)
 
-        assertInCentre("Examples for agents")
+        assertTrue(inTile("workspace", "Examples for agents").isNotEmpty())
         rule.onNodeWithText("No step examples yet. Add a golden screenshot or reference log in a step editor.").assertExists()
         rule.onNodeWithText("Open step").assertDoesNotExist()
     }

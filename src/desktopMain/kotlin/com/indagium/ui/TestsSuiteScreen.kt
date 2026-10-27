@@ -144,10 +144,13 @@ internal fun TestsSuiteScreen(suiteId: String) {
         if (ui.view.previewCaseId != null && suite.cases.none { it.id == ui.view.previewCaseId }) ui.view.previewCaseId = null
     }
     val previewCase = suite.cases.firstOrNull { it.id == ui.view.previewCaseId }.takeIf { ui.view.selectedSuiteTab == SuiteTab.Cases }
-    val detailPanel: (@Composable () -> Unit)? = previewCase?.let { case -> { CaseDetailPanel(suite, case, data) } }
-    TestsScreenScaffold(inspector = detailPanel) {
+    val detailPanel: @Composable () -> Unit = previewCase?.let { case -> { CaseDetailPanel(suite, case, data) } }
+        ?: { SuiteDetailPanel(suite, access.editable) }
+    TestsScreenScaffold(
+        header = { SuiteHeader(suite, access, data.history.latestTerminalRun, onDelete = { confirmDelete = true }) },
+        inspector = detailPanel,
+    ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            SuiteHeader(suite, access, data.history.latestTerminalRun, onDelete = { confirmDelete = true })
             SuiteLastRunLine(suiteLastRun(data.loaded, data.history.latestTerminalRun))
             SuiteTabs(suite, if (data.loaded) data.history.runs.size else null)
             when (ui.view.selectedSuiteTab) {
@@ -228,6 +231,8 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, latestFinishe
     val limits = LocalTestsLimits.current
     val writable = !ui.library.readOnly
     val runnable = !limits.isSuiteLocked(suite.id) && suite.cases.any { !limits.isCaseLocked(it.id) }
+    val canRecord = !ui.library.readOnly && !suite.readOnly &&
+        (limits.canCreateCase(suite.id) || suite.cases.any { !limits.isCaseLocked(it.id) })
     val rerunLabel = remember(latestFinishedRun) { latestFinishedRun?.let { rerunButtonLabel(failedCaseIds(it).size, interruptedCaseIds(it).size) } }
     TestsPageHeader(
         title = suite.name,
@@ -257,6 +262,15 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, latestFinishe
                     disabledHint = limits.hint,
                     variant = ButtonVariant.Primary,
                 )
+                HintedButton(
+                    "Record…",
+                    onClick = {
+                        ui.view.recordDialogTarget = TestsOperationTarget(suite.id)
+                        ui.reclaimFocus()
+                    },
+                    enabled = canRecord,
+                    disabledHint = if (ui.library.readOnly || suite.readOnly) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
+                )
             }
         },
         overflowDescription = "Suite actions",
@@ -277,6 +291,51 @@ private fun SuiteHeader(suite: TestSuite, access: TestsEditAccess, latestFinishe
     if (access.reason != null) {
         Spacer(Modifier.height(6.dp))
         TestsLockedNotice(access.reason)
+    }
+}
+
+/** The Details tile follows the suite while no case row is selected, with high-use shared fields close at hand. */
+@Composable
+private fun SuiteDetailPanel(suite: TestSuite, editable: Boolean) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    val update: ((TestSuite) -> TestSuite) -> StoreResult<*> = { transform -> ui.state.updateTestSuite(suite.id, transform) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        TestsInspectorHeader("Suite details", suite.name.ifBlank { "Untitled suite" }, Modifier.fillMaxWidth())
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            TestsChip(countNoun(suite.cases.size, "case"))
+            TestsChip(countNoun(suite.cases.sumOf { it.steps.size }, "step"))
+        }
+        TestsLabeled("Suite goal") {
+            CommitTextField(
+                suite.description,
+                { value -> update { it.copy(description = value) } },
+                enabled = editable,
+                multiline = true,
+                placeholder = "What this suite covers",
+                proseTargetId = "test-suite:${suite.id}:goal",
+            )
+        }
+        TestsLabeled("Instructions for every agent") {
+            CommitTextField(
+                suite.instructions,
+                { value -> update { it.copy(instructions = value) } },
+                enabled = editable,
+                multiline = true,
+                placeholder = "Context every case shares",
+                proseTargetId = "test-suite:${suite.id}:instructions",
+            )
+        }
+        TestsLabeled("Target package") {
+            CommitTextField(
+                suite.targetPackage,
+                { value -> update { it.copy(targetPackage = value.trim()) } },
+                enabled = editable,
+                placeholder = "com.example.app",
+                mono = true,
+            )
+        }
+        if (!editable) AppText(LIBRARY_READ_ONLY_MESSAGE, color = tc.td, fontSize = 10.sp)
     }
 }
 

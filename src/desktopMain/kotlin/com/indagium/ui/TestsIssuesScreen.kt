@@ -69,24 +69,52 @@ internal fun TestsIssuesScreen() {
         value = ui.state.testRunCoordinator.listRuns().associate { it.id to it.createdAt }
     }
     val selected = view.selectedIssueId
+    val issueRevision by ui.state.issueStore.revision.collectAsState()
+    val selectedIssue by produceState<Result<IssueRecord?>?>(null, selected, issueRevision) {
+        value = selected?.let { id -> Result.success(withContext(Dispatchers.IO) { ui.state.issueStore.load(id) }) }
+    }
     var deleteRequest by remember { mutableStateOf<List<IssueRecord>?>(null) }
     val deletable = remember(shown) { shown.filterNot { it.readOnly } }
     // Opening the screen with nothing selected selects the newest issue, so the inspector is never an empty pane next to a list.
     LaunchedEffect(selected, issues) { if (selected == null) issues.firstOrNull()?.let { view.selectedIssueId = it.id } }
-    TestsScreenScaffold(inspector = selected?.let { id -> { IssueInspector(id, runStarts) } }) {
-        TestsPageHeader(
-            "Issues",
-            overflowDescription = "More issues actions",
-            overflowItems = listOf(
-                TestsMenuItem(
-                    "Delete ${deletable.size} shown ${if (deletable.size == 1) "issue" else "issues"}…",
-                    onClick = { deleteRequest = deletable },
-                    danger = true,
-                    enabled = deletable.isNotEmpty(),
-                    disabledHint = "No issue matches the search.",
+    LaunchedEffect(selected, selectedIssue) {
+        if (selected != null && selectedIssue != null && selectedIssue?.getOrNull() == null) view.selectedIssueId = null
+    }
+    TestsScreenScaffold(
+        header = {
+            TestsPageHeader(
+                "Issues",
+                overflowDescription = "More issues actions",
+                overflowItems = listOf(
+                    TestsMenuItem(
+                        "Delete ${deletable.size} shown ${if (deletable.size == 1) "issue" else "issues"}…",
+                        onClick = { deleteRequest = deletable },
+                        danger = true,
+                        enabled = deletable.isNotEmpty(),
+                        disabledHint = "No issue matches the search.",
+                    ),
                 ),
-            ),
-        )
+            )
+        },
+        inspector = {
+            val issue = selectedIssue?.getOrNull()
+            when {
+                selected == null -> TestsHint("Select an issue to see its details.")
+                selectedIssue == null -> TestsHint("Loading the issue…")
+                issue == null -> TestsHint("This issue no longer exists.")
+                else -> IssueDetail(issue, runStarts[issue.source.runId])
+            }
+        },
+        evidence = {
+            val issue = selectedIssue?.getOrNull()
+            when {
+                selected == null -> TestsHint("Select an issue to see its evidence.")
+                selectedIssue == null -> TestsHint("Loading the issue evidence…")
+                issue == null -> TestsHint("This issue no longer exists.")
+                else -> IssueEvidenceFor(issue)
+            }
+        },
+    ) {
         TestsHint(
             "Issues are made from failed steps: from a step's “Create issue…” in a run report, " +
                 "or automatically as drafts for steps set to create an issue.",
@@ -211,27 +239,7 @@ private fun IssueRow(issue: IssueRecord, selected: Boolean, runCreatedAt: Long?,
 
 private const val ISSUE_READ_ONLY_DELETE_HINT = "This issue was saved by a newer version of Indagium and is read-only here."
 
-// ── Inspector ────────────────────────────────────────────────────────
-
-@Composable
-private fun IssueInspector(issueId: String, runStarts: Map<String, Long>) {
-    val ui = LocalTestsUi.current
-    val revision by ui.state.issueStore.revision.collectAsState()
-    // Wrapped so "not read yet" (null) differs from "read, and gone" (a Result holding null).
-    val read by produceState<Result<IssueRecord?>?>(null, issueId, revision) {
-        value = Result.success(withContext(Dispatchers.IO) { ui.state.issueStore.load(issueId) })
-    }
-    val issue = read?.getOrNull()
-    when {
-        read == null -> TestsHint("Loading the issue…")
-        issue == null -> {
-            // The selected issue was deleted: drop the selection so the screen selects the newest one that is left.
-            LaunchedEffect(issueId) { ui.view.selectedIssueId = null }
-            TestsHint("This issue no longer exists.")
-        }
-        else -> IssueDetail(issue, runStarts[issue.source.runId])
-    }
-}
+// ── Details and Evidence ─────────────────────────────────────────────
 
 @Composable
 private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
@@ -251,19 +259,28 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             }
         }
     }
-    TestsInspectorHeader(
-        eyebrow = "${issue.status.label()} · ${issue.draft.severity.chipLabel()} · ${formatRunMoment(issue.createdAt, nowMs)}",
-        title = issue.draft.title.ifBlank { "Untitled issue" },
-        overflowItems = listOf(
-            TestsMenuItem("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") }),
-            TestsMenuItem("Add to notes", onClick = { addToNotes(openLaneLog = false) }),
-            TestsMenuItem("Open folder", onClick = { ui.openFolderReportingFailure(ui.state.issueStore.issueDir(issue.id), "the issue folder") }),
-            TestsMenuItem(
-                "Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true,
-                enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            AppText(
+                "${issue.status.label()} · ${issue.draft.severity.chipLabel()} · ${formatRunMoment(issue.createdAt, nowMs)}",
+                color = tc.td,
+                fontSize = 10.sp,
+            )
+            AppText(issue.draft.title.ifBlank { "Untitled issue" }, color = tc.tx, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        TestsOverflowMenu(
+            listOf(
+                TestsMenuItem("Copy Markdown", onClick = { ui.state.copyToClipboard(markdown); ui.info("The issue as Markdown was copied to the clipboard.") }),
+                TestsMenuItem("Add to notes", onClick = { addToNotes(openLaneLog = false) }),
+                TestsMenuItem("Open folder", onClick = { ui.openFolderReportingFailure(ui.state.issueStore.issueDir(issue.id), "the issue folder") }),
+                TestsMenuItem(
+                    "Delete…", onClick = { deleting = true }, danger = true, dividerBefore = true,
+                    enabled = !issue.readOnly, disabledHint = ISSUE_READ_ONLY_DELETE_HINT,
+                ),
             ),
-        ),
-    )
+            contentDescription = "Issue actions",
+        )
+    }
     Spacer(Modifier.height(6.dp))
     AppText(issue.originLine(runCreatedAt, nowMs), color = tc.td, fontSize = 10.sp, maxLines = 2)
     if (issue.readOnly) TestsLockedNotice("This issue was saved by a newer version of Indagium and is read-only here.", Modifier.padding(top = 6.dp))
@@ -274,12 +291,6 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             variant = ButtonVariant.Secondary, isDanger = true,
         )
     }
-    // Right under the Edit / Delete row: the saved files are what the reader came for, before the re-check line and the Markdown.
-    // Resolved on IO: each stored file is checked on disk, so a deleted one shows as missing instead of a button that fails.
-    val evidence by produceState(emptyList<EvidenceRow>(), issue) {
-        value = withContext(Dispatchers.IO) { issueEvidenceRows(issue.draft.attachments) { ui.state.issueStore.attachmentFile(issue, it) } }
-    }
-    IssueEvidenceSection(evidence, onOpen = ui::openIssueAttachment, onReveal = ui::revealIssueFile)
     if (issue.recheck != null) {
         Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(issue.recheck.outcome.label(), recheckColor(issue.recheck.outcome))
@@ -328,5 +339,18 @@ private fun IssueDetail(issue: IssueRecord, runCreatedAt: Long?) {
             onDismiss = { needsLog = null },
             danger = false,
         )
+    }
+}
+
+@Composable
+private fun IssueEvidenceFor(issue: IssueRecord) {
+    val ui = LocalTestsUi.current
+    val evidence by produceState(emptyList<EvidenceRow>(), issue) {
+        value = withContext(Dispatchers.IO) { issueEvidenceRows(issue.draft.attachments) { ui.state.issueStore.attachmentFile(issue, it) } }
+    }
+    if (evidence.isEmpty()) {
+        TestsHint("No saved attachments for this issue.")
+    } else {
+        IssueEvidenceSection(evidence, onOpen = ui::openIssueAttachment, onReveal = ui::revealIssueFile, showTitle = false)
     }
 }

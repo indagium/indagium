@@ -1618,6 +1618,11 @@ data class AppSettings(
     // The New tab's Open section action-area height, in dp; the splitter above Recent files changes it and the
     // available height clamps it at render time. JSON-only so the frozen positional settings token stays compatible.
     val homeOpenActionsHeightDp: Int = DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP,
+    // The Tests workspace's tile tree and tile flags, encoded as compact JSON by
+    // ui/TestsLayoutSettingsJson.kt. Kept as raw JSON here so the model package does not depend
+    // on the UI-owned Tests tile ids; null means a first-run/default workspace layout. JSON-only,
+    // so the frozen positional settings decoder stays compatible.
+    val testsWorkspaceLayout: String? = null,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */

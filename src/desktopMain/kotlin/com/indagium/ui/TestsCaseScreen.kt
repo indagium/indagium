@@ -51,18 +51,24 @@ internal fun TestsCaseScreen(suiteId: String, caseId: String) {
     // A chip's editor belongs to the case it was opened on: another case always opens on its steps.
     LaunchedEffect(case.id) { ui.view.caseInspectorField = null }
     TestsScreenScaffold(
+        header = {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CaseHeader(suite, case, access.editable) { confirmDelete = true }
+                CaseStepsHeader(suite.id, case, access.editable) { addBlankStep(ui, ops) }
+            }
+        },
         inspector = {
             val field = ui.view.caseInspectorField
             if (field != null) CaseFieldInspector(case, field, access.editable) else SelectedStepInspector(ops)
         },
+        evidence = { key(case.id) { SelectedStepEvidence(ops) } },
     ) {
         Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(CASE_COLUMN_GAP)) {
-            CaseHeader(suite, case, access.editable) { confirmDelete = true }
             if (!access.editable) TestsLockedNotice(access.reason.orEmpty())
             CaseGoal(case, access.editable)
             CaseSummaryChips(case)
             Column(Modifier.fillMaxWidth()) {
-                StepListSection(ops, header = { CaseStepsHeader(suite.id, case, access.editable) { addBlankStep(ui, ops) } })
+                StepListSection(ops, header = {})
             }
         }
     }
@@ -79,12 +85,11 @@ internal fun TestsCaseScreen(suiteId: String, caseId: String) {
     }
 }
 
-/** Breadcrumb (the suite, a link back to it), the case name, ▶ Run case and the ⋯ menu (Duplicate, Delete…). */
+/** The case name, its main actions and the ⋯ menu (Duplicate, Delete…). */
 @Composable
 private fun CaseHeader(suite: TestSuite, case: TestCase, editable: Boolean, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
     val limits = LocalTestsLimits.current
-    val tc = tc()
     val writable = !ui.library.readOnly
     TestsPageHeader(
         title = case.name,
@@ -93,19 +98,30 @@ private fun CaseHeader(suite: TestSuite, case: TestCase, editable: Boolean, onDe
         titleDescription = "Case name",
         proseTargetId = "test-case:${case.id}:title",
         titlePlaceholder = "Case name",
-        breadcrumb = {
-            val suiteName = suite.name.ifBlank { "Suite" }
-            TestsBreadcrumbLink(suiteName, onClick = { ui.view.selectedCaseId = null }, contentDescription = "Back to suite $suiteName")
-            AppText("›", color = tc.td, fontSize = 11.sp)
-        },
         primary = {
-            HintedButton(
-                "▶ Run case",
-                onClick = { ui.view.runDialog = RunDialogTarget(suite.id, case.id) },
-                enabled = !limits.isCaseLocked(case.id) && !limits.isSuiteLocked(suite.id),
-                disabledHint = limits.hint,
-                variant = ButtonVariant.Primary,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                TestsBreadcrumbLink(
+                    "‹ Suite",
+                    onClick = { ui.view.selectedCaseId = null },
+                    contentDescription = "Back to suite ${suite.name.ifBlank { "Suite" }}",
+                )
+                HintedButton(
+                    "▶ Run case",
+                    onClick = { ui.view.runDialog = RunDialogTarget(suite.id, case.id) },
+                    enabled = !limits.isCaseLocked(case.id) && !limits.isSuiteLocked(suite.id),
+                    disabledHint = limits.hint,
+                    variant = ButtonVariant.Primary,
+                )
+                HintedButton(
+                    "Record",
+                    onClick = {
+                        ui.view.recordDialogTarget = TestsOperationTarget(suite.id, case.id)
+                        ui.reclaimFocus()
+                    },
+                    enabled = editable,
+                    disabledHint = if (editable) null else "This case is read-only.",
+                )
+            }
         },
         overflowDescription = "More case actions",
         overflowItems = listOf(

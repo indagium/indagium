@@ -141,7 +141,7 @@ private fun TestRunList() {
     var deleteRequest by remember { mutableStateOf<RunDeleteRequest?>(null) }
     val activeRunIds = ui.state.testRuns.filter { !it.isFinished }.mapTo(HashSet()) { it.id }
     val deletable = remember(shown, activeRunIds) { deletableRuns(shown, activeRunIds) }
-    TestsScreenScaffold {
+    TestsScreenScaffold(header = {
         TestsPageHeader(
             title = "Runs",
             overflowDescription = "More runs actions",
@@ -165,6 +165,7 @@ private fun TestRunList() {
                 )
             },
         )
+    }) {
         TestsHint("Start a run with “Run suite” on a suite or “Run case” on a case. A run keeps its evidence in the save folder.")
         if (!summaries.isNullOrEmpty()) {
             TestsHint(runsUsageLine(summaries.size, sizes, summaries.map { it.id }), Modifier.semantics { contentDescription = "Runs disk usage" })
@@ -357,9 +358,12 @@ private fun TestRunReportScreen(runId: String) {
     val loaded by produceState<TestRun?>(null, runId, live == null) { if (live == null) value = coordinator.loadRun(runId) }
     val run = live ?: loaded
     if (run == null) {
-        TestsScreenScaffold {
-            TestsBreadcrumbLink("‹ Runs", onClick = { ui.view.selectedRunId = null }, contentDescription = "Back to runs")
-            Spacer(Modifier.height(6.dp))
+        TestsScreenScaffold(header = {
+            TestsPageHeader(
+                "Run",
+                breadcrumb = { TestsBreadcrumbLink("‹ Runs", onClick = { ui.view.selectedRunId = null }, contentDescription = "Back to runs") },
+            )
+        }) {
             TestsHint("Loading the run…")
         }
         return
@@ -369,7 +373,7 @@ private fun TestRunReportScreen(runId: String) {
 
 /**
  * One run's report (wireframe C): "‹ Runs", the suite name with Re-run failed and a ⋯ menu, the verdict box, then the tabs
- * Results · Compare · Activity · Usage. The selected step's evidence is the inspector. The selection, the filters and the
+ * Results · Compare · Activity · Usage. The selected step's summary is Details and its artifacts are Evidence. The selection, the filters and the
  * comparison choice are remembered per run; the previous run is only read while the Compare tab (or its picker) is open.
  */
 @Suppress("ktlint:standard:max-line-length", "MaxLineLength")
@@ -406,6 +410,7 @@ private fun RunReport(run: TestRun, runDir: File) {
         val next = if (delta != null && plain && tab == RunReportTab.Results) reportSelectionMovedBy(rows, selection, delta) else null
         if (next != null) {
             selection = next
+            ui.view.recordingReviewOpen = false
             ui.reclaimFocus()
         }
         next != null
@@ -430,28 +435,36 @@ private fun RunReport(run: TestRun, runDir: File) {
     val interruptedIds = remember(run) { interruptedCaseIds(run) }
     val rerunLabel = rerunButtonLabel(failedIds.size, interruptedIds.size)
     var deleteRequest by remember(run.id) { mutableStateOf<RunDeleteRequest?>(null) }
-    TestsScreenScaffold(inspector = { ReportInspector(shown, runDir, selection) }) {
-        TestsPageHeader(
-            title = run.suite.name.ifBlank { "Untitled suite" },
-            breadcrumb = { TestsBreadcrumbLink("‹ Runs", onClick = { view.selectedRunId = null }, contentDescription = "Back to runs") },
-            primary = if (rerunLabel != null && !active) {
-                {
-                    AppButton(rerunLabel, onClick = { ui.openRerunDialog(run) }, variant = ButtonVariant.Primary)
-                }
-            } else {
-                null
-            },
-            overflowDescription = "More report actions",
-            overflowItems = listOf(
-                TestsMenuItem("Export report…", onClick = { showExport = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
-                TestsMenuItem("Compare with…", onClick = { showComparePicker = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
-                TestsMenuItem(
-                    "Delete run…",
-                    onClick = { deleteRequest = RunDeleteRequest(listOf(run.summary())) { view.selectedRunId = null } },
-                    danger = true, enabled = !active, disabledHint = RUN_DELETE_ACTIVE_HINT, dividerBefore = true,
+    val selectedStep = selection
+    TestsScreenScaffold(
+        header = {
+            TestsPageHeader(
+                title = run.suite.name.ifBlank { "Untitled suite" },
+                breadcrumb = { TestsBreadcrumbLink("‹ Runs", onClick = { view.selectedRunId = null }, contentDescription = "Back to runs") },
+                primary = if (rerunLabel != null && !active) {
+                    {
+                        AppButton(rerunLabel, onClick = { ui.openRerunDialog(run) }, variant = ButtonVariant.Primary)
+                    }
+                } else {
+                    null
+                },
+                overflowDescription = "More report actions",
+                overflowItems = listOf(
+                    TestsMenuItem("Export report…", onClick = { showExport = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
+                    TestsMenuItem("Compare with…", onClick = { showComparePicker = true }, enabled = !active, disabledHint = RUN_ACTIVE_HINT),
+                    TestsMenuItem(
+                        "Delete run…",
+                        onClick = { deleteRequest = RunDeleteRequest(listOf(run.summary())) { view.selectedRunId = null } },
+                        danger = true, enabled = !active, disabledHint = RUN_DELETE_ACTIVE_HINT, dividerBefore = true,
+                    ),
                 ),
-            ),
-        )
+            )
+        },
+        inspector = {
+            if (selectedStep == null) RunOverviewDetails(run, verdict, meta) else StepDetailFor(shown, selectedStep)
+        },
+        evidence = { RunStepEvidenceFor(shown, runDir, selectedStep) },
+    ) {
         Spacer(Modifier.height(8.dp))
         RunVerdictBox(verdict, meta)
         run.warnings.forEach { TestsLockedNotice(it, Modifier.padding(top = 6.dp)) }
@@ -463,7 +476,11 @@ private fun RunReport(run: TestRun, runDir: File) {
             RunReportTab.Results -> ResultsTab(
                 shown, runDir, tick, active, rows, filters, selection,
                 onFilters = { filters = it },
-                onSelect = { selection = it },
+                onSelect = {
+                    selection = it
+                    // Choosing a result gives Details/Evidence back to that result without discarding the recording draft.
+                    ui.view.recordingReviewOpen = false
+                },
                 onAttempt = { key, attempt -> attemptViews = attemptViews + (key to attempt) },
             )
             RunReportTab.Compare -> CompareTab(run, active, summaries, comparedRun, wantedCompareId, onPick = { showComparePicker = true })
@@ -488,6 +505,25 @@ private fun RunReport(run: TestRun, runDir: File) {
 }
 
 private const val RUN_ACTIVE_HINT = "Available once the run has finished."
+
+@Composable
+private fun RunOverviewDetails(run: TestRun, verdict: RunVerdict, meta: String) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        StatusChip(run.status.label(), runColor(run.status))
+        AppText(verdict.headline, color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 3)
+        if (meta.isNotBlank()) AppText(meta, color = tc.ts, fontSize = 11.sp, maxLines = 4)
+        Divider()
+        TestsSectionTitle("Run scope")
+        AppText(
+            "${run.suite.cases.size} ${if (run.suite.cases.size == 1) "case" else "cases"} · " +
+                "${run.lanes.size} ${if (run.lanes.size == 1) "lane" else "lanes"}",
+            color = tc.ts,
+            fontSize = 11.sp,
+        )
+        TestsHint("Select a step in Results to inspect its checks, judge result, and actions.")
+    }
+}
 
 /** The tinted box under the header: a status glyph, the verdict sentence and the meta line (when, cases, lanes, judge). */
 @Composable
@@ -524,16 +560,6 @@ private fun ReportTabs(run: TestRun) {
             },
             modifier = Modifier.widthIn(max = REPORT_TABS_MAX_WIDTH),
         )
-    }
-}
-
-/** The inspector of the report: the selected step's evidence and actions, or the prompt to select one. */
-@Composable
-private fun ReportInspector(run: TestRun, runDir: File, selection: StepSelection?) {
-    if (selection == null) {
-        TestsHint("Select a step to see its evidence.")
-    } else {
-        StepDetailFor(run, runDir, selection)
     }
 }
 

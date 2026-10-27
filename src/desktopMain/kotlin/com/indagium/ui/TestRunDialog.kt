@@ -56,8 +56,9 @@ import kotlinx.coroutines.withContext
 //   Record - a one-line summary of the recording every lane does that opens the same "Before start" controls as a manual
 //            live capture;
 //   More   - a one-line summary of retries, repeat, tool-call limit, evidence and manual steps that opens those controls.
-// Start validates through the coordinator (which refuses with every problem at once); on success the Runs screen opens on the
-// new run. The device list is read with adb off the UI thread. The summary strings are pure functions in TestRunUiState.kt.
+// Start validates through the coordinator (which refuses with every problem at once); the execution tile keeps the run visible
+// while the user continues authoring. The device list is read with adb off the UI thread. The summary strings are pure functions
+// in TestRunUiState.kt.
 
 private val DIALOG_WIDTH = 640.dp
 private val DIALOG_MAX_HEIGHT = 720.dp
@@ -160,7 +161,6 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
             when (val started = ui.state.testRunCoordinator.start(config)) {
                 is StartRunResult.Started -> {
                     ui.view.selectedRunId = started.runId
-                    ui.view.nav = TestsNav.Runs
                     if (started.warnings.isNotEmpty()) ui.info(started.warnings.joinToString(" "))
                     close()
                 }
@@ -546,7 +546,10 @@ private fun RecordingRow(model: RunDialogModel, onModel: (RunDialogModel) -> Uni
         AppText(recordingSummary(null, model.openLaneTabs), color = tc().ts, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
         return
     }
-    TestsSummaryRow(recordingSummary(capture, model.openLaneTabs), open, onToggle)
+    TestsSummaryRow(
+        recordingSummary(capture, model.openLaneTabs), open, onToggle,
+        toggleDescription = if (open) "Close run recording options" else "Configure run recording",
+    )
     if (!open) return
     DetailsBox {
         TestsHint(
@@ -586,7 +589,10 @@ private fun RecordingRow(model: RunDialogModel, onModel: (RunDialogModel) -> Uni
 /** Retries, repeat, the tool-call limit, the evidence to keep and the manual-steps choice in one line; "Change ▸" opens them all. */
 @Composable
 private fun MoreRow(model: RunDialogModel, onModel: (RunDialogModel) -> Unit, showManualSteps: Boolean, open: Boolean, onToggle: () -> Unit) {
-    TestsSummaryRow(moreSummary(model, showManualSteps), open, onToggle)
+    TestsSummaryRow(
+        moreSummary(model, showManualSteps), open, onToggle,
+        toggleDescription = if (open) "Close run options" else "Configure run options",
+    )
     if (!open) return
     DetailsBox {
         RetrySection(model, onModel)
