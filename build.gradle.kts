@@ -143,10 +143,13 @@ val linuxBundleArchitecture = when (System.getProperty("os.arch").lowercase()) {
     else -> "unsupported"
 }
 val composeAppDirectory = layout.buildDirectory.dir("compose/binaries/main/app/Indagium")
-val mediaPackageRoot = if (isMacHost) {
-    layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app/Contents/app")
-} else {
-    composeAppDirectory
+// The readable legal/ folder goes inside jpackage's app directory on every OS: when an installer
+// is built from --app-image, jpackage on Linux and Windows copies only its own layout (launchers,
+// app, runtime), so a folder at the image root is missing from the .deb and .msi.
+val mediaPackageRoot = when {
+    isMacHost -> layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app/Contents/app")
+    isWindowsHost -> composeAppDirectory.map { it.dir("app") }
+    else -> composeAppDirectory.map { it.dir("lib/app") }
 }
 val distributionImageRoot = if (isMacHost) {
     layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app")

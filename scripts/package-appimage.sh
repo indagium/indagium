@@ -63,8 +63,15 @@ tool_cache="$project_dir/build/tools/appimagetool/$asset_id"
 tool_path=${INDAGIUM_APPIMAGETOOL_PATH:-"$tool_cache/$tool_name"}
 if [[ -z ${INDAGIUM_APPIMAGETOOL_PATH:-} && ! -f "$tool_path" ]]; then
     mkdir -p "$tool_cache"
+    # Unauthenticated GitHub API calls are rate-limited per IP, which shared CI runners exhaust
+    # (HTTP 403). Use the job's token when one is provided; the pinned checksum still applies.
+    auth_header=()
+    if [[ -n ${GITHUB_TOKEN:-} ]]; then
+        auth_header=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    fi
     curl --fail --location --retry 3 --retry-delay 2 \
         -H 'Accept: application/octet-stream' \
+        ${auth_header[@]+"${auth_header[@]}"} \
         "https://api.github.com/repos/AppImage/appimagetool/releases/assets/$asset_id" \
         --output "$tool_path"
 fi

@@ -297,6 +297,10 @@ jobs:
         # platform-specific Compose runtime. Retry the whole package task twice; Gradle reuses any
         # artifacts downloaded before a failed attempt, so this is both bounded and inexpensive
         # when the repository has a transient network failure.
+        env:
+          # package-appimage.sh downloads appimagetool through the GitHub API, which rate-limits
+          # unauthenticated calls from shared runner IPs.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           for attempt in 1 2 3; do
             if ./gradlew -Pindagium.license=eula ${{ matrix.tasks }}; then
