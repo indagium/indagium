@@ -101,7 +101,7 @@ private val PANEL_WIDTH = 392.dp
 
 // Item 14 — drag bounds for the queue-panel divider. The panel width stays the seed value a
 // freshly-opened workspace starts at.
-// internal (not private): AutosaveCodec's seq3ViewToken()/restoreSeq3ViewToken() re-clamp a
+// internal (not private): DiagramWorkspaceViewCodec's seq3ViewToken()/restoreSeq3ViewToken() re-clamp a
 // restored panelWidthDp through these same bounds rather than trusting the stored value.
 internal const val PANEL_WIDTH_MIN_DP = 280f
 internal const val PANEL_WIDTH_MAX_DP = 560f
@@ -138,19 +138,40 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
                 .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },
         ) {
             Seq3TitleBar(state, session, view)
-            // Keep the title identity block visually separate from the Messages/Canvas body.
+            // The identity bar stays outside the resizable tile surface; messages, lifelines,
+            // artifacts and the canvas now participate in one saved layout tree.
             Divider()
             if (view.guidedPass != null) {
                 Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
             } else {
-                Row(Modifier.fillMaxSize()) {
-                    if (seq3PanelVisible(view)) {
-                        Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
-                        HDivider { delta ->
-                            view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
-                        }
+                DiagramWorkspaceTilingHost(
+                    state = state,
+                    session = session,
+                    view = view,
+                    onReclaimFocus = { runCatching { view.focusRequester.requestFocus() } },
+                    modifier = Modifier.weight(1f).fillMaxSize(),
+                ) { id ->
+                    when (id) {
+                        DiagramWorkspaceSectionId.MESSAGES -> Seq3MessagesTileBody(state, session, view, Modifier.fillMaxSize())
+                        DiagramWorkspaceSectionId.LIFELINES -> Seq3LifelinesSection(
+                            state,
+                            session,
+                            view,
+                            Modifier.fillMaxSize(),
+                            showSectionHeader = false,
+                            forceExpanded = true,
+                        )
+                        DiagramWorkspaceSectionId.ARTIFACTS -> Seq3FragmentsAndNotesSection(
+                            state,
+                            session,
+                            view,
+                            session.document,
+                            Modifier.fillMaxSize(),
+                            showSectionHeader = false,
+                            forceExpanded = true,
+                        )
+                        DiagramWorkspaceSectionId.PREVIEW -> Seq3Canvas(state, session, view, Modifier.fillMaxSize())
                     }
-                    Seq3Canvas(state, session, view, Modifier.weight(1f).fillMaxHeight())
                 }
             }
         }
@@ -166,7 +187,7 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
     // Keep the title bar focused on identity and size. The exact timestamp range belongs to the
     // log view, not this diagram header, and made the title area noisy without changing the
     // diagram's scope. Scope changes still happen through the regenerate sheet.
-    val subtitle = "$tabName · $scanned rows"
+    val subtitle = if (session.document.sourceFile.isNullOrBlank()) "Manual diagram" else "$tabName · $scanned rows"
     Row(
         Modifier.fillMaxWidth().background(tc.p)
             .padding(horizontal = 12.dp, vertical = 8.dp),
@@ -204,8 +225,6 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Seq3PanesGroup(view)
-            Seq3HeaderHairline()
             Seq3DiagramPresentationGroup(state, session)
             // Placed right before the OUTPUT group's leading hairline (not the diagram-
             // presentation group's) so it reads as "still generating — the actions on the right
@@ -225,24 +244,8 @@ private fun Seq3HeaderHairline() {
     Box(Modifier.width(1.dp).height(20.dp).background(tc().br))
 }
 
-/** Design variant 1a's Panes group — replaces three solid-accent `≡`/`⇅`/`▦` [ToolbarBtn]s (whose
- *  accent fill made an "open" pane read as one of three heavy blocks, and whose glyphs meant
- *  nothing without their tooltip) with ONE multi-select [SegmentedControl] whose labels
- *  ("Messages"/"Lifelines"/"Artifacts") say outright what each toggles — the accent tint now
- *  reads as "this pane is open" rather than "this button is pressed", and the old glyph tooltips
- *  stop being load-bearing. [seq3PaneSegments]/[seq3TogglePaneSegment] hold the actual mapping to
- *  [Seq3ViewState]'s three section-visibility flags as plain functions so [Seq3WorkspaceTest] can
- *  assert it without composing this row. */
-@Composable
-private fun Seq3PanesGroup(view: Seq3ViewState) {
-    SegmentedControl(
-        options = listOf("Messages", "Lifelines", "Artifacts"),
-        selectedIndices = seq3PaneSegments(view),
-        onToggle = { index -> seq3TogglePaneSegment(view, index) },
-    )
-}
-
-/** Which segments of [Seq3PanesGroup]'s multi-select read as "on" — index 0 Messages/
+/** Legacy pane-visibility mapping retained for old section flags and their migration tests.
+ *  Index 0 is Messages/
  *  [Seq3ViewState.messagesSectionOpen], 1 Lifelines/[Seq3ViewState.lifelinesSectionOpen],
  *  2 Artifacts/[Seq3ViewState.artifactsSectionOpen]. All three are peers: each hides only its own
  *  panel section, and the panel itself follows from them ([seq3PanelVisible]). */
@@ -951,7 +954,7 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
 internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryId: Int?)
 
 /**
- * Session-scoped VIEW state shared between [Seq3QueuePanel] and [Seq3Canvas] —
+ * Session-scoped VIEW state shared between [Seq3MessagesTileBody] and [Seq3Canvas] —
  * filter/sort/selection/hover/zoom/focused message. Deliberately never part of
  * [Seq3WorkspaceSession]: spec §07's "sort is a view, never an edit" reasoning extends to every
  * field here — none of it is undo-tracked, none of it is written to a note, and losing it when a
@@ -960,16 +963,14 @@ internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryI
  * through [Seq3Session.applyCommand] — this class itself never holds a [com.indagium.diagram3.
  * Seq3Document].
  *
- * EXCEPTION (Wave 2.5): the queue panel's own layout preferences — [messagesSectionOpen]/
- * [messagesExpanded], [lifelinesSectionOpen]/[lifelinesExpanded]/[lifelinesSectionHeightDp],
- * [artifactsSectionOpen]/[artifactsExpanded]/[artifactsSectionHeightDp], and [panelWidthDp] — ARE
- * persisted across a restart, keyed by the session's `libraryItemId` (stable) rather than its
- * `sessionId` (regenerated every reopen — see [activeDiagramToken] for the identical
- * substitution). See `seq3ViewToken()`/`restoreSeq3ViewToken()` in AutosaveCodec.kt. A user who
- * spends time collapsing Lifelines and stretching Artifacts on one diagram found that layout gone
- * on every restart, which reads as the app not remembering a preference rather than as the
- * deliberate ephemerality every other field in this class still has. Nothing else here changes:
- * selection/hover/zoom/filter/sort still reset to defaults on reopen, same as before.
+ * EXCEPTION (Wave 2.5 and diagram tiling): the saved layout preferences — legacy section-open /
+ * expanded flags and heights, [panelWidthDp], [diagramTileLayout], [diagramHiddenTiles],
+ * [diagramCollapsedTiles], [diagramTilesLocked], and [diagramLastPreset] — ARE persisted across a
+ * restart, keyed by the session's `libraryItemId` (stable) rather than its `sessionId`
+ * (regenerated every reopen — see [activeDiagramToken] for the identical substitution). See
+ * `seq3ViewToken()`/`restoreSeq3ViewToken()` in DiagramWorkspaceViewCodec.kt. Maximize remains transient.
+ * Nothing else here changes: selection/hover/zoom/filter/sort still reset to defaults on reopen,
+ * same as before.
  */
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
@@ -1010,7 +1011,7 @@ internal class Seq3ViewState {
      *  the other. */
     var hoveredMessageId by mutableStateOf<String?>(null)
 
-    /** Set by [Seq3Canvas] when an arrow is clicked; [Seq3QueuePanel] consumes it to scroll that
+    /** Set by [Seq3Canvas] when an arrow is clicked; [Seq3MessagesTileBody] consumes it to scroll that
      *  row into view "even when the current filter hides it" (spec §04) — the canvas clears the
      *  filter itself before setting this, so the panel only ever needs to scroll. */
     var scrollRequestId by mutableStateOf<String?>(null)
@@ -1118,6 +1119,30 @@ internal class Seq3ViewState {
      *  already-visible section down to its header row. Panel-only; never enters the saved diagram
      *  or undo history. */
     var artifactsSectionOpen by mutableStateOf(true)
+
+    /** The tiled diagram workspace arrangement. This view state is saved in the per-library-item
+     *  `seq3View` autosave token and never enters the diagram document or its undo history. */
+    var diagramTileLayout by mutableStateOf(diagramWorkspaceDefaultLayout())
+
+    /** Hidden tiles keep their nodes in [diagramTileLayout], so showing one restores its place. */
+    var diagramHiddenTiles by mutableStateOf<List<DiagramWorkspaceSectionId>>(emptyList())
+
+    /** Collapsed tiles are distinct from hidden tiles and keep their normal headers visible. */
+    var diagramCollapsedTiles by mutableStateOf(listOf(DiagramWorkspaceSectionId.ARTIFACTS))
+
+    /** Locks drag handles while leaving splitters available for resizing. */
+    var diagramTilesLocked by mutableStateOf(false)
+
+    /** Last selected preset for the Layout menu's Reset action. */
+    var diagramLastPreset by mutableStateOf(DiagramWorkspacePreset.STANDARD)
+
+    /** Maximize is transient; Escape restores the saved tiled arrangement. */
+    var maximizedDiagramTile by mutableStateOf<DiagramWorkspaceSectionId?>(null)
+
+    /** Shared header/body action state for the lifeline dialog and artifact add hint. */
+    var lifelineAddDialogOpen by mutableStateOf(false)
+    var artifactsHint by mutableStateOf<String?>(null)
+    var messageAddHint by mutableStateOf<String?>(null)
 
     /** WP8: the fragment selected by clicking a Fragments & notes panel row's body. The row used
      *  to carry a checkbox that drove a bare local `remember` — no shared selection, no bulk
@@ -1972,6 +1997,9 @@ internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, vie
         seq3ClearSelection(view)
         true
     }
+    // Maximize is the final workspace-wide Escape action: focused editors, context menus, and
+    // selections each get their existing first refusal before the tiled arrangement is restored.
+    view.maximizedDiagramTile != null -> { view.maximizedDiagramTile = null; true }
     else -> false
 }
 

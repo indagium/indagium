@@ -36,6 +36,7 @@ internal fun DiagramLibraryTileBody(state: AppState, tab: LogTab, modifier: Modi
             onToggle = {},
             onCreate = { state.seq3Sessions.begin(tab.id, tab.selected) },
             onCreateFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
+            onCreateEmpty = { state.seq3Sessions.beginEmpty(tab.id) },
             editingEnabled = !notesLocked,
             selectedLineCount = tab.selected.size,
             // Keyed on the two inputs it reads, like the Notes panel's call sites (see seq3NotesSelection's doc).
@@ -67,7 +68,7 @@ internal fun DiagramLibraryTileBody(state: AppState, tab: LogTab, modifier: Modi
 
 private const val DIAGRAM_LIBRARY_PANEL_VERTICAL_PADDING_DP = 8
 
-/** The Diagram library tile's header action: the "+ diagram" button and its create menu (From selection / From notes). */
+/** The Diagram library tile's header action: the "+ diagram" button and its create menu. */
 @Composable
 internal fun RowScope.DiagramLibraryHeaderAction(state: AppState, tab: LogTab) {
     val notesLocked = LocalNotesEditLocked.current
@@ -86,6 +87,10 @@ internal fun RowScope.DiagramLibraryHeaderAction(state: AppState, tab: LogTab) {
                 onCreateFromNotes = {
                     createMenuOpen = false
                     if (notesMutationAllowed(notesLocked)) state.seq3Sessions.beginFromNotes(tab.id)
+                },
+                onCreateEmpty = {
+                    createMenuOpen = false
+                    if (notesMutationAllowed(notesLocked)) state.seq3Sessions.beginEmpty(tab.id)
                 },
                 onDismiss = { createMenuOpen = false },
                 tc = tc(),

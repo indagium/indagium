@@ -864,9 +864,11 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   A capture tab keeps its per-device video height: Video is pinned to `captureMirrorLayouts[device].videoSplit` x the host height while
   the tab is active, and resizing Video writes the per-device layout, never the global one.
 - **The Diagram library is a standalone tile, never an inline Notes section.** Classic shows it collapsed at the top of the right sidebar above Notes; the Layout menu can hide or restore it.
-  `DiagramLibraryTile` owns the saved-diagram list and the `+ diagram` menu (From selection / From notes); its `FLEX` body makes the list scroll inside
+  `DiagramLibraryTile` owns the saved-diagram list and the `+ diagram` menu (From selection / From notes / Empty diagram); its `FLEX` body makes the list scroll inside
   its viewport and lets the tile's end splitter resize that viewport. Hiding the tile removes the library without changing Notes, which retains the
-  source-linked diagram-note controls.
+  source-linked diagram-note controls. Empty diagram immediately saves a blank draft, does not scan the source log, and starts with no participants,
+  messages, or log evidence. The source tab only determines library organization and a possible explicit later regeneration; the workspace identifies
+  this source-free document as “Manual diagram”.
 - **Toolbars at the top of a tile's body share one look** (`ui/TileToolbarStyle.kt`). The log toolbar is the Log tile's header; the Notes actions (Preview, Copy ▾, Save,
   New, Locate log…, Open ▾) are the Notes tile's header too (`ui/NotesHeaderActions.kt`, `NotesActionButtons`): one row, grip, icon, "Notes", "3 notes", the buttons, then
   the header icons, laid out by `notesHeaderLayout` (`ui/NotesHeaderLayout.kt`, pure, `NotesHeaderLayoutTest`). **The text gives way before any button does.** As the card
@@ -1630,6 +1632,14 @@ per `applySeq3Command` call, including a whole regeneration apply), dirty/draft-
 the note block id a confirm writes into. A source tab can close without destroying an already-built
 session; regeneration is disabled (`requestGenerate` is a no-op) until the session is relinked.
 
+The workspace uses `DiagramWorkspaceTilingHost` (`ui/DiagramWorkspaceTiling.kt`) to put Messages, Lifelines, Artifacts, and Diagram preview in the
+shared tile system. Its default layout stacks the three authoring tiles at the left of the preview; each tile has the common header, resize handle,
+collapse, hide, and maximize controls. The Layout menu offers Standard and Canvas focus presets, visibility controls, Lock tiles, and Reset to the
+last preset. Narrow windows use a scrollable preview-first stack, where controls that need split geometry (resize, collapse, maximize) are omitted.
+The tree, hidden tiles, collapsed tiles, lock, and last preset are saved with the diagram's `seq3View` state; maximize remains transient. Older saved
+section-open and expanded flags migrate into hidden and collapsed tiles on restore. Escape first lets a focused editor handle the key, then clears
+transient workspace state before restoring a maximized tile.
+
 ---
 
 ## 9. Key packages and classes
@@ -1772,7 +1782,9 @@ itself does no source-trace enrichment.
 | `diagram3/Seq3Codec.kt` | The `<!-- indagium:diagram3 v1 {json} -->` note-header codec — the whole `Seq3Document` as JSON, SHA-256 body-hash guard, own bounds discipline. Exactly one version constant; a note written by an unrecognised/future version degrades to "not a diagram note" rather than throwing. |
 | `diagram3/Seq3Queue.kt` / `Seq3Guided.kt` / `Seq3Regeneration.kt` / `Seq3Commands.kt` | Pure filter/sort/selection/bulk-action logic, the guided target-resolution pass, the regenerate-review diff, and every mutation as a named command producing one undo entry. |
 | `ui/Seq3Session.kt` | State owner (`AppState.seq3Sessions`): session lifecycle keyed off a source log tab, the debounced generate+layout pipeline, per-session undo stack, note-write on confirm, and the `DiagramLibraryStore` integration that keeps a confirmed diagram reachable from the source tab's standalone Diagram library tile. Declares `ActiveSurface` (moved here from the deleted `ui/SeqDiagramCoordinator.kt`). |
-| `ui/Seq3Workspace.kt` / `Seq3QueuePanel.kt` / `Seq3Canvas.kt` / `Seq3Inspector.kt` / `Seq3GuidedPass.kt` / `Seq3RegenerateSheet.kt` | The workspace shell, the message queue panel, the Compose canvas (drawn from `Seq3Layout`), the pattern/kind/evidence inspector, the guided "Fix these" mode, and the regenerate review sheet. |
+| `ui/DiagramWorkspaceTiling.kt` | Diagram session's four-tile layout, shared tile chrome, narrow stacked behavior, presets, and hide/collapse state. |
+| `ui/DiagramWorkspaceViewCodec.kt` | Per-library-item diagram tile preferences, with legacy queue flags projected from current state and migrated on restore. |
+| `ui/Seq3Workspace.kt` / `Seq3QueuePanel.kt` / `Seq3Canvas.kt` / `Seq3Inspector.kt` / `Seq3GuidedPass.kt` / `Seq3RegenerateSheet.kt` | The workspace shell, message/lifeline/artifact tile bodies, Compose canvas (drawn from `Seq3Layout`), pattern/kind/evidence inspector, guided "Fix these" mode, and regenerate review sheet. |
 | `ui/Seq3Theme.kt` | `ThemeColors.toSeq3RasterTheme()` plus `Seq3RenderCache` — a bounded LRU in front of `layoutSeq3`/`renderSeq3`, split into a layout tier (theme/scale-independent) and a render tier, so a theme switch never recomputes geometry and an unrelated note edit never re-rasterizes every open diagram. |
 
 ### 9.8 `testing`, `edition`, `security`

@@ -204,7 +204,8 @@ private fun restoreGeneratedAuthoring(document: Seq3Document, baseline: Seq3Docu
 }
 
 /**
- * A unique default title for a brand-new session, seeded in [Seq3Session.begin] against that exact
+ * A unique default title for a brand-new session, seeded in [Seq3Session.begin] or
+ * [Seq3Session.beginEmpty] against that exact
  * log's own already-saved diagrams ([DiagramLibraryStore.forSource]) so two diagrams for the SAME
  * log never start out sharing a name — a different log is free to also start at "Untitled diagram",
  * since [existingTitles] is scoped per-source by the caller. `internal`, not `private`, purely so
@@ -246,11 +247,11 @@ class Seq3Session(
      * active-surface switch removes the workspace from composition, so a `remember(sessionId)`
      * inside [Seq3Workspace] would lose zoom and the other view preferences every time the user
      * visited another tab. Most of the state here is still ephemeral: closing the workspace drops
-     * it from this map. The exception (Wave 2.5) is the queue panel's own section open/expanded
-     * flags and heights plus the panel width — those survive a full app restart too, via
-     * `seq3ViewToken()`/`restoreSeq3ViewToken()` (AutosaveCodec.kt), which read/write them back
-     * into whichever [Seq3ViewState] this map hands out for a session's id — see the EXCEPTION
-     * note on [Seq3ViewState] itself for which fields and why.
+     * it from this map. The exception is the diagram's layout preferences — the tiled tree,
+     * hidden/collapsed tiles, lock and last preset, alongside the legacy section flags and sizes —
+     * which survive a full app restart via `seq3ViewToken()`/`restoreSeq3ViewToken()` (DiagramWorkspaceViewCodec.kt).
+     * Those functions read/write the preferences into whichever [Seq3ViewState] this map hands out
+     * for a session's id; see the EXCEPTION note on [Seq3ViewState] itself.
      */
     private val workspaceViewStates = ConcurrentHashMap<String, Seq3ViewState>()
 
@@ -295,6 +296,41 @@ class Seq3Session(
     fun begin(tabId: String, selectedIds: Set<Int> = emptySet()): String? {
         val tab = appState.tab(tabId) ?: return null
         return begin(tab, rangeFor(tab, selectedIds), emptyList())
+    }
+
+    /** Opens a blank diagram for [tabId]. Unlike [begin], this does not scan the log or derive
+     *  participants, messages, notes, or other artifacts from it. The source tab is retained only
+     *  for the diagram library's normal per-log organization and autosave behavior; the blank
+     *  document itself carries no source filename. Its first library snapshot is written before
+     *  returning, so closing the workspace before the first edit still leaves a reopenable draft. */
+    fun beginEmpty(tabId: String): String? {
+        val tab = appState.tab(tabId) ?: return null
+        val source = sourceIdentity(tab)
+        val title = defaultSeq3Title(libraryStore.forSource(source).map { it.title }.toSet())
+        val document = Seq3Document(title = title)
+        val id = "seq3-${UUID.randomUUID()}"
+        val session = Seq3WorkspaceSession(
+            id = id,
+            sourceTabId = tab.id,
+            document = document,
+            range = document.range,
+            // Keep the blank document source-free, but remember which log an explicit future
+            // regeneration should use. The filename becomes document metadata only after that
+            // generation actually runs.
+            generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
+        )
+        sessions = sessions + session
+        activeSessionId = id
+        appState.activeSurface = ActiveSurface.Diagram3(id)
+        generatedBaselines[id] = document
+
+        val exportMode = appState.settings.diagramDefaultExportMode
+        val encoded = encodeSeq3Note(document, session.dialect, exportMode = exportMode)
+        val item = saveToLibrary(session, tab, encoded)
+        if (item != null) {
+            replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
+        }
+        return id
     }
 
     /**
@@ -812,9 +848,10 @@ class Seq3Session(
         runDraftSave(id, generation)
     }
 
-    /** Keeps the diagram library useful as a real draft library. A workspace gets a record as soon
-     * as its first generation lands, and every later document/title edit refreshes that same
-     * record. This is deliberately independent from [confirm], which is still the explicit note
+    /** Keeps the diagram library useful as a real draft library. A generated workspace gets a
+     * record as soon as its first generation lands; a blank workspace gets its first record in
+     * [beginEmpty] before returning. Every later document/title edit refreshes that same record.
+     * This is deliberately independent from [confirm], which is still the explicit note
      * action and may or may not be used for a given diagram.
      *
      * WP14: deliberately UNCHANGED by the hand-edit gate added to [confirm]/[syncLiveLinkedNote].
@@ -826,7 +863,6 @@ class Seq3Session(
     private fun autoSaveDraftToLibrary(id: String) {
         val current = session(id) ?: return
         val tab = current.sourceTabId?.let(appState::tab) ?: return
-        if (current.document.lifelines.isEmpty()) return
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val encoded = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
         val item = saveToLibrary(current, tab, encoded) ?: return
@@ -1282,7 +1318,10 @@ class Seq3Session(
             sourceTabId = usableTabId,
             document = parsed.document,
             range = parsed.document.range,
-            generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile),
+            generateOptions = Seq3GenerateOptions(
+                sourceFile = parsed.document.sourceFile
+                    ?: usableTabId?.let(appState::tab)?.let { File(it.filename).name },
+            ),
             libraryItemId = item.id,
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
@@ -1456,6 +1495,11 @@ class Seq3Session(
      */
     private fun scannedEntries(id: String): List<com.indagium.model.LogEntry> {
         val current = session(id) ?: return emptyList()
+        // A manually authored diagram has no source filename because it has never been generated.
+        // Its live source tab is only where it is organized and saved; counting those rows would
+        // claim work the session never did. Generated diagrams keep their source filename even
+        // when generation legitimately found no messages or the user later removes them all.
+        if (current.document.sourceFile.isNullOrBlank()) return emptyList()
         val tab = current.sourceTabId?.let(appState::tab) ?: return emptyList()
         return when (val range = current.range) {
             is Seq3Range.VisibleView -> tab.logData
@@ -1490,7 +1534,9 @@ class Seq3Session(
      * needed. Null when there is nothing to show (no source tab, or the resolved range is empty).
      */
     fun scannedTimeRange(id: String): Pair<String, String>? {
-        val range = session(id)?.range
+        val current = session(id) ?: return null
+        if (current.document.sourceFile.isNullOrBlank()) return null
+        val range = current.range
         if (range is Seq3Range.Time) return range.fromTs to range.toTs
         val entries = scannedEntries(id)
         val first = entries.firstOrNull() ?: return null

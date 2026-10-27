@@ -17,9 +17,12 @@ import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -100,6 +103,7 @@ private const val SEQ3_LIFELINES_MIN_HEIGHT_DP = 120f
 private const val SEQ3_LIFELINES_MAX_HEIGHT_DP = 420f
 private const val SEQ3_ARTIFACTS_MIN_HEIGHT_DP = 100f
 private const val SEQ3_ARTIFACTS_MAX_HEIGHT_DP = 360f
+private const val SEQ3_LIFELINE_HEADER_LABELS_MIN_WIDTH_DP = 360f
 private val SEQ3_ACTION_BADGE_SIZE = 24.dp
 private val SEQ3_SUBMESSAGE_ROW_HEIGHT = 44.dp
 
@@ -209,15 +213,15 @@ internal fun seq3ClampLifelinesHeight(
     max: Float = SEQ3_LIFELINES_MAX_HEIGHT_DP,
 ): Float = (current - delta).coerceIn(min, max)
 
-/** Which of the panel's three stacked sections [Seq3QueuePanel] gives `Modifier.weight(1f)`. */
+/** Section ids for the legacy combined queue panel's weight-selection helper. */
 internal enum class Seq3PanelSection { MESSAGES, LIFELINES, ARTIFACTS }
 
 /**
  * WP8: generalises the panel's "last section standing absorbs the remaining height" rule from two
  * sections to three. Lifelines and Artifacts each normally hold either a fixed, user-resized
  * height (dragged via their own [VDivider]) or a small collapsed header height — they only grow to
- * fill the panel when nothing higher in priority is doing it, so the `Column` in [Seq3QueuePanel]
- * (`Modifier.fillMaxHeight()` from its caller) doesn't leave dead space below a shorter stack.
+ * fill a legacy combined panel when nothing higher in priority is doing it, so its `Column`
+ * doesn't leave dead space below a shorter stack.
  *
  * Priority is Messages > Lifelines > Artifacts. Each argument means "this section is visible AND
  * expanded", so only a section that actually has a body to show can claim the remaining height.
@@ -251,10 +255,9 @@ internal fun seq3PanelWeightedSection(
 
 /**
  * [seq3PanelWeightedSection] applied to a live [Seq3ViewState] — the one place the "visible AND
- * expanded" eligibility rule for each of the three sections is written down. Split out from
- * [Seq3QueuePanel] so a test can pin the combination that used to stretch a *collapsed* Lifelines
- * section over the whole panel (everything collapsed ⇒ nothing is weighted) without composing the
- * panel.
+ * expanded" eligibility rule for each of the three sections is written down. Retained as a pure
+ * regression helper so a test can pin the combination that used to stretch a *collapsed* Lifelines
+ * section over the whole panel (everything collapsed ⇒ nothing is weighted) without composition.
  */
 internal fun seq3PanelWeightedSectionFor(view: Seq3ViewState): Seq3PanelSection? =
     seq3PanelWeightedSection(
@@ -272,16 +275,10 @@ internal fun seq3PanelWeightedSectionFor(view: Seq3ViewState): Seq3PanelSection?
  *  in place of the row list) — see `Seq3FragmentsAndNotesSection`. */
 internal fun seq3ArtifactsSectionVisible(view: Seq3ViewState): Boolean = view.artifactsSectionOpen
 
-// ── The panel is a queue — design spec §04 + §06 + §07 ─────────────────────────────────────────
-//
-// A thin composable shell around `diagram3.Seq3Queue` (filter/sort/selection math) and
-// `diagram3.Seq3Commands` (every mutation) — exactly the split `diagram.ManualDiagramMessageQueue`
-// had for the v1/v2 panel. EVERY editing verb below routes through
-// `state.seq3Sessions.applyCommand(session.id, Seq3Command…)`; nothing here ever calls
-// `session.document.copy(...)` directly, so ⌘Z stays uniform (see this phase's brief).
-
+/** The Messages tile body. The title and add action live in the shared tile header; all queue
+ *  editing, filtering, selection and canvas handoff paths stay the same as the former panel. */
 @Composable
-internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
+internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
     val tc = tc()
     val document = session.document
     val counts = seq3FilterCounts(document)
@@ -291,9 +288,6 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     val visibleIds = remember(rows) { rows.map(Seq3Message::id) }
     val listState = rememberLazyListState()
 
-    // Two-way row<->arrow (spec §04): a canvas arrow click already reset the filter/text before
-    // setting scrollRequestId (see Seq3Canvas), so by the time `rows` reflects that reset, the
-    // target id is guaranteed visible and this only has to find and scroll to it.
     LaunchedEffect(view.scrollRequestId, rows) {
         val targetId = view.scrollRequestId ?: return@LaunchedEffect
         val index = rows.indexOfFirst { it.id == targetId }
@@ -303,156 +297,73 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
         }
     }
 
-    // WP8 (revised): whether the Artifacts section renders at all — purely the user's own
-    // show/hide toggle. It used to also require the document to already have a fragment or note,
-    // which meant turning the section ON for an empty document rendered NOTHING at all — no
-    // header, no "+ note" button — hiding the only way to add the first one. An empty section now
-    // still renders (header + empty-state hint); see `Seq3FragmentsAndNotesSection`.
-    val artifactsVisible = seq3ArtifactsSectionVisible(view)
-    // 1a header rework: Messages is now a section toggle like the other two, so a hidden Messages
-    // section is neither drawn nor eligible for the weight(1f) chain — `messagesExpanded` alone
-    // (which only collapses a *visible* section to its header) is no longer the whole story.
-    val messagesVisible = view.messagesSectionOpen
-    // A section is eligible for the weight(1f) remainder only when it is both shown and expanded —
-    // a collapsed section is a fixed-height header with no body to stretch. See
-    // [seq3PanelWeightedSection].
-    val messagesWeighted = messagesVisible && view.messagesExpanded
-    val weightedSection = seq3PanelWeightedSectionFor(view)
-
     Column(modifier.background(tc.p)) {
-        if (messagesWeighted) {
-            Column(Modifier.weight(1f).fillMaxWidth()) {
-                Seq3QueueHeader(state, session, counts, view)
-                Column(Modifier.weight(1f).fillMaxWidth()) {
-                    if (counts.needsTarget > 0) {
-                        Seq3NeedsTargetBanner(counts.needsTarget) {
-                            // Spec §05: the banner is what starts the guided pass. `startSeq3GuidedPass`
-                            // returns null only when nothing is unresolved — unreachable here, since this
-                            // banner is itself gated on needsTarget > 0.
-                            view.guidedPass = startSeq3GuidedPass(document)
-                            runCatching { view.focusRequester.requestFocus() }
-                        }
-                    }
-                    // WP11 auto-suggest: OFFER, never insert silently — see Seq3DelaySuggest.kt's own
-                    // header for the "manual insert plus auto-suggest" decision this implements.
-                    val delaySuggestions = remember(document, view.dismissedDelaySuggestionAfterIds) {
-                        seq3SuggestedDelays(document).filterNot { it.afterMessageId in view.dismissedDelaySuggestionAfterIds }
-                    }
-                    delaySuggestions.firstOrNull()?.let { suggestion ->
-                        Seq3DelaySuggestionBanner(
-                            suggestion = suggestion,
-                            moreCount = delaySuggestions.size - 1,
-                            // Pass the measured gap through as the label — otherwise seq3InsertDelayAfter's
-                            // own literal default ("delay") wins and the number this banner just computed
-                            // (and the user is about to read in the banner text right below) never reaches
-                            // the diagram at all.
-                            onInsert = { seq3InsertDelayAfter(state, session, suggestion.afterMessageId, label = formatDuration(suggestion.gapMillis)) },
-                            onDismiss = { view.dismissedDelaySuggestionAfterIds = view.dismissedDelaySuggestionAfterIds + suggestion.afterMessageId },
-                        )
-                    }
-                    Seq3FilterChipsRow(view, counts)
-                    Seq3FilterTextAndSortRow(view)
-                    Box(Modifier.weight(1f)) {
-                        LazyColumn(
-                            Modifier.fillMaxSize().padding(end = 6.dp),
-                            state = listState,
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            items(rows, key = Seq3Message::id) { message ->
-                                Seq3QueueRow(state, session, view, document, message, visibleIds)
-                            }
-                        }
-                        VerticalScrollbar(
-                            adapter = rememberScrollbarAdapter(listState),
-                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                            style = appScrollbarStyle(tc),
-                        )
-                    }
-                    Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
+        view.messageAddHint?.let { hint ->
+            AppText(hint, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+        }
+        if (counts.needsTarget > 0) {
+            Seq3NeedsTargetBanner(counts.needsTarget) {
+                view.guidedPass = startSeq3GuidedPass(document)
+                runCatching { view.focusRequester.requestFocus() }
+            }
+        }
+        val delaySuggestions = remember(document, view.dismissedDelaySuggestionAfterIds) {
+            seq3SuggestedDelays(document).filterNot { it.afterMessageId in view.dismissedDelaySuggestionAfterIds }
+        }
+        delaySuggestions.firstOrNull()?.let { suggestion ->
+            Seq3DelaySuggestionBanner(
+                suggestion = suggestion,
+                moreCount = delaySuggestions.size - 1,
+                onInsert = {
+                    seq3InsertDelayAfter(state, session, suggestion.afterMessageId, label = formatDuration(suggestion.gapMillis))
+                },
+                onDismiss = {
+                    view.dismissedDelaySuggestionAfterIds = view.dismissedDelaySuggestionAfterIds + suggestion.afterMessageId
+                },
+            )
+        }
+        Seq3FilterChipsRow(view, counts)
+        Seq3FilterTextAndSortRow(view)
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(end = 6.dp),
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(rows, key = Seq3Message::id) { message ->
+                    Seq3QueueRow(state, session, view, document, message, visibleIds)
                 }
             }
-        } else if (messagesVisible) {
-            Seq3QueueHeader(state, session, counts, view)
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(listState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc),
+            )
         }
-        if (view.lifelinesSectionOpen) {
-            if (messagesWeighted) {
-                VDivider { delta ->
-                    view.lifelinesSectionHeightDp =
-                        seq3ClampLifelinesHeight(view.lifelinesSectionHeightDp, delta)
-                }
-            }
-            val lifelinesModifier = when {
-                weightedSection == Seq3PanelSection.LIFELINES -> Modifier.weight(1f).fillMaxWidth()
-                view.lifelinesExpanded -> Modifier.height(view.lifelinesSectionHeightDp.dp).fillMaxWidth()
-                // Collapsed: wrap the section header and nothing else, the same way a collapsed
-                // Messages section does by simply rendering its header. A forced height here (this
-                // was 48dp against a ~32dp header) padded 16dp of blank panel underneath, which
-                // read as a gap between Lifelines and Artifacts that Messages/Lifelines never had.
-                else -> Modifier.fillMaxWidth()
-            }
-            Seq3LifelinesSection(state, session, view, lifelinesModifier)
-        }
-        // Item 9 — promoted out of the Messages area (it used to render above the message
-        // LazyColumn) into its own top-level, independently collapsible/resizable section, same
-        // "own VDivider + own clamped height" shape as Lifelines above. WP8 3c added its own
-        // show/hide toggle (`artifactsSectionOpen`); `artifactsVisible` is now exactly that toggle
-        // (see its own comment above) — an empty document still shows the section when toggled on.
-        if (artifactsVisible) {
-            // The Lifelines divider above shows only when ITS pane above (Messages) is expanded.
-            // This is that same rule applied to this divider's own pane above — Lifelines when it
-            // is open, otherwise Messages. Collapse everything and neither divider draws, so the
-            // three headers stack identically instead of Artifacts being the only separated one.
-            // …and only when BOTH panes it separates can actually change size. A collapsed
-            // section is just its header, so there is nothing to drag and the handle is not drawn
-            // at all — rather than drawn but inert, or worse, drawn and quietly resizing something
-            // else.
-            val paneAboveExpanded =
-                if (view.lifelinesSectionOpen) view.lifelinesExpanded else messagesWeighted
-            if (paneAboveExpanded && view.artifactsExpanded) {
-                // Lifelines is present and fixed-height: the two trade, and Messages — the
-                // weighted section — is not touched by any code path here. The one exception is
-                // Lifelines being hidden or itself weighted, where there is no fixed pane above to
-                // trade with and no Lifelines that could move either way.
-                val tradesWithLifelines = view.lifelinesSectionOpen &&
-                    weightedSection != Seq3PanelSection.LIFELINES
-                VDivider { delta ->
-                    if (tradesWithLifelines) {
-                        val (lifelines, artifacts) = seq3DragArtifactsBoundary(
-                            view.lifelinesSectionHeightDp,
-                            view.artifactsSectionHeightDp,
-                            delta,
-                        )
-                        view.lifelinesSectionHeightDp = lifelines
-                        view.artifactsSectionHeightDp = artifacts
-                    } else {
-                        view.artifactsSectionHeightDp =
-                            seq3ClampArtifactsHeight(view.artifactsSectionHeightDp, delta)
-                    }
-                }
-            }
-            val artifactsModifier = when {
-                weightedSection == Seq3PanelSection.ARTIFACTS -> Modifier.weight(1f).fillMaxWidth()
-                view.artifactsExpanded -> Modifier.height(view.artifactsSectionHeightDp.dp).fillMaxWidth()
-                // Collapsed: wrap the header, same as Lifelines above.
-                else -> Modifier.fillMaxWidth()
-            }
-            Seq3FragmentsAndNotesSection(state, session, view, document, artifactsModifier)
-        }
+        Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
     }
 }
 
+/** Header action only, used by the tile chrome while keeping its Add menu and dialog state local
+ *  to the fixed Messages tile composition. */
 @Composable
-private fun Seq3LifelinesSection(
+internal fun Seq3QueueHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    Seq3QueueHeader(state, session, seq3FilterCounts(session.document), view, showTitle = false)
+}
+
+@Composable
+internal fun Seq3LifelinesSection(
     state: AppState,
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     modifier: Modifier = Modifier,
+    showSectionHeader: Boolean = true,
+    forceExpanded: Boolean = false,
 ) {
     val tc = tc()
     val document = session.document
     val lifelines = remember(document) { document.lifelines.sortedBy { it.ordinal } }
     val lifelineIds = remember(lifelines) { lifelines.map { it.id } }
-    var addDialogOpen by remember(session.id) { mutableStateOf(false) }
     var editingId by remember(session.id) { mutableStateOf<String?>(null) }
     var editingText by remember(session.id) { mutableStateOf("") }
     var hint by remember(session.id) { mutableStateOf<String?>(null) }
@@ -526,38 +437,16 @@ private fun Seq3LifelinesSection(
     }
 
     Column(modifier.fillMaxWidth()) {
-        SectionHeader(
-            title = "Lifelines · ${lifelines.size}",
-            trailing = {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Diagram-wide default for every lifeline whose own "name ▾" is "Diagram
-                    // default" (item 3's second half) — otherwise that per-lifeline option would
-                    // have nothing to inherit.
-                    Seq3DropdownButton(
-                        label = "names: ${seq3DocumentDisplaySegmentsLabel(document.lifelineDisplaySegments)}",
-                        labelColor = tc.ts,
-                        fillColor = tc.p2,
-                        menuWidth = 150.dp,
-                    ) { close ->
-                        SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS.forEach { (label, value) ->
-                            Seq3DropdownMenuItem(label, active = document.lifelineDisplaySegments == value) {
-                                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentDisplaySegments(value))
-                                close()
-                            }
-                        }
-                    }
-                    LabelIconButton(
-                        text = "+ lifeline",
-                        fontSize = 10.sp,
-                        onClick = { addDialogOpen = true },
-                    )
-                }
-            },
-            expanded = view.lifelinesExpanded,
-            onToggle = { view.lifelinesExpanded = !view.lifelinesExpanded },
-        )
+        if (showSectionHeader) {
+            SectionHeader(
+                title = "Lifelines · ${lifelines.size}",
+                trailing = { Seq3LifelinesHeaderActions(state, session, view) },
+                expanded = view.lifelinesExpanded,
+                onToggle = { view.lifelinesExpanded = !view.lifelinesExpanded },
+            )
+        }
         hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
-        if (view.lifelinesExpanded) {
+        if (forceExpanded || view.lifelinesExpanded) {
             // WP8 item 4: the Merge/Clear footer used to be the last child of this scrolling
             // Column, so with more than a handful of lifelines it sat below the fold and checking
             // two lifelines showed no Merge button at all. Pin it as an unweighted sibling below
@@ -716,11 +605,11 @@ private fun Seq3LifelinesSection(
             }
         }
     }
-    if (addDialogOpen) {
+    if (view.lifelineAddDialogOpen) {
         Seq3LifelineNameDialog(
-            onDismiss = { addDialogOpen = false },
+            onDismiss = { view.lifelineAddDialogOpen = false },
             onAdd = { name ->
-                addDialogOpen = false
+                view.lifelineAddDialogOpen = false
                 val ordinal = (document.lifelines.maxOfOrNull { it.ordinal } ?: -1) + 1
                 val added = state.seq3Sessions.applyCommand(
                     session.id,
@@ -745,6 +634,72 @@ private fun Seq3LifelinesSection(
                 if (!added) hint = "Enter a non-empty, unique lifeline name"
             },
         )
+    }
+}
+
+/** Lifeline actions shared by the tile chrome and the legacy combined panel header. */
+@Composable
+internal fun Seq3LifelinesHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    val tc = tc()
+    val document = session.document
+    val compact = LocalTileHeaderWidthDp.current < SEQ3_LIFELINE_HEADER_LABELS_MIN_WIDTH_DP
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp),
+    ) {
+        Seq3LifelineDisplayDropdown(state, session, document, compact)
+        if (compact) {
+            TileIconButton(
+                icon = Icons.Outlined.Add,
+                contentDescription = "Add lifeline",
+                tooltip = "Add lifeline",
+                tag = "diagram-lifeline-add-compact",
+                onClick = { view.lifelineAddDialogOpen = true },
+            )
+        } else {
+            LabelIconButton(
+                text = "+ lifeline",
+                fontSize = 10.sp,
+                onClick = { view.lifelineAddDialogOpen = true },
+            )
+        }
+    }
+}
+
+@Composable
+private fun Seq3LifelineDisplayDropdown(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    document: Seq3Document,
+    compact: Boolean,
+) {
+    val tc = tc()
+    Seq3DropdownButton(
+        label = "Names",
+        modifier = if (compact) Modifier.size(22.dp) else Modifier,
+        labelColor = tc.ts,
+        fillColor = tc.p2,
+        menuWidth = 180.dp,
+        fixedHeight = if (compact) 22.dp else null,
+        anchorContent = if (compact) {
+            {
+                Icon(
+                    Icons.Outlined.Tune,
+                    contentDescription = "Lifeline name display",
+                    tint = tc.ts,
+                    modifier = Modifier.size(15.dp),
+                )
+            }
+        } else {
+            null
+        },
+    ) { close ->
+        SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS.forEach { (label, value) ->
+            Seq3DropdownMenuItem(label, active = document.lifelineDisplaySegments == value) {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentDisplaySegments(value))
+                close()
+            }
+        }
     }
 }
 
@@ -1058,19 +1013,18 @@ private fun Seq3QueueHeader(
     session: Seq3WorkspaceSession,
     counts: com.indagium.diagram3.Seq3FilterCounts,
     view: Seq3ViewState,
+    showTitle: Boolean = true,
 ) {
-    val tc = tc()
     val density = LocalDensity.current
     // A short-lived rejection hint ("Select rows from a single tag", …) — this file has no other
     // transient-message convention to match (checked, per this phase's brief), so a plain
     // remember+LaunchedEffect auto-clear is the documented fallback.
-    var addHint by remember(session.id) { mutableStateOf<String?>(null) }
     var addMenuOpen by remember(session.id) { mutableStateOf(false) }
     var addDialog by remember(session.id) { mutableStateOf<Seq3AddDialog?>(null) }
-    LaunchedEffect(addHint) {
-        if (addHint != null) {
+    LaunchedEffect(view.messageAddHint) {
+        if (view.messageAddHint != null) {
             delay(ADD_HINT_DURATION_MS)
-            addHint = null
+            view.messageAddHint = null
         }
     }
 
@@ -1078,31 +1032,24 @@ private fun Seq3QueueHeader(
         when (val result = addSeq3MessageFromSelection(session.document, selectedEntries)) {
             is Seq3AddResult.Added ->
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.ReplaceDocument(result.document))
-            is Seq3AddResult.Rejected -> addHint = result.reason
+            is Seq3AddResult.Rejected -> view.messageAddHint = result.reason
         }
     }
 
     val tab = session.sourceTabId?.let(state::tab)
-    Column(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth()) {
-            SectionHeader(
-                title = "Messages · ${counts.all}",
-                trailing = {
-                    // The action stays on the shared 32dp header rhythm, but opens a visible
-                    // choice surface instead of silently assuming the log selection is correct.
-                    LabelIconButton(
-                        text = "+ message",
-                        fontSize = 10.sp,
-                        onClick = { addMenuOpen = !addMenuOpen },
-                        modifier = Modifier.pointerHoverIcon(
-                            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
-                            overrideDescendants = true,
-                        ),
-                    )
-                },
-                expanded = view.messagesExpanded,
-                onToggle = { view.messagesExpanded = !view.messagesExpanded },
-            )
+    val boxModifier = if (showTitle) Modifier.fillMaxWidth() else Modifier
+    Column(if (showTitle) Modifier.fillMaxWidth() else Modifier) {
+        Box(boxModifier) {
+            if (showTitle) {
+                SectionHeader(
+                    title = "Messages · ${counts.all}",
+                    trailing = { Seq3MessageAddButton { addMenuOpen = !addMenuOpen } },
+                    expanded = view.messagesExpanded,
+                    onToggle = { view.messagesExpanded = !view.messagesExpanded },
+                )
+            } else {
+                Seq3MessageAddButton { addMenuOpen = !addMenuOpen }
+            }
             if (addMenuOpen) {
                 Popup(
                     alignment = Alignment.TopEnd,
@@ -1132,8 +1079,8 @@ private fun Seq3QueueHeader(
                 }
             }
         }
-        addHint?.let { hint ->
-            AppText(hint, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+        if (showTitle) view.messageAddHint?.let { hint ->
+            AppText(hint, color = tc().warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
         }
     }
     when (addDialog) {
@@ -1151,12 +1098,25 @@ private fun Seq3QueueHeader(
             onAdd = { spec ->
                 addDialog = null
                 if (!state.seq3Sessions.applyCommand(session.id, Seq3Command.AddCustomMessage(spec))) {
-                    addHint = "The custom message could not be added"
+                    view.messageAddHint = "The custom message could not be added"
                 }
             },
         )
         null -> Unit
     }
+}
+
+@Composable
+private fun Seq3MessageAddButton(onClick: () -> Unit) {
+    LabelIconButton(
+        text = "+ message",
+        fontSize = 10.sp,
+        onClick = onClick,
+        modifier = Modifier.pointerHoverIcon(
+            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+            overrideDescendants = true,
+        ),
+    )
 }
 
 @Composable
@@ -1613,15 +1573,16 @@ private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, onRe
 // already exempts exactly these two actions (Seq3Queue.kt's own comment on that guard).
 
 @Composable
-private fun Seq3FragmentsAndNotesSection(
+internal fun Seq3FragmentsAndNotesSection(
     state: AppState,
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     document: Seq3Document,
     modifier: Modifier = Modifier,
+    showSectionHeader: Boolean = true,
+    forceExpanded: Boolean = false,
 ) {
     val tc = tc()
-    val total = document.fragments.size + document.notes.size + document.delays.size + document.manualActivations.size
     // WP8 3b (revised): "+ note" attaches to the current message selection, same as the title
     // bar's own "Note" action (Seq3TitleActionButton in Seq3Workspace.kt) — but when nothing is
     // selected it now falls back to a free-floating note at `seq3DefaultNotePlacement`'s default
@@ -1629,50 +1590,27 @@ private fun Seq3FragmentsAndNotesSection(
     // button always succeeds. `hint` is kept only for the one genuine failure mode left: a stale
     // panel selection whose ids no longer resolve to any message in the document (`seq3AddNote`'s
     // own `ids.isEmpty() && placement == null` guard) — selectedIds non-empty but placement null.
-    var hint by remember(session.id) { mutableStateOf<String?>(null) }
-    LaunchedEffect(hint) {
-        if (hint != null) {
+    LaunchedEffect(view.artifactsHint) {
+        if (view.artifactsHint != null) {
             delay(ADD_HINT_DURATION_MS)
-            hint = null
+            view.artifactsHint = null
         }
     }
     Column(modifier.fillMaxWidth()) {
-        SectionHeader(
+        if (showSectionHeader) SectionHeader(
             // User-observed correction: this used to enumerate "Fragments, notes & delays" —
             // every field/function backing this section is already named "artifact"
             // (artifactsVisible, artifactsExpanded, Seq3ArtifactRow) precisely so a fourth kind
             // added later doesn't need yet another word stitched onto the title.
-            title = "Artifacts · $total",
-            trailing = {
-                // SectionHeader's whole Row sits inside a HoverBox(onClick = onToggle)
-                // (Components.kt:222) — LabelIconButton's own `.clickable` consumes the tap
-                // before it can bubble to that outer toggle, same as Lifelines' "+ lifeline".
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    LabelIconButton(
-                        text = "+ note",
-                        fontSize = 10.sp,
-                        onClick = {
-                            val selectedIds = seq3SelectedMessageIds(document, view)
-                            val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
-                            if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
-                                hint = "Select a message first to attach a note to it"
-                            }
-                        },
-                    )
-                    // User-observed correction: removed the "+ delay" button this section briefly
-                    // had — its only anchor logic ("after the latest selected message, else the
-                    // document's end") wasn't precise enough to be trustworthy, and the canvas
-                    // context menu's "Insert delay after this" (right-click the exact row) already
-                    // covers creating one precisely. A delay's Seq3ArtifactRow below still lists,
-                    // renames, hides, and removes every existing delay — only the ADD affordance
-                    // moved back to being canvas-only.
-                }
-            },
+            title = "Artifacts · ${document.fragments.size + document.notes.size + document.delays.size + document.manualActivations.size}",
+            trailing = { Seq3ArtifactsHeaderActions(state, session, view) },
             expanded = view.artifactsExpanded,
             onToggle = { view.artifactsExpanded = !view.artifactsExpanded },
         )
-        hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
-        if (view.artifactsExpanded) {
+        view.artifactsHint?.let { hint ->
+            AppText(hint, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+        }
+        if (forceExpanded || view.artifactsExpanded) {
             if (document.fragments.isEmpty() && document.notes.isEmpty() && document.delays.isEmpty() && document.manualActivations.isEmpty()) {
                 // WP8 (revised): the section now renders even with nothing to show (see
                 // `artifactsVisible`'s own comment above) — replace the now-empty scrolling list
@@ -1691,6 +1629,22 @@ private fun Seq3FragmentsAndNotesSection(
             }
         }
     }
+}
+
+@Composable
+internal fun Seq3ArtifactsHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    val document = session.document
+    LabelIconButton(
+        text = "+ note",
+        fontSize = 10.sp,
+        onClick = {
+            val selectedIds = seq3SelectedMessageIds(document, view)
+            val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
+            if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
+                view.artifactsHint = "Select a message first to attach a note to it"
+            }
+        },
+    )
 }
 
 /** Every message id a fragment's bracket spans — [Seq3Fragment.occurrenceRefs] takes precedence

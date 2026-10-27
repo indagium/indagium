@@ -5,7 +5,10 @@ import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3CustomMessageSpec
+import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
@@ -14,6 +17,7 @@ import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
@@ -110,6 +114,109 @@ class Seq3SessionTest {
 
         assertNull(id)
         assertTrue(state.seq3Sessions.sessions.isEmpty())
+    }
+
+    @Test
+    fun beginEmptySavesAReopenableBlankDraftWithoutGeneratingLogContent() {
+        val root = createTempDirectory("indagium-seq3-empty").toFile()
+        val libraryFile = File(root, "library.cache")
+        val tab = mkTab("empty-log", "empty.log", emptyList())
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(libraryFile),
+        )
+        state.tabs = listOf(tab)
+        state.activateTab(tab.id)
+        var restoredState: AppState? = null
+        try {
+            val id = state.seq3Sessions.beginEmpty(tab.id)!!
+            val blank = state.seq3Sessions.sessions.single { it.id == id }
+
+            assertEquals(ActiveSurface.Diagram3(id), state.activeSurface)
+            assertFalse(blank.generating)
+            assertEquals(0L, state.seq3Sessions.generateRunCount.get(), "empty creation must not run the log generator")
+            assertNull(blank.document.sourceFile, "a blank draft does not claim a log-derived source")
+            assertTrue(blank.document.lifelines.isEmpty())
+            assertTrue(blank.document.messages.isEmpty())
+            assertTrue(blank.document.fragments.isEmpty())
+            assertTrue(blank.document.notes.isEmpty())
+            assertTrue(blank.document.delays.isEmpty())
+            assertTrue(blank.document.stateInvariants.isEmpty())
+            assertTrue(blank.document.manualActivations.isEmpty())
+            assertEquals(0, state.seq3Sessions.scannedEntryCount(id))
+            assertNull(state.seq3Sessions.scannedTimeRange(id))
+            val mermaid = blank.document.toSource(Seq3Dialect.MERMAID)
+            val plantUml = blank.document.toSource(Seq3Dialect.PLANTUML)
+            assertFalse(mermaid.contains("participant "))
+            assertFalse(mermaid.contains("->"))
+            assertFalse(plantUml.contains("participant "))
+            assertFalse(plantUml.contains("->"))
+
+            val initialItem = state.seq3Sessions.libraryForTab(tab).single()
+            assertEquals(blank.document, initialItem.parsed?.document, "the blank draft is saved before the first edit")
+
+            state.seq3Sessions.close(id)
+
+            // A new store and AppState model a process restart: the initial empty snapshot must
+            // already be on disk and reopenable before any lifeline has been added.
+            val reopenedState = AppState(
+                File(root, "restored-state.cache"),
+                notesDir = File(root, "notes"),
+                diagramLibraryStore = DiagramLibraryStore(libraryFile),
+            ).also {
+                it.tabs = listOf(tab)
+                it.activateTab(tab.id)
+            }
+            restoredState = reopenedState
+            assertTrue(reopenedState.seq3Sessions.openLibraryItem(initialItem.id, tab.id))
+            val reopenedId = reopenedState.seq3Sessions.activeSessionId!!
+            assertEquals(blank.document, reopenedState.seq3Sessions.activeSession!!.document)
+            assertEquals(0L, reopenedState.seq3Sessions.generateRunCount.get())
+            assertEquals(0, reopenedState.seq3Sessions.scannedEntryCount(reopenedId))
+
+            reopenedState.seq3Sessions.updateTitle(reopenedId, "Blank draft")
+            reopenedState.seq3Sessions.flush(reopenedId)
+            assertEquals(
+                "Blank draft",
+                DiagramLibraryStore(libraryFile).get(initialItem.id)?.parsed?.document?.title,
+                "metadata edits on a still-empty document autosave too",
+            )
+
+            val client = Seq3Lifeline("client-id", "Client", emptySet(), 0)
+            val server = Seq3Lifeline("server-id", "Server", emptySet(), 1)
+            assertTrue(reopenedState.seq3Sessions.applyCommand(reopenedId, Seq3Command.AddLifeline(client)))
+            assertTrue(reopenedState.seq3Sessions.applyCommand(reopenedId, Seq3Command.AddLifeline(server)))
+            assertTrue(
+                reopenedState.seq3Sessions.applyCommand(
+                    reopenedId,
+                    Seq3Command.AddCustomMessage(
+                        Seq3CustomMessageSpec(
+                            fromLifelineId = client.id,
+                            toLifelineId = server.id,
+                            text = "request",
+                            position = Seq3InsertionPosition.Start,
+                        ),
+                    ),
+                ),
+            )
+            reopenedState.seq3Sessions.flush(reopenedId)
+
+            val saved = DiagramLibraryStore(libraryFile).get(initialItem.id)!!.parsed!!.document
+            assertEquals(reopenedState.seq3Sessions.activeSession!!.document, saved)
+            assertEquals(listOf("Client", "Server"), saved.lifelines.map { it.name })
+            assertEquals("request", saved.messages.single().labelTemplate)
+            assertTrue(saved.messages.single().occurrences.isEmpty(), "manual messages must not fabricate log evidence")
+            assertEquals(0L, reopenedState.seq3Sessions.generateRunCount.get())
+            assertEquals(0, reopenedState.seq3Sessions.scannedEntryCount(reopenedId))
+            assertNull(reopenedState.seq3Sessions.scannedTimeRange(reopenedId))
+        } finally {
+            state.seq3Sessions.sessions.toList().forEach { state.seq3Sessions.close(it.id) }
+            restoredState?.let { restored ->
+                restored.seq3Sessions.sessions.toList().forEach { restored.seq3Sessions.close(it.id) }
+            }
+            root.deleteRecursively()
+        }
     }
 
     @Test

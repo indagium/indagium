@@ -80,6 +80,9 @@ internal fun layoutMenuTab(state: AppState): LogTab? {
     return tab.takeIf { !it.isCaptureLauncher && onLogSurface }
 }
 
+private fun AppState.layoutMenuDiagramSessionId(): String? =
+    (activeSurface as? ActiveSurface.Diagram3)?.sessionId
+
 /** The tile context the menu reads: the compare view's when compare is on (and there are two tabs), else the single view's for [tab]. */
 private fun AppState.layoutMenuContext(tab: LogTab): LogViewTileContext {
     val pair = compareTabs()?.takeIf { compareMode }
@@ -102,16 +105,19 @@ internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
  */
 @Composable
 internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, vertical: Boolean = false, wrap: Boolean = false, menuBeside: Boolean = vertical) {
-    val activeTab = state.activeTab() ?: return
+    val activeTab = state.activeTab()
     val onLogSurface = state.activeSurface.let { it == null || it is ActiveSurface.Log }
-    val home = activeTab.isCaptureLauncher && onLogSurface
+    val home = activeTab?.isCaptureLauncher == true && onLogSurface
     val tab = if (home) null else layoutMenuTab(state)
-    if (!home && tab == null) return
+    val diagramSessionId = state.layoutMenuDiagramSessionId()
+    val diagramView = diagramSessionId?.let(state.seq3Sessions::viewState)
+    if (!home && tab == null && diagramView == null) return
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val ctx = tab?.let(state::layoutMenuContext)
     val badge = when {
         home -> state.settings.homeHiddenSections.size
+        diagramView != null -> diagramView.diagramHiddenTiles.size
         ctx?.compare == true -> state.compareBadgeCount(ctx)
         ctx != null -> state.logViewBadgeCount(ctx)
         else -> 0
@@ -149,8 +155,10 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
             }
             if (home) {
                 HomeLayoutMenuPopup(state, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
+            } else if (diagramView != null) {
+                DiagramLayoutMenuPopup(state, diagramView, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
             } else {
-                LayoutMenuPopup(state, requireNotNull(tab), vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss)
+                tab?.let { LayoutMenuPopup(state, it, vertical = menuBeside, onReclaimFocus = onReclaimFocus, onDismiss = dismiss) }
             }
         }
     }
@@ -278,6 +286,127 @@ private fun HomePresetThumb(preset: HomeLayoutPreset, active: Boolean, onClick: 
             }
         }
         AppText(preset.label, color = tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Diagram workspace version of the Layout menu; the session-scoped view tree and visibility
+ *  flags travel with the same per-session autosave token as the older queue preferences. */
+@Composable
+private fun DiagramLayoutMenuPopup(
+    state: AppState,
+    view: Seq3ViewState,
+    onReclaimFocus: () -> Unit,
+    onDismiss: () -> Unit,
+    vertical: Boolean = false,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(8.dp)
+    val visible = diagramWorkspaceVisibleTiles(view)
+    Popup(
+        popupPositionProvider = remember(vertical) { LayoutMenuPositionProvider(vertical) },
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape)
+                .padding(vertical = 8.dp).testTag("layout-menu-popup"),
+        ) {
+            MenuLabel("Layout presets")
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DiagramWorkspacePreset.entries.forEach { preset ->
+                    DiagramPresetThumb(preset, active = diagramWorkspacePresetActive(view, preset)) {
+                        applyDiagramWorkspacePreset(view, preset)
+                        state.autosaveInBackground()
+                        onReclaimFocus()
+                    }
+                }
+            }
+            Divider()
+            MenuLabel("Panels")
+            DiagramWorkspaceSectionId.entries.forEach { id ->
+                val isVisible = id in visible
+                Box(Modifier.testTag("diagram-layout-menu-panel-${id.key}")) {
+                    CheckRow(
+                        checked = isVisible,
+                        onToggle = {
+                            if (setDiagramWorkspaceTileVisible(view, id, !isVisible)) state.autosaveInBackground()
+                            onReclaimFocus()
+                        },
+                        enabled = !isVisible || visible.size > 1,
+                    ) { AppText(diagramWorkspaceTitle(id), color = tc.tx, fontSize = 12.sp) }
+                }
+            }
+            Divider()
+            Box(Modifier.testTag("diagram-layout-menu-lock")) {
+                CheckRow(view.diagramTilesLocked, {
+                    view.diagramTilesLocked = !view.diagramTilesLocked
+                    state.autosaveInBackground()
+                    onReclaimFocus()
+                }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
+            }
+            val resetTo = view.diagramLastPreset
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable(role = Role.Button) {
+                        applyDiagramWorkspacePreset(view, resetTo)
+                        state.autosaveInBackground()
+                        onReclaimFocus()
+                    }
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag("diagram-layout-menu-reset"),
+            ) { AppText("Reset to ${resetTo.label}", color = tc.ac, fontSize = 12.sp) }
+        }
+    }
+}
+
+@Composable
+private fun DiagramPresetThumb(preset: DiagramWorkspacePreset, active: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val fill = if (active) tc.ac else tc.td
+    val geometry = remember(preset) {
+        tileGeometry(
+            preset.layout,
+            THUMB_VIRTUAL_WIDTH,
+            THUMB_VIRTUAL_HEIGHT,
+            DIAGRAM_WORKSPACE_CHROME_SPEC.geometrySpec(),
+            scrolls = DIAGRAM_WORKSPACE_CHROME_SPEC.scrolls,
+        )
+    }
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(
+            Modifier
+                .size(THUMB_WIDTH_DP.dp, THUMB_HEIGHT_DP.dp)
+                .clip(CORNER_MD)
+                .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
+                .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
+                .testTag("diagram-layout-menu-preset-${preset.name}")
+                .semantics {
+                    contentDescription = preset.label
+                    selected = active
+                }
+                .clickable(role = Role.Button, onClick = onClick)
+                .padding(3.dp),
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val sx = size.width / THUMB_VIRTUAL_WIDTH
+                val sy = size.height / THUMB_VIRTUAL_HEIGHT
+                geometry.cards.forEach { card ->
+                    val r = card.rect
+                    drawRoundRect(
+                        color = fill.copy(alpha = if (card.section == DiagramWorkspaceSectionId.PREVIEW) THUMB_LOG_FILL_ALPHA else THUMB_FILL_ALPHA),
+                        topLeft = Offset(r.x * sx, r.y * sy),
+                        size = Size((r.w * sx - 1f).coerceAtLeast(1f), (r.h * sy - 1f).coerceAtLeast(1f)),
+                        cornerRadius = CornerRadius(1.dp.toPx()),
+                    )
+                }
+            }
+        }
+        Box(Modifier.width(THUMB_WIDTH_DP.dp), contentAlignment = Alignment.Center) {
+            AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

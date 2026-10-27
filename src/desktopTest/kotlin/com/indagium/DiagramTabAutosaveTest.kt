@@ -5,6 +5,7 @@ import com.indagium.model.LogLevel
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramWorkspaceSectionId
 import com.indagium.ui.TabRef
 import com.indagium.ui.mkTab
 import java.io.File
@@ -202,14 +203,12 @@ class DiagramTabAutosaveTest {
 
     // ── Queue-panel view state (Wave 2.5) ───────────────────────────────────────────────────────
     //
-    // The Messages/Lifelines/Artifacts section open/expanded flags, their drag-resized heights,
-    // and the panel width used to be documented as deliberately ephemeral (Seq3ViewState's own
-    // header) — these prove the "seq3View" autosave key carved out for them round-trips, and that
-    // a cache written before the key existed degrades to the same constructed defaults rather than
-    // crashing or leaving a partially-decoded state.
+    // Diagram tile visibility/collapse, the prior section heights, and the panel width all live in
+    // the per-library-item "seq3View" autosave entry. The old section flags remain a compatibility
+    // projection of the tile state, and pre-tiling entries still migrate from those flags.
 
     @Test
-    fun seq3ViewStatePersistsQueuePanelLayoutAcrossARestart() {
+    fun seq3ViewStatePersistsDiagramTileLayoutAcrossARestart() {
         val dir = createTempDirectory("openlog-diagram-view-restore").toFile()
         val logFile = File(dir, "app.log").apply { writeText("x") }
         val cacheFile = File(dir, "state.cache")
@@ -225,12 +224,12 @@ class DiagramTabAutosaveTest {
         // Flip every persisted field away from its constructed default so a bug that silently no-
         // ops the restore (leaving defaults in place) can't pass this test by accident.
         val view = state.seq3Sessions.viewState(sessionId)!!
-        view.messagesSectionOpen = false
-        view.messagesExpanded = false
-        view.lifelinesSectionOpen = false
-        view.lifelinesExpanded = false
-        view.artifactsSectionOpen = false
-        view.artifactsExpanded = true
+        view.diagramHiddenTiles = listOf(
+            DiagramWorkspaceSectionId.MESSAGES,
+            DiagramWorkspaceSectionId.LIFELINES,
+            DiagramWorkspaceSectionId.ARTIFACTS,
+        )
+        view.diagramCollapsedTiles = listOf(DiagramWorkspaceSectionId.MESSAGES, DiagramWorkspaceSectionId.LIFELINES)
         view.lifelinesSectionHeightDp = 300f
         view.artifactsSectionHeightDp = 250f
         view.panelWidthDp = 450f

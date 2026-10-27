@@ -1645,6 +1645,7 @@ internal fun DiagramLibrarySection(
     onToggle: () -> Unit,
     onCreate: () -> Unit,
     onCreateFromNotes: () -> Unit,
+    onCreateEmpty: () -> Unit,
     // Read straight off `tab.selected` by the caller — this section doesn't own the log-viewer
     // selection, it only reports its size in the popup's "From selection" subtitle.
     selectedLineCount: Int,
@@ -1678,6 +1679,7 @@ internal fun DiagramLibrarySection(
                             notesDiagramSummary = notesDiagramSummary,
                             onCreateFromSelection = { createMenuOpen = false; if (editingEnabled) onCreate() },
                             onCreateFromNotes = { createMenuOpen = false; if (editingEnabled) onCreateFromNotes() },
+                            onCreateEmpty = { createMenuOpen = false; if (editingEnabled) onCreateEmpty() },
                             onDismiss = { createMenuOpen = false },
                             tc = tc,
                         )
@@ -1772,9 +1774,10 @@ internal fun DiagramLibrarySection(
 }
 
 /**
- * The Diagram library's `+ diagram` two-option menu — "From selection" (the existing behaviour,
- * unchanged) and "From notes" (generates from exactly the log lines curated into this tab's Notes
- * document, see `Seq3Session.beginFromNotes`). Modeled directly on [RecentNotesPopup] below (same
+ * The Diagram library's `+ diagram` menu — "From selection" (the existing behaviour, unchanged),
+ * "From notes" (generates from exactly the log lines curated into this tab's Notes document, see
+ * `Seq3Session.beginFromNotes`), and "Empty diagram" (opens a blank authoring workspace without
+ * scanning the log). Modeled directly on [RecentNotesPopup] below (same
  * `Popup` alignment/offset/`PopupProperties(focusable = true)`, bordered `Box`, hover rows, Esc/
  * Enter/arrow-key roving) rather than a split button: the trailing slot this renders into already
  * sits inside [SectionHeader]'s own `HoverBox(onClick = onToggle)`, so a single click target that
@@ -1793,6 +1796,7 @@ internal fun CreateDiagramPopup(
     notesDiagramSummary: Seq3NotesSelection?,
     onCreateFromSelection: () -> Unit,
     onCreateFromNotes: () -> Unit,
+    onCreateEmpty: () -> Unit,
     onDismiss: () -> Unit,
     tc: ThemeColors,
 ) {
@@ -1813,7 +1817,11 @@ internal fun CreateDiagramPopup(
         }
     }
     val selectionSubtitle = if (selectedLineCount > 0) "$selectedLineCount selected lines" else "whole visible view"
-    val rovingRows = listOf(RovingItem("selection", enabled = true), RovingItem("notes", enabled = notesEnabled))
+    val rovingRows = listOf(
+        RovingItem("selection", enabled = true),
+        RovingItem("notes", enabled = notesEnabled),
+        RovingItem("empty", enabled = true),
+    )
     Popup(
         alignment = Alignment.TopEnd,
         offset = IntOffset(0, (34 * density).roundToInt()),
@@ -1838,6 +1846,7 @@ internal fun CreateDiagramPopup(
                             when (rovingRows.getOrNull(selectedIdx)?.id) {
                                 "selection" -> onCreateFromSelection()
                                 "notes" -> if (notesEnabled) onCreateFromNotes()
+                                "empty" -> onCreateEmpty()
                             }
                             true
                         }
@@ -1866,6 +1875,17 @@ internal fun CreateDiagramPopup(
                     Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
                         AppText("From notes", color = if (notesEnabled) tc.tx else tc.td, fontSize = 11.sp)
                         AppText(notesSubtitle, color = tc.td, fontSize = 9.sp)
+                    }
+                }
+                Divider()
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth(),
+                    forceHover = selectedIdx == 2,
+                    onClick = onCreateEmpty,
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        AppText("Empty diagram", color = tc.tx, fontSize = 11.sp)
+                        AppText("blank canvas · no log data", color = tc.td, fontSize = 9.sp)
                     }
                 }
             }
