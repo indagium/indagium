@@ -104,6 +104,19 @@ class ChromeSettingsCodecTest {
     }
 
     @Test
+    fun addedTabStylesAppendAfterTheExistingIdsAndRoundTripByName() {
+        assertEquals(
+            listOf("CURRENT", "RAISED", "SEGMENTED", "TYPED", "COMPACT", "SOURCE_STRIPE", "TWO_LINE", "QUIET"),
+            TabStripStyle.entries.take(8).map { it.name },
+        )
+        listOf(TabStripStyle.OUTLINED, TabStripStyle.PILL).forEach { style ->
+            val json = AppSettings().copy(tabStripStyle = style).settingsJson()
+            assertTrue("\"${style.name}\"" in json, "stored by stable name: $json")
+            assertEquals(style, decode(json).tabStripStyle)
+        }
+    }
+
+    @Test
     fun theNewLabelModeIsStoredByNameAndAnUnknownNameFallsBackToTheDefault() {
         val json = AppSettings().copy(tabLabelMode = TabLabelMode.FILE_FOLDER_ALWAYS).settingsJson()
         assertTrue("\"FILE_FOLDER_ALWAYS\"" in json, "stored by name: $json")

@@ -118,14 +118,15 @@ class LogViewLayoutStateTest {
 
     @Test
     fun showingATileUnhidesItAndSwitchesItsGroupOn() {
+        assertFalse(LogViewSectionId.DIAGRAMS in state.settings.logViewHidden)
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
+        assertTrue(visible(LogViewSectionId.DIAGRAMS), "the Diagram library is visible by default")
         state.hideLogViewTile(LogViewSectionId.NOTES)
         state.annotationVisible = false
         state.showLogViewTile(LogViewSectionId.NOTES)
         assertFalse(LogViewSectionId.NOTES in state.settings.logViewHidden)
         assertTrue(state.annotationVisible)
         assertTrue(visible(LogViewSectionId.NOTES))
-        state.showLogViewTile(LogViewSectionId.DIAGRAMS)
-        assertTrue(visible(LogViewSectionId.DIAGRAMS), "the Diagram library is hidden by default and can be shown")
     }
 
     @Test
@@ -155,15 +156,17 @@ class LogViewLayoutStateTest {
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.REVIEW))
         state.applyLogViewPreset(LogViewLayoutPreset.CLASSIC)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
-        assertEquals(listOf(LogViewSectionId.DIAGRAMS), state.settings.logViewHidden)
+        assertEquals(emptyList(), state.settings.logViewHidden)
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
     }
 
     @Test
-    fun classicIsActiveByDefaultAndSwitchingTheFilterGroupOffReadsAsLogFocus() {
+    fun switchingTheFilterGroupOffDoesNotMakeClassicOrLogFocusActiveWhileDiagramRemainsVisible() {
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
         state.updateFilterVisible(false)
-        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
+        assertTrue(visible(LogViewSectionId.DIAGRAMS), "filter visibility does not hide the Diagram library")
     }
 
     @Test
@@ -248,7 +251,7 @@ class LogViewLayoutStateTest {
     @Test
     fun theBadgeCountsOnlyWhatTheLastPresetDoesNotHide() {
         val ctx = state.logViewTileContext(assertNotNull(state.tab(TAB)))
-        assertEquals(0, state.logViewBadgeCount(ctx), "Classic hides the Diagram library on purpose")
+        assertEquals(0, state.logViewBadgeCount(ctx), "the default layout shows the Diagram library")
         state.hideLogViewTile(LogViewSectionId.NOTES)
         assertEquals(1, state.logViewBadgeCount(ctx))
         state.showLogViewTile(LogViewSectionId.DIAGRAMS)

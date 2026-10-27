@@ -1,21 +1,21 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.sp
 import com.indagium.model.LogTab
 
 /**
- * The Diagram library as a body of its own (the DIAGRAMS tile), for when AnnotationPanel is shown with `showDiagramLibrary =
- * false`. Same rows and delete confirmation as the section at the top of the Notes panel, wired to the same
+ * The Diagram library as a body of its own (the DIAGRAMS tile). Same rows and delete confirmation as the former Notes section, wired to the same
  * [AppState.seq3Sessions] calls the Notes call sites make; it is always open. The tile's own header carries the title and
  * [DiagramLibraryHeaderAction] the "+ diagram" create menu, so the list draws no header of its own.
  */
@@ -24,7 +24,12 @@ internal fun DiagramLibraryTileBody(state: AppState, tab: LogTab, modifier: Modi
     val notesLocked = LocalNotesEditLocked.current
     val items = state.seq3Sessions.libraryForTab(tab)
     var pendingDeleteId by remember(tab.id) { mutableStateOf<String?>(null) }
-    Column(modifier.fillMaxWidth()) {
+    val listScroll = rememberScrollState()
+    FlexRegion(
+        scrollState = listScroll,
+        modifier = modifier.fillMaxWidth().testTag("diagram-library-section"),
+        capDp = DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP + DIAGRAM_LIBRARY_PANEL_VERTICAL_PADDING_DP,
+    ) {
         DiagramLibrarySection(
             items = items,
             expanded = true,
@@ -39,6 +44,7 @@ internal fun DiagramLibraryTileBody(state: AppState, tab: LogTab, modifier: Modi
             onRequestDelete = { pendingDeleteId = it },
             collapsible = false,
             showHeader = false,
+            listScrollState = listScroll,
         )
     }
     pendingDeleteId?.let { id ->
@@ -58,6 +64,8 @@ internal fun DiagramLibraryTileBody(state: AppState, tab: LogTab, modifier: Modi
         }
     }
 }
+
+private const val DIAGRAM_LIBRARY_PANEL_VERTICAL_PADDING_DP = 8
 
 /** The Diagram library tile's header action: the "+ diagram" button and its create menu (From selection / From notes). */
 @Composable

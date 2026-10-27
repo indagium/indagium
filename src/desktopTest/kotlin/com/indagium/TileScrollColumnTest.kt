@@ -168,6 +168,39 @@ class TileScrollColumnTest {
     }
 
     @Test
+    fun aRootColumnEndHandleUsesTheOutsideGutterWithoutExtendingItsScrollRange() {
+        val spec = SPEC.copy(scrollEndHandle = true, scrollEndHandleOuterRoomDp = GAP)
+        val root = sideColumn(leaf(S.B, dp = 100f), leaf(S.C, dp = 100f), leaf(S.D, dp = 100f))
+        val fitting = tileGeometry(root, HOST_W, HOST_H, spec, scrolls = scrolls)
+        val region = fitting.scrollRegions.single()
+        val handle = fitting.gaps.single { it.scrolling && it.index == 3 }
+
+        assertEquals(HOST_H, fitting.rect(S.D).bottom, EPS, "the final card ends at the Log bottom")
+        assertEquals(HOST_H, region.viewport.bottom, EPS)
+        assertEquals(HOST_H, region.contentHeight, EPS, "the exterior handle room is not scrollable content")
+        assertEquals(0f, region.maxOffset, EPS, "a fitting column has no artificial gutter scroll range")
+        assertEquals(HOST_H, handle.rect.y, EPS)
+        assertEquals(GAP, handle.rect.h, EPS)
+        assertTrue(handle.scrollEndHandleOutsideViewport)
+
+        val overflow = tileGeometry(sideColumn(leaf(S.B, dp = HOST_H + 100f)), HOST_W, HOST_H, spec, scrolls = scrolls)
+        val overflowRegion = overflow.scrollRegions.single()
+        assertEquals(100f, overflowRegion.maxOffset, EPS, "the six-dp handle gutter is excluded from overflow range")
+        assertEquals(HOST_H, overflowRegion.viewport.bottom, EPS)
+        assertEquals(HOST_H, overflow.visibleCards { 0f }.rect(S.B).bottom, EPS, "the visible card edge is clipped to the viewport")
+
+        val collapsedLast = tileGeometry(root, HOST_W, HOST_H, spec, collapsed = setOf(S.D), scrolls = scrolls)
+        val collapsedHandle = collapsedLast.gaps.single { it.scrolling && it.index == 3 }
+        assertEquals(HOST_H, collapsedLast.rect(S.D).bottom, EPS, "the prior open card fills above the collapsed last tile")
+        assertFalse(collapsedHandle.resizable, "a collapsed last card keeps a non-resizable end handle")
+
+        // A nested scrolling column whose bottom is above the host does not borrow the host's exterior gutter.
+        val nested = column(column(leaf(S.B, dp = 100f), leaf(S.C, dp = 100f)), leaf(S.LOG))
+        val nestedGeometry = tileGeometry(nested, HOST_W, HOST_H, spec, scrolls = scrolls)
+        assertFalse(nestedGeometry.gaps.single { it.scrolling && it.index == 2 }.scrollEndHandleOutsideViewport)
+    }
+
+    @Test
     fun weightedTilesShareWhatThePinnedOnesLeaveAndNeverGetLessThanTheMinimum() {
         val roomy = geometry(sideColumn(leaf(S.B, dp = 200f), leaf(S.C, 1f), leaf(S.D, 3f)))
         val share = HOST_H - 2 * GAP - 200f

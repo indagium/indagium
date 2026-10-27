@@ -824,14 +824,15 @@ internal fun ToolbarTooltip(text: String, maxLines: Int = 2, detail: String? = n
 fun CloseButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    shape: Shape = CORNER_MD,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
         modifier
             .size(24.dp)
-            .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
-            .clip(CORNER_MD)
+            .background(if (hovered) tc.hv else Color.Transparent, shape)
+            .clip(shape)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },

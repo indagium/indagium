@@ -25,6 +25,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -160,6 +161,8 @@ class LogViewTilingUiTest {
 
     private fun exists(tag: String): Boolean = rule.onAllNodesWithTag(tag).fetchSemanticsNodes().isNotEmpty()
 
+    private fun textCount(text: String): Int = rule.onAllNodesWithText(text, useUnmergedTree = true).fetchSemanticsNodes().size
+
     private val filterKeys = LOG_VIEW_FILTER_TILES.map { it.key }
 
     @Test
@@ -168,18 +171,83 @@ class LogViewTilingUiTest {
         filterKeys.forEach { assertTrue(exists("tile-card-$it"), "filter tile $it is present") }
         assertTrue(exists("tile-card-log"))
         assertTrue(exists("tile-card-notes"))
-        // Defaults: AI is off, Diagram library is hidden, there is no video and no Original.
+        // Defaults: Diagram library is shown collapsed; AI is off, with no video or Original.
         assertFalse(exists("tile-card-ai"))
-        assertFalse(exists("tile-card-diagrams"))
+        assertTrue(exists("tile-card-diagrams"))
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
         assertFalse(exists("tile-card-video"))
         assertFalse(exists("tile-card-original"))
-        // Classic: filters | log | notes, left to right.
+        assertTrue(bounds("tile-card-diagrams").bottom <= bounds("tile-card-notes").top, "Diagram library sits above Notes")
+        // Classic: filters | log | Diagram library + Notes, left to right.
         assertTrue(bounds("tile-card-tags").right <= bounds("tile-card-log").left)
         assertTrue(bounds("tile-card-log").right <= bounds("tile-card-notes").left)
         // The log toolbar is the Log tile's header: grip and maximize, no separate header row.
         assertTrue(exists("tile-grip-log"))
         assertTrue(exists("tile-maximize-log"))
         assertFalse(exists("tile-header-log"))
+    }
+
+    @Test
+    fun diagramLibraryOnlyAppearsInItsLayoutTileAndKeepsItsHeaderActions() {
+        setup(height = 900)
+        assertTrue(exists("tile-card-diagrams"))
+        assertTrue(exists("diagram-library-section"), "the collapsed body stays composed for state retention")
+        assertEquals(0f, bounds("diagram-library-section").height.value, 0.1f, "the collapsed body has no visible viewport")
+        assertEquals(1, textCount("Diagram library"), "the collapsed standalone tile owns the only library heading")
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
+        rule.onNodeWithTag("tile-collapse-diagrams").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("diagram-library-section"))
+        assertEquals(1, textCount("Diagram library"), "the standalone tile owns the only library heading")
+        rule.onNodeWithText("+ diagram", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertTrue(textCount("From selection") > 0)
+        assertTrue(textCount("From notes") > 0)
+        rule.onNodeWithText("From selection", useUnmergedTree = true).performKeyInput { pressKey(Key.Escape) }
+        rule.waitForIdle()
+
+        val before = heightOf("tile-card-diagrams")
+        dragBy(assertNotNull(handleUnder("diagrams"), "the last tile in the right column has an end splitter"), 60f)
+        val after = heightOf("tile-card-diagrams")
+        assertTrue(after > before + 30f, "the Diagram library tile grew by ${after - before} dp")
+        assertEquals(after, storedHeight(LogViewSectionId.DIAGRAMS)!!, 1f, "the resize is persisted on release")
+
+        state.updateSettings { s -> s.withLogViewTileHidden(LogViewSectionId.DIAGRAMS, true) }
+        rule.waitForIdle()
+        assertFalse(exists("tile-card-diagrams"))
+        assertFalse(exists("diagram-library-section"))
+        assertEquals(0, textCount("Diagram library"), "hiding the standalone tile never puts the library back in Notes")
+    }
+
+    @Test
+    fun resettingClassicRestoresDiagramAboveNotesAndCollapsedAfterMoveHideAndExpand() {
+        setup()
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
+        state.toggleLogViewTileCollapsed(LogViewSectionId.DIAGRAMS)
+        val moved = dropTile(
+            state.currentLogViewLayout(),
+            LogViewSectionId.DIAGRAMS,
+            TileDropTarget.OnSection(LogViewSectionId.NOTES, TileEdge.BOTTOM),
+        )
+        state.commitLogViewLayout(moved)
+        rule.waitForIdle()
+        assertTrue(bounds("tile-card-diagrams").top >= bounds("tile-card-notes").bottom, "the explicit moved layout stays below Notes")
+        val customLayout = state.settings.logViewLayout
+        state.hideLogViewTile(LogViewSectionId.DIAGRAMS)
+        rule.waitForIdle()
+        assertFalse(exists("tile-card-diagrams"))
+        assertFalse(LogViewSectionId.DIAGRAMS in state.settings.logViewCollapsed)
+        assertEquals(customLayout, state.settings.logViewLayout, "hiding a tile preserves the explicit custom tree")
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("layout-menu-reset").performClick()
+        rule.waitForIdle()
+
+        assertTrue(exists("tile-card-diagrams"))
+        assertFalse(LogViewSectionId.DIAGRAMS in state.settings.logViewHidden)
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
+        assertTrue(bounds("tile-card-diagrams").bottom <= bounds("tile-card-notes").top)
     }
 
     @Test
@@ -303,7 +371,7 @@ class LogViewTilingUiTest {
     @Test
     fun hidingNotesListsItAsHiddenAndCountsOnTheBadgeWithoutTouchingTheGroupFlag() {
         setup()
-        assertFalse(exists("layout-menu-badge"), "nothing hidden beyond the preset's own Diagram library")
+        assertFalse(exists("layout-menu-badge"), "nothing is hidden in the default preset")
         assertTrue(state.annotationVisible)
         rule.onNodeWithTag("tile-hide-notes").performClick()
         rule.waitForIdle()
@@ -386,14 +454,17 @@ class LogViewTilingUiTest {
     fun f6FollowsTheTilesInReadingOrder() {
         setup(showUnfiltered = true) { it.aiPanelVisible = true }
         val tab = assertNotNull(state.tab(TAB_ID))
-        // Filters first (one stop for all eight tiles), Original and Log (the log column), Notes, AI.
+        // Filters first (one stop for all eight tiles), then Original and Log, Diagram library, Notes and AI.
         assertEquals(
-            listOf(LogViewFocusPanel.FILTERS, LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI),
+            listOf(
+                LogViewFocusPanel.FILTERS, LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.DIAGRAMS,
+                LogViewFocusPanel.NOTES, LogViewFocusPanel.AI,
+            ),
             state.logViewVisiblePanels(tab),
         )
         state.updateFilterVisible(false)
         assertEquals(
-            listOf(LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI),
+            listOf(LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.DIAGRAMS, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI),
             state.logViewVisiblePanels(tab),
         )
     }
@@ -656,9 +727,13 @@ class LogViewTilingUiTest {
 
     // The splitter (any) whose strip starts where the card [tile] ends: the handle that resizes that tile. Null when there is none.
     private fun handleUnder(tile: String): androidx.compose.ui.test.SemanticsNodeInteraction? {
-        val bottom = bounds("tile-card-$tile").bottom.value
+        val card = bounds("tile-card-$tile")
         val all = rule.onAllNodesWithContentDescription("Resize sections")
-        return (0 until all.fetchSemanticsNodes().size).map { all[it] }.firstOrNull { kotlin.math.abs(it.getBoundsInRoot().top.value - bottom) < 1f }
+        return (0 until all.fetchSemanticsNodes().size).map { all[it] }.firstOrNull { handle ->
+            val handleBounds = handle.getBoundsInRoot()
+            kotlin.math.abs(handleBounds.top.value - card.bottom.value) < 1f &&
+                handleBounds.left.value < card.right.value && handleBounds.right.value > card.left.value
+        }
     }
 
     private fun dragBy(node: androidx.compose.ui.test.SemanticsNodeInteraction, dyDp: Float) {
@@ -668,6 +743,15 @@ class LogViewTilingUiTest {
             moveBy(Offset(0f, dyDp / 2 * d))
             moveBy(Offset(0f, dyDp / 2 * d))
             up()
+        }
+        rule.waitForIdle()
+    }
+
+    private fun scrollTileFromHeader(tile: String, delta: Float) {
+        val d = rule.density.density
+        rule.onNodeWithTag("tile-card-$tile").performMouseInput {
+            moveTo(Offset(24f * d, 16f * d))
+            scroll(delta)
         }
         rule.waitForIdle()
     }
@@ -837,6 +921,68 @@ class LogViewTilingUiTest {
         val right = (state.settings.logViewLayout as TileSplit<LogViewSectionId>).children.last() as TileSplit<LogViewSectionId>
         val ai = right.children.single { (it as? TileLeaf)?.section == LogViewSectionId.AI }
         assertEquals(before - shrunk, ai.sizeDp!!, 1f)
+    }
+
+    @Test
+    fun overflowingSideColumnsEndAtTheLogAndTheirOutsideGutterHandlesStayDraggable() {
+        val classic = classicLogViewLayout(LogViewLegacySizes()) as TileSplit<LogViewSectionId>
+        val filters = classic.children.first() as TileSplit<LogViewSectionId>
+        val tallFilters = filters.copy(
+            children = filters.children.map { child ->
+                val tile = child as TileLeaf<LogViewSectionId>
+                if (tile.section == LogViewSectionId.TAGS) tile.copy(sizeDp = 900f) else tile
+            },
+        )
+        val right = classic.children.last() as TileSplit<LogViewSectionId>
+        val tallRight = right.copy(
+            children = right.children.map { child ->
+                val tile = child as TileLeaf<LogViewSectionId>
+                if (tile.section == LogViewSectionId.NOTES) tile.copy(sizeDp = 900f) else tile
+            },
+        )
+        val layout = classic.copy(children = listOf(tallFilters, classic.children[1], tallRight))
+        setup(height = 800) { s ->
+            s.updateSettings { settings ->
+                val hiddenFilters = LOG_VIEW_FILTER_TILES.filter { it != LogViewSectionId.TAGS }
+                    .fold(settings) { current, id -> current.withLogViewTileHidden(id, true) }
+                hiddenFilters.withLogViewLayout(layout)
+            }
+        }
+
+        val logBottom = bounds("tile-card-log").bottom.value
+        assertTrue(
+            rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().bottom.value > logBottom,
+            "the left card content continues beyond the viewport",
+        )
+        assertTrue(
+            rule.onNodeWithTag("tile-card-notes").getUnclippedBoundsInRoot().bottom.value > logBottom,
+            "the right card content continues beyond the viewport",
+        )
+        assertEquals(logBottom, bounds("tile-scrollbar-tags").bottom.value, 0.7f, "left scrollbar and Log share a bottom")
+        assertEquals(logBottom, bounds("tile-scrollbar-diagrams").bottom.value, 0.7f, "right scrollbar and Log share a bottom")
+
+        // At the bottom of each scroll range, the end handle sits in the real six-dp frame gutter and still receives pointer input.
+        scrollTileFromHeader("tags", 5000f)
+        val tagHandle = assertNotNull(handleUnder("tags"), "the end handle follows the left column to its viewport bottom")
+        assertEquals(logBottom, tagHandle.getBoundsInRoot().top.value, 0.7f)
+        assertEquals(LOG_VIEW_GAP_COLUMN_DP, tagHandle.getBoundsInRoot().height.value, 0.7f)
+        assertTrue(tagHandle.getBoundsInRoot().right.value <= bounds("tile-card-log").left.value, "the Tags handle stays left of the Log")
+        val tagBefore = rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().height.value
+        dragBy(tagHandle, -40f)
+        val tagAfter = rule.onNodeWithTag("tile-card-tags").getUnclippedBoundsInRoot().height.value
+        assertTrue(tagBefore - tagAfter > 10f, "the left gutter handle shrank Tags by ${tagBefore - tagAfter} dp")
+        assertEquals(tagAfter, storedHeight(LogViewSectionId.TAGS)!!, 1f, "the left gutter handle commits its drag")
+
+        scrollTileFromHeader("notes", 5000f)
+        val notesHandle = assertNotNull(handleUnder("notes"), "the end handle follows the right column to its viewport bottom")
+        assertEquals(logBottom, notesHandle.getBoundsInRoot().top.value, 0.7f)
+        assertEquals(LOG_VIEW_GAP_COLUMN_DP, notesHandle.getBoundsInRoot().height.value, 0.7f)
+        assertTrue(notesHandle.getBoundsInRoot().left.value >= bounds("tile-card-log").right.value, "the Notes handle stays right of the Log")
+        val notesBefore = rule.onNodeWithTag("tile-card-notes").getUnclippedBoundsInRoot().height.value
+        dragBy(notesHandle, -40f)
+        val notesAfter = rule.onNodeWithTag("tile-card-notes").getUnclippedBoundsInRoot().height.value
+        assertTrue(notesBefore - notesAfter > 10f, "the right gutter handle shrank Notes by ${notesBefore - notesAfter} dp")
+        assertEquals(notesAfter, storedHeight(LogViewSectionId.NOTES)!!, 1f, "the right gutter handle commits its drag")
     }
 
     @Test
@@ -1399,6 +1545,7 @@ class LogViewTilingUiTest {
     fun theGapsOnBothSidesOfTheLogAreEqualWithAndWithoutAScrollbarAndTheBarStaysInsideTheGap() {
         // Few enough filter tiles that the left column fits the window.
         setup(height = 700, width = 1000) { s ->
+            s.hideLogViewTile(LogViewSectionId.DIAGRAMS)
             listOf(LogViewSectionId.HIGHLIGHTERS, LogViewSectionId.SEQUENCES, LogViewSectionId.ISSUES, LogViewSectionId.SAVED_FILTERS)
                 .forEach(s::hideLogViewTile)
         }

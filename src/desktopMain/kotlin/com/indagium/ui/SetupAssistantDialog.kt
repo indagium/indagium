@@ -356,6 +356,7 @@ private fun LookStep(state: AppState) {
         height = null,
     )
     AppearanceBasicsRow(state)
+    TabAppearanceControls(state)
 }
 
 @Composable

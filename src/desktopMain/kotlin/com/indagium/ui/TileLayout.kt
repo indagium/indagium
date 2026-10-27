@@ -24,8 +24,9 @@ import kotlin.math.min
 // viewport the last tile that is not collapsed takes the rest. The column's content (the heights plus the gaps) may be taller than
 // the viewport; the host then scrolls it, and TileGeometry says so through a TileScrollRegion. A resize there changes only the tile
 // above the gap (the weighted siblings are first pinned at the height they have), so nothing else shrinks and the tiles below move. The
-// last tile has a gap of its own below it (TileGeometrySpec.scrollEndHandle), so it can be resized too. When the tiles report what their
-// content needs (a TileSizing, see TileContentSizing.kt) they are as tall as that, within bounds, instead of sharing by weight.
+// last tile has a gap of its own below it (TileGeometrySpec.scrollEndHandle), so it can be resized too. A caller may place that handle in a
+// bottom gutter outside the viewport without adding the gutter to the scroll range. When the tiles report what their content needs (a
+// TileSizing, see TileContentSizing.kt) they are as tall as that, within bounds, instead of sharing by weight.
 //
 // A tile alone where a column would be. A tile that is a direct child of a ROW (or the root) has no column around it, so it would be laid
 // out full height with the card stretched over empty space and no handle to size it. The caller names such tiles with TileLoneColumns
@@ -100,6 +101,8 @@ data class TileCardRect<K>(val section: K, val rect: TileRect, val scrollRegion:
  * @property scrolling true when the split that owns the gap is a scrolling column: a resize changes only the tile above the gap. The gap
  * below the last tile of such a column (when it has one) has [index] = the number of children.
  * @property scrollRegion the index in [TileGeometry.scrollRegions] of the scrolling column the gap lies in (its rect is unscrolled).
+ * @property scrollEndHandleOutsideViewport true when the trailing splitter lives in an outside host gutter and must follow the column scroll
+ * without clipping to its viewport.
  */
 data class TileGap(
     val path: List<Int>,
@@ -110,6 +113,7 @@ data class TileGap(
     val resizable: Boolean = true,
     val scrolling: Boolean = false,
     val scrollRegion: Int? = null,
+    val scrollEndHandleOutsideViewport: Boolean = false,
 )
 
 /**
@@ -153,7 +157,8 @@ data class TileGeometry<K>(val cards: List<TileCardRect<K>>, val gaps: List<Tile
  * [scrollMinDp] / [scrollMaxDp] bound the height of a pinned tile in a scrolling column. [scrollEdgeRoomDp] is the room the surface keeps
  * beyond the host's right edge (outside the width the geometry is laid out in): a scrolling column that ends at that edge draws its scrollbar
  * there, one that has a neighbour draws it in the [gapRowDp] gap, so the cards of a column are the same width whether or not it overflows.
- * [scrollEndHandle] adds a gap below its last tile, the splitter that resizes that tile.
+ * [scrollEndHandle] adds a gap below its last tile, the splitter that resizes that tile. [scrollEndHandleOuterRoomDp] moves the handle into an
+ * outside bottom gutter when the column reaches the host's bottom; the gutter is excluded from the scroll viewport and range.
  */
 data class TileGeometrySpec(
     val gapRowDp: Float,
@@ -165,6 +170,7 @@ data class TileGeometrySpec(
     val scrollMaxDp: Float = TILE_MAX_SIZE_DP,
     val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
+    val scrollEndHandleOuterRoomDp: Float = 0f,
 )
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -739,7 +745,7 @@ internal fun <K> tileGeometry(
     scrolls: (K) -> Boolean = { false },
     sizing: (K) -> TileSizing? = { null },
 ): TileGeometry<K> {
-    val layout = TileLayoutRun(spec, collapsed, scrolls, sizing, width)
+    val layout = TileLayoutRun(spec, collapsed, scrolls, sizing, width, height)
     layout.node(root, TileRect(0f, 0f, width, height), emptyList(), null)
     return TileGeometry(layout.cards, layout.gaps, layout.regions)
 }
@@ -751,6 +757,7 @@ private class TileLayoutRun<K>(
     val scrolls: (K) -> Boolean,
     val sizing: (K) -> TileSizing?,
     val hostWidth: Float,
+    val hostHeight: Float,
 ) {
     val cards = mutableListOf<TileCardRect<K>>()
     val gaps = mutableListOf<TileGap>()
@@ -786,13 +793,24 @@ private class TileLayoutRun<K>(
     private fun scrollingColumn(split: TileSplit<K>, rect: TileRect, path: List<Int>) {
         val gap = spec.gapColumnDp
         val endGap = if (spec.scrollEndHandle) gap else 0f
+        val outerEndRoom = if (rect.bottom >= hostHeight - TILE_SCROLL_EPSILON_DP) {
+            min(endGap, spec.scrollEndHandleOuterRoomDp)
+        } else {
+            0f
+        }
         val gapTotal = gap * (split.children.size - 1) + endGap
-        val extent = max(0f, rect.h - gapTotal)
+        val extent = max(0f, rect.h + outerEndRoom - gapTotal)
         val plan = scrollPlan(split, extent, spec.minTileDp, spec.scrollMinDp, spec.collapsedExtentDp, collapsed, sizing)
         val region = regions.size
         // The scrollbar lives beyond the column's right edge: in the gap to the next column, or at the host's edge in the room kept there.
         val room = if (rect.right >= hostWidth - TILE_SCROLL_EPSILON_DP) spec.scrollEdgeRoomDp else spec.gapRowDp
-        regions += TileScrollRegion(tileLeafSections(split).first(), rect, plan.sizes.sumOf { it.toDouble() }.toFloat() + gapTotal, room)
+        val contentGapTotal = gapTotal - outerEndRoom
+        regions += TileScrollRegion(
+            tileLeafSections(split).first(),
+            rect,
+            plan.sizes.sumOf { it.toDouble() }.toFloat() + contentGapTotal,
+            room,
+        )
         val width = rect.w
 
         fun resizable(tile: Int): Boolean = !plan.collapsed[tile] && plan.sizing[tile]?.resizable != false
@@ -810,7 +828,17 @@ private class TileLayoutRun<K>(
         if (endGap > 0f) {
             val count = split.children.size
             val strip = TileRect(rect.x, cursor, width, gap)
-            gaps += TileGap(path, count, split.axis, strip, extent, resizable(count - 1), scrolling = true, scrollRegion = region)
+            gaps += TileGap(
+                path,
+                count,
+                split.axis,
+                strip,
+                extent,
+                resizable(count - 1),
+                scrolling = true,
+                scrollRegion = region,
+                scrollEndHandleOutsideViewport = outerEndRoom > 0f,
+            )
         }
     }
 }

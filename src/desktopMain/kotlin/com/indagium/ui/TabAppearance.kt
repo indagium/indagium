@@ -223,7 +223,7 @@ private const val SEGMENT_DOT_DP = 12f
 internal fun tabFitContentDp(label: String, appearance: TabAppearance): Float {
     val charDp = when (appearance.style) {
         TabStripStyle.COMPACT -> MONO_COMPACT_CHAR_DP
-        TabStripStyle.SEGMENTED, TabStripStyle.QUIET -> UI_CHAR_DP
+        TabStripStyle.SEGMENTED, TabStripStyle.QUIET, TabStripStyle.OUTLINED, TabStripStyle.PILL -> UI_CHAR_DP
         else -> MONO_CHAR_DP
     }
     val longest = max(label.length, appearance.secondLine?.length ?: 0)

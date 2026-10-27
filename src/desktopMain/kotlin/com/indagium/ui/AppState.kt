@@ -6772,10 +6772,11 @@ class AppState(
             compareTabId = tabs.firstOrNull { it.id != activeTabId }?.id ?: ""
         }
         // Compare never touches showUnfiltered (it is persisted per tab, and a restore snapshot
-        // held only in memory would not survive a relaunch). It only collapses Find to the single
-        // Filtered field, the one field Compare exposes; leaving Compare restores nothing and the
-        // next Find open applies the scope policy again. Both directions change the effective
-        // filter the Filtered slot searches (see effectiveSearchFilter), hence the refresh.
+        // held only in memory would not survive a relaunch). It normally collapses Find to the
+        // single Filtered field; a maximized Original tile may explicitly open its Unfiltered
+        // field afterward. Leaving Compare restores nothing and the next plain Find open applies
+        // the scope policy again. Both directions change the effective filter the Filtered slot
+        // searches (see effectiveSearchFilter), hence the refresh.
         tabs.map { it.id }.forEach { tabId ->
             if (next) {
                 cancelSearchJob(tabId, SearchScope.UNFILTERED)
@@ -10446,7 +10447,13 @@ class AppState(
     // Each concrete panel scope owns a stable query/result/cursor slot. The legacy LogTab.search
     // property is maintained as a projection of focusedSearchScope for older diagnostics.
 
-    fun openSearch(tabId: String, scope: SearchScope? = null) {
+    fun openSearch(
+        tabId: String,
+        scope: SearchScope? = null,
+        rememberScopeChoice: Boolean = true,
+        preserveOtherActiveScope: Boolean = false,
+        allowUnfilteredInCompare: Boolean = false,
+    ) {
         val before = tab(tabId) ?: return
         // A plain open (⌘F, toolbar) while Find is already showing only refocuses the field the
         // user was in. The scope policy decides what an OPENING does; re-resolving it here would,
@@ -10455,22 +10462,60 @@ class AppState(
             refocusOpenSearch(tabId)
             return
         }
-        if (!compareMode && scope == SearchScope.UNFILTERED && before.searchMode == SearchMode.TWO_SEARCHES) {
-            openUnfilteredBesideFiltered(tabId, before)
-            return
+        if (preserveOtherActiveScope && scope != null && openScopeBesideActiveSearch(tabId, before, scope)) return
+        if (openUnfilteredBesideFilteredIfNeeded(tabId, before, scope)) return
+        openSearchInResolvedMode(tabId, before, scope, rememberScopeChoice, allowUnfilteredInCompare)
+    }
+
+    private fun openScopeBesideActiveSearch(tabId: String, before: LogTab, scope: SearchScope): Boolean {
+        val otherScope = if (scope == SearchScope.FILTERED) SearchScope.UNFILTERED else SearchScope.FILTERED
+        if (!before.searchFor(otherScope).active) return false
+        openScopeBesideActiveScope(tabId, before, scope)
+        return true
+    }
+
+    private fun openUnfilteredBesideFilteredIfNeeded(tabId: String, before: LogTab, scope: SearchScope?): Boolean {
+        if (compareMode || scope != SearchScope.UNFILTERED || before.searchMode != SearchMode.TWO_SEARCHES) return false
+        openUnfilteredBesideFiltered(tabId, before)
+        return true
+    }
+
+    private fun openSearchInResolvedMode(
+        tabId: String,
+        before: LogTab,
+        scope: SearchScope?,
+        rememberScopeChoice: Boolean,
+        allowUnfilteredInCompare: Boolean,
+    ) {
+        val mode = findOpenMode(before, scope, allowUnfilteredInCompare)
+        val focusScope = if (scope != null && (!compareMode || allowUnfilteredInCompare)) {
+            scope
+        } else {
+            focusScopeFor(mode, before.focusedSearchScope)
         }
-        val mode = findOpenMode(before, scope)
-        val focusScope = if (scope != null && !compareMode) scope else focusScopeFor(mode, before.focusedSearchScope)
         // An explicit scope (⌘⌥F) counts as a manual mode choice for "Last search mode".
-        if (scope != null && !compareMode) updateSettings { it.copy(lastManualSearchMode = mode) }
+        if (scope != null && !compareMode && rememberScopeChoice) updateSettings { it.copy(lastManualSearchMode = mode) }
         if (mode != SearchMode.FILTERED && !compareMode) {
             setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
         }
         val scopes = scopesForMode(mode)
-        (SearchScope.entries - scopes.toSet()).forEach {
-            cancelSearchJob(tabId, it)
-            discardSearchNavigationsForScope(tabId, it)
+        deactivateSearchScopesOutside(tabId, scopes)
+        activateSearchScopes(tabId, mode, scopes, focusScope)
+    }
+
+    private fun deactivateSearchScopesOutside(tabId: String, scopes: List<SearchScope>) {
+        (SearchScope.entries - scopes.toSet()).forEach { scope ->
+            cancelSearchJob(tabId, scope)
+            discardSearchNavigationsForScope(tabId, scope)
         }
+    }
+
+    private fun activateSearchScopes(
+        tabId: String,
+        mode: SearchMode,
+        scopes: List<SearchScope>,
+        focusScope: SearchScope,
+    ) {
         val newlyActive = mutableListOf<SearchScope>()
         upTab(tabId) { t ->
             var sessions = t.searches
@@ -10495,6 +10540,84 @@ class AppState(
         }
         // Closed slots kept their last matches but were not recomputed while closed.
         newlyActive.forEach { scheduleSearchRecompute(tabId, it) }
+    }
+
+    /**
+     * Ctrl/Cmd+F while a log tile is maximized opens Find for the tile that is actually on screen.
+     * This resolves compare panes from the current visible pair rather than searchFocusTabId, which
+     * can still name the pane that had focus before a tile was maximized. A compare Original tile
+     * explicitly opens its Unfiltered Find slot; ordinary compare search remains Filtered-only.
+     */
+    fun openSearchInMaximizedLogView(): Boolean {
+        val (visibleTab, scope) = maximizedLogSearchTarget() ?: return false
+        openSearch(
+            visibleTab.id,
+            scope,
+            rememberScopeChoice = false,
+            preserveOtherActiveScope = true,
+            allowUnfilteredInCompare = compareMode && scope == SearchScope.UNFILTERED,
+        )
+        return true
+    }
+
+    private fun maximizedLogSearchTarget(): Pair<LogTab, SearchScope>? {
+        val maximized = logViewMaximized ?: return null
+        if (!activeSurfaceShowsLogView()) return null
+        val target = if (compareMode) {
+            compareMaximizedLogSearchTarget(maximized)
+        } else {
+            singleMaximizedLogSearchTarget(maximized)
+        }
+        return target?.takeIf { (tab, scope) ->
+            !tab.isCaptureLauncher && (scope != SearchScope.UNFILTERED || tab.showUnfiltered)
+        }
+    }
+
+    private fun activeSurfaceShowsLogView(): Boolean = when (val surface = activeSurface) {
+        null -> true
+        is ActiveSurface.Log -> surface.tabId == activeTabId
+        else -> false
+    }
+
+    private fun compareMaximizedLogSearchTarget(maximized: LogViewSectionId): Pair<LogTab, SearchScope>? {
+        val (left, right) = compareTabs() ?: return null
+        return when (maximized) {
+            LogViewSectionId.LOG_A -> left to SearchScope.FILTERED
+            LogViewSectionId.ORIGINAL_A -> left to SearchScope.UNFILTERED
+            LogViewSectionId.LOG_B -> right to SearchScope.FILTERED
+            LogViewSectionId.ORIGINAL_B -> right to SearchScope.UNFILTERED
+            else -> null
+        }
+    }
+
+    private fun singleMaximizedLogSearchTarget(maximized: LogViewSectionId): Pair<LogTab, SearchScope>? {
+        val visibleTab = activeTab()?.takeUnless { it.isCaptureLauncher } ?: return null
+        return when (maximized) {
+            LogViewSectionId.LOG -> visibleTab to SearchScope.FILTERED
+            LogViewSectionId.ORIGINAL -> visibleTab to SearchScope.UNFILTERED
+            else -> null
+        }
+    }
+
+    /** Opens one explicit search scope while keeping its already-active sibling field available. */
+    private fun openScopeBesideActiveScope(tabId: String, before: LogTab, scope: SearchScope) {
+        if (scope == SearchScope.UNFILTERED && !before.showUnfiltered && !compareMode) {
+            setOriginalVisible(tabId, true, OriginalVisibilityOrigin.SEARCH_REVEAL)
+        }
+        val wasActive = before.searchFor(scope).active
+        upTab(tabId) { current ->
+            val slot = current.searchFor(scope).copy(
+                active = true,
+                focusNonce = current.searchFor(scope).focusNonce + 1,
+            )
+            current.copy(
+                searchMode = SearchMode.TWO_SEARCHES,
+                focusedSearchScope = scope,
+                searches = current.searches.with(scope, slot),
+                search = slot,
+            )
+        }
+        if (!wasActive) scheduleSearchRecompute(tabId, scope)
     }
 
     // ⌘⌥F in Two searches opens (or refocuses) the Unfiltered field without touching Filtered,
@@ -10634,10 +10757,14 @@ class AppState(
         SearchMode.FILTERED -> SearchScope.FILTERED
     }
 
-    // Which mode a Find open lands on: Compare always uses Filtered, an explicit scope (⌘⌥F)
-    // picks its single field, and a plain open follows the scope policy.
-    private fun findOpenMode(before: LogTab, scope: SearchScope?): SearchMode = when {
-        compareMode -> SearchMode.FILTERED
+    // Which mode a Find open lands on: Compare defaults to Filtered; only the maximized Original
+    // tile path may explicitly open Unfiltered there. A plain single-view open follows the policy.
+    private fun findOpenMode(
+        before: LogTab,
+        scope: SearchScope?,
+        allowUnfilteredInCompare: Boolean = false,
+    ): SearchMode = when {
+        compareMode && !(allowUnfilteredInCompare && scope == SearchScope.UNFILTERED) -> SearchMode.FILTERED
         scope == SearchScope.FILTERED -> SearchMode.FILTERED
         scope == SearchScope.UNFILTERED -> SearchMode.UNFILTERED
         else -> resolveSearchPolicy(
@@ -10776,8 +10903,8 @@ class AppState(
 
     // Compare mode's panes never render their own stored `.filter` as is — CompareView.kt shows
     // compareDisplayedFilters(compareFilterTarget, A's filter, B's filter): the filter on the pane(s) it applies
-    // to, everything (plus the other tab's highlighters) on the other. Search must match against that same
-    // *displayed* filter. Compare searches each tab with its Filtered slot only.
+    // to, everything (plus the other tab's highlighters) on the other. Filtered search must match against that same
+    // *displayed* filter. An explicit Unfiltered search scans the full log.
     private fun effectiveSearchFilter(tabId: String, stored: LogTab): Filter {
         if (!compareMode) return stored.filter
         val left = tab(activeTabId) ?: return stored.filter
@@ -10819,7 +10946,9 @@ class AppState(
                 return@launch
             }
             val t = stored.copy(filter = effectiveSearchFilter(tabId, stored))
-            val applyFilter = scope == SearchScope.FILTERED || compareMode
+            // Compare applies its displayed filter only to the Filtered slot. An explicit
+            // Unfiltered search (used by a maximized Original pane) scans every log row.
+            val applyFilter = scope == SearchScope.FILTERED
             val cancellationCheck = CancellationCheck { ensureActive() }
             val result = searchScanMutex.withLock {
                 ensureActive()

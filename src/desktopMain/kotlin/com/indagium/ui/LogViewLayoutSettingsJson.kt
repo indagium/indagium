@@ -87,7 +87,7 @@ internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettin
     return copy(
         logViewLayout = single.first,
         logViewHidden = single.second,
-        logViewCollapsed = idsFromJson(o["logViewCollapsed"])?.distinct().orEmpty(),
+        logViewCollapsed = idsFromJson(o["logViewCollapsed"])?.distinct() ?: logViewCollapsed,
         logViewTilesLocked = (o["logViewTilesLocked"] as? JsonPrimitive)?.booleanOrNull ?: logViewTilesLocked,
         lastLogViewPreset = presetFromJson(o["lastLogViewPreset"], LogViewScope.SINGLE, lastLogViewPreset),
         compareLayout = compare.first,

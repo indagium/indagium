@@ -98,6 +98,11 @@ internal fun <K> Modifier.tileScrollRegion(scroll: TileScrollState<K>, region: T
         .scrollable(scroll.scrollableOf(region.key), Orientation.Vertical, enabled = region.scrolls, reverseDirection = true)
         .bringIntoViewResponder(TileRegionBringIntoView(scroll, region, rect))
 
+/** The trailing splitter is placed at its already-scrolled content position, outside the viewport clip. */
+internal fun <K> Modifier.tileScrollEndHandleRegion(scroll: TileScrollState<K>, region: TileScrollRegion<K>): Modifier =
+    this
+        .scrollable(scroll.scrollableOf(region.key), Orientation.Vertical, enabled = region.scrolls, reverseDirection = true)
+
 // Scrolls the column so the requested rect (px, in the element's own coordinates) is inside the viewport.
 private class TileRegionBringIntoView<K>(
     private val scroll: TileScrollState<K>,

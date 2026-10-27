@@ -4,6 +4,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -13,11 +14,15 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.unit.width
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.TabSizeMode
+import com.indagium.model.TabStripStyle
 import com.indagium.ui.AppState
 import com.indagium.ui.LICENSE_VERSION
 import com.indagium.ui.SetupAssistantDialog
+import com.indagium.ui.TAB_STYLE_GRID_TAG
 import com.indagium.update.ReleaseInfo
 import org.junit.Rule
 import org.junit.Test
@@ -71,6 +76,30 @@ class SetupAssistantUiTest {
 
         rule.onNodeWithText("Pick a look").assertExists()
         assertEquals(before, state.settings)
+    }
+
+    @Test
+    fun lookStepIncludesLiveTabAppearanceControls() {
+        val state = AppState()
+        state.maybeShowSetupAssistantOnStartup()
+        install(state)
+        rule.onNodeWithText("Continue").performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("tab-style-PILL").performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(TabStripStyle.PILL, state.settings.tabStripStyle)
+
+        val grid = rule.onNodeWithTag(TAB_STYLE_GRID_TAG).getBoundsInRoot()
+        val firstPreview = rule.onNodeWithTag("tab-style-CURRENT").getBoundsInRoot()
+        val fifthPreview = rule.onNodeWithTag("tab-style-COMPACT").getBoundsInRoot()
+        assertEquals(grid.left, firstPreview.left)
+        assertEquals(grid.right, fifthPreview.right)
+        assertEquals(firstPreview.width, rule.onNodeWithTag("tab-style-label-CURRENT").getBoundsInRoot().width)
+
+        rule.onNodeWithText("Fit label").performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(TabSizeMode.FIT, state.settings.tabSizeMode)
     }
 
     @Test

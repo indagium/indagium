@@ -172,17 +172,17 @@ private fun filterColumn(ids: List<LogViewSectionId>, widthDp: Float): LogViewNo
 private fun classicRight(sizes: LogViewLegacySizes): LogViewNode {
     val split = share(sizes.rightSidebarSplit)
     return lvCol(
+        lvLeaf(LogViewSectionId.DIAGRAMS, DIAGRAMS_WEIGHT),
         lvLeaf(LogViewSectionId.VIDEO, VIDEO_WEIGHT),
         lvLeaf(LogViewSectionId.NOTES, split),
         lvLeaf(LogViewSectionId.AI, 1f - split),
-        lvLeaf(LogViewSectionId.DIAGRAMS, DIAGRAMS_WEIGHT),
         dp = pinnedDp(sizes.annotationPanelWidth, DEFAULT_RIGHT_WIDTH_DP),
     )
 }
 
 /**
  * Classic: today's log view. Filter column (pinned to filterPanelWidth) | Original above Log (equal weights) | right column
- * (pinned to annotationPanelWidth): Video, Notes and AI (weights from rightSidebarSplit), Diagram library. Inside the filter
+ * (pinned to annotationPanelWidth): Diagram library, Video, Notes and AI (weights from rightSidebarSplit). Inside the filter
  * column Tags, Message rules and Saved filters start taller; Log level is pinned to its natural height.
  */
 internal fun classicLogViewLayout(sizes: LogViewLegacySizes): LogViewNode = lvRow(
@@ -278,7 +278,7 @@ private val DIAGRAMS_ONLY = setOf(LogViewSectionId.DIAGRAMS)
 
 /**
  * A ready-made arrangement. [layout] is the tree, [hidden] the tiles the preset hides: layout + hidden together cover every
- * tile of [scope], and a hidden tile either keeps its place in [layout] (Classic's Diagram library) or is left out of it (Log
+ * tile of [scope], and a hidden tile either keeps its place in [layout] (for example, Filters on top's Diagram library) or is left out of it (Log
  * focus's filter tiles), in which case sanitizing re-inserts it at its default anchor when the preset is applied.
  */
 enum class LogViewLayoutPreset(
@@ -288,7 +288,7 @@ enum class LogViewLayoutPreset(
     val layout: (LogViewLegacySizes) -> TileNode<LogViewSectionId>,
     val hidden: Set<LogViewSectionId>,
 ) {
-    CLASSIC(LogViewPresetId.CLASSIC, "Classic", LogViewScope.SINGLE, ::classicLogViewLayout, DIAGRAMS_ONLY),
+    CLASSIC(LogViewPresetId.CLASSIC, "Classic", LogViewScope.SINGLE, ::classicLogViewLayout, emptySet()),
     REVIEW(LogViewPresetId.REVIEW, "Review", LogViewScope.SINGLE, { reviewLayout() }, emptySet()),
     LOG_FOCUS(
         LogViewPresetId.LOG_FOCUS,
@@ -298,8 +298,8 @@ enum class LogViewLayoutPreset(
         LOG_VIEW_FILTER_TILES.toSet() + LogViewSectionId.DIAGRAMS,
     ),
     FILTERS_ON_TOP(LogViewPresetId.FILTERS_ON_TOP, "Filters on top", LogViewScope.SINGLE, ::filtersOnTopLayout, DIAGRAMS_ONLY),
-    COMPARE_GRID(LogViewPresetId.COMPARE_GRID, "Compare grid", LogViewScope.COMPARE, ::compareGridLayout, DIAGRAMS_ONLY),
-    COMPARE_COLUMNS(LogViewPresetId.COMPARE_COLUMNS, "Compare rows", LogViewScope.COMPARE, ::compareColumnsLayout, DIAGRAMS_ONLY),
+    COMPARE_GRID(LogViewPresetId.COMPARE_GRID, "Compare grid", LogViewScope.COMPARE, ::compareGridLayout, emptySet()),
+    COMPARE_COLUMNS(LogViewPresetId.COMPARE_COLUMNS, "Compare rows", LogViewScope.COMPARE, ::compareColumnsLayout, emptySet()),
     ;
 
     companion object {
@@ -402,7 +402,7 @@ internal val LOG_VIEW_DEFAULT_ANCHORS: Map<LogViewSectionId, Pair<LogViewSection
     LogViewSectionId.ORIGINAL to (LogViewSectionId.LOG to TileEdge.TOP),
     LogViewSectionId.ORIGINAL_A to (LogViewSectionId.LOG_A to TileEdge.TOP),
     LogViewSectionId.ORIGINAL_B to (LogViewSectionId.LOG_B to TileEdge.TOP),
-    LogViewSectionId.DIAGRAMS to (LogViewSectionId.NOTES to TileEdge.BOTTOM),
+    LogViewSectionId.DIAGRAMS to (LogViewSectionId.NOTES to TileEdge.TOP),
     LogViewSectionId.VIDEO to (LogViewSectionId.NOTES to TileEdge.TOP),
     LogViewSectionId.AI to (LogViewSectionId.NOTES to TileEdge.BOTTOM),
 )
@@ -459,7 +459,7 @@ private fun defaultPreset(scope: LogViewScope): LogViewLayoutPreset =
  * - the first duplicate of a tile wins, tiles of the other scope are dropped, weights are sanitized and pinned sizes clamped
  *   to 80..2000 dp;
  * - tiles missing from the tree are inserted beside their default anchor ([LOG_VIEW_DEFAULT_ANCHORS]: Original above Log,
- *   Diagram library below Notes, Video above Notes, AI below Notes, a filter tile below its predecessor in declaration order,
+ *   Diagram library above Notes, Video above Notes, AI below Notes, a filter tile below its predecessor in declaration order,
  *   Tags above the first filter tile), and appended at the trailing page edge when the anchor is not in the tree either;
  * - an empty tree falls back to the default preset (Classic / Compare grid);
  * - the log tiles and the toolbar tile are never hidden, and the hidden list keeps only distinct tiles of [scope] (a hidden tile
@@ -555,7 +555,17 @@ internal fun AppSettings.withLogViewTileHidden(id: LogViewSectionId, hidden: Boo
 internal fun AppSettings.withLogViewPreset(preset: LogViewLayoutPreset, sizes: LogViewLegacySizes): AppSettings {
     if (preset.scope != LogViewScope.SINGLE) return this
     val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.SINGLE, toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
-    return copy(logViewLayout = state.first, logViewHidden = state.second, lastLogViewPreset = preset.id)
+    val collapsed = if (preset == LogViewLayoutPreset.CLASSIC) {
+        (logViewCollapsed + LogViewSectionId.DIAGRAMS).distinct()
+    } else {
+        logViewCollapsed
+    }
+    return copy(
+        logViewLayout = state.first,
+        logViewHidden = state.second,
+        logViewCollapsed = collapsed,
+        lastLogViewPreset = preset.id,
+    )
 }
 
 /** Collapses or expands [id] (to its header). The log tiles cannot collapse. */
@@ -580,7 +590,13 @@ internal fun AppSettings.withCompareTileHidden(id: LogViewSectionId, hidden: Boo
 internal fun AppSettings.withComparePreset(preset: LogViewLayoutPreset, sizes: LogViewLegacySizes): AppSettings {
     if (preset.scope != LogViewScope.COMPARE) return this
     val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.COMPARE)
-    return copy(compareLayout = state.first, compareHidden = state.second, lastComparePreset = preset.id)
+    val collapsed = (logViewCollapsed + LogViewSectionId.DIAGRAMS).distinct()
+    return copy(
+        compareLayout = state.first,
+        compareHidden = state.second,
+        logViewCollapsed = collapsed,
+        lastComparePreset = preset.id,
+    )
 }
 
 // ---------------------------------------------------------------------------------------------------------------

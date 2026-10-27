@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Shape
@@ -56,8 +57,13 @@ import com.indagium.model.TabStripStyle
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
+import java.awt.image.BufferedImage
 import java.io.File
+import javax.imageio.ImageIO
 import kotlin.io.path.createTempDirectory
+import kotlin.math.abs
+import kotlin.math.roundToInt
+import kotlin.math.sqrt
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -69,6 +75,22 @@ import kotlin.test.assertTrue
  */
 @OptIn(ExperimentalTestApi::class)
 class TabStripStyleUiTest {
+    private companion object {
+        const val TAB_ACCENT_PIXEL_TOLERANCE = 32
+        const val TAB_CAPSULE_SOURCE_PIXEL_TOLERANCE = 12
+        const val RAISED_CORNER_RADIUS_DP = 8f
+        const val STANDARD_ROUNDED_CORNER_RADIUS_DP = 6f
+        const val ACTIVE_CONTOUR_DIAGONAL_FACTOR = 0.7f
+        const val HALF_PIXEL_OFFSET = 0.5f
+        const val SOURCE_BEND_DEPTH_DP = 5f
+        const val ARGB_RED_SHIFT = 16
+        const val ARGB_GREEN_SHIFT = 8
+        const val ARGB_CHANNEL_MASK = 0xff
+        const val LOG_SOURCE_BLUE_MIN = 210
+        const val LOG_BLUE_GREEN_GAP_MIN = 20
+        const val LOG_GREEN_RED_GAP_MIN = 20
+    }
+
     @get:Rule
     val rule = createComposeRule()
 
@@ -116,6 +138,195 @@ class TabStripStyleUiTest {
     private fun bounds(tag: String): DpRect = rule.onNodeWithTag(tag).getBoundsInRoot()
 
     private fun exists(tag: String): Boolean = rule.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+
+    private fun saveTabContourQaImage(image: ImageBitmap) {
+        val directory = File("build/tab-style-qa").apply { mkdirs() }
+        val pixels = image.toPixelMap()
+        val rendered = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until image.height) for (x in 0 until image.width) rendered.setRGB(x, y, pixels[x, y].toArgb())
+        check(ImageIO.write(rendered, "png", File(directory, "rounded-contours.png")))
+    }
+
+    private data class PixelPoint(val x: Int, val y: Int)
+
+    private fun roundedContourRadius(style: TabStripStyle, image: ImageBitmap, density: Float): Float = when (style) {
+        TabStripStyle.RAISED -> RAISED_CORNER_RADIUS_DP * density
+        TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED -> STANDARD_ROUNDED_CORNER_RADIUS_DP * density
+        TabStripStyle.PILL -> minOf(image.width, image.height) / 2f
+        else -> error("not a rounded style: $style")
+    }
+
+    private fun activeContourPoint(radius: Float, thickness: Float): PixelPoint {
+        val innerRadius = radius - thickness / 2f
+        val x = radius - innerRadius * ACTIVE_CONTOUR_DIAGONAL_FACTOR
+        val y = radius - innerRadius * ACTIVE_CONTOUR_DIAGONAL_FACTOR
+        return PixelPoint((x - HALF_PIXEL_OFFSET).roundToInt(), (y - HALF_PIXEL_OFFSET).roundToInt())
+    }
+
+    private fun sourceBendPoint(
+        position: TabStripPosition,
+        width: Int,
+        height: Int,
+        radius: Float,
+        thickness: Float,
+        density: Float,
+    ): PixelPoint {
+        val depth = SOURCE_BEND_DEPTH_DP * density
+        val innerRadius = radius - thickness / 2f
+        val along = radius - sqrt(innerRadius * innerRadius - (radius - depth) * (radius - depth))
+        val depthIndex = (depth - HALF_PIXEL_OFFSET).roundToInt()
+        val alongIndex = (along - HALF_PIXEL_OFFSET).roundToInt()
+        return when (position) {
+            TabStripPosition.TOP -> PixelPoint(alongIndex, depthIndex)
+            TabStripPosition.BOTTOM -> PixelPoint(alongIndex, height - depthIndex - 1)
+            TabStripPosition.LEFT -> PixelPoint(depthIndex, alongIndex)
+            TabStripPosition.RIGHT -> PixelPoint(width - depthIndex - 1, alongIndex)
+        }
+    }
+
+    private fun activeContourPoint(position: TabStripPosition, width: Int, height: Int, curve: PixelPoint): PixelPoint = when (position) {
+        TabStripPosition.TOP -> PixelPoint(curve.x, height - curve.y - 1)
+        TabStripPosition.BOTTOM -> curve
+        TabStripPosition.LEFT -> PixelPoint(width - curve.y - 1, curve.x)
+        TabStripPosition.RIGHT -> PixelPoint(curve.y, curve.x)
+    }
+
+    private fun hasLogSourceBlueAround(image: ImageBitmap, point: PixelPoint): Boolean {
+        val pixels = image.toPixelMap()
+        for (y in point.y - 1..point.y + 1) {
+            for (x in point.x - 1..point.x + 1) {
+                if (x in 0 until image.width && y in 0 until image.height && hasLogSourceBlue(pixels[x, y].toArgb())) return true
+            }
+        }
+        return false
+    }
+
+    private fun hasColorNear(image: ImageBitmap, point: PixelPoint, target: Int, tolerance: Int): Boolean {
+        val pixels = image.toPixelMap()
+        val targetRed = target shr ARGB_RED_SHIFT and ARGB_CHANNEL_MASK
+        val targetGreen = target shr ARGB_GREEN_SHIFT and ARGB_CHANNEL_MASK
+        val targetBlue = target and ARGB_CHANNEL_MASK
+        for (y in point.y - 1..point.y + 1) {
+            for (x in point.x - 1..point.x + 1) {
+                if (x !in 0 until image.width || y !in 0 until image.height) continue
+                val color = pixels[x, y].toArgb()
+                val red = color shr ARGB_RED_SHIFT and ARGB_CHANNEL_MASK
+                val green = color shr ARGB_GREEN_SHIFT and ARGB_CHANNEL_MASK
+                val blue = color and ARGB_CHANNEL_MASK
+                if (abs(red - targetRed) <= tolerance &&
+                    abs(green - targetGreen) <= tolerance &&
+                    abs(blue - targetBlue) <= tolerance
+                ) return true
+            }
+        }
+        return false
+    }
+
+    private fun straightContourPoint(position: TabStripPosition, width: Int, height: Int): PixelPoint = when (position) {
+        TabStripPosition.TOP -> PixelPoint(width / 2, 1)
+        TabStripPosition.BOTTOM -> PixelPoint(width / 2, height - 2)
+        TabStripPosition.LEFT -> PixelPoint(1, height / 2)
+        TabStripPosition.RIGHT -> PixelPoint(width - 2, height / 2)
+    }
+
+    private fun hasLogSourceBlue(argb: Int): Boolean {
+        val red = argb shr ARGB_RED_SHIFT and ARGB_CHANNEL_MASK
+        val green = argb shr ARGB_GREEN_SHIFT and ARGB_CHANNEL_MASK
+        val blue = argb and ARGB_CHANNEL_MASK
+        return blue >= LOG_SOURCE_BLUE_MIN &&
+            blue - green >= LOG_BLUE_GREEN_GAP_MIN &&
+            green - red >= LOG_GREEN_RED_GAP_MIN
+    }
+
+    private fun raisedRoundedCorner(position: TabStripPosition, width: Int, height: Int): PixelPoint = when (position) {
+        TabStripPosition.TOP, TabStripPosition.LEFT -> PixelPoint(0, 0)
+        TabStripPosition.BOTTOM -> PixelPoint(0, height - 1)
+        TabStripPosition.RIGHT -> PixelPoint(width - 1, 0)
+    }
+
+    private fun assertRoundedContourPixels(
+        style: TabStripStyle,
+        position: TabStripPosition,
+        image: ImageBitmap,
+        density: Float,
+        blue: Int,
+        accent: Int,
+    ) {
+        val pixels = image.toPixelMap()
+        val radius = roundedContourRadius(style, image, density)
+        val sourceBend = sourceBendPoint(position, image.width, image.height, radius, 3f * density, density)
+        val activeCurve = activeContourPoint(radius, 2f * density)
+        val active = activeContourPoint(position, image.width, image.height, activeCurve)
+        val behind = tabStripBackground(style, LIGHT_THEME).toArgb()
+        val straight = straightContourPoint(position, image.width, image.height)
+        val sourcePixel = pixels[straight.x, straight.y].toArgb()
+        val capsuleSide = style == TabStripStyle.PILL && (position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT)
+        assertTrue(
+            sourcePixel == blue || (capsuleSide && hasColorNear(image, straight, blue, TAB_CAPSULE_SOURCE_PIXEL_TOLERANCE)),
+            "$style on $position: source color is present inside the outer edge band",
+        )
+        assertTrue(
+            hasLogSourceBlueAround(image, sourceBend),
+            "$style on $position: source blue reaches 5 dp into the rounded corner, beyond a straight 3 dp band",
+        )
+        if (style == TabStripStyle.OUTLINED || style == TabStripStyle.PILL) {
+            val activePixel = pixels[active.x, active.y].toArgb()
+            assertTrue(
+                activePixel == accent || hasColorNear(image, active, accent, TAB_ACCENT_PIXEL_TOLERANCE),
+                "$style on $position: active accent follows the content curve, allowing only an antialiased edge blend",
+            )
+        }
+        val corner = if (style == TabStripStyle.RAISED) raisedRoundedCorner(position, image.width, image.height) else PixelPoint(0, 0)
+        assertEquals(behind, pixels[corner.x, corner.y].toArgb(), "$style on $position: a genuinely rounded outer corner remains outside the stripe")
+    }
+
+    @Composable
+    private fun roundedContourPreview(styles: List<TabStripStyle>) {
+        CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+            Column(Modifier.width(720.dp).testTag("tab-rounded-contour-preview")) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AppText("Style", color = LIGHT_THEME.ts, fontSize = 9.sp, modifier = Modifier.width(54.dp))
+                    TabStripPosition.entries.forEach { position ->
+                        AppText(position.name, color = LIGHT_THEME.ts, fontSize = 9.sp, modifier = Modifier.width(160.dp))
+                    }
+                }
+                styles.forEach { style ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AppText(style.name, color = LIGHT_THEME.ts, fontSize = 9.sp, modifier = Modifier.width(54.dp))
+                        TabStripPosition.entries.forEach { position ->
+                            Box(Modifier.width(160.dp).background(tabStripBackground(style, LIGHT_THEME))) {
+                                TabShell(
+                                    pointerKey = "${style.name}-${position.name}",
+                                    label = "contour.log",
+                                    tooltip = "contour.log",
+                                    isActive = true,
+                                    showClose = false,
+                                    onClick = {},
+                                    onClose = {},
+                                    appearance = TabAppearance(style = style, showStripe = true, position = position),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun assertRoundedContours(styles: List<TabStripStyle>, density: Float, blue: Int, accent: Int) {
+        styles.forEach { style ->
+            TabStripPosition.entries.forEach { position ->
+                assertRoundedContourPixels(
+                    style = style,
+                    position = position,
+                    image = rule.onNodeWithTag("tab-${style.name}-${position.name}").captureToImage(),
+                    density = density,
+                    blue = blue,
+                    accent = accent,
+                )
+            }
+        }
+    }
 
     private fun style(style: TabStripStyle) {
         state.updateSettings { it.copy(tabStripStyle = style) }
@@ -393,6 +604,129 @@ class TabStripStyleUiTest {
         assertFalse(state.settings.tabCloseOnEvery)
     }
 
+    @Test
+    fun theTenStylePickerUsesFiveColumnsWheneverTheAvailableWidthAllowsIt() {
+        state = newState()
+        listOf(700, 480, 1100).forEach { width ->
+            rule.setContent {
+                CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                    Column(Modifier.width(width.dp)) { TabsAppearanceSettings(state) }
+                }
+            }
+            rule.waitForIdle()
+            val styles = TabStripStyle.entries
+            assertEquals(10, styles.size)
+            val firstRow = styles.take(5).map { bounds("tab-style-${it.name}") }
+            val secondRow = styles.drop(5).map { bounds("tab-style-${it.name}") }
+            val firstRowLabels = styles.take(5).map { bounds("tab-style-label-${it.name}") }
+            val grid = bounds(TAB_STYLE_GRID_TAG)
+            assertTrue(firstRow.all { it.top == firstRow.first().top }, "first five share a row at $width dp: $firstRow")
+            assertTrue(secondRow.all { it.top == secondRow.first().top }, "last five share a row at $width dp: $secondRow")
+            assertTrue(secondRow.first().top > firstRow.first().top, "the tenth style starts the second row at $width dp")
+            assertTrue(firstRow.zipWithNext().all { (left, right) -> left.left < right.left })
+            assertEquals(grid.left, firstRow.first().left, "first preview reaches the left grid edge at $width dp")
+            assertEquals(grid.right, firstRow.last().right, "fifth preview reaches the right grid edge at $width dp")
+            firstRow.zip(firstRowLabels).forEach { (preview, label) ->
+                assertEquals(preview.width, label.width, "preview and caption use equal full-width columns at $width dp")
+            }
+        }
+
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column(Modifier.width(420.dp)) { TabsAppearanceSettings(state) }
+            }
+        }
+        rule.waitForIdle()
+        val fitsFour = TabStripStyle.entries.take(4).map { bounds("tab-style-${it.name}") }
+        val narrowGrid = bounds(TAB_STYLE_GRID_TAG)
+        assertTrue(fitsFour.all { it.top == fitsFour.first().top })
+        assertEquals(narrowGrid.left, fitsFour.first().left)
+        assertEquals(narrowGrid.right, fitsFour.last().right)
+        assertTrue(bounds("tab-style-${TabStripStyle.COMPACT.name}").top > fitsFour.first().top)
+        val firstCellWidth = fitsFour.first().width
+        TabStripStyle.entries.forEach { style ->
+            assertEquals(firstCellWidth, bounds("tab-style-${style.name}").width, "$style keeps the same narrow-grid column width")
+            assertEquals(
+                firstCellWidth,
+                bounds("tab-style-label-${style.name}").width,
+                "$style caption spans the same narrow-grid column",
+            )
+        }
+    }
+
+    @Test
+    fun closeButtonHoverBackgroundFollowsRoundedTabStyleOnEveryStripEdge() {
+        val roundedStyles = listOf(TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL)
+        val cases = roundedStyles.flatMap { style -> TabStripPosition.entries.map { position -> style to position } } +
+            (TabStripStyle.CURRENT to TabStripPosition.TOP)
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column(Modifier.width(720.dp)) {
+                    cases.forEach { (style, position) ->
+                        Box(Modifier.width(180.dp).background(tabStripBackground(style, LIGHT_THEME))) {
+                            TabShell(
+                                pointerKey = "close-hover-${style.name}-${position.name}",
+                                label = "close.log",
+                                tooltip = "close.log",
+                                isActive = true,
+                                showClose = true,
+                                onClick = {},
+                                onClose = {},
+                                appearance = TabAppearance(style = style, position = position),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+        val density = rule.density.density
+        cases.forEach { (style, position) ->
+            val tabNode = rule.onNodeWithTag("tab-close-hover-${style.name}-${position.name}")
+            val node = rule.onNodeWithTag("tab-close-close-hover-${style.name}-${position.name}")
+            val bounds = node.getBoundsInRoot()
+            assertEquals(24.dp, bounds.width, "$style on $position keeps the close hitbox width")
+            assertEquals(24.dp, bounds.height, "$style on $position keeps the close hitbox height")
+
+            tabNode.performMouseInput { moveTo(Offset(center.x / 2f, center.y)) }
+            rule.waitForIdle()
+            val before = node.captureToImage().toPixelMap()
+            node.performMouseInput { moveTo(center) }
+            rule.waitForIdle()
+            val hovered = node.captureToImage().toPixelMap()
+            val centerProbe = PixelPoint(hovered.width / 2, (4f * density).roundToInt())
+            assertNotEquals(
+                before[centerProbe.x, centerProbe.y],
+                hovered[centerProbe.x, centerProbe.y],
+                "$style on $position paints the hover background inside the close button",
+            )
+
+            val corner = closeButtonHoverProbe(style, position, hovered.width, hovered.height)
+            val beforeCorner = before[corner.x, corner.y]
+            val hoveredCorner = hovered[corner.x, corner.y]
+            if (style == TabStripStyle.CURRENT) {
+                assertNotEquals(beforeCorner, hoveredCorner, "the classic style keeps its existing close-button corner fill")
+            } else {
+                assertEquals(beforeCorner, hoveredCorner, "$style on $position keeps the rounded hover corner clear")
+            }
+        }
+    }
+
+    private fun closeButtonHoverProbe(
+        style: TabStripStyle,
+        position: TabStripPosition,
+        width: Int,
+        height: Int,
+    ): PixelPoint {
+        if (style == TabStripStyle.CURRENT) return PixelPoint(width / 2, 0)
+        if (style != TabStripStyle.RAISED) return PixelPoint(0, 0)
+        return when (position) {
+            TabStripPosition.TOP, TabStripPosition.LEFT -> PixelPoint(0, 0)
+            TabStripPosition.BOTTOM -> PixelPoint(0, height - 1)
+            TabStripPosition.RIGHT -> PixelPoint(width - 1, 0)
+        }
+    }
+
     // The Tab label control: the four options, the one-line hint under it and every option fully inside the control at the widths of the
     // settings dialog's content column (about 650 dp) and well below it.
     @Test
@@ -451,9 +785,25 @@ class TabStripStyleUiTest {
         )
         raised.forEach { (position, shape) -> assertEquals(shape, tabShape(TabStripStyle.RAISED, position), "raised on $position") }
         TabStripPosition.entries.forEach { assertEquals(RoundedCornerShape(6.dp), tabShape(TabStripStyle.SEGMENTED, it)) }
+        TabStripPosition.entries.forEach { assertEquals(RoundedCornerShape(6.dp), tabShape(TabStripStyle.OUTLINED, it)) }
+        TabStripPosition.entries.forEach { assertEquals(RoundedCornerShape(50), tabShape(TabStripStyle.PILL, it)) }
         listOf(TabStripStyle.TYPED, TabStripStyle.COMPACT, TabStripStyle.SOURCE_STRIPE, TabStripStyle.TWO_LINE, TabStripStyle.QUIET).forEach { style ->
             TabStripPosition.entries.forEach { assertEquals(RectangleShape, tabShape(style, it), "$style") }
         }
+    }
+
+    @Test
+    fun sourceAndActiveAccentsFollowRoundedContoursOnEveryEdge() {
+        directory = createTempDirectory("tab-strip-contour-pixels").toFile()
+        val roundedStyles = listOf(TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL)
+        rule.setContent { roundedContourPreview(roundedStyles) }
+        rule.waitForIdle()
+        saveTabContourQaImage(rule.onNodeWithTag("tab-rounded-contour-preview").captureToImage())
+
+        val density = rule.density.density
+        val blue = tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb()
+        val accent = LIGHT_THEME.ac.toArgb()
+        assertRoundedContours(roundedStyles, density, blue, accent)
     }
 
     // A tab under the mouse (the hover highlight of its click), selected or not, in every style on every edge: the rounded corners of its shape

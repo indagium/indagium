@@ -124,7 +124,9 @@ internal const val TILE_HEADER_GAP_DP = 6f
  * they add up to more than the window; see TileLayout.kt), with [scrollMinDp] / [scrollMaxDp] bounding a tile's height there; the
  * default is none, a surface that always fits. A scrolling column's scrollbar is drawn in the gap beside the column ([tileScrollbarRect]), never
  * over a card; a column that ends at the host's right edge has [scrollEdgeRoomDp] there (the caller gives the surface that much more width than
- * the cards use, the log view its host padding). [scrollEndHandle] adds the splitter below the column's last tile. [loneColumn] says which tiles
+ * the cards use, the log view its host padding). [scrollEndHandle] adds the splitter below the column's last tile;
+ * [scrollEndHandleOuterRoomDp] can place it in an outside bottom gutter while the viewport and scrollbar stay aligned with the main host.
+ * [loneColumn] says which tiles
  * are kept in a one-tile column of their own when they end up alone where a column would be, so they size and scroll like a column's tiles
  * (see normalizeTileLayout); the default is none.
  */
@@ -144,6 +146,7 @@ internal data class TileChromeSpec<K>(
     val loneColumn: (K) -> Boolean = { false },
     val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
+    val scrollEndHandleOuterRoomDp: Float = 0f,
 ) {
     /** [loneColumn] together with [scrolls], as the layout edits (drop, remove, normalize) take them. */
     val loneColumns: TileLoneColumns<K> get() = TileLoneColumns(loneColumn, scrolls)
@@ -158,6 +161,7 @@ internal data class TileChromeSpec<K>(
         scrollMaxDp = scrollMaxDp,
         scrollEdgeRoomDp = scrollEdgeRoomDp,
         scrollEndHandle = scrollEndHandle,
+        scrollEndHandleOuterRoomDp = scrollEndHandleOuterRoomDp,
     )
 }
 
@@ -452,7 +456,13 @@ internal fun <K> TilingSurface(
                             gap = gap,
                             spec = spec,
                             modifier = gap.scrollRegion?.let { geometry.scrollRegions.getOrNull(it) }
-                                ?.let { Modifier.tileScrollRegion(drag.scroll, it, gap.rect) } ?: Modifier,
+                                ?.let { region ->
+                                    if (gap.scrollEndHandleOutsideViewport) {
+                                        Modifier.tileScrollEndHandleRegion(drag.scroll, region)
+                                    } else {
+                                        Modifier.tileScrollRegion(drag.scroll, region, gap.rect)
+                                    }
+                                } ?: Modifier,
                             onDelta = { delta ->
                                 val current = drag.draft ?: fullLayout
                                 projectTileLayout(current, shown)?.let { proj -> drag.draft = resized(current, proj, delta) }

@@ -8,14 +8,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +55,8 @@ internal fun tabStyleLabel(style: TabStripStyle): String = when (style) {
     TabStripStyle.SOURCE_STRIPE -> "F Source colour"
     TabStripStyle.TWO_LINE -> "G Two-line"
     TabStripStyle.QUIET -> "H Quiet"
+    TabStripStyle.OUTLINED -> "I Outline"
+    TabStripStyle.PILL -> "J Pill"
 }
 
 internal fun tabLabelModeLabel(mode: TabLabelMode): String = when (mode) {
@@ -69,12 +72,22 @@ internal const val TAB_LABEL_HINT: String = "The folder is added when two open t
 /** Test tags of the Tab label control and its hint. */
 internal const val TAB_LABEL_CONTROL_TAG = "tab-label-mode"
 internal const val TAB_LABEL_HINT_TAG = "tab-label-hint"
+internal const val TAB_STYLE_GRID_TAG = "tab-style-grid"
 
-private val THUMB_WIDTH = 84.dp
+private val THUMB_MIN_WIDTH = 84.dp
 private val THUMB_HEIGHT = 34.dp
+private val TAB_STYLE_GRID_GAP = 8.dp
+private const val TAB_STYLE_COLUMNS = 5
 
 @Composable
 internal fun TabsAppearanceSettings(state: AppState) {
+    TabAppearanceControls(state)
+    ChromePlacementSettings(state)
+}
+
+/** Shared by Settings and setup's Look step; changes go straight through AppState in both places. */
+@Composable
+internal fun TabAppearanceControls(state: AppState) {
     val tc = tc()
     val settings = state.settings
     Column(Modifier.settingsAnchor("Tab style"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -116,7 +129,6 @@ internal fun TabsAppearanceSettings(state: AppState) {
             state.updateSettings { it.copy(tabCloseOnEvery = !it.tabCloseOnEvery) }
         }
     }
-    ChromePlacementSettings(state)
 }
 
 @Composable
@@ -133,21 +145,40 @@ private fun DetailCheck(label: String, checked: Boolean, locked: Boolean, onTogg
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TabStyleGrid(selected: TabStripStyle, onSelect: (TabStripStyle) -> Unit) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        TabStripStyle.entries.forEach { style -> TabStyleThumb(style, style == selected) { onSelect(style) } }
+    BoxWithConstraints(Modifier.fillMaxWidth().testTag(TAB_STYLE_GRID_TAG)) {
+        val minimumCellWidth = minOf(THUMB_MIN_WIDTH, maxWidth)
+        val columnCount = ((maxWidth + TAB_STYLE_GRID_GAP) / (minimumCellWidth + TAB_STYLE_GRID_GAP))
+            .toInt()
+            .coerceIn(1, TAB_STYLE_COLUMNS)
+        Column(verticalArrangement = Arrangement.spacedBy(TAB_STYLE_GRID_GAP)) {
+            TabStripStyle.entries.chunked(columnCount).forEach { rowStyles ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(TAB_STYLE_GRID_GAP)) {
+                    rowStyles.forEach { style ->
+                        TabStyleThumb(
+                            style = style,
+                            active = style == selected,
+                            modifier = Modifier.weight(1f).widthIn(min = minimumCellWidth),
+                        ) { onSelect(style) }
+                    }
+                    repeat(columnCount - rowStyles.size) {
+                        Spacer(Modifier.weight(1f).widthIn(min = minimumCellWidth))
+                    }
+                }
+            }
+        }
     }
 }
 
 @Composable
-private fun TabStyleThumb(style: TabStripStyle, active: Boolean, onClick: () -> Unit) {
+private fun TabStyleThumb(style: TabStripStyle, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tc = tc()
-    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Row(
             Modifier
-                .size(THUMB_WIDTH, THUMB_HEIGHT)
+                .fillMaxWidth()
+                .height(THUMB_HEIGHT)
                 .clip(CORNER_MD)
                 .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
                 .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
@@ -167,58 +198,139 @@ private fun TabStyleThumb(style: TabStripStyle, active: Boolean, onClick: () -> 
             fontSize = 9.sp,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.width(THUMB_WIDTH),
+            modifier = Modifier.fillMaxWidth().testTag("tab-style-label-${style.name}"),
         )
     }
 }
 
 private val THUMB_STRIPES = listOf(Color(0xFF60a5fa), Color(0xFFfb923c), Color(0xFFa78bfa))
 
+private data class TabThumbMetrics(
+    val tc: ThemeColors,
+    val tabColor: Color,
+    val dimColor: Color,
+    val unit: Float,
+    val tabWidth: Float,
+    val fullHeight: Float,
+    val height: Float,
+    val top: Float,
+    val accent: Color,
+)
+
 // Three miniature tabs (the middle one active) in the look of [style].
 private fun DrawScope.drawTabThumb(style: TabStripStyle, tc: ThemeColors, selected: Boolean) {
-    val tab = tc.td.copy(alpha = if (selected) 0.9f else 0.7f)
-    val dim = tc.td.copy(alpha = 0.45f)
     val unit = 1.dp.toPx()
     val tabWidth = size.width / 3f
     val full = size.height
     val height = if (style == TabStripStyle.COMPACT) full * 0.72f else full
     val top = full - height
-    val accent = tc.ac
+    val metrics = TabThumbMetrics(
+        tc = tc,
+        tabColor = tc.td.copy(alpha = if (selected) 0.9f else 0.7f),
+        dimColor = tc.td.copy(alpha = 0.45f),
+        unit = unit,
+        tabWidth = tabWidth,
+        fullHeight = full,
+        height = height,
+        top = top,
+        accent = tc.ac,
+    )
     repeat(3) { i ->
         val x = i * tabWidth
         val isActive = i == 1
         val inner = Offset(x + 4 * unit, top + height / 2f - unit)
         when (style) {
-            TabStripStyle.RAISED -> {
-                if (isActive) {
-                    drawRoundRect(tc.br, Offset(x + unit, top + 2 * unit), Size(tabWidth - 2 * unit, height), CornerRadius(4 * unit))
-                    drawRoundRect(tc.bg, Offset(x + 1.5f * unit, top + 3 * unit), Size(tabWidth - 3 * unit, height), CornerRadius(3.5f * unit))
-                }
-                drawBar(inner.copy(y = top + height / 2f + unit), tabWidth - 10 * unit, if (isActive) tab else dim)
-            }
-
-            TabStripStyle.SEGMENTED -> {
-                if (isActive) {
-                    drawRoundRect(tc.br, Offset(x + unit, top + 3 * unit), Size(tabWidth - 2 * unit, height - 6 * unit), CornerRadius(3 * unit))
-                    drawRoundRect(tc.p, Offset(x + 1.5f * unit, top + 3.5f * unit), Size(tabWidth - 3 * unit, height - 7 * unit), CornerRadius(2.5f * unit))
-                    drawCircle(accent, 1.5f * unit, Offset(x + 5 * unit, top + height / 2f))
-                }
-                drawBar(inner.copy(x = x + (if (isActive) 8 else 4) * unit), tabWidth - 14 * unit, if (isActive) tab else dim)
-            }
-
-            TabStripStyle.QUIET -> {
-                drawBar(inner.copy(y = top + height / 2f - 3 * unit), tabWidth - 10 * unit, if (isActive) accent else dim)
-                drawRect(if (isActive) accent else tc.br, Offset(x, full - 2 * unit), Size(tabWidth, 2 * unit))
-            }
-
-            else -> {
-                drawRect(if (isActive) tc.bg else tc.p2, Offset(x, top), Size(tabWidth, height))
-                drawRect(tc.br, Offset(x, top), Size(tabWidth, height), style = androidx.compose.ui.graphics.drawscope.Stroke(unit))
-                if (isActive) drawRect(accent, Offset(x, full - 2 * unit), Size(tabWidth, 2 * unit))
-                drawClassicDetails(style, tc, x, top, tabWidth, height, i, if (isActive) tab else dim)
-            }
+            TabStripStyle.RAISED -> drawRaisedThumb(metrics, x, isActive, inner)
+            TabStripStyle.SEGMENTED -> drawSegmentedThumb(metrics, x, isActive, inner)
+            TabStripStyle.QUIET -> drawQuietThumb(metrics, x, isActive, inner)
+            TabStripStyle.OUTLINED -> drawOutlinedThumb(metrics, x, isActive, inner)
+            TabStripStyle.PILL -> drawPillThumb(metrics, x, isActive, inner)
+            else -> drawClassicThumb(style, metrics, x, i, isActive)
         }
     }
+}
+
+private fun DrawScope.drawRaisedThumb(metrics: TabThumbMetrics, x: Float, active: Boolean, inner: Offset) {
+    val unit = metrics.unit
+    if (active) {
+        drawRoundRect(metrics.tc.br, Offset(x + unit, metrics.top + 2 * unit), Size(metrics.tabWidth - 2 * unit, metrics.height), CornerRadius(4 * unit))
+        drawRoundRect(
+            metrics.tc.bg,
+            Offset(x + 1.5f * unit, metrics.top + 3 * unit),
+            Size(metrics.tabWidth - 3 * unit, metrics.height),
+            CornerRadius(3.5f * unit),
+        )
+    }
+    drawBar(inner.copy(y = metrics.top + metrics.height / 2f + unit), metrics.tabWidth - 10 * unit, if (active) metrics.tabColor else metrics.dimColor)
+}
+
+private fun DrawScope.drawSegmentedThumb(metrics: TabThumbMetrics, x: Float, active: Boolean, inner: Offset) {
+    val unit = metrics.unit
+    if (active) {
+        drawRoundRect(
+            metrics.tc.br,
+            Offset(x + unit, metrics.top + 3 * unit),
+            Size(metrics.tabWidth - 2 * unit, metrics.height - 6 * unit),
+            CornerRadius(3 * unit),
+        )
+        drawRoundRect(
+            metrics.tc.p,
+            Offset(x + 1.5f * unit, metrics.top + 3.5f * unit),
+            Size(metrics.tabWidth - 3 * unit, metrics.height - 7 * unit),
+            CornerRadius(2.5f * unit),
+        )
+        drawCircle(metrics.accent, 1.5f * unit, Offset(x + 5 * unit, metrics.top + metrics.height / 2f))
+    }
+    drawBar(inner.copy(x = x + (if (active) 8 else 4) * unit), metrics.tabWidth - 14 * unit, if (active) metrics.tabColor else metrics.dimColor)
+}
+
+private fun DrawScope.drawQuietThumb(metrics: TabThumbMetrics, x: Float, active: Boolean, inner: Offset) {
+    val unit = metrics.unit
+    val color = if (active) metrics.accent else metrics.dimColor
+    drawBar(inner.copy(y = metrics.top + metrics.height / 2f - 3 * unit), metrics.tabWidth - 10 * unit, color)
+    drawRect(if (active) metrics.accent else metrics.tc.br, Offset(x, metrics.fullHeight - 2 * unit), Size(metrics.tabWidth, 2 * unit))
+}
+
+private fun DrawScope.drawOutlinedThumb(metrics: TabThumbMetrics, x: Float, active: Boolean, inner: Offset) {
+    val unit = metrics.unit
+    val left = x + 2 * unit
+    val top = metrics.top + 2 * unit
+    val width = metrics.tabWidth - 4 * unit
+    val height = metrics.height - 4 * unit
+    drawRoundRect(if (active) metrics.tc.p else Color.Transparent, Offset(left, top), Size(width, height), CornerRadius(5 * unit))
+    drawRoundRect(
+        if (active) metrics.accent else metrics.tc.br,
+        Offset(left, top), Size(width, height), CornerRadius(5 * unit),
+        style = androidx.compose.ui.graphics.drawscope.Stroke(unit),
+    )
+    drawBar(inner.copy(x = x + 5 * unit), metrics.tabWidth - 12 * unit, if (active) metrics.tabColor else metrics.dimColor)
+}
+
+private fun DrawScope.drawPillThumb(metrics: TabThumbMetrics, x: Float, active: Boolean, inner: Offset) {
+    val unit = metrics.unit
+    val left = x + 2 * unit
+    val top = metrics.top + 5 * unit
+    val width = metrics.tabWidth - 4 * unit
+    val height = metrics.height - 10 * unit
+    drawRoundRect(
+        if (active) metrics.accent.copy(alpha = 0.2f) else metrics.tc.p,
+        Offset(left, top), Size(width, height), CornerRadius(height / 2f),
+    )
+    drawRoundRect(
+        if (active) metrics.accent else metrics.tc.br,
+        Offset(left, top), Size(width, height), CornerRadius(height / 2f),
+        style = androidx.compose.ui.graphics.drawscope.Stroke(unit),
+    )
+    drawBar(inner.copy(x = x + 5 * unit), metrics.tabWidth - 12 * unit, if (active) metrics.accent else metrics.dimColor)
+}
+
+private fun DrawScope.drawClassicThumb(style: TabStripStyle, metrics: TabThumbMetrics, x: Float, index: Int, active: Boolean) {
+    val unit = metrics.unit
+    drawRect(if (active) metrics.tc.bg else metrics.tc.p2, Offset(x, metrics.top), Size(metrics.tabWidth, metrics.height))
+    drawRect(metrics.tc.br, Offset(x, metrics.top), Size(metrics.tabWidth, metrics.height), style = androidx.compose.ui.graphics.drawscope.Stroke(unit))
+    if (active) drawRect(metrics.accent, Offset(x, metrics.fullHeight - 2 * unit), Size(metrics.tabWidth, 2 * unit))
+    val textColor = if (active) metrics.tabColor else metrics.dimColor
+    drawClassicDetails(style, metrics.tc, x, metrics.top, metrics.tabWidth, metrics.height, index, textColor)
 }
 
 private fun DrawScope.drawBar(topLeft: Offset, width: Float, color: Color) {

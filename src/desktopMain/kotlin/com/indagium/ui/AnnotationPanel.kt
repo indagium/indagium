@@ -614,22 +614,6 @@ internal fun AnnotationPanel(
         dialect: Seq3Dialect,
         confirmEvidenceLoss: Boolean,
     ) -> Seq3SourceImportResult? = { _, _, _, _ -> null },
-    // The panel deliberately receives library data/actions rather than reaching into AppState:
-    // it stays a UI leaf and the caller owns source-identity scoping and workspace transitions.
-    diagramLibraryItems: List<DiagramLibraryItem> = emptyList(),
-    onCreateDiagram: () -> Unit = {},
-    // "From notes" — the Diagram library's `+ diagram` menu's second option. Generates a v3
-    // diagram from exactly the log lines curated into this tab's Notes document instead of the
-    // current log-viewer selection; see Seq3Session.beginFromNotes and ui/Seq3NotesSelection.kt.
-    // Defaulted (with notesDiagramSummary below) so every existing call site and the test harness
-    // keep compiling — the file's existing convention for every other diagram-library param above.
-    onCreateDiagramFromNotes: () -> Unit = {},
-    // Precomputed by the caller (FileView/CompareView), not this panel — the panel stays a UI leaf
-    // that only renders counts, it never walks tab.annotations itself. Null reads the same as "no
-    // notes have been curated yet" for the popup's disabled-row/subtitle logic.
-    notesDiagramSummary: Seq3NotesSelection? = null,
-    onOpenDiagramLibraryItem: (id: String) -> Unit = {},
-    onDeleteDiagramLibraryItem: (id: String) -> Unit = {},
     width: Float,
     focusRequester: FocusRequester? = null,
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -640,8 +624,6 @@ internal fun AnnotationPanel(
     /** AI profile access for the editor's text-only rewrite action. */
     rewriteState: AppState? = null,
     modifier: Modifier = Modifier.fillMaxHeight(),
-    // False when the Diagram library is its own tile (DiagramLibraryTileBody) instead of the top section of this panel.
-    showDiagramLibrary: Boolean = true,
     // True when the Notes tile draws the action buttons (Preview, Copy, Save, New, Open) in its own header row (NotesTile decides that from the card's
     // width); the panel then leaves its button bar out. The tile owns the Copy feedback, so the header, the preview dialog and the shortcut share one.
     actionsInHeader: Boolean = false,
@@ -671,10 +653,6 @@ internal fun AnnotationPanel(
     var suffixFocused by remember { mutableStateOf(false) }
     // Session-only, not persisted — only the text itself needs to survive a restart.
     var issueDescExpanded by remember(tab.id) { mutableStateOf(false) }
-    // The library is supporting material rather than the primary Notes workflow. Start it
-    // folded on every tab, like Issue description, and let a reader opt into its list.
-    var diagramLibraryExpanded by remember(tab.id) { mutableStateOf(false) }
-    var pendingDiagramLibraryDeleteId by remember(tab.id) { mutableStateOf<String?>(null) }
     var blockFieldFocused by remember { mutableStateOf(false) }
     var activeBlockFieldId by remember(tab.id) { mutableStateOf<String?>(null) }
     var navIndex by remember(tab.id) { mutableStateOf(0) }
@@ -1295,24 +1273,6 @@ internal fun AnnotationPanel(
         // scrollbar sits in a matchParentSize box so it does not claim the whole height either.
         FlexRegion(scroll, capDp = null, fill = Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxWidth().verticalScroll(scroll).padding(end = 8.dp)) {
-                // This is intentionally above Issue description: saved diagrams are log-specific
-                // workspace artifacts, while the issue description is private free-form context.
-                // The coordinator has already filtered the list by path + content fingerprint.
-                if (showDiagramLibrary) {
-                    DiagramLibrarySection(
-                        items = diagramLibraryItems,
-                        expanded = diagramLibraryExpanded,
-                        onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
-                        onCreate = onCreateDiagram,
-                        onCreateFromNotes = onCreateDiagramFromNotes,
-                        editingEnabled = !notesLocked,
-                        selectedLineCount = tab.selected.size,
-                        notesDiagramSummary = notesDiagramSummary,
-                        onOpen = onOpenDiagramLibraryItem,
-                        onRequestDelete = { pendingDiagramLibraryDeleteId = it },
-                    )
-                    Divider()
-                }
                 // Issue description — a private working note, persisted in the .ann sidecar and
                 // autosave, but deliberately never rendered into the Markdown preview/export/MCP
                 // markdown so it stays out of anything shared or copied as the issue writeup.
@@ -1672,29 +1632,11 @@ internal fun AnnotationPanel(
                 ThinVerticalScrollbar(scroll, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
             }
         }
-
-        pendingDiagramLibraryDeleteId?.let { id ->
-            val item = diagramLibraryItems.firstOrNull { it.id == id }
-            if (item == null) {
-                pendingDiagramLibraryDeleteId = null
-            } else {
-                DiagramLibraryDeleteDialog(
-                    title = item.title,
-                    onConfirm = {
-                        // Deletion is intentionally confined to this explicit confirmation
-                        // action; a row's Delete button only opens this dialog.
-                        mutate { onDeleteDiagramLibraryItem(id) }
-                        pendingDiagramLibraryDeleteId = null
-                    },
-                    onDismiss = { pendingDiagramLibraryDeleteId = null },
-                )
-            }
-        }
     }
 }
 
 private const val DIAGRAM_LIBRARY_PANEL_ROW_DP = 42
-private const val DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP = 168
+internal const val DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP = 168
 
 @Composable
 internal fun DiagramLibrarySection(
@@ -1714,6 +1656,7 @@ internal fun DiagramLibrarySection(
     collapsible: Boolean = true,
     // False when the tile's own header carries the title and the "+ diagram" button (DiagramLibraryHeaderAction): only the list shows.
     showHeader: Boolean = true,
+    listScrollState: ScrollState? = null,
 ) {
     val tc = tc()
     // Local, not lifted to AppState like RecentNotesPopup's own open flag: nothing outside this
@@ -1753,13 +1696,13 @@ internal fun DiagramLibrarySection(
     // The viewport keeps four dp of breathing room above and below each library list. Include
     // those in the measured section height so the 42-dp item and its related range line are not
     // clipped by the padded Box.
-    // Inside a tile's flex region (the Notes list) the region scrolls, so the library shows every row and has no scrollbar of its own.
+    // A standalone tile passes its flex-region scroll state, so the library keeps a bounded viewport and owns its scrollbar.
     val flat = LocalFlatLists.current
     val listHeight = (items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP)
         .coerceIn(DIAGRAM_LIBRARY_PANEL_ROW_DP, if (flat) Int.MAX_VALUE else DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP).dp
         .plus(8.dp)
-    val listScroll = rememberScrollState()
-    val needsScrollbar = !flat && items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP > DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP
+    val listScroll = listScrollState ?: rememberScrollState()
+    val needsScrollbar = (!flat || listScrollState != null) && items.size * DIAGRAM_LIBRARY_PANEL_ROW_DP > DIAGRAM_LIBRARY_PANEL_MAX_HEIGHT_DP
     Box(Modifier.fillMaxWidth().height(listHeight).padding(vertical = 4.dp)) {
         if (items.isEmpty()) {
             AppText(

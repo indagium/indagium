@@ -1324,9 +1324,11 @@ internal fun LogViewer(
     onSearchNext: (SearchScope) -> Unit = {},
     onSearchPrev: (SearchScope) -> Unit = {},
     onSearchClose: (SearchScope) -> Unit = {},
-    // Mode dropdown, Original-panel Find field and "Search all lines" — only FileView.kt turns
-    // this on. CompareView exposes just the Filtered field, even when a pane shows Original.
+    // Mode dropdown and "Search all lines" — only FileView.kt turns this on. The Original-pane
+    // field is also enabled in compare when that side has an explicit Unfiltered search opened
+    // from its maximized Original tile; normal compare search remains Filtered-only.
     showSearchScopeChip: Boolean = false,
+    showOriginalSearchInCompare: Boolean = false,
     onSearchToggleScope: (SearchMode) -> Unit = {},
     onToggleSearchSync: () -> Unit = {},
     onSearchFocused: (SearchScope) -> Unit = {},
@@ -2584,8 +2586,11 @@ internal fun LogViewer(
             // above it belongs to the host, which also decides [showPidTid].
             @Composable
             fun OriginalPane(showPidTid: Boolean) {
-                if (showSearchScopeChip && unfilteredSearch.active &&
-                    (tab.searchMode == SearchMode.UNFILTERED || tab.searchMode == SearchMode.TWO_SEARCHES)
+                if (shouldShowOriginalSearchBar(
+                        enabled = showSearchScopeChip || showOriginalSearchInCompare,
+                        active = unfilteredSearch.active,
+                        mode = tab.searchMode,
+                    )
                 ) {
                     val originalFieldSearch = unfilteredSearch
                     SearchBar(
@@ -2595,10 +2600,11 @@ internal fun LogViewer(
                         mode = tab.searchMode,
                         // The remaining Original field must still be able to reopen Filtered
                         // after the user closes its sibling in Two searches mode.
-                        showModeSelector = tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active,
+                        showModeSelector = showSearchScopeChip &&
+                            (tab.searchMode != SearchMode.TWO_SEARCHES || !filteredSearch.active),
                         sameModeIsNoop = selectedSearchModeIsFullyOpen,
                         onModeChange = onSearchToggleScope,
-                        showSyncToggle = tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
+                        showSyncToggle = showSearchScopeChip && tab.searchMode == SearchMode.TWO_SEARCHES && !filteredSearch.active,
                         syncEnabled = settings.syncSplitPanelSelectionAndScroll,
                         onSyncToggle = onToggleSearchSync,
                         searchScopeBehavior = settings.searchScopeBehavior,
@@ -4637,6 +4643,9 @@ private fun SectionBanner(label: String, color: Color, tc: ThemeColors) {
         AppText(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     }
 }
+
+private fun shouldShowOriginalSearchBar(enabled: Boolean, active: Boolean, mode: SearchMode): Boolean =
+    enabled && active && (mode == SearchMode.UNFILTERED || mode == SearchMode.TWO_SEARCHES)
 
 @Composable
 private fun EmptyState(tc: ThemeColors, totalCount: Int, onClear: () -> Unit) {

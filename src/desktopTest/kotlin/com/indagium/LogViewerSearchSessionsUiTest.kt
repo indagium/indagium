@@ -28,9 +28,11 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.text.TextRange
+import com.indagium.model.CtrlFTarget
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogViewSectionId
 import com.indagium.model.SearchMode
 import com.indagium.model.SearchScope
 import com.indagium.model.SequenceDef
@@ -677,6 +679,45 @@ class LogViewerSearchSessionsUiTest {
             state.searchNavigationFor(rightId, SearchScope.FILTERED) == null &&
                 state.logViewerScrollStateStore.lazyState("$rightId:main").firstVisibleItemIndex > 0
         }
+    }
+
+    @Test
+    fun maximizedCompareOriginalShowsUnfilteredFindAndMatchesRowsFilteredOutOfLogTile() {
+        val leftId = "search-compare-original-left-ui"
+        val rightId = "search-compare-original-right-ui"
+        val rows = listOf(
+            LogEntry(1, "10:00:00.001", LogLevel.I, "Keep", "visible in filtered log"),
+            LogEntry(2, "10:00:00.002", LogLevel.I, "Drop", "needle only in Original"),
+        )
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(leftId, "left.log", rows).copy(filter = Filter(activeTags = setOf("Keep"))),
+            mkTab(rightId, "right.log", rows).copy(showUnfiltered = true),
+        )
+        state.activeTabId = leftId
+        state.compareTabId = rightId
+        state.updateCompareMode(true)
+        state.logViewMaximized = LogViewSectionId.ORIGINAL_B
+        state.updateSettings {
+            it.copy(
+                ctrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+                openUnfilteredOnCtrlF = true,
+            )
+        }
+        val settingsBefore = state.settings
+
+        assertTrue(state.openSearchInMaximizedLogView())
+        state.setSearchQuery(rightId, "needle", SearchScope.UNFILTERED)
+        rule.waitUntil(5_000) {
+            state.tab(rightId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.contentEquals(intArrayOf(2)) == true
+        }
+        rule.setContent { CompareView(state) }
+
+        rule.onNodeWithTag("search-field-unfiltered").assertIsDisplayed().assertTextEquals("needle")
+        rule.onNodeWithTag("log-row-$rightId:original-2").assertIsDisplayed()
+        rule.onAllNodesWithTag("search-field-filtered").assertCountEquals(0)
+        rule.runOnIdle { assertEquals(settingsBefore, state.settings) }
+        state.close()
     }
 
     @Test

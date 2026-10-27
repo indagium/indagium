@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -102,10 +103,16 @@ internal fun SearchBar(
 ) {
     val tc = tc()
     val focusRequester = remember(tabId, search.scope) { FocusRequester() }
+    val searchFieldFocusOwner = remember(tabId, search.scope) { Any() }
+    val reportSearchFieldFocus = LocalLogViewSearchFieldFocusChanged.current
     val localFieldState = fieldState ?: remember(tabId, search.scope) { SearchBarFieldState(search.query) }
     var fieldValue by localFieldState.value
     var handledFocusNonce by localFieldState.handledFocusNonce
     var focusRestoreRequestNonce by localFieldState.focusRestoreRequestNonce
+
+    DisposableEffect(searchFieldFocusOwner, reportSearchFieldFocus) {
+        onDispose { reportSearchFieldFocus(searchFieldFocusOwner, false) }
+    }
 
     fun withSearchFocus(action: () -> Unit) {
         onFocused(search.scope)
@@ -189,6 +196,7 @@ internal fun SearchBar(
                     .testTag("search-field-${search.scope.name.lowercase()}")
                     .focusRequester(focusRequester)
                     .onFocusChanged {
+                        reportSearchFieldFocus(searchFieldFocusOwner, it.isFocused)
                         if (it.isFocused) {
                             onFocused(search.scope)
                         }

@@ -7,14 +7,16 @@ import androidx.compose.ui.focus.FocusRequester
 import com.indagium.model.CtxMenuState
 import com.indagium.model.LogTab
 import com.indagium.model.SearchScope
+import com.indagium.model.searchFor
 
 /**
  * The log viewer wired to [state] for [tab]: the horizontal filter bar's model and actions, and every LogViewer callback. Pulled out of
  * FileView so the tiled log view and the legacy single-column call bind the log the same way. [tiles] non-null emits the Original and
  * Log tiles into the enclosing tiling surface (see LogViewerTiles.kt); null is today's single Column filling [modifier].
  * [onPanelFocusChanged] reports focus entering the log panel; [onExportCaptureRange] is the toolbar's "Export capture range" (null hides it).
- * [compare] binds the log as one side of the compare view: no horizontal filter bar and no Find scope chip (compare searches each tab's
- * Filtered slot only); [tab] is then the tab as displayed (its filter replaced, see compareDisplayedFilters), its id the real tab's.
+ * [compare] binds the log as one side of the compare view: no horizontal filter bar or Find mode chip; normal Find uses Filtered, while
+ * an active Unfiltered session on a maximized Original pane can render in that pane. [tab] is then the tab as displayed (its filter
+ * replaced, see compareDisplayedFilters), its id the real tab's.
  */
 @Composable
 internal fun BoundLogViewer(
@@ -115,6 +117,9 @@ internal fun BoundLogViewer(
         onSearchPrev = { scope -> state.searchPrev(tab.id, scope) },
         onSearchClose = { scope -> state.closeSearch(tab.id, scope) },
         showSearchScopeChip = !compare,
+        showOriginalSearchInCompare = compare && (
+            state.logViewMaximized == tiles?.originalId || tab.searchFor(SearchScope.UNFILTERED).active
+        ),
         onSearchToggleScope = { mode -> state.setSearchMode(tab.id, mode) },
         onToggleSearchSync = {
             state.updateSettings {

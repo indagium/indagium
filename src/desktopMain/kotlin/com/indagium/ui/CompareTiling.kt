@@ -265,7 +265,7 @@ private fun TileScope<LogViewSectionId>.CompareTiles(
     )
     val notesLocked = rememberNotesEditLocked(state, left)
     CompositionLocalProvider(LocalNotesEditLocked provides notesLocked) {
-        NotesTile(state, left, panels, collapsible = LogViewSectionId.NOTES in collapsibleTiles, diagramsShown = isVisible(LogViewSectionId.DIAGRAMS))
+        NotesTile(state, left, panels, collapsible = LogViewSectionId.NOTES in collapsibleTiles)
         DiagramsTile(state, left, collapsible = LogViewSectionId.DIAGRAMS in collapsibleTiles)
     }
     AiTile(state, left, panels, collapsible = LogViewSectionId.AI in collapsibleTiles)

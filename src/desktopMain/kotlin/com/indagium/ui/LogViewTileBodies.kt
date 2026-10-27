@@ -2,7 +2,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import com.indagium.diagram3.Seq3SourceImportResult
@@ -14,8 +13,8 @@ import com.indagium.model.LogTab
 // same way.
 
 /**
- * The Notes panel wired to [state] for [tab]. [showDiagramLibrary] false leaves the Diagram library out (it is then its own tile,
- * see DiagramLibraryTileBody). [onPanelFocusChanged] is the panel's focus-changed callback (the caller records which panel has focus).
+ * The Notes panel wired to [state] for [tab]. The saved Diagram library is a separate tile; source-linked diagram controls remain in Notes.
+ * [onPanelFocusChanged] is the panel's focus-changed callback (the caller records which panel has focus).
  */
 @Composable
 internal fun BoundAnnotationPanel(
@@ -24,7 +23,6 @@ internal fun BoundAnnotationPanel(
     width: Float,
     focusRequester: FocusRequester?,
     onPanelFocusChanged: (Boolean) -> Unit,
-    showDiagramLibrary: Boolean = true,
     modifier: Modifier = Modifier.fillMaxSize(),
     actionsInHeader: Boolean = false,
     copyFeedbackState: CopyFeedbackState? = null,
@@ -85,14 +83,6 @@ internal fun BoundAnnotationPanel(
                 state.seq3Sessions.importSource(session.id, source, dialect, confirm)
             }
         },
-        diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
-        onCreateDiagram = { state.seq3Sessions.begin(tab.id, tab.selected) },
-        onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
-        // seq3NotesSelection is a cheap list walk, but keyed on the two inputs it actually reads so it isn't rerun on every
-        // recomposition (e.g. a selection drag or an unrelated panel resize) — see that function's own doc.
-        notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
-        onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
-        onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
         width = width,
         focusRequester = focusRequester,
         onPanelFocusChanged = onPanelFocusChanged,
@@ -100,7 +90,6 @@ internal fun BoundAnnotationPanel(
         scrollStateStore = state.logViewerScrollStateStore,
         highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
         modifier = modifier,
-        showDiagramLibrary = showDiagramLibrary,
         actionsInHeader = actionsInHeader,
         copyFeedbackState = copyFeedbackState,
     )

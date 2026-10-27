@@ -856,10 +856,17 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   to the splitter (resize cursor, drag to resize, double-click to reset, written on release). The thumb plus `TILE_SCROLLBAR_GRAB_MARGIN_DP` (2 dp) above and
   below is the bar's hit area: a drag there scrolls (pixel deltas divided by the density, the thumb's travel mapped onto the content's range) and so does the
   wheel. A column that overflows only slightly has a thumb nearly as tall as the strip, and then little of the strip is left to the splitter (the arrow keys
-  on the focused splitter always work).
+  on the focused splitter always work). The last tile in each scrolling column has an end splitter as well. When the column reaches the host bottom,
+  `LogViewTilingFrame` keeps a 6 dp gutter inside the surface but outside the scroll viewport: a full-height side card and its scrollbar end at the Log's
+  bottom, while the end splitter remains hit-testable in that gutter. The gutter is excluded from `TileScrollRegion.contentHeight`, so a fitting column gains
+  no artificial scroll range; the end splitter follows the column when it is scrolled and can resize its last tile at the bottom of the range.
   A detached video player keeps its window by staying composed: the host *parks* the Video tile (0 x 0) when the player reports it left the sidebar.
   A capture tab keeps its per-device video height: Video is pinned to `captureMirrorLayouts[device].videoSplit` x the host height while
   the tab is active, and resizing Video writes the per-device layout, never the global one.
+- **The Diagram library is a standalone tile, never an inline Notes section.** Classic shows it collapsed at the top of the right sidebar above Notes; the Layout menu can hide or restore it.
+  `DiagramLibraryTile` owns the saved-diagram list and the `+ diagram` menu (From selection / From notes); its `FLEX` body makes the list scroll inside
+  its viewport and lets the tile's end splitter resize that viewport. Hiding the tile removes the library without changing Notes, which retains the
+  source-linked diagram-note controls.
 - **Toolbars at the top of a tile's body share one look** (`ui/TileToolbarStyle.kt`). The log toolbar is the Log tile's header; the Notes actions (Preview, Copy ▾, Save,
   New, Locate log…, Open ▾) are the Notes tile's header too (`ui/NotesHeaderActions.kt`, `NotesActionButtons`): one row, grip, icon, "Notes", "3 notes", the buttons, then
   the header icons, laid out by `notesHeaderLayout` (`ui/NotesHeaderLayout.kt`, pure, `NotesHeaderLayoutTest`). **The text gives way before any button does.** As the card
@@ -904,7 +911,10 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   and shortcuts included); `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
   Filter group off instead of listing eight hidden tiles (the badge stays meaningful and the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
-  switches the group on again. `revealFilterTiles` (Cmd+1, Ctrl+F, the filter bar's residual chip) un-hides, expands and un-maximizes.
+  switches the group on again. `revealFilterTiles` (Cmd+1, the filter-input Ctrl+F path, and the filter bar's residual chip) un-hides,
+  expands and un-maximizes. Plain Ctrl+F with a maximized Original or Log tile opens Find in that visible pane instead: Original uses
+  Unfiltered, Log uses Filtered. The shortcut bypasses and leaves `ctrlFTarget`, `searchScopeBehavior`, `lastManualSearchMode` and
+  `openUnfilteredOnCtrlF` unchanged; it does not reveal sibling tiles or unmaximize.
 - **Compare on tiles.** `CompareView` (`ui/CompareView.kt`: which tabs are A and B, F6, displayed filters) puts a strip above one `TilingSurface`
   (`ui/CompareTiling.kt`): "Filters apply to" with an A | B | Both `SegmentedControl`, "B:" with the full `CompareTabPicker` (every tab as a pill, the overflow
   list and drag reorder, in the width left over; picking a pill sets `compareTabId`) and a "Link scroll" pill (`AppSettings.compareSyncScroll`). The strip is
@@ -914,8 +924,9 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   app-wide: `AppSettings.compareLayout` (null = Compare grid from `compareSplit` and the legacy widths), `compareHidden`, `lastComparePreset`
   (Compare grid = originals on top, A left; Compare rows = both Originals in one row, both Logs in the next), edited by `commitCompareLayout` /
   `AppState.hideLogViewTile` (compare-aware) on release. ORIGINAL_A / ORIGINAL_B apply per tab's own `showUnfiltered` (`compareTileContext`).
-  `BoundLogViewer(compare = true)` binds each side without the horizontal filter bar and the Find scope chip (compare searches each tab's Filtered slot
-  only). Each log header starts with an A / B badge (accent while the filter panel edits that side), a kind pill (Log / Live / Capture) and the file name,
+  `BoundLogViewer(compare = true)` binds each side without the horizontal filter bar or Find mode chip. Ordinary compare Find uses each tab's Filtered
+  slot; plain Ctrl+F on a maximized Original_A / Original_B opens Unfiltered Find in that visible side. Each log header starts with an A / B badge
+  (accent while the filter panel edits that side), a kind pill (Log / Live / Capture) and the file name,
   which ellipsizes first when the tile narrows (see "Log toolbar in a tile"). The Layout menu works in compare: the two compare
   presets, the shared panels, Lock and Reset (`layoutMenuContext` picks the compare context while compare is on).
 - **Log toolbar in a tile.** The log toolbar is the Log tile's header, so it degrades by the tile's width instead of clipping. The pure rule is
@@ -941,15 +952,15 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   `logViewerScrollStateStore`) onto the other: the first visible row's time of day, `nearestEntryIndexByTime` (a binary search that steps over rows
   without a timestamp; a log that crosses midnight gets an approximate answer) over the other tab's displayed rows (`visibleItemsSummaryOf`), then
   `scrollToItem`. The index a mirror just set is remembered so the echo is not mistaken for a drive; selection is left alone.
-- **Persistence and migration.** `logViewLayout` (nullable), `logViewHidden` (default `[diagrams]`), `logViewCollapsed`,
+- **Persistence and migration.** `logViewLayout` (nullable), `logViewHidden` (default `[]`), `logViewCollapsed` (default `[diagrams]`),
   `logViewTilesLocked` and `lastLogViewPreset` are JSON-only settings (`ui/LogViewLayoutSettingsJson.kt`, §13.4; the decoder reads `toolbarPlacement` from the same object to know whether a stored tree keeps the toolbar tile). A null layout means Classic
   derived from the legacy panel widths, so an old autosave restores into the previous sizes; the legacy token fields keep being
   written, but a stored layout wins. The maximized tile, the per-tile focus and the video pin are not persisted.
 
 ### 6.5 Tab strip appearance
 
-The tab strip has eight looks (`TabStripStyle`: Current, Raised, Segmented, Typed, Compact, Source colour, Two-line, Quiet), chosen in
-Settings > Appearance > Tabs (`ui/TabsAppearanceSettings.kt`: a thumbnail grid, Tab size, Tab label, three detail checkboxes). Current
+The tab strip has ten looks (`TabStripStyle`: Current, Raised, Segmented, Typed, Compact, Source colour, Two-line, Quiet, Outline, Pill), chosen in
+Settings > Appearance > Tabs (`ui/TabsAppearanceSettings.kt`: a five-column thumbnail grid, Tab size, Tab label, three detail checkboxes). The same tab appearance controls are available in the setup assistant's Look step and write directly to settings. Current
 is the default and draws exactly what the shell always drew (`TabStripStyleUiTest` compares its pixels with a copy of the old shell).
 
 - **Pure side** (`ui/TabAppearance.kt`, `TabAppearanceTest`): `tabKind` derives LOG / ZIP / IND / CAPTURE / LIVE / HOME from the
@@ -957,10 +968,10 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
   IND are the Recent files list's labels), `tabSourceColor`, `tabLabelParts` (FILE_SESSION, the default "File (+ folder if same name)", is exactly `tabDisplayLabel`: the file name, plus the folder or archive only when two open tabs share it; SESSION_ONLY, "Folder", is the folder or archive the file lives in; FILE_ONLY, "File only", the bare file name; FILE_FOLDER_ALWAYS, "File — folder" (appended last: the mode is stored by name, an unknown name decodes to the default), always `file — folder`, the disambiguation winning where it is more specific so two tabs never share a label, and a tab with no source path and a unique name is just its file name. The control sits in Settings > Appearance > Tabs with a one-line hint under it that explains the default ("The folder is added when two open tabs have the same file name."); the options use 11 sp text and 8 dp padding so they fit the dialog's content column without clipping),
   `tabStripHeightDp` (Compact 28, Two-line 44, the rest 36) and the FIT-width maths.
 - **Drawing** (`ui/TabStyles.kt`): `TabShell(..., appearance: TabAppearance = TabAppearance.Default)` keeps one structure for every
-  style (stripe overlay + Row of live dot, badge, label, close) and varies only metrics, the chrome behind the Row and the label type.
+  style (source stripe plus a Row of live dot, badge, label, close) and varies only metrics, the chrome behind the Row and the label type.
   Diagram and Tests tabs go through the same shell with their own kinds.
 - **One shape per tab** (`tabShape(style, position)`). The raised style's card is rounded on the three sides away from the content (`raisedShape`, open
-  towards it), Segmented's item is a 6 dp pill, every other style a rectangle. Everything the tab owns follows that shape on every edge: the active fill and
+  towards it), Segmented and Outline use 6 dp rounded corners, Pill uses a capsule, and the other styles are rectangular. Source-colour and active marks bend around rounded edges on every supported strip position. Everything the tab owns follows that shape on every edge: the active fill and
   outline, the hover fill of an inactive raised tab (it used to be a differently rounded pill), and the press / hover / focus highlights that
   `Modifier.clickable` draws, which are cut to the shape by a `clip` placed after the chrome and before the click (a plain rectangle gets no clip,
   so the default style adds no layer and stays pixel-identical). `TabStripStyleUiTest` hovers a tab of every style and edge and checks that the corners the
@@ -1760,7 +1771,7 @@ itself does no source-trace enrichment.
 | `diagram3/Seq3Emitters.kt` | Mermaid and PlantUML source emission. |
 | `diagram3/Seq3Codec.kt` | The `<!-- indagium:diagram3 v1 {json} -->` note-header codec — the whole `Seq3Document` as JSON, SHA-256 body-hash guard, own bounds discipline. Exactly one version constant; a note written by an unrecognised/future version degrades to "not a diagram note" rather than throwing. |
 | `diagram3/Seq3Queue.kt` / `Seq3Guided.kt` / `Seq3Regeneration.kt` / `Seq3Commands.kt` | Pure filter/sort/selection/bulk-action logic, the guided target-resolution pass, the regenerate-review diff, and every mutation as a named command producing one undo entry. |
-| `ui/Seq3Session.kt` | State owner (`AppState.seq3Sessions`): session lifecycle keyed off a source log tab, the debounced generate+layout pipeline, per-session undo stack, note-write on confirm, and the `DiagramLibraryStore` integration that keeps a confirmed diagram reachable from the Notes-panel library section. Declares `ActiveSurface` (moved here from the deleted `ui/SeqDiagramCoordinator.kt`). |
+| `ui/Seq3Session.kt` | State owner (`AppState.seq3Sessions`): session lifecycle keyed off a source log tab, the debounced generate+layout pipeline, per-session undo stack, note-write on confirm, and the `DiagramLibraryStore` integration that keeps a confirmed diagram reachable from the source tab's standalone Diagram library tile. Declares `ActiveSurface` (moved here from the deleted `ui/SeqDiagramCoordinator.kt`). |
 | `ui/Seq3Workspace.kt` / `Seq3QueuePanel.kt` / `Seq3Canvas.kt` / `Seq3Inspector.kt` / `Seq3GuidedPass.kt` / `Seq3RegenerateSheet.kt` | The workspace shell, the message queue panel, the Compose canvas (drawn from `Seq3Layout`), the pattern/kind/evidence inspector, the guided "Fix these" mode, and the regenerate review sheet. |
 | `ui/Seq3Theme.kt` | `ThemeColors.toSeq3RasterTheme()` plus `Seq3RenderCache` — a bounded LRU in front of `layoutSeq3`/`renderSeq3`, split into a layout tier (theme/scale-independent) and a render tier, so a theme switch never recomputes geometry and an unrelated note edit never re-rasterizes every open diagram. |
 
@@ -2403,8 +2414,10 @@ refresh (new `logData`/stack-trace groups, a filter or grouping change) keeps th
 current matches navigable until the new result lands. Either way the previous matches stay visible
 until replaced, and Enter pressed during an edit's recompute is replayed on the fresh matches. A
 zero-match Filtered search offers an explicit "Search all lines" action (`AppState.searchAllLines`)
-rather than switching scope by itself. Compare collapses each tab's Find to its Filtered slot and
-never changes the persisted `showUnfiltered`. The saved split-view link preference applies in every
+rather than switching scope by itself. Entering Compare collapses each tab's Find to its Filtered slot
+and never changes the persisted `showUnfiltered`; while Compare is active, plain Ctrl+F on a maximized
+Original pane explicitly opens that side's Unfiltered slot. Ordinary compare Find remains Filtered.
+The saved split-view link preference applies in every
 Filtered/Original split mode: it mirrors Filtered row selection into Original and can mirror Find
 navigation in either direction; free scrolling and ordinary Original row clicks remain local.
 Compare mode uses separate tabs and does not couple their selections. The monotonic split-sync
@@ -2444,8 +2457,8 @@ sanitizer, so settings written by the UI satisfy the same invariants.
 
 The log view's tiling (§6.4) adds five more JSON-only settings, decoded by the log-view codec in `ui/LogViewLayoutSettingsJson.kt`
 next to the compare view's four: `logViewLayout` (a tree of `{"split":..,"children":[..]}` / `{"section":"<key>","w":..,"dp":..}` nodes, absent while the
-user has not changed the layout), `logViewHidden` (tile keys, default `["diagrams"]`), `logViewCollapsed` (tile keys), `logViewTilesLocked` (boolean) and
-`lastLogViewPreset` (the `LogViewPresetId` name: `CLASSIC`, `REVIEW`, `LOG_FOCUS`, `FILTERS_ON_TOP`); the compare view's `compareLayout`, `compareHidden`,
+user has not changed the layout), `logViewHidden` (tile keys, default `[]`), `logViewCollapsed` (tile keys, default `["diagrams"]`), `logViewTilesLocked` (boolean) and
+`lastLogViewPreset` (the `LogViewPresetId` name: `CLASSIC`, `REVIEW`, `LOG_FOCUS`, `FILTERS_ON_TOP`); the compare view's `compareLayout`, `compareHidden` (default `[]`),
 `lastComparePreset` (`COMPARE_GRID`, `COMPARE_COLUMNS`) and `compareSyncScroll`. The decoder sanitizes through `sanitizeLogViewLayoutState`, so every tile
 appears exactly once whatever the file says (the single view's `toolbar` tile only while `toolbarPlacement` is `IN_LAYOUT`, which the decoder reads from the same
 object, §6.6). The window chrome's fields are `tabStripStyle` ... `toolbarEdge` (§6.5) and, appended last, `toolbarOuter` (boolean), `toolbarAlign` (`START` / `CENTER` / `END`),

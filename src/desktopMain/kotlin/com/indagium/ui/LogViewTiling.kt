@@ -17,6 +17,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
@@ -55,6 +56,10 @@ private const val DEFAULT_RIGHT_COLUMN_DP = 360f
 private const val DEFAULT_LOG_LEVEL_DP = 80f
 private const val PIN_EPSILON_DP = 0.5f
 
+/** Search-field focus reported to the containing tiling frame so its Escape restore waits for Find first. */
+internal val LocalLogViewSearchFieldFocusChanged =
+    staticCompositionLocalOf<(owner: Any, focused: Boolean) -> Unit> { { _, _ -> } }
+
 /**
  * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling side columns ([logViewScrollsInColumn]) with a splitter
  * under their last tile. A column's scrollbar is drawn in the 8 dp gap beside it (1 dp, the 6 dp bar, 1 dp), or, for a column at the right edge, in the
@@ -76,6 +81,7 @@ internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     loneColumn = ::logViewLoneColumn,
     scrollEdgeRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
+    scrollEndHandleOuterRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
 )
 
 /**
@@ -150,32 +156,46 @@ internal fun LogViewTilingHost(
 
 /**
  * The padded host both the single log view and the compare view tile into: it measures itself (see [LogViewTilingHost] for why with
- * onSizeChanged), restores a maximized tile on Esc, and gives [content] its size in dp once there is one.
+ * onSizeChanged), reserves its bottom padding for the side columns' trailing resize handles, restores a maximized tile on Esc, and gives
+ * [content] the remaining viewport size in dp once there is one.
  */
 @Composable
 internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @Composable (widthDp: Float, heightDp: Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     var sizePx by remember { mutableStateOf(IntSize.Zero) }
+    var focusedSearchField by remember { mutableStateOf<Any?>(null) }
+    val reportSearchFieldFocus: (Any, Boolean) -> Unit = remember {
+        { owner, focused ->
+            if (focused) focusedSearchField = owner
+            else if (focusedSearchField === owner) focusedSearchField = null
+        }
+    }
     // Esc restores a maximized tile. It is taken on the preview pass: the log viewer swallows every Esc (it clears the selection), so
-    // a bubbling handler would never see it from the log; a find bar or an editor open inside the tile gets its Esc on the next press.
+    // a bubbling handler would never see it from the log. A focused Find field gets first refusal so its Escape closes Find while the
+    // maximized view stays put; Escape from the log or another tile control still restores immediately.
     Box(
         modifier.background(tc.bg).onPreviewKeyEvent { event ->
-            val restoring = event.type == KeyEventType.KeyDown && event.key == Key.Escape && state.logViewMaximized != null
+            val escape = event.type == KeyEventType.KeyDown && event.key == Key.Escape
+            val escapeBelongsToFind = escape && focusedSearchField != null
+            val restoring = escape && state.logViewMaximized != null && !escapeBelongsToFind
             if (restoring) state.logViewMaximized = null
             restoring
         },
     ) {
-        // No padding at the right: that strip belongs to the surface (LOG_VIEW_CHROME_SPEC's edge room), where a scrolling column's scrollbar goes.
-        Box(
-            Modifier.fillMaxSize()
-                .padding(start = LOG_VIEW_HOST_PAD_DP.dp, top = LOG_VIEW_HOST_PAD_DP.dp, bottom = LOG_VIEW_HOST_PAD_DP.dp)
-                .onSizeChanged { sizePx = it },
-        ) {
-            val widthDp = sizePx.width / density
-            val heightDp = sizePx.height / density
-            // Until the first measurement there is nothing to lay out; mounting a surface at 0 x 0 would only be torn down again.
-            if (sizePx.width > 0 && sizePx.height > 0) content(widthDp, heightDp)
+        CompositionLocalProvider(LocalLogViewSearchFieldFocusChanged provides reportSearchFieldFocus) {
+            // No padding at the right: that strip belongs to the surface (LOG_VIEW_CHROME_SPEC's edge room), where a scrolling column's scrollbar goes.
+            // The bottom 6 dp is inside the surface's actual bounds but outside the tile viewport, for the side columns' trailing resize handles.
+            Box(
+                Modifier.fillMaxSize()
+                    .padding(start = LOG_VIEW_HOST_PAD_DP.dp, top = LOG_VIEW_HOST_PAD_DP.dp)
+                    .onSizeChanged { sizePx = it },
+            ) {
+                val widthDp = sizePx.width / density
+                val heightDp = (sizePx.height / density - LOG_VIEW_HOST_PAD_DP).coerceAtLeast(0f)
+                // Until the first measurement there is nothing to lay out; mounting a surface at 0 x 0 would only be torn down again.
+                if (sizePx.width > 0 && sizePx.height > 0) content(widthDp, heightDp)
+            }
         }
     }
 }
@@ -208,7 +228,7 @@ internal fun LogViewSurface(
             callbacks = callbacks,
             // The toolbar's card is a slim one, not a screenful.
             heightOf = { id -> TOOLBAR_STACKED_CARD_DP.takeIf { id == LogViewSectionId.TOOLBAR } },
-            modifier = Modifier.padding(end = LOG_VIEW_HOST_PAD_DP.dp),
+            modifier = Modifier.padding(end = LOG_VIEW_HOST_PAD_DP.dp, bottom = LOG_VIEW_HOST_PAD_DP.dp),
             content = content,
         )
     } else {
@@ -346,7 +366,7 @@ private fun TileScope<LogViewSectionId>.LogViewTiles(
     )
     val notesLocked = rememberNotesEditLocked(state, tab)
     CompositionLocalProvider(LocalNotesEditLocked provides notesLocked) {
-        NotesTile(state, tab, focus, collapsible = LogViewSectionId.NOTES in collapsibleTiles, diagramsShown = isVisible(LogViewSectionId.DIAGRAMS))
+        NotesTile(state, tab, focus, collapsible = LogViewSectionId.NOTES in collapsibleTiles)
         DiagramsTile(state, tab, collapsible = LogViewSectionId.DIAGRAMS in collapsibleTiles)
     }
     AiTile(state, tab, focus, collapsible = LogViewSectionId.AI in collapsibleTiles)
@@ -359,7 +379,6 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
     tab: LogTab,
     focus: LogViewPanelFocus,
     collapsible: Boolean,
-    diagramsShown: Boolean,
 ) {
     // The Notes actions are part of the tile's header row while they fit there (NotesHeaderActions.kt), so the tile, not the panel, owns the Copy
     // feedback they and the panel's preview dialog and shortcut share.
@@ -407,8 +426,6 @@ internal fun TileScope<LogViewSectionId>.NotesTile(
                     width = info.widthDp,
                     focusRequester = focus.notes,
                     onPanelFocusChanged = { focused -> if (focused) focus.onPanelFocused(focus.notes) },
-                    // With the Diagram library as its own tile the Notes panel leaves its built-in section out.
-                    showDiagramLibrary = !diagramsShown,
                     actionsInHeader = layoutAt(info.widthDp).actionsInHeader,
                     copyFeedbackState = copyFeedback,
                 )
@@ -429,8 +446,8 @@ internal fun TileScope<LogViewSectionId>.DiagramsTile(state: AppState, tab: LogT
             headerAction = { DiagramLibraryHeaderAction(state, tab) },
             collapsible = collapsible,
             maximizable = true,
-            // The list is already bounded (DiagramLibrarySection), so the tile is exactly as tall as that.
-            sizing = TileBodySizing.CONTENT,
+            // The library list is the flex part, so a splitter can resize its viewport and scroll the rows.
+            sizing = TileBodySizing.FLEX,
             body = { info -> TileBodyColumn(info) { DiagramLibraryTileBody(state, tab) } },
         ),
     )

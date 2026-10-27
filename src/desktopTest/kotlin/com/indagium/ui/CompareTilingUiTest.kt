@@ -419,7 +419,7 @@ class CompareTilingUiTest {
         rule.waitForIdle()
         assertFalse(LogViewSectionId.HIGHLIGHTERS in state.settings.compareHidden)
         assertTrue(exists("tile-card-highlighters"))
-        assertEquals(listOf(LogViewSectionId.DIAGRAMS), state.settings.logViewHidden, "the single view's hidden list is left alone")
+        assertEquals(emptyList(), state.settings.logViewHidden, "the single view's hidden list is left alone")
     }
 
     @Test

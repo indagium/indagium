@@ -1586,12 +1586,12 @@ data class AppSettings(
     // place in the tree). The compare view has its own layout and hidden list. JSON-only (ui/LogViewLayoutSettingsJson.kt),
     // same rule as above: the frozen positional settings decoder must not gain a field.
     val logViewLayout: TileNode<LogViewSectionId>? = null,
-    val logViewHidden: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
-    val logViewCollapsed: List<LogViewSectionId> = emptyList(),
+    val logViewHidden: List<LogViewSectionId> = emptyList(),
+    val logViewCollapsed: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
     val logViewTilesLocked: Boolean = false,
     val lastLogViewPreset: LogViewPresetId = LogViewPresetId.CLASSIC,
     val compareLayout: TileNode<LogViewSectionId>? = null,
-    val compareHidden: List<LogViewSectionId> = listOf(LogViewSectionId.DIAGRAMS),
+    val compareHidden: List<LogViewSectionId> = emptyList(),
     val lastComparePreset: LogViewPresetId = LogViewPresetId.COMPARE_GRID,
     val compareSyncScroll: Boolean = false,
     // The window chrome: how the tab strip looks (tabStripStyle ... tabCloseOnEvery, ui/TabAppearance.kt) and where the tab strip
@@ -1706,8 +1706,10 @@ enum class CompareFilterTarget { A, B, BOTH }
 /** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the last two are for the compare view. */
 enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS }
 
-/** How the tab strip is drawn (Settings > Appearance > Tabs): [CURRENT] is the long-standing look and the default. */
-enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_STRIPE, TWO_LINE, QUIET }
+/** How the tab strip is drawn (Settings > Appearance > Tabs): [CURRENT] is the long-standing look and the default.
+ * Older entries keep their order; new style IDs are appended.
+ */
+enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_STRIPE, TWO_LINE, QUIET, OUTLINED, PILL }
 
 /** [FIXED]: every visible tab gets an equal share of the strip. [FIT]: a tab is as wide as its label. */
 enum class TabSizeMode { FIXED, FIT }

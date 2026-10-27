@@ -132,7 +132,7 @@ class LogViewLayoutTest {
         assertEquals(420f, right.sizeDp)
         assertEquals(LOG_VIEW_FILTER_TILES, leafIds(filters))
         assertEquals(listOf(ORIGINAL, LOG), leafIds(middle))
-        assertEquals(listOf(VIDEO, NOTES, AI, DIAGRAMS), leafIds(right))
+        assertEquals(listOf(DIAGRAMS, VIDEO, NOTES, AI), leafIds(right))
         // Tags, Message rules and Saved filters start taller; Log level is pinned to its natural height.
         val byId = children(filters).associate { (it as TileLeaf).section to it }
         assertEquals(2.2f, byId.getValue(TAGS).weight)
@@ -141,6 +141,27 @@ class LogViewLayoutTest {
         assertEquals(1f, byId.getValue(HIGHLIGHTERS).weight)
         assertEquals(80f, byId.getValue(LOG_LEVEL).sizeDp)
         assertNull(byId.getValue(TAGS).sizeDp)
+    }
+
+    @Test
+    fun freshAndResetPresetsShowDiagramAtTheTopAndCollapseIt() {
+        val fresh = AppSettings()
+        assertEquals(emptyList(), fresh.logViewHidden)
+        assertEquals(emptyList(), fresh.compareHidden)
+        assertEquals(listOf(DIAGRAMS), fresh.logViewCollapsed)
+
+        val expanded = fresh.withLogViewTileCollapsed(DIAGRAMS, false)
+        val classic = expanded.withLogViewPreset(LogViewLayoutPreset.CLASSIC, sizes)
+        val classicRight = children(classic.logViewLayout!! as TileSplit).last()
+        assertEquals(listOf(DIAGRAMS, VIDEO, NOTES, AI), leafIds(classicRight))
+        assertTrue(DIAGRAMS in classic.logViewCollapsed, "Classic restores the collapsed state")
+        assertFalse(DIAGRAMS in classic.logViewHidden, "Classic shows the Diagram library")
+
+        val compare = expanded.withComparePreset(LogViewLayoutPreset.COMPARE_GRID, sizes)
+        val compareRight = children(compare.compareLayout!! as TileSplit).last()
+        assertEquals(listOf(DIAGRAMS, VIDEO, NOTES, AI), leafIds(compareRight))
+        assertTrue(DIAGRAMS in compare.logViewCollapsed, "the compare preset shares the sidebar's collapsed state")
+        assertFalse(DIAGRAMS in compare.compareHidden, "the compare default shows the Diagram library")
     }
 
     @Test
@@ -314,7 +335,7 @@ class LogViewLayoutTest {
         assertEquals(notes.x, video.x)
         assertTrue(video.bottom <= notes.y, "Video above Notes")
         assertTrue(ai.y >= notes.bottom, "AI below Notes")
-        assertTrue(diagrams.y >= notes.bottom, "Diagram library below Notes")
+        assertTrue(diagrams.bottom <= notes.y, "Diagram library above Notes")
     }
 
     @Test
@@ -408,10 +429,10 @@ class LogViewLayoutTest {
             LogViewLayoutPreset.forScope(LogViewScope.COMPARE).map { it.id },
         )
         LogViewPresetId.entries.forEach { assertEquals(it, LogViewLayoutPreset.of(it).id) }
-        // Log focus hides the filter tiles; Review shows the Diagram library.
+        // Log focus hides the filter tiles and Diagram library; Review and Classic show it.
         assertTrue(LOG_VIEW_FILTER_TILES.all { it in LogViewLayoutPreset.LOG_FOCUS.hidden })
         assertFalse(DIAGRAMS in LogViewLayoutPreset.REVIEW.hidden)
-        assertEquals(setOf(DIAGRAMS), LogViewLayoutPreset.CLASSIC.hidden)
+        assertFalse(DIAGRAMS in LogViewLayoutPreset.CLASSIC.hidden)
     }
 
     @Test
@@ -452,16 +473,16 @@ class LogViewLayoutTest {
     @Test
     fun hideShowCollapseAndLockMutators() {
         val s = AppSettings()
-        assertEquals(listOf(DIAGRAMS, TAGS), s.withLogViewTileHidden(TAGS, true).logViewHidden)
-        assertEquals(listOf(DIAGRAMS), s.withLogViewTileHidden(TAGS, true).withLogViewTileHidden(TAGS, false).logViewHidden)
-        assertEquals(listOf(DIAGRAMS, TAGS), s.withLogViewTileHidden(TAGS, true).withLogViewTileHidden(TAGS, true).logViewHidden)
+        assertEquals(listOf(TAGS), s.withLogViewTileHidden(TAGS, true).logViewHidden)
+        assertEquals(emptyList(), s.withLogViewTileHidden(TAGS, true).withLogViewTileHidden(TAGS, false).logViewHidden)
+        assertEquals(listOf(TAGS), s.withLogViewTileHidden(TAGS, true).withLogViewTileHidden(TAGS, true).logViewHidden)
         assertSame(s, s.withLogViewTileHidden(LOG_A, true))
         assertSame(s, s.withCompareTileHidden(ORIGINAL, true))
-        assertEquals(listOf(DIAGRAMS, AI), s.withCompareTileHidden(AI, true).compareHidden)
+        assertEquals(listOf(AI), s.withCompareTileHidden(AI, true).compareHidden)
         assertNull(s.withLogViewTileHidden(TAGS, true).logViewLayout)
 
-        assertEquals(listOf(TAGS), s.withLogViewTileCollapsed(TAGS, true).logViewCollapsed)
-        assertEquals(emptyList(), s.withLogViewTileCollapsed(TAGS, true).withLogViewTileCollapsed(TAGS, false).logViewCollapsed)
+        assertEquals(listOf(DIAGRAMS, TAGS), s.withLogViewTileCollapsed(TAGS, true).logViewCollapsed)
+        assertEquals(listOf(DIAGRAMS), s.withLogViewTileCollapsed(TAGS, true).withLogViewTileCollapsed(TAGS, false).logViewCollapsed)
         assertSame(s, s.withLogViewTileCollapsed(LOG, true))
         assertTrue(s.withLogViewTilesLocked(true).logViewTilesLocked)
         assertSame(s, s.withLogViewTilesLocked(false))
@@ -471,7 +492,7 @@ class LogViewLayoutTest {
     fun storingALayoutSanitizesItAgainstTheHiddenList() {
         val s = AppSettings().withLogViewLayout(row(leaf(LOG), leaf(LOG), leaf(NOTES)))
         assertComplete(s.logViewLayout!!, LogViewScope.SINGLE)
-        assertEquals(listOf(DIAGRAMS), s.logViewHidden)
+        assertEquals(emptyList(), s.logViewHidden)
         val c = AppSettings().withCompareLayout(row(leaf(LOG_A), leaf(LOG)))
         assertComplete(c.compareLayout!!, LogViewScope.COMPARE)
     }
@@ -498,8 +519,8 @@ class LogViewLayoutTest {
         val all = logViewFocusOrder(classicLogViewLayout(sizes))
         assertEquals(
             listOf(
-                LogViewFocusPanel.FILTERS, LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.VIDEO,
-                LogViewFocusPanel.NOTES, LogViewFocusPanel.AI, LogViewFocusPanel.DIAGRAMS,
+                LogViewFocusPanel.FILTERS, LogViewFocusPanel.ORIGINAL, LogViewFocusPanel.LOG, LogViewFocusPanel.DIAGRAMS,
+                LogViewFocusPanel.VIDEO, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI,
             ),
             all,
         )
@@ -513,7 +534,7 @@ class LogViewLayoutTest {
         assertEquals(
             listOf(
                 LogViewFocusPanel.FILTERS, LogViewFocusPanel.ORIGINAL_A, LogViewFocusPanel.LOG_A, LogViewFocusPanel.ORIGINAL_B,
-                LogViewFocusPanel.LOG_B, LogViewFocusPanel.VIDEO, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI, LogViewFocusPanel.DIAGRAMS,
+                LogViewFocusPanel.LOG_B, LogViewFocusPanel.DIAGRAMS, LogViewFocusPanel.VIDEO, LogViewFocusPanel.NOTES, LogViewFocusPanel.AI,
             ),
             compare,
         )
