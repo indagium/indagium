@@ -143,9 +143,8 @@ val linuxBundleArchitecture = when (System.getProperty("os.arch").lowercase()) {
     else -> "unsupported"
 }
 val composeAppDirectory = layout.buildDirectory.dir("compose/binaries/main/app/Indagium")
-// The readable legal/ folder goes inside jpackage's app directory on every OS: when an installer
-// is built from --app-image, jpackage on Linux and Windows copies only its own layout (launchers,
-// app, runtime), so a folder at the image root is missing from the .deb and .msi.
+// The readable legal/ folder goes inside the image's app directory on every OS, next to the jars,
+// which every installer type carries.
 val mediaPackageRoot = when {
     isMacHost -> layout.buildDirectory.dir("compose/binaries/main/app/Indagium.app/Contents/app")
     isWindowsHost -> composeAppDirectory.map { it.dir("app") }
@@ -928,6 +927,18 @@ tasks.matching { it.name == "createRuntimeImage" }.configureEach {
                 "JAVA_HOME=\$(/usr/libexec/java_home -v 21) ./gradlew packageDistributionForCurrentOS"
         }
     }
+}
+
+// Without an app image, Compose builds the .deb and .msi straight from the jars and runtime, so the
+// legal/ folder and runtime manifest that createDistributable adds below never reach them (the .dmg
+// is already built from that image). Handing those tasks the finished image keeps both.
+if (!isMacHost) {
+    tasks.withType<org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask>()
+        .matching { it.name == "packageDeb" || it.name == "packageMsi" }
+        .configureEach {
+            dependsOn("createDistributable")
+            appImage.set(composeAppDirectory)
+        }
 }
 
 tasks.matching { it.name == "createDistributable" }.configureEach {
