@@ -59,7 +59,12 @@ class VideoSparseSeekTest {
             Thread.sleep(250L)
             assertTrue(controller.positionMs in 800L..1_300L, "the clock should advance through the first sparse interval")
             assertTrue(isGreen(controller.grabCurrentFrame()), "the 1.5s frame must not display before its PTS")
-            awaitPicture("first resumed frame", controller, 30_000L) { dominantChannel(it, 2) }
+            // The 1.5 s frame is due for only 100 ms. A decode thread that wakes more than
+            // FRAME_DROP_LATENESS_US late drops it, as it should, because the 1.6 s frame is due by
+            // then. So the held image must give way to the 1.5 s frame, or straight to the 1.6 s
+            // one, and to nothing else.
+            val resumed = awaitPicture("first resumed frame", controller, 30_000L) { !dominantChannel(it, 1) }
+            assertTrue(dominantChannel(resumed, 2) || isCyan(resumed), "resumed into %06x, not the 1.5 s or 1.6 s frame".format(resumed and 0xFFFFFF))
             assertTrue(controller.positionMs >= 1_500L)
 
             controller.pause()
@@ -246,7 +251,9 @@ class VideoSparseSeekTest {
 
     private fun isBlue(png: ByteArray?): Boolean = png?.let { dominantChannel(it, 2) } == true
 
-    private fun isCyan(png: ByteArray?): Boolean = png?.let { pixel(it)?.let { rgb -> green(rgb) > 180 && blue(rgb) > 180 && red(rgb) < 100 } } == true
+    private fun isCyan(png: ByteArray?): Boolean = png?.let { pixel(it)?.let(::isCyan) } == true
+
+    private fun isCyan(rgb: Int): Boolean = green(rgb) > 180 && blue(rgb) > 180 && red(rgb) < 100
 
     private fun isMagenta(rgb: Int): Boolean = red(rgb) > 180 && blue(rgb) > 180 && green(rgb) < 100
 
@@ -290,7 +297,7 @@ class VideoSparseSeekTest {
      * step over the whole window. Reading the published bitmap's reference is cheap, and each new
      * picture is inspected exactly once.
      */
-    private fun awaitPicture(label: String, controller: VideoPlayerController, timeoutMs: Long, matches: (Int) -> Boolean) {
+    private fun awaitPicture(label: String, controller: VideoPlayerController, timeoutMs: Long, matches: (Int) -> Boolean): Int {
         val start = System.currentTimeMillis()
         val deadline = start + timeoutMs
         val seen = mutableListOf<String>()
@@ -301,7 +308,7 @@ class VideoSparseSeekTest {
                 last = bitmap
                 val rgb = centreRgb(bitmap)
                 seen += "+${System.currentTimeMillis() - start}ms pos=${controller.positionMs} rgb=%06x".format(rgb and 0xFFFFFF)
-                if (matches(rgb)) return
+                if (matches(rgb)) return rgb
             }
             Thread.sleep(PICTURE_POLL_MS)
         }
