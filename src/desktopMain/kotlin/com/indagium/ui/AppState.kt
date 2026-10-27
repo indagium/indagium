@@ -6320,6 +6320,13 @@ class AppState(
     var appDataSizeBytes by mutableStateOf(0L)
         private set
 
+    // A size walk can still be running on ioScope when deleteAllAppData() succeeds (one starts at
+    // construction), and publishing its total afterwards would undo the zeroed figures. The delete
+    // bumps storageSizeGeneration, and a walk publishes only if no delete happened since it began.
+    // The check and the write share storageSizeLock, which is never held with any other lock.
+    private val storageSizeLock = Any()
+    private var storageSizeGeneration = 0L
+
     /** Size of the data removed by the user-facing "Clear temporary data" action. */
     var temporaryDataSizeBytes by mutableStateOf(0L)
         private set
@@ -15995,11 +16002,15 @@ class AppState(
 
     // ── App data / clearable cache ────────────────────────────────────
     fun refreshAppDataSizeInfo() {
-        appDataSizeBytes = File(appCachePath).totalFileSize()
+        val generation = synchronized(storageSizeLock) { storageSizeGeneration }
+        val size = File(appCachePath).totalFileSize()
+        synchronized(storageSizeLock) { if (storageSizeGeneration == generation) appDataSizeBytes = size }
     }
 
     fun refreshTemporaryDataSizeInfo() {
-        temporaryDataSizeBytes = archiveCacheDir.totalFileSize() + notesDir.totalFileSize()
+        val generation = synchronized(storageSizeLock) { storageSizeGeneration }
+        val size = archiveCacheDir.totalFileSize() + notesDir.totalFileSize()
+        synchronized(storageSizeLock) { if (storageSizeGeneration == generation) temporaryDataSizeBytes = size }
     }
 
     fun refreshStorageSizeInfo() {
@@ -16056,8 +16067,11 @@ class AppState(
         }
         resetAppDataConfirmOpen = false
         resetAppDataError = null
-        appDataSizeBytes = 0L
-        temporaryDataSizeBytes = 0L
+        synchronized(storageSizeLock) {
+            storageSizeGeneration++
+            appDataSizeBytes = 0L
+            temporaryDataSizeBytes = 0L
+        }
         return true
     }
 

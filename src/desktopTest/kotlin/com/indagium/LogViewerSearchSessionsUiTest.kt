@@ -48,6 +48,12 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
+// Ceiling for every wait here, each on async item computation, a search job or a LazyColumn scroll.
+// It was 5s, and turningSyncOffBeforeAQueuedSearchNavigationPreventsOriginalMovement timed out on
+// GitHub's macOS runner while passing locally. waitUntil returns as soon as its condition holds, so
+// a passing run pays nothing for the higher bound.
+private const val UI_WAIT_TIMEOUT_MS = 15_000L
+
 /** Integration coverage for the independent Find sessions in the real split log viewer. */
 @OptIn(ExperimentalTestApi::class)
 class LogViewerSearchSessionsUiTest {
@@ -64,7 +70,7 @@ class LogViewerSearchSessionsUiTest {
         rule.setContent { StateBackedLogViewer(state, tabId) }
 
         rule.onNodeWithTag("log-row-$tabId:main-2").assertIsSelected().performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)!!.selected.isEmpty() }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)!!.selected.isEmpty() }
         rule.onNodeWithTag("log-row-$tabId:original-2").assertIsNotSelected()
     }
 
@@ -117,7 +123,7 @@ class LogViewerSearchSessionsUiTest {
         val row = rule.onNodeWithTag("log-row-$tabId:main-1")
         row.performMouseInput { doubleClick(Offset(180f, center.y)) }
         val text = rule.onNodeWithText("alpha beta gamma", substring = true)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             runCatching {
                 !text.fetchSemanticsNode().config[SemanticsProperties.TextSelectionRange].collapsed
             }.getOrDefault(false)
@@ -166,12 +172,12 @@ class LogViewerSearchSessionsUiTest {
 
         val store = state.logViewerScrollStateStore
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(54) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 54 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 54 }
         val originalRow = rule.onNodeWithTag("log-row-$tabId:original-55")
         originalRow.performClick()
         originalRow.assertIsSelected()
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(49) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
         var originalAnchor = 0
         rule.runOnIdle { originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex }
 
@@ -182,9 +188,9 @@ class LogViewerSearchSessionsUiTest {
         rule.onNodeWithText("Independent").assertExists()
         rule.onNodeWithTag("search-mode-dropdown").performClick()
         rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
         rule.onNodeWithTag("log-row-$tabId:main-50").performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(50) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)!!.selected == setOf(50) }
         rule.runOnIdle {
             assertEquals(originalAnchor, store.lazyState("$tabId:original").firstVisibleItemIndex)
         }
@@ -204,15 +210,15 @@ class LogViewerSearchSessionsUiTest {
         rule.onNodeWithTag("log-row-$tabId:original-50").assertIsNotSelected()
 
         rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(69) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 69 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 69 }
         rule.onNodeWithTag("log-row-$tabId:main-70").performClick()
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)!!.selected == setOf(70) &&
                 store.lazyState("$tabId:original").firstVisibleItemIndex > originalAnchor
         }
         rule.onNodeWithTag("log-row-$tabId:original-70").assertIsDisplayed().assertIsSelected()
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(49) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 49 }
         rule.onNodeWithTag("log-row-$tabId:original-55").assertIsNotSelected()
     }
 
@@ -229,14 +235,14 @@ class LogViewerSearchSessionsUiTest {
 
         val store = state.logViewerScrollStateStore
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(79) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
         val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
         originalRow.performClick()
         originalRow.assertIsSelected()
 
         // Keep Filtered row 50 composed at the same viewport position for the whole round trip.
         rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
         val filteredRow = rule.onNodeWithTag("log-row-$tabId:main-50")
         filteredRow.assertIsDisplayed().assertIsSelected()
         val originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex
@@ -250,7 +256,7 @@ class LogViewerSearchSessionsUiTest {
         filteredRow.assertIsDisplayed()
         val firstClickAt = System.currentTimeMillis()
         filteredRow.performClick()
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)!!.selected.isEmpty() && System.currentTimeMillis() - firstClickAt >= 600
         }
         rule.runOnIdle {
@@ -272,8 +278,8 @@ class LogViewerSearchSessionsUiTest {
         // This is the exact same already-composed row. Its next click selects it again and must
         // use the latest Linked callback, mirroring selection and scrolling Original to row 50.
         filteredRow.performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(50) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)!!.selected == setOf(50) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
         rule.onNodeWithTag("log-row-$tabId:original-50").assertIsDisplayed().assertIsSelected()
         rule.runOnIdle { assertEquals(setOf(50), state.tab(tabId)!!.selected) }
     }
@@ -289,13 +295,13 @@ class LogViewerSearchSessionsUiTest {
 
         val store = state.logViewerScrollStateStore
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(79) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 79 }
         val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
         originalRow.performClick()
         originalRow.assertIsSelected()
         val originalAnchor = store.lazyState("$tabId:original").firstVisibleItemIndex
         rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(49) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex >= 49 }
         val filteredRow = rule.onNodeWithTag("log-row-$tabId:main-50")
         filteredRow.assertIsDisplayed().assertIsSelected()
 
@@ -349,7 +355,7 @@ class LogViewerSearchSessionsUiTest {
 
         val store = state.logViewerScrollStateStore
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(77) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
         val originalRow = rule.onNodeWithTag("log-row-$tabId:original-80")
         originalRow.performClick()
         originalRow.assertIsSelected()
@@ -364,7 +370,7 @@ class LogViewerSearchSessionsUiTest {
         rule.onNodeWithTag("search-mode-dropdown").performClick()
         val firstClickAt = System.currentTimeMillis()
         filteredHeader.performClick() // deselect the preselected header while Independent
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)!!.selected.isEmpty() && System.currentTimeMillis() - firstClickAt >= 600
         }
         originalRow.assertIsSelected()
@@ -383,10 +389,10 @@ class LogViewerSearchSessionsUiTest {
 
         // The same header is still composed. Its next click must mirror selection and scroll.
         filteredHeader.performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)!!.selected == setOf(1) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)!!.selected == setOf(1) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex < originalAnchor }
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(77) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 77 }
         originalRow.assertIsNotSelected()
     }
 
@@ -405,16 +411,16 @@ class LogViewerSearchSessionsUiTest {
         state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
         state.setSearchQuery(tabId, "filtered needle", SearchScope.FILTERED)
         state.setSearchQuery(tabId, "original needle", SearchScope.UNFILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)!!.searchFor(SearchScope.FILTERED).matchIds.toList() == listOf(70) &&
                 state.tab(tabId)!!.searchFor(SearchScope.UNFILTERED).matchIds.toList() == listOf(90)
         }
         rule.setContent { StateBackedLogViewer(state, tabId) }
         rule.onNodeWithTag("search-next-filtered").performClick()
-        rule.waitUntil(5_000) { state.searchNavigationFor(tabId, SearchScope.FILTERED) == null }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.searchNavigationFor(tabId, SearchScope.FILTERED) == null }
         rule.onNodeWithTag("log-row-$tabId:original-70").assertIsDisplayed().assertIsSelected()
         rule.onNodeWithTag("search-next-unfiltered").performClick()
-        rule.waitUntil(5_000) { state.searchNavigationFor(tabId, SearchScope.UNFILTERED) == null }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.searchNavigationFor(tabId, SearchScope.UNFILTERED) == null }
         rule.onNodeWithTag("log-row-$tabId:main-90").assertIsDisplayed().assertIsSelected()
         rule.onNodeWithTag("log-row-$tabId:original-90").assertIsDisplayed().assertIsSelected()
         rule.onNodeWithTag("search-field-filtered").assertTextEquals("filtered needle")
@@ -442,7 +448,7 @@ class LogViewerSearchSessionsUiTest {
         state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
         state.setSearchQuery(tabId, "filtered needle", SearchScope.FILTERED)
         state.setSearchQuery(tabId, "original needle", SearchScope.UNFILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(70)) == true &&
                 state.tab(tabId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.contentEquals(intArrayOf(75)) == true
         }
@@ -470,7 +476,7 @@ class LogViewerSearchSessionsUiTest {
         filteredField.assertIsFocused()
 
         val store = state.logViewerScrollStateStore
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
         rule.runOnIdle {
             assertEquals(0, store.lazyState("$tabId:original").firstVisibleItemIndex)
         }
@@ -497,7 +503,7 @@ class LogViewerSearchSessionsUiTest {
             keyUp(Key.ShiftLeft)
         }
         unfilteredField.assertIsFocused()
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex > 0 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex > 0 }
         rule.runOnIdle {
             assertEquals(filteredIndexBefore, store.lazyState("$tabId:main").firstVisibleItemIndex)
         }
@@ -522,7 +528,7 @@ class LogViewerSearchSessionsUiTest {
         state.tabs = listOf(mkTab(tabId, "pending.log", rows))
         state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
         state.setSearchQuery(tabId, "needle", SearchScope.FILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(75)) == true
         }
         // Queue while sync is On, then turn it Off before LogViewer composes/consumes the request.
@@ -531,7 +537,7 @@ class LogViewerSearchSessionsUiTest {
 
         rule.setContent { StateBackedLogViewer(state, tabId) }
         val store = state.logViewerScrollStateStore
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             store.lazyState("$tabId:main").firstVisibleItemIndex > 0 && state.searchNavigationFor(tabId, SearchScope.FILTERED) == null
         }
         rule.runOnIdle {
@@ -539,7 +545,7 @@ class LogViewerSearchSessionsUiTest {
             assertEquals(setOf(75), state.tab(tabId)!!.selected)
         }
         rule.runOnIdle { store.lazyState("$tabId:original").requestScrollToItem(75) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 75 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:original").firstVisibleItemIndex >= 75 }
         rule.onNodeWithTag("log-row-$tabId:original-75").assertIsNotSelected()
     }
 
@@ -553,7 +559,7 @@ class LogViewerSearchSessionsUiTest {
         state.tabs = listOf(mkTab(tabId, "effective-linking.log", rows))
         state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
         state.setSearchQuery(tabId, "needle", SearchScope.FILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(70)) == true
         }
 
@@ -574,7 +580,7 @@ class LogViewerSearchSessionsUiTest {
             state.updateSettings { it.copy(syncSplitPanelSelectionAndScroll = false) }
         }
         assertTrue(state.splitSyncRevision > queuedRevision)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             store.lazyState("$tabId:main").firstVisibleItemIndex > 0 &&
                 state.searchNavigationFor(tabId, SearchScope.FILTERED) == null
         }
@@ -586,14 +592,14 @@ class LogViewerSearchSessionsUiTest {
         // Switching to the single-field mode does not override the saved global Off setting.
         state.setSearchMode(tabId, SearchMode.FILTERED)
         rule.onNodeWithTag("search-next-filtered").performClick()
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
         rule.runOnIdle {
             assertEquals(0, store.lazyState("$tabId:original").firstVisibleItemIndex)
         }
 
         // Ordinary Filtered row selection also stays local in the single-field split.
         rule.runOnIdle { store.lazyState("$tabId:main").requestScrollToItem(19) }
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex == 19 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex == 19 }
         rule.onNodeWithTag("log-row-$tabId:main-20").assertIsDisplayed().performClick()
         rule.runOnIdle {
             assertEquals(setOf(20), state.tab(tabId)!!.selected)
@@ -603,13 +609,13 @@ class LogViewerSearchSessionsUiTest {
         // Returning to Two searches keeps the same global choice.
         rule.onNodeWithTag("search-mode-dropdown").performClick()
         rule.onNodeWithTag("search-mode-option-two_searches").performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)?.searchMode == SearchMode.TWO_SEARCHES }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)?.searchMode == SearchMode.TWO_SEARCHES }
         rule.runOnIdle {
             assertFalse(state.settings.syncSplitPanelSelectionAndScroll)
             store.lazyState("$tabId:original").requestScrollToItem(0)
             store.lazyState("$tabId:main").requestScrollToItem(0)
         }
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             store.lazyState("$tabId:original").firstVisibleItemIndex == 0 &&
                 store.lazyState("$tabId:main").firstVisibleItemIndex == 0
         }
@@ -617,7 +623,7 @@ class LogViewerSearchSessionsUiTest {
         rule.onNodeWithText("Independent").assertExists()
         rule.onNodeWithTag("search-mode-dropdown").performClick()
         rule.onNodeWithTag("search-next-filtered").performClick()
-        rule.waitUntil(5_000) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { store.lazyState("$tabId:main").firstVisibleItemIndex > 0 }
         rule.runOnIdle {
             assertEquals(0, store.lazyState("$tabId:original").firstVisibleItemIndex)
         }
@@ -640,7 +646,7 @@ class LogViewerSearchSessionsUiTest {
         state.tabs = listOf(mkTab(tabId, "collapsed.log", rows).copy(filter = Filter(sequences = listOf(sequence))))
         state.openSearch(tabId, SearchScope.FILTERED)
         state.setSearchQuery(tabId, "needle", SearchScope.FILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(2)) == true
         }
 
@@ -648,7 +654,7 @@ class LogViewerSearchSessionsUiTest {
         // that request, validate its owner revision, expand the collapsed group, and reveal row 2.
         rule.setContent { StateBackedLogViewer(state, tabId) }
         rule.onNodeWithTag("search-next-filtered").performClick()
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.searchNavigationFor(tabId, SearchScope.FILTERED) == null &&
                 state.tab(tabId)!!.expanded.isNotEmpty()
         }
@@ -669,13 +675,13 @@ class LogViewerSearchSessionsUiTest {
         state.updateCompareMode(true)
         state.openSearch(rightId)
         state.setSearchQuery(rightId, "needle", SearchScope.FILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(rightId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(90)) == true
         }
 
         rule.setContent { CompareView(state) }
         rule.onNodeWithTag("search-next-filtered").performClick()
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.searchNavigationFor(rightId, SearchScope.FILTERED) == null &&
                 state.logViewerScrollStateStore.lazyState("$rightId:main").firstVisibleItemIndex > 0
         }
@@ -708,7 +714,7 @@ class LogViewerSearchSessionsUiTest {
 
         assertTrue(state.openSearchInMaximizedLogView())
         state.setSearchQuery(rightId, "needle", SearchScope.UNFILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(rightId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.contentEquals(intArrayOf(2)) == true
         }
         rule.setContent { CompareView(state) }
@@ -730,7 +736,7 @@ class LogViewerSearchSessionsUiTest {
         state.tabs = listOf(mkTab(tabId, "stale.log", rows))
         state.openSearch(tabId, SearchScope.FILTERED)
         state.setSearchQuery(tabId, "needle", SearchScope.FILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.contentEquals(intArrayOf(70)) == true
         }
         state.searchNext(tabId, SearchScope.FILTERED)
@@ -738,7 +744,7 @@ class LogViewerSearchSessionsUiTest {
         val staleRequest = currentRequest.copy(inputRevision = currentRequest.inputRevision - 1)
 
         rule.setContent { StateBackedLogViewer(state, tabId, searchNavigationOverride = staleRequest) }
-        rule.waitUntil(5_000) { state.searchNavigationFor(tabId, SearchScope.FILTERED) == null }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.searchNavigationFor(tabId, SearchScope.FILTERED) == null }
         rule.runOnIdle {
             assertEquals(0, state.logViewerScrollStateStore.lazyState("$tabId:main").firstVisibleItemIndex)
         }
@@ -762,7 +768,7 @@ class LogViewerSearchSessionsUiTest {
         state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
         state.setSearchQuery(tabId, "filtered needle", SearchScope.FILTERED)
         state.setSearchQuery(tabId, "original needle", SearchScope.UNFILTERED)
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             state.tab(tabId)?.searchFor(SearchScope.FILTERED)?.matchIds?.size == 2 &&
                 state.tab(tabId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.size == 2
         }
@@ -812,7 +818,7 @@ class LogViewerSearchSessionsUiTest {
         rule.setContent { StateBackedLogViewer(state, tabId) }
         val field = rule.onNodeWithTag("search-field-filtered")
         field.performTextInput("hidden")
-        rule.waitUntil(5_000) {
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
             val slot = state.tab(tabId)?.searchFor(SearchScope.FILTERED)
             slot != null && slot.query == "hidden" && !slot.isSearching
         }
@@ -820,7 +826,7 @@ class LogViewerSearchSessionsUiTest {
         assertFalse(state.tab(tabId)!!.showUnfiltered)
 
         rule.onNodeWithTag("search-all-lines").performClick()
-        rule.waitUntil(5_000) { state.tab(tabId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.toList() == listOf(2) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)?.searchFor(SearchScope.UNFILTERED)?.matchIds?.toList() == listOf(2) }
 
         val original = rule.onNodeWithTag("search-field-unfiltered")
         original.assertTextEquals("hidden")

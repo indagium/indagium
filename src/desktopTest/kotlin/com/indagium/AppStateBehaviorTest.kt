@@ -118,6 +118,12 @@ import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
+// Ceiling for the latches in the mcpControlServer* race tests, which wait on a real Ktor server
+// start or on the test thread reaching its next step. It was 2s, and the v1.9.0 tag run failed one
+// (firstCompleted) on GitHub's macOS runner. Like waitUntil's ceiling below, it costs nothing on a
+// passing run: await returns as soon as the latch opens.
+private const val CONTROL_SERVER_LATCH_SECONDS = 10L
+
 class AppStateBehaviorTest {
     // Stays true even after AppState.ensureHomeTab was added (see the tests further down): that
     // auto-open is driven from App.kt's own LaunchedEffect, deliberately NOT from AppState.init,
@@ -8567,7 +8573,7 @@ class AppStateBehaviorTest {
                 captures += allowBrowserClients
                 if (call == 0) {
                     firstCaptured.countDown()
-                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                    check(releaseFirst.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                 }
                 try {
                     ControlServer(
@@ -8584,7 +8590,7 @@ class AppStateBehaviorTest {
 
         try {
             state.setMcpControlEnabled(true, port)
-            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCaptured.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertEquals(listOf(false), captures.toList())
 
             state.setMcpAllowBrowserClients(true)
@@ -8594,7 +8600,7 @@ class AppStateBehaviorTest {
             assertTrue(state.settings.mcpAllowBrowserClients)
 
             releaseFirst.countDown()
-            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCompleted.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertTrue(state.controlServerToken() != null, "the stale start must not clear the replacement")
         } finally {
             releaseFirst.countDown()
@@ -8616,7 +8622,7 @@ class AppStateBehaviorTest {
             controlServerFactory = { s, p ->
                 val call = calls.getAndIncrement()
                 captured[call].countDown()
-                check(release[call].await(2, TimeUnit.SECONDS))
+                check(release[call].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                 try {
                     ControlServer(
                         s,
@@ -8632,14 +8638,14 @@ class AppStateBehaviorTest {
 
         try {
             state.setMcpControlEnabled(true, port)
-            assertTrue(captured[0].await(2, TimeUnit.SECONDS))
+            assertTrue(captured[0].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             state.setMcpAllowBrowserClients(true)
-            assertTrue(captured[1].await(2, TimeUnit.SECONDS))
+            assertTrue(captured[1].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
 
             state.setMcpControlEnabled(false, port)
             release.forEach { it.countDown() }
 
-            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertTrue(completed.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertEquals(null, state.controlServerToken())
             assertFalse(state.settings.mcpControlEnabled)
         } finally {
@@ -8665,7 +8671,7 @@ class AppStateBehaviorTest {
                 capturedPorts += p
                 if (call == 0) {
                     firstCaptured.countDown()
-                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                    check(releaseFirst.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                 }
                 try {
                     ControlServer(
@@ -8683,7 +8689,7 @@ class AppStateBehaviorTest {
 
         try {
             state.startControlServerForThisSessionOnly(runtimePort)
-            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCaptured.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertFalse(state.settings.mcpControlEnabled)
             assertEquals(persistedPort, state.settings.mcpControlPort)
 
@@ -8695,7 +8701,7 @@ class AppStateBehaviorTest {
             assertEquals(persistedPort, state.settings.mcpControlPort)
 
             releaseFirst.countDown()
-            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCompleted.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
         } finally {
             releaseFirst.countDown()
             state.stopControlServerForShutdown()
@@ -8721,7 +8727,7 @@ class AppStateBehaviorTest {
                 capturedTokens += token
                 if (call == 0) {
                     firstCaptured.countDown()
-                    check(releaseFirst.await(2, TimeUnit.SECONDS))
+                    check(releaseFirst.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                 }
                 try {
                     ControlServer(s, p, token = token).also { it.start() }
@@ -8733,7 +8739,7 @@ class AppStateBehaviorTest {
 
         try {
             state.setMcpControlEnabled(true, port)
-            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCaptured.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             val oldToken = capturedTokens.single()
 
             state.rotateControlToken()
@@ -8745,7 +8751,7 @@ class AppStateBehaviorTest {
             assertEquals(200, controlServerRequestStatus(port, newToken))
 
             releaseFirst.countDown()
-            assertTrue(firstCompleted.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCompleted.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertEquals(newToken, state.controlServerToken())
         } finally {
             releaseFirst.countDown()
@@ -8771,7 +8777,7 @@ class AppStateBehaviorTest {
                 capturedCors += allowBrowserClients
                 if (call < 2) {
                     captured[call].countDown()
-                    check(release[call].await(2, TimeUnit.SECONDS))
+                    check(release[call].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                 }
                 try {
                     ControlServer(
@@ -8788,16 +8794,16 @@ class AppStateBehaviorTest {
 
         try {
             state.setMcpControlEnabled(true, port)
-            assertTrue(captured[0].await(2, TimeUnit.SECONDS))
+            assertTrue(captured[0].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             state.setMcpAllowBrowserClients(true)
-            assertTrue(captured[1].await(2, TimeUnit.SECONDS))
+            assertTrue(captured[1].await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             state.setMcpAllowBrowserClients(false)
 
             waitUntil { state.controlServerToken() == "generation-2" }
             assertEquals(listOf(false, true, false), capturedCors.toList())
 
             release.forEach { it.countDown() }
-            assertTrue(completed.await(2, TimeUnit.SECONDS))
+            assertTrue(completed.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             assertEquals("generation-2", state.controlServerToken())
         } finally {
             release.forEach { it.countDown() }
@@ -8818,7 +8824,7 @@ class AppStateBehaviorTest {
             controlServerFactory = { s, p ->
                 if (calls.getAndIncrement() == 0) {
                     firstCaptured.countDown()
-                    check(releaseFailure.await(2, TimeUnit.SECONDS))
+                    check(releaseFailure.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
                     error("controlled start failure")
                 }
                 ControlServer(s, p, token = "recovered").also { it.start() }
@@ -8829,7 +8835,7 @@ class AppStateBehaviorTest {
 
         try {
             state.startControlServerForThisSessionOnly(port)
-            assertTrue(firstCaptured.await(2, TimeUnit.SECONDS))
+            assertTrue(firstCaptured.await(CONTROL_SERVER_LATCH_SECONDS, TimeUnit.SECONDS))
             releaseFailure.countDown()
             waitUntil { state.mcpControlError?.contains("controlled start failure") == true }
 
