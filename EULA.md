@@ -44,6 +44,14 @@ The official application is licensed, not sold. The licensor and the applicable 
 
 Retain the notices supplied with permitted copies. The Indagium name, logo, and branding may be displayed as part of ordinary use of the official application and used to identify it accurately. No right is granted to use them to brand another product or imply sponsorship or endorsement. Third-party trademark rights remain with their owners.
 
+## Third-party services and AI features
+
+Some features connect to services that the licensor does not operate, such as AI model providers and AI agent tools you configure with your own accounts or keys, issue trackers you connect, Android devices you attach, and GitHub for update checks and downloads. Your use of those services is governed by the terms and privacy policies between you and their providers. The licensor is not a party to them and is not responsible for their availability, cost, security, or handling of your content.
+
+Content is sent to such a service only when you configure it and use a feature that relies on it. You are responsible for having the right to send your logs, recordings, screenshots, source code, and other content to the services you choose, and for meeting any confidentiality, privacy, or data-protection obligations that apply to that content.
+
+AI output, including analyses, notes, diagrams, test verdicts, and issue drafts, can be incomplete, inaccurate, or misleading. Review it before relying on it. AI agents and automated test runs act on connected devices and within the application as you configure them, including by sending input and commands to those devices. Use them only with devices, accounts, and data you are permitted to use in that way. The optional local control server lets programs on your computer operate the application; enable it only for programs you trust.
+
 ## Termination
 
 You may terminate your use under this EULA at any time. The licensor may terminate this EULA for a material breach if you do not remedy it within 30 days after written notice identifying the breach. On termination, stop using and remove the copies of the official application licensed solely under this EULA. This requirement does not apply to your own content or copies and components that you remain entitled to possess or use under an independent license or applicable law.
@@ -54,7 +62,7 @@ Any separately agreed purchase terms and mandatory rights govern the consequence
 
 To the extent permitted by applicable law, the application is provided **as is** and **as available**, without warranties or conditions of any kind, including merchantability, fitness for a particular purpose, and non-infringement. The licensor does not promise uninterrupted or error-free operation. You are responsible for evaluating the application for your purposes and protecting your data.
 
-To the extent permitted by applicable law, the licensor will not be liable for damages arising from the application or this EULA, including lost profits, loss of data, or interruption of business. These exclusions do not apply where liability cannot lawfully be excluded or limited, and do not remove mandatory statutory remedies. Any additional warranty, support, or other obligation expressly undertaken by the licensor is undertaken by the licensor alone, not by any upstream contributor.
+To the extent permitted by applicable law, the licensor will not be liable for damages arising from the application or this EULA, including lost profits, loss of data, or interruption of business. Where liability cannot lawfully be excluded but can lawfully be limited, the licensor's total liability arising from the application and this EULA is limited to the greater of the amounts you paid the licensor for Indagium in the twelve months before the event giving rise to the claim and fifty euros (EUR 50). Nothing in this EULA excludes or limits liability that cannot lawfully be excluded or limited, such as liability for intent, for death or personal injury, or under mandatory product liability law, and nothing in it removes mandatory statutory remedies. Any additional warranty, support, or other obligation expressly undertaken by the licensor is undertaken by the licensor alone, not by any upstream contributor.
 
 ## Changes and other agreements
 
