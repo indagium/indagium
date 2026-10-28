@@ -21,6 +21,7 @@ plugins {
     // Kover 0.7.6 references KotlinJvmCompilation.compileKotlinTask, removed in the Kotlin 2.4.0
     // Gradle plugin — bumped to 0.9.8, which also uses the 0.8.0+ `kover { reports { ... } }` DSL.
     id("org.jetbrains.kotlinx.kover") version "0.9.8"
+    id("org.gradle.test-retry") version "1.6.6"
 }
 
 // MCP SDK 0.14.0 is built with Kotlin 2.3.21 (consumable by our 2.4.0 compiler) and Ktor 3.4.3;
@@ -1085,6 +1086,21 @@ tasks.withType<Test>().configureEach {
         exceptionFormat = TestExceptionFormat.FULL
         showStackTraces = true
         showCauses = true
+    }
+}
+
+// GitHub's shared macOS runner is several times slower than a developer machine, and during the
+// 1.9.0 release its verify job failed on a different timing-sensitive test almost every attempt
+// (six distinct ones across 7,317 tests). On CI only, a failed test is re-run up to twice within the
+// same job; one that fails every attempt still fails the build, and one that passes on a retry is
+// listed in the Gradle log as flaky rather than hidden. Local builds stay strict (no retries).
+// More than 20 failures means something is really broken, so retries are skipped and the build fails.
+val runningOnCi = providers.environmentVariable("CI").map { it.equals("true", ignoreCase = true) }.getOrElse(false)
+tasks.withType<Test>().configureEach {
+    retry {
+        maxRetries.set(if (runningOnCi) 2 else 0)
+        maxFailures.set(20)
+        failOnPassedAfterRetry.set(false)
     }
 }
 
