@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -50,6 +51,7 @@ import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.width
 import com.indagium.model.LogTab
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripPosition
@@ -135,7 +137,8 @@ class TabStripStyleUiTest {
         rule.waitForIdle()
     }
 
-    private fun bounds(tag: String): DpRect = rule.onNodeWithTag(tag).getBoundsInRoot()
+    private fun bounds(tag: String, useUnmergedTree: Boolean = false): DpRect =
+        rule.onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).getBoundsInRoot()
 
     private fun exists(tag: String): Boolean = rule.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
 
@@ -281,7 +284,7 @@ class TabStripStyleUiTest {
     }
 
     @Composable
-    private fun roundedContourPreview(styles: List<TabStripStyle>) {
+    private fun roundedContourPreview(styles: List<TabStripStyle>, withGroupIndicator: Boolean = false) {
         CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
             Column(Modifier.width(720.dp).testTag("tab-rounded-contour-preview")) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -294,16 +297,34 @@ class TabStripStyleUiTest {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         AppText(style.name, color = LIGHT_THEME.ts, fontSize = 9.sp, modifier = Modifier.width(54.dp))
                         TabStripPosition.entries.forEach { position ->
+                            val key = "${style.name}-${position.name}"
+                            val group = TabGroup(
+                                id = "contour-group",
+                                name = "Group",
+                                color = TabGroupColor.GREEN,
+                                collapsed = false,
+                                members = listOf(TabRef.Log("contour")),
+                            )
                             Box(Modifier.width(160.dp).background(tabStripBackground(style, LIGHT_THEME))) {
                                 TabShell(
-                                    pointerKey = "${style.name}-${position.name}",
+                                    pointerKey = key,
                                     label = "contour.log",
                                     tooltip = "contour.log",
                                     isActive = true,
                                     showClose = false,
                                     onClick = {},
                                     onClose = {},
-                                    appearance = TabAppearance(style = style, showStripe = true, position = position),
+                                    groupIndicator = if (withGroupIndicator) {
+                                        { TabGroupHeaderIcon(group, testTagValue = "group-indicator-$key") }
+                                    } else {
+                                        null
+                                    },
+                                    appearance = TabAppearance(
+                                        style = style,
+                                        showStripe = true,
+                                        position = position,
+                                        groupIndicatorWidthDp = if (withGroupIndicator) tabGroupIndicatorWidthDp(group) else 0f,
+                                    ),
                                 )
                             }
                         }
@@ -344,6 +365,66 @@ class TabStripStyleUiTest {
             }
             assertTrue(exists("tab-tailing-mid"), "$s: tailing dot")
             assertFalse(exists("tab-tailing-short"), "$s: only the tailing tab has the dot")
+        }
+    }
+
+    @Test
+    fun closeButtonPositionWrapsLeadingContentAndBadgeAcrossAllStylesAndStripEdges() {
+        val cases = TabStripStyle.entries.flatMap { style -> TabStripPosition.entries.map { style to it } }
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column {
+                    TabStripStyle.entries.forEach { style ->
+                        Row {
+                            TabStripPosition.entries.forEach { position ->
+                                Column(Modifier.width(220.dp)) {
+                                    TabCloseButtonPosition.entries.forEach { closePosition ->
+                                        val key = "${style.name}-${position.name}-${closePosition.name}"
+                                        Box(Modifier.width(220.dp).background(tabStripBackground(style, LIGHT_THEME))) {
+                                            TabShell(
+                                                pointerKey = key,
+                                                label = "session.log",
+                                                tooltip = "session.log",
+                                                isActive = false,
+                                                showClose = true,
+                                                leading = { Box(Modifier.size(8.dp).testTag("tab-leading-$key")) },
+                                                onClick = {},
+                                                onClose = {},
+                                                appearance = TabAppearance(
+                                                    style = style,
+                                                    showBadge = true,
+                                                    closeAlways = true,
+                                                    position = position,
+                                                    closeButtonPosition = closePosition,
+                                                ),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+
+        cases.forEach { (style, position) ->
+            TabCloseButtonPosition.entries.forEach { closePosition ->
+                val key = "${style.name}-${position.name}-${closePosition.name}"
+                val close = bounds("tab-close-$key", useUnmergedTree = true)
+                val label = bounds("tab-label-$key", useUnmergedTree = true)
+                val leading = bounds("tab-leading-$key", useUnmergedTree = true)
+                val badge = bounds("tab-badge-$key", useUnmergedTree = true)
+                if (closePosition == TabCloseButtonPosition.LEFT) {
+                    assertTrue(close.right <= leading.left, "$style on $position places LEFT close before leading content")
+                    assertTrue(close.right <= badge.left, "$style on $position places LEFT close before the badge")
+                    assertTrue(close.right <= label.left, "$style on $position places LEFT close before the label")
+                } else {
+                    assertTrue(label.right <= close.left, "$style on $position places RIGHT close after the label")
+                    assertTrue(badge.right <= close.left, "$style on $position places RIGHT close after the badge")
+                }
+            }
         }
     }
 
@@ -453,6 +534,55 @@ class TabStripStyleUiTest {
         assertTrue(exists("tab-close-short"), "the active tab keeps its close button")
         assertFalse(exists("tab-close-long"))
         assertFalse(exists("tab-close-mid"))
+    }
+
+    @Test
+    fun hoverRevealsTheReservedCloseSlotWithoutMovingTheLabelOnEitherSide() {
+        val cases = TabCloseButtonPosition.entries
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Column {
+                    cases.forEach { position ->
+                        val key = "hover-${position.name}"
+                        Box(Modifier.width(280.dp)) {
+                            TabShell(
+                                pointerKey = key,
+                                label = "inactive.log",
+                                tooltip = "inactive.log",
+                                isActive = false,
+                                showClose = true,
+                                onClick = {},
+                                onClose = {},
+                                appearance = TabAppearance(
+                                    closeAlways = false,
+                                    closeButtonPosition = position,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+
+        cases.forEach { position ->
+            val key = "hover-${position.name}"
+            assertFalse(exists("tab-close-$key"), "$position: inactive close starts hidden")
+            assertTrue(exists("tab-close-slot-$key"), "$position: its hitbox space stays reserved")
+            val reservedSlot = bounds("tab-close-slot-$key", useUnmergedTree = true)
+            assertEquals(24.dp, reservedSlot.width, "$position: the hidden slot reserves a full hitbox")
+            val before = bounds("tab-label-$key", useUnmergedTree = true)
+            rule.onNodeWithTag("tab-$key").performMouseInput { moveTo(center) }
+            rule.waitForIdle()
+            assertTrue(exists("tab-close-$key"), "$position: hover reveals the close button")
+            val close = bounds("tab-close-$key", useUnmergedTree = true)
+            assertEquals(reservedSlot.left, close.left, "$position: the button appears in its reserved slot")
+            assertEquals(reservedSlot.right, close.right, "$position: the button keeps the reserved slot's width")
+            val after = bounds("tab-label-$key", useUnmergedTree = true)
+            assertEquals(before.left, after.left, "$position: label keeps its left edge")
+            assertEquals(before.right, after.right, "$position: label keeps its right edge")
+            assertEquals(before.width, after.width, "$position: label keeps its width")
+        }
     }
 
     private fun hasLabel(text: String): Boolean =
@@ -602,6 +732,14 @@ class TabStripStyleUiTest {
         rule.onNodeWithTag("tab-detail-close-button-on-every-tab", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertFalse(state.settings.tabCloseOnEvery)
+        val closePositionControl = rule.onNodeWithTag(TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG)
+        closePositionControl.performTouchInput { click(Offset(5f, center.y)) }
+        rule.waitForIdle()
+        assertEquals(TabCloseButtonPosition.LEFT, state.settings.tabCloseButtonPosition)
+        val controlWidthPx = with(rule.density) { closePositionControl.getBoundsInRoot().width.toPx() }
+        closePositionControl.performTouchInput { click(Offset(controlWidthPx - 5f, center.y)) }
+        rule.waitForIdle()
+        assertEquals(TabCloseButtonPosition.RIGHT, state.settings.tabCloseButtonPosition)
     }
 
     @Test
@@ -804,6 +942,28 @@ class TabStripStyleUiTest {
         val blue = tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb()
         val accent = LIGHT_THEME.ac.toArgb()
         assertRoundedContours(roundedStyles, density, blue, accent)
+    }
+
+    @Test
+    fun groupIndicatorStaysInsideRoundedTabShapeAndLeavesExistingAccentsVisible() {
+        directory = createTempDirectory("tab-strip-group-indicator-shapes").toFile()
+        val roundedStyles = listOf(TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL)
+        rule.setContent { roundedContourPreview(roundedStyles, withGroupIndicator = true) }
+        rule.waitForIdle()
+
+        val density = rule.density.density
+        val blue = tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb()
+        val accent = LIGHT_THEME.ac.toArgb()
+        assertRoundedContours(roundedStyles, density, blue, accent)
+        roundedStyles.forEach { style ->
+            TabStripPosition.entries.forEach { position ->
+                val key = "${style.name}-${position.name}"
+                val tab = rule.onNodeWithTag("tab-$key").getBoundsInRoot()
+                val marker = rule.onNodeWithTag("group-indicator-$key", useUnmergedTree = true).getBoundsInRoot()
+                assertTrue(marker.left >= tab.left && marker.right <= tab.right, "$style on $position keeps the group marker inside the tab width")
+                assertTrue(marker.top >= tab.top && marker.bottom <= tab.bottom, "$style on $position keeps the group marker inside the tab height")
+            }
+        }
     }
 
     // A tab under the mouse (the hover highlight of its click), selected or not, in every style on every edge: the rounded corners of its shape

@@ -3,6 +3,7 @@ package com.indagium
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabStripStyle
 import com.indagium.ui.DANGER_RED
@@ -30,6 +31,7 @@ import com.indagium.ui.tabOffsets
 import com.indagium.ui.tabSourceColor
 import com.indagium.ui.tabStripHeightDp
 import com.indagium.ui.tabStripeShown
+import com.indagium.ui.workspaceTabDescriptor
 import com.indagium.utils.ZipLogCandidate
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -196,7 +198,17 @@ class TabAppearanceTest {
         assertFalse(d.appearance.showBadge)
         assertFalse(d.appearance.showStripe)
         assertTrue(d.appearance.closeAlways)
+        assertEquals(TabCloseButtonPosition.RIGHT, d.appearance.closeButtonPosition)
         assertNull(d.appearance.secondLine)
+    }
+
+    @Test
+    fun theCloseButtonPositionFlowsToLogAndWorkspaceTabAppearances() {
+        val settings = AppSettings(tabCloseButtonPosition = TabCloseButtonPosition.LEFT)
+        val log = tab("a", "a.log", "/logs/a.log")
+        assertEquals(TabCloseButtonPosition.LEFT, logTabDescriptor(log, listOf(log), settings).appearance.closeButtonPosition)
+        assertEquals(TabCloseButtonPosition.LEFT, workspaceTabDescriptor("sequence.puml", TabKind.DIAGRAM, settings).appearance.closeButtonPosition)
+        assertEquals(TabCloseButtonPosition.LEFT, workspaceTabDescriptor("test suite", TabKind.TESTS, settings).appearance.closeButtonPosition)
     }
 
     @Test
@@ -239,6 +251,11 @@ class TabAppearanceTest {
         val short = tabFitContentDp("a.log", TabAppearance.Default)
         val long = tabFitContentDp("a-much-longer-file-name.log", TabAppearance.Default)
         assertTrue(long > short)
+        assertEquals(
+            short,
+            tabFitContentDp("a.log", TabAppearance.Default.copy(closeButtonPosition = TabCloseButtonPosition.LEFT)),
+            "moving the reserved close slot does not change the natural tab width",
+        )
         // Details widen a tab.
         assertTrue(tabFitContentDp("a.log", TabAppearance.Default.copy(showBadge = true)) > short)
         assertTrue(tabFitContentDp("a.log", TabAppearance.Default.copy(tailing = true)) > short)

@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripPosition
@@ -162,9 +163,10 @@ internal fun tabStripeShown(settings: AppSettings): Boolean = settings.tabShowSo
 
 /**
  * Everything the tab shell needs to draw one tab beyond the label: the strip style, the kind (for badge and stripe), whether the
- * badge/stripe/close button show, the dim second line and whether the tab is live-tailing (only for width estimates; the dot itself is
- * the shell's `leading` slot). [position] is the window edge the strip sits on: the active tab's accent mark and a raised card face the
- * content side of it. [Default] is the long-standing look and draws exactly what the shell drew before styles existed.
+ * badge/stripe/close button show, where that button sits, the dim second line and whether the tab is live-tailing (only for width
+ * estimates; the dot itself is the shell's `leading` slot). [position] is the window edge the strip sits on: the active tab's accent
+ * mark and a raised card face the content side of it. [Default] is the long-standing look and draws exactly what the shell drew before
+ * styles existed.
  */
 internal data class TabAppearance(
     val style: TabStripStyle = TabStripStyle.CURRENT,
@@ -175,6 +177,9 @@ internal data class TabAppearance(
     val secondLine: String? = null,
     val tailing: Boolean = false,
     val position: TabStripPosition = TabStripPosition.TOP,
+    val closeButtonPosition: TabCloseButtonPosition = TabCloseButtonPosition.RIGHT,
+    /** Extra content width for a strip-owned group dot or icon shown before the label. */
+    val groupIndicatorWidthDp: Float = 0f,
 ) {
     companion object {
         val Default = TabAppearance()
@@ -193,6 +198,7 @@ private fun appearanceOf(settings: AppSettings, kind: TabKind, secondLine: Strin
     secondLine = secondLine,
     tailing = tailing,
     position = settings.tabStripPosition,
+    closeButtonPosition = settings.tabCloseButtonPosition,
 )
 
 internal fun logTabDescriptor(tab: LogTab, allTabs: List<LogTab>, settings: AppSettings): TabDescriptor {
@@ -230,6 +236,9 @@ internal fun tabFitContentDp(label: String, appearance: TabAppearance): Float {
     var width = TAB_PADDING_DP + longest * charDp + CLOSE_BUTTON_DP + TAB_GAP_DP
     if (appearance.showBadge) width += BADGE_DP + TAB_GAP_DP
     if (appearance.tailing) width += DOT_DP + TAB_GAP_DP
+    if (appearance.groupIndicatorWidthDp > 0f) {
+        width += appearance.groupIndicatorWidthDp + TAB_GAP_DP
+    }
     if (appearance.style == TabStripStyle.SEGMENTED) width += SEGMENT_DOT_DP
     return width
 }

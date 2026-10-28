@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.ChromeEdge
 import com.indagium.model.MAX_VERTICAL_TAB_BAR_DP
 import com.indagium.model.MIN_VERTICAL_TAB_BAR_DP
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripPosition
@@ -20,8 +21,8 @@ import kotlinx.serialization.json.floatOrNull
 import kotlinx.serialization.json.put
 
 // The window chrome's settings (AppSettings.tabStripStyle, tabSizeMode, tabLabelMode, tabShowTypeBadge, tabShowSourceStripe,
-// tabCloseOnEvery, chromeLocked, tabStripPosition, toolbarPlacement, toolbarEdge, toolbarOuter, toolbarAlign, verticalTabBarWidthDp,
-// toolbarFallbackPlacement), JSON only. They live here, not in
+// tabCloseOnEvery, tabCloseButtonPosition, chromeLocked, tabStripPosition, toolbarPlacement, toolbarEdge, toolbarOuter, toolbarAlign,
+// verticalTabBarWidthDp, toolbarFallbackPlacement), JSON only. They live here, not in
 // AutosaveCodec.kt, which is already at detekt's per-file function limit. Enums are stored by name. The decoder never throws:
 // an absent, unknown or wrongly typed value leaves the field at its default (a fresh AppSettings), so an old autosave, a legacy
 // positional token or a hand-edited file all give the long-standing tab strip.
@@ -34,6 +35,7 @@ internal fun JsonObjectBuilder.putChromeSettings(settings: AppSettings) {
     put("tabShowTypeBadge", settings.tabShowTypeBadge)
     put("tabShowSourceStripe", settings.tabShowSourceStripe)
     put("tabCloseOnEvery", settings.tabCloseOnEvery)
+    put("tabCloseButtonPosition", settings.tabCloseButtonPosition.name)
     put("chromeLocked", settings.chromeLocked)
     put("tabStripPosition", settings.tabStripPosition.name)
     put("toolbarPlacement", settings.toolbarPlacement.name)
@@ -71,6 +73,7 @@ internal fun AppSettings.withChromeSettingsFrom(o: JsonObject): AppSettings = co
     tabShowTypeBadge = o["tabShowTypeBadge"].boolOrDefault(tabShowTypeBadge),
     tabShowSourceStripe = o["tabShowSourceStripe"].boolOrDefault(tabShowSourceStripe),
     tabCloseOnEvery = o["tabCloseOnEvery"].boolOrDefault(tabCloseOnEvery),
+    tabCloseButtonPosition = o["tabCloseButtonPosition"].enumOrDefault<TabCloseButtonPosition>(tabCloseButtonPosition),
     chromeLocked = o["chromeLocked"].boolOrDefault(chromeLocked),
     tabStripPosition = o["tabStripPosition"].enumOrDefault<TabStripPosition>(tabStripPosition),
     toolbarPlacement = o["toolbarPlacement"].enumOrDefault<ToolbarPlacement>(toolbarPlacement),

@@ -293,9 +293,13 @@ class Seq3Session(
      * falls back to [Seq3Range.VisibleView]. Returns null (opening nothing) when [tabId] isn't a
      * live tab.
      */
-    fun begin(tabId: String, selectedIds: Set<Int> = emptySet()): String? {
+    fun begin(tabId: String, selectedIds: Set<Int> = emptySet()): String? =
+        begin(tabId, selectedIds, TabRef.Log(tabId))
+
+    internal fun begin(tabId: String, selectedIds: Set<Int>, origin: TabRef?): String? {
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
-        return begin(tab, rangeFor(tab, selectedIds), emptyList())
+        return begin(tab, rangeFor(tab, selectedIds), emptyList(), originGroupId)
     }
 
     /** Opens a blank diagram for [tabId]. Unlike [begin], this does not scan the log or derive
@@ -303,7 +307,10 @@ class Seq3Session(
      *  for the diagram library's normal per-log organization and autosave behavior; the blank
      *  document itself carries no source filename. Its first library snapshot is written before
      *  returning, so closing the workspace before the first edit still leaves a reopenable draft. */
-    fun beginEmpty(tabId: String): String? {
+    fun beginEmpty(tabId: String): String? = beginEmpty(tabId, TabRef.Log(tabId))
+
+    internal fun beginEmpty(tabId: String, origin: TabRef?): String? {
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
         val source = sourceIdentity(tab)
         val title = defaultSeq3Title(libraryStore.forSource(source).map { it.title }.toSet())
@@ -320,6 +327,8 @@ class Seq3Session(
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
         )
         sessions = sessions + session
+        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
+        appState.revealTabGroupForActivation(TabRef.Diagram(id))
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
         generatedBaselines[id] = document
@@ -344,18 +353,21 @@ class Seq3Session(
      * finds no usable noted lines at all (nothing to draw) — the panel is expected to have already
      * disabled the menu row in that case, but this stays the authoritative guard.
      */
-    fun beginFromNotes(tabId: String): String? {
+    fun beginFromNotes(tabId: String): String? = beginFromNotes(tabId, TabRef.Log(tabId))
+
+    internal fun beginFromNotes(tabId: String, origin: TabRef?): String? {
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
         val selection = seq3NotesSelection(tab)
         if (selection.entryIds.isEmpty()) return null
         val range = Seq3Range.Ids(selection.entryIds.min(), selection.entryIds.max(), selection.entryIds)
-        return begin(tab, range, selection.seeds)
+        return begin(tab, range, selection.seeds, originGroupId)
     }
 
     // Shared body for [begin] and [beginFromNotes] — everything about opening a fresh workspace
     // (title, library scoping, activeSurface, kicking off the first generate) is identical between
     // the two; only the range and the notes-derived seeds differ.
-    private fun begin(tab: LogTab, range: Seq3Range, seeds: List<Seq3NoteSeed>): String {
+    private fun begin(tab: LogTab, range: Seq3Range, seeds: List<Seq3NoteSeed>, originGroupId: String?): String {
         val id = "seq3-${UUID.randomUUID()}"
         // Unique against THIS exact log's own library entries (not the whole library) — two
         // different logs are free to each have their own "Untitled diagram".
@@ -377,6 +389,8 @@ class Seq3Session(
             noteSeeds = seeds,
         )
         sessions = sessions + session
+        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
+        appState.revealTabGroupForActivation(TabRef.Diagram(id))
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
         requestGenerate(id)
@@ -390,7 +404,10 @@ class Seq3Session(
      * source log (e.g. Case Library "notes only") still shows its saved document rather than
      * nothing. Returns null when [blockId] isn't a v3 diagram note.
      */
-    fun beginEdit(tabId: String, blockId: String): String? {
+    fun beginEdit(tabId: String, blockId: String): String? = beginEdit(tabId, blockId, TabRef.Log(tabId))
+
+    internal fun beginEdit(tabId: String, blockId: String, origin: TabRef?): String? {
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
         val tab = appState.tab(tabId) ?: return null
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note ?: return null
         val parsed = parseSeq3Note(block.text) ?: return null
@@ -423,6 +440,8 @@ class Seq3Session(
             dialect = parsed.dialect,
         )
         sessions = sessions + session
+        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
+        appState.revealTabGroupForActivation(TabRef.Diagram(id))
         generatedBaselines[id] = parsed.document
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
@@ -433,6 +452,7 @@ class Seq3Session(
      *  [SeqDiagramCoordinator.activateWorkspace]. */
     fun activate(id: String): Boolean {
         if (session(id) == null) return false
+        appState.revealTabGroupForActivation(TabRef.Diagram(id))
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
         return true
@@ -455,6 +475,7 @@ class Seq3Session(
         generatedBaselines.remove(id)
         lastReportedRejectionKey.remove(id)
         sessions = sessions.filterNot { it.id == id }
+        appState.stripTabClosed(TabRef.Diagram(id))
         if (activeSessionId == id) {
             val next = sessions.lastOrNull()?.id
             activeSessionId = next
@@ -1299,7 +1320,18 @@ class Seq3Session(
      * makes the session regenerable; omitting it (or naming a tab that isn't open) still opens a
      * fully viewable session from the cached document, same as v1/v2's offline contract.
      */
-    fun openLibraryItem(id: String, tabId: String? = null): Boolean {
+    fun openLibraryItem(id: String, tabId: String? = null): Boolean =
+        openLibraryItem(id, tabId, tabId?.let { TabRef.Log(it) })
+
+    internal fun openLibraryItem(id: String, origin: TabRef?): Boolean =
+        openLibraryItem(id, tabId = null, origin = origin)
+
+    internal fun openLibraryItem(id: String, tabId: String?, origin: TabRef?): Boolean {
+        // Capture this before any store work or publication. `origin` is independent of tabId:
+        // reference-diagram links pass their containing diagram here while leaving tabId null, so
+        // the opened workspace remains offline-capable and does not inherit the referenced item's
+        // unrelated source log.
+        val originGroupId = appState.tabGroupIdForOrigin(origin)
         sessions.firstOrNull { existing ->
             existing.libraryItemId == id && (tabId == null || existing.sourceTabId == tabId)
         }?.let { existing ->
@@ -1327,6 +1359,8 @@ class Seq3Session(
             dialect = parsed.dialect,
         )
         sessions = sessions + session
+        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(sessionId))
+        appState.revealTabGroupForActivation(TabRef.Diagram(sessionId))
         generatedBaselines[sessionId] = parsed.document
         activeSessionId = sessionId
         appState.activeSurface = ActiveSurface.Diagram3(sessionId)

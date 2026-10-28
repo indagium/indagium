@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.model.AppSettings
 import com.indagium.model.ChromeEdge
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripPosition
@@ -47,6 +48,7 @@ class ChromeSettingsCodecTest {
         assertFalse(s.tabShowTypeBadge)
         assertFalse(s.tabShowSourceStripe)
         assertTrue(s.tabCloseOnEvery)
+        assertEquals(TabCloseButtonPosition.RIGHT, s.tabCloseButtonPosition)
         assertFalse(s.chromeLocked)
         assertEquals(TabStripPosition.TOP, s.tabStripPosition)
         assertEquals(ToolbarPlacement.WITH_TABS_END, s.toolbarPlacement)
@@ -66,6 +68,7 @@ class ChromeSettingsCodecTest {
             tabShowTypeBadge = true,
             tabShowSourceStripe = true,
             tabCloseOnEvery = false,
+            tabCloseButtonPosition = TabCloseButtonPosition.LEFT,
             chromeLocked = true,
             tabStripPosition = TabStripPosition.LEFT,
             toolbarPlacement = ToolbarPlacement.OWN_EDGE,
@@ -83,6 +86,7 @@ class ChromeSettingsCodecTest {
         assertTrue(back.tabShowTypeBadge)
         assertTrue(back.tabShowSourceStripe)
         assertFalse(back.tabCloseOnEvery)
+        assertEquals(TabCloseButtonPosition.LEFT, back.tabCloseButtonPosition)
         assertTrue(back.chromeLocked)
         assertEquals(TabStripPosition.LEFT, back.tabStripPosition)
         assertEquals(ToolbarPlacement.OWN_EDGE, back.toolbarPlacement)
@@ -97,10 +101,25 @@ class ChromeSettingsCodecTest {
     fun everyStyleAndEnumValueSurvives() {
         TabStripStyle.entries.forEach { assertEquals(it, decode(AppSettings().copy(tabStripStyle = it).settingsJson()).tabStripStyle) }
         TabLabelMode.entries.forEach { assertEquals(it, decode(AppSettings().copy(tabLabelMode = it).settingsJson()).tabLabelMode) }
+        TabCloseButtonPosition.entries.forEach {
+            assertEquals(it, decode(AppSettings().copy(tabCloseButtonPosition = it).settingsJson()).tabCloseButtonPosition)
+        }
         TabStripPosition.entries.forEach { assertEquals(it, decode(AppSettings().copy(tabStripPosition = it).settingsJson()).tabStripPosition) }
         ToolbarPlacement.entries.forEach { assertEquals(it, decode(AppSettings().copy(toolbarPlacement = it).settingsJson()).toolbarPlacement) }
         ChromeEdge.entries.forEach { assertEquals(it, decode(AppSettings().copy(toolbarEdge = it).settingsJson()).toolbarEdge) }
         ToolbarAlign.entries.forEach { assertEquals(it, decode(AppSettings().copy(toolbarAlign = it).settingsJson()).toolbarAlign) }
+    }
+
+    @Test
+    fun closeButtonPositionIsStoredByNameAndUnknownNamesUseTheRightDefault() {
+        val json = AppSettings(tabCloseButtonPosition = TabCloseButtonPosition.LEFT).settingsJson()
+        assertTrue("\"LEFT\"" in json, "stored by the stable enum name: $json")
+        assertEquals(TabCloseButtonPosition.LEFT, decode(json).tabCloseButtonPosition)
+
+        val unknown = withKeys(AppSettings(tabCloseButtonPosition = TabCloseButtonPosition.LEFT)) {
+            it["tabCloseButtonPosition"] = parse("\"CENTER\"")
+        }
+        assertEquals(TabCloseButtonPosition.RIGHT, decode(unknown).tabCloseButtonPosition)
     }
 
     @Test
@@ -143,6 +162,7 @@ class ChromeSettingsCodecTest {
                 listOf(
                     "tabStripStyle", "tabSizeMode", "tabLabelMode", "tabShowTypeBadge", "tabShowSourceStripe",
                     "tabCloseOnEvery", "chromeLocked", "tabStripPosition", "toolbarPlacement", "toolbarEdge",
+                    "tabCloseButtonPosition",
                     "toolbarOuter", "toolbarAlign", "verticalTabBarWidthDp", "toolbarFallbackPlacement",
                 ).toSet(),
             )
@@ -159,6 +179,7 @@ class ChromeSettingsCodecTest {
             it["tabShowTypeBadge"] = parse("\"yes\"")
             it["tabShowSourceStripe"] = parse("{}")
             it["tabCloseOnEvery"] = parse("\"false\"")
+            it["tabCloseButtonPosition"] = parse("42")
             it["chromeLocked"] = parse("1")
             it["tabStripPosition"] = parse("\"top\"")
             it["toolbarPlacement"] = parse("null")

@@ -1623,6 +1623,9 @@ data class AppSettings(
     // on the UI-owned Tests tile ids; null means a first-run/default workspace layout. JSON-only,
     // so the frozen positional settings decoder stays compatible.
     val testsWorkspaceLayout: String? = null,
+    // Where a closable tab puts its close button within the tab. JSON-only so the frozen
+    // positional settings token and every existing positional AppSettings constructor stay stable.
+    val tabCloseButtonPosition: TabCloseButtonPosition = TabCloseButtonPosition.RIGHT,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1718,6 +1721,9 @@ enum class TabStripStyle { CURRENT, RAISED, SEGMENTED, TYPED, COMPACT, SOURCE_ST
 
 /** [FIXED]: every visible tab gets an equal share of the strip. [FIT]: a tab is as wide as its label. */
 enum class TabSizeMode { FIXED, FIT }
+
+/** Which side of a tab's content the close button occupies. */
+enum class TabCloseButtonPosition { LEFT, RIGHT }
 
 /**
  * What a log tab's label shows: the file name, with the folder (or archive) appended only when two open tabs share that file name

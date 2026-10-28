@@ -35,6 +35,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabLabelMode
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripStyle
@@ -72,6 +73,7 @@ internal const val TAB_LABEL_HINT: String = "The folder is added when two open t
 /** Test tags of the Tab label control and its hint. */
 internal const val TAB_LABEL_CONTROL_TAG = "tab-label-mode"
 internal const val TAB_LABEL_HINT_TAG = "tab-label-hint"
+internal const val TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG = "tab-close-button-position"
 internal const val TAB_STYLE_GRID_TAG = "tab-style-grid"
 
 private val THUMB_MIN_WIDTH = 84.dp
@@ -114,6 +116,15 @@ internal fun TabAppearanceControls(state: AppState) {
                 segmentHorizontalPadding = 8.dp,
             )
             AppText(TAB_LABEL_HINT, color = tc.td, fontSize = 10.sp, modifier = Modifier.testTag(TAB_LABEL_HINT_TAG))
+        }
+        CompactSetting("Close button position") {
+            val positions = TabCloseButtonPosition.entries
+            SegmentedControl(
+                options = listOf("Left", "Right"),
+                selectedIndices = setOf(positions.indexOf(settings.tabCloseButtonPosition)),
+                onToggle = { idx -> state.updateSettings { it.copy(tabCloseButtonPosition = positions[idx]) } },
+                modifier = Modifier.testTag(TAB_CLOSE_BUTTON_POSITION_CONTROL_TAG),
+            )
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {

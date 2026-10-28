@@ -63,11 +63,12 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.LogTab
+import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 
 // How each tab strip style (Settings > Appearance > Tabs) draws one tab. The shell keeps one structure for every style (a stripe
-// overlay and a Row of [live dot] [badge] [label] [close]) and only the metrics, the chrome behind the Row and the label's type
+// overlay and a Row of [close?] [live dot] [badge] [label] [close?]) and only the metrics, the chrome behind the Row and the label's type
 // change, so a behaviour (click, right-click menu, tooltip, drag, close) is the same in every style. CURRENT is the long-standing
 // look and produces exactly the modifiers the shell had before styles existed. A strip on another window edge (TabAppearance.position)
 // turns the same drawing around: the accent mark, a raised card's open side and the source stripe move to the matching side of the tab.
@@ -379,6 +380,7 @@ internal fun TabShell(
     showClose: Boolean,
     dragging: Boolean = false,
     leading: (@Composable () -> Unit)? = null,
+    groupIndicator: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
     onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
@@ -436,25 +438,34 @@ internal fun TabShell(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(metrics.gap),
         ) {
+            if (appearance.closeButtonPosition == TabCloseButtonPosition.LEFT) {
+                TabCloseSlot(
+                    pointerKey = pointerKey,
+                    showClose = showClose,
+                    visible = appearance.closeAlways || lit || hov,
+                    style = style,
+                    position = position,
+                    onClose = onClose,
+                )
+            }
             leading?.invoke()
+            groupIndicator?.invoke()
             if (style == TabStripStyle.SEGMENTED && isActive) {
                 Box(Modifier.testTag("tab-dot-$pointerKey").size(SEGMENT_DOT).background(tc.ac, CircleShape))
             }
             if (appearance.showBadge) TabBadge(tabKindBadge(appearance.kind), "tab-badge-$pointerKey")
-            TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f)) {
+            TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f).testTag("tab-label-$pointerKey")) {
                 TabLabelText(label, appearance.secondLine, labelStyle)
             }
-            if (showClose) {
-                if (appearance.closeAlways || lit || hov) {
-                    CloseButton(
-                        onClick = onClose,
-                        modifier = Modifier.testTag("tab-close-$pointerKey"),
-                        shape = tabCloseButtonShape(style, position),
-                    )
-                } else {
-                    // Keeps the label's room stable: the button appears on hover without the text reflowing.
-                    Spacer(Modifier.size(CLOSE_SLOT))
-                }
+            if (appearance.closeButtonPosition == TabCloseButtonPosition.RIGHT) {
+                TabCloseSlot(
+                    pointerKey = pointerKey,
+                    showClose = showClose,
+                    visible = appearance.closeAlways || lit || hov,
+                    style = style,
+                    position = position,
+                    onClose = onClose,
+                )
             }
         }
         if (appearance.showStripe && shape == RectangleShape) {
@@ -472,6 +483,29 @@ internal fun TabShell(
                 ),
             )
         }
+    }
+}
+
+/** The close hit target and its hover-only placeholder share one slot so the label never shifts. */
+@Composable
+private fun TabCloseSlot(
+    pointerKey: Any,
+    showClose: Boolean,
+    visible: Boolean,
+    style: TabStripStyle,
+    position: TabStripPosition,
+    onClose: () -> Unit,
+) {
+    if (!showClose) return
+    if (visible) {
+        CloseButton(
+            onClick = onClose,
+            modifier = Modifier.testTag("tab-close-$pointerKey"),
+            shape = tabCloseButtonShape(style, position),
+        )
+    } else {
+        // Keeps the label's room stable: the button appears on hover without the text reflowing.
+        Spacer(Modifier.size(CLOSE_SLOT).testTag("tab-close-slot-$pointerKey"))
     }
 }
 
@@ -541,6 +575,7 @@ internal fun TabItem(
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
     appearance: TabAppearance = TabAppearance.Default,
+    groupIndicator: (@Composable () -> Unit)? = null,
 ) {
     val tc = tc()
     TabShell(
@@ -575,5 +610,6 @@ internal fun TabItem(
         onClose = onClose,
         onCtxMenu = onCtxMenu,
         appearance = appearance,
+        groupIndicator = groupIndicator,
     )
 }

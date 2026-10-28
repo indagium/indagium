@@ -123,6 +123,7 @@ class TileScrollColumnTest {
             S.B to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 120f, fitDp = 300f),
             S.C to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 220f, fitDp = 500f),
         )
+
         fun sized(collapsed: Set<S>) = tileGeometry(root, HOST_W, HOST_H, SPEC, collapsed, scrolls) { sizing[it] }
 
         val open = sized(emptySet())
@@ -149,6 +150,7 @@ class TileScrollColumnTest {
             S.B to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 120f, fitDp = 300f),
             S.C to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 220f, fitDp = 500f),
         )
+
         fun sized(collapsed: Set<S>) = tileGeometry(root, HOST_W, HOST_H, SPEC, collapsed, scrolls) { sizing[it] }
 
         val closed = sized(setOf(S.B, S.C))

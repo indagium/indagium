@@ -2048,7 +2048,7 @@ private fun Seq3FragmentLabelOverlay(
                     // `refMissing` above and this tap landing.
                     onTap = {
                         if (refDiagramId != null) {
-                            state.seq3Sessions.openLibraryItem(refDiagramId)
+                            state.seq3Sessions.openLibraryItem(refDiagramId, origin = TabRef.Diagram(session.id))
                         } else {
                             seq3ClearSelection(view, clearFocus = true)
                         }

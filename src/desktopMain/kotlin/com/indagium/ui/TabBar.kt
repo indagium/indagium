@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -20,14 +21,78 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
 import kotlin.math.roundToInt
+
+internal fun groupedFixedVisibleWidthsPx(
+    items: List<TabStripItem>,
+    headerWidthsPx: Map<String, Float>,
+    availablePx: Float,
+    fallbackTabPx: Float,
+): List<Float> {
+    if (items.isEmpty()) return emptyList()
+    val headers = items.filterIsInstance<TabStripItem.GroupHeader>()
+    val headerTotal = headers.sumOf { (headerWidthsPx[it.group.id] ?: 0f).toDouble() }.toFloat()
+    val tabCount = items.count { it is TabStripItem.Tab }
+    val headerBudget = when {
+        headerTotal < availablePx -> headerTotal
+        tabCount == 0 -> availablePx
+        else -> (availablePx - minOf(availablePx * TAB_GROUP_HEADER_TAB_RESERVE_RATIO, fallbackTabPx * tabCount))
+            .coerceAtLeast(0f)
+    }
+    val headerScale = if (headerTotal > headerBudget && headerTotal > 0f) headerBudget / headerTotal else 1f
+    val scaledHeaderTotal = headerTotal * headerScale
+    val sharedTabWidth = if (tabCount == 0) {
+        fallbackTabPx
+    } else {
+        (availablePx - scaledHeaderTotal).coerceAtLeast(0f) / tabCount
+    }
+    return items.map { item ->
+        if (item is TabStripItem.GroupHeader) (headerWidthsPx[item.group.id] ?: 0f) * headerScale else sharedTabWidth
+    }
+}
+
+internal fun groupHeaderPopupOrigin(
+    position: TabStripPosition,
+    headerBounds: IntRect,
+    popupSize: IntSize,
+    windowSize: IntSize,
+    topDropPx: Int,
+    layoutDirection: LayoutDirection = LayoutDirection.Ltr,
+): IntOffset {
+    val placed = ChromePopupPositionProvider(position, topDropPx)
+        .calculatePosition(headerBounds, windowSize, layoutDirection, popupSize)
+    return IntOffset(
+        placed.x.coerceIn(0, (windowSize.width - popupSize.width).coerceAtLeast(0)),
+        placed.y.coerceIn(0, (windowSize.height - popupSize.height).coerceAtLeast(0)),
+    )
+}
+
+private class GroupHeaderPopupPositionProvider(
+    private val position: TabStripPosition,
+    private val headerBounds: IntRect,
+    private val topDropPx: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset = groupHeaderPopupOrigin(position, headerBounds, popupContentSize, windowSize, topDropPx, layoutDirection)
+}
+
+private const val TAB_GROUP_HEADER_TAB_RESERVE_RATIO = 0.5f
 
 // Fraction of a tab's own width used as the drag-reorder snap threshold — moved here from
 // App.kt's file-level consts since it's only used by TabBar's drag logic.
@@ -278,7 +343,9 @@ internal fun <T> tabOrderAfterVisibleReorder(
 @Composable
 internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boolean = false, onReclaimFocus: () -> Unit = {}) {
     val tc = tc()
-    val density = LocalDensity.current.density
+    val openGroupEditor = LocalOpenTabGroupEditor.current
+    val densityContext = LocalDensity.current
+    val density = densityContext.density
     var containerPx by remember { mutableStateOf(0) }
     var tabAreaPx by remember { mutableStateOf(0) }
     var dragTabId by remember { mutableStateOf<String?>(null) }
@@ -288,6 +355,13 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     var justReleasedTabId by remember { mutableStateOf<String?>(null) }
     var liveVisualTabIds by remember { mutableStateOf(emptyList<String>()) }
     var overflowOpen by remember { mutableStateOf(false) }
+    var viewportAnchorRef by remember { mutableStateOf<TabRef?>(null) }
+    var dropTargetKey by remember { mutableStateOf<String?>(null) }
+    var dropTargetAfter by remember { mutableStateOf(false) }
+    var dropAtStripStart by remember { mutableStateOf(false) }
+    var dropAtStripEnd by remember { mutableStateOf(false) }
+    var ctxMenuGroupId by remember { mutableStateOf<String?>(null) }
+    var ctxMenuGroupBounds by remember { mutableStateOf<IntRect?>(null) }
     // Right-click popup for a single diagram tab — local like the overflow popup below, not an
     // AppState field: a log tab's context menu is the window-level state.tabCtx overlay (App.kt),
     // but a diagram tab's menu only ever needs a Popup anchored to that tab's own Box.
@@ -299,68 +373,67 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         onReclaimFocus()
     }
 
+    fun dismissGroupMenu() {
+        ctxMenuGroupId = null
+        ctxMenuGroupBounds = null
+        onReclaimFocus()
+    }
+
     fun dismissOverflow() {
         overflowOpen = false
         onReclaimFocus()
     }
-
-    // The strip's own interleaving of log tabs and diagram workspaces — the union order that lets
-    // a diagram tab sit anywhere among log tabs. Deliberately session-only Compose state, not a
-    // new AppState field to DRIVE rendering from: TabBar is composed exactly once for the life of
-    // the window (App.kt:308, never behind a key()/conditional that would tear this down), so
-    // `remember` here already gives it the same lifetime an AppState field would, without widening
-    // AppState's surface for something that's purely a rendering order, fully re-derivable from
-    // the two backing stores on every read via reconcileTabOrder.
-    //
-    // User-observed correction: seeded from state.tabOrder (rather than always emptyList()) so a
-    // restart can put a diagram tab BACK where it actually sat among the log tabs, not always
-    // appended after every one of them — AppState.restoreTabOrder resolves the persisted order's
-    // ids to whatever's actually live before this composable's first composition ever reads them,
-    // the same "restore runs before Compose starts" ordering AppState.restoreDiagramTabs already
-    // relies on. Every one of the three sites below that reassigns unifiedOrder also mirrors the
-    // new value into state.tabOrder — the one-way trip back out, purely so serializeAutosave() has
-    // something to persist; state.tabOrder is otherwise never read to drive anything.
-    var unifiedOrder by remember { mutableStateOf(state.tabOrder) }
 
     val stripHeightDp = tabStripHeightDp(state.settings.tabStripStyle)
     val minTabPx = (80 * density).toInt()
     // A vertical strip's overflow button is as tall as a tab; a horizontal one is 40 dp wide.
     val ovBtnPx = if (vertical) (stripHeightDp * density).toInt() else (40 * density).toInt()
 
-    val logTabIds = state.tabs.map { it.id }
-    val diagramSessionIds = state.seq3Sessions.sessions.map { it.id }
-    val testsOpen = state.testsTabOpen
-    // Reconciled only while nothing is mid-drag — mirrors liveVisualTabIds' own dragTabId-gated
-    // LaunchedEffect below, so a membership change landing mid-gesture can never clobber the
-    // in-flight optimistic reorder.
-    LaunchedEffect(logTabIds, diagramSessionIds, testsOpen) {
-        if (dragTabId == null) {
-            unifiedOrder = reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds, testsOpen)
-            state.tabOrder = unifiedOrder
-        }
-    }
-
-    // The order the strip actually draws. The LaunchedEffect above only lands a frame AFTER the store
-    // changed, so rendering straight from unifiedOrder would draw one frame without a just-opened tab
-    // (an empty slot where a replaced New tab used to be). Reconciling synchronously here, with the
-    // same pure function, makes the first frame already right; the effect then writes the identical
-    // result back. Mid-drag the in-flight optimistic order is rendered untouched (same gating as the
-    // effect), so a membership change landing mid-gesture still can't clobber it.
-    val renderOrder = if (dragTabId == null) {
-        remember(unifiedOrder, logTabIds, diagramSessionIds, testsOpen) {
-            reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds, testsOpen)
-        }
-    } else {
-        unifiedOrder
-    }
+    // AppState is the sole order authority so group menu changes, close cleanup and drag commits
+    // cannot be overwritten by a remembered composition-only copy.
+    val renderOrder = state.reconciledTabOrder()
+    val groups = state.tabGroups
+    val groupedMode = groups.isNotEmpty()
+    val stripItems = remember(renderOrder, groups) { projectTabStripItems(renderOrder, groups) }
 
     val visibleTabLimit = state.settings.visibleTabLimit
     val settings = state.settings
     val position = settings.tabStripPosition
     // The widths-differ maths (FIT) also serves a vertical strip, where every tab's length along the strip is one style height.
     val fit = vertical || settings.tabsFitLabel()
+    val groupedFixedMode = groupedMode && !fit
+    val textMeasurer = rememberTextMeasurer()
+    val uiFont = LocalUiFontFamily.current
+    val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont) {
+        groups.associate { group ->
+            group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext)
+        }
+    }
     val logById = state.tabs.associateBy { it.id }
     val diagramById = state.seq3Sessions.sessions.associateBy { it.id }
+    val activeStripRef = when (val active = state.activeSurface) {
+        is ActiveSurface.Log -> TabRef.Log(active.tabId)
+        is ActiveSurface.Diagram3 -> TabRef.Diagram(active.sessionId)
+        ActiveSurface.Tests -> TabRef.Tests
+        null -> state.activeTabId?.let(TabRef::Log)
+    }
+    val activeGroup = activeStripRef?.let(state::tabGroupOf)
+
+    data class ActiveGroupObservation(val ref: TabRef?, val groupId: String?, val collapsed: Boolean?)
+    val activeObservation = ActiveGroupObservation(activeStripRef, activeGroup?.id, activeGroup?.collapsed)
+    var lastActiveObservation by remember { mutableStateOf(activeObservation) }
+    LaunchedEffect(activeObservation) {
+        val previous = lastActiveObservation
+        lastActiveObservation = activeObservation
+        when {
+            activeObservation.ref != null && activeObservation.groupId == null -> viewportAnchorRef = null
+            activeObservation.ref != null && activeObservation.collapsed == false -> {
+                val refChanged = previous.ref != activeObservation.ref
+                val groupExpanded = previous.groupId == activeObservation.groupId && previous.collapsed == true
+                if (refChanged || groupExpanded) viewportAnchorRef = activeObservation.ref
+            }
+        }
+    }
 
     // Label and look of every tab in the strip, per the Tabs appearance settings (the default is today's tabDisplayLabel).
     fun describe(ref: TabRef): TabDescriptor? = when (ref) {
@@ -371,36 +444,59 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         TabRef.Tests -> workspaceTabDescriptor("Tests", TabKind.TESTS, settings)
     }
     val descriptors = renderOrder.mapNotNull { ref -> describe(ref)?.let { ref.rawId() to it } }.toMap()
+
     // FIT only: each tab as wide as its label (the equal-share maths of FIXED needs none of this).
-    val fitWidthsPx = if (vertical) {
-        renderOrder.map { stripHeightDp * density }
-    } else if (fit) {
-        fitTabWidthsPx(renderOrder.map { ref -> descriptors[ref.rawId()]?.let { tabFitContentDp(it.label, it.appearance) } ?: FIT_TAB_MIN_DP }, density)
-    } else {
-        emptyList()
+    fun itemFitDp(item: TabStripItem): Float = when (item) {
+        is TabStripItem.Tab -> descriptors[item.ref.rawId()]?.let { descriptor ->
+            val indicatorWidth = state.tabGroupOf(item.ref)?.let(::tabGroupIndicatorWidthDp) ?: 0f
+            tabFitContentDp(descriptor.label, descriptor.appearance.copy(groupIndicatorWidthDp = indicatorWidth))
+        } ?: FIT_TAB_MIN_DP
+        is TabStripItem.GroupHeader -> (groupHeaderWidthsPx[item.group.id] ?: 64 * density).div(density)
     }
-    val (visibleRefs, overflowRefs) = remember(renderOrder, containerPx, visibleTabLimit, fit, fitWidthsPx) {
-        if (fit) {
-            splitTabsForVisibilityFit(
-                tabs = renderOrder,
-                widthsPx = fitWidthsPx,
-                containerPx = containerPx,
-                overflowButtonPx = ovBtnPx,
-                visibleTabLimit = visibleTabLimit,
-            )
+    val fitWidthsPx = when {
+        vertical -> stripItems.map { stripHeightDp * density }
+        settings.tabsFitLabel() -> fitTabWidthsPx(stripItems.map(::itemFitDp), density)
+        else -> emptyList()
+    }
+    val selectionWidthsPx = when {
+        vertical -> stripItems.map { stripHeightDp * density }
+        fit -> fitWidthsPx
+        groupedFixedMode -> stripItems.map { item ->
+            if (item is TabStripItem.GroupHeader) groupHeaderWidthsPx[item.group.id] ?: minTabPx.toFloat() else minTabPx.toFloat()
+        }
+        else -> stripItems.map { minTabPx.toFloat() }
+    }
+    val (visibleItems, overflowItems) = remember(
+        stripItems, containerPx, visibleTabLimit, fit, fitWidthsPx, selectionWidthsPx, viewportAnchorRef, groups, groupedFixedMode,
+    ) {
+        if (!groupedMode) {
+            val (visible, overflow) = if (fit) {
+                splitTabsForVisibilityFit(renderOrder, fitWidthsPx, containerPx, ovBtnPx, visibleTabLimit)
+            } else {
+                splitTabsForVisibility(renderOrder, containerPx, minTabPx, ovBtnPx, visibleTabLimit)
+            }
+            visible.map(TabStripItem::Tab) to overflow.map(TabStripItem::Tab)
         } else {
-            splitTabsForVisibility(
-                tabs = renderOrder,
+            splitTabStripItems(
+                items = stripItems,
+                widthsPx = selectionWidthsPx,
                 containerPx = containerPx,
-                minTabPx = minTabPx,
                 overflowButtonPx = ovBtnPx,
-                visibleTabLimit = visibleTabLimit,
+                visibleItemLimit = visibleTabLimit,
+                minimumItemPx = if (vertical) (stripHeightDp * density).toInt() else minTabPx,
+                groups = groups,
+                anchorRef = viewportAnchorRef,
+                forceOverflow = stripItems.filterIsInstance<TabStripItem.Tab>().size < renderOrder.size,
+                preserveItemSize = vertical,
             )
         }
     }
 
-    val visibleTabIds = visibleRefs.map { it.rawId() }
-    val overflowTabIds = overflowRefs.map { it.rawId() }
+    val visibleRefs = visibleItems.filterIsInstance<TabStripItem.Tab>().map { it.ref }
+    val visibleRefSet = visibleRefs.toSet()
+    val overflowRefs = if (groupedMode) renderOrder.filterNot { it in visibleRefSet } else overflowItems.filterIsInstance<TabStripItem.Tab>().map { it.ref }
+    val visibleTabIds = visibleItems.map { it.key }
+    val overflowTabIds = overflowItems.map { it.key }
     LaunchedEffect(visibleTabIds, dragTabId) {
         if (dragTabId == null) liveVisualTabIds = visibleTabIds
     }
@@ -410,35 +506,114 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
             justReleasedTabId = null
         }
     }
-    val tabWidthPx =
-        if (visibleRefs.isNotEmpty() && tabAreaPx > 0) tabAreaPx.toFloat() / visibleRefs.size else minTabPx.toFloat()
+    val tabWidthPx = if (visibleItems.isNotEmpty() && tabAreaPx > 0) {
+        tabAreaPx.toFloat() / visibleItems.size
+    } else {
+        minTabPx.toFloat()
+    }
     // Each visible tab's width: an equal share of the strip (FIXED, unchanged), or its label's width, scaled down together when they
     // would not fit (FIT).
-    val fitWidthById = if (fit) renderOrder.map { it.rawId() }.zip(fitWidthsPx).toMap() else emptyMap()
-    val visibleWidthsPx =
-        if (fit) shrinkTabWidthsToFit(visibleTabIds.map { fitWidthById[it] ?: minTabPx.toFloat() }, tabAreaPx.toFloat()) else emptyList()
-    val widthById = if (fit) visibleTabIds.zip(visibleWidthsPx).toMap() else emptyMap()
+    val visibleWidthsPx = when {
+        vertical -> visibleItems.map { stripHeightDp * density }
+        fit -> shrinkTabWidthsToFit(
+            visibleItems.map { item ->
+                when (item) {
+                    is TabStripItem.GroupHeader -> groupHeaderWidthsPx[item.group.id] ?: minTabPx.toFloat()
+                    is TabStripItem.Tab -> selectionWidthsPx.getOrElse(stripItems.indexOfFirst { it.key == item.key }) { minTabPx.toFloat() }
+                }
+            },
+            tabAreaPx.toFloat(),
+        )
+        groupedFixedMode -> groupedFixedVisibleWidthsPx(visibleItems, groupHeaderWidthsPx, tabAreaPx.toFloat(), minTabPx.toFloat())
+        else -> emptyList()
+    }
+    val variableWidthMode = fit || groupedFixedMode
+    val widthById = if (variableWidthMode) visibleTabIds.zip(visibleWidthsPx).toMap() else emptyMap()
     val visualOrderIds =
         liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size }
             ?: visibleTabIds
-    val visualOffsetsPx = if (fit) tabOffsets(visualOrderIds.map { widthById[it] ?: tabWidthPx }) else emptyList()
+    val visualOffsetsPx = if (variableWidthMode) tabOffsets(visualOrderIds.map { widthById[it] ?: tabWidthPx }) else emptyList()
     val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
     val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
     val currentUnifiedOrder by rememberUpdatedState(renderOrder)
+    val currentVisibleItems by rememberUpdatedState(visibleItems)
+    val currentAllItems by rememberUpdatedState(stripItems)
+    val currentDropTargetKey by rememberUpdatedState(dropTargetKey)
+    val currentDropTargetAfter by rememberUpdatedState(dropTargetAfter)
+    val currentDropAtStripStart by rememberUpdatedState(dropAtStripStart)
+    val currentDropAtStripEnd by rememberUpdatedState(dropAtStripEnd)
+    val currentOverflowItems by rememberUpdatedState(overflowItems)
 
-    // Commits a drag release: resolves the reordered raw ids back to TabRefs, updates the strip's
-    // own unifiedOrder, then partitions and writes BOTH backing stores — state.tabs via the same
-    // direct assignment the pre-merge log-tab strip always used, seq3Sessions via its own
-    // reorderSessions. The two stores are never otherwise touched by this file.
-    fun commitReorder(newVisibleOrder: List<String>, overflowOrder: List<String>) {
-        val newRawOrder = tabOrderAfterVisibleReorder(visibleIds = newVisibleOrder, overflowIds = overflowOrder)
-        val byRawId = currentUnifiedOrder.associateBy { it.rawId() }
-        val newOrder = newRawOrder.mapNotNull(byRawId::get)
-        unifiedOrder = newOrder
-        state.tabOrder = newOrder
-        val (logOrder, diagramOrder) = partitionTabOrder(newOrder)
-        state.tabs = logOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
-        state.seq3Sessions.reorderSessions(diagramOrder)
+    fun commitReorder(newVisibleOrder: List<String>, overflowOrder: List<String>, draggedKey: String?, targetKey: String?) {
+        val itemByKey = (currentAllItems + currentVisibleItems + currentOverflowItems).associateBy { it.key }
+        val dragged = itemByKey[draggedKey]
+        val target = itemByKey[targetKey]
+        val visibleOrderRefs = newVisibleOrder.mapNotNull { itemByKey[it] as? TabStripItem.Tab }.map { it.ref }.distinct()
+        val reorderedRefs = if (!groupedMode) {
+            val newRawOrder = tabOrderAfterVisibleReorder(newVisibleOrder, overflowOrder)
+            newRawOrder.mapNotNull { itemByKey[it] as? TabStripItem.Tab }.map { it.ref }.distinct()
+        } else {
+            val visibleSet = currentVisibleItems.filterIsInstance<TabStripItem.Tab>().mapTo(mutableSetOf()) { it.ref }
+            var replacementIndex = 0
+            currentUnifiedOrder.map { ref ->
+                if (ref in visibleSet) visibleOrderRefs.getOrNull(replacementIndex++) ?: ref else ref
+            }
+        }
+        when (dragged) {
+            is TabStripItem.GroupHeader -> {
+                val before = when {
+                    currentDropAtStripStart -> currentUnifiedOrder.firstOrNull { it !in dragged.group.members }
+                    currentDropAtStripEnd -> null
+                    else -> tabGroupDropBefore(target, currentUnifiedOrder, currentDropTargetAfter)
+                }
+                if (target !is TabStripItem.GroupHeader || target.group.id != dragged.group.id) {
+                    state.moveTabGroup(dragged.group.id, before)
+                }
+            }
+            is TabStripItem.Tab -> {
+                val ref = dragged.ref
+                val targetGroup = when (target) {
+                    is TabStripItem.GroupHeader -> target.group
+                    is TabStripItem.Tab -> state.tabGroupOf(target.ref)
+                    null -> null
+                }
+                when {
+                    targetGroup != null && target is TabStripItem.Tab -> {
+                        state.assignTabToGroup(
+                            ref,
+                            targetGroup.id,
+                            before = if (!currentDropTargetAfter) {
+                                target.ref
+                            } else {
+                                targetGroup.members.dropWhile { it != target.ref }.drop(1).firstOrNull { it != ref }
+                            },
+                        )
+                    }
+                    targetGroup != null -> state.assignTabToGroup(ref, targetGroup.id)
+                    else -> {
+                        if (state.tabGroupOf(ref) != null) state.removeTabFromGroup(ref)
+                        state.commitTabOrder(reorderedRefs)
+                    }
+                }
+            }
+            null -> state.commitTabOrder(reorderedRefs)
+        }
+    }
+
+    fun pointerTargetIndex(pointerMain: Float): Int? {
+        val total = if (variableWidthMode) visibleWidthsPx.sum() else tabWidthPx * visibleTabIds.size
+        if (pointerMain < 0f || pointerMain > total || visibleTabIds.isEmpty()) return null
+        return if (variableWidthMode) {
+            tabIndexAtX(pointerMain, visibleWidthsPx)
+        } else {
+            (pointerMain / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex)
+        }
+    }
+
+    fun pointerIsAfterTarget(pointerMain: Float, targetIndex: Int): Boolean {
+        val start = if (variableWidthMode) tabOffsets(visibleWidthsPx).getOrElse(targetIndex) { 0f } else targetIndex * tabWidthPx
+        val width = if (variableWidthMode) visibleWidthsPx.getOrElse(targetIndex) { tabWidthPx } else tabWidthPx
+        return pointerMain >= start + width / 2f
     }
 
     // The strip itself: a row (tabs, then the overflow button) or, vertical, a column of the same.
@@ -452,93 +627,119 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                     var downId: String? = null
                     var dragging = false
                     awaitReorderPointerScope {
-                        while (true) {
-                            val ev = awaitPointerEvent(PointerEventPass.Initial)
-                            val ch = ev.changes.firstOrNull() ?: continue
-                            when (ev.type) {
-                                PointerEventType.Press -> {
-                                    downPos = ch.position; dragging = false
-                                    val pointerMain = if (vertical) ch.position.y else ch.position.x
-                                    downMain = pointerMain
-                                    val idx = if (fit) {
-                                        tabIndexAtX(pointerMain, visibleWidthsPx)
-                                    } else {
-                                        (pointerMain / tabWidthPx).toInt().coerceIn(0, visibleTabIds.lastIndex.coerceAtLeast(0))
+                        try {
+                            while (true) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                val ch = ev.changes.firstOrNull() ?: continue
+                                when (ev.type) {
+                                    PointerEventType.Press -> {
+                                        downPos = ch.position; dragging = false
+                                        val pointerMain = if (vertical) ch.position.y else ch.position.x
+                                        downMain = pointerMain
+                                        val idx = pointerTargetIndex(pointerMain) ?: -1
+                                        downId = visibleTabIds.getOrNull(idx)
+                                        dropTargetKey = downId
+                                        dropTargetAfter = if (idx >= 0) pointerIsAfterTarget(pointerMain, idx) else false
+                                        dropAtStripStart = false
+                                        dropAtStripEnd = false
                                     }
-                                    downId = visibleTabIds.getOrNull(idx)
-                                }
 
-                                PointerEventType.Move -> {
-                                    if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
-                                        dragging = true
-                                        holdMoveDragCursor()
-                                        dragTabId = downId
-                                        justReleasedTabId = null
-                                        dragStartIndex = visibleTabIds.indexOf(downId)
-                                        dragOffsetX = 0f
-                                    }
-                                    if (dragging && dragTabId != null) {
-                                        ch.consume()
-                                        dragOffsetX = (if (vertical) ch.position.y else ch.position.x) - downMain
-                                        liveVisualTabIds = if (fit) {
-                                            browserTabOrderDuringDragVariable(
-                                                visibleIds = visibleTabIds,
-                                                widthsPx = visibleWidthsPx,
-                                                draggedId = dragTabId,
-                                                dragStartIndex = dragStartIndex,
-                                                dragOffsetX = dragOffsetX,
-                                            )
-                                        } else {
-                                            browserTabOrderDuringDrag(
-                                                visibleIds = visibleTabIds,
-                                                draggedId = dragTabId,
-                                                dragStartIndex = dragStartIndex,
-                                                dragOffsetX = dragOffsetX,
-                                                tabWidth = tabWidthPx,
-                                            )
+                                    PointerEventType.Move -> {
+                                        if (downId != null && !dragging && (ch.position - downPos).getDistance() > 8f) {
+                                            dragging = true
+                                            holdMoveDragCursor()
+                                            dragTabId = downId
+                                            justReleasedTabId = null
+                                            dragStartIndex = visibleTabIds.indexOf(downId)
+                                            dragOffsetX = 0f
+                                        }
+                                        if (dragging && dragTabId != null) {
+                                            ch.consume()
+                                            dragOffsetX = (if (vertical) ch.position.y else ch.position.x) - downMain
+                                            val pointerMain = if (vertical) ch.position.y else ch.position.x
+                                            val targetIndex = pointerTargetIndex(pointerMain)
+                                            dropTargetKey = targetIndex?.let(visibleTabIds::getOrNull)
+                                            dropTargetAfter = targetIndex?.let { pointerIsAfterTarget(pointerMain, it) } ?: false
+                                            val total = if (variableWidthMode) visibleWidthsPx.sum() else tabWidthPx * visibleTabIds.size
+                                            dropAtStripStart = pointerMain < 0f
+                                            dropAtStripEnd = pointerMain > total
+                                            liveVisualTabIds = if (variableWidthMode) {
+                                                browserTabOrderDuringDragVariable(
+                                                    visibleIds = visibleTabIds,
+                                                    widthsPx = visibleWidthsPx,
+                                                    draggedId = dragTabId,
+                                                    dragStartIndex = dragStartIndex,
+                                                    dragOffsetX = dragOffsetX,
+                                                )
+                                            } else {
+                                                browserTabOrderDuringDrag(
+                                                    visibleIds = visibleTabIds,
+                                                    draggedId = dragTabId,
+                                                    dragStartIndex = dragStartIndex,
+                                                    dragOffsetX = dragOffsetX,
+                                                    tabWidth = tabWidthPx,
+                                                )
+                                            }
                                         }
                                     }
-                                }
 
-                                PointerEventType.Release -> {
-                                    releaseMoveDragCursor()
-                                    if (dragging && dragTabId != null) {
-                                        justReleasedTabId = dragTabId
-                                        commitReorder(currentVisualOrderIds, currentOverflowTabIds)
+                                    PointerEventType.Release -> {
+                                        releaseMoveDragCursor()
+                                        if (dragging && dragTabId != null) {
+                                            justReleasedTabId = dragTabId
+                                            commitReorder(currentVisualOrderIds, currentOverflowTabIds, dragTabId, currentDropTargetKey)
+                                        }
+                                        dragTabId = null
+                                        dragStartIndex = -1
+                                        dragOffsetX = 0f
+                                        downId = null
+                                        dropTargetKey = null
+                                        dropTargetAfter = false
+                                        dropAtStripStart = false
+                                        dropAtStripEnd = false
+                                        dragging = false
                                     }
-                                    dragTabId = null
-                                    dragStartIndex = -1
-                                    dragOffsetX = 0f
-                                    downId = null
-                                    dragging = false
-                                }
 
-                                else -> {}
+                                    else -> {}
+                                }
                             }
+                        } finally {
+                            // A live order or membership change cancels this pointerInput block.
+                            // Always clear the drag gate here so clicks cannot remain disabled.
+                            dragTabId = null
+                            dragStartIndex = -1
+                            dragOffsetX = 0f
+                            dropTargetKey = null
+                            dropTargetAfter = false
+                            dropAtStripStart = false
+                            dropAtStripEnd = false
+                            liveVisualTabIds = emptyList()
+                            releaseMoveDragCursor()
                         }
                     }
-                },
+                }
+                .testTag("tab-strip-drag-${if (dragTabId == null) "idle" else "active"}"),
         ) {
-            visibleRefs.forEach { ref ->
-                key(ref.rawId()) {
-                    val isDragging = ref.rawId() == dragTabId
-                    val targetIndex = visualOrderIds.indexOf(ref.rawId()).takeIf { it >= 0 } ?: visibleRefs.indexOf(ref)
-                    val targetX = if (fit) visualOffsetsPx.getOrElse(targetIndex) { 0f } else targetIndex * tabWidthPx
+            visibleItems.forEach { item ->
+                key(item.key) {
+                    val isDragging = item.key == dragTabId
+                    val targetIndex = visualOrderIds.indexOf(item.key).takeIf { it >= 0 } ?: visibleItems.indexOf(item)
+                    val targetX = if (variableWidthMode) visualOffsetsPx.getOrElse(targetIndex) { 0f } else targetIndex * tabWidthPx
                     val animatedX by animateFloatAsState(
                         targetValue = targetX,
                         animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
-                        label = "tab-x-${ref.rawId()}",
+                        label = "tab-x-${item.key}",
                     )
                     val startIndex = dragStartIndex.takeIf { it >= 0 } ?: targetIndex
-                    val startX = if (fit) tabOffsets(visibleWidthsPx).getOrElse(startIndex) { 0f } else startIndex * tabWidthPx
+                    val startX = if (variableWidthMode) tabOffsets(visibleWidthsPx).getOrElse(startIndex) { 0f } else startIndex * tabWidthPx
                     val tabX = tabRenderX(
                         isDragging = isDragging,
-                        isJustReleased = ref.rawId() == justReleasedTabId,
+                        isJustReleased = item.key == justReleasedTabId,
                         pointerX = startX + dragOffsetX,
                         targetX = targetX,
                         animatedX = animatedX,
                     )
-                    val tabLengthDp = ((widthById[ref.rawId()] ?: tabWidthPx) / density).dp
+                    val tabLengthDp = ((widthById[item.key] ?: tabWidthPx) / density).dp
                     Box(
                         Modifier
                             .then(
@@ -556,95 +757,182 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                                 }
                             }
                     ) {
-                        when (ref) {
-                            is TabRef.Log -> logById[ref.tabId]?.let { tab ->
-                                val described = descriptors[ref.rawId()]
-                                TabItem(
-                                    tab = tab,
-                                    label = described?.label ?: tabDisplayLabel(tab, state.tabs),
-                                    appearance = described?.appearance ?: TabAppearance.Default,
-                                    isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
-                                    showClose = true,
-                                    dragging = isDragging,
-                                    onClick = { if (dragTabId == null) state.activateTab(tab.id).also { onReclaimFocus() } },
-                                    onClose = { state.closeTab(tab.id).also { onReclaimFocus() } },
-                                    onCtxMenu = { x, y -> state.tabCtx = TabCtxMenuState(tab.id, x, y) },
+                        when (item) {
+                            is TabStripItem.GroupHeader -> {
+                                val active = item.group.members.any { member ->
+                                    when (member) {
+                                        is TabRef.Log -> !state.diagramSurfaceActive && !state.testsSurfaceActive && state.activeTabId == member.tabId
+                                        is TabRef.Diagram -> state.activeSurface == ActiveSurface.Diagram3(member.sessionId)
+                                        TabRef.Tests -> state.testsSurfaceActive
+                                    }
+                                }
+                                TabGroupHeader(
+                                    group = item.group,
+                                    vertical = vertical,
+                                    activeMember = active,
+                                    width = tabLengthDp,
+                                    height = stripHeightDp.dp,
+                                    supporting = item.supporting,
+                                    onClick = { state.toggleTabGroupCollapsed(item.group.id); onReclaimFocus() },
+                                    onContextMenu = { bounds ->
+                                        ctxMenuGroupId = item.group.id
+                                        ctxMenuGroupBounds = bounds
+                                    },
                                 )
                             }
+                            is TabStripItem.Tab -> when (val ref = item.ref) {
+                                is TabRef.Log -> logById[ref.tabId]?.let { tab ->
+                                    val described = descriptors[ref.rawId()]
+                                    Box(Modifier.fillMaxSize()) {
+                                        TabItem(
+                                            tab = tab,
+                                            label = described?.label ?: tabDisplayLabel(tab, state.tabs),
+                                            appearance = described?.appearance ?: TabAppearance.Default,
+                                            isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
+                                            showClose = true,
+                                            dragging = isDragging,
+                                            onClick = {
+                                                if (dragTabId == null) state.activateStripTab(ref).also {
+                                                    viewportAnchorRef = ref.takeIf { groupedMode }
+                                                    onReclaimFocus()
+                                                }
+                                            },
+                                            onClose = { state.closeTab(tab.id).also { onReclaimFocus() } },
+                                            onCtxMenu = { x, y -> state.tabCtx = TabCtxMenuState(tab.id, x, y) },
+                                            groupIndicator = state.tabGroupOf(ref)?.let { group ->
+                                                { TabGroupHeaderIcon(group, testTagValue = "tab-group-member-indicator-${group.id}-${ref.rawId()}") }
+                                            },
+                                        )
+                                    }
+                                }
 
-                            is TabRef.Diagram -> diagramById[ref.sessionId]?.let { workspace ->
-                                val active = state.activeSurface == ActiveSurface.Diagram3(workspace.id)
-                                TabShell(
-                                    pointerKey = workspace.id,
-                                    label = workspace.document.title.ifBlank { "Diagram" },
-                                    appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
-                                    tooltip = diagramTabTooltip(workspace),
-                                    isActive = active,
-                                    showClose = true,
-                                    dragging = isDragging,
-                                    onClick = { if (dragTabId == null) state.seq3Sessions.activate(workspace.id).also { onReclaimFocus() } },
-                                    onClose = { state.seq3Sessions.close(workspace.id).also { onReclaimFocus() } },
-                                    onCtxMenu = { _, _ -> ctxMenuSessionId = workspace.id },
-                                )
-                                if (ctxMenuSessionId == workspace.id) {
-                                    Popup(
-                                        popupPositionProvider = remember(position, density, stripHeightDp) {
-                                            ChromePopupPositionProvider(position, ((stripHeightDp - 2) * density).roundToInt())
-                                        },
-                                        onDismissRequest = ::dismissCtxMenu,
-                                        properties = PopupProperties(focusable = true),
-                                    ) {
-                                        Column(
-                                            Modifier.width(200.dp).background(tc.p, RoundedCornerShape(7.dp))
-                                                .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp),
+                                is TabRef.Diagram -> diagramById[ref.sessionId]?.let { workspace ->
+                                    val active = state.activeSurface == ActiveSurface.Diagram3(workspace.id)
+                                    Box(Modifier.fillMaxSize()) {
+                                        TabShell(
+                                            pointerKey = workspace.id,
+                                            label = descriptors[ref.rawId()]?.label ?: workspace.document.title.ifBlank { "Diagram" },
+                                            appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
+                                            tooltip = diagramTabTooltip(workspace),
+                                            isActive = active,
+                                            showClose = true,
+                                            dragging = isDragging,
+                                            onClick = {
+                                                if (dragTabId == null) state.activateStripTab(ref).also {
+                                                    viewportAnchorRef = ref.takeIf { groupedMode }
+                                                    onReclaimFocus()
+                                                }
+                                            },
+                                            onClose = { state.seq3Sessions.close(workspace.id).also { onReclaimFocus() } },
+                                            onCtxMenu = { _, _ -> ctxMenuSessionId = workspace.id },
+                                            groupIndicator = state.tabGroupOf(ref)?.let { group ->
+                                                { TabGroupHeaderIcon(group, testTagValue = "tab-group-member-indicator-${group.id}-${ref.rawId()}") }
+                                            },
+                                        )
+                                    }
+                                    if (ctxMenuSessionId == workspace.id) {
+                                        Popup(
+                                            popupPositionProvider = remember(position, density, stripHeightDp) {
+                                                ChromePopupPositionProvider(position, ((stripHeightDp - 2) * density).roundToInt())
+                                            },
+                                            onDismissRequest = ::dismissCtxMenu,
+                                            properties = PopupProperties(focusable = true),
                                         ) {
-                                            // Extended to match the log-tab context menu's own action
-                                            // family (copy / close-other / close-to-side / close-all) —
-                                            // see this file's WP6 report for why a diagram's "to the
-                                            // right/left" scope is the diagram-only order rather than
-                                            // the strip's merged visual order (closeTabsToRight/Left's
-                                            // own log-tab precedent).
-                                            CtxItem(icon = Icons.Outlined.ContentCopy, label = "Copy diagram title") {
-                                                state.copyToClipboard(workspace.document.title.ifBlank { "Diagram" })
-                                                dismissCtxMenu()
-                                            }
-                                            CtxDivider()
-                                            CtxItem(icon = Icons.Outlined.Close, label = "Close") {
-                                                state.seq3Sessions.close(workspace.id)
-                                                dismissCtxMenu()
-                                            }
-                                            CtxItem(icon = Icons.Outlined.Block, label = "Close other diagrams") {
-                                                closeOtherDiagramWorkspaces(state, keepId = workspace.id)
-                                                dismissCtxMenu()
-                                            }
-                                            CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the right") {
-                                                closeDiagramWorkspacesToRight(state, workspace.id)
-                                                dismissCtxMenu()
-                                            }
-                                            CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the left") {
-                                                closeDiagramWorkspacesToLeft(state, workspace.id)
-                                                dismissCtxMenu()
-                                            }
-                                            CtxItem(icon = Icons.Outlined.Block, label = "Close all diagrams") {
-                                                closeAllDiagramWorkspaces(state)
-                                                dismissCtxMenu()
+                                            Column(
+                                                Modifier.width(200.dp).background(tc.p, RoundedCornerShape(7.dp))
+                                                    .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp),
+                                            ) {
+                                                // Extended to match the log-tab context menu's own action
+                                                // family (copy / close-other / close-to-side / close-all) —
+                                                // see this file's WP6 report for why a diagram's "to the
+                                                // right/left" scope is the diagram-only order rather than
+                                                // the strip's merged visual order (closeTabsToRight/Left's
+                                                // own log-tab precedent).
+                                                CtxItem(icon = Icons.Outlined.ContentCopy, label = "Copy diagram title") {
+                                                    state.copyToClipboard(workspace.document.title.ifBlank { "Diagram" })
+                                                    dismissCtxMenu()
+                                                }
+                                                TabGroupContextActions(
+                                                    state = state,
+                                                    ref = ref,
+                                                    onDismiss = ::dismissCtxMenu,
+                                                    onEdit = openGroupEditor,
+                                                )
+                                                CtxDivider()
+                                                CtxItem(icon = Icons.Outlined.Close, label = "Close") {
+                                                    state.seq3Sessions.close(workspace.id)
+                                                    dismissCtxMenu()
+                                                }
+                                                CtxItem(icon = Icons.Outlined.Block, label = "Close other diagrams") {
+                                                    closeOtherDiagramWorkspaces(state, keepId = workspace.id)
+                                                    dismissCtxMenu()
+                                                }
+                                                CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the right") {
+                                                    closeDiagramWorkspacesToRight(state, workspace.id)
+                                                    dismissCtxMenu()
+                                                }
+                                                CtxItem(icon = Icons.Outlined.Block, label = "Close diagrams to the left") {
+                                                    closeDiagramWorkspacesToLeft(state, workspace.id)
+                                                    dismissCtxMenu()
+                                                }
+                                                CtxItem(icon = Icons.Outlined.Block, label = "Close all diagrams") {
+                                                    closeAllDiagramWorkspaces(state)
+                                                    dismissCtxMenu()
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            TabRef.Tests -> TabShell(
-                                pointerKey = TESTS_TAB_RAW_ID,
-                                label = "Tests",
-                                appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
-                                tooltip = "AI test suites",
-                                isActive = state.testsSurfaceActive,
-                                showClose = true,
-                                dragging = isDragging,
-                                onClick = { if (dragTabId == null) state.openTestsTab().also { onReclaimFocus() } },
-                                onClose = { state.closeTestsTab().also { onReclaimFocus() } },
-                            )
+                                TabRef.Tests -> TabShell(
+                                    pointerKey = TESTS_TAB_RAW_ID,
+                                    label = "Tests",
+                                    appearance = descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
+                                    tooltip = "AI test suites",
+                                    isActive = state.testsSurfaceActive,
+                                    showClose = true,
+                                    dragging = isDragging,
+                                    onClick = { if (dragTabId == null) state.openTestsTab().also { onReclaimFocus() } },
+                                    onClose = { state.closeTestsTab().also { onReclaimFocus() } },
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ctxMenuGroupId?.let { groupId ->
+            val group = state.tabGroups.firstOrNull { it.id == groupId }
+            val headerBounds = ctxMenuGroupBounds
+            if (group != null && headerBounds != null) {
+                Popup(
+                    popupPositionProvider = remember(position, headerBounds, stripHeightDp, density) {
+                        GroupHeaderPopupPositionProvider(
+                            position,
+                            headerBounds,
+                            ((stripHeightDp - 2) * density).roundToInt(),
+                        )
+                    },
+                    onDismissRequest = ::dismissGroupMenu,
+                    properties = PopupProperties(focusable = true),
+                ) {
+                    Column(
+                        Modifier.width(200.dp).background(tc.p, RoundedCornerShape(7.dp))
+                            .border(1.dp, tc.br, RoundedCornerShape(7.dp)).testTag("tab-group-context-menu")
+                            .padding(vertical = 4.dp),
+                    ) {
+                        CtxItem(icon = Icons.Outlined.Edit, label = "Edit group…") {
+                            openGroupEditor(group.id)
+                            dismissGroupMenu()
+                        }
+                        CtxDivider()
+                        CtxItem(icon = Icons.Outlined.Block, label = "Ungroup") {
+                            state.ungroupTabs(group.id)
+                            dismissGroupMenu()
+                        }
+                        CtxItem(icon = Icons.Outlined.Close, label = "Close group") {
+                            state.closeTabGroup(group.id)
+                            dismissGroupMenu()
                         }
                     }
                 }
@@ -653,11 +941,13 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         if (overflowRefs.isNotEmpty()) {
             val overflowFill = if (vertical) Modifier.fillMaxWidth().height(stripHeightDp.dp) else Modifier.fillMaxHeight()
             Box(overflowFill) {
-                ToolbarBtn(
-                    "▾ ${overflowRefs.size}",
-                    active = overflowOpen,
-                    modifier = overflowFill,
-                ) { overflowOpen = !overflowOpen }
+                TooltipArea(tooltip = { ToolbarTooltip("More tabs — collapsed groups and tabs outside the visible area") }) {
+                    ToolbarBtn(
+                        "▾ ${overflowRefs.size}",
+                        active = overflowOpen,
+                        modifier = overflowFill.testTag("tab-overflow-button"),
+                    ) { overflowOpen = !overflowOpen }
+                }
                 if (overflowOpen) {
                     Popup(
                         popupPositionProvider = remember(position, density, stripHeightDp) {
@@ -671,34 +961,39 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                                 .background(tc.p, RoundedCornerShape(7.dp))
                                 .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
                         ) {
-                            Column(Modifier.padding(vertical = 4.dp)) {
-                                overflowRefs.forEach { ref ->
-                                    val label = descriptors[ref.rawId()]?.label ?: return@forEach
-                                    HoverBox(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        onClick = {
-                                            // Bring the picked tab into the visible window, mirroring
-                                            // AppState.activateOverflowTab's own "select from overflow
-                                            // moves it into view" contract for log tabs — diagrams
-                                            // have no independent "into view" concept of their own
-                                            // (unlike the deleted diagramWorkspaceIdsForWidth sliding
-                                            // window), so this strip's own unifiedOrder is what moves.
-                                            unifiedOrder = renderOrder.filterNot { it == ref } + ref
-                                            state.tabOrder = unifiedOrder
+                            Column(
+                                Modifier.heightIn(max = 400.dp)
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(vertical = 4.dp)
+                                    .testTag("tab-overflow-list"),
+                            ) {
+                                val collapsedRefs = overflowRefs.filter { state.tabGroupOf(it)?.collapsed == true }
+                                val moreRefs = overflowRefs.filterNot { state.tabGroupOf(it)?.collapsed == true }
+                                if (collapsedRefs.isNotEmpty()) {
+                                    OverflowSectionTitle("Collapsed groups", "tab-overflow-collapsed-groups")
+                                    TabOverflowEntries(state, collapsedRefs, descriptors, tc) { ref ->
+                                        viewportAnchorRef = ref
+                                        state.activateStripTab(ref)
+                                        dismissOverflow()
+                                    }
+                                }
+                                if (moreRefs.isNotEmpty()) {
+                                    OverflowSectionTitle("More tabs", "tab-overflow-more-tabs")
+                                    TabOverflowEntries(state, moreRefs, descriptors, tc) { ref ->
+                                        if (groupedMode) {
+                                            viewportAnchorRef = ref
+                                            state.activateStripTab(ref)
+                                        } else {
+                                            // Keep the legacy ungrouped behavior: picking from
+                                            // overflow slides the tab to the end of the strip.
+                                            state.commitTabOrder(renderOrder.filterNot { it == ref } + ref)
                                             when (ref) {
                                                 is TabRef.Log -> state.activateOverflowTab(ref.tabId)
                                                 is TabRef.Diagram -> state.seq3Sessions.activate(ref.sessionId)
                                                 TabRef.Tests -> state.openTestsTab()
                                             }
-                                            dismissOverflow()
-                                        },
-                                    ) {
-                                        AppText(
-                                            label, color = tc.tx, fontSize = 12.sp,
-                                            fontFamily = MONO,
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                        }
+                                        dismissOverflow()
                                     }
                                 }
                             }
@@ -706,6 +1001,56 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun OverflowSectionTitle(title: String, tag: String) {
+    val tc = tc()
+    AppText(
+        title,
+        color = tc.ts,
+        fontSize = 10.sp,
+        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 3.dp).testTag(tag),
+    )
+}
+
+@Composable
+private fun TabOverflowEntries(
+    state: AppState,
+    refs: List<TabRef>,
+    descriptors: Map<String, TabDescriptor>,
+    tc: ThemeColors,
+    onClick: (TabRef) -> Unit,
+) {
+    val shownGroups = mutableSetOf<String>()
+    refs.forEach { ref ->
+        val label = descriptors[ref.rawId()]?.label ?: return@forEach
+        val group = state.tabGroupOf(ref)
+        if (group != null && shownGroups.add(group.id)) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 5.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(7.dp).background(group.color.uiColor(), RoundedCornerShape(50)))
+                Spacer(Modifier.width(7.dp))
+                AppText(group.name, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        HoverBox(
+            modifier = Modifier.fillMaxWidth().testTag("tab-overflow-ref-${ref.rawId()}"),
+            onClick = { onClick(ref) },
+        ) {
+            AppText(
+                label,
+                color = tc.tx,
+                fontSize = 12.sp,
+                fontFamily = MONO,
+                modifier = Modifier.padding(start = if (group == null) 14.dp else 28.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

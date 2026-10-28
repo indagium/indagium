@@ -1756,7 +1756,7 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
             // to attach it to — `openLibraryItem`'s own doc says a null tabId still opens a fully
             // viewable, offline-capable session, which is exactly right here. Its Boolean return is
             // discarded by ordinary `() -> Unit` coercion; nothing else here needs it.
-            { state.seq3Sessions.openLibraryItem(diagramId) }
+            { state.seq3Sessions.openLibraryItem(diagramId, origin = TabRef.Diagram(session.id)) }
         },
         searchRefDiagrams = { query -> state.seq3Sessions.searchLibrary(query) },
         recentRefDiagrams = { state.seq3Sessions.recentLibrary() },

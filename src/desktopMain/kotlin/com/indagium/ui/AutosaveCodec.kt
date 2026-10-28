@@ -1160,7 +1160,7 @@ internal fun AppState.restoreDiagramTabs(token: String) {
         val fields = entry.unb64().tokenFields()
         val libraryItemId = fields.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@forEach
         val tabId = fields.getOrNull(1)?.takeIf { it.isNotBlank() }
-        seq3Sessions.openLibraryItem(libraryItemId, tabId)
+        seq3Sessions.openLibraryItem(libraryItemId, tabId, origin = null)
     }
 }
 
@@ -1204,7 +1204,8 @@ internal fun AppState.tabOrderToken(): String {
     // The Tests workspace tab is a singleton written as a bare "T" entry (appended-last letter: a build
     // that predates it drops the unknown letter). An open Tests tab the strip has not mirrored yet is
     // still written, at the end, so a quit right after opening it does not lose it.
-    val order = if (testsTabOpen && TabRef.Tests !in tabOrder) tabOrder + TabRef.Tests else tabOrder
+    val liveOrder = reconciledTabOrder()
+    val order = if (testsTabOpen && TabRef.Tests !in liveOrder) liveOrder + TabRef.Tests else liveOrder
     return order.mapNotNull { ref ->
         when (ref) {
             is TabRef.Log -> tokenFields("L", ref.tabId)
@@ -1224,12 +1225,13 @@ internal fun AppState.tabOrderToken(): String {
  *  next reconcile, this just saves that one extra frame of a stale id floating in the seed value. */
 internal fun AppState.restoreTabOrder(token: String) {
     if (token.isBlank()) {
-        tabOrder = emptyList()
+        testsTabOpen = false
+        commitTabOrder(emptyList())
         return
     }
     val liveTabIds = tabs.mapTo(hashSetOf()) { it.id }
     val sessionIdByLibraryItemId = seq3Sessions.sessions.mapNotNull { s -> s.libraryItemId?.let { it to s.id } }.toMap()
-    tabOrder = token.split(",").mapNotNull { entry ->
+    val restoredOrder = token.split(",").mapNotNull { entry ->
         val fields = entry.unb64().tokenFields()
         when (fields.getOrNull(0)) {
             "L" -> fields.getOrNull(1)?.takeIf { it in liveTabIds }?.let(TabRef::Log)
@@ -1239,7 +1241,8 @@ internal fun AppState.restoreTabOrder(token: String) {
         }
     }.distinct()
     // A "T" entry means the Tests workspace tab was open at quit; reopen it (without activating it).
-    if (TabRef.Tests in tabOrder) testsTabOpen = true
+    testsTabOpen = TabRef.Tests in restoredOrder
+    commitTabOrder(restoredOrder)
 }
 
 internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(

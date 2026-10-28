@@ -1582,6 +1582,8 @@ data class PendingZipPicker(
     val zipFile: File,
     val candidates: List<ZipLogCandidate>,
     val videoCandidates: List<ZipLogCandidate> = emptyList(),
+    /** Group captured when this archive open began; independent of later tab switches. */
+    val originGroupId: String? = null,
 )
 
 // Deliberately a SEPARATE state class from PendingZipPicker above, not a generalization of it —
@@ -1654,6 +1656,9 @@ data class PendingSplitPrompt(
     /** The recording to attach to the opened log tab(s) once the prompt is resolved (Split or Open as
      *  is). Null when the open carried none. Appended last. */
     val video: PendingPromptVideo? = null,
+    /** Origin group ids captured for sources explicitly split from an existing tab. IDs are
+     * snapshots only: if a group is removed while the prompt is open, publication won't recreate it. */
+    val originGroupIds: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -1672,6 +1677,7 @@ internal fun mergeSplitPrompts(existing: PendingSplitPrompt, added: PendingSplit
             .filter { SplitSource.ArchiveEntry(it.archiveFile, it.candidate).id !in sourceIds },
         memoryShortfall = listOfNotNull(existing.memoryShortfall, added.memoryShortfall).maxByOrNull { it.neededBytes },
         video = existing.video ?: added.video,
+        originGroupIds = existing.originGroupIds + added.originGroupIds,
     )
 }
 
@@ -5447,6 +5453,7 @@ class AppState(
                 processNameMode = newTabProcessNameMode(),
             ).copy(isCaptureLauncher = true)
             tabs = tabs + launcher
+            commitTabOrderLocked(reconciledTabOrderLocked())
             setActiveSurfaceToTab(launcherId)
         }
     }
@@ -5526,8 +5533,12 @@ class AppState(
         val tabId = "t${tabCounter.getAndIncrement()}"
         // Where Start was pressed: the live tab takes the launcher's place (see publishOpenedTab).
         val originLauncherId = activeLauncherTabId().takeIf { takeFocus }
+        val originGroupId = if (takeFocus) activeStripTabGroupId() else null
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
-        val plan = CaptureStartPlan(device, settings, controller, tabId, "Capture — ${device.model}", lane = null, originLauncherId, takeFocus)
+        val plan = CaptureStartPlan(
+            device, settings, controller, tabId, "Capture — ${device.model}", lane = null,
+            originLauncherId = originLauncherId, takeFocus = takeFocus, originGroupId = originGroupId,
+        )
         ioScope.launch {
             try {
                 runCaptureStart(plan)
@@ -5561,6 +5572,7 @@ class AppState(
         val lane: TestLaneTabRef?,
         val originLauncherId: String?,
         val takeFocus: Boolean = true,
+        val originGroupId: String? = null,
     )
 
     /**
@@ -5656,10 +5668,11 @@ class AppState(
             checkCaptureStartOwnershipLocked(plan)
             if (plan.lane == null && plan.takeFocus) {
                 check(tabs.none { it.captureSessionId != null && it.testLane == null }) { "A capture is already recording" }
-                publishOpenedTab(liveTab, plan.originLauncherId)
+                publishOpenedTab(liveTab, plan.originLauncherId, plan.originGroupId)
             } else {
                 // Lane tabs and authoring-only captures open quietly: the surface the user is looking at stays in front.
                 tabs = tabs + liveTab
+                commitTabOrderLocked(reconciledTabOrderLocked())
                 if (activeSurface == null) setActiveSurfaceToTab(liveTab.id)
             }
         }
@@ -5742,6 +5755,7 @@ class AppState(
             runCatching { tailCoordinator.cancelTailingFor(tabId) }
             synchronized(stateLock) {
                 tabs = tabs.filterNot { it.id == tabId }
+                stripTabClosed(TabRef.Log(tabId))
                 if (activeTabId == tabId) activeTabId = tabs.lastOrNull()?.id.orEmpty()
                 if (activeSurface is ActiveSurface.Log && (activeSurface as ActiveSurface.Log).tabId == tabId) {
                     activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
@@ -6216,7 +6230,10 @@ class AppState(
     /** Closes the Tests workspace tab and returns to the surface it was opened from, when that still exists. */
     fun closeTestsTab() {
         if (!testsTabOpen) return
-        testsTabOpen = false
+        synchronized(stateLock) {
+            testsTabOpen = false
+            commitTabOrderLocked(tabOrder)
+        }
         if (activeSurface !is ActiveSurface.Tests) return
         val previous = surfaceBeforeTests
         surfaceBeforeTests = null
@@ -6231,17 +6248,14 @@ class AppState(
         }
     }
 
-    /** User-observed correction: a mirror of [TabBar]'s own `unifiedOrder` — the strip's
-     *  interleaving of log tabs and diagram workspaces into one visual order. That composable's
-     *  own header explains why the LIVE value stays local `remember` state there rather than
-     *  living here natively (purely a rendering order, fully re-derivable from [tabs] +
-     *  `seq3Sessions.sessions` via `reconcileTabOrder` on every read) — this field exists purely
-     *  so [tabOrderToken] (AutosaveCodec.kt) has something to persist and [restoreTabOrder]
-     *  something to seed `unifiedOrder`'s OWN initial value with on the next launch (TabBar reads
-     *  this exactly once, at its first composition, the same "composed once for the life of the
-     *  window" lifetime `unifiedOrder`'s own `remember` already relies on). TabBar writes this
-     *  alongside every `unifiedOrder` assignment; nothing else ever reads it to drive rendering. */
+    /** Authoritative interleaved strip order for log tabs, diagrams, and Tests. The log and diagram
+     * backing stores remain separate, but their per-kind order is synchronized from this list by
+     * [commitTabOrderLocked]. */
     internal var tabOrder by mutableStateOf(emptyList<TabRef>())
+
+    /** Group metadata and memberships for the unified strip. Every membership/order RMW uses
+     * [stateLock], the same monitor that protects structural log-tab mutations. */
+    internal var tabGroups by mutableStateOf(emptyList<TabGroup>())
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
     var splitSyncRevision by mutableStateOf(0L)
@@ -11260,12 +11274,14 @@ class AppState(
         val t = emptyWorkspaceTab().copy(id = "t$n")
         synchronized(stateLock) {
             tabs = tabs + t
+            commitTabOrderLocked(reconciledTabOrderLocked())
             setActiveSurfaceToTab(t.id)
         }
     }
 
-    fun activateTab(tabId: String) {
+    fun activateTab(tabId: String) = synchronized(stateLock) {
         if (tabs.any { it.id == tabId }) {
+            revealTabGroupForActivation(TabRef.Log(tabId))
             activeTabId = tabId
             activeSurface = ActiveSurface.Log(tabId)
         }
@@ -11277,11 +11293,10 @@ class AppState(
     // keys off activeSurface alone, not activeTabId) even though a new/different log tab is now
     // "active". Unlike `activateTab`, this helper does NOT take `stateLock` itself: most call
     // sites already run inside a `synchronized(stateLock) { ... }` block (mkTab publish paths),
-    // and re-entering the lock there would be redundant (Kotlin's `synchronized` is reentrant, so
-    // it wouldn't deadlock, but the couple of call sites that run outside any lock — e.g. the
-    // "already open" short-circuit — don't need one either, matching their prior unlocked
-    // `activeTabId = ...` assignment).
-    private fun setActiveSurfaceToTab(tabId: String) {
+    // and re-entering the lock there is safe (Kotlin's `synchronized` is reentrant); taking it here
+    // also protects the group's reveal from a concurrent group removal.
+    private fun setActiveSurfaceToTab(tabId: String) = synchronized(stateLock) {
+        revealTabGroupForActivation(TabRef.Log(tabId))
         activeTabId = tabId
         activeSurface = ActiveSurface.Log(tabId)
     }
@@ -11302,19 +11317,27 @@ class AppState(
      * (opened from a normal tab, or the user switched away while it loaded) the tab is appended as
      * before. Sync callers rely on the default, which reads the launcher at the moment of publishing.
      */
-    private fun publishOpenedTab(tab: LogTab, originLauncherId: String? = activeLauncherTabId()) {
+    private fun publishOpenedTab(
+        tab: LogTab,
+        originLauncherId: String? = activeLauncherTabId(),
+        originGroupId: String? = null,
+    ) {
         synchronized(stateLock) {
             val launcherIndex = originLauncherId?.takeIf { it == activeLauncherTabId() }
                 ?.let { id -> tabs.indexOfFirst { it.id == id } } ?: -1
             if (launcherIndex < 0) {
                 tabs = tabs + tab
+                inheritTabGroupForOpenedRef(originGroupId, TabRef.Log(tab.id))
+                commitTabOrderLocked(reconciledTabOrderLocked())
                 setActiveSurfaceToTab(tab.id)
                 return
             }
+            val launcherId = tabs.getOrNull(launcherIndex)?.id ?: return
             tabs = tabs.toMutableList().apply { add(launcherIndex + 1, tab) }
+            commitTabOrderLocked(reconciledTabOrderLocked())
             setActiveSurfaceToTab(tab.id)
             // Reentrant: runs the launcher's normal close cleanup, now that the new tab is active.
-            closeTabsById(setOf(tabs[launcherIndex].id), preferredActiveId = tab.id)
+            closeTabsById(setOf(launcherId), preferredActiveId = tab.id)
         }
     }
 
@@ -11327,17 +11350,43 @@ class AppState(
     }
 
     fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
-        val tab = tabs.find { it.id == tabId } ?: return
-        tabs = tabs.filter { it.id != tabId } + tab
+        if (tabs.none { it.id == tabId }) return
+        val ref = TabRef.Log(tabId)
+        val group = tabGroups.firstOrNull { ref in it.members }
+        val order = reconciledTabOrderLocked()
+        val moved = group?.members?.let { members -> order.filter { it in members } } ?: listOf(ref)
+        val rest = order.filterNot { it in moved }
+        commitTabOrderLocked(rest + moved)
+        revealTabGroupForActivation(ref)
         activeTabId = tabId
         activeSurface = ActiveSurface.Log(tabId)
     }
 
+    /** Closes every live log and diagram tab in [id] through each backing store's normal cleanup. */
+    internal fun closeTabGroup(id: String) {
+        val refs = synchronized(stateLock) {
+            val group = tabGroups.firstOrNull { it.id == id } ?: return
+            val members = group.members.toList()
+            tabGroups = tabGroups.filterNot { it.id == id }
+            commitTabOrderLocked(tabOrder)
+            members
+        }
+        val logIds = refs.filterIsInstance<TabRef.Log>().map { it.tabId }.toSet()
+        if (logIds.isNotEmpty()) closeTabsById(logIds, preferredActiveId = null)
+        refs.filterIsInstance<TabRef.Diagram>().forEach { seq3Sessions.close(it.sessionId) }
+    }
+
     fun reorderTabs(fromId: String, beforeId: String?): Unit = synchronized(stateLock) {
-        val from = tabs.find { it.id == fromId } ?: return
-        val without = tabs.filter { it.id != fromId }
-        val idx = beforeId?.let { id -> without.indexOfFirst { it.id == id }.takeIf { it >= 0 } } ?: without.size
-        tabs = without.take(idx) + from + without.drop(idx)
+        if (tabs.none { it.id == fromId }) return
+        val order = reconciledTabOrderLocked()
+        val logRefs = order.filterIsInstance<TabRef.Log>().toMutableList()
+        val from = logRefs.firstOrNull { it.tabId == fromId } ?: return
+        logRefs.remove(from)
+        val target = beforeId?.let { id -> logRefs.indexOfFirst { it.tabId == id }.takeIf { it >= 0 } } ?: logRefs.size
+        logRefs.add(target, from)
+        val iterator = logRefs.iterator()
+        val newOrder = order.map { ref -> if (ref is TabRef.Log) iterator.next() else ref }
+        commitTabOrderLocked(newOrder)
     }
 
     fun closeTab(tabId: String) {
@@ -11499,6 +11548,7 @@ class AppState(
             if (compareTabId in tabIds) compareTabId = next.firstOrNull()?.id ?: ""
             exitCompare = !canCompareTabs(next) // updateCompareMode(false) no-ops outside Compare
             tabs = next
+            stripTabsClosed(tabIds)
         }
         // Outside stateLock: updateCompareMode takes it again through upTab and autosaves.
         if (exitCompare) updateCompareMode(false)
@@ -11629,6 +11679,9 @@ class AppState(
     // anything touching logData, even though mergeLogs() itself is a pure in-memory sort.
     fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
         val tabsToMerge = tabIds.mapNotNull { id -> tab(id) }
+        // The first selected source is the explicit origin; capture its group before the merge job
+        // is queued so switching tabs while rows are combined cannot change inheritance.
+        val originGroupId = tabsToMerge.firstOrNull()?.let { tabGroupIdForOrigin(TabRef.Log(it.id)) }
         val formats = tabsToMerge.map { it.logFormat }.toSet()
         if (formats.size > 1) {
             showOpenError(
@@ -11664,8 +11717,7 @@ class AppState(
                 )
                 synchronized(stateLock) {
                     ensureActive()
-                    tabs = tabs + t
-                    setActiveSurfaceToTab(t.id)
+                    publishOpenedTab(t, originLauncherId = null, originGroupId = originGroupId)
                 }
                 finishLoading()
                 published = true
@@ -11703,7 +11755,13 @@ class AppState(
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
+    internal fun openFile(file: File, origin: TabRef?): String? =
+        openFileInternal(file, bypassSplitPrompt = false, originGroupId = tabGroupIdForOrigin(origin))
+
     fun openFileAsIs(file: File): String? = openFileInternal(file, bypassSplitPrompt = true)
+
+    internal fun openFileAsIs(file: File, origin: TabRef?): String? =
+        openFileInternal(file, bypassSplitPrompt = true, originGroupId = tabGroupIdForOrigin(origin))
 
     fun openPaths(files: List<File>, splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES) {
         // Folders never reach isOpenableAsLog's file-only checks (isLikelyLogPath/isLikelyTextFile
@@ -11909,7 +11967,12 @@ class AppState(
 
     // [bypassMemoryCheck] skips only the free-heap check (the size threshold still prompts): a file
     // that a confirmed prompt deferred was already weighed in that prompt's batch decision.
-    private fun openFileInternal(file: File, bypassSplitPrompt: Boolean, bypassMemoryCheck: Boolean = false): String? {
+    private fun openFileInternal(
+        file: File,
+        bypassSplitPrompt: Boolean,
+        bypassMemoryCheck: Boolean = false,
+        originGroupId: String? = null,
+    ): String? {
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
             removeRecentFile(file)
@@ -11935,7 +11998,14 @@ class AppState(
         if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None) {
             val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(file.length()))
             if (requiresSplitPrompt(file.length()) || shortfall != null) {
-                raiseSplitPrompt(PendingSplitPrompt(listOf(SplitSource.RealFile(file)), memoryShortfall = shortfall))
+                val source = SplitSource.RealFile(file)
+                raiseSplitPrompt(
+                    PendingSplitPrompt(
+                        sources = listOf(source),
+                        memoryShortfall = shortfall,
+                        originGroupIds = originGroupId?.let { mapOf(source.id to it) }.orEmpty(),
+                    ),
+                )
                 return null
             }
         }
@@ -11987,7 +12057,7 @@ class AppState(
                     )
                 synchronized(stateLock) {
                     ensureActive()
-                    publishOpenedTab(t, originLauncherId)
+                    publishOpenedTab(t, originLauncherId, originGroupId)
                 }
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -12078,18 +12148,38 @@ class AppState(
 
     fun openPath(file: File): String? = openPathInternal(file, bypassMemoryCheck = false)
 
+    internal fun openPath(file: File, origin: TabRef?): String? =
+        openPathInternal(file, bypassMemoryCheck = false, originGroupId = tabGroupIdForOrigin(origin))
+
     // A file deferred by a confirmed split prompt: opened without a fresh free-heap check (it was part
     // of the prompt's batch decision, and a per-file re-check would raise new prompts that overwrite
     // one another).
-    private fun openPathInternal(file: File, bypassMemoryCheck: Boolean): String? = when {
-        file.name == "capture.indagium.json" -> openCaptureFile(file)
-        else -> openOrdinaryPath(file, bypassMemoryCheck)
+    private fun openPathInternal(file: File, bypassMemoryCheck: Boolean, originGroupId: String? = null): String? = when {
+        file.name == "capture.indagium.json" ->
+            openCaptureFileFromGroup(file, originGroupId)
+        else -> openOrdinaryPath(file, bypassMemoryCheck, originGroupId)
     }
 
-    private fun openOrdinaryPath(file: File, bypassMemoryCheck: Boolean = false): String? = when (detectArchiveFormat(file)) {
+    private fun openOrdinaryPath(file: File, bypassMemoryCheck: Boolean = false, originGroupId: String? = null): String? = when (detectArchiveFormat(file)) {
         // Zip/SevenZ/Sequential all go through the picker-capable archive path.
-        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file, bypassMemoryCheck = bypassMemoryCheck); null }
-        is ArchiveFormat.Sequential -> { openZipFile(file, bypassMemoryCheck = bypassMemoryCheck); null }
+        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> {
+            openZipFileFromGroup(
+                file,
+                ignoreCaptureDescriptor = false,
+                bypassMemoryCheck = bypassMemoryCheck,
+                originGroupId = originGroupId,
+            )
+            null
+        }
+        is ArchiveFormat.Sequential -> {
+            openZipFileFromGroup(
+                file,
+                ignoreCaptureDescriptor = false,
+                bypassMemoryCheck = bypassMemoryCheck,
+                originGroupId = originGroupId,
+            )
+            null
+        }
         // CompressedFile falls through to plain openFile alongside None (an ordinary log/text
         // file) — that's what makes a bare compressed log cheap to support: no picker (there's
         // exactly one log inside), sourcePath stays the bare absolute path so dedup/recents/
@@ -12097,12 +12187,17 @@ class AppState(
         // FileSource that restores correctly via the `parser` seam change above. Unsupported
         // and None both land here too — openFile's own existence/readability check produces the
         // right error for those, same as before this change.
-        else -> openFileInternal(file, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck)
+        else -> openFileInternal(file, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck, originGroupId = originGroupId)
     }
 
     /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
+    fun openCaptureFile(file: File): String = openCaptureFileFromGroup(file, null)
+
+    internal fun openCaptureFile(file: File, origin: TabRef?): String =
+        openCaptureFileFromGroup(file, tabGroupIdForOrigin(origin))
+
     @Suppress("TooGenericExceptionCaught")
-    fun openCaptureFile(file: File): String {
+    private fun openCaptureFileFromGroup(file: File, originGroupId: String?): String {
         val legacyPreferences = legacyLogRefPreferences()
         val existing = tabs.firstOrNull {
             it.captureArchivePath == file.absolutePath || it.attachedVideo?.captureSourcePath == file.absolutePath
@@ -12195,7 +12290,7 @@ class AppState(
                 }
                 synchronized(stateLock) {
                     ensureActive()
-                    publishOpenedTab(captureTab, originLauncherId)
+                    publishOpenedTab(captureTab, originLauncherId, originGroupId)
                     if (snapshotSource != null) {
                         importedCaptureSnapshots[tabId] = snapshotSource
                         importedSnapshotsChanged()
@@ -12503,9 +12598,20 @@ class AppState(
     // user must be able to see and confirm the optional log/video association. 2+ log candidates
     // also show a picker rather than guessing. 0 candidates reports that no log-like entries were
     // found.
-    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false, bypassMemoryCheck: Boolean = false) {
+    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false, bypassMemoryCheck: Boolean = false) =
+        openZipFileFromGroup(file, ignoreCaptureDescriptor, bypassMemoryCheck, originGroupId = null)
+
+    internal fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean, bypassMemoryCheck: Boolean, origin: TabRef?) =
+        openZipFileFromGroup(file, ignoreCaptureDescriptor, bypassMemoryCheck, tabGroupIdForOrigin(origin))
+
+    private fun openZipFileFromGroup(
+        file: File,
+        ignoreCaptureDescriptor: Boolean,
+        bypassMemoryCheck: Boolean,
+        originGroupId: String?,
+    ) {
         if (!ignoreCaptureDescriptor && com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) {
-            openCaptureFile(file)
+            openCaptureFileFromGroup(file, originGroupId)
             return
         }
         val path = file.absolutePath
@@ -12537,12 +12643,12 @@ class AppState(
             candidates.size == 1 && videoCandidates.isEmpty() -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                openZipEntries(file, listOf(candidates.first()), bypassMemoryCheck = bypassMemoryCheck)
+                openZipEntriesFromGroup(file, listOf(candidates.first()), bypassMemoryCheck = bypassMemoryCheck, originGroupId = originGroupId)
             }
             candidates.isNotEmpty() -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                pendingZipPicker = PendingZipPicker(file, candidates, videoCandidates)
+                pendingZipPicker = PendingZipPicker(file, candidates, videoCandidates, originGroupId)
             }
             else -> {
                 removeRecentFile(file)
@@ -12592,6 +12698,20 @@ class AppState(
         selected: List<ZipLogCandidate>,
         videoToAttach: ZipLogCandidate? = null,
         bypassMemoryCheck: Boolean = false,
+    ): List<String> = openZipEntriesFromGroup(
+        zipFile,
+        selected,
+        videoToAttach,
+        bypassMemoryCheck,
+        pendingZipPicker?.takeIf { it.zipFile.absolutePath == zipFile.absolutePath }?.originGroupId,
+    )
+
+    private fun openZipEntriesFromGroup(
+        zipFile: File,
+        selected: List<ZipLogCandidate>,
+        videoToAttach: ZipLogCandidate? = null,
+        bypassMemoryCheck: Boolean = false,
+        originGroupId: String? = null,
     ): List<String> {
         // Entry sizes are the real (uncompressed) sizes, so the memory check applies to them too.
         val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(selected.map { it.sizeBytes })
@@ -12609,13 +12729,16 @@ class AppState(
                     memoryShortfall = shortfall,
                     video = videoToAttach?.takeIf { it.kind == ZipLogCandidateKind.VIDEO }
                         ?.let { PendingPromptVideo.FromArchive(zipFile, it) },
+                    originGroupIds = (oversized + normal).associate { source ->
+                        SplitSource.ArchiveEntry(zipFile, source).id to originGroupId
+                    }.filterValues { it != null }.mapValues { it.value!! },
                 ),
             )
             pendingZipPicker = null
             return emptyList()
         }
         val tabIds = selected.mapNotNull {
-            openZipEntry(zipFile, it, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck)
+            openZipEntry(zipFile, it, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck, originGroupId = originGroupId)
         }
         pendingZipPicker = null
         attachArchiveVideoToTabsWhenAvailable(zipFile, videoToAttach, tabIds)
@@ -12757,6 +12880,7 @@ class AppState(
         candidate: ZipLogCandidate,
         bypassSplitPrompt: Boolean,
         bypassMemoryCheck: Boolean = false,
+        originGroupId: String? = null,
     ): String? {
         val path = "${zipFile.absolutePath}!${candidate.entryPath}"
         val existing = tabs.find { it.sourcePath == path }
@@ -12766,10 +12890,12 @@ class AppState(
         if (!bypassSplitPrompt) {
             val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(candidate.sizeBytes))
             if (requiresSplitPrompt(candidate.sizeBytes) || shortfall != null) {
+                val source = SplitSource.ArchiveEntry(zipFile, candidate)
                 raiseSplitPrompt(
                     PendingSplitPrompt(
-                        listOf(SplitSource.ArchiveEntry(zipFile, candidate)),
+                        sources = listOf(source),
                         memoryShortfall = shortfall,
+                        originGroupIds = originGroupId?.let { mapOf(source.id to it) }.orEmpty(),
                     ),
                 )
                 return null
@@ -12829,7 +12955,7 @@ class AppState(
                     )
                 synchronized(stateLock) {
                     ensureActive()
-                    publishOpenedTab(t, originLauncherId)
+                    publishOpenedTab(t, originLauncherId, originGroupId)
                 }
                 AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -12869,7 +12995,11 @@ class AppState(
             showDltSplittingUnavailable(sourcePath)
             return false
         }
-        pendingSplitPrompt = PendingSplitPrompt(listOf(source))
+        val groupId = tabGroupIdForOrigin(TabRef.Log(tabId))
+        pendingSplitPrompt = PendingSplitPrompt(
+            sources = listOf(source),
+            originGroupIds = groupId?.let { mapOf(source.id to it) }.orEmpty(),
+        )
         return true
     }
 
@@ -12954,17 +13084,28 @@ class AppState(
                 // check, or each could raise a new prompt over the others and some would never open.
                 pending.deferredFiles.forEach { file ->
                     budget?.reserveRegardless(file.length())
-                    openPathInternal(file, bypassMemoryCheck = true)?.let(openedTabIds::add)
+                    val source = SplitSource.RealFile(file)
+                    openPathInternal(
+                        file,
+                        bypassMemoryCheck = true,
+                        originGroupId = pending.originGroupIds[source.id],
+                    )?.let(openedTabIds::add)
                 }
                 pending.deferredArchiveEntries.forEach { deferred ->
                     budget?.reserveRegardless(deferred.candidate.sizeBytes)
-                    openZipEntry(deferred.archiveFile, deferred.candidate, bypassSplitPrompt = true)?.let(openedTabIds::add)
+                    val source = SplitSource.ArchiveEntry(deferred.archiveFile, deferred.candidate)
+                    openZipEntry(
+                        deferred.archiveFile,
+                        deferred.candidate,
+                        bypassSplitPrompt = true,
+                        originGroupId = pending.originGroupIds[source.id],
+                    )?.let(openedTabIds::add)
                 }
                 pending.sources.forEach { source ->
                     when (modes[source.id] ?: SplitMode.SPLIT) {
                         SplitMode.OPEN_AS_IS -> {
                             budget?.reserveRegardless(source.sizeBytes)
-                            openSplitSourceAsIs(source)?.let(openedTabIds::add)
+                            openSplitSourceAsIs(source, pending.originGroupIds[source.id])?.let(openedTabIds::add)
                         }
                         SplitMode.SPLIT -> {
                             val result = splitSourceAndOpenParts(
@@ -12973,6 +13114,7 @@ class AppState(
                                 postfix = postfixes[source.id] ?: postfix,
                                 partCount = partCounts[source.id] ?: defaultSplitPartCount(source, pending.memoryShortfall),
                                 budget = budget,
+                                originGroupId = pending.originGroupIds[source.id],
                             )
                             openedTabIds += result.openedTabIds
                             unopenedParts += result.unopened
@@ -13005,6 +13147,17 @@ class AppState(
     fun splitSourceAndOpen(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> =
         splitSourceAndOpenParts(source, destinationDir, postfix, partCount).written
 
+    internal fun splitSourceAndOpen(
+        source: SplitSource,
+        destinationDir: File,
+        postfix: String,
+        partCount: Int,
+        origin: TabRef?,
+    ): List<File> = splitSourceAndOpenParts(
+        source, destinationDir, postfix, partCount,
+        originGroupId = tabGroupIdForOrigin(origin),
+    ).written
+
     /**
      * [splitSourceAndOpen] for a source whose open was blocked by a memory [shortfall]: every part is
      * written, but only as many as fit in the free heap are opened (at least the first); the result's
@@ -13016,9 +13169,11 @@ class AppState(
         postfix: String,
         partCount: Int,
         shortfall: MemoryShortfall?,
+        origin: TabRef? = null,
     ): SplitOpenResult = splitSourceAndOpenParts(
         source, destinationDir, postfix, partCount,
         budget = shortfall?.let { MemoryOpenBudget(heapFreeBytesProvider()) },
+        originGroupId = tabGroupIdForOrigin(origin),
     )
 
     private fun splitSourceAndOpenParts(
@@ -13027,6 +13182,7 @@ class AppState(
         postfix: String,
         partCount: Int,
         budget: MemoryOpenBudget? = null,
+        originGroupId: String? = null,
     ): SplitOpenResult {
         val classification = classifySplitSourceAndStream(source) ?: run {
             showOpenError(
@@ -13064,7 +13220,7 @@ class AppState(
             } else {
                 budget.tryReserve(part.length())
             }
-            if (fits) loadSplitPartAsTab(part)?.let(openedIds::add) else unopened += part
+            if (fits) loadSplitPartAsTab(part, originGroupId)?.let(openedIds::add) else unopened += part
         }
         return SplitOpenResult(written, openedIds, unopened)
     }
@@ -13125,7 +13281,7 @@ class AppState(
         return -1
     }
 
-    private fun loadSplitPartAsTab(file: File): String? {
+    private fun loadSplitPartAsTab(file: File, originGroupId: String? = null): String? {
         val path = file.absolutePath
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
@@ -13159,14 +13315,14 @@ class AppState(
                 largeFileMode = file.length() >= LARGE_FILE_MODE_BYTES,
                 showUnfiltered = settings.openNewFilesWithUnfiltered,
             )
-        publishOpenedTab(t)
+        publishOpenedTab(t, originLauncherId = null, originGroupId = originGroupId)
         autoLoadOwnNotesIfAny(tabId)
         return tabId
     }
 
-    private fun openSplitSourceAsIs(source: SplitSource): String? = when (source) {
-        is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
-        is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
+    private fun openSplitSourceAsIs(source: SplitSource, originGroupId: String? = null): String? = when (source) {
+        is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true, originGroupId = originGroupId)
+        is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true, originGroupId = originGroupId)
     }
 
     private fun splitSourceFromPath(sourcePath: String, entryPath: String?): SplitSource? {
@@ -14331,6 +14487,7 @@ class AppState(
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
         if (preview.reopenDisabledReason != null) return
         val sourcePath = preview.sourcePath ?: return
+        val originGroupId = caseLibraryTabId?.let { tabGroupIdForOrigin(TabRef.Log(it)) }
         val seq = ++caseReopenRequestSeq
         caseLibraryLoadingId = id
         ioScope.launch {
@@ -14344,8 +14501,13 @@ class AppState(
                 return@launch
             }
             val newTabId = when (source) {
-                is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
-                is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
+                is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true, originGroupId = originGroupId)
+                is SplitSource.ArchiveEntry -> openZipEntry(
+                    source.archiveFile,
+                    source.candidate,
+                    bypassSplitPrompt = true,
+                    originGroupId = originGroupId,
+                )
             }
             if (seq != caseReopenRequestSeq) return@launch
             caseLibraryLoadingId = null
@@ -14379,6 +14541,7 @@ class AppState(
         val seq = ++caseReopenRequestSeq
         caseLibraryNotesOnlyLoadingId = id
         val originLauncherId = activeLauncherTabId()
+        val originGroupId = caseLibraryTabId?.let { tabGroupIdForOrigin(TabRef.Log(it)) }
         ioScope.launch {
             val record = caseSearch.getCase(id)
             val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
@@ -14390,7 +14553,7 @@ class AppState(
             }
             val n = tabCounter.getAndIncrement()
             val t = emptyWorkspaceTab().copy(id = "t$n", filename = preview.title)
-            publishOpenedTab(t, originLauncherId)
+            publishOpenedTab(t, originLauncherId, originGroupId)
             caseLibraryNotesOnlyLoadingId = null
             openNoteFile(t.id, noteFile)
             closeCaseLibrary()
@@ -16130,6 +16293,11 @@ class AppState(
             val tabOrderToken = keyLines.firstOrNull { it.substringBefore('\t') == "tabOrder" }
                 ?.substringAfter('\t', "")?.unb64().orEmpty()
             restoreTabOrder(tabOrderToken)
+            // Group memberships resolve only after log shells, durable diagram library items, and
+            // the interleaved strip order all exist. Invalid/stale member ids are pruned here.
+            val tabGroupsToken = keyLines.firstOrNull { it.substringBefore('\t') == "tabGroups" }
+                ?.substringAfter('\t', "")?.unb64().orEmpty()
+            if (tabGroupsToken.isNotBlank()) restoreTabGroups(tabGroupsToken)
         }
     }
 
@@ -16461,6 +16629,7 @@ class AppState(
         appendLine("activeDiagram\t${activeDiagramToken().b64()}")
         appendLine("seq3View\t${seq3ViewToken().b64()}")
         appendLine("tabOrder\t${tabOrderToken().b64()}")
+        appendLine("tabGroups\t${tabGroupsJson().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }
