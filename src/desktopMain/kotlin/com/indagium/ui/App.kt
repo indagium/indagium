@@ -93,7 +93,7 @@ private fun appHasOpenFilterDialog(state: AppState): Boolean =
 
 private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
     state.pendingNoteOverwrite != null || state.pendingLogRelink != null || state.pendingDiagramNotice != null ||
-        state.pendingImportReview != null || state.importError != null || state.workspaceProfileError != null ||
+        state.pendingImportReview != null || state.importError != null || state.workspaceProfileError != null || state.logViewLayoutError != null ||
         state.openError != null ||
         state.retraceDialogState != null
 
@@ -2320,6 +2320,24 @@ fun App(
                         Spacer(Modifier.height(14.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                             DialogActionButton("OK", active = true) { state.workspaceProfileError = null }
+                        }
+                    }
+                }
+            }
+
+            state.logViewLayoutError?.let { message ->
+                Dialog(onDismissRequest = { state.logViewLayoutError = null }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Log layout", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(message, color = tc2.td, fontSize = 11.sp, maxLines = 4)
+                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            DialogActionButton("OK", active = true) { state.logViewLayoutError = null }
                         }
                     }
                 }

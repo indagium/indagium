@@ -6975,6 +6975,119 @@ class AppState(
         }
     }
 
+    // ── Single-log layout presets (ui/LogViewLayoutState.kt) ───────────────────────
+
+    var logViewLayoutError by mutableStateOf<String?>(null)
+
+    internal fun customLogViewLayoutNames(): List<String> = settings.customLogViewLayouts.map { it.name }
+
+    /** Saves the current single-log tile tree, sizing and panel state as a named custom layout. */
+    internal fun saveCurrentAsLogViewLayout(name: String): com.indagium.model.CustomLogViewLayout {
+        val uniqueName = uniqueLogViewLayoutName(name, customLogViewLayoutNames())
+        val layout = captureCustomLogViewLayout(uniqueName)
+        updateSettings {
+            it.copy(
+                customLogViewLayouts = it.customLogViewLayouts + layout,
+                lastCustomLogViewLayoutId = layout.id,
+            )
+        }
+        return layout
+    }
+
+    /** Replaces one saved snapshot with the current layout while keeping its stable identity and name. */
+    internal fun updateSavedLogViewLayoutFromCurrent(id: String): com.indagium.model.CustomLogViewLayout? {
+        val existing = settings.customLogViewLayouts.firstOrNull { it.id == id } ?: return null
+        val updated = captureCustomLogViewLayout(existing.name).copy(id = existing.id, name = existing.name)
+        updateSettings { current ->
+            current.copy(
+                customLogViewLayouts = current.customLogViewLayouts.map { if (it.id == id) updated else it },
+                lastCustomLogViewLayoutId = id,
+            )
+        }
+        return updated
+    }
+
+    internal fun applySavedLogViewLayout(id: String) {
+        settings.customLogViewLayouts.firstOrNull { it.id == id }?.let(::applyCustomLogViewLayout)
+    }
+
+    /** Delete a saved layout. If it was the reset target, Reset falls back to Classic. */
+    internal fun deleteSavedLogViewLayout(id: String) {
+        updateSettings { current ->
+            val wasResetTarget = current.lastCustomLogViewLayoutId == id
+            current.copy(
+                customLogViewLayouts = current.customLogViewLayouts.filterNot { it.id == id },
+                lastCustomLogViewLayoutId = current.lastCustomLogViewLayoutId.takeUnless { it == id },
+                lastLogViewPreset = if (wasResetTarget) LogViewPresetId.CLASSIC else current.lastLogViewPreset,
+            )
+        }
+    }
+
+    internal fun writeLogViewLayoutFile(file: File, layout: com.indagium.model.CustomLogViewLayout): Result<Unit> =
+        runCatching { file.writeText(encodeLogViewLayoutFile(layout)) }
+
+    /** Reads, validates, adds with a unique name, then applies a standalone layout file. */
+    internal fun importLogViewLayoutFrom(file: File): Result<com.indagium.model.CustomLogViewLayout> = runCatching {
+        val text = runCatching { readFilterImportText(file) }.getOrElse {
+            if (it is IllegalArgumentException) throw it
+            error("Could not read ${file.name}.")
+        }
+        val decoded = decodeLogViewLayoutFile(text).getOrThrow()
+        val imported = decoded.copy(
+            id = newCustomLogViewLayoutId(),
+            name = uniqueLogViewLayoutName(decoded.name, customLogViewLayoutNames()),
+        )
+        updateSettings {
+            it.copy(
+                customLogViewLayouts = it.customLogViewLayouts + imported,
+                lastCustomLogViewLayoutId = imported.id,
+            )
+        }
+        applyCustomLogViewLayout(imported)
+        imported
+    }
+
+    /** Native save dialog for a selected custom layout. */
+    internal fun exportLogViewLayout(layout: com.indagium.model.CustomLogViewLayout) {
+        val slug = layout.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "layout" }
+        val dlg = FileDialog(null as Frame?, "Export log layout", FileDialog.SAVE).apply {
+            file = "indagium_layout_$slug.json"
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val target = File(dir, path)
+        ioScope.launch {
+            writeLogViewLayoutFile(target, layout).fold(
+                onSuccess = { AppLogger.info("layouts", "Exported log layout to ${target.absolutePath}") },
+                onFailure = { e ->
+                    logViewLayoutError = "Could not save the layout file: ${e.message ?: "unknown error"}"
+                    AppLogger.error("layouts", "Failed to export log layout to ${target.absolutePath}", e)
+                },
+            )
+        }
+    }
+
+    /** Native file dialog; a valid import is added and applied, with errors shown in the app dialog. */
+    internal fun importLogViewLayout() {
+        val dlg = FileDialog(null as Frame?, "Import log layout", FileDialog.LOAD).apply {
+            setFilenameFilter { _, n -> n.endsWith(".json", ignoreCase = true) }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val file = File(dir, path)
+        ioScope.launch {
+            importLogViewLayoutFrom(file).fold(
+                onSuccess = { AppLogger.info("layouts", "Imported log layout from ${file.absolutePath}") },
+                onFailure = { e ->
+                    logViewLayoutError = e.message ?: "Could not import that layout."
+                    AppLogger.error("layouts", "Failed to import log layout from ${file.absolutePath}", e)
+                },
+            )
+        }
+    }
+
     internal fun writeWorkspaceProfileFile(file: File, name: String, spec: ProfileSpec): Result<Unit> =
         runCatching { file.writeText(encodeWorkspaceProfileFile(name, spec)) }
 

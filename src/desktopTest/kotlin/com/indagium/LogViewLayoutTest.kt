@@ -119,6 +119,18 @@ class LogViewLayoutTest {
 
     private fun leafIds(node: TileNode<LogViewSectionId>): List<LogViewSectionId> = tileLeafSections(node)
 
+    private fun presetGeometry(
+        preset: LogViewLayoutPreset,
+        width: Float,
+        height: Float,
+        groups: Set<LogViewTileGroup> = LogViewTileGroup.entries.toSet(),
+    ) = run {
+        val (tree, hidden) = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.SINGLE)
+        val context = ctx(showUnfiltered = true, groups = groups)
+        val projection = assertNotNull(projectTileLayout(tree) { logViewTileVisible(it, context, hidden) })
+        tileGeometry(projection.root, width, height, LOG_VIEW_TILE_SPEC, scrolls = ::logViewScrollsInColumn)
+    }
+
     // ---- legacy derivation -------------------------------------------------------------------------------------
 
     @Test
@@ -421,7 +433,7 @@ class LogViewLayoutTest {
     @Test
     fun presetScopesAndMenuGroups() {
         assertEquals(
-            listOf(LogViewPresetId.CLASSIC, LogViewPresetId.REVIEW, LogViewPresetId.LOG_FOCUS, LogViewPresetId.FILTERS_ON_TOP),
+            listOf(LogViewPresetId.CLASSIC, LogViewPresetId.LOG_FOCUS, LogViewPresetId.FILTERING, LogViewPresetId.ANALYSIS),
             LogViewLayoutPreset.forScope(LogViewScope.SINGLE).map { it.id },
         )
         assertEquals(
@@ -429,10 +441,53 @@ class LogViewLayoutTest {
             LogViewLayoutPreset.forScope(LogViewScope.COMPARE).map { it.id },
         )
         LogViewPresetId.entries.forEach { assertEquals(it, LogViewLayoutPreset.of(it).id) }
-        // Log focus hides the filter tiles and Diagram library; Review and Classic show it.
+        // The old IDs and arrangements still decode/reset, while the menu uses the focused practical set.
+        assertFalse(LogViewLayoutPreset.REVIEW in LogViewLayoutPreset.forScope(LogViewScope.SINGLE))
+        assertFalse(LogViewLayoutPreset.FILTERS_ON_TOP in LogViewLayoutPreset.forScope(LogViewScope.SINGLE))
+        assertEquals("Review", LogViewLayoutPreset.of(LogViewPresetId.REVIEW).label)
+        assertEquals("Filters on top", LogViewLayoutPreset.of(LogViewPresetId.FILTERS_ON_TOP).label)
+        // Log focus hides all side groups; Classic keeps its original arrangement.
         assertTrue(LOG_VIEW_FILTER_TILES.all { it in LogViewLayoutPreset.LOG_FOCUS.hidden })
+        assertTrue(setOf(DIAGRAMS, VIDEO, NOTES, AI).all { it in LogViewLayoutPreset.LOG_FOCUS.hidden })
         assertFalse(DIAGRAMS in LogViewLayoutPreset.REVIEW.hidden)
         assertFalse(DIAGRAMS in LogViewLayoutPreset.CLASSIC.hidden)
+        assertFalse(tileLayoutShapeEquals(LogViewLayoutPreset.REVIEW.layout(sizes), LogViewLayoutPreset.ANALYSIS.layout(sizes)))
+        assertFalse(tileLayoutShapeEquals(LogViewLayoutPreset.FILTERS_ON_TOP.layout(sizes), LogViewLayoutPreset.FILTERING.layout(sizes)))
+        val filtering = LogViewLayoutPreset.FILTERING
+        assertTrue(filtering.hidden.containsAll(setOf(DIAGRAMS, VIDEO, NOTES, AI)))
+        assertTrue((filtering.layout(sizes) as TileSplit).children.first() is TileSplit, "Filtering keeps the filter sidebar vertical")
+        assertEquals(singleIds, tileLeafSections(LogViewLayoutPreset.ANALYSIS.layout(sizes)).toSet())
+        assertTrue(SEQUENCES in tileLeafSections(LogViewLayoutPreset.ANALYSIS.layout(sizes)))
+        assertTrue(ISSUES in tileLeafSections(LogViewLayoutPreset.ANALYSIS.layout(sizes)))
+    }
+
+    @Test
+    fun focusedPresetsKeepTheLogLargeAtCommonWindowSizesWithGroupsPresentOrAbsent() {
+        for ((width, height) in listOf(1000f to 650f, 1600f to 900f)) {
+            val focus = presetGeometry(LogViewLayoutPreset.LOG_FOCUS, width, height, emptySet())
+            assertEquals(setOf(ORIGINAL, LOG), focus.cards.map { it.section }.toSet())
+            assertEquals(width, focus.cardOf(LOG)!!.w, EPS)
+            assertTrue(focus.cardOf(LOG)!!.h >= height * 0.65f, "Log focus at ${width}x$height: ${focus.cardOf(LOG)}")
+
+            val filtering = presetGeometry(LogViewLayoutPreset.FILTERING, width, height)
+            assertTrue(TAGS in filtering.cards.map { it.section })
+            assertTrue(NOTES !in filtering.cards.map { it.section } && AI !in filtering.cards.map { it.section })
+            assertTrue(VIDEO !in filtering.cards.map { it.section } && DIAGRAMS !in filtering.cards.map { it.section })
+            assertTrue(filtering.cardOf(LOG)!!.w > width * 0.6f, "Filtering at ${width}x$height: ${filtering.cardOf(LOG)}")
+            assertTrue(filtering.cardOf(LOG)!!.h >= height * 0.65f, "Filtering at ${width}x$height: ${filtering.cardOf(LOG)}")
+            val filteringWithoutFilterGroup = presetGeometry(LogViewLayoutPreset.FILTERING, width, height, emptySet())
+            assertEquals(width, filteringWithoutFilterGroup.cardOf(LOG)!!.w, EPS)
+
+            val analysis = presetGeometry(LogViewLayoutPreset.ANALYSIS, width, height)
+            val log = analysis.cardOf(LOG)!!
+            assertTrue(log.w >= width * 0.45f, "Analysis at ${width}x$height: $log")
+            assertTrue(log.h >= height * 0.65f, "Analysis at ${width}x$height: $log")
+            assertTrue(analysis.cardOf(SEQUENCES)!!.x >= log.right, "Sequences is in the artifact column: ${analysis.cardOf(SEQUENCES)} / $log")
+            assertEquals(analysis.cardOf(SEQUENCES)!!.x, analysis.cardOf(ISSUES)!!.x, EPS)
+            val analysisWithoutOptionalGroups = presetGeometry(LogViewLayoutPreset.ANALYSIS, width, height, emptySet())
+            assertEquals(width, analysisWithoutOptionalGroups.cardOf(LOG)!!.w, EPS)
+            assertEquals(log.h, analysisWithoutOptionalGroups.cardOf(LOG)!!.h, EPS, "side tiles do not take height from the log")
+        }
     }
 
     @Test

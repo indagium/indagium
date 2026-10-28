@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.model.AppSettings
+import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -10,12 +11,16 @@ import com.indagium.model.LogViewSectionId.LOG
 import com.indagium.model.LogViewSectionId.LOG_A
 import com.indagium.model.LogViewSectionId.NOTES
 import com.indagium.model.LogViewSectionId.TAGS
+import com.indagium.model.LogViewSectionId.TOOLBAR
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
+import com.indagium.ui.decodeLogViewLayoutFile
+import com.indagium.ui.encodeLogViewLayoutFile
 import com.indagium.ui.logViewTileTreeJson
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsFromToken
@@ -28,6 +33,7 @@ import com.indagium.ui.withLogViewTileCollapsed
 import com.indagium.ui.withLogViewTileHidden
 import com.indagium.ui.withLogViewTilesLocked
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.util.Base64
@@ -92,6 +98,146 @@ class LogViewLayoutSettingCodecTest {
         assertNotNull(back.logViewLayout)
         assertEquals(singleIds, tileLeafSections(back.logViewLayout).toSet())
         assertEquals(compareIds, tileLeafSections(back.compareLayout!!).toSet())
+    }
+
+    @Test
+    fun namedCustomLayoutsAndResetTargetRoundTripThroughSettingsJsonAndPortableFile() {
+        val baseLayout = AppSettings(toolbarPlacement = ToolbarPlacement.IN_LAYOUT)
+            .withLogViewPreset(LogViewLayoutPreset.ANALYSIS, sizes)
+            .withLogViewTileHidden(DIAGRAMS, true)
+        val layout = CustomLogViewLayout(
+            id = "custom-log-view-test",
+            name = "Crash review",
+            tree = baseLayout.logViewLayout!!,
+            filterPanelWidth = 284f,
+            annotationPanelWidth = 410f,
+            rightSidebarSplit = 0.37f,
+            hidden = baseLayout.logViewHidden,
+            collapsed = listOf(TAGS, NOTES),
+            tilesLocked = true,
+            filterVisible = false,
+            annotationVisible = true,
+            aiPanelVisible = false,
+            videoPanelVisible = true,
+            filterBarVisible = true,
+        )
+        // Current chrome is outside the layout, but this named snapshot remembers its own in-layout toolbar position.
+        val saved = AppSettings(
+            toolbarPlacement = ToolbarPlacement.WITH_TABS_END,
+            customLogViewLayouts = listOf(layout),
+            lastCustomLogViewLayoutId = layout.id,
+        )
+        val restored = decode(saved.settingsJson())
+        assertEquals(listOf(layout), restored.customLogViewLayouts)
+        assertEquals(layout.id, restored.lastCustomLogViewLayoutId)
+        assertTrue(TOOLBAR in tileLeafSections(restored.customLogViewLayouts.single().tree))
+        assertEquals(true, restored.customLogViewLayouts.single().filterBarVisible)
+
+        val imported = decodeLogViewLayoutFile(encodeLogViewLayoutFile(layout)).getOrThrow()
+        assertEquals(layout.name, imported.name)
+        assertEquals(layout.tree, imported.tree)
+        assertEquals(layout.hidden, imported.hidden)
+        assertEquals(layout.collapsed, imported.collapsed)
+        assertEquals(layout.filterPanelWidth, imported.filterPanelWidth)
+        assertEquals(layout.annotationPanelWidth, imported.annotationPanelWidth)
+        assertEquals(layout.rightSidebarSplit, imported.rightSidebarSplit)
+        assertTrue(imported.filterVisible.not())
+        assertTrue(imported.annotationVisible)
+        assertTrue(imported.aiPanelVisible.not())
+        assertTrue(imported.videoPanelVisible)
+        assertEquals(true, imported.filterBarVisible)
+        assertTrue(imported.id != layout.id, "portable imports receive a fresh local id")
+    }
+
+    @Test
+    fun customSettingsDropUnknownHiddenAndCollapsedIdsWithoutDroppingTheSnapshot() {
+        val base = AppSettings().withLogViewPreset(LogViewLayoutPreset.ANALYSIS, sizes)
+        val layout = CustomLogViewLayout(
+            id = "custom-log-view-future-ids",
+            name = "Future IDs",
+            tree = base.logViewLayout!!,
+            filterPanelWidth = 220f,
+            annotationPanelWidth = 360f,
+            rightSidebarSplit = 0.5f,
+            hidden = listOf(DIAGRAMS),
+            collapsed = listOf(TAGS),
+            tilesLocked = false,
+            filterVisible = true,
+            annotationVisible = true,
+            aiPanelVisible = true,
+            videoPanelVisible = true,
+        )
+        val raw = Json.parseToJsonElement(
+            AppSettings(customLogViewLayouts = listOf(layout), lastCustomLogViewLayoutId = layout.id).settingsJson(),
+        ).jsonObject.toMutableMap()
+        val savedEntry = (raw.getValue("customLogViewLayouts") as JsonArray).single().jsonObject.toMutableMap()
+        savedEntry["hidden"] = parse("[\"diagrams\",\"future_hidden\"]")
+        savedEntry["collapsed"] = parse("[\"tags\",\"future_collapsed\"]")
+        raw["customLogViewLayouts"] = JsonArray(listOf(JsonObject(savedEntry)))
+
+        raw["lastCustomLogViewLayoutId"] = parse("\"${layout.id}\"")
+        val restored = decode(JsonObject(raw).toString())
+        val snapshot = restored.customLogViewLayouts.single()
+        assertEquals(listOf(DIAGRAMS), snapshot.hidden)
+        assertEquals(listOf(TAGS), snapshot.collapsed)
+        assertEquals(layout.id, restored.lastCustomLogViewLayoutId)
+    }
+
+    @Test
+    fun portableLayoutImportIgnoresUnknownAndMissingTilesAndLetsTheSanitizerRestoreThem() {
+        val base = AppSettings().withLogViewPreset(LogViewLayoutPreset.ANALYSIS, sizes)
+        val layout = CustomLogViewLayout(
+            id = "custom-log-view-test",
+            name = "Analysis",
+            tree = base.logViewLayout!!,
+            filterPanelWidth = 220f,
+            annotationPanelWidth = 360f,
+            rightSidebarSplit = 0.5f,
+            hidden = emptyList(),
+            collapsed = emptyList(),
+            tilesLocked = false,
+            filterVisible = true,
+            annotationVisible = true,
+            aiPanelVisible = false,
+            videoPanelVisible = true,
+        )
+        val future = encodeLogViewLayoutFile(layout).replace("\"section\": \"issues\"", "\"section\": \"future_panel\"")
+        val imported = decodeLogViewLayoutFile(future).getOrThrow()
+        assertTrue(LogViewSectionId.ISSUES in tileLeafSections(imported.tree), "the sanitizer restores the missing known tile")
+    }
+
+    @Test
+    fun portableLayoutImportKeepsTheInLayoutToolbarPosition() {
+        val saved = AppSettings(toolbarPlacement = ToolbarPlacement.IN_LAYOUT)
+            .withLogViewPreset(LogViewLayoutPreset.ANALYSIS, sizes)
+        val layout = CustomLogViewLayout(
+            id = "custom-log-view-toolbar",
+            name = "Toolbar in layout",
+            tree = saved.logViewLayout!!,
+            filterPanelWidth = 220f,
+            annotationPanelWidth = 360f,
+            rightSidebarSplit = 0.5f,
+            hidden = emptyList(),
+            collapsed = emptyList(),
+            tilesLocked = false,
+            filterVisible = true,
+            annotationVisible = true,
+            aiPanelVisible = false,
+            videoPanelVisible = true,
+        )
+
+        val imported = decodeLogViewLayoutFile(encodeLogViewLayoutFile(layout)).getOrThrow()
+        assertTrue(TOOLBAR in tileLeafSections(imported.tree))
+        assertEquals(layout.tree, imported.tree, "the imported toolbar keeps its saved location")
+    }
+
+    @Test
+    fun portableLayoutImportRejectsWrongFormatAndFutureVersion() {
+        assertTrue(decodeLogViewLayoutFile("{} ").isFailure)
+        assertTrue(
+            decodeLogViewLayoutFile("""{"format":"indagium-log-view-layout","version":99}""").exceptionOrNull()
+                ?.message.orEmpty().contains("newer version"),
+        )
     }
 
     @Test

@@ -1550,6 +1550,8 @@ fun AppButton(
     textColor: Color? = null,
     // Hover explanation, shown like ToolbarBtn's; null (every pre-existing call site) adds no wrapper.
     tooltip: String? = null,
+    tooltipMaxLines: Int = 2,
+    labelOverflow: TextOverflow = TextOverflow.Clip,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -1606,6 +1608,7 @@ fun AppButton(
                             color = resolvedTextColor,
                             fontSize = 12.sp,
                             fontWeight = if (variant == ButtonVariant.Primary) FontWeight.Medium else FontWeight.Normal,
+                            overflow = labelOverflow,
                         )
                     }
                 }
@@ -1613,7 +1616,7 @@ fun AppButton(
         }
     }
     if (tooltip != null) {
-        TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) { button() }
+        TooltipArea(tooltip = { ToolbarTooltip(tooltip, maxLines = tooltipMaxLines) }) { button() }
     } else {
         button()
     }

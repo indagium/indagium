@@ -242,9 +242,11 @@ private fun reviewLayout(): LogViewNode = lvRow(
 private const val REVIEW_FILTER_DP: Float = 250f
 private const val REVIEW_SEQUENCES_DP: Float = 300f
 private const val REVIEW_RIGHT_DP: Float = 360f
-private const val LOG_FOCUS_RIGHT_DP: Float = 300f
 private const val FILTERS_TOP_ROW_DP: Float = 220f
 private const val FILTERS_TOP_RIGHT_DP: Float = 340f
+private const val FOCUSED_LOG_WEIGHT: Float = 2.2f
+private const val ANALYSIS_FILTER_MAX_DP: Float = 220f
+private const val ANALYSIS_ARTIFACTS_MAX_DP: Float = 300f
 
 // Video, Notes and AI in one column of [widthDp] (the right column of the presets that leave the Diagram library out of it).
 private fun notesColumn(split: Float, widthDp: Float): LogViewNode = lvCol(
@@ -254,13 +256,10 @@ private fun notesColumn(split: Float, widthDp: Float): LogViewNode = lvCol(
     dp = widthDp,
 )
 
-// Log focus: no filter tiles (they are hidden), the log with Notes and AI beside it.
-private fun logFocusLayout(sizes: LogViewLegacySizes): LogViewNode {
-    val split = share(sizes.rightSidebarSplit)
-    return lvRow(
-        lvCol(lvLeaf(LogViewSectionId.ORIGINAL), lvLeaf(LogViewSectionId.LOG)),
-        notesColumn(split, LOG_FOCUS_RIGHT_DP),
-    )
+// Log focus keeps only the unfiltered/log pair on screen. The hidden tiles are still completed into their
+// normal anchors by the sanitizer, so showing a group again restores a sensible arrangement.
+private fun logFocusLayout(): LogViewNode {
+    return lvCol(lvLeaf(LogViewSectionId.ORIGINAL), lvLeaf(LogViewSectionId.LOG, FOCUSED_LOG_WEIGHT))
 }
 
 // Filters on top: all filter tiles in a strip across the top, the log with Notes and AI below.
@@ -275,7 +274,38 @@ private fun filtersOnTopLayout(sizes: LogViewLegacySizes): LogViewNode {
     )
 }
 
+// Filtering: the vertical filter rail sits beside a dominant log. Notes, AI, Video and the Diagram library stay parked
+// at their normal anchors in the complete tree, but are hidden initially so the log gets the full remaining width.
+private fun filteringLayout(sizes: LogViewLegacySizes): LogViewNode = lvRow(
+    filterColumn(LOG_VIEW_FILTER_TILES, pinnedDp(sizes.filterPanelWidth, DEFAULT_FILTER_WIDTH_DP)),
+    lvCol(lvLeaf(LogViewSectionId.ORIGINAL), lvLeaf(LogViewSectionId.LOG, FOCUSED_LOG_WEIGHT)),
+)
+
+// Analysis: the log and Original occupy the full center column. Sequences and Issues live in the independent, scrolling
+// artifact column beside Notes, AI, Diagrams and Video, so they never take a fixed-height slice out of the log.
+private fun analysisLayout(sizes: LogViewLegacySizes): LogViewNode {
+    val analysisFilters = LOG_VIEW_FILTER_TILES - LogViewSectionId.SEQUENCES - LogViewSectionId.ISSUES
+    val logColumn = lvCol(
+        lvLeaf(LogViewSectionId.ORIGINAL),
+        lvLeaf(LogViewSectionId.LOG, FOCUSED_LOG_WEIGHT),
+    )
+    val right = lvCol(
+        lvLeaf(LogViewSectionId.SEQUENCES),
+        lvLeaf(LogViewSectionId.ISSUES),
+        lvLeaf(LogViewSectionId.DIAGRAMS, DIAGRAMS_WEIGHT),
+        lvLeaf(LogViewSectionId.VIDEO, VIDEO_WEIGHT),
+        lvLeaf(LogViewSectionId.NOTES, share(sizes.rightSidebarSplit)),
+        lvLeaf(LogViewSectionId.AI, 1f - share(sizes.rightSidebarSplit)),
+        dp = minOf(pinnedDp(sizes.annotationPanelWidth, DEFAULT_RIGHT_WIDTH_DP), ANALYSIS_ARTIFACTS_MAX_DP),
+    )
+    val filterWidth = minOf(pinnedDp(sizes.filterPanelWidth, DEFAULT_FILTER_WIDTH_DP), ANALYSIS_FILTER_MAX_DP)
+    return lvRow(filterColumn(analysisFilters, filterWidth), logColumn, right)
+}
+
 private val DIAGRAMS_ONLY = setOf(LogViewSectionId.DIAGRAMS)
+private val RIGHT_ARTIFACTS = setOf(LogViewSectionId.DIAGRAMS, LogViewSectionId.VIDEO, LogViewSectionId.NOTES, LogViewSectionId.AI)
+private val FILTERING_HIDDEN = RIGHT_ARTIFACTS
+private val LOG_FOCUS_HIDDEN = LOG_VIEW_FILTER_TILES.toSet() + RIGHT_ARTIFACTS
 
 /**
  * A ready-made arrangement. [layout] is the tree, [hidden] the tiles the preset hides: layout + hidden together cover every
@@ -290,24 +320,31 @@ enum class LogViewLayoutPreset(
     val hidden: Set<LogViewSectionId>,
 ) {
     CLASSIC(LogViewPresetId.CLASSIC, "Classic", LogViewScope.SINGLE, ::classicLogViewLayout, emptySet()),
+    // Kept for settings written by older releases. These legacy presets remain decodable/resettable but aren't in the current menu.
     REVIEW(LogViewPresetId.REVIEW, "Review", LogViewScope.SINGLE, { reviewLayout() }, emptySet()),
     LOG_FOCUS(
         LogViewPresetId.LOG_FOCUS,
         "Log focus",
         LogViewScope.SINGLE,
-        ::logFocusLayout,
-        LOG_VIEW_FILTER_TILES.toSet() + LogViewSectionId.DIAGRAMS,
+        { logFocusLayout() },
+        LOG_FOCUS_HIDDEN,
     ),
     FILTERS_ON_TOP(LogViewPresetId.FILTERS_ON_TOP, "Filters on top", LogViewScope.SINGLE, ::filtersOnTopLayout, DIAGRAMS_ONLY),
     COMPARE_GRID(LogViewPresetId.COMPARE_GRID, "Compare grid", LogViewScope.COMPARE, ::compareGridLayout, emptySet()),
     COMPARE_COLUMNS(LogViewPresetId.COMPARE_COLUMNS, "Compare rows", LogViewScope.COMPARE, ::compareColumnsLayout, emptySet()),
+    FILTERING(LogViewPresetId.FILTERING, "Filtering", LogViewScope.SINGLE, ::filteringLayout, FILTERING_HIDDEN),
+    ANALYSIS(LogViewPresetId.ANALYSIS, "Analysis", LogViewScope.SINGLE, ::analysisLayout, emptySet()),
     ;
 
     companion object {
         fun of(id: LogViewPresetId): LogViewLayoutPreset = entries.first { it.id == id }
 
         /** The presets that apply to a [scope] view, in menu order. */
-        fun forScope(scope: LogViewScope): List<LogViewLayoutPreset> = entries.filter { it.scope == scope }
+        fun forScope(scope: LogViewScope): List<LogViewLayoutPreset> = when (scope) {
+            LogViewScope.SINGLE -> listOf(CLASSIC, LOG_FOCUS, FILTERING, ANALYSIS)
+            LogViewScope.COMPARE -> listOf(COMPARE_GRID, COMPARE_COLUMNS)
+            LogViewScope.BOTH -> emptyList()
+        }
     }
 }
 
@@ -566,6 +603,7 @@ internal fun AppSettings.withLogViewPreset(preset: LogViewLayoutPreset, sizes: L
         logViewHidden = state.second,
         logViewCollapsed = collapsed,
         lastLogViewPreset = preset.id,
+        lastCustomLogViewLayoutId = null,
     )
 }
 

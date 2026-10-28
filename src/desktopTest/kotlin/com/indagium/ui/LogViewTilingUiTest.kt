@@ -8,12 +8,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.asComposeCanvas
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
@@ -21,6 +25,7 @@ import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -30,6 +35,8 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
@@ -76,6 +83,8 @@ import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -445,13 +454,245 @@ class LogViewTilingUiTest {
         rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").performClick()
         rule.waitForIdle()
         assertFalse(state.filterVisible, "Log focus switches the Filter group off instead of hiding eight tiles")
-        assertEquals(listOf(LogViewSectionId.DIAGRAMS), state.settings.logViewHidden)
+        assertTrue(LogViewSectionId.NOTES in state.settings.logViewHidden)
         filterKeys.forEach { assertFalse(exists("tile-card-$it")) }
         assertTrue(exists("tile-card-log"))
-        assertTrue(exists("tile-card-notes"))
+        assertFalse(exists("tile-card-notes"))
         assertFalse(exists("layout-menu-badge"))
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
+    }
+
+    @Test
+    fun singleLogMenuOffersTheFourCurrentPresetsAndLegacyResetIdsUseTheirReplacements() {
+        setup()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        listOf("CLASSIC", "LOG_FOCUS", "FILTERING", "ANALYSIS").forEach {
+            assertTrue(exists("layout-menu-preset-$it"), "$it is in the single-log menu")
+        }
+        assertFalse(exists("layout-menu-preset-REVIEW"))
+        assertFalse(exists("layout-menu-preset-FILTERS_ON_TOP"))
+
+        rule.runOnIdle {
+            state.updateSettings { it.copy(lastLogViewPreset = com.indagium.model.LogViewPresetId.REVIEW) }
+            assertEquals("Analysis", state.lastLogViewPresetOrClassic().label)
+            state.resetLogViewLayout()
+            assertEquals(com.indagium.model.LogViewPresetId.ANALYSIS, state.settings.lastLogViewPreset)
+            state.updateSettings { it.copy(lastLogViewPreset = com.indagium.model.LogViewPresetId.FILTERS_ON_TOP) }
+            assertEquals("Filtering", state.lastLogViewPresetOrClassic().label)
+            state.resetLogViewLayout()
+            assertEquals(com.indagium.model.LogViewPresetId.FILTERING, state.settings.lastLogViewPreset)
+        }
+    }
+
+    @Test
+    fun aSavedLayoutRestoresTreeSizesCollapseFlagsAndPanelGroups() {
+        setup()
+        val saved = rule.runOnIdle {
+            state.filterPanelWidth = 335f
+            state.annotationPanelWidth = 425f
+            state.rightSidebarSplit = 0.31f
+            state.updateFilterPanelUiState {
+                highlightersExpanded = false
+                lvlExpanded = false
+                seqExpanded = false
+                crashExpanded = false
+                sfExpanded = false
+                logCompositionExpanded = false
+            }
+            state.toggleLogViewTileCollapsed(LogViewSectionId.NOTES)
+            state.updateFilterVisible(false)
+            state.updateAnnotationVisible(false)
+            state.updateAiPanelVisible(true)
+            state.updateVideoPanelVisible(false)
+            state.updateFilterBarVisible(false)
+            state.saveCurrentAsLogViewLayout("Triage")
+        }
+        assertEquals("Triage", state.lastLogViewResetLabel())
+
+        rule.runOnIdle {
+            state.filterPanelWidth = 210f
+            state.annotationPanelWidth = 310f
+            state.rightSidebarSplit = 0.5f
+            state.compareSplit = 0.74f
+            state.updateFilterPanelUiState {
+                highlightersExpanded = true
+                lvlExpanded = true
+                seqExpanded = true
+                crashExpanded = true
+                sfExpanded = true
+                logCompositionExpanded = true
+            }
+            state.updateFilterVisible(true)
+            state.updateAnnotationVisible(true)
+            state.updateAiPanelVisible(false)
+            state.updateVideoPanelVisible(true)
+            state.updateFilterBarVisible(true)
+            state.applySavedLogViewLayout(saved.id)
+        }
+        rule.waitForIdle()
+
+        assertEquals(335f, state.filterPanelWidth)
+        assertEquals(425f, state.annotationPanelWidth)
+        assertEquals(0.31f, state.rightSidebarSplit)
+        assertEquals(0.74f, state.compareSplit, "a single-log layout leaves the compare split alone")
+        assertFalse(state.fpState.highlightersExpanded)
+        assertFalse(state.fpState.lvlExpanded)
+        assertFalse(state.fpState.seqExpanded)
+        assertFalse(state.fpState.crashExpanded)
+        assertFalse(state.fpState.sfExpanded)
+        assertFalse(state.fpState.logCompositionExpanded)
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.NOTES))
+        assertFalse(state.filterVisible)
+        assertFalse(state.annotationVisible)
+        assertTrue(state.aiPanelVisible)
+        assertFalse(state.videoPanelVisible)
+        assertFalse(state.filterBarVisible, "a saved Tags layout restores its filter-bar presentation")
+
+        rule.runOnIdle {
+            state.deleteSavedLogViewLayout(saved.id)
+            assertEquals("Classic", state.lastLogViewResetLabel())
+            state.resetLogViewLayout()
+        }
+        assertTrue(state.settings.lastCustomLogViewLayoutId == null)
+        assertEquals(LogViewLayoutPreset.CLASSIC.id, state.settings.lastLogViewPreset)
+    }
+
+    @Test
+    fun savedLayoutsCanBeAppliedFromTheLayoutMenu() {
+        setup()
+        val saved = rule.runOnIdle {
+            state.updateFilterVisible(false)
+            state.saveCurrentAsLogViewLayout("Filter-free")
+        }
+        rule.runOnIdle { state.updateFilterVisible(true) }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-custom-${saved.id}"))
+        rule.onNodeWithTag("layout-menu-apply-${saved.id}").performClick()
+        rule.waitForIdle()
+        assertFalse(state.filterVisible)
+        assertEquals(saved.id, state.settings.lastCustomLogViewLayoutId)
+    }
+
+    @Test
+    fun savedLayoutsShowExactActiveAndModifiedStateAndUpdateInPlace() {
+        setup(height = 900)
+        val selected = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Current setup") }
+        rule.runOnIdle { state.filterPanelWidth += 1f }
+        assertFalse(state.matchesCustomLogViewLayout(selected), "the selected snapshot differs from the current state")
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC), "the built-in Classic shape still matches despite the saved width difference")
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Modified").assertExists()
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
+        rule.onNodeWithTag("layout-menu-update-existing").assertExists()
+        assertTrue(
+            bounds("layout-menu-custom-${selected.id}").bottom < bounds("layout-menu-panel-notes").top,
+            "saved layouts appear above Panels",
+        )
+        saveScreenshot("saved-layouts-modified.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
+
+        rule.onNodeWithTag("layout-menu-delete-${selected.id}").performMouseInput { moveTo(center) }
+        rule.waitUntil(5_000) { textCount("Delete saved layout") > 0 }
+
+        rule.onNodeWithTag("layout-menu-update-existing").performClick()
+        rule.waitForIdle()
+        val updated = state.settings.customLogViewLayouts.single { it.id == selected.id }
+        assertEquals(selected.id, updated.id, "updating preserves the stable ID")
+        assertEquals(selected.name, updated.name, "updating preserves the name")
+        assertTrue(state.matchesCustomLogViewLayout(updated), "the saved snapshot now matches the current view")
+        rule.onNodeWithText("Active").assertExists()
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
+        saveScreenshot("saved-layouts-active.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
+
+        rule.runOnIdle { state.filterPanelWidth = updated.filterPanelWidth + 1f }
+        rule.onNodeWithTag("layout-menu-reset").performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(selected.id, state.settings.lastCustomLogViewLayoutId)
+        assertEquals(updated.filterPanelWidth, state.filterPanelWidth, "Reset restores the updated custom width")
+        assertTrue(state.matchesCustomLogViewLayout(updated), "Reset reapplies the updated custom snapshot")
+    }
+
+    @Test
+    fun duplicateSnapshotsMarkOnlyTheSelectedOneAndChoosingClassicClearsCustomStatus() {
+        setup(height = 900)
+        val first = rule.runOnIdle { state.saveCurrentAsLogViewLayout("First copy") }
+        val second = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Second copy") }
+        assertTrue(state.matchesCustomLogViewLayout(first))
+        assertTrue(state.matchesCustomLogViewLayout(second))
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertEquals(1, textCount("Active"), "identical snapshots do not both claim the selected state")
+        assertTrue(exists("layout-menu-status-${second.id}"))
+        assertFalse(exists("layout-menu-status-${first.id}"))
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
+
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").performClick()
+        rule.waitForIdle()
+        assertEquals(null, state.settings.lastCustomLogViewLayoutId, "selecting a built-in clears the custom selection")
+        assertFalse(exists("layout-menu-status-${first.id}"))
+        assertFalse(exists("layout-menu-status-${second.id}"))
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsSelected()
+    }
+
+    @OptIn(androidx.compose.ui.test.InternalTestApi::class, androidx.compose.ui.InternalComposeUiApi::class)
+    private fun verifyPracticalPresetsAndSaveEvidence(width: Int, height: Int) {
+        rule.runOnUiThread {
+            (rule as androidx.compose.ui.test.junit4.DesktopComposeTestRule).scene.size = androidx.compose.ui.unit.IntSize(width, height)
+        }
+        setup(width = width, height = height)
+        val evidence = File("build/log-layout-review").apply { mkdirs() }
+        listOf(LogViewLayoutPreset.LOG_FOCUS, LogViewLayoutPreset.FILTERING, LogViewLayoutPreset.ANALYSIS).forEach { preset ->
+            rule.runOnIdle { state.applyLogViewPreset(preset) }
+            rule.waitForIdle()
+            val log = bounds("tile-card-log")
+            assertTrue(log.height.value >= (height - 36) * 0.9f, "${preset.label} keeps the log full height")
+            assertTrue(log.width.value >= width * 0.45f, "${preset.label} gives the log usable width: ${log.width}")
+            rule.runOnUiThread {
+                org.jetbrains.skia.Surface.makeRasterN32Premul(width, height).use { surface ->
+                    (rule as androidx.compose.ui.test.junit4.DesktopComposeTestRule).scene.render(surface.canvas.asComposeCanvas(), System.nanoTime())
+                    surface.makeImageSnapshot().use { image ->
+                        image.encodeToData()!!.use { data ->
+                            File(evidence, "${preset.name}-${width}x${height}.png").writeBytes(data.bytes)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun practicalPresetGeometryAtCompactDesktopSize() = verifyPracticalPresetsAndSaveEvidence(1000, 650)
+
+    @Test
+    fun practicalPresetGeometryAtWideDesktopSize() = verifyPracticalPresetsAndSaveEvidence(1600, 900)
+
+    @Test
+    fun savedLayoutDialogsCanSaveCancelAndDeleteThroughTheMenu() {
+        setup(height = 900)
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("layout-menu-save-current").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("Investigation")
+        rule.onNode(hasText("Save") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        val saved = state.settings.customLogViewLayouts.single()
+        assertEquals("Investigation", saved.name)
+        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(1, state.settings.customLogViewLayouts.size)
+        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performScrollTo().performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.customLogViewLayouts.isEmpty())
+        assertEquals("Classic", state.lastLogViewResetLabel())
     }
 
     @Test
@@ -1581,6 +1822,16 @@ class LogViewTilingUiTest {
 
     private fun overlaps(a: DpRect, b: DpRect): Boolean =
         a.left.value < b.right.value && b.left.value < a.right.value && a.top.value < b.bottom.value && b.top.value < a.bottom.value
+
+    private fun saveScreenshot(name: String, image: ImageBitmap) {
+        val directory = File("build/log-layout-review").apply { mkdirs() }
+        val pixels = image.toPixelMap()
+        val rendered = BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_ARGB)
+        for (y in 0 until image.height) {
+            for (x in 0 until image.width) rendered.setRGB(x, y, pixels[x, y].toArgb())
+        }
+        check(ImageIO.write(rendered, "png", File(directory, name)))
+    }
 
     @Test
     fun theGapsOnBothSidesOfTheLogAreEqualWithAndWithoutAScrollbarAndTheBarStaysInsideTheGap() {

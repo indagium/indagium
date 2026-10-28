@@ -54,6 +54,8 @@ internal fun JsonObjectBuilder.putLogViewLayoutSettings(settings: AppSettings) {
     put("compareHidden", idsJson(settings.compareHidden))
     put("lastComparePreset", settings.lastComparePreset.name)
     put("compareSyncScroll", settings.compareSyncScroll)
+    put("customLogViewLayouts", customLogViewLayoutsJson(settings.customLogViewLayouts))
+    settings.lastCustomLogViewLayoutId?.let { put("lastCustomLogViewLayoutId", it) }
 }
 
 // One view's layout and hidden list, decoded and sanitized together. A layout that is absent or malformed stays null; the
@@ -84,15 +86,24 @@ private fun JsonObject.toolbarInLayout(): Boolean = (this["toolbarPlacement"] as
 internal fun AppSettings.withLogViewLayoutSettingsFrom(o: JsonObject): AppSettings {
     val single = o.layoutAndHidden("logViewLayout", "logViewHidden", LogViewScope.SINGLE, logViewHidden, o.toolbarInLayout())
     val compare = o.layoutAndHidden("compareLayout", "compareHidden", LogViewScope.COMPARE, compareHidden, false)
+    val customLayouts = customLogViewLayoutsFromJson(o["customLogViewLayouts"])
+    val requestedLastCustom = (o["lastCustomLogViewLayoutId"] as? JsonPrimitive)?.contentOrNull
+    val validLastCustom = requestedLastCustom?.takeIf { id -> customLayouts.any { it.id == id } }
     return copy(
         logViewLayout = single.first,
         logViewHidden = single.second,
         logViewCollapsed = idsFromJson(o["logViewCollapsed"])?.distinct() ?: logViewCollapsed,
         logViewTilesLocked = (o["logViewTilesLocked"] as? JsonPrimitive)?.booleanOrNull ?: logViewTilesLocked,
-        lastLogViewPreset = presetFromJson(o["lastLogViewPreset"], LogViewScope.SINGLE, lastLogViewPreset),
+        lastLogViewPreset = if (requestedLastCustom != null && validLastCustom == null) {
+            LogViewPresetId.CLASSIC
+        } else {
+            presetFromJson(o["lastLogViewPreset"], LogViewScope.SINGLE, lastLogViewPreset)
+        },
         compareLayout = compare.first,
         compareHidden = compare.second,
         lastComparePreset = presetFromJson(o["lastComparePreset"], LogViewScope.COMPARE, lastComparePreset),
         compareSyncScroll = (o["compareSyncScroll"] as? JsonPrimitive)?.booleanOrNull ?: compareSyncScroll,
+        customLogViewLayouts = customLayouts,
+        lastCustomLogViewLayoutId = validLastCustom,
     )
 }

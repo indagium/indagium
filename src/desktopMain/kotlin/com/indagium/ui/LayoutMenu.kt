@@ -11,11 +11,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,6 +53,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP
 import com.indagium.model.HomeSectionId
+import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
@@ -61,6 +65,7 @@ import com.indagium.model.LogViewSectionId
 // back to the root (CLAUDE.md: a clickable or a dismissed Popup steals it and never returns it).
 
 private const val MENU_WIDTH_DP = 320
+private const val LOG_LAYOUT_MENU_WIDTH_DP = 340
 private const val THUMB_WIDTH_DP = 66
 private const val THUMB_HEIGHT_DP = 38
 private const val THUMB_VIRTUAL_WIDTH = 1200f
@@ -541,6 +546,8 @@ internal fun LayoutMenuPopup(
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
+    var saveLayoutDialog by remember { mutableStateOf(false) }
+    var deleteLayoutRequest by remember { mutableStateOf<CustomLogViewLayout?>(null) }
     val ctx = state.layoutMenuContext(tab)
     val compare = ctx.compare
     val settings = state.settings
@@ -551,14 +558,123 @@ internal fun LayoutMenuPopup(
         properties = PopupProperties(focusable = true),
     ) {
         Column(
-            Modifier.width(MENU_WIDTH_DP.dp).background(tc.p, shape).border(1.dp, tc.br, shape).padding(vertical = 8.dp).testTag("layout-menu-popup"),
+            Modifier.width((if (compare) MENU_WIDTH_DP else LOG_LAYOUT_MENU_WIDTH_DP).dp).heightIn(max = 640.dp).verticalScroll(rememberScrollState())
+                .background(tc.p, shape).border(1.dp, tc.br, shape).padding(vertical = 8.dp).testTag("layout-menu-popup"),
         ) {
+            val selectedCustom = if (compare) null else settings.customLogViewLayouts.firstOrNull { it.id == settings.lastCustomLogViewLayoutId }
+            val selectedCustomActive = selectedCustom?.let(state::matchesCustomLogViewLayout) == true
             MenuLabel("Layout presets")
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 LogViewLayoutPreset.forScope(if (compare) LogViewScope.COMPARE else LogViewScope.SINGLE).forEach { preset ->
-                    PresetThumb(preset, active = if (compare) state.comparePresetActive(preset) else state.logViewPresetActive(preset)) {
+                    val presetActive = if (compare) state.comparePresetActive(preset) else state.logViewPresetActive(preset) && selectedCustom == null
+                    PresetThumb(preset, active = presetActive) {
                         if (compare) state.applyComparePreset(preset) else state.applyLogViewPreset(preset)
                         onReclaimFocus()
+                    }
+                }
+            }
+            if (!compare) {
+                MenuLabel("Saved layouts")
+                if (settings.customLogViewLayouts.isEmpty()) {
+                    AppText(
+                        "No saved layouts yet.",
+                        color = tc.td,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                    )
+                }
+                settings.customLogViewLayouts.forEach { layout ->
+                    val isSelected = settings.lastCustomLogViewLayoutId == layout.id
+                    val isActive = isSelected && state.matchesCustomLogViewLayout(layout)
+                    val status = when {
+                        isActive -> "Active"
+                        isSelected -> "Modified"
+                        else -> null
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                            .testTag("layout-menu-custom-${layout.id}"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            AppButton(
+                                layout.name,
+                                onClick = {
+                                    state.applySavedLogViewLayout(layout.id)
+                                    onReclaimFocus()
+                                },
+                                variant = ButtonVariant.Ghost,
+                                horizontalPadding = 6.dp,
+                                tooltip = layout.name,
+                                tooltipMaxLines = 6,
+                                modifier = Modifier.fillMaxWidth().height(28.dp).testTag("layout-menu-apply-${layout.id}")
+                                    .semantics { selected = isActive },
+                                textColor = if (isActive) tc.ac else tc.tx,
+                                labelOverflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        if (status != null) {
+                            AppText(
+                                status,
+                                color = if (isActive) tc.ac else tc.warn,
+                                fontSize = 9.sp,
+                                maxLines = 1,
+                                modifier = Modifier.testTag("layout-menu-status-${layout.id}")
+                                    .semantics { contentDescription = "$status saved layout" },
+                            )
+                        }
+                        AppButton(
+                            "Export",
+                            onClick = {
+                                state.exportLogViewLayout(layout)
+                                onReclaimFocus()
+                            },
+                            variant = ButtonVariant.Ghost,
+                            horizontalPadding = 5.dp,
+                            tooltip = "Export saved layout",
+                            modifier = Modifier.height(26.dp).testTag("layout-menu-export-${layout.id}"),
+                            textColor = tc.td,
+                        )
+                        SquareIconButton(
+                            "×",
+                            fontSize = 12.sp,
+                            onClick = {
+                                deleteLayoutRequest = layout
+                                onReclaimFocus()
+                            },
+                            size = 20.dp,
+                            tooltip = "Delete saved layout",
+                            modifier = Modifier.testTag("layout-menu-delete-${layout.id}")
+                                .semantics { contentDescription = "Delete saved layout ${layout.name}" },
+                        )
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (selectedCustom != null) {
+                        AppButton(
+                            "Update existing",
+                            onClick = {
+                                state.updateSavedLogViewLayoutFromCurrent(selectedCustom.id)
+                                onReclaimFocus()
+                            },
+                            enabled = !selectedCustomActive,
+                            variant = ButtonVariant.Secondary,
+                            horizontalPadding = 7.dp,
+                            tooltip = if (selectedCustomActive) "Saved layout already matches the current view" else "Update ${selectedCustom.name} with the current view",
+                            modifier = Modifier.testTag("layout-menu-update-existing"),
+                        )
+                    }
+                    Row(
+                        Modifier.weight(1f),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AccentLink("Save current…", onClick = { saveLayoutDialog = true }, modifier = Modifier.testTag("layout-menu-save-current"))
+                        AccentLink("Import…", onClick = {
+                            state.importLogViewLayout()
+                            onReclaimFocus()
+                        }, modifier = Modifier.padding(start = 10.dp).testTag("layout-menu-import"))
                     }
                 }
             }
@@ -580,7 +696,7 @@ internal fun LayoutMenuPopup(
                     onReclaimFocus()
                 }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
             }
-            val resetTo = if (compare) state.lastComparePresetOrGrid() else state.lastLogViewPresetOrClassic()
+            val resetTo = if (compare) state.lastComparePresetOrGrid().label else state.lastLogViewResetLabel()
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -590,7 +706,45 @@ internal fun LayoutMenuPopup(
                     }
                     .padding(horizontal = 12.dp, vertical = 8.dp)
                     .testTag("layout-menu-reset"),
-            ) { AppText("Reset to ${resetTo.label}", color = tc.ac, fontSize = 12.sp) }
+            ) { AppText("Reset to $resetTo", color = tc.ac, fontSize = 12.sp) }
+        }
+        if (saveLayoutDialog) {
+            WorkspaceProfileNameDialog(
+                title = "Save current log layout",
+                confirmLabel = "Save",
+                initialName = uniqueLogViewLayoutName("My layout", state.customLogViewLayoutNames()),
+                takenNames = state.customLogViewLayoutNames(),
+                noun = "layout",
+                onConfirm = { name ->
+                    state.saveCurrentAsLogViewLayout(name)
+                    saveLayoutDialog = false
+                    onReclaimFocus()
+                },
+                onDismiss = {
+                    saveLayoutDialog = false
+                    onReclaimFocus()
+                },
+            )
+        }
+        deleteLayoutRequest?.let { layout ->
+            SettingsConfirmDialog(
+                title = "Delete saved layout?",
+                message = "Delete “${layout.name}”? This only removes the saved layout.",
+                onDismissRequest = {
+                    deleteLayoutRequest = null
+                    onReclaimFocus()
+                },
+            ) {
+                DialogActionButton("Delete", active = true, danger = true) {
+                    state.deleteSavedLogViewLayout(layout.id)
+                    deleteLayoutRequest = null
+                    onReclaimFocus()
+                }
+                DialogActionButton("Cancel", active = false) {
+                    deleteLayoutRequest = null
+                    onReclaimFocus()
+                }
+            }
         }
     }
 }

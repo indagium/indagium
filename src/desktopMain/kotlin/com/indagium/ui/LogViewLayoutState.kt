@@ -4,6 +4,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
+import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.LogViewTileGroup
 import com.indagium.model.TileAxis
@@ -102,6 +103,94 @@ internal fun AppState.applyLogViewPreset(preset: LogViewLayoutPreset) {
     }
     logViewMaximized = null
     updateFilterVisible(!filtersOff)
+    if (preset == LogViewLayoutPreset.ANALYSIS) updateAnnotationVisible(true)
+}
+
+/** Captures the single-log layout and its associated panel/collapse state as one named snapshot. */
+internal fun AppState.captureCustomLogViewLayout(name: String): com.indagium.model.CustomLogViewLayout {
+    val tree = currentLogViewLayout()
+    return com.indagium.model.CustomLogViewLayout(
+        id = newCustomLogViewLayoutId(),
+        name = name,
+        tree = tree,
+        filterPanelWidth = filterPanelWidth,
+        annotationPanelWidth = annotationPanelWidth,
+        rightSidebarSplit = rightSidebarSplit,
+        hidden = settings.logViewHidden,
+        collapsed = tileLeafSections(tree).filter { !it.neverHidden && isLogViewTileCollapsed(it) }.distinct(),
+        tilesLocked = settings.logViewTilesLocked,
+        filterVisible = filterVisible,
+        annotationVisible = annotationVisible,
+        aiPanelVisible = aiPanelVisible,
+        videoPanelVisible = videoPanelVisible,
+        filterBarVisible = filterBarVisible,
+    )
+}
+
+/** True when the current single-log view exactly matches a saved snapshot. */
+internal fun AppState.matchesCustomLogViewLayout(layout: com.indagium.model.CustomLogViewLayout): Boolean {
+    if (compareMode) return false
+    val toolbarInLayout = settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT
+    val savedState = sanitizeLogViewLayoutState(
+        layout.tree,
+        layout.hidden,
+        LogViewScope.SINGLE,
+        toolbarInLayout,
+    )
+    val currentState = sanitizeLogViewLayoutState(
+        currentLogViewLayout(),
+        settings.logViewHidden,
+        LogViewScope.SINGLE,
+        toolbarInLayout,
+    )
+    val singleTileSet = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE }.toSet()
+    val current = captureCustomLogViewLayout(layout.name)
+    return savedState.first == currentState.first &&
+        layout.filterPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP) == current.filterPanelWidth &&
+        layout.annotationPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP) == current.annotationPanelWidth &&
+        layout.rightSidebarSplit.coerceIn(0.1f, 0.9f) == current.rightSidebarSplit &&
+        savedState.second.toSet() == currentState.second.toSet() &&
+        layout.collapsed.filter { it in singleTileSet }.toSet() == current.collapsed.toSet() &&
+        layout.tilesLocked == current.tilesLocked &&
+        layout.filterVisible == current.filterVisible &&
+        layout.annotationVisible == current.annotationVisible &&
+        layout.aiPanelVisible == current.aiPanelVisible &&
+        layout.videoPanelVisible == current.videoPanelVisible &&
+        (layout.filterBarVisible == null || layout.filterBarVisible == current.filterBarVisible)
+}
+
+/** Applies a saved single-log layout, restoring both settings-backed and filter-panel-backed collapse flags. */
+internal fun AppState.applyCustomLogViewLayout(layout: com.indagium.model.CustomLogViewLayout) {
+    if (compareMode) return
+    val sanitized = sanitizeLogViewLayoutState(
+        layout.tree,
+        layout.hidden,
+        LogViewScope.SINGLE,
+        LogViewSectionId.TOOLBAR in tileLeafSections(layout.tree),
+    )
+    val filterTileSet = LOG_VIEW_FILTER_TILES.toSet()
+    val singleTileSet = LogViewSectionId.entries.filter { it.scope != LogViewScope.COMPARE }.toSet()
+    updateSettings { current ->
+        current.copy(
+            logViewLayout = sanitized.first,
+            logViewHidden = sanitized.second,
+            logViewCollapsed = (current.logViewCollapsed - singleTileSet + layout.collapsed.filter { it in singleTileSet }).distinct(),
+            logViewTilesLocked = layout.tilesLocked,
+            lastCustomLogViewLayoutId = layout.id,
+        )
+    }
+    filterPanelWidth = layout.filterPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP)
+    annotationPanelWidth = layout.annotationPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP)
+    rightSidebarSplit = layout.rightSidebarSplit.coerceIn(0.1f, 0.9f)
+    updateFilterPanelUiState {
+        filterTileSet.forEach { setExpandedFlag(it, it !in layout.collapsed) }
+    }
+    logViewMaximized = null
+    updateFilterVisible(layout.filterVisible)
+    updateAnnotationVisible(layout.annotationVisible)
+    updateAiPanelVisible(layout.aiPanelVisible)
+    updateVideoPanelVisible(layout.videoPanelVisible)
+    layout.filterBarVisible?.let { updateFilterBarVisible(it) }
 }
 
 // A preset that leaves the filter tiles out of its tree gets them back from the sanitizer at the trailing page edge, as a weighted
@@ -117,13 +206,33 @@ private fun AppSettings.withFiltersKeptAtTheLeft(sizes: LogViewLegacySizes): App
 
 /** "Reset to <preset>": re-applies the preset the layout was last set from (Classic when none). */
 internal fun AppState.resetLogViewLayout() {
-    val preset = LogViewLayoutPreset.of(settings.lastLogViewPreset).takeIf { it.scope == LogViewScope.SINGLE } ?: LogViewLayoutPreset.CLASSIC
+    settings.lastCustomLogViewLayoutId
+        ?.let { id -> settings.customLogViewLayouts.firstOrNull { it.id == id } }
+        ?.let { custom ->
+            applyCustomLogViewLayout(custom)
+            return
+        }
+    if (settings.lastCustomLogViewLayoutId != null) {
+        applyLogViewPreset(LogViewLayoutPreset.CLASSIC)
+        return
+    }
+    val preset = resettableSinglePreset(settings.lastLogViewPreset)
     applyLogViewPreset(preset)
 }
 
+internal fun AppState.lastLogViewResetLabel(): String =
+    settings.lastCustomLogViewLayoutId?.let { id -> settings.customLogViewLayouts.firstOrNull { it.id == id }?.name }
+        ?: if (settings.lastCustomLogViewLayoutId != null) LogViewLayoutPreset.CLASSIC.label else lastLogViewPresetOrClassic().label
+
 /** The preset [resetLogViewLayout] would apply, for the menu's label. */
 internal fun AppState.lastLogViewPresetOrClassic(): LogViewLayoutPreset =
-    LogViewLayoutPreset.of(settings.lastLogViewPreset).takeIf { it.scope == LogViewScope.SINGLE } ?: LogViewLayoutPreset.CLASSIC
+    resettableSinglePreset(settings.lastLogViewPreset)
+
+private fun resettableSinglePreset(id: LogViewPresetId): LogViewLayoutPreset = when (id) {
+    LogViewPresetId.REVIEW -> LogViewLayoutPreset.ANALYSIS
+    LogViewPresetId.FILTERS_ON_TOP -> LogViewLayoutPreset.FILTERING
+    else -> LogViewLayoutPreset.of(id).takeIf { it.scope == LogViewScope.SINGLE } ?: LogViewLayoutPreset.CLASSIC
+}
 
 /**
  * True when the view currently shows [preset]. A switched-off Filter group counts as the filter tiles being hidden, because that is

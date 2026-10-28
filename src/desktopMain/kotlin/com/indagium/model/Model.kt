@@ -1626,6 +1626,10 @@ data class AppSettings(
     // Where a closable tab puts its close button within the tab. JSON-only so the frozen
     // positional settings token and every existing positional AppSettings constructor stay stable.
     val tabCloseButtonPosition: TabCloseButtonPosition = TabCloseButtonPosition.RIGHT,
+    // User-saved single-log layouts. Their format is JSON-only; appended to keep positional AppSettings callers stable.
+    val customLogViewLayouts: List<CustomLogViewLayout> = emptyList(),
+    // The custom layout the Layout menu's Reset action reapplies. Null means the last built-in preset.
+    val lastCustomLogViewLayoutId: String? = null,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1711,8 +1715,27 @@ enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val sc
  */
 enum class CompareFilterTarget { A, B, BOTH }
 
-/** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the last two are for the compare view. */
-enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS }
+/** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the legacy IDs stay stable for saved settings. */
+enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS, FILTERING, ANALYSIS }
+
+/** A named single-log layout saved from the Layout menu. */
+data class CustomLogViewLayout(
+    val id: String,
+    val name: String,
+    val tree: TileNode<LogViewSectionId>,
+    val filterPanelWidth: Float,
+    val annotationPanelWidth: Float,
+    val rightSidebarSplit: Float,
+    val hidden: List<LogViewSectionId>,
+    val collapsed: List<LogViewSectionId>,
+    val tilesLocked: Boolean,
+    val filterVisible: Boolean,
+    val annotationVisible: Boolean,
+    val aiPanelVisible: Boolean,
+    val videoPanelVisible: Boolean,
+    // Captured with the tile presentation. Null preserves the current state when applying older snapshots.
+    val filterBarVisible: Boolean? = null,
+)
 
 /** How the tab strip is drawn (Settings > Appearance > Tabs): [CURRENT] is the long-standing look and the default.
  * Older entries keep their order; new style IDs are appended.

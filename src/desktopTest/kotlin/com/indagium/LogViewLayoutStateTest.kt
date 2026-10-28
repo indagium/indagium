@@ -6,11 +6,15 @@ import com.indagium.model.LogLevel
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
+import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
 import com.indagium.ui.applyLogViewPreset
+import com.indagium.ui.applyCustomLogViewLayout
+import com.indagium.ui.captureCustomLogViewLayout
 import com.indagium.ui.classicLogViewLayout
 import com.indagium.ui.columnTiles
 import com.indagium.ui.commitLogViewLayout
@@ -24,6 +28,7 @@ import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.logViewTileContext
 import com.indagium.ui.logViewTileVisible
 import com.indagium.ui.mkTab
+import com.indagium.ui.matchesCustomLogViewLayout
 import com.indagium.ui.resetLogViewLayout
 import com.indagium.ui.revealFilterTiles
 import com.indagium.ui.showLogViewTile
@@ -133,7 +138,13 @@ class LogViewLayoutStateTest {
     fun logFocusSwitchesTheFilterGroupOffInsteadOfHidingEightTiles() {
         state.applyLogViewPreset(LogViewLayoutPreset.LOG_FOCUS)
         assertFalse(state.filterVisible)
-        assertEquals(listOf(LogViewSectionId.DIAGRAMS), state.settings.logViewHidden)
+        assertEquals(
+            setOf(LogViewSectionId.DIAGRAMS, LogViewSectionId.VIDEO, LogViewSectionId.NOTES, LogViewSectionId.AI),
+            state.settings.logViewHidden.toSet(),
+        )
+        assertFalse(visible(LogViewSectionId.NOTES))
+        assertFalse(visible(LogViewSectionId.AI))
+        assertFalse(visible(LogViewSectionId.VIDEO))
         assertEquals(LogViewLayoutPreset.LOG_FOCUS.id, state.settings.lastLogViewPreset)
         val stored = assertNotNull(state.settings.logViewLayout)
         // The filter tiles are still in the stored tree, so switching the group back on shows them somewhere.
@@ -149,6 +160,57 @@ class LogViewLayoutStateTest {
     }
 
     @Test
+    fun customSnapshotRestoresItsOwnToolbarMembershipAndFilterBarState() {
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.IN_LAYOUT) }
+        state.updateFilterBarVisible(true)
+        val snapshot = state.captureCustomLogViewLayout("Toolbar and filter bar")
+        assertTrue(LogViewSectionId.TOOLBAR in tileLeafSections(snapshot.tree))
+
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.WITH_TABS_END) }
+        state.updateFilterBarVisible(false)
+        state.applyCustomLogViewLayout(snapshot)
+
+        assertTrue(LogViewSectionId.TOOLBAR in tileLeafSections(assertNotNull(state.settings.logViewLayout)))
+        assertTrue(state.filterBarVisible)
+    }
+
+    @Test
+    fun savedSnapshotEqualityIncludesLayoutStateAndProjectsTheToolbarToCurrentChrome() {
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.IN_LAYOUT) }
+        state.filterPanelWidth = 335f
+        state.annotationPanelWidth = 425f
+        state.rightSidebarSplit = 0.31f
+        state.updateFilterBarVisible(true)
+        state.hideLogViewTile(LogViewSectionId.NOTES)
+        state.toggleLogViewTileCollapsed(LogViewSectionId.DIAGRAMS)
+        state.toggleLogViewTilesLocked()
+        val saved = state.captureCustomLogViewLayout("Review")
+        assertTrue(state.matchesCustomLogViewLayout(saved))
+
+        assertTrue(state.matchesCustomLogViewLayout(saved.copy(hidden = saved.hidden.reversed(), collapsed = saved.collapsed.reversed())))
+        assertTrue(state.matchesCustomLogViewLayout(saved.copy(filterBarVisible = null)), "legacy snapshots leave the current filter-bar state alone")
+        fun resizeTags(node: TileNode<LogViewSectionId>): TileNode<LogViewSectionId> = when (node) {
+            is TileLeaf -> if (node.section == LogViewSectionId.TAGS) node.copy(sizeDp = 260f) else node
+            is TileSplit -> node.copy(children = node.children.map(::resizeTags))
+        }
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(tree = resizeTags(saved.tree))), "tree sizing is part of the snapshot")
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(collapsed = saved.collapsed + LogViewSectionId.DIAGRAMS)))
+
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.WITH_TABS_END) }
+        assertTrue(state.matchesCustomLogViewLayout(saved), "the saved toolbar is compared after projection to the current chrome")
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(filterPanelWidth = saved.filterPanelWidth + 1f)))
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(rightSidebarSplit = 0.5f)))
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(tilesLocked = !saved.tilesLocked)))
+        assertFalse(state.matchesCustomLogViewLayout(saved.copy(filterVisible = !saved.filterVisible)))
+
+        state.updateFilterBarVisible(false)
+        assertFalse(state.matchesCustomLogViewLayout(saved), "filter-bar presentation is part of the snapshot")
+        state.updateFilterBarVisible(true)
+        state.showLogViewTile(LogViewSectionId.NOTES)
+        assertFalse(state.matchesCustomLogViewLayout(saved), "hidden tiles are part of the snapshot")
+    }
+
+    @Test
     fun presetsThatShowFiltersSwitchTheGroupBackOn() {
         state.applyLogViewPreset(LogViewLayoutPreset.LOG_FOCUS)
         state.applyLogViewPreset(LogViewLayoutPreset.REVIEW)
@@ -158,6 +220,18 @@ class LogViewLayoutStateTest {
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
         assertEquals(emptyList(), state.settings.logViewHidden)
         assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.DIAGRAMS))
+    }
+
+    @Test
+    fun analysisTurnsOnTheNotesGroupForItsArtifactColumn() {
+        state.updateAnnotationVisible(false)
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
+
+        assertTrue(state.filterVisible)
+        assertTrue(state.annotationVisible)
+        assertTrue(visible(LogViewSectionId.NOTES))
+        assertTrue(visible(LogViewSectionId.SEQUENCES))
+        assertTrue(visible(LogViewSectionId.ISSUES))
     }
 
     @Test
@@ -171,13 +245,13 @@ class LogViewLayoutStateTest {
 
     @Test
     fun resetReappliesTheLastPreset() {
-        state.applyLogViewPreset(LogViewLayoutPreset.REVIEW)
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
         state.hideLogViewTile(LogViewSectionId.AI)
         state.commitLogViewLayout(TileLeaf(LogViewSectionId.LOG))
-        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.REVIEW))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.ANALYSIS))
         state.resetLogViewLayout()
-        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.REVIEW))
-        assertEquals(LogViewLayoutPreset.REVIEW.id, state.settings.lastLogViewPreset)
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.ANALYSIS))
+        assertEquals(LogViewLayoutPreset.ANALYSIS.id, state.settings.lastLogViewPreset)
     }
 
     @Test

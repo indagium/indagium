@@ -40,6 +40,7 @@ internal fun WorkspaceProfileNameDialog(
     confirmLabel: String,
     initialName: String,
     takenNames: List<String>,
+    noun: String = "profile",
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -49,7 +50,7 @@ internal fun WorkspaceProfileNameDialog(
     val trimmed = value.text.trim()
     val error = when {
         trimmed.isEmpty() -> "Enter a name."
-        takenNames.any { it.trim().equals(trimmed, ignoreCase = true) } -> "A profile with this name already exists."
+        takenNames.any { it.trim().equals(trimmed, ignoreCase = true) } -> "A $noun with this name already exists."
         else -> null
     }
     // Requested on open so typing replaces the prefilled name straight away.
@@ -68,7 +69,7 @@ internal fun WorkspaceProfileNameDialog(
             InlineField(
                 value = value,
                 onValue = { value = it },
-                placeholder = "Profile name",
+                placeholder = noun.replaceFirstChar { it.uppercase() } + " name",
                 modifier = Modifier.fillMaxWidth().focusRequester(focus).testTag("profile-name-field"),
                 fontSize = 12.sp,
                 onSubmit = ::confirm,
