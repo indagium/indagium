@@ -548,6 +548,9 @@ jobs:
       contents: write
 
     steps:
+      # Check out first: actions/checkout cleans the workspace, so running it after the downloads
+      # below deleted artifacts/ and the asset check found nothing (the first v1.9.0 tag run).
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       # Only the package/source artifacts (named Indagium-*, see the build matrix and verify job)
       # and the dependency report — never "everything in the run". A run can also hold failure-only test-report
       # artifacts (desktop-test-report, video-duration-test-report-*), and after "Re-run failed
@@ -568,7 +571,6 @@ jobs:
       # suffix rather than expecting people to infer compatibility from the filenames. The in-app
       # updater selects the matching release asset for .deb/AppImage launches; Flatpak updates are
       # intentionally delegated to Flatpak itself.
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Refuse historical release changes and validate complete assets
         env:
           GH_TOKEN: ${{ github.token }}
