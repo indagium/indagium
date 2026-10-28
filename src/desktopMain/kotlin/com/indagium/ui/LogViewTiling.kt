@@ -118,7 +118,7 @@ internal fun logViewDefaultDp(node: TileNode<LogViewSectionId>): Float? {
     }
 }
 
-/** The tiles that sit in a COLUMN split of [root]: only those shrink to their header when collapsed. */
+/** Returns leaves directly in a COLUMN split; used for column-specific sizing and collapse eligibility of non-filter tiles. */
 internal fun <K> columnTiles(root: TileNode<K>): Set<K> = when (root) {
     is TileLeaf -> emptySet()
     is TileSplit -> root.children.flatMapTo(HashSet()) { child ->
@@ -286,7 +286,7 @@ private fun LogViewTileSurface(
     val layout = if (videoPin != null && baseVideo != null) baseLayout.withVideoSlot(baseVideo.first, videoPin) else baseLayout
 
     val projection = projectTileLayout(layout, isVisible)
-    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty()
+    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty() + LOG_VIEW_FILTER_TILES.filterTo(HashSet(), isVisible)
     val collapsedTiles = collapsibleTiles.filterTo(HashSet()) { state.isLogViewTileCollapsed(it) }
     val toggles = remember { HashMap<LogViewSectionId, () -> Unit>() }
 

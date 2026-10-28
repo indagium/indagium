@@ -48,7 +48,7 @@ data class TileSizing(val minDp: Float, val maxDp: Float, val defaultDp: Float?,
 
 /**
  * The heights [sizes] of a scrolling column's children and what the plan knows about each child: [collapsed] (header only), [pinned]
- * (a stored sizeDp is honoured), [sizing] (the leaf's TileSizing, null when unknown) and [dependent] (its height depends on its siblings, so
+ * (a stored sizeDp is honoured), [sizing] (the tile's or row's TileSizing, null when unknown) and [dependent] (its height depends on its siblings, so
  * the first resize pins it at the height it has).
  */
 internal class TileScrollPlan(
@@ -72,9 +72,9 @@ internal fun <K> scrollPlan(
     sizingOf: (K) -> TileSizing? = { null },
 ): TileScrollPlan {
     val children = split.children
-    val isCollapsed = children.map { it is TileLeaf && it.section in collapsedSet }
+    val isCollapsed = children.map { tileNodeIsCollapsed(it, collapsedSet) }
     val isPinned = children.mapIndexed { i, c -> !isCollapsed[i] && c.pinnedDp() != null }
-    val sizing = children.mapIndexed { i, c -> if (isCollapsed[i]) null else nodeSizing(c, sizingOf) }
+    val sizing = children.mapIndexed { i, c -> if (isCollapsed[i]) null else nodeSizing(c, sizingOf, collapsedSet, collapsedExtentDp) }
     return if (sizing.any { it != null }) {
         sizedPlan(split, extent, minTileDp, scrollMinDp, collapsedExtentDp, isCollapsed, isPinned, sizing)
     } else {
@@ -82,22 +82,38 @@ internal fun <K> scrollPlan(
     }
 }
 
+/** A leaf is collapsed directly; a row is collapsed when all of its tiles are, and a one-child column carries that state through projection. */
+internal fun <K> tileNodeIsCollapsed(node: TileNode<K>, collapsed: Set<K>): Boolean = when (node) {
+    is TileLeaf -> node.section in collapsed
+    is TileSplit -> when (node.axis) {
+        TileAxis.ROW -> node.children.isNotEmpty() && node.children.all { tileNodeIsCollapsed(it, collapsed) }
+        TileAxis.COLUMN -> node.children.singleOrNull()?.let { tileNodeIsCollapsed(it, collapsed) } == true
+    }
+}
+
 // What a child of a scrolling column asks of its height: a leaf's own sizing; for a row nested in the column (a tile dropped beside another one) the
-// tallest of what its tiles ask, so the row is as tall as its tallest tile needs instead of sharing the column's leftover room by weight, and is
-// resizable between the least and the most any of them allows. Null when any tile in it has not reported (or is not content sized). A tile
-// alone in a one-child column inside the row (a lone tile kept as a column of its own, see normalizeTileLayout) asks what the tile asks.
-private fun <K> nodeSizing(node: TileNode<K>, sizingOf: (K) -> TileSizing?): TileSizing? = when (node) {
+// tallest open tile's sizing, so collapsed tiles do not keep the row tall. Null when any open tile in it has not reported (or is not content sized).
+// A tile alone in a one-child column inside the row (a lone tile kept as a column of its own, see normalizeTileLayout) asks what the tile asks.
+private fun <K> nodeSizing(node: TileNode<K>, sizingOf: (K) -> TileSizing?, collapsed: Set<K>, collapsedExtentDp: Float): TileSizing? = when (node) {
     is TileLeaf -> sizingOf(node.section)
     is TileSplit -> if (node.axis != TileAxis.ROW) {
-        node.children.singleOrNull()?.let { nodeSizing(it, sizingOf) }
+        node.children.singleOrNull()?.let { nodeSizing(it, sizingOf, collapsed, collapsedExtentDp) }
     } else {
-        node.children.map { nodeSizing(it, sizingOf) }.takeIf { all -> all.isNotEmpty() && all.none { it == null } }?.filterNotNull()?.let { all ->
-            TileSizing(
-                minDp = all.maxOf { it.minDp },
-                maxDp = all.maxOf { it.maxDp },
-                defaultDp = all.map { it.defaultDp }.takeIf { defaults -> defaults.none { it == null } }?.maxOfOrNull { it!! },
-                fitDp = all.maxOf { it.fitDp },
-            )
+        val open = node.children.filterNot { tileNodeIsCollapsed(it, collapsed) }
+        if (open.isEmpty()) {
+            TileSizing(collapsedExtentDp, collapsedExtentDp, collapsedExtentDp, collapsedExtentDp)
+        } else {
+            open.map { nodeSizing(it, sizingOf, collapsed, collapsedExtentDp) }
+                .takeIf { all -> all.isNotEmpty() && all.none { it == null } }
+                ?.filterNotNull()
+                ?.let { all ->
+                    TileSizing(
+                        minDp = all.maxOf { it.minDp },
+                        maxDp = all.maxOf { it.maxDp },
+                        defaultDp = all.map { it.defaultDp }.takeIf { defaults -> defaults.none { it == null } }?.maxOfOrNull { it!! },
+                        fitDp = all.maxOf { it.fitDp },
+                    )
+                }
         }
     }
 }

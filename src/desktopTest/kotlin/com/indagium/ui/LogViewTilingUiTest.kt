@@ -319,6 +319,47 @@ class LogViewTilingUiTest {
     }
 
     @Test
+    fun filterTilesInARowKeepCollapseControlsAndCanExpandAgain() {
+        setup(width = 1300)
+        val rowLayout = dropTile(
+            state.currentLogViewLayout(),
+            LogViewSectionId.LOG_LEVEL,
+            TileDropTarget.OnSection(LogViewSectionId.MESSAGE_RULES, TileEdge.RIGHT),
+        )
+        assertTrue(containsRow(rowLayout, LogViewSectionId.MESSAGE_RULES, LogViewSectionId.LOG_LEVEL))
+        state.commitLogViewLayout(rowLayout)
+        rule.waitForIdle()
+
+        assertTrue(exists("tile-collapse-message_rules"), "the message rules tile exposes collapse in the row")
+        assertTrue(exists("tile-collapse-log_level"), "the log level tile exposes collapse in the row")
+        assertTrue(bounds("tile-card-message_rules").height.value > 32f)
+        assertTrue(bounds("tile-card-log_level").height.value > 32f)
+
+        rule.onNodeWithTag("tile-collapse-log_level").performClick()
+        rule.waitForIdle()
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.LOG_LEVEL))
+        assertEquals(32f, bounds("tile-card-log_level").height.value, 0.5f)
+        assertTrue(bounds("tile-card-message_rules").height.value > 32f, "the open row sibling keeps its body")
+
+        rule.onNodeWithTag("tile-collapse-message_rules").performClick()
+        rule.waitForIdle()
+        assertTrue(state.isLogViewTileCollapsed(LogViewSectionId.MESSAGE_RULES))
+        assertEquals(32f, bounds("tile-card-log_level").height.value, 0.5f)
+        assertEquals(32f, bounds("tile-card-message_rules").height.value, 0.5f)
+
+        rule.onNodeWithTag("tile-collapse-log_level").performClick()
+        rule.waitForIdle()
+        assertFalse(state.isLogViewTileCollapsed(LogViewSectionId.LOG_LEVEL))
+        assertTrue(bounds("tile-card-log_level").height.value > 32f, "expanding restores the tile body")
+        assertEquals(32f, bounds("tile-card-message_rules").height.value, 0.5f)
+
+        rule.onNodeWithTag("tile-collapse-message_rules").performClick()
+        rule.waitForIdle()
+        assertFalse(state.isLogViewTileCollapsed(LogViewSectionId.MESSAGE_RULES))
+        assertTrue(bounds("tile-card-message_rules").height.value > 32f, "the second row tile expands too")
+    }
+
+    @Test
     fun theDefaultFilterTilesAreAsTallAsTheirContentWithNoEmptySpaceAtTheBottom() {
         setup()
         // Tags with no active tag is its header and the input: the weights that used to stretch it are gone.

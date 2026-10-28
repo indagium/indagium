@@ -112,14 +112,22 @@ class TileLayoutEngineTest {
     }
 
     @Test
-    fun aCollapsedLeafOfARowIsLaidOutNormallyAndOnlyColumnNeighboursOfItFreeze() {
+    fun aCollapsedLeafOfARowKeepsItsWidthAndShrinksToItsHeader() {
         val inRow = tileGeometry(row(leaf(T.A), leaf(T.B)), 408f, 100f, SPEC, collapsed = setOf(T.B))
         assertEquals(200f, inRow.cardOf(T.B)!!.w, EPS)
-        assertTrue(inRow.gaps.single().resizable)
+        assertEquals(100f, inRow.cardOf(T.A)!!.h, EPS)
+        assertEquals(32f, inRow.cardOf(T.B)!!.h, EPS)
+        assertTrue(inRow.gaps.single().resizable, "the horizontal splitter still resizes tile widths")
         val four = tileGeometry(col(leaf(T.A), leaf(T.B), leaf(T.C), leaf(T.D)), 100f, 812f, SPEC, collapsed = setOf(T.B))
         assertEquals(listOf(false, false, true), four.gaps.map { it.resizable })
         assertEquals(256f, four.cardOf(T.A)!!.h, EPS)
         assertEquals(256f, four.cardOf(T.D)!!.h, EPS)
+    }
+
+    @Test
+    fun aCollapsedRootLeafShrinksToItsHeader() {
+        val geo = tileGeometry(leaf(T.B), 400f, 300f, SPEC, collapsed = setOf(T.B))
+        assertRect(TileRect(0f, 0f, 400f, 32f), geo.cardOf(T.B))
     }
 
     @Test

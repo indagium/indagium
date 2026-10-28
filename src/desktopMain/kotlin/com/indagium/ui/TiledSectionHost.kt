@@ -46,7 +46,8 @@ internal fun filterTileSizing(id: LogViewSectionId): TileBodySizing =
 
 /**
  * Emits each section of the filter panel as a tile of [scope]. [visibleSections] are the filter tiles that currently take part in the
- * layout; [collapsibleTiles] those that sit in a COLUMN split (only there does a collapsed tile shrink to its header). [toggles]
+ * layout; [collapsibleTiles] are the filter tiles whose header exposes collapse (a row child keeps its width and shrinks to its header height).
+ * [toggles]
  * collects each section's own expand/collapse handler (it also clears editors and pickers), which the surface's collapse button calls
  * so a collapse from the tile header behaves exactly like the legacy section header's chevron.
  */

@@ -116,6 +116,52 @@ class TileScrollColumnTest {
         assertNull(geo.cards.single { it.section == S.LOG }.scrollRegion)
     }
 
+    @Test
+    fun aRowInAScrollingColumnSizesFromItsOpenTilesAndShrinksWhenAllAreCollapsed() {
+        val root = sideColumn(row(leaf(S.B), leaf(S.C)))
+        val sizing = mapOf(
+            S.B to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 120f, fitDp = 300f),
+            S.C to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 220f, fitDp = 500f),
+        )
+        fun sized(collapsed: Set<S>) = tileGeometry(root, HOST_W, HOST_H, SPEC, collapsed, scrolls) { sizing[it] }
+
+        val open = sized(emptySet())
+        assertEquals(500f, open.rect(S.B).h, EPS)
+        assertEquals(500f, open.rect(S.C).h, EPS)
+
+        val oneCollapsed = sized(setOf(S.C))
+        assertEquals(300f, oneCollapsed.rect(S.B).h, EPS, "the row height follows the open tile's content fit")
+        assertEquals(HEADER, oneCollapsed.rect(S.C).h, EPS)
+        assertEquals(300f, oneCollapsed.scrollRegions.single().contentHeight, EPS)
+        assertTrue(oneCollapsed.gaps.single { it.axis == TileAxis.ROW && it.scrollRegion != null }.resizable)
+
+        val allCollapsed = sized(setOf(S.B, S.C))
+        assertEquals(HEADER, allCollapsed.rect(S.B).h, EPS)
+        assertEquals(HEADER, allCollapsed.rect(S.C).h, EPS)
+        assertEquals(HEADER, allCollapsed.scrollRegions.single().contentHeight, EPS)
+        assertFalse(allCollapsed.scrollRegions.single().scrolls)
+    }
+
+    @Test
+    fun aFullyCollapsedPinnedRowIgnoresItsStoredHeightAndRestoresItWhenOpen() {
+        val root = sideColumn(row(leaf(S.B), leaf(S.C), dp = 260f))
+        val sizing = mapOf(
+            S.B to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 120f, fitDp = 300f),
+            S.C to TileSizing(minDp = 80f, maxDp = 500f, defaultDp = 220f, fitDp = 500f),
+        )
+        fun sized(collapsed: Set<S>) = tileGeometry(root, HOST_W, HOST_H, SPEC, collapsed, scrolls) { sizing[it] }
+
+        val closed = sized(setOf(S.B, S.C))
+        assertEquals(HEADER, closed.rect(S.B).h, EPS)
+        assertEquals(HEADER, closed.rect(S.C).h, EPS)
+        assertEquals(HEADER, closed.scrollRegions.single().contentHeight, EPS)
+
+        val open = sized(emptySet())
+        assertEquals(260f, open.rect(S.B).h, EPS)
+        assertEquals(260f, open.rect(S.C).h, EPS)
+        assertEquals(260f, open.scrollRegions.single().contentHeight, EPS)
+    }
+
     // ---- sizes -----------------------------------------------------------------------------------------------------
 
     @Test

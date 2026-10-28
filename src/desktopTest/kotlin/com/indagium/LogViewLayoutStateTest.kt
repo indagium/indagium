@@ -271,7 +271,7 @@ class LogViewLayoutStateTest {
     }
 
     @Test
-    fun onlyTilesInAColumnCanCollapse() {
+    fun columnTilesCollectsTheLeavesDirectlyInsideColumnSplits() {
         val tiles = columnTiles(classicLogViewLayout(LogViewLegacySizes()))
         assertTrue(LogViewSectionId.TAGS in tiles && LogViewSectionId.NOTES in tiles && LogViewSectionId.VIDEO in tiles)
         assertTrue(LogViewSectionId.LOG in tiles, "Original over Log is a column too")

@@ -13,7 +13,8 @@ import kotlin.math.min
 // HomeLayout.kt binds K to HomeSectionId and keeps the New tab's names; the settings codec is TileLayoutJson.kt.
 //
 // Sizing along a split's axis. A child is one of:
-// - collapsed: a leaf of a COLUMN split that is in the `collapsed` set; it takes exactly collapsedExtentDp;
+// - collapsed: a leaf of a COLUMN split (or a fully collapsed ROW nested in a column) takes exactly collapsedExtentDp. A collapsed leaf in a ROW
+//   keeps its share of the width and only its card height shrinks to the header;
 // - pinned: it has a sizeDp; it takes that many dp. If that would leave the weighted children less than minTileDp each, all
 //   pinned sizes scale down together. When no weighted child is left, the pinned sizes act as weights over what remains;
 // - weighted: the rest share what remains by weight.
@@ -395,7 +396,7 @@ private class TileSizePlan(
 private fun <K> sizePlan(split: TileSplit<K>, extent: Float, minTileDp: Float, collapsedExtentDp: Float, collapsedSet: Set<K>): TileSizePlan {
     val children = split.children
     val column = split.axis == TileAxis.COLUMN
-    val isCollapsed = children.map { column && it is TileLeaf && it.section in collapsedSet }
+    val isCollapsed = children.map { column && tileNodeIsCollapsed(it, collapsedSet) }
     val isPinned = children.mapIndexed { i, c -> !isCollapsed[i] && c.pinnedDp() != null }
     val available = max(0f, extent - isCollapsed.count { it } * collapsedExtentDp)
     val pinnedSum = children.indices.filter { isPinned[it] }.sumOf { children[it].pinnedDp()!!.toDouble() }.toFloat()
@@ -731,7 +732,8 @@ private fun <K> writeBackSiblings(fullRoot: TileNode<K>, projection: TileProject
 
 /**
  * Card rects and gaps for [root] laid out in a [width] x [height] dp host. Leaves in [collapsed] that sit in a COLUMN split
- * shrink to [TileGeometrySpec.collapsedExtentDp]; the gaps next to them are not resizable. A COLUMN split whose leaves all
+ * shrink to [TileGeometrySpec.collapsedExtentDp]; leaves in a ROW keep their width and shrink their card height. A fully
+ * collapsed ROW inside a column takes one header extent, and its column gaps are not resizable. A COLUMN split whose leaves all
  * satisfy [scrolls] is a scrolling column (see the header comment): it keeps its children's heights, may be taller than its
  * rect, and is reported in [TileGeometry.scrollRegions]. Splits nested inside one are laid out normally in their children's rects. [sizing]
  * tells what the content of a leaf asks of its height in a scrolling column (null = not known).
@@ -765,7 +767,10 @@ private class TileLayoutRun<K>(
 
     fun node(node: TileNode<K>, rect: TileRect, path: List<Int>, region: Int?) {
         when (node) {
-            is TileLeaf -> cards += TileCardRect(node.section, rect, region)
+            is TileLeaf -> {
+                val cardRect = if (node.section in collapsed) rect.copy(h = min(rect.h, spec.collapsedExtentDp)) else rect
+                cards += TileCardRect(node.section, cardRect, region)
+            }
             is TileSplit -> if (region == null && isScrollingColumn(node, scrolls)) scrollingColumn(node, rect, path) else split(node, rect, path, region)
         }
     }

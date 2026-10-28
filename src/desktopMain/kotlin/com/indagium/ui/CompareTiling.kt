@@ -187,7 +187,7 @@ private fun CompareTileSurface(
     val isVisible: (LogViewSectionId) -> Boolean = { logViewTileVisible(it, ctx, hidden) }
     val layout = state.currentCompareLayout()
     val projection = projectTileLayout(layout, isVisible)
-    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty()
+    val collapsibleTiles = projection?.let { columnTiles(it.root) }.orEmpty() + LOG_VIEW_FILTER_TILES.filterTo(HashSet(), isVisible)
     val collapsedTiles = collapsibleTiles.filterTo(HashSet()) { state.isLogViewTileCollapsed(it) }
     val toggles = remember { HashMap<LogViewSectionId, () -> Unit>() }
     // A detached video player must stay composed (it owns its window), so Video is parked at 0 x 0 instead of dropped.
