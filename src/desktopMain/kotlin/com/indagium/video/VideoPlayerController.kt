@@ -560,6 +560,21 @@ internal fun shouldDropLateFrame(latenessUs: Long, consecutiveDrops: Int): Boole
     latenessUs > FRAME_DROP_LATENESS_US && consecutiveDrops < MAX_CONSECUTIVE_FRAME_DROPS
 
 /**
+ * Whether a later frame will promptly replace a late one that [shouldDropLateFrame] would skip.
+ * Skipping is only right when it does: otherwise the screen keeps the previous picture while the
+ * position moves past the skipped one. A sparse recording, whose next frame is seconds away, or the
+ * last frame of a stream would then never be shown at all, which is how a loaded CI runner caught it.
+ *
+ *  - [nextFrameTimestampUs] is the next queued frame's timestamp. It replaces this one only if it is
+ *    already due at [clockUs]; a next frame still in the future means this late one is shown.
+ *  - With nothing queued behind it, a frame at clean end of stream ([grabberExhausted]) is the last
+ *    one and is shown. Otherwise the next frame simply has not been read yet, and the drop stands, as
+ *    it always has: rate > 1 and a pipeline catching up after a stall rely on it.
+ */
+internal fun lateFrameHasReplacement(nextFrameTimestampUs: Long?, clockUs: Long, grabberExhausted: Boolean): Boolean =
+    if (nextFrameTimestampUs != null) nextFrameTimestampUs <= clockUs else !grabberExhausted
+
+/**
  * How far into the future decode-ahead has already buffered video, in microseconds: the gap
  * between the playback clock and the newest (most recently decoded, i.e. last-queued) frame
  * currently sitting in the read-ahead queue. Never negative — a queue whose newest frame the clock
@@ -1635,8 +1650,12 @@ private class FfmpegVideoPlayerController(
             // entry (refill fell behind, or rate > 1 made the clock outrun it) reaches here with a
             // positive latenessUs instead of ever causing a wait. Drop it before paying for the
             // conversion, which is the expensive part (see MAX_DECODE_LONG_EDGE_PX's comment).
-            val latenessUs = currentClockUs() - frame.timestamp
-            if (shouldDropLateFrame(latenessUs, consecutiveDrops)) {
+            val clockUs = currentClockUs()
+            val latenessUs = clockUs - frame.timestamp
+            if (
+                shouldDropLateFrame(latenessUs, consecutiveDrops) &&
+                lateFrameHasReplacement(peekVideoQueueHead()?.frame?.timestamp, clockUs, grabberExhausted)
+            ) {
                 consecutiveDrops++
                 // Still advance the published position to this frame's timestamp even though its
                 // picture is being skipped — video-to-log sync (and the slider) must keep moving

@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.video.lateFrameHasReplacement
 import com.indagium.video.shouldDropLateFrame
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -98,5 +99,22 @@ class FrameDropPolicyTest {
         }
 
         assertFalse(droppedAnyFrame)
+    }
+
+    // A late frame is skipped only when the next one is already due to take its place.
+    @Test
+    fun aLateFrameIsSkippedOnlyWhenTheNextQueuedFrameIsAlreadyDue() {
+        assertTrue(lateFrameHasReplacement(nextFrameTimestampUs = 1_600_000L, clockUs = 1_650_000L, grabberExhausted = false))
+        assertTrue(lateFrameHasReplacement(nextFrameTimestampUs = 1_650_000L, clockUs = 1_650_000L, grabberExhausted = true))
+        // Sparse recording: the next frame is far in the future, so skipping would hold the old picture.
+        assertFalse(lateFrameHasReplacement(nextFrameTimestampUs = 3_000_000L, clockUs = 1_650_000L, grabberExhausted = false))
+    }
+
+    // Nothing queued behind it: the last frame of a stream is always shown, while mid-stream the
+    // drop stands because the next frame has only not been read yet.
+    @Test
+    fun theLastFrameOfAStreamIsNeverSkipped() {
+        assertFalse(lateFrameHasReplacement(nextFrameTimestampUs = null, clockUs = 3_200_000L, grabberExhausted = true))
+        assertTrue(lateFrameHasReplacement(nextFrameTimestampUs = null, clockUs = 3_200_000L, grabberExhausted = false))
     }
 }
