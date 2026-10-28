@@ -3434,11 +3434,12 @@ class AppStateBehaviorTest {
                 .copy(sourcePath = File(dir, "folder_b/sample.log").absolutePath),
         )
         stateB.confirmAddAnn("log", "log", listOf(1), "notes for file B", null)
+        // The export records the note in recentNotes only after writing both files, so waiting for
+        // the files alone let the recentNotes assertion below run before that update on a slow runner.
         waitUntil {
-            File(notesDir, "sample_analysis_2.md").exists() && File(
-                notesDir,
-                "sample_analysis_2.ann"
-            ).exists()
+            File(notesDir, "sample_analysis_2.md").exists() &&
+                File(notesDir, "sample_analysis_2.ann").exists() &&
+                stateB.recentNotes.isNotEmpty()
         }
 
         // File A's saved note must survive untouched — this is the silent-overwrite bug being fixed.
@@ -4172,9 +4173,11 @@ class AppStateBehaviorTest {
         )
 
         state.confirmAddAnn("log", "log", listOf(1), "new owner", null)
+        // recentNotes is updated after both files are written; see autoExportDisambiguates... above.
         waitUntil {
             File(notesDir, "sample_analysis_2.md").exists() &&
-                File(notesDir, "sample_analysis_2.ann").exists()
+                File(notesDir, "sample_analysis_2.ann").exists() &&
+                state.recentNotes.isNotEmpty()
         }
 
         assertEquals("keep original", originalNote.readText())
