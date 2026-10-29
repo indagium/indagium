@@ -423,9 +423,60 @@ internal fun <T> seq3ChronologicalOrder(
 ): List<T> {
     val messageOrder = document.messages.withIndex().associate { (index, message) -> message.id to index }
     val fallbacks = seq3ChronologicalFallbacks(document)
-    return items.sortedWith(
-        compareBy<T> { item -> timestampMillisOf(item) ?: fallbacks[messageIdOf(item)] ?: Long.MAX_VALUE }
-            .thenBy { item -> messageOrder[messageIdOf(item)] ?: Int.MAX_VALUE }
-            .thenBy { item -> entryIdOf(item) ?: Int.MAX_VALUE },
-    )
+    val legacyOrder = compareBy<T> { item -> timestampMillisOf(item) ?: fallbacks[messageIdOf(item)] ?: Long.MAX_VALUE }
+        .thenBy { item -> messageOrder[messageIdOf(item)] ?: Int.MAX_VALUE }
+        .thenBy { item -> entryIdOf(item) ?: Int.MAX_VALUE }
+    if (document.rowOrder.isEmpty()) return items.sortedWith(legacyOrder)
+
+    val explicitRanks = seq3RowOrderRanks(document)
+    val firstRankByMessage = explicitRanks.entries.groupBy({ it.key.messageId }, { it.value })
+        .mapValues { (_, ranks) -> ranks.minOrNull() ?: Int.MAX_VALUE }
+    fun rank(item: T): Int? {
+        val messageId = messageIdOf(item)
+        val entryId = entryIdOf(item)
+        return explicitRanks[Seq3RowRef(messageId, entryId)]
+            ?: explicitRanks[Seq3RowRef(messageId, null)]
+            // A summary without a specific occurrence follows its parent's first represented row.
+            // This also keeps unknown/null custom rows attached to the parent's manual placement.
+            ?: if (entryId == null) firstRankByMessage[messageId] else null
+    }
+    return items.withIndex().sortedWith { a, b ->
+        val leftRank = rank(a.value)
+        val rightRank = rank(b.value)
+        when {
+            leftRank != null && rightRank != null -> leftRank.compareTo(rightRank)
+            leftRank != null -> -1
+            rightRank != null -> 1
+            else -> legacyOrder.compare(a.value, b.value)
+        }.takeIf { it != 0 } ?: a.index.compareTo(b.index)
+    }.map { it.value }
 }
+
+/** Resolve the supplied visible row refs through the document's manual order. Unrecognized/new
+ *  rows retain their input order after the known rows; callers supply legacy chronological order
+ *  when bootstrapping a list. Empty manual order is a no-op. */
+fun seq3ResolveRowOrder(document: Seq3Document, rows: List<Seq3RowRef>): List<Seq3RowRef> {
+    if (document.rowOrder.isEmpty()) return rows
+    val ranks = seq3RowOrderRanks(document)
+    val firstByMessage = ranks.entries.groupBy({ it.key.messageId }, { it.value })
+        .mapValues { (_, values) -> values.minOrNull() ?: Int.MAX_VALUE }
+    fun rank(ref: Seq3RowRef): Int? = ranks[ref]
+        ?: ranks[Seq3RowRef(ref.messageId)]
+        ?: if (ref.occurrenceEntryId == null) firstByMessage[ref.messageId] else null
+    return rows.withIndex().sortedWith(
+        compareBy<IndexedValue<Seq3RowRef>> { rank(it.value) ?: Int.MAX_VALUE }
+            .thenBy { it.index },
+    ).map { it.value }
+}
+
+private fun seq3RowOrderRanks(document: Seq3Document): Map<Seq3RowRef, Int> =
+    buildMap {
+        val messages = document.messages.associateBy { it.id }
+        document.rowOrder.forEachIndexed { index, ref ->
+            val message = messages[ref.messageId] ?: return@forEachIndexed
+            if (ref.occurrenceEntryId != null && message.occurrences.none { it.entryId == ref.occurrenceEntryId }) {
+                return@forEachIndexed
+            }
+            if (ref !in this) put(ref, index)
+        }
+    }

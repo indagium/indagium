@@ -5,6 +5,7 @@ import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.Seq3AttachmentMetadata
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Delay
@@ -22,6 +23,7 @@ import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.adoptSeq3NoteSource
@@ -113,6 +115,24 @@ class Seq3CodecTest {
         val legacy = parseSeq3Note(legacyText)
         assertNotNull(legacy)
         assertEquals(Seq3Visibility.VISIBLE, legacy.document.lifelines.single().visibility)
+        assertEquals(null, legacy.document.lifelines.single().headerWidthDp)
+        assertTrue(legacy.document.rowOrder.isEmpty())
+    }
+
+    @Test
+    fun rowOrderAndArtifactStylesRoundTripWithNullableHeaderWidths() {
+        val noteStyle = Seq3ArtifactStyle(fillArgb = 0x80ff00ff.toInt(), borderArgb = 0xff010203.toInt(), textArgb = 0xffffffff.toInt())
+        val fragmentStyle = Seq3ArtifactStyle(fillArgb = 0x40112233, borderArgb = null, textArgb = 0xffabcdef.toInt())
+        val original = fixedDocument().copy(
+            lifelines = fixedDocument().lifelines.map { if (it.id == "A") it.copy(headerWidthDp = 127.5) else it },
+            messages = fixedDocument().messages.map { it.copy(kind = Seq3Kind.NOTE, toLifelineId = null, noteStyle = noteStyle) },
+            fragments = fixedDocument().fragments.map { it.copy(style = fragmentStyle) },
+            notes = fixedDocument().notes.map { it.copy(style = noteStyle) },
+            rowOrder = listOf(Seq3RowRef("m1", 42)),
+        )
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
     }
 
     @Test

@@ -25,6 +25,8 @@ const val DEFAULT_SEQ3_MAX_LIFELINES = 8
 /** Default `×n` collapse threshold for [Seq3Repeat.COLLAPSE_ABOVE] — "collapse above 3" per the
  *  design spec's §03 table. */
 const val DEFAULT_SEQ3_REPEAT_THRESHOLD = 3
+const val MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP = 70.0
+const val MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP = 360.0
 
 // ── Lifelines ────────────────────────────────────────────────────────────────────────────────
 
@@ -57,6 +59,17 @@ data class Seq3Lifeline(
      *  positive n keeps the last n segments (`com.mycompany.myapp.Example1` at n=1 -> `Example1`).
      *  See [seq3DisplayName], the pure resolver both renderers and the panel call. */
     val displaySegments: Int? = null,
+    /** Explicit header width in dp-like layout units. Null keeps automatic measurement. Appended
+     *  last so positional model constructors and older codecs retain their defaults. */
+    val headerWidthDp: Double? = null,
+)
+
+/** Optional ARGB overrides for an authored diagram artifact. Null on the style means inherit the
+ *  active theme color; null on an artifact's style means inherit every color. */
+data class Seq3ArtifactStyle(
+    val fillArgb: Int? = null,
+    val borderArgb: Int? = null,
+    val textArgb: Int? = null,
 )
 
 // ── Match / capture ──────────────────────────────────────────────────────────────────────────
@@ -231,6 +244,8 @@ data class Seq3Message(
      *  rows do I have evidence to draw" keep reading `occurrences.size` — see Seq3Generator.kt's own
      *  header for the exact line between the two. */
     val totalOccurrenceCount: Int? = null,
+    /** Per-note color override; meaningful only when [kind] is [Seq3Kind.NOTE]. */
+    val noteStyle: Seq3ArtifactStyle? = null,
 ) {
     /** True for an author-created message without log evidence. Generated messages always retain
      *  at least one occurrence, so this is the durable distinction used by custom-only actions. */
@@ -307,7 +322,17 @@ sealed class Seq3InsertionPosition {
     data class BeforeMessage(val messageId: String) : Seq3InsertionPosition()
 
     data class AfterMessage(val messageId: String) : Seq3InsertionPosition()
+
+    /** Insert after this exact currently drawn row. Used by canvas actions; occurrence membership
+     *  and evidence stay untouched. */
+    data class BeforeRow(val rowRef: Seq3RowRef) : Seq3InsertionPosition()
+
+    data class AfterRow(val rowRef: Seq3RowRef) : Seq3InsertionPosition()
 }
+
+/** Durable identity of one canvas/emitter row. A null occurrence id represents a custom row or a
+ *  collapsed/summary row; expanded evidence-backed rows use their stable entry id. */
+data class Seq3RowRef(val messageId: String, val occurrenceEntryId: Int? = null)
 
 /** Explicit author input for a custom message. Lifeline values are IDs from [Seq3Document.lifelines],
  *  not display names, so a renamed lifeline does not make an existing custom message ambiguous. */
@@ -497,6 +522,8 @@ data class Seq3Fragment(
      *  every fragment written before this field existed -> decodes to null -> byte-identical
      *  rendering to today. */
     val refDiagramId: String? = null,
+    /** Per-fragment palette override. */
+    val style: Seq3ArtifactStyle? = null,
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct
@@ -512,6 +539,8 @@ data class Seq3Note(
     val height: Double? = null,
     /** Same meaning as [Seq3Fragment.visibility] — see that field's own doc. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+    /** Per-note palette override. */
+    val style: Seq3ArtifactStyle? = null,
 )
 
 // ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────────
@@ -758,6 +787,10 @@ data class Seq3Document(
      *  versioning" invariant). Defaults empty so every document written before this field existed
      *  decodes to its original, bar-free-except-for-auto rendering. */
     val manualActivations: List<Seq3ManualActivation> = emptyList(),
+    /** Explicit canvas/emitter row order. Empty preserves the historical timestamp chronology.
+     *  Dangling refs are ignored by resolvers and pruned by edits; hidden but still valid refs are
+     *  retained so showing an artifact restores its authored position. */
+    val rowOrder: List<Seq3RowRef> = emptyList(),
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────

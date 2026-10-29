@@ -511,20 +511,15 @@ private fun paintLostFoundStubRow(g: Graphics2D, row: Seq3UnresolvedStubRow, the
 }
 
 private fun paintMessageNoteRow(g: Graphics2D, row: Seq3MessageNoteRow, theme: Seq3RasterTheme) {
-    val box = row.box
-    g.color = Color(theme.noteFill, true)
-    g.fillRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), NOTE_ARC.toInt(), NOTE_ARC.toInt())
-    g.color = Color(theme.noteBorder, true)
-    g.stroke = BasicStroke(STROKE_THIN)
-    g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), NOTE_ARC.toInt(), NOTE_ARC.toInt())
-    g.font = fontFor(Seq3FontRole.NOTE)
-    g.color = Color(theme.noteText, true)
-    val fm = g.fontMetrics
-    var ty = box.y + fm.ascent + NOTE_ARC / 2
-    row.lines.forEach { line ->
-        g.drawString(line, (box.x + NOTE_ARC / 2).roundToInt(), ty.roundToInt())
-        ty += fm.height
-    }
+    paintArtifactNote(
+        g = g,
+        box = row.box,
+        textBox = row.textBox,
+        lines = row.lines,
+        lineHeight = row.textLineHeight,
+        style = row.style,
+        theme = theme,
+    )
 }
 
 private fun paintElisionRow(g: Graphics2D, row: Seq3ElisionRow, theme: Seq3RasterTheme) {
@@ -559,15 +554,19 @@ private fun paintBadge(g: Graphics2D, text: String, box: Seq3Box, theme: Seq3Ras
 private fun paintFragment(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3RasterTheme) {
     val box = fragment.box
     val arc = HEADER_ARC.toInt()
-    g.color = Color(theme.fragmentWash, true)
+    val fill = fragment.style?.fillArgb ?: theme.fragmentWash
+    val border = fragment.style?.borderArgb ?: theme.fragmentBorder
+    val text = fragment.style?.textArgb ?: theme.fragmentBorder
+    g.color = Color(fill, true)
     g.fillRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), arc, arc)
-    g.color = Color(theme.fragmentBorder, true)
+    g.color = Color(border, true)
     g.stroke = BasicStroke(STROKE_THIN)
     g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), arc, arc)
     g.font = fontFor(Seq3FontRole.FRAGMENT)
     val fm = g.fontMetrics
+    g.color = Color(text, true)
     g.drawString(fragment.label, (box.x + 6).roundToInt(), (box.y + fm.ascent + 2).roundToInt())
-    paintFragmentDividers(g, fragment, theme)
+    paintFragmentDividers(g, fragment, border, text)
 }
 
 /**
@@ -582,29 +581,67 @@ private fun paintFragment(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3R
  * No new [Seq3RasterTheme] field, per this deliverable's own brief: everything painted here is
  * already one of [fragmentBorder]'s existing two uses (border stroke, label text).
  */
-private fun paintFragmentDividers(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3RasterTheme) {
+private fun paintFragmentDividers(
+    g: Graphics2D,
+    fragment: Seq3FragmentBox,
+    borderArgb: Int,
+    textArgb: Int,
+) {
     if (fragment.dividers.isEmpty()) return
     val box = fragment.box
-    g.color = Color(theme.fragmentBorder, true)
+    g.color = Color(borderArgb, true)
     g.font = fontFor(Seq3FontRole.FRAGMENT)
     g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_LIFELINE, 0f)
     fragment.dividers.forEach { divider ->
         g.draw(java.awt.geom.Line2D.Double(box.x, divider.y, box.x + box.width, divider.y))
-        if (divider.guard.isNotBlank()) g.drawString(divider.guard, (box.x + 6).roundToInt(), (divider.y - 3).roundToInt())
+        if (divider.guard.isNotBlank()) {
+            g.color = Color(textArgb, true)
+            g.drawString(divider.guard, (box.x + 6).roundToInt(), (divider.y - 3).roundToInt())
+            g.color = Color(borderArgb, true)
+        }
     }
 }
 
 private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterTheme) {
-    val box = note.box
-    g.color = Color(theme.noteFill, true)
+    paintArtifactNote(
+        g = g,
+        box = note.box,
+        textBox = note.textBox,
+        lines = note.lines,
+        lineHeight = note.textLineHeight,
+        style = note.style,
+        theme = theme,
+    )
+}
+
+/**
+ * Paints both kinds of authored note from the exact wrapped lines, text inset, and line height
+ * supplied by [Seq3Layout]. In particular, this renderer never re-wraps text or infers its own
+ * content box, so a saved/PNG result uses the same geometry as the editable canvas.
+ */
+private fun paintArtifactNote(
+    g: Graphics2D,
+    box: Seq3Box,
+    textBox: Seq3Box,
+    lines: List<String>,
+    lineHeight: Double,
+    style: Seq3ArtifactStyle?,
+    theme: Seq3RasterTheme,
+) {
+    g.color = Color(style?.fillArgb ?: theme.noteFill, true)
     g.fillRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), NOTE_ARC.toInt(), NOTE_ARC.toInt())
-    g.color = Color(theme.noteBorder, true)
+    g.color = Color(style?.borderArgb ?: theme.noteBorder, true)
     g.stroke = BasicStroke(STROKE_THIN)
     g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), NOTE_ARC.toInt(), NOTE_ARC.toInt())
+
     g.font = fontFor(Seq3FontRole.NOTE)
-    g.color = Color(theme.noteText, true)
+    g.color = Color(style?.textArgb ?: theme.noteText, true)
     val fm = g.fontMetrics
-    g.drawString(note.text, (box.x + NOTE_ARC / 2).roundToInt(), (box.y + fm.ascent + NOTE_ARC / 2).roundToInt())
+    val baselineOffset = (lineHeight - fm.height) / 2.0 + fm.ascent
+    lines.forEachIndexed { index, line ->
+        val baseline = textBox.y + baselineOffset + index * lineHeight
+        g.drawString(line, textBox.x.roundToInt(), baseline.roundToInt())
+    }
 }
 
 // WP11: a labelled vertical gap spanning the full diagram width — a horizontal dashed rule with
@@ -620,12 +657,15 @@ private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterThem
 // label to [Seq3FontRole.DELAY] (that role's own doc) — NOTE's 11pt read as too easy to miss,
 // floating alone with nothing else in its band to draw the eye to it.
 private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterTheme) {
-    val box = delay.box
+    val box = delay.labelBox
     g.font = fontFor(Seq3FontRole.DELAY)
     g.color = Color(theme.label, true)
     val fm = g.fontMetrics
     val text = delay.label
-    val tx = box.x + (box.width - fm.stringWidth(text)) / 2
+    // labelBox is the layout's already-measured text extent, centered inside the larger delay
+    // band. Start at that box's left edge instead of measuring again or using the full band's
+    // width, so the raster stays inside the same content bounds as the canvas.
+    val tx = box.x
     val ty = box.y + (box.height + fm.ascent - fm.descent) / 2
     g.drawString(text, tx.roundToInt(), ty.roundToInt())
 }

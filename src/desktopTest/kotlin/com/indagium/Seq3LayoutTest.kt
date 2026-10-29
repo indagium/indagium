@@ -32,6 +32,7 @@ import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.SEQ3_LAYOUT_MARGIN
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.seq3DefaultManualActivationEnd
@@ -238,6 +239,44 @@ class Seq3LayoutTest {
         assertEquals(500.0, note.box.y)
         assertEquals(220.0, note.box.width)
         assertEquals(72.0, note.box.height)
+    }
+
+    @Test
+    fun fixedWidthNotePreservesBlankLinesLongTokensAndMoreThanSixtyFourLines() {
+        val token = "x".repeat(80)
+        val paragraphs = listOf("opening", "", token) + (1..70).map { "line$it" } + ""
+        val source = paragraphs.joinToString("\n")
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            notes = listOf(
+                Seq3Note("floating", source, emptyList(), x = 300.0, y = 500.0, width = 130.0, height = 20.0),
+            ),
+        )
+        val note = layoutSeq3(doc, opts()).notes.single()
+
+        assertEquals(130.0, note.box.width, "manual note width is preserved")
+        assertEquals("", note.lines[1], "an explicit blank line must remain a line")
+        assertTrue(note.lines.size > 64, "layout must preserve the complete multiline note")
+        assertEquals(source.replace("\n", ""), note.lines.joinToString(""), "long tokens wrap without losing characters")
+        assertEquals(16.0, note.textLineHeight, "shared geometry uses the text metrics line height")
+        assertEquals(note.lines.size * note.textLineHeight, note.textBox.height)
+        assertTrue(note.box.height > 20.0, "a fixed-width note grows to fit its wrapped content")
+    }
+
+    @Test
+    fun manuallyWideHeaderKeepsItsWidthAndWrapsWithinTheOverride() {
+        val wide = Seq3Lifeline(
+            "A",
+            "com.example.gateway.transport.AuthenticatedSessionService",
+            setOf("A"),
+            0,
+            headerWidthDp = 350.0,
+        )
+        val doc = Seq3Document(lifelines = listOf(wide, lifeline("B", 1)))
+        val column = layoutSeq3(doc, opts()).lifelines.single { it.lifelineId == "A" }
+
+        assertEquals(350.0, column.header.width, "a manual width above the automatic cap must not shrink")
+        assertTrue(column.labelLines.size > 1, "the name wraps against the manual width")
     }
 
     @Test
@@ -1223,6 +1262,46 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun noteMessageKeepsEveryExplicitLineAndWrapsAnUnbrokenToken() {
+        val token = "z".repeat(100)
+        val paragraphs = listOf("first", "", token) + (1..70).map { "line$it" } + ""
+        val source = paragraphs.joinToString("\n")
+        val noteMessage = message("note", "A", "B", kind = Seq3Kind.NOTE, occurrences = emptyList(), template = source)
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0), lifeline("B", 1)), messages = listOf(noteMessage))
+        val row = layoutSeq3(doc, opts()).rows.single() as Seq3MessageNoteRow
+
+        assertEquals("", row.lines[1], "explicit blank lines must be shared with both renderers")
+        assertTrue(row.lines.size > 64)
+        assertEquals(source.replace("\n", ""), row.lines.joinToString(""))
+        assertEquals(16.0, row.textLineHeight)
+        assertEquals(row.lines.size * row.textLineHeight, row.textBox.height)
+        assertEquals(row.lines.size * row.textLineHeight + 12.0, row.box.height)
+    }
+
+    @Test
+    fun noteMessageOnLeftmostLifelineReservesItsEntireBoxInsideTheCanvasMargin() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            messages = listOf(message("note", "A", null, kind = Seq3Kind.NOTE, occurrences = emptyList(), template = "A note")),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val row = layout.rows.filterIsInstance<Seq3MessageNoteRow>().single()
+        assertTrue(row.box.x >= SEQ3_LAYOUT_MARGIN, "a centered NOTE row must be fully inside the left canvas margin; x=${row.box.x}")
+    }
+
+    @Test
+    fun automaticMessageAnchoredNoteClampsItsLeftEdgeToTheCanvasMargin() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            messages = listOf(message("m1", "A", "A", kind = Seq3Kind.SELF)),
+            notes = listOf(Seq3Note("n1", "very wide automatic note ".repeat(20), listOf("m1"))),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val note = layout.notes.single()
+        assertTrue(note.box.x >= SEQ3_LAYOUT_MARGIN, "an auto-anchored note must stay inside the left canvas margin; x=${note.box.x}")
+    }
+
+    @Test
     fun stubRowWithCapturesNeverShowsALiteralBraceToken() {
         val match = Seq3Match(tag = "A", template = "deviceKey={deviceKey}", captures = listOf(Seq3Capture("deviceKey", Seq3CaptureSource.NAMED_VALUE)))
         val doc = Seq3Document(
@@ -1261,11 +1340,81 @@ class Seq3LayoutTest {
         assertEquals("d1", delayBox.delayId)
         assertEquals("a while later", delayBox.label)
         assertTrue(delayBox.box.width > 0.0, "the band must span real width, not a zero-width sliver")
+        assertTrue(delayBox.hitBox.width < delayBox.box.width, "delay interaction stays on the visible label/control, not the full band")
+        assertTrue(delayBox.hitBox.x > delayBox.box.x, "delay hit area is centered on the visible control")
 
         val m1Row = layout.rows.single { it.messageId == "m1" }
         val m2Row = layout.rows.single { it.messageId == "m2" }
         assertTrue(delayBox.box.y >= m1Row.y, "the band must sit at or after its anchor row")
         assertTrue(m2Row.y >= delayBox.box.y + delayBox.box.height, "a row after the delay must be pushed below the whole band, not overlap it")
+    }
+
+    @Test
+    fun aDelayBandEndsBeforeTheNextMultilineNoteBoxBegins() {
+        val noteText = (1..5).joinToString("\n") { "note line $it" }
+        val noteMessage = message("note", "A", "B", kind = Seq3Kind.NOTE, occurrences = emptyList(), template = noteText)
+            .copy(manualTimestampMillis = 2_000L)
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("call", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))), noteMessage),
+            delays = listOf(Seq3Delay("d", "call", "later")),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val delay = layout.delays.single()
+        val note = layout.rows.filterIsInstance<Seq3MessageNoteRow>().single()
+
+        assertTrue(delay.box.y + delay.box.height <= note.box.y, "delay band must not overlap the next note box")
+    }
+
+    @Test
+    fun adjacentSiblingFragmentsReserveTheirActualHeadersAroundBetweenGroupDelays() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+            fragments = listOf(
+                Seq3Fragment("first", Seq3FragmentKind.LOOP, "first", listOf("m1")),
+                Seq3Fragment("second", Seq3FragmentKind.ALT, "second", listOf("m2")),
+            ),
+            delays = listOf(Seq3Delay("d", "m1", "later")),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val first = layout.fragments.single { it.fragmentId == "first" }
+        val second = layout.fragments.single { it.fragmentId == "second" }
+        val delay = layout.delays.single()
+
+        assertTrue(first.box.y + first.box.height < delay.box.y, "the closing bracket ends before its following delay")
+        assertTrue(delay.box.y + delay.box.height <= second.box.y, "the next opening control starts after the full delay band")
+    }
+
+    @Test
+    fun nestedSiblingGroupsKeepInsideDelayBetweenClosingAndOpeningControls() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+            fragments = listOf(
+                Seq3Fragment("outer", Seq3FragmentKind.LOOP, "outer", listOf("m1", "m2", "m3")),
+                Seq3Fragment("inner-first", Seq3FragmentKind.ALT, "first", listOf("m1")),
+                Seq3Fragment("inner-second", Seq3FragmentKind.OPT, "second", listOf("m2")),
+            ),
+            delays = listOf(Seq3Delay("d", "m1", "inside")),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val first = layout.fragments.single { it.fragmentId == "inner-first" }
+        val second = layout.fragments.single { it.fragmentId == "inner-second" }
+        val outer = layout.fragments.single { it.fragmentId == "outer" }
+        val delay = layout.delays.single()
+
+        assertTrue(first.depth > 0 && second.depth > 0, "fixture contains nested siblings")
+        assertTrue(first.box.y + first.box.height < delay.box.y, "nested close box ends before its internal delay")
+        assertTrue(delay.box.y + delay.box.height <= second.box.y, "nested opening control follows the entire delay")
+        assertTrue(outer.box.y <= first.box.y && outer.box.y + outer.box.height >= second.box.y + second.box.height)
     }
 
     @Test

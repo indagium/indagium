@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toSource
+import com.indagium.diagram3.toPlantUml
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
@@ -698,6 +699,83 @@ class Seq3SessionTest {
         assertEquals(lifelinesBefore, after.document.lifelines, "title must not touch the generated model")
         assertFalse(after.generating)
         assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "a metadata-only edit must never call generateSeq3")
+        assertEquals(1, after.undoStack.size, "a title update is one ordinary diagram command")
+    }
+
+    @Test
+    fun titleNoOpDoesNotAddUndoAndTitleEditUndoesAsOneCommand() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val initial = state.seq3Sessions.sessions.single().document.title
+        val before = state.seq3Sessions.sessions.single().undoStack.size
+
+        state.seq3Sessions.updateTitle(id, "  Renamed  ")
+        assertEquals("Renamed", state.seq3Sessions.sessions.single().document.title)
+        assertEquals(before + 1, state.seq3Sessions.sessions.single().undoStack.size)
+        state.seq3Sessions.updateTitle(id, "Renamed")
+        state.seq3Sessions.updateTitle(id, "   ")
+        assertEquals(before + 1, state.seq3Sessions.sessions.single().undoStack.size, "identical and blank commits are no-ops")
+
+        assertTrue(state.seq3Sessions.undo(id))
+        assertEquals(initial, state.seq3Sessions.sessions.single().document.title)
+    }
+
+    @Test
+    fun sourceDraftIsInvalidatedBySourceChangingVisualEditsAndExplicitReloadRestoresIt() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val baseSource = view.sourceDraft
+        val titlePattern = Regex("(?m)^title .+$")
+        val draftSource = if (titlePattern.containsMatchIn(baseSource)) {
+            baseSource.replaceFirst(titlePattern, "title Source draft")
+        } else {
+            baseSource.replace("@startuml", "@startuml\ntitle Source draft")
+        }
+        view.sourceDraft = draftSource
+        view.sourceDraftDirty = true
+
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetTitle("Visual change")))
+        assertTrue(view.sourceDraftStale)
+        assertEquals(draftSource, view.sourceDraft)
+        assertIs<Seq3SourceImportResult.Failure>(
+            state.seq3Sessions.importSource(id, view.sourceDraft, Seq3Dialect.PLANTUML),
+        )
+        assertTrue(state.seq3Sessions.undo(id), "diagram undo remains available while source is docked")
+        assertFalse(view.sourceDraftStale, "undo restoring the source base makes the preserved draft safe to apply again")
+        assertEquals(draftSource, view.sourceDraft)
+        assertIs<Seq3SourceImportResult.Success>(
+            state.seq3Sessions.importSource(id, view.sourceDraft, Seq3Dialect.PLANTUML),
+        )
+        assertEquals("Source draft", state.seq3Sessions.sessions.single { it.id == id }.document.title)
+        assertFalse(view.sourceDraftDirty)
+        assertFalse(view.sourceDraftStale)
+
+        assertTrue(state.seq3Sessions.reloadSourceDraft(id))
+        assertEquals(state.seq3Sessions.sessions.single { it.id == id }.document.toPlantUml(), view.sourceDraft)
+        assertFalse(view.sourceDraftDirty)
+        assertFalse(view.sourceDraftStale)
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetTitle("After reload")))
+        assertEquals(state.seq3Sessions.sessions.single().document.toPlantUml(), view.sourceDraft)
+    }
+
+    @Test
+    fun presentationOnlyVisualChangesDoNotStalePlantUmlDraft() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        view.sourceDraft += "\n' edit"
+        view.sourceDraftDirty = true
+
+        val lifelineId = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.first().id
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetLifelineHeaderWidth(lifelineId, 240.0)))
+        assertFalse(view.sourceDraftStale, "presentation changes excluded from emitted source do not invalidate a draft")
+        assertTrue(view.sourceDraftDirty)
     }
 
     @Test
@@ -888,6 +966,26 @@ class Seq3SessionTest {
         assertEquals(id, reopened, "opening a live-linked note must activate the existing session")
         assertEquals(1, state.seq3Sessions.sessions.size)
     }
+
+    @Test
+    fun undoingATitleCommandRefreshesItsLiveLinkedNote() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val previousTitle = state.seq3Sessions.sessions.single().document.title
+        val blockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))
+
+        state.seq3Sessions.updateTitle(id, "Live title one step")
+        state.seq3Sessions.flush(id)
+        assertEquals("Live title one step", linkedNoteDocument(state, blockId).title)
+
+        assertTrue(state.seq3Sessions.undo(id))
+        state.seq3Sessions.flush(id)
+        assertEquals(previousTitle, linkedNoteDocument(state, blockId).title)
+    }
+
+    private fun linkedNoteDocument(state: AppState, blockId: String): Seq3Document =
+        parseSeq3Note((state.tab("log")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text)!!.document
 
     @Test
     fun sameDocumentLinkedImportCanonicalizesDriftWithoutAddingUndo() {

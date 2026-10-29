@@ -14,9 +14,11 @@ import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.ui.Seq3ArtifactHeading
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.blockOrderDuringDrag
 import com.indagium.ui.cumulativeBlockOffsets
+import com.indagium.ui.seq3ArtifactHeading
 import com.indagium.ui.seq3CanSwapEndpoints
 import com.indagium.ui.seq3CollapsedOccurrenceCount
 import com.indagium.ui.seq3DocumentDisplaySegmentsLabel
@@ -35,9 +37,9 @@ import kotlin.test.assertTrue
 // ── Phase 4: Seq3QueuePanel's pure (non-Compose) helpers ───────────────────────────────────────
 //
 // Compose UI itself is untested in this repo (this phase's brief) — these cover exactly the parts
-// of Seq3QueuePanel.kt that don't need a composition: the tie-only pin rule, the collapsed-repeat
-// detector, and template-string parsing for the row's accent-highlighted pattern line and the
-// Inspector's pattern field.
+// of Seq3QueuePanel.kt that don't need a composition: artifact heading display, the tie-only pin
+// rule, the collapsed-repeat detector, and template-string parsing for the row's accent-highlighted
+// pattern line and the Inspector's pattern field.
 
 class Seq3QueuePanelTest {
     private fun occ(id: Int, ts: Long, text: String = "line $id") = Seq3Occurrence(id, ts, "10:00:00.000", 1, 1, 'I', text)
@@ -49,6 +51,13 @@ class Seq3QueuePanelTest {
         threshold: Int = 3,
         template: String = "$id-label",
     ) = Seq3Message(id, Seq3Match("A", template), "A", "B", template, repeat = repeat, repeatThreshold = threshold, occurrences = occurrences)
+
+    @Test
+    fun artifactHeadingKeepsTheEditableLabelAndDropsOnlyAnExactKindDuplicate() {
+        assertEquals(Seq3ArtifactHeading(kind = null, label = "group"), seq3ArtifactHeading("group", "group"))
+        assertEquals(Seq3ArtifactHeading(kind = "loop", label = "retry"), seq3ArtifactHeading("loop", "retry"))
+        assertEquals(Seq3ArtifactHeading(kind = "group", label = "Group"), seq3ArtifactHeading("group", "Group"))
+    }
 
     // ── seq3PinnableDirections: tie-only pin rule (spec §07) ────────────────────────────────────
 

@@ -66,6 +66,7 @@ private const val MAX_SEQ3_STATE_INVARIANTS = 400
 // placement" shape.
 private const val MAX_SEQ3_MANUAL_ACTIVATIONS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
+private const val MAX_SEQ3_ROW_ORDER = 25_000
 
 // WP4: guards are short strings against a 512 KB header cap, so this bound exists to match the
 // existing per-fragment caps' posture (reject a pathological document rather than truncate it
@@ -432,6 +433,8 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // Phase 1 (manual activation bars): append-last, same invariant — see Seq3Model.kt's own doc
     // on manualActivations for why an absent key decoding to emptyList() (below) is load-bearing.
     "manualActivations" to d.manualActivations.map(::manualActivationToMap),
+    // Append-last: documents predating authored row order decode to empty and preserve chronology.
+    "rowOrder" to d.rowOrder.map(::rowRefToMap),
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -445,11 +448,12 @@ private fun withinSeq3DocumentBounds(
     delayMaps: List<*>,
     stateInvariantMaps: List<*>,
     manualActivationMaps: List<*>,
+    rowOrderMaps: List<*>,
 ): Boolean =
     lifelineMaps.size <= MAX_SEQ3_LIFELINES && messageMaps.size <= MAX_SEQ3_MESSAGES &&
         fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES &&
         delayMaps.size <= MAX_SEQ3_DELAYS && stateInvariantMaps.size <= MAX_SEQ3_STATE_INVARIANTS &&
-        manualActivationMaps.size <= MAX_SEQ3_MANUAL_ACTIVATIONS
+        manualActivationMaps.size <= MAX_SEQ3_MANUAL_ACTIVATIONS && rowOrderMaps.size <= MAX_SEQ3_ROW_ORDER
 
 /**
  * Validates an in-memory candidate before import/session mutation using the same caps as decode.
@@ -464,6 +468,7 @@ internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when
     document.delays.size > MAX_SEQ3_DELAYS -> "Document has too many delays."
     document.stateInvariants.size > MAX_SEQ3_STATE_INVARIANTS -> "Document has too many state invariants."
     document.manualActivations.size > MAX_SEQ3_MANUAL_ACTIVATIONS -> "Document has too many manual activation bars."
+    document.rowOrder.size > MAX_SEQ3_ROW_ORDER -> "Document has too many row-order references."
     document.messages.any { it.occurrences.size > MAX_SEQ3_OCCURRENCES_PER_MESSAGE } ->
         "A message has too many occurrences."
     document.messages.any { it.match.captures.size > MAX_SEQ3_CAPTURES_PER_MATCH } ->
@@ -480,6 +485,9 @@ internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when
         "Document metadata exceeds the supported header size."
     else -> null
 }
+
+internal fun seq3RowOrderBoundsViolation(document: Seq3Document): String? =
+    if (document.rowOrder.size > MAX_SEQ3_ROW_ORDER) "Document has too many row-order references." else null
 
 private fun seq3DocumentStrings(document: Seq3Document): Sequence<String> = sequence {
     yieldSeq3DocumentMetadata(document)
@@ -503,6 +511,7 @@ private suspend fun SequenceScope<String>.yieldSeq3DocumentMetadata(document: Se
         yield(lifeline.name)
         lifeline.tagIds.forEach { yield(it) }
     }
+    document.rowOrder.forEach { ref -> yield(ref.messageId) }
 }
 
 private suspend fun SequenceScope<String>.yieldSeq3MessageStrings(messages: List<Seq3Message>) {
@@ -574,7 +583,8 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val stateInvariantMaps = map.mapList("stateInvariants").orEmpty()
     // Phase 1 (manual activation bars): appended last in turn, same posture.
     val manualActivationMaps = map.mapList("manualActivations").orEmpty()
-    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps, stateInvariantMaps, manualActivationMaps)) {
+    val rowOrderMaps = map.mapList("rowOrder").orEmpty()
+    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps, stateInvariantMaps, manualActivationMaps, rowOrderMaps)) {
         return null
     }
 
@@ -625,6 +635,9 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // rendering to today, same contract as "delays"/"stateInvariants" above. A malformed
         // individual element drops out via mapNotNull rather than failing the whole document.
         manualActivations = manualActivationMaps.mapNotNull(::manualActivationFromMap),
+        // Older notes have no explicit row order and keep the legacy shared chronology. Malformed
+        // individual references drop out without losing the diagram.
+        rowOrder = rowOrderMaps.mapNotNull(::rowRefFromMap),
     )
 }
 
@@ -657,6 +670,8 @@ private fun lifelineToMap(l: Seq3Lifeline): Map<String, Any?> =
         "visibility" to l.visibility.name,
         "kind" to l.kind.name,
         "displaySegments" to l.displaySegments,
+        // Append-last: absent on older documents and defaults to automatic measurement.
+        "headerWidthDp" to l.headerWidthDp,
     )
 
 private fun lifelineFromMap(map: Map<String, Any?>): Seq3Lifeline? {
@@ -677,8 +692,33 @@ private fun lifelineFromMap(map: Map<String, Any?>): Seq3Lifeline? {
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
         kind = enumFromName(map.str("kind"), Seq3LifelineKind.PARTICIPANT),
         displaySegments = map.int("displaySegments"),
+        headerWidthDp = (map["headerWidthDp"] as? Number)?.toDouble()?.takeIf {
+            it.isFinite() && it in MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP..MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP
+        },
     )
 }
+
+private fun styleToMap(style: Seq3ArtifactStyle): Map<String, Any?> = mapOf(
+    "fillArgb" to style.fillArgb,
+    "borderArgb" to style.borderArgb,
+    "textArgb" to style.textArgb,
+)
+
+private fun styleFromMap(map: Map<String, Any?>?): Seq3ArtifactStyle? = map?.let {
+    Seq3ArtifactStyle(
+        fillArgb = it.int("fillArgb"),
+        borderArgb = it.int("borderArgb"),
+        textArgb = it.int("textArgb"),
+    )
+}
+
+private fun rowRefToMap(ref: Seq3RowRef): Map<String, Any?> = mapOf(
+    "messageId" to ref.messageId,
+    "occurrenceEntryId" to ref.occurrenceEntryId,
+)
+
+private fun rowRefFromMap(map: Map<String, Any?>): Seq3RowRef? =
+    boundedString(map.str("messageId"))?.let { Seq3RowRef(it, map.int("occurrenceEntryId")) }
 
 // ── Match / capture ──────────────────────────────────────────────────────────────────────────
 
@@ -772,6 +812,7 @@ private fun messageToMap(m: Seq3Message): Map<String, Any?> = mapOf(
     // Append-last (CLAUDE.md invariant): a new field goes at the END of the map, never inserted
     // earlier, so every already-written note keeps decoding unchanged.
     "totalOccurrenceCount" to m.totalOccurrenceCount,
+    "noteStyle" to m.noteStyle?.let(::styleToMap),
 )
 
 private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
@@ -799,6 +840,7 @@ private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
         // Missing (every note written before W1a) or unparsable both decode to null — "occurrences
         // is complete" — matching this field's own pre-existing default.
         totalOccurrenceCount = map.int("totalOccurrenceCount"),
+        noteStyle = styleFromMap(subMap(map, "noteStyle")),
     )
 }
 
@@ -856,6 +898,7 @@ private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
         // WP17: appended last in turn, same rule. Absent/null on every fragment written before
         // this field existed (and on every non-REF fragment) -> decodes to null below.
         "refDiagramId" to f.refDiagramId,
+        "style" to f.style?.let(::styleToMap),
     )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
@@ -888,6 +931,7 @@ private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
         // see Seq3Fragment.refDiagramId's own doc for why those three cases share one value on
         // purpose.
         refDiagramId = boundedString(map.str("refDiagramId")),
+        style = styleFromMap(subMap(map, "style")),
     )
 }
 
@@ -900,6 +944,7 @@ private fun noteToMap(n: Seq3Note): Map<String, Any?> = mapOf(
     "width" to n.width,
     "height" to n.height,
     "visibility" to n.visibility.name,
+    "style" to n.style?.let(::styleToMap),
 )
 
 private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
@@ -914,6 +959,7 @@ private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
         width = (map["width"] as? Number)?.toDouble(),
         height = (map["height"] as? Number)?.toDouble(),
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+        style = styleFromMap(subMap(map, "style")),
     )
 }
 

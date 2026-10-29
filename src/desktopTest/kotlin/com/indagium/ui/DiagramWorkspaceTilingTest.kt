@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class DiagramWorkspaceTilingTest {
     @Test
-    fun defaultLayoutKeepsThreeAuthoringTilesInALeftColumnBesidePreview() {
+    fun defaultLayoutKeepsAuthoringTilesLeftAndPlantUmlUnderPreview() {
         val layout = diagramWorkspaceDefaultLayout()
         val root = assertIs<TileSplit<DiagramWorkspaceSectionId>>(layout)
         assertEquals(TileAxis.ROW, root.axis)
@@ -27,7 +27,10 @@ class DiagramWorkspaceTilingTest {
             ),
             tileLeafSections(sidebar),
         )
-        assertEquals(listOf(DiagramWorkspaceSectionId.PREVIEW), tileLeafSections(root.children.last()))
+        val right = assertIs<TileSplit<DiagramWorkspaceSectionId>>(root.children.last())
+        assertEquals(TileAxis.COLUMN, right.axis)
+        assertEquals(listOf(DiagramWorkspaceSectionId.PREVIEW, DiagramWorkspaceSectionId.SOURCE), tileLeafSections(right))
+        assertTrue(DiagramWorkspaceSectionId.SOURCE in Seq3ViewState().diagramHiddenTiles)
     }
 
     @Test
@@ -62,6 +65,7 @@ class DiagramWorkspaceTilingTest {
             TileAxis.ROW,
             listOf(
                 TileLeaf(DiagramWorkspaceSectionId.PREVIEW, 2.4f),
+                TileLeaf(DiagramWorkspaceSectionId.SOURCE),
                 TileLeaf(DiagramWorkspaceSectionId.MESSAGES),
                 TileSplit(
                     TileAxis.COLUMN,
@@ -108,10 +112,37 @@ class DiagramWorkspaceTilingTest {
 
         state.restoreSeq3ViewToken(legacyToken)
 
-        assertEquals(listOf(DiagramWorkspaceSectionId.LIFELINES), view.diagramHiddenTiles)
+        assertEquals(listOf(DiagramWorkspaceSectionId.LIFELINES, DiagramWorkspaceSectionId.SOURCE), view.diagramHiddenTiles)
         assertEquals(listOf(DiagramWorkspaceSectionId.MESSAGES), view.diagramCollapsedTiles)
         assertFalse(view.messagesExpanded)
         assertFalse(view.lifelinesSectionOpen)
+    }
+
+    @Test
+    fun olderFourTileTokenAddsSourceHiddenAndKeepsExistingVisibility() = withEmptyDiagram { state, sessionId ->
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        val libraryItemId = requireNotNull(state.seq3Sessions.sessions.single { it.id == sessionId }.libraryItemId)
+        val oldLayout = TileSplit(
+            TileAxis.ROW,
+            listOf(
+                TileLeaf(DiagramWorkspaceSectionId.MESSAGES),
+                TileLeaf(DiagramWorkspaceSectionId.LIFELINES),
+                TileLeaf(DiagramWorkspaceSectionId.ARTIFACTS),
+                TileLeaf(DiagramWorkspaceSectionId.PREVIEW),
+            ),
+        )
+        val oldToken = tokenFields(
+            libraryItemId,
+            "true", "true", "true", "true", "true", "true", "220", "200", "392",
+            tileLayoutJson(oldLayout) { it.key }.toString(),
+            "", "", "false", "STANDARD",
+        ).b64()
+
+        state.restoreSeq3ViewToken(oldToken)
+
+        assertTrue(DiagramWorkspaceSectionId.SOURCE in tileLeafSections(view.diagramTileLayout))
+        assertTrue(DiagramWorkspaceSectionId.SOURCE in view.diagramHiddenTiles)
+        assertTrue(DiagramWorkspaceSectionId.PREVIEW !in view.diagramHiddenTiles)
     }
 
     @Test

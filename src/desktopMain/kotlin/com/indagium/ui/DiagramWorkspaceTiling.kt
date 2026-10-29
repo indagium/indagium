@@ -32,6 +32,7 @@ internal enum class DiagramWorkspaceSectionId(val key: String) {
     LIFELINES("lifelines"),
     ARTIFACTS("artifacts"),
     PREVIEW("preview"),
+    SOURCE("source"),
     ;
 
     companion object {
@@ -43,22 +44,26 @@ internal typealias DiagramWorkspaceLayout = TileNode<DiagramWorkspaceSectionId>
 
 private const val DIAGRAM_MESSAGES_TILE_WEIGHT = 1.6f
 private const val DIAGRAM_NARROW_PREVIEW_WEIGHT = 1.5f
+private const val DIAGRAM_SOURCE_TILE_WEIGHT = 0.9f
 
 /** A preset changes the saved tree and weight distribution; panels keep their place when hidden. */
 internal enum class DiagramWorkspacePreset(
     val label: String,
     val layout: DiagramWorkspaceLayout,
     val collapsed: Set<DiagramWorkspaceSectionId>,
+    val hidden: Set<DiagramWorkspaceSectionId>,
 ) {
     STANDARD(
         "Standard",
         diagramWorkspaceLayout(sideWeight = 0.9f, previewWeight = 2.2f),
-        setOf(DiagramWorkspaceSectionId.ARTIFACTS),
+        collapsed = setOf(DiagramWorkspaceSectionId.ARTIFACTS),
+        hidden = setOf(DiagramWorkspaceSectionId.SOURCE),
     ),
     CANVAS_FOCUS(
         "Canvas focus",
         diagramWorkspaceLayout(sideWeight = 0.65f, previewWeight = 3f),
-        emptySet(),
+        collapsed = emptySet(),
+        hidden = setOf(DiagramWorkspaceSectionId.SOURCE),
     ),
 }
 
@@ -75,7 +80,14 @@ internal fun diagramWorkspaceLayout(sideWeight: Float = 0.9f, previewWeight: Flo
                 ),
                 sideWeight,
             ),
-            TileLeaf(DiagramWorkspaceSectionId.PREVIEW, previewWeight),
+            TileSplit(
+                TileAxis.COLUMN,
+                listOf(
+                    TileLeaf(DiagramWorkspaceSectionId.PREVIEW, previewWeight),
+                    TileLeaf(DiagramWorkspaceSectionId.SOURCE, DIAGRAM_SOURCE_TILE_WEIGHT),
+                ),
+                previewWeight,
+            ),
         ),
     )
 
@@ -128,11 +140,11 @@ internal fun sanitizeDiagramWorkspaceLayoutState(
 }
 
 internal fun diagramWorkspacePresetActive(view: Seq3ViewState, preset: DiagramWorkspacePreset): Boolean =
-    view.diagramTileLayout == preset.layout && view.diagramHiddenTiles.isEmpty() && view.diagramCollapsedTiles.toSet() == preset.collapsed
+    view.diagramTileLayout == preset.layout && view.diagramHiddenTiles.toSet() == preset.hidden && view.diagramCollapsedTiles.toSet() == preset.collapsed
 
 internal fun applyDiagramWorkspacePreset(view: Seq3ViewState, preset: DiagramWorkspacePreset) {
     view.diagramTileLayout = preset.layout
-    view.diagramHiddenTiles = emptyList()
+    view.diagramHiddenTiles = preset.hidden.toList()
     view.diagramCollapsedTiles = preset.collapsed.toList()
     setLegacyDiagramPaneOpen(view, DiagramWorkspaceSectionId.MESSAGES, true)
     setLegacyDiagramPaneOpen(view, DiagramWorkspaceSectionId.LIFELINES, true)
@@ -176,8 +188,8 @@ internal val DIAGRAM_WORKSPACE_CHROME_SPEC = TileChromeSpec<DiagramWorkspaceSect
     keyOf = { it.key },
     scrollMinDp = 96f,
     scrollMaxDp = 2000f,
-    scrolls = { it != DiagramWorkspaceSectionId.PREVIEW },
-    loneColumn = { it != DiagramWorkspaceSectionId.PREVIEW },
+    scrolls = { it != DiagramWorkspaceSectionId.PREVIEW && it != DiagramWorkspaceSectionId.SOURCE },
+    loneColumn = { it != DiagramWorkspaceSectionId.PREVIEW && it != DiagramWorkspaceSectionId.SOURCE },
     scrollEdgeRoomDp = DIAGRAM_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
     scrollEndHandleOuterRoomDp = DIAGRAM_HOST_PAD_DP.toFloat(),
@@ -188,6 +200,7 @@ internal fun diagramWorkspaceTitle(id: DiagramWorkspaceSectionId): String = when
     DiagramWorkspaceSectionId.LIFELINES -> "Lifelines"
     DiagramWorkspaceSectionId.ARTIFACTS -> "Artifacts"
     DiagramWorkspaceSectionId.PREVIEW -> "Diagram preview"
+    DiagramWorkspaceSectionId.SOURCE -> "PlantUML"
 }
 
 private fun diagramWorkspaceSlot(
@@ -203,6 +216,7 @@ private fun diagramWorkspaceSlot(
         DiagramWorkspaceSectionId.ARTIFACTS -> session.document.fragments.size + session.document.notes.size +
             session.document.delays.size + session.document.manualActivations.size
         DiagramWorkspaceSectionId.PREVIEW -> null
+        DiagramWorkspaceSectionId.SOURCE -> null
     }
     return TileSlot(
         icon = when (id) {
@@ -210,6 +224,7 @@ private fun diagramWorkspaceSlot(
             DiagramWorkspaceSectionId.LIFELINES -> Icons.Outlined.Groups
             DiagramWorkspaceSectionId.ARTIFACTS -> Icons.AutoMirrored.Outlined.StickyNote2
             DiagramWorkspaceSectionId.PREVIEW -> Icons.Outlined.AccountTree
+            DiagramWorkspaceSectionId.SOURCE -> Icons.Outlined.Description
         },
         title = diagramWorkspaceTitle(id),
         summary = summary?.toString(),
@@ -284,6 +299,7 @@ internal fun DiagramWorkspaceTilingHost(
                             DiagramWorkspaceSectionId.MESSAGES -> ({ Seq3QueueHeaderActions(state, session, view) })
                             DiagramWorkspaceSectionId.LIFELINES -> ({ Seq3LifelinesHeaderActions(state, session, view) })
                             DiagramWorkspaceSectionId.ARTIFACTS -> ({ Seq3ArtifactsHeaderActions(state, session, view) })
+                            DiagramWorkspaceSectionId.SOURCE -> ({ Seq3SourceHeaderActions(state, session, view) })
                             DiagramWorkspaceSectionId.PREVIEW -> null
                         }
                         val slot = diagramWorkspaceSlot(id, session, visible.size > 1, headerAction) { content(id) }
@@ -334,7 +350,7 @@ internal fun setLegacyDiagramPaneOpen(view: Seq3ViewState, id: DiagramWorkspaceS
         DiagramWorkspaceSectionId.MESSAGES -> view.messagesSectionOpen = open
         DiagramWorkspaceSectionId.LIFELINES -> view.lifelinesSectionOpen = open
         DiagramWorkspaceSectionId.ARTIFACTS -> view.artifactsSectionOpen = open
-        DiagramWorkspaceSectionId.PREVIEW -> Unit
+        DiagramWorkspaceSectionId.PREVIEW, DiagramWorkspaceSectionId.SOURCE -> Unit
     }
 }
 
@@ -343,7 +359,7 @@ internal fun setLegacyDiagramTileExpanded(view: Seq3ViewState, id: DiagramWorksp
         DiagramWorkspaceSectionId.MESSAGES -> view.messagesExpanded = expanded
         DiagramWorkspaceSectionId.LIFELINES -> view.lifelinesExpanded = expanded
         DiagramWorkspaceSectionId.ARTIFACTS -> view.artifactsExpanded = expanded
-        DiagramWorkspaceSectionId.PREVIEW -> Unit
+        DiagramWorkspaceSectionId.PREVIEW, DiagramWorkspaceSectionId.SOURCE -> Unit
     }
 }
 

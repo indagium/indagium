@@ -25,7 +25,6 @@ import com.indagium.diagram3.undoSeq3Command
 import com.indagium.diagram3.updateSeq3MessageTimestamp
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -125,12 +124,14 @@ class Seq3CustomMessageTest {
     }
 
     @Test
-    fun generatedMessagesCannotBeMoved() {
+    fun generatedMessagesCanBeMovedAsWholeParents() {
         val document = baseDocument()
         val result = moveSeq3Message(document, "m1", Seq3InsertionPosition.End)
-        assertFalse(result is Seq3MessageEditResult.Updated)
-        val rejected = result as? Seq3MessageEditResult.Rejected ?: error("expected move to be rejected")
-        assertEquals("Only custom messages can be moved", rejected.reason)
+        val updated = (result as? Seq3MessageEditResult.Updated)?.document ?: error("expected generated parent move to be allowed")
+        assertEquals(listOf("m2", "m1"), updated.messages.map { it.id })
+        val originalEvidence = document.messages.associateBy { it.id }.mapValues { it.value.occurrences }
+        val movedEvidence = updated.messages.associateBy { it.id }.mapValues { it.value.occurrences }
+        assertEquals(originalEvidence, movedEvidence)
     }
 
     @Test

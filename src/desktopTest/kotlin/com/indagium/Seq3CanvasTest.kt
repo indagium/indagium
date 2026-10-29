@@ -8,6 +8,7 @@ import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3ManualActivation
@@ -16,6 +17,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
@@ -30,6 +32,8 @@ import com.indagium.ui.Seq3EndpointSide
 import com.indagium.ui.seq3ActorGlyphGeometry
 import com.indagium.ui.seq3ArrowEndpointAt
 import com.indagium.ui.seq3ArrowStrokeWidths
+import com.indagium.ui.seq3CanvasRowRef
+import com.indagium.ui.seq3HeaderWidthAfterPhysicalDrag
 import com.indagium.ui.seq3ContextMenuOffset
 import com.indagium.ui.seq3CrossingLabel
 import com.indagium.ui.seq3DragPreview
@@ -46,6 +50,7 @@ import com.indagium.ui.seq3PointerPxToLayoutUnits
 import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
+import com.indagium.ui.seq3RowReorderPreviewAt
 import com.indagium.ui.seq3RowIsEmphasized
 import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3RowsInSelection
@@ -821,5 +826,42 @@ class Seq3CanvasTest {
     @Test
     fun snapActivationEndIsNullWhenThereAreNoCandidates() {
         assertNull(seq3SnapActivationEnd(emptyList(), 10.0))
+    }
+
+    @Test
+    fun rowReorderPreviewUsesExactVisibleInsertionNeighbor() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val source = Seq3RowRef("m2", 2)
+        val preview = seq3RowReorderPreviewAt(doc, layout, source, layout.rows.first().y - 1.0)
+
+        assertEquals(Seq3InsertionPosition.BeforeRow(Seq3RowRef("m1", 1)), preview?.position)
+        assertEquals(source, preview?.rowRef)
+        assertTrue(preview?.active == true)
+    }
+
+    @Test
+    fun collapsedSummaryRowsUseWholeMessageIdentityForCanvasReorder() {
+        val collapsed = message("m1", "A", "B", occurrences = (1..4).map { occurrence(it, ts = it * 1000L) })
+            .copy(repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 2)
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0), lifeline("B", 1)), messages = listOf(collapsed))
+        val row = layoutSeq3(doc, opts()).rows.single()
+
+        assertEquals(Seq3RowRef("m1", occurrenceEntryId = null), seq3CanvasRowRef(doc, row))
+    }
+
+    @Test
+    fun headerResizeConvertsPhysicalPointerMotionByDensityAndZoomAndClamps() {
+        assertEquals(220.0, seq3HeaderWidthAfterPhysicalDrag(120.0, 100f, density = 2f, zoom = 0.5f))
+        assertEquals(145.0, seq3HeaderWidthAfterPhysicalDrag(120.0, 100f, density = 2f, zoom = 2f))
+        assertEquals(360.0, seq3HeaderWidthAfterPhysicalDrag(350.0, 100f, density = 2f, zoom = 0.5f))
+        assertEquals(70.0, seq3HeaderWidthAfterPhysicalDrag(80.0, -100f, density = 2f, zoom = 0.5f))
     }
 }

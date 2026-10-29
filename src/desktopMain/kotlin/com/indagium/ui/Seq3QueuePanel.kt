@@ -1,8 +1,13 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 
 package com.indagium.ui
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -35,14 +40,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -50,6 +65,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.SEQ3_OPERAND_FRAGMENT_KINDS
@@ -71,6 +87,7 @@ import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Operand
@@ -82,6 +99,7 @@ import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.addSeq3MessageFromSelection
+import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3DisplayName
@@ -191,6 +209,107 @@ private enum class Seq3AddDialog {
     CUSTOM,
 }
 
+internal fun seq3InsertionPositionAfter(rowRef: Seq3RowRef): Seq3InsertionPosition =
+    rowRef.occurrenceEntryId?.let { Seq3InsertionPosition.AfterRow(rowRef) }
+        ?: Seq3InsertionPosition.AfterMessage(rowRef.messageId)
+
+/** Shared queue/canvas "Add message after this" flow. The request remains view-only until one of
+ *  the existing authoring paths produces a single command through Seq3Session.applyCommand. */
+@Composable
+internal fun Seq3PendingInsertFlow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    val request = view.pendingInsertRequest ?: return
+    val tab = session.sourceTabId?.let(state::tab)
+    var nextStep by remember(session.id, request) { mutableStateOf(Seq3AddDialogStep.CHOICE) }
+    val position = remember(request) { seq3InsertionPositionAfter(request.after) }
+
+    fun applyInsertion(command: Seq3Command): Boolean {
+        val preview = applySeq3Command(session.document, command)
+        if (!preview.applied) {
+            view.messageAddHint = preview.reason ?: "The message could not be added after this row"
+            return false
+        }
+        val applied = state.seq3Sessions.applyCommand(session.id, command)
+        if (applied) {
+            view.pendingInsertRequest = null
+            view.messageAddHint = null
+            runCatching { view.focusRequester.requestFocus() }
+        } else {
+            view.messageAddHint = "The message could not be added after this row"
+            nextStep = Seq3AddDialogStep.CHOICE
+        }
+        return applied
+    }
+
+    when (nextStep) {
+        Seq3AddDialogStep.CHOICE -> {
+            val tc = tc()
+            Dialog(
+                onDismissRequest = { view.pendingInsertRequest = null; runCatching { view.focusRequester.requestFocus() } },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                Column(
+                    Modifier.width(310.dp).clip(RoundedCornerShape(10.dp))
+                        .background(tc.p).border(1.dp, tc.br, RoundedCornerShape(10.dp)).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AppText("Add message after this row", color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    AppText("Choose a log-backed message or author one manually.", color = tc.ts, fontSize = 10.sp)
+                    AppButton(
+                        "Selected log rows · ${tab?.selected?.size ?: 0}",
+                        onClick = {
+                            val entries = tab?.let { seq3ResolveSelectedEntries(it.logData, it.selected) }.orEmpty()
+                            applyInsertion(Seq3Command.AddSelectionMessage(entries, position))
+                        },
+                        enabled = !entriesEmpty(tab),
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalPadding = 8.dp,
+                    )
+                    AppButton(
+                        "Enter row numbers…",
+                        onClick = { nextStep = Seq3AddDialogStep.ROWS },
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    AppButton(
+                        "Open log view to select rows",
+                        onClick = { session.sourceTabId?.let(state::activateTab) },
+                        enabled = session.sourceTabId != null,
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    AppButton(
+                        "Custom message…",
+                        onClick = { nextStep = Seq3AddDialogStep.CUSTOM },
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    AppButton("Cancel", onClick = { view.pendingInsertRequest = null }, variant = ButtonVariant.Ghost, modifier = Modifier.align(Alignment.End))
+                }
+            }
+        }
+        Seq3AddDialogStep.ROWS -> Seq3AddRowsDialog(
+            entries = tab?.logData.orEmpty(),
+            onDismiss = { nextStep = Seq3AddDialogStep.CHOICE },
+            onAdd = { entries ->
+                applyInsertion(Seq3Command.AddSelectionMessage(entries, position))
+            },
+        )
+        Seq3AddDialogStep.CUSTOM -> Seq3AddCustomDialog(
+            document = session.document,
+            positionOverride = position,
+            onDismiss = { nextStep = Seq3AddDialogStep.CHOICE },
+            onAdd = { spec ->
+                applyInsertion(Seq3Command.AddCustomMessage(spec.copy(position = position)))
+            },
+        )
+    }
+}
+
+private enum class Seq3AddDialogStep { CHOICE, ROWS, CUSTOM }
+
+private fun entriesEmpty(tab: com.indagium.model.LogTab?): Boolean = tab?.selected.isNullOrEmpty()
+
 private enum class Seq3CustomPositionMode {
     START,
     END,
@@ -287,6 +406,76 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
     }
     val visibleIds = remember(rows) { rows.map(Seq3Message::id) }
     val listState = rememberLazyListState()
+    val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
+    val density = LocalDensity.current.density
+    val reorderEnabled = view.sort == Seq3Sort.LOG_ORDER
+    val currentVisibleIds = rememberUpdatedState(visibleIds)
+    val currentDocument = rememberUpdatedState(document)
+    val currentReorderEnabled = rememberUpdatedState(reorderEnabled)
+    var justReleasedId by remember(session.id) { mutableStateOf<String?>(null) }
+    var dragStartIds by remember(session.id) { mutableStateOf(emptyList<String>()) }
+    var dragGrabOffsetY by remember(session.id) { mutableStateOf(0f) }
+    val rowsById = remember(rows) { rows.associateBy(Seq3Message::id) }
+    val visibleIdSet = remember(visibleIds) { visibleIds.toHashSet() }
+    val queuedVisualIdSet = remember(view.queueReorderVisualIds) { view.queueReorderVisualIds.toHashSet() }
+    val dragStartIdSet = remember(dragStartIds) { dragStartIds.toHashSet() }
+    val visualIds = if ((view.queueReorderDraggedId != null || justReleasedId != null) && view.queueReorderVisualIds.isNotEmpty()) {
+        view.queueReorderVisualIds.filter { it in visibleIdSet } + visibleIds.filterNot { it in queuedVisualIdSet }
+    } else visibleIds
+    val renderRows = remember(rows, visualIds) {
+        visualIds.mapNotNull(rowsById::get)
+    }
+
+    fun heightOf(id: String): Float = rowHeights[id] ?: (94f * density)
+    fun advanceOf(id: String): Float = heightOf(id) + 4f * density
+
+    fun updateReorderPreview() {
+        val draggedId = view.queueReorderDraggedId ?: return
+        val liveVisibleIds = currentVisibleIds.value
+        view.queueReorderVisualIds = blockOrderDuringDrag(
+            liveVisibleIds,
+            draggedId,
+            view.queueReorderOffsetY,
+            ::advanceOf,
+        )
+    }
+
+    fun finishQueueReorder(commit: Boolean) {
+        val movedId = view.queueReorderDraggedId
+        val finalOrder = view.queueReorderVisualIds
+        val liveVisibleIds = currentVisibleIds.value
+        val command = if (commit && !view.queueReorderCancelled) {
+            seq3QueueReorderCommand(movedId, liveVisibleIds, finalOrder)
+        } else {
+            null
+        }
+        var committed = false
+        if (command != null && movedId != null) {
+            val dropDocument = currentDocument.value
+            val preview = applySeq3Command(dropDocument, command)
+            if (!preview.applied) {
+                view.messageAddHint = preview.reason ?: "Message order was not changed"
+            } else if (!state.seq3Sessions.applyCommand(session.id, command)) {
+                view.messageAddHint = "Message order could not be saved"
+            } else {
+                committed = true
+            }
+        }
+        if (committed && movedId != null) {
+            justReleasedId = movedId
+            dragStartIds = liveVisibleIds
+            view.queueReorderVisualIds = finalOrder
+        } else {
+            justReleasedId = null
+            dragStartIds = emptyList()
+            view.queueReorderVisualIds = emptyList()
+            view.queueReorderOffsetY = 0f
+            view.queueReorderPointerY = 0f
+            dragGrabOffsetY = 0f
+        }
+        view.queueReorderDraggedId = null
+        view.queueReorderCancelled = false
+    }
 
     LaunchedEffect(view.scrollRequestId, rows) {
         val targetId = view.scrollRequestId ?: return@LaunchedEffect
@@ -294,6 +483,63 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
         if (index >= 0) {
             listState.animateScrollToItem(index)
             view.scrollRequestId = null
+        }
+    }
+
+    LaunchedEffect(view.sort) {
+        if (view.sort != Seq3Sort.LOG_ORDER && view.queueReorderDraggedId != null) {
+            view.queueReorderCancelled = true
+            view.queueReorderDraggedId = null
+            view.queueReorderVisualIds = emptyList()
+            dragStartIds = emptyList()
+        }
+    }
+
+    LaunchedEffect(visibleIds, view.queueReorderDraggedId, justReleasedId) {
+        if (view.queueReorderDraggedId != null && view.queueReorderDraggedId !in visibleIds) {
+            view.queueReorderCancelled = true
+            view.queueReorderDraggedId = null
+            view.queueReorderVisualIds = emptyList()
+            dragStartIds = emptyList()
+        }
+        if (view.queueReorderDraggedId == null && justReleasedId == null) {
+            view.queueReorderVisualIds = emptyList()
+            dragStartIds = emptyList()
+            view.queueReorderOffsetY = 0f
+            view.queueReorderPointerY = 0f
+            dragGrabOffsetY = 0f
+        }
+    }
+
+    LaunchedEffect(justReleasedId) {
+        if (justReleasedId != null) {
+            delay(120)
+            justReleasedId = null
+            view.queueReorderVisualIds = emptyList()
+            dragStartIds = emptyList()
+            view.queueReorderOffsetY = 0f
+            view.queueReorderPointerY = 0f
+            dragGrabOffsetY = 0f
+        }
+    }
+
+    LaunchedEffect(view.queueReorderDraggedId) {
+        val dragId = view.queueReorderDraggedId ?: return@LaunchedEffect
+        while (view.queueReorderDraggedId == dragId) {
+            val viewportHeight = listState.layoutInfo.viewportSize.height.toFloat()
+            val edge = 36f * density
+            val scrollDelta = when {
+                viewportHeight <= 0f -> 0f
+                view.queueReorderPointerY < edge -> -14f
+                view.queueReorderPointerY > viewportHeight - edge -> 14f
+                else -> 0f
+            }
+            if (scrollDelta != 0f) {
+                val consumed = listState.scrollBy(scrollDelta)
+                view.queueReorderOffsetY += consumed
+                updateReorderPreview()
+            }
+            delay(24)
         }
     }
 
@@ -324,14 +570,216 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
         }
         Seq3FilterChipsRow(view, counts)
         Seq3FilterTextAndSortRow(view)
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        Box(
+            Modifier.weight(1f).fillMaxWidth().clipToBounds().pointerInput(session.id) {
+                val dragSlop = viewConfiguration.touchSlop
+                awaitPointerEventScope {
+                    var candidateId: String? = null
+                    var candidatePointerId: PointerId? = null
+                    var pressPosition: Offset? = null
+                    var lastPosition: Offset? = null
+                    var active = false
+
+                    fun clearLocalState() {
+                        candidateId = null
+                        candidatePointerId = null
+                        pressPosition = null
+                        lastPosition = null
+                        active = false
+                        releaseMoveDragCursor()
+                    }
+
+                    fun cancelPointerGesture() {
+                        if (active) finishQueueReorder(commit = false)
+                        clearLocalState()
+                    }
+
+                    fun handleMove(change: PointerInputChange, event: PointerEvent) {
+                        val messageId = candidateId ?: return
+                        val start = pressPosition ?: return
+                        if (active && (view.queueReorderDraggedId != messageId || view.queueReorderCancelled)) {
+                            cancelPointerGesture()
+                            return
+                        }
+                        val primaryPressed = if (change.type == PointerType.Mouse) {
+                            event.buttons.isPrimaryPressed
+                        } else {
+                            change.pressed
+                        }
+                        if (!primaryPressed) {
+                            cancelPointerGesture()
+                            return
+                        }
+                        val current = change.position
+                        val crossedSlop = (current - start).getDistance() > dragSlop
+                        if (!active && crossedSlop) {
+                            active = true
+                            view.queueReorderCancelled = false
+                            view.queueReorderDraggedId = messageId
+                            view.queueReorderOffsetY = current.y - start.y
+                            view.queueReorderPointerY = current.y
+                            dragStartIds = currentVisibleIds.value
+                            view.queueReorderVisualIds = currentVisibleIds.value
+                            view.textFieldFocused = false
+                            runCatching { view.focusRequester.requestFocus() }
+                            holdMoveDragCursor()
+                            updateReorderPreview()
+                            change.consume()
+                        } else if (active) {
+                            val previous = lastPosition ?: current
+                            view.queueReorderOffsetY += current.y - previous.y
+                            view.queueReorderPointerY = current.y
+                            updateReorderPreview()
+                            change.consume()
+                        }
+                        lastPosition = current
+                    }
+
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val pointerId = candidatePointerId
+                            val change = if (pointerId == null) {
+                                event.changes.firstOrNull()
+                            } else {
+                                event.changes.firstOrNull { it.id == pointerId }
+                            } ?: continue
+                            when (event.type) {
+                                PointerEventType.Press -> {
+                                    if (candidateId != null) cancelPointerGesture()
+                                    val primaryPressed = if (change.type == PointerType.Mouse) {
+                                        event.buttons.isPrimaryPressed
+                                    } else {
+                                        change.pressed
+                                    }
+                                    val handleLeft = 4f * density
+                                    val handleRight = 18f * density
+                                    if (primaryPressed && currentReorderEnabled.value &&
+                                        change.position.x in handleLeft..handleRight
+                                    ) {
+                                        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                            change.position.y >= info.offset && change.position.y < info.offset + info.size
+                                        }
+                                        val messageId = item?.key as? String
+                                        if (messageId != null && messageId in currentVisibleIds.value) {
+                                            candidateId = messageId
+                                            candidatePointerId = change.id
+                                            pressPosition = change.position
+                                            lastPosition = change.position
+                                            dragGrabOffsetY = change.position.y - item.offset.toFloat()
+                                        }
+                                    }
+                                }
+                                PointerEventType.Move -> handleMove(change, event)
+                                PointerEventType.Release -> {
+                                    if (active) {
+                                        change.consume()
+                                        finishQueueReorder(commit = true)
+                                    }
+                                    clearLocalState()
+                                }
+                                PointerEventType.Exit -> {
+                                    if (candidateId != null) cancelPointerGesture()
+                                }
+                                else -> Unit
+                            }
+                        }
+                    } finally {
+                        cancelPointerGesture()
+                    }
+                }
+            },
+        ) {
+            val startIds = if ((view.queueReorderDraggedId != null || justReleasedId != null) && dragStartIds.isNotEmpty()) {
+                dragStartIds.filter { it in visibleIdSet } + visibleIds.filterNot { it in dragStartIdSet }
+            } else visibleIds
+            val startOffsets = cumulativeBlockOffsets(startIds, ::advanceOf)
+            val targetOffsets = cumulativeBlockOffsets(visualIds, ::advanceOf)
             LazyColumn(
-                Modifier.fillMaxSize().padding(end = 6.dp),
+                Modifier.fillMaxSize().padding(end = 6.dp).testTag("seq3-message-list"),
                 state = listState,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                items(rows, key = Seq3Message::id) { message ->
-                    Seq3QueueRow(state, session, view, document, message, visibleIds)
+                items(renderRows, key = Seq3Message::id) { message ->
+                    val draggedId = view.queueReorderDraggedId
+                    val startY = startOffsets[message.id] ?: 0f
+                    val slotY = targetOffsets[message.id] ?: startY
+                    val targetY = targetOffsets[message.id] ?: startY
+                    val animatedY by key(message.id) {
+                        animateFloatAsState(
+                            targetValue = targetY,
+                            animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                            label = "seq3-queue-row-y-${message.id}",
+                        )
+                    }
+                    val isDragging = draggedId == message.id
+                    val isJustReleased = justReleasedId == message.id
+                    val renderY = sequenceRenderY(
+                        isDragging = isDragging,
+                        isJustReleased = isJustReleased,
+                        pointerY = startY + view.queueReorderOffsetY,
+                        targetY = targetY,
+                        animatedY = animatedY,
+                    )
+                    if (isDragging) {
+                        Spacer(
+                            Modifier.fillMaxWidth()
+                                .height((heightOf(message.id) / density).dp)
+                                .onSizeChanged { rowHeights[message.id] = it.height.toFloat() },
+                        )
+                    } else {
+                        Box(
+                            Modifier.fillMaxWidth()
+                                .offset { IntOffset(0, (renderY - slotY).roundToInt()) }
+                                .zIndex(if (isJustReleased) 1f else 0f)
+                                .graphicsLayer {
+                                    if (isJustReleased) {
+                                        scaleX = 1.015f
+                                        scaleY = 1.015f
+                                    }
+                                }
+                                .onSizeChanged { rowHeights[message.id] = it.height.toFloat() },
+                        ) {
+                            Seq3QueueRow(
+                                state, session, view, document, message, visibleIds,
+                                dragHandleModifier = Modifier,
+                                reorderEnabled = reorderEnabled,
+                                isDragging = false,
+                                onRightClickAddAfter = {
+                                    view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(message.id))
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+            val draggingMessage = view.queueReorderDraggedId?.let(rowsById::get)
+            if (draggingMessage != null) {
+                Box(
+                    Modifier.fillMaxWidth()
+                        .padding(end = 6.dp)
+                        .offset {
+                            IntOffset(
+                                0,
+                                (view.queueReorderPointerY - dragGrabOffsetY).roundToInt(),
+                            )
+                        }
+                        .zIndex(2f)
+                        .testTag("seq3-queue-drag-ghost-${draggingMessage.id}"),
+                ) {
+                    Seq3QueueRow(
+                        state = state,
+                        session = session,
+                        view = view,
+                        document = document,
+                        message = draggingMessage,
+                        visibleIds = visibleIds,
+                        reorderEnabled = reorderEnabled,
+                        isDragging = true,
+                        onRightClickAddAfter = {
+                            view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(draggingMessage.id))
+                        },
+                    )
                 }
             }
             VerticalScrollbar(
@@ -348,7 +796,9 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
  *  to the fixed Messages tile composition. */
 @Composable
 internal fun Seq3QueueHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
-    Seq3QueueHeader(state, session, seq3FilterCounts(session.document), view, showTitle = false)
+    Box {
+        Seq3QueueHeader(state, session, seq3FilterCounts(session.document), view, showTitle = false)
+    }
 }
 
 @Composable
@@ -643,25 +1093,27 @@ internal fun Seq3LifelinesHeaderActions(state: AppState, session: Seq3WorkspaceS
     val tc = tc()
     val document = session.document
     val compact = LocalTileHeaderWidthDp.current < SEQ3_LIFELINE_HEADER_LABELS_MIN_WIDTH_DP
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp),
-    ) {
-        Seq3LifelineDisplayDropdown(state, session, document, compact)
-        if (compact) {
-            TileIconButton(
-                icon = Icons.Outlined.Add,
-                contentDescription = "Add lifeline",
-                tooltip = "Add lifeline",
-                tag = "diagram-lifeline-add-compact",
-                onClick = { view.lifelineAddDialogOpen = true },
-            )
-        } else {
-            LabelIconButton(
-                text = "+ lifeline",
-                fontSize = 10.sp,
-                onClick = { view.lifelineAddDialogOpen = true },
-            )
+    Box {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 6.dp),
+        ) {
+            Seq3LifelineDisplayDropdown(state, session, document, compact)
+            if (compact) {
+                TileIconButton(
+                    icon = Icons.Outlined.Add,
+                    contentDescription = "Add lifeline",
+                    tooltip = "Add lifeline",
+                    tag = "diagram-lifeline-add-compact",
+                    onClick = { view.lifelineAddDialogOpen = true },
+                )
+            } else {
+                LabelIconButton(
+                    text = "+ lifeline",
+                    fontSize = 10.sp,
+                    onClick = { view.lifelineAddDialogOpen = true },
+                )
+            }
         }
     }
 }
@@ -1213,6 +1665,7 @@ private fun Seq3AddRowsDialog(entries: List<LogEntry>, onDismiss: () -> Unit, on
 @Composable
 private fun Seq3AddCustomDialog(
     document: Seq3Document,
+    positionOverride: Seq3InsertionPosition? = null,
     onDismiss: () -> Unit,
     onAdd: (Seq3CustomMessageSpec) -> Unit,
 ) {
@@ -1226,7 +1679,7 @@ private fun Seq3AddCustomDialog(
     var positionValue by remember { mutableStateOf("") }
     var fragmentId by remember { mutableStateOf<String?>(null) }
 
-    val position = when (positionMode) {
+    val position = positionOverride ?: when (positionMode) {
         Seq3CustomPositionMode.START -> Seq3InsertionPosition.Start
         Seq3CustomPositionMode.END -> Seq3InsertionPosition.End
         Seq3CustomPositionMode.BEFORE -> document.messages.firstOrNull { it.id == positionValue }
@@ -1277,7 +1730,7 @@ private fun Seq3AddCustomDialog(
         }
     }
 
-    val positionLabel = when (positionMode) {
+    val positionLabel = if (positionOverride != null) "After clicked row" else when (positionMode) {
         Seq3CustomPositionMode.START -> "At start"
         Seq3CustomPositionMode.END -> "At end"
         Seq3CustomPositionMode.INDEX -> "At index ${positionValue.ifBlank { "…" }}"
@@ -1326,7 +1779,9 @@ private fun Seq3AddCustomDialog(
                     modifier = Modifier.weight(1f),
                     fontSize = 12.sp,
                 )
-                Seq3DropdownButton(positionLabel, modifier = Modifier.weight(1f), menuWidth = 330.dp) { close ->
+                if (positionOverride != null) {
+                    AppText(positionLabel, color = tc.ac, fontSize = 11.sp, modifier = Modifier.weight(1f).padding(8.dp))
+                } else Seq3DropdownButton(positionLabel, modifier = Modifier.weight(1f), menuWidth = 330.dp) { close ->
                     Seq3DropdownMenuItem("At start", active = positionMode == Seq3CustomPositionMode.START) {
                         positionMode = Seq3CustomPositionMode.START; positionValue = ""; close()
                     }
@@ -1634,17 +2089,19 @@ internal fun Seq3FragmentsAndNotesSection(
 @Composable
 internal fun Seq3ArtifactsHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     val document = session.document
-    LabelIconButton(
-        text = "+ note",
-        fontSize = 10.sp,
-        onClick = {
-            val selectedIds = seq3SelectedMessageIds(document, view)
-            val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
-            if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
-                view.artifactsHint = "Select a message first to attach a note to it"
-            }
-        },
-    )
+    Box {
+        LabelIconButton(
+            text = "+ note",
+            fontSize = 10.sp,
+            onClick = {
+                val selectedIds = seq3SelectedMessageIds(document, view)
+                val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
+                if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
+                    view.artifactsHint = "Select a message first to attach a note to it"
+                }
+            },
+        )
+    }
 }
 
 /** Every message id a fragment's bracket spans — [Seq3Fragment.occurrenceRefs] takes precedence
@@ -1653,6 +2110,12 @@ internal fun Seq3ArtifactsHeaderActions(state: AppState, session: Seq3WorkspaceS
  *  `applyGroup`'s own `referencedMessageIds` computation. */
 internal fun seq3FragmentMessageCount(fragment: Seq3Fragment): Int =
     (fragment.messageIds + fragment.occurrenceRefs.map { it.messageId }).distinct().size
+
+/** Keeps the editable artifact label visible while avoiding a repeated kind word in the row title. */
+internal data class Seq3ArtifactHeading(val kind: String?, val label: String)
+
+internal fun seq3ArtifactHeading(kindWord: String, label: String): Seq3ArtifactHeading =
+    Seq3ArtifactHeading(kind = kindWord.takeUnless { it == label }, label = label)
 
 @Composable
 private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, fragment: Seq3Fragment) {
@@ -1704,6 +2167,17 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
             state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteFragment(fragment.id)))
         },
         view = view,
+        styleAction = {
+            val defaults = resolveSeq3ThemeColors(session.document, state.settings)
+            Seq3ArtifactColorAction(
+                state = state,
+                style = fragment.style,
+                onStyleChange = { style -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetFragmentStyle(fragment.id, style)) },
+                fillDefault = defaults.seq1.copy(alpha = .07f),
+                borderDefault = defaults.seq1,
+                textDefault = defaults.seq1,
+            )
+        },
         fragmentKind = fragment.kind,
         onSetFragmentKind = { kind ->
             state.seq3Sessions.applyCommand(
@@ -1809,6 +2283,17 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
             state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.id)))
         },
         view = view,
+        styleAction = {
+            val defaults = resolveSeq3ThemeColors(session.document, state.settings)
+            Seq3ArtifactColorAction(
+                state = state,
+                style = note.style,
+                onStyleChange = { style -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetNoteStyle(note.id, style)) },
+                fillDefault = defaults.seq2.copy(alpha = .20f),
+                borderDefault = defaults.seq2,
+                textDefault = defaults.tx,
+            )
+        },
     )
 }
 
@@ -1971,6 +2456,7 @@ private fun Seq3ArtifactRow(
     onToggleVisibility: () -> Unit,
     onRemove: () -> Unit,
     view: Seq3ViewState,
+    styleAction: (@Composable () -> Unit)? = null,
     // WP12: fragment-only controls (null/no-op for a note row). [fragmentKind] non-null is what
     // gates rendering the kind dropdown + hide-operator-word toggle below — a note has neither.
     fragmentKind: Seq3FragmentKind? = null,
@@ -2000,6 +2486,7 @@ private fun Seq3ArtifactRow(
     recentRefDiagrams: (() -> List<DiagramLibrarySummary>)? = null,
 ) {
     val tc = tc()
+    val heading = seq3ArtifactHeading(kindWord, label)
     Column(
         Modifier.fillMaxWidth()
             .clip(CORNER_SM)
@@ -2043,9 +2530,11 @@ private fun Seq3ArtifactRow(
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            AppText(kindWord, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                            heading.kind?.let { kind ->
+                                AppText(kind, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                            }
                             AppText(
-                                label,
+                                heading.label,
                                 color = if (!hidden) tc.tx else tc.ts,
                                 fontSize = 11.sp,
                                 maxLines = 1,
@@ -2078,6 +2567,7 @@ private fun Seq3ArtifactRow(
                                 onClick = onRename,
                             )
                         }
+                        if (styleAction != null) styleAction()
                         // WP12: fragment kind change + hide-operator-word toggle — mirrors the
                         // lifeline-kind Seq3DropdownButton above (`Seq3LifelineRow`). Absent for a
                         // note row, which has no kind at all.
@@ -2386,8 +2876,21 @@ private fun Seq3QueueRow(
     document: Seq3Document,
     message: Seq3Message,
     visibleIds: List<String>,
+    dragHandleModifier: Modifier = Modifier,
+    reorderEnabled: Boolean = true,
+    isDragging: Boolean = false,
+    onRightClickAddAfter: () -> Unit = {},
 ) {
     val tc = tc()
+    var contextMenuOpen by remember(session.id, message.id) { mutableStateOf(false) }
+    val menuFocusRequester = remember(session.id, message.id) { FocusRequester() }
+    LaunchedEffect(session.id, message.id, contextMenuOpen) {
+        if (contextMenuOpen) runCatching { menuFocusRequester.requestFocus() }
+    }
+    fun dismissContextMenu() {
+        contextMenuOpen = false
+        runCatching { view.focusRequester.requestFocus() }
+    }
     val selected = message.id in view.selection.selectedIds
     val needsTarget = message.state == Seq3State.NEEDS_TARGET
     val hidden = message.visibility == Seq3Visibility.HIDDEN
@@ -2406,7 +2909,7 @@ private fun Seq3QueueRow(
             .clip(CORNER_SM)
             .background(
                 when {
-                    focused -> tc.abg
+                    focused || isDragging -> tc.abg
                     selected -> tc.sl
                     needsTarget -> tc.warnBg
                     hovered -> tc.hv
@@ -2422,9 +2925,27 @@ private fun Seq3QueueRow(
             }
             .onPointerEvent(PointerEventType.Enter) { view.hoveredMessageId = message.id }
             .onPointerEvent(PointerEventType.Exit) { if (view.hoveredMessageId == message.id) view.hoveredMessageId = null }
+            .onPointerEvent(PointerEventType.Press) { event ->
+                if (event.buttons.isSecondaryPressed) {
+                    contextMenuOpen = true
+                    runCatching { view.focusRequester.requestFocus() }
+                }
+            }
+            .testTag("seq3-queue-row-${message.id}")
             .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TooltipArea(tooltip = {
+                ToolbarTooltip(if (reorderEnabled) "Drag to reorder message" else "Set sort to Log order to move messages")
+            }) {
+                Box(
+                    Modifier.width(14.dp).height(22.dp).testTag("seq3-queue-drag-${message.id}").then(dragHandleModifier)
+                        .then(if (reorderEnabled) Modifier.moveCursor() else Modifier),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText("⠿", color = if (reorderEnabled) tc.td else tc.td.copy(alpha = .45f), fontSize = 12.sp)
+                }
+            }
             if (message.occurrences.size > 1) {
                 Seq3OccurrenceToggle(
                     expanded = message.id in view.expandedOccurrenceMessageIds,
@@ -2527,6 +3048,18 @@ private fun Seq3QueueRow(
                 Seq3RowPatternLine(message, collapsedCount)
                 Seq3RowEndpointsLine(state, session, message)
                 Seq3MessageControlsLine(state, session, view, message, pinnable, hidden, mergeBackTarget)
+                if (message.kind == Seq3Kind.NOTE) {
+                    val defaults = resolveSeq3ThemeColors(document, state.settings)
+                    Seq3ArtifactColorAction(
+                        state = state,
+                        style = message.noteStyle,
+                        onStyleChange = { style -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetMessageNoteStyle(message.id, style)) },
+                        fillDefault = defaults.seq2.copy(alpha = .20f),
+                        borderDefault = defaults.seq2,
+                        textDefault = defaults.tx,
+                        modifier = Modifier.padding(start = 22.dp, top = 4.dp),
+                    )
+                }
                 if (hidden) {
                     Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         AppText("Hidden from canvas · evidence kept", color = tc.td, fontSize = 10.sp)
@@ -2593,6 +3126,40 @@ private fun Seq3QueueRow(
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
+            }
+        }
+        if (contextMenuOpen) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, with(LocalDensity.current) { 28.dp.roundToPx() }),
+                onDismissRequest = ::dismissContextMenu,
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(210.dp).clip(RoundedCornerShape(7.dp)).background(tc.p)
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(5.dp)
+                        .focusRequester(menuFocusRequester)
+                        .focusable()
+                        .onPreviewKeyEvent { event ->
+                            if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                                dismissContextMenu()
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                ) {
+                    AppButton(
+                        "Add message after this",
+                        onClick = {
+                            dismissContextMenu()
+                            onRightClickAddAfter()
+                        },
+                        variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().testTag("seq3-queue-context-add-after"),
+                        horizontalPadding = 8.dp,
+                    )
+                }
             }
         }
     }
@@ -3195,6 +3762,23 @@ internal fun seq3PinnableDirections(document: Seq3Document, messageId: String): 
  *  jumps around between rows as a selection changes kind/target. */
 internal fun seq3CanSwapEndpoints(message: Seq3Message): Boolean =
     message.kind != Seq3Kind.NOTE && message.toLifelineId != null
+
+private fun seq3QueueReorderCommand(
+    movedId: String?,
+    originalOrder: List<String>,
+    finalOrder: List<String>,
+): Seq3Command.MoveMessage? {
+    if (movedId == null) return null
+    val newIndex = finalOrder.indexOf(movedId)
+    val oldIndex = originalOrder.indexOf(movedId)
+    if (newIndex < 0 || oldIndex < 0 || newIndex == oldIndex || finalOrder.isEmpty()) return null
+    val position = if (newIndex < oldIndex) {
+        Seq3InsertionPosition.BeforeMessage(finalOrder.getOrNull(newIndex + 1) ?: finalOrder.last())
+    } else {
+        Seq3InsertionPosition.AfterMessage(finalOrder.getOrNull(newIndex - 1) ?: finalOrder.first())
+    }
+    return Seq3Command.MoveMessage(movedId, position)
+}
 
 /** Non-null exactly when [message] is currently drawn as one collapsed/badged arrow (spec §04's
  *  third inset row line) — the same condition Seq3Layout's own `expandForLayout` uses for

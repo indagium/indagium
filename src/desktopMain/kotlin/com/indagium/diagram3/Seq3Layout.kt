@@ -220,10 +220,14 @@ data class Seq3MessageNoteRow(
     override val rawTimestamp: String,
     val lifelineId: String,
     val box: Seq3Box,
-    /** Already wrapped/ellipsized to [Seq3LayoutOptions.maxLabelLines] — [box]'s height was sized
-     *  from exactly this many lines, so a renderer must draw these, never the message's own
-     *  un-wrapped [Seq3Message.labelTemplate] text, or the two will silently disagree. */
+    /** Wrapped from the complete message text by layout. [box]'s height is sized from these exact
+     *  lines, so renderers draw them directly instead of wrapping independently. */
     val lines: List<String>,
+    /** Exact text inset computed with the box so raster and Compose use the same padding. */
+    val textBox: Seq3Box = box,
+    /** Per-message NOTE style; null fields inherit the document theme in both renderers. */
+    val style: Seq3ArtifactStyle? = null,
+    val textLineHeight: Double = 14.0,
 ) : Seq3RowGeometry()
 
 /** The elision marker between a [Seq3Repeat.FIRST_LAST] message's first and last drawn rows. */
@@ -272,9 +276,22 @@ data class Seq3FragmentBox(
      *  versioning rule (see [Seq3Layout.activations]' own doc for why that rule matters here too).
      */
     val dividers: List<Seq3FragmentDivider> = emptyList(),
+    /** Nullable artifact colors are resolved against the active document theme by each renderer. */
+    val style: Seq3ArtifactStyle? = null,
 )
 
-data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
+data class Seq3NoteBox(
+    val noteId: String,
+    val box: Seq3Box,
+    val text: String,
+    /** Wrapped source lines retained by layout; renderers must not wrap this text independently. */
+    val lines: List<String> = listOf(text),
+    /** Exact padded text bounds shared by raster and Compose. */
+    val textBox: Seq3Box = box,
+    /** Nullable artifact colors are resolved against the active document theme by each renderer. */
+    val style: Seq3ArtifactStyle? = null,
+    val textLineHeight: Double = 14.0,
+)
 
 /** A [Seq3Delay]'s drawn geometry (WP11) — a labelled band spanning the full diagram width,
  *  anchored right after its [Seq3Delay.afterMessageId]'s own drawn row (the exact occurrence when
@@ -283,7 +300,17 @@ data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
  *  centers the label inside it and, per [seq3LifelineSegments], switches every lifeline crossing
  *  it to a dotted pattern for the band's height — see `buildRows`' own doc for where [box] comes
  *  from. */
-data class Seq3DelayBox(val delayId: String, val label: String, val box: Seq3Box)
+data class Seq3DelayBox(
+    val delayId: String,
+    val label: String,
+    /** Full-width vertical band reserved between message rows. */
+    val box: Seq3Box,
+    /** Centered visible control bounds, used for pointer hit testing and overlay sizing. */
+    val labelBox: Seq3Box = box,
+    /** Hit bounds for the visible chip and its editor state; deliberately much narrower than
+     * [box], but at least wide enough for the text field and both editor buttons. */
+    val hitBox: Seq3Box = labelBox,
+)
 
 /**
  * A promoted [Seq3StateInvariant]'s drawn geometry (WP18) — a small marker anchored ON its
@@ -408,7 +435,8 @@ data class Seq3Layout(
 
 // ── Layout constants (all unit-less "1x" values — see this file's header) ──────────────────────
 
-private const val MARGIN = 24.0
+internal const val SEQ3_LAYOUT_MARGIN = 24.0
+private const val MARGIN = SEQ3_LAYOUT_MARGIN
 private const val HEADER_PAD_H = 12.0
 private const val HEADER_PAD_V = 6.0
 private const val HEADER_MIN_W = 90.0
@@ -446,12 +474,17 @@ private const val STUB_LABEL_PILL_GAP = 6.0
 private const val BADGE_PAD_H = 6.0
 private const val BADGE_H = 16.0
 private const val NOTE_ROW_W = 130.0
+private const val NOTE_ROW_MAX_W = 260.0
+private const val NOTE_BOX_MAX_W = 320.0
 private const val NOTE_PAD = 6.0
-private const val NOTE_LINE_H = 14.0
+private const val NOTE_ROW_GAP = 8.0
 private const val ELISION_BOX_W = 40.0
 
 private const val FRAGMENT_PAD = 10.0
-private const val FRAGMENT_LABEL_H = 16.0
+// The canvas label control (label plus edit/delete actions) is up to 28 logical units tall. Use
+// that actual extent for brackets and shared row spacing, not just the text baseline height.
+private const val FRAGMENT_LABEL_H = 28.0
+private const val GROUP_GAP_CLEARANCE = 6.0
 private const val FRAGMENT_INSET_PER_DEPTH = 10.0
 
 // WP11: the vertical band a time-gap marker reserves between the row it follows and whatever
@@ -461,6 +494,17 @@ private const val FRAGMENT_INSET_PER_DEPTH = 10.0
 // emissions rather than replacing one, so this constant is added to the y-cursor directly in
 // buildRows rather than folded into a BuiltRow's own pitch.
 private const val DELAY_BAND_H = 34.0
+private const val DELAY_CONTROL_PAD_H = 4.0
+private const val DELAY_CONTROL_PAD_V = 2.0
+private const val DELAY_DELETE_BUTTON_W = 14.0
+private const val DELAY_CONTROL_GAP = 2.0
+private const val DELAY_CONTROL_MIN_H = 20.0
+// The delay editor is wider than a short label such as "delay": 90dp text field + two 16dp
+// buttons + two 2dp gaps + 6dp horizontal padding. Keep hitBox wide enough for both display and
+// edit states so Compose's parent bounds do not squeeze the field or leave the commit buttons
+// outside the pointer target.
+internal const val SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP = 90.0
+internal const val SEQ3_DELAY_EDITOR_MIN_WIDTH_DP = 132.0
 
 // The fixed intrusion a fragment box claims above its first row (ROW_H/2 + FRAGMENT_LABEL_H) — see
 // fragmentBoxFrom's own doc. buildRows widens the header-to-rows gap by at least this much whenever
@@ -525,10 +569,17 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // line, not the raw (possibly much longer) resolved name, so a long dotted name widens its
     // column only as far as its longest wrapped line actually needs.
     val displayNames = lifelinesSorted.map { l -> seq3DisplayName(l.name, l.displaySegments, doc.lifelineDisplaySegments) }
-    val labelLinesPerLifeline = displayNames.map { name -> seq3WrapDisplayName(name, HEADER_MAX_W - 2 * HEADER_PAD_H, tm) }
-    val headerWidths = labelLinesPerLifeline.map { lines ->
+    val autoLabelLinesPerLifeline = displayNames.map { name -> seq3WrapDisplayName(name, HEADER_MAX_W - 2 * HEADER_PAD_H, tm) }
+    val autoHeaderWidths = autoLabelLinesPerLifeline.map { lines ->
         val widest = withMeasurementSlack(lines.maxOfOrNull { tm.width(Seq3FontRole.LIFELINE, it) } ?: 0.0)
         (widest + 2 * HEADER_PAD_H).coerceIn(HEADER_MIN_W, HEADER_MAX_W)
+    }
+    val headerWidths = lifelinesSorted.mapIndexed { index, lifeline ->
+        lifeline.headerWidthDp?.coerceIn(MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP, MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP)
+            ?: autoHeaderWidths[index]
+    }
+    val labelLinesPerLifeline = displayNames.mapIndexed { index, name ->
+        seq3WrapDisplayName(name, headerWidths[index] - 2 * HEADER_PAD_H, tm)
     }
     // headerHeight is ONE shared value across every column (Seq3LifelineColumn's own doc:
     // lifelineTop = MARGIN + headerHeight is shared geometry) — computed from the MAXIMUM line
@@ -601,6 +652,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
             ?: candidateIndices.last()
         delaysByRowIndex.getOrPut(targetIndex) { mutableListOf() } += delay
     }
+    val siblingBoundaryPadding = fragmentSiblingBoundaryPadding(doc.fragments, emissions, requirements, delaysByRowIndex)
     val bandLeft = lefts.firstOrNull() ?: MARGIN
     val rowBuild = buildRows(
         emissions,
@@ -612,6 +664,8 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         delaysByRowIndex,
         bandLeft,
         contentRight,
+        siblingBoundaryPadding,
+        tm,
     )
 
     // WP10: which row, if any, creates/destroys each lifeline — see resolveSeq3Lifecycle's own
@@ -897,6 +951,7 @@ private sealed class Emission {
         override val entryId: Int?,
         override val timestampMillis: Long?,
         val rawTimestamp: String,
+        val style: Seq3ArtifactStyle? = null,
     ) : Emission()
 
     /** The "N more" marker between a [Seq3Repeat.FIRST_LAST] message's first and last drawn rows —
@@ -952,6 +1007,7 @@ private fun expandForLayout(
                 occ?.entryId,
                 message.primaryTimestampMillis,
                 message.primaryRawTimestamp,
+                message.noteStyle,
             ),
         )
     }
@@ -1495,7 +1551,12 @@ private fun prefixEmissionLabels(
 
 // ── Label/requirement measurement ───────────────────────────────────────────────────────────
 
-private class RowRequirement(val lines: List<String>, val labelWidth: Double, val badgeWidth: Double)
+private class RowRequirement(
+    val lines: List<String>,
+    val labelWidth: Double,
+    val badgeWidth: Double,
+    val lineHeight: Double = 0.0,
+)
 
 private fun badgeText(count: Int): String = "×$count"
 
@@ -1513,18 +1574,86 @@ private fun withMeasurementSlack(width: Double): Double =
     if (width <= 0.0) width else width + LABEL_SLACK_CONSTANT + width * LABEL_SLACK_RATIO
 
 private fun measureRequirement(emission: Emission, tm: Seq3TextMetrics, maxLines: Int): RowRequirement {
+    if (emission is Emission.Note) {
+        // NOTE rows use a fixed, bounded box. Their full text is wrapped within that width,
+        // including explicit newlines and single unbroken tokens; other message labels retain
+        // the existing one-line/optional-wrap behavior.
+        val contentWidth = NOTE_ROW_MAX_W - 2 * NOTE_PAD
+        val lines = wrapFixedText(emission.text, tm, Seq3FontRole.NOTE, contentWidth)
+        return RowRequirement(lines, contentWidth, 0.0, tm.lineHeight(Seq3FontRole.NOTE))
+    }
     val (text, repeatCount) = when (emission) {
         is Emission.Arrow -> emission.label to emission.repeatCount
         is Emission.Self -> emission.label to emission.repeatCount
         is Emission.Stub -> emission.label to emission.repeatCount
-        is Emission.Note -> emission.text to 1
+        is Emission.Note -> error("NOTE requirements are handled above")
         is Emission.Elision -> return RowRequirement(emptyList(), 0.0, 0.0)
     }
-    val role = if (emission is Emission.Note) Seq3FontRole.NOTE else Seq3FontRole.LABEL
+    val role = Seq3FontRole.LABEL
     val lines = wrapLines(text, tm, role, maxLines.coerceAtLeast(1))
     val labelWidth = withMeasurementSlack(lines.maxOfOrNull { tm.width(role, it) } ?: 0.0)
     val badgeWidth = if (repeatCount > 1) withMeasurementSlack(tm.width(Seq3FontRole.BADGE, badgeText(repeatCount))) + 2 * BADGE_PAD_H else 0.0
     return RowRequirement(lines, labelWidth, badgeWidth)
+}
+
+/** Fixed-width note wrapping shared by canvas notes and NOTE message rows. Explicit line breaks
+ * are retained, words wrap at spaces, and an overlong token is split by measured character width
+ * so no renderer needs to clip or wrap the same source text independently. */
+private fun wrapFixedText(
+    text: String,
+    tm: Seq3TextMetrics,
+    role: Seq3FontRole,
+    maxWidth: Double,
+): List<String> {
+    val width = maxWidth.coerceAtLeast(1.0)
+    val result = mutableListOf<String>()
+    fun splitLongWord(word: String): List<String> {
+        val pieces = mutableListOf<String>()
+        var start = 0
+        while (start < word.length) {
+            var end = start + 1
+            while (end < word.length && tm.width(role, word.substring(start, end + 1)) <= width) end++
+            pieces += word.substring(start, end)
+            start = end
+        }
+        return pieces
+    }
+    val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+    val paragraphs = mutableListOf<String>()
+    var paragraphStart = 0
+    for (index in normalized.indices) {
+        if (normalized[index] == '\n') {
+            paragraphs += normalized.substring(paragraphStart, index)
+            paragraphStart = index + 1
+        }
+    }
+    paragraphs += normalized.substring(paragraphStart)
+    for (paragraph in paragraphs) {
+        if (paragraph.isBlank()) {
+            result += ""
+            continue
+        }
+        var current = ""
+        for (word in paragraph.trim().split(Regex("\\s+")).filter(String::isNotEmpty)) {
+            val candidate = if (current.isEmpty()) word else "$current $word"
+            if (tm.width(role, candidate) <= width) {
+                current = candidate
+            } else {
+                if (current.isNotEmpty()) result += current
+                current = ""
+                if (tm.width(role, word) > width) {
+                    val pieces = splitLongWord(word)
+                    result += pieces.dropLast(1)
+                    current = pieces.lastOrNull().orEmpty()
+                } else {
+                    current = word
+                }
+            }
+        }
+        if (current.isNotEmpty()) result += current
+    }
+    if (result.isEmpty()) result += ""
+    return result
 }
 
 private fun wrapLines(text: String, tm: Seq3TextMetrics, role: Seq3FontRole, maxLines: Int): List<String> {
@@ -1607,8 +1736,14 @@ private fun solveGaps(
             }
             is Emission.Note -> {
                 val c = lifelineIndex[emission.fromLifelineId] ?: return@forEachIndexed
-                val need = NOTE_PAD + max(NOTE_ROW_W, req.labelWidth + 2 * NOTE_PAD)
-                rightExtra = widenSingle(gaps, headerWidths, c, need, rightExtra)
+                val halfBoxWidth = max(NOTE_ROW_W, req.labelWidth + 2 * NOTE_PAD) / 2
+                // A NOTE row is centered on its source lifeline. Reserve its full half-width on
+                // both sides; the old right-only reservation let the first note extend left of
+                // the canvas margin and clipped its border/text in both renderers.
+                val leftNeed = if (c == 0) (halfBoxWidth - headerWidths[c] / 2).coerceAtLeast(0.0) else halfBoxWidth
+                leftExtra = widenLeftSingle(gaps, headerWidths, c, leftNeed, leftExtra)
+                val rightNeed = if (c == n - 1) (halfBoxWidth - headerWidths[c] / 2).coerceAtLeast(0.0) else halfBoxWidth
+                rightExtra = widenSingle(gaps, headerWidths, c, rightNeed, rightExtra)
             }
             is Emission.Elision -> Unit
         }
@@ -1727,31 +1862,153 @@ private fun buildRows(
     delaysByRowIndex: Map<Int, List<Seq3Delay>> = emptyMap(),
     bandLeft: Double = MARGIN,
     bandRight: Double = MARGIN,
+    siblingBoundaryPadding: Map<Int, Double> = emptyMap(),
+    textMetrics: Seq3TextMetrics,
 ): RowBuildResult {
     val rows = mutableListOf<Seq3RowGeometry>()
     val delayBoxes = mutableListOf<Seq3DelayBox>()
     val first = HashMap<String, Int>()
     val last = HashMap<String, Int>()
     val rowYByIndex = HashMap<Int, Pair<Double, Double>>()
+    var minimumNextRowVisualTop: Double? = null
     val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
     var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
     emissions.forEachIndexed { i, emission ->
         val req = requirements[i]
-        val built = buildRow(emission, req, lifelineIndex, centers, y) ?: return@forEachIndexed
+        var built = buildRow(emission, req, lifelineIndex, centers, y) ?: return@forEachIndexed
+        minimumNextRowVisualTop?.let { floor ->
+            val actualTop = rowVisibleTop(built.geometry)
+            if (actualTop < floor) {
+                // Delays sit between row baselines. A following note box or label can extend above
+                // its row baseline, so the next baseline must be pushed down by that real visual
+                // overhang or the control band will paint through the next artifact.
+                y += floor - actualTop
+                built = buildRow(emission, req, lifelineIndex, centers, y) ?: return@forEachIndexed
+            }
+        }
+        minimumNextRowVisualTop = null
         first.getOrPut(emission.messageId) { rows.size }
         rows += built.geometry
         last[emission.messageId] = rows.lastIndex
         rowYByIndex[i] = rowVerticalExtent(built.geometry)
         y += built.pitch
         rightExtra = max(rightExtra, built.rightEdge)
-        delaysByRowIndex[i]?.forEach { delay ->
-            val box = Seq3Box(bandLeft, y, (bandRight - bandLeft).coerceAtLeast(1.0), DELAY_BAND_H)
-            delayBoxes += Seq3DelayBox(delay.id, delay.label, box)
-            y += DELAY_BAND_H
+        val rowDelays = delaysByRowIndex[i].orEmpty()
+        rowDelays.forEach { delay ->
+            val bandHeight = delayBandHeight(textMetrics)
+            val box = Seq3Box(bandLeft, y, (bandRight - bandLeft).coerceAtLeast(1.0), bandHeight)
+            val centerX = box.x + box.width / 2
+            val labelWidth = withMeasurementSlack(textMetrics.width(Seq3FontRole.DELAY, delay.label)).coerceAtLeast(1.0)
+            val labelBox = Seq3Box(centerX - labelWidth / 2, box.y, labelWidth, bandHeight)
+            val controlWidth = max(
+                labelWidth + 2 * DELAY_CONTROL_PAD_H + DELAY_DELETE_BUTTON_W + DELAY_CONTROL_GAP,
+                SEQ3_DELAY_EDITOR_MIN_WIDTH_DP,
+            )
+            val controlHeight = max(DELAY_CONTROL_MIN_H, textMetrics.lineHeight(Seq3FontRole.DELAY) + 2 * DELAY_CONTROL_PAD_V)
+            val hitBox = Seq3Box(centerX - controlWidth / 2, box.y + (bandHeight - controlHeight) / 2, controlWidth, controlHeight)
+            delayBoxes += Seq3DelayBox(delay.id, delay.label, box, labelBox, hitBox)
+            y += bandHeight
         }
+        if (rowDelays.isNotEmpty()) minimumNextRowVisualTop = y
+        y += siblingBoundaryPadding[i] ?: 0.0
     }
     return RowBuildResult(rows, first, last, y, rightExtra, delayBoxes, rowYByIndex)
+}
+
+private fun rowVisibleTop(row: Seq3RowGeometry): Double = when (row) {
+    is Seq3ArrowRow -> min(row.y, min(row.labelBox.y, row.badgeBox?.y ?: row.y))
+    is Seq3SelfLoopRow -> min(row.y, row.labelBox.y)
+    is Seq3UnresolvedStubRow -> min(row.y, min(row.labelBox.y, row.dropPill.y))
+    is Seq3MessageNoteRow -> min(row.y, row.box.y)
+    is Seq3ElisionRow -> row.box.y
+}
+
+private fun delayBandHeight(tm: Seq3TextMetrics): Double {
+    // The full band contains the visible 13pt label and its edit/delete control, with clear space
+    // above and below. Height is measured from the same font metrics used for text wrapping.
+    val visibleControlHeight = max(DELAY_CONTROL_MIN_H, tm.lineHeight(Seq3FontRole.DELAY) + 2 * DELAY_CONTROL_PAD_V)
+    return max(DELAY_BAND_H, visibleControlHeight + 2 * DELAY_CONTROL_PAD_V)
+}
+
+/** Extra pitch before the next emission where one sibling fragment closes and another opens.
+ * The bracket's closing edge, the next fragment's actual 28-unit edit control, and any delay band
+ * anchored after the closing row are treated as real geometry. Nested groups only add spacing
+ * between sibling groups at the same depth; a delay between rows inside a still-open group remains
+ * inside that group and receives no boundary padding. */
+private fun fragmentSiblingBoundaryPadding(
+    fragments: List<Seq3Fragment>,
+    emissions: List<Emission>,
+    requirements: List<RowRequirement>,
+    delaysByRowIndex: Map<Int, List<Seq3Delay>>,
+): Map<Int, Double> {
+    if (fragments.isEmpty() || emissions.isEmpty()) return emptyMap()
+    val spans = fragmentEmissionSpans(fragments, emissions)
+    val nested = nestFragmentEmissionSpans(spans)
+    return nested.mapNotNull { closing ->
+        val isSiblingBoundary = nested.any { next -> next.depth == closing.depth && next.start == closing.end + 1 }
+        if (!isSiblingBoundary) return@mapNotNull null
+        val index = closing.end
+        val row = emissions.getOrNull(index) ?: return@mapNotNull null
+        val requirement = requirements.getOrNull(index) ?: return@mapNotNull null
+        val padding = fragmentBoundaryPadding(row, requirement, delaysByRowIndex[index].orEmpty().isNotEmpty())
+        if (padding <= 0.0) null else index to padding
+    }.groupBy({ it.first }, { it.second })
+        .mapValues { (_, values) -> values.maxOrNull() ?: 0.0 }
+}
+
+private data class FragmentEmissionSpan(val start: Int, val end: Int, val depth: Int)
+
+private fun fragmentEmissionSpans(fragments: List<Seq3Fragment>, emissions: List<Emission>): List<IntRange> {
+    val rowsByMessage = emissions.indices.groupBy { emissions[it].messageId }
+    return fragments.asSequence()
+        .filter { it.visibility == Seq3Visibility.VISIBLE }
+        .mapNotNull { fragment ->
+            val exactIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
+            val exactIndices = fragment.occurrenceRefs.mapNotNull { ref ->
+                emissions.indices.firstOrNull { index ->
+                    emissions[index].messageId == ref.messageId && emissions[index].entryId == ref.entryId
+                }
+            }
+            val messageIndices = fragment.messageIds.filterNot { it in exactIds }.flatMap { rowsByMessage[it].orEmpty() }
+            val indices = (exactIndices + messageIndices).distinct()
+            val first = indices.minOrNull() ?: return@mapNotNull null
+            val last = indices.maxOrNull() ?: return@mapNotNull null
+            first..last
+        }
+        .sortedWith(compareBy<IntRange>({ it.first }, { -it.last }))
+        .toList()
+}
+
+private fun nestFragmentEmissionSpans(spans: List<IntRange>): List<FragmentEmissionSpan> {
+    val nested = mutableListOf<FragmentEmissionSpan>()
+    val stack = ArrayDeque<FragmentEmissionSpan>()
+    spans.forEach { range ->
+        while (stack.isNotEmpty() && stack.last().end < range.first) stack.removeLast()
+        val parent = stack.lastOrNull()
+        val span = FragmentEmissionSpan(range.first, parent?.let { min(range.last, it.end) } ?: range.last, stack.size)
+        nested += span
+        stack.addLast(span)
+    }
+    return nested
+}
+
+private fun fragmentBoundaryPadding(row: Emission, req: RowRequirement, hasDelay: Boolean): Double {
+    val (pitch, bottomOffset) = when (row) {
+        is Emission.Note -> max(ROW_H, req.lines.size * req.lineHeight + 2 * NOTE_PAD + NOTE_ROW_GAP) to
+            max(ROW_H / 2, -ROW_H / 2 + req.lines.size * req.lineHeight + 2 * NOTE_PAD)
+        is Emission.Self -> (ROW_H + max(SELF_EXTRA, ROW_H / 2)) to max(ROW_H / 2, max(SELF_EXTRA, ROW_H / 2))
+        is Emission.Stub -> (ROW_H + STUB_LABEL_PILL_GAP + PILL_H) to max(ROW_H / 2, -ROW_H / 2 + STUB_LABEL_PILL_GAP + PILL_H)
+        is Emission.Elision -> (ROW_H / 2) to ROW_H / 4
+        is Emission.Arrow -> ROW_H to ROW_H / 2
+    }
+    // With a delay, the band occupies the space after the closing row. The next fragment's opening
+    // control needs its own reserve after that band; the delay cannot stand in for the header gap.
+    return if (hasDelay) {
+        GROUP_GAP_CLEARANCE + ROW_H / 2 + FRAGMENT_LABEL_H
+    } else {
+        (bottomOffset + GROUP_GAP_CLEARANCE + ROW_H / 2 + FRAGMENT_LABEL_H - pitch).coerceAtLeast(0.0)
+    }
 }
 
 /**
@@ -1913,10 +2170,16 @@ private fun buildNoteRow(e: Emission.Note, req: RowRequirement, lifelineIndex: M
     val idx = lifelineIndex[e.fromLifelineId] ?: return null
     val cx = centers[idx]
     val width = max(NOTE_ROW_W, req.labelWidth + 2 * NOTE_PAD)
-    val height = req.lines.size * NOTE_LINE_H + 2 * NOTE_PAD
+    val height = req.lines.size * req.lineHeight + 2 * NOTE_PAD
     val box = Seq3Box(cx - width / 2, y - ROW_H / 2, width, height.coerceAtLeast(ROW_H / 2))
-    val row = Seq3MessageNoteRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, box, req.lines)
-    return BuiltRow(row, ROW_H, box.x + box.width)
+    val textWidth = (box.width - 2 * NOTE_PAD).coerceAtLeast(1.0)
+    val textHeight = (box.height - 2 * NOTE_PAD).coerceAtLeast(req.lineHeight)
+    val textBox = Seq3Box(box.x + NOTE_PAD, box.y + NOTE_PAD, textWidth, textHeight)
+    val row = Seq3MessageNoteRow(
+        e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, box, req.lines,
+        textBox = textBox, style = e.style, textLineHeight = req.lineHeight,
+    )
+    return BuiltRow(row, max(ROW_H, box.height + NOTE_ROW_GAP), box.x + box.width)
 }
 
 private fun buildElisionRow(e: Emission.Elision, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {
@@ -2113,7 +2376,7 @@ private fun fragmentBoxFrom(
     val right = (xs.maxOrNull() ?: 0.0) + FRAGMENT_PAD - inset
     val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
     val top = max(rawTop, minTop)
-    val bottom = (spanned.lastOrNull()?.y ?: 0.0) + ROW_H / 2
+    val bottom = spanned.lastOrNull()?.let(::fragmentRowBottom) ?: 0.0
     val label = fragment.label.ifBlank { fragment.kind.name.lowercase() }
     return Seq3FragmentBox(
         fragment.id,
@@ -2123,7 +2386,18 @@ private fun fragmentBoxFrom(
         depth,
         fragment.hideKindLabel,
         fragmentDividers(fragment, range, firstRowIndex, rows),
+        fragment.style,
     )
+}
+
+/** Full lower edge of a row's visible geometry, used so a fragment's closing border does not cut
+ * through the final note text, stub pill, or self-loop bottom segment. */
+private fun fragmentRowBottom(row: Seq3RowGeometry): Double = when (row) {
+    is Seq3ArrowRow -> row.y + ROW_H / 2
+    is Seq3SelfLoopRow -> max(row.y + ROW_H / 2, row.loopBottomY)
+    is Seq3UnresolvedStubRow -> max(row.y + ROW_H / 2, row.dropPill.y + row.dropPill.height)
+    is Seq3MessageNoteRow -> max(row.y + ROW_H / 2, row.box.y + row.box.height)
+    is Seq3ElisionRow -> row.box.y + row.box.height
 }
 
 private fun rowXExtent(row: Seq3RowGeometry): List<Double> = when (row) {
@@ -2148,16 +2422,24 @@ private fun layoutNotes(
     val visibleNotes = notes.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (visibleNotes.isEmpty()) return emptyList()
     return visibleNotes.mapNotNull { note ->
-        val naturalWidth = max(NOTE_ROW_W, tm.width(Seq3FontRole.NOTE, note.text) + 2 * NOTE_PAD)
-        val naturalHeight = ROW_H / 2 + NOTE_PAD
+        val noteLineHeight = tm.lineHeight(Seq3FontRole.NOTE)
+        val naturalWidth = note.text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+            .maxOfOrNull { tm.width(Seq3FontRole.NOTE, it) }?.plus(2 * NOTE_PAD)
+            ?.coerceIn(NOTE_ROW_W, NOTE_BOX_MAX_W) ?: NOTE_ROW_W
         // WP7 item 3: a free-floating note (the empty-canvas "Add note here" context menu) carries
         // its own explicit geometry and an EMPTY messageIds — it has nothing to anchor to on
         // purpose. Resolve its box from that geometry FIRST, before ever touching messageIds/
         // lastRowIndex, so it is never dropped for having no message span (the old code's ?: return
         // null on an empty `note.messageIds.mapNotNull{...}.maxOrNull()` did exactly that).
         if (note.x != null && note.y != null && note.width != null && note.height != null) {
-            val box = Seq3Box(note.x, note.y, max(NOTE_ROW_W, note.width), max(naturalHeight, note.height))
-            return@mapNotNull Seq3NoteBox(note.id, box, note.text)
+            // A user-sized box keeps its explicit width; automatic sizing is the only path with a
+            // maximum. Very wide authored boxes remain wide and still wrap at their own text inset.
+            val width = note.width.coerceAtLeast(NOTE_ROW_W)
+            val lines = wrapFixedText(note.text, tm, Seq3FontRole.NOTE, width - 2 * NOTE_PAD)
+            val requiredHeight = lines.size * noteLineHeight + 2 * NOTE_PAD
+            val box = Seq3Box(note.x, note.y, width, max(requiredHeight, note.height))
+            val textBox = Seq3Box(box.x + NOTE_PAD, box.y + NOTE_PAD, box.width - 2 * NOTE_PAD, box.height - 2 * NOTE_PAD)
+            return@mapNotNull Seq3NoteBox(note.id, box, note.text, lines, textBox, note.style, noteLineHeight)
         }
         // Ordinary message-spanning note (design spec §06's "Note" verb): anchor to the LAST drawn
         // row among its messages, same as before this WP.
@@ -2165,7 +2447,14 @@ private fun layoutNotes(
         val anchorRow = rows.getOrNull(anchorIdx) ?: return@mapNotNull null
         val touchedX = note.messageIds.mapNotNull { lastRowIndex[it] }.flatMap { rowXExtent(rows[it]) }
         val cx = touchedX.average().takeIf { !it.isNaN() } ?: centers.firstOrNull() ?: 0.0
-        val box = Seq3Box(cx - naturalWidth / 2, anchorRow.y + ROW_H / 2, naturalWidth, naturalHeight)
-        Seq3NoteBox(note.id, box, note.text)
+        val lines = wrapFixedText(note.text, tm, Seq3FontRole.NOTE, naturalWidth - 2 * NOTE_PAD)
+        val box = Seq3Box(
+            max(MARGIN, cx - naturalWidth / 2),
+            anchorRow.y + ROW_H / 2,
+            naturalWidth,
+            lines.size * noteLineHeight + 2 * NOTE_PAD,
+        )
+        val textBox = Seq3Box(box.x + NOTE_PAD, box.y + NOTE_PAD, box.width - 2 * NOTE_PAD, box.height - 2 * NOTE_PAD)
+        Seq3NoteBox(note.id, box, note.text, lines, textBox, note.style, noteLineHeight)
     }
 }

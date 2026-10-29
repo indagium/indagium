@@ -1636,6 +1636,26 @@ can never draw something the user didn't see on screen, because both consumers d
 the same computed `Seq3Layout`, differing only in which transform (density vs. raster scale) turns
 its numbers into pixels.
 
+Manual sequence editing adds an optional `Seq3Document.rowOrder` of stable `Seq3RowRef` values
+(message id and optional occurrence entry id). An empty order retains chronological rendering;
+an authored order is resolved by the shared ordering helper used by layout, text emission, and
+lifecycle validation. Reordering never rewrites log timestamps or occurrence evidence. Canvas
+drags can move one occurrence, while a message-list drag moves the parent's occurrences together.
+Hidden references retain their positions and obsolete references are discarded during edits.
+The default message-list order follows the first represented row; its alternative sorts remain
+views rather than mutations.
+
+Canvas inline editors share one active target across message labels, group labels, delays,
+notes, and lifeline names. Opening another editor discards the previous uncommitted draft;
+group headers take pointer priority over message editors that extend into their header area.
+
+`Seq3Lifeline.headerWidthDp` overrides automatic name-box measurement. Nullable
+`Seq3ArtifactStyle` ARGB fill, border, and text overrides apply to fragments, notes, and NOTE
+messages; absent fields retain the diagram theme. These fields and row order are optional additions
+to the existing v1 JSON codec, so older saved diagrams need no migration. Note text wrapping and
+group/delay boundary spacing belong to layout, with both renderers consuming the resulting
+geometry and wrapped text instead of measuring a second time.
+
 Diagram workspaces remain deliberately separate from `LogTab`, same shape as before the cutover:
 `AppState.tabs` stays the list of open log files; `ActiveSurface` selects either a log tab
 (`ActiveSurface.Log`) or an independent `Seq3WorkspaceSession` (`ActiveSurface.Diagram3` — the only
@@ -1652,6 +1672,17 @@ last preset. Narrow windows use a scrollable preview-first stack, where controls
 The tree, hidden tiles, collapsed tiles, lock, and last preset are saved with the diagram's `seq3View` state; maximize remains transient. Older saved
 section-open and expanded flags migrate into hidden and collapsed tiles on restore. Escape first lets a focused editor handle the key, then clears
 transient workspace state before restoring a maximized tile.
+
+PlantUML source is an independent workspace tile with the same resize, move, collapse, hide, and
+maximize controls as the other diagram tiles. It starts hidden, below the preview in the default
+tree, and its visibility and geometry use the existing tile-state codec. Visual editing remains
+available while source is visible. A clean source buffer follows the latest document automatically;
+an unapplied draft is retained and marked stale if the document's generated source changes.
+Reload explicitly discards that draft; Apply is disabled until a stale draft has been reloaded.
+The conservative `Seq3SourceImport` inverse of Indagium's emitted syntax retains identity/evidence
+markers and presentation metadata and reports unsupported syntax with line diagnostics. Apply is
+one `ReplaceDocument` undo transaction; removing evidence requires confirmation. Text-field undo
+stays local to the text editor; Ctrl+Z/Cmd+Z elsewhere restores the active session's document.
 
 ---
 
@@ -3603,6 +3634,9 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | New tab layout settings decode: round trip, defaults for `{}`/legacy, sanitizing of duplicate/unknown ids, bad weights and over-deep trees | `HomeLayoutSettingCodecTest` |
 | Tiling host: default arrangement, hide/restore, last section not hideable, preset click, one settings write per grip drag, splitter commit on release, tip | `HomeTilingUiTest` |
 | Generic tiling surface: collapse, lock, park, maximize, reset, grip drag, multi-emission, invisible splitters (no size readout, no splitter line at rest, hovered or dragged) | `TilingSurfaceUiTest`, `TileLayoutEngineTest` |
+| Sequence presentation order, occurrence moves, insertion membership, lifecycle validation, and persisted widths/colors | `Seq3RowOrderTest`, `Seq3CommandsTest`, `Seq3CodecTest`, `Seq3LifecycleTest` |
+| Shared group/delay spacing and wrapped note text in canvas/PNG | `Seq3LayoutTest`, `Seq3RasterTest` |
+| Sequence pointer release cleanup, continuous drag previews and edge scrolling, compact artifact colors, source synchronization, and undo focus | `Seq3CanvasQueuePointerUiTest`, `Seq3ArtifactColorsUiTest`, `Seq3SourceAndQueueInteractionsUiTest`, `DiagramWorkspaceTilingUiTest` |
 | Scrolling side columns: which splits scroll, heights, last-tile stretch, resize pins siblings and moves the tiles below, min/max, collapse, hidden siblings, reset, visible geometry and drops, scroll offsets | `TileScrollColumnTest`, `LogViewLayoutTest`, `LogViewLayoutSettingCodecTest` |
 | Scrolling columns on a surface: wheel, scrollbar, clip outside the viewport, nested scrolling first, short content fills, resize on release, bring into view, drop onto what is on screen | `TilingScrollUiTest`, `LogViewTilingUiTest` |
 | The column scrollbar takes the pointer only at its thumb; the rest of the strip resizes the column | `TilingScrollbarSplitterUiTest` |

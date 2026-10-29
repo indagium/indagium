@@ -18,13 +18,18 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
 import com.indagium.model.LogEntry
@@ -37,6 +42,7 @@ import java.io.File
 import java.nio.file.Files
 import javax.imageio.ImageIO
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -94,6 +100,14 @@ class DiagramWorkspaceTilingUiTest {
         assertTrue(messages.right <= preview.left, "authoring tiles should sit to the left of preview in wide layout")
         saveEvidenceScreenshot("diagram-wide-generated.png", rule.onNodeWithTag("diagram-tiling-host").captureToImage())
 
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("diagram-tile-card-source").assertExists()
+        rule.onNodeWithTag("seq3-source-editor").assertIsDisplayed()
+        saveEvidenceScreenshot("seq3-source-tile.png", rule.onNodeWithTag("diagram-tiling-host").captureToImage())
+        rule.onNodeWithTag("diagram-tile-hide-source").performMouseInput { click() }
+        rule.waitForIdle()
+
         rule.runOnIdle { workspaceWidth = 620 }
         rule.waitForIdle()
         val narrowPreview = rule.onNodeWithTag("diagram-tile-card-preview").getBoundsInRoot()
@@ -144,7 +158,83 @@ class DiagramWorkspaceTilingUiTest {
         rule.onNodeWithTag("diagram-layout-menu-reset").performClick()
         rule.waitForIdle()
         assertEquals(DiagramWorkspacePreset.CANVAS_FOCUS.layout, view.diagramTileLayout)
-        assertTrue(view.diagramHiddenTiles.isEmpty(), "Reset should restore all preset tiles")
+        assertEquals(listOf(DiagramWorkspaceSectionId.SOURCE), view.diagramHiddenTiles, "presets keep source hidden until requested")
+    }
+
+    @Test
+    fun sourceTileCanBeShownCollapsedHiddenAndItsVisibilityPersists() {
+        val tab = mkTab("diagram-source-tile", "source-tile.log", emptyList())
+        state.tabs = listOf(tab)
+        state.activateTab(tab.id)
+        val sessionId = requireNotNull(state.seq3Sessions.beginEmpty(tab.id))
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        assertTrue(DiagramWorkspaceSectionId.SOURCE in view.diagramHiddenTiles)
+        assertFalse(DiagramWorkspaceSectionId.SOURCE in view.diagramCollapsedTiles, "new source tile starts expanded")
+        setWorkspace(sessionId)
+        rule.waitForIdle()
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("diagram-layout-menu-panel-source").performClick()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(DiagramWorkspaceSectionId.SOURCE !in view.diagramHiddenTiles)
+        rule.onNodeWithTag("diagram-tile-card-source").assertExists()
+        rule.onNodeWithTag("seq3-source-editor").assertExists()
+        val sourceEditor = rule.onNodeWithTag("seq3-source-editor")
+        val sourceDraft = "${view.sourceDraft}\n' visibility draft"
+        sourceEditor.performTextReplacement(sourceDraft)
+        rule.waitForIdle()
+        assertTrue(view.sourceDraftDirty)
+        assertTrue(view.textFieldFocused)
+        assertFalse(DiagramWorkspaceSectionId.SOURCE in view.diagramCollapsedTiles, "source tile starts expanded after Show")
+
+        val collapseControl = rule.onNodeWithTag("diagram-tile-collapse-source").assertIsDisplayed()
+        val collapseBounds = collapseControl.getBoundsInRoot()
+        val editorBounds = rule.onNodeWithTag("seq3-source-editor").getBoundsInRoot()
+        val headerBounds = rule.onNodeWithTag("diagram-tile-header-source").getBoundsInRoot()
+        val sourceCardBounds = rule.onNodeWithTag("diagram-tile-card-source").getBoundsInRoot()
+        val previewBounds = rule.onNodeWithTag("diagram-tile-card-preview").getBoundsInRoot()
+        val collapseCenterX = (collapseBounds.left.value + collapseBounds.right.value) / 2
+        val collapseCenterY = (collapseBounds.top.value + collapseBounds.bottom.value) / 2
+        assertFalse(
+            collapseCenterX in editorBounds.left.value..editorBounds.right.value &&
+                collapseCenterY in editorBounds.top.value..editorBounds.bottom.value,
+            "source editor bounds $editorBounds must not cover the collapse control at ($collapseCenterX, $collapseCenterY)",
+        )
+        saveEvidenceScreenshot("source-tile-collapse-before.png", rule.onNodeWithTag("diagram-tiling-host").captureToImage())
+        collapseControl.performMouseInput { click() }
+        rule.waitForIdle()
+        assertTrue(
+            DiagramWorkspaceSectionId.SOURCE in view.diagramCollapsedTiles,
+            "physical collapse click did not update state; control=$collapseBounds header=$headerBounds " +
+                "card=$sourceCardBounds preview=$previewBounds editor=$editorBounds",
+        )
+        assertFalse(view.textFieldFocused, "collapsing the focused source tile returns focus to the workspace")
+        assertEquals(sourceDraft, view.sourceDraft, "collapse preserves the detached source draft")
+        rule.onNodeWithTag("seq3-workspace-root").assertIsFocused()
+        rule.onNodeWithTag("diagram-tile-collapse-source").performClick()
+        rule.waitForIdle()
+        assertTrue(DiagramWorkspaceSectionId.SOURCE !in view.diagramCollapsedTiles)
+
+        rule.onNodeWithTag("diagram-tile-hide-source").performMouseInput { click() }
+        rule.waitForIdle()
+        assertTrue(DiagramWorkspaceSectionId.SOURCE in view.diagramHiddenTiles)
+        assertFalse(view.textFieldFocused)
+        assertEquals(sourceDraft, view.sourceDraft, "hiding preserves the draft for a later show")
+
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("diagram-layout-menu-panel-source").performClick()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertEquals(sourceDraft, view.sourceDraft)
+        assertTrue(view.sourceDraftDirty)
+        val tokenWithSourceVisible = state.seq3ViewToken()
+        rule.onNodeWithTag("diagram-tile-hide-source").performClick()
+        rule.waitForIdle()
+        state.restoreSeq3ViewToken(tokenWithSourceVisible)
+        rule.waitForIdle()
+        assertTrue(DiagramWorkspaceSectionId.SOURCE !in view.diagramHiddenTiles, "saved visibility restores the explicit Show choice")
+        rule.onNodeWithTag("diagram-tile-card-source").assertExists()
     }
 
     private fun setWorkspace(sessionId: String) {

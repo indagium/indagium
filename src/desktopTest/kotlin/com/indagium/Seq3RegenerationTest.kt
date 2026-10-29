@@ -3,9 +3,11 @@ package com.indagium
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.Seq3RegenChangeKind
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.acceptAllSeq3Regen
@@ -20,6 +22,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class Seq3RegenerationTest {
+    private companion object {
+        const val CUSTOM_HEADER_WIDTH_DP = 144.0
+    }
+
     private fun occ(id: Int) = Seq3Occurrence(id, 100L + id, "10:00:00.000", 1, 1, 'I', "text $id")
 
     private fun message(id: String, from: String, to: String?, entryId: Int, template: String, authoring: Seq3Authoring = Seq3Authoring.AUTO) =
@@ -142,6 +148,27 @@ class Seq3RegenerationTest {
         assertTrue("f-new" in ids) // accepted the addition
         assertTrue("c-edited" in ids) // locked, always kept
         assertEquals(freshDocument().lifelines, applied.lifelines, "lifelines always track the fresh scan")
+    }
+
+    @Test
+    fun regenerationRefreshesLifelineSetButPreservesPresentationOverridesByStableId() {
+        val original = currentDocument()
+        val editedA = original.lifelines.first().copy(
+            visibility = Seq3Visibility.HIDDEN,
+            kind = Seq3LifelineKind.ACTOR,
+            displaySegments = 1,
+            headerWidthDp = CUSTOM_HEADER_WIDTH_DP,
+        )
+        val current = original.copy(lifelines = listOf(editedA, original.lifelines[1]))
+        val applied = applySeq3Regeneration(current, reviewSeq3Regeneration(current, freshDocument()))
+
+        assertEquals(listOf("A", "B", "C"), applied.lifelines.map { it.id })
+        assertEquals("A", applied.lifelines.first().name, "the fresh scan still supplies identity data")
+        assertEquals(Seq3Visibility.HIDDEN, applied.lifelines.first().visibility)
+        assertEquals(Seq3LifelineKind.ACTOR, applied.lifelines.first().kind)
+        assertEquals(1, applied.lifelines.first().displaySegments)
+        assertEquals(CUSTOM_HEADER_WIDTH_DP, applied.lifelines.first().headerWidthDp)
+        assertEquals(Seq3LifelineKind.PARTICIPANT, applied.lifelines.last().kind, "new lifelines keep fresh defaults")
     }
 
     @Test

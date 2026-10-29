@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Authoring
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Delay
@@ -21,6 +22,7 @@ import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3StateInvariant
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.importSeq3Source
 import com.indagium.diagram3.toSource
 import kotlin.test.Test
@@ -56,6 +58,23 @@ class Seq3SourceImportTest {
         assertEquals(before.messages.single().occurrences, result.document.messages.single().occurrences)
     }
 
+    @Test fun sourceImportKeepsStyleAndHeaderWidthMetadata() {
+        val style = Seq3ArtifactStyle(fillArgb = 0xff112233.toInt(), borderArgb = 0xff445566.toInt(), textArgb = null)
+        val before = document().copy(
+            lifelines = document().lifelines.map { it.copy(headerWidthDp = 132.0) },
+            messages = document().messages.map { it.copy(kind = Seq3Kind.NOTE, toLifelineId = null, noteStyle = style) },
+            fragments = listOf(Seq3Fragment("f", Seq3FragmentKind.GROUP, "group", listOf("m1"), style = style)),
+            notes = listOf(Seq3Note("n", "annotation", listOf("m1"), style = style)),
+        )
+        val result = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(before.toSource(Seq3Dialect.MERMAID), Seq3Dialect.MERMAID, before),
+        )
+        assertEquals(132.0, result.document.lifelines.first { it.id == "A" }.headerWidthDp)
+        assertEquals(style, result.document.messages.single().noteStyle)
+        assertEquals(style, result.document.fragments.single().style)
+        assertEquals(style, result.document.notes.single().style)
+    }
+
     @Test fun invalidSourceDoesNotProducePartialDocument() {
         val result = importSeq3Source("sequenceDiagram\n    made up grammar", Seq3Dialect.MERMAID, document())
         assertIs<Seq3SourceImportResult.Failure>(result)
@@ -78,7 +97,7 @@ class Seq3SourceImportTest {
         assertEquals(before, document(), "the pure importer must not mutate its input")
     }
 
-    @Test fun markedEvidenceReorderAndInconsistentRepeatedEditFailAtomically() {
+    @Test fun markedEvidenceReorderIsStoredAndInconsistentRepeatedEditFailsAtomically() {
         val twoMessages = document().copy(messages = listOf(
             document().messages.single(),
             Seq3Message("m2", Seq3Match("A", "pong"), "A", "B", "pong"),
@@ -92,10 +111,11 @@ class Seq3SourceImportTest {
         lines[first] = secondBlock[1]
         lines[second - 1] = firstBlock[0]
         lines[second] = firstBlock[1]
-        val reordered = assertIs<Seq3SourceImportResult.Failure>(
+        val reordered = assertIs<Seq3SourceImportResult.Success>(
             importSeq3Source(lines.joinToString("\n"), Seq3Dialect.MERMAID, twoMessages),
         )
-        assertTrue(reordered.diagnostics.any { it.line > 0 && it.message.contains("reordered") })
+        assertEquals(listOf("m2", "m1"), reordered.document.rowOrder.map { it.messageId })
+        assertFalse(reordered.evidenceLoss)
 
         val repeated = document().copy(messages = listOf(
             Seq3Message(
@@ -113,6 +133,69 @@ class Seq3SourceImportTest {
         )
         assertTrue(inconsistentFailure.diagnostics.any { it.line > 0 && it.message.contains("inconsistent") })
         assertEquals("value {n}", repeated.messages.single().labelTemplate)
+    }
+
+    @Test fun deletingOneRepeatedEmissionHidesOnlyThatOccurrenceAndRequestsConfirmation() {
+        val repeated = document().copy(messages = listOf(
+            Seq3Message(
+                "m1", Seq3Match("A", "value {n}", listOf(Seq3Capture("n", Seq3CaptureSource.AUTHOR))),
+                "A", "B", "value {n}", repeat = Seq3Repeat.EVERY,
+                occurrences = listOf(
+                    Seq3Occurrence(1, 1, "00", 1, 1, 'I', "one", mapOf("n" to "one")),
+                    Seq3Occurrence(2, 2, "00", 1, 1, 'I', "two", mapOf("n" to "two")),
+                ),
+            ),
+        ))
+        val source = repeated.toSource(Seq3Dialect.MERMAID)
+        val lines = source.lines().toMutableList()
+        val firstArrow = lines.indexOfFirst { it.trim() == "A->>B: value one" }
+        lines.removeAt(firstArrow)
+        lines.removeAt(firstArrow - 1)
+        val withoutFirst = lines.joinToString("\n")
+        val imported = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(withoutFirst, Seq3Dialect.MERMAID, repeated),
+        )
+        assertTrue(imported.evidenceLoss)
+        assertEquals(listOf(Seq3Visibility.HIDDEN, Seq3Visibility.VISIBLE), imported.document.messages.single().occurrences.map { it.visibility })
+    }
+
+    @Test fun unchangedRepeatSummariesDoNotTreatElidedOccurrencesAsDeleted() {
+        val fourOccurrences = (1..4).map { entryId ->
+            Seq3Occurrence(entryId, entryId.toLong(), "00", 1, 1, 'I', "value $entryId", mapOf("n" to entryId.toString()))
+        }
+        listOf(Seq3Repeat.FIRST_LAST, Seq3Repeat.COLLAPSE_ABOVE).forEach { repeat ->
+            val repeated = document().copy(messages = listOf(
+                Seq3Message(
+                    "m1", Seq3Match("A", "value {n}", listOf(Seq3Capture("n", Seq3CaptureSource.AUTHOR))),
+                    "A", "B", "value {n}", repeat = repeat, repeatThreshold = 2, occurrences = fourOccurrences,
+                ),
+            ))
+            val imported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(repeated.toSource(Seq3Dialect.MERMAID), Seq3Dialect.MERMAID, repeated),
+            )
+            assertFalse(imported.evidenceLoss, repeat.name)
+            assertEquals(fourOccurrences, imported.document.messages.single().occurrences, repeat.name)
+        }
+    }
+
+    @Test fun newUnmarkedRowsKeepTheirInterleavedSourceOrder() {
+        val repeated = document().copy(messages = listOf(
+            Seq3Message(
+                "m1", Seq3Match("A", "value {n}", listOf(Seq3Capture("n", Seq3CaptureSource.AUTHOR))),
+                "A", "B", "value {n}", repeat = Seq3Repeat.EVERY,
+                occurrences = listOf(
+                    Seq3Occurrence(1, 1, "00", 1, 1, 'I', "one", mapOf("n" to "one")),
+                    Seq3Occurrence(2, 2, "00", 1, 1, 'I', "two", mapOf("n" to "two")),
+                ),
+            ),
+        ))
+        val edited = repeated.toSource(Seq3Dialect.MERMAID)
+            .replace("A->>B: value one", "A->>B: value one\n    A->>B: extra one")
+            .replace("A->>B: value two", "A->>B: value two\n    A->>B: extra two")
+        val imported = assertIs<Seq3SourceImportResult.Success>(importSeq3Source(edited, Seq3Dialect.MERMAID, repeated))
+        assertEquals(listOf("m1#1", "new", "m1#2", "new"), imported.document.rowOrder.map { ref ->
+            if (ref.messageId == "m1") "m1#${ref.occurrenceEntryId}" else "new"
+        })
     }
 
     @Test fun unmarkedArrowIsAuthoredAndCandidateBoundsAreCheckedBeforeSuccess() {

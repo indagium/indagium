@@ -1,10 +1,12 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Authoring
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CommandResult
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
@@ -12,6 +14,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
@@ -79,6 +82,38 @@ class Seq3CommandsTest {
         assertEquals(0, result.document.lifelines.single { it.id == "B" }.ordinal)
         assertEquals(1, result.document.lifelines.single { it.id == "A" }.ordinal)
         assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
+    fun titleHeaderWidthAndNoteStyleCommandsAreUndoableAndNoOpsDoNotCreateHistory() {
+        val note = message("note", "A", null, 3).copy(kind = Seq3Kind.NOTE)
+        val doc = baseDocument().copy(messages = baseDocument().messages + note)
+        val title = applySeq3Command(doc, Seq3Command.SetTitle("Edited title"))
+        assertTrue(title.applied)
+        assertEquals(doc, title.undo?.let(::undoSeq3Command))
+        val titleNoOp = applySeq3Command(title.document, Seq3Command.SetTitle("Edited title"))
+        assertFalseApplied(titleNoOp)
+        assertNull(titleNoOp.undo)
+
+        val width = applySeq3Command(doc, Seq3Command.SetLifelineHeaderWidth("A", 120.0))
+        assertTrue(width.applied)
+        assertEquals(120.0, width.document.lifelines.single { it.id == "A" }.headerWidthDp)
+        val badWidth = applySeq3Command(doc, Seq3Command.SetLifelineHeaderWidth("A", Double.NaN))
+        assertFalseApplied(badWidth)
+        assertEquals(doc, badWidth.document)
+
+        val style = Seq3ArtifactStyle(fillArgb = 0xff112233.toInt(), borderArgb = null, textArgb = 0xffffffff.toInt())
+        val styled = applySeq3Command(doc, Seq3Command.SetMessageNoteStyle("note", style))
+        assertTrue(styled.applied)
+        assertEquals(style, styled.document.messages.single { it.id == "note" }.noteStyle)
+        val styleNoOp = applySeq3Command(styled.document, Seq3Command.SetMessageNoteStyle("note", style))
+        assertFalseApplied(styleNoOp)
+        assertNull(styleNoOp.undo)
+
+        val rowRef = Seq3RowRef("m1", 1)
+        val rowNoOp = applySeq3Command(doc, Seq3Command.MoveRow(rowRef, Seq3InsertionPosition.BeforeRow(rowRef)))
+        assertFalseApplied(rowNoOp)
+        assertNull(rowNoOp.undo)
     }
 
     @Test

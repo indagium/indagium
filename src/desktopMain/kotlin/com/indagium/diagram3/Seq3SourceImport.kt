@@ -86,6 +86,7 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     val activeNewFragments = ArrayDeque<String>()
     val newFragmentMessages = mutableMapOf<String, MutableList<String>>()
     val seenMarkedMessages = mutableListOf<String>()
+    val importedRowOrder = mutableListOf<Seq3RowRef>()
     val seenEvidence = mutableSetOf<Pair<String, Int?>>()
     val seenMarkerPayloads = mutableSetOf<String>()
     val unmarkedMessages = mutableListOf<Seq3Message>()
@@ -98,6 +99,7 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     var lastUnmarkedMessageIndex: Int? = null
 
     fun recordEmission(marker: SourceMarker) {
+        importedRowOrder += Seq3RowRef(marker.id, marker.entryId)
         pendingOperands.toList().forEach { (operandMarker, guard) ->
             val (fragmentId, old) = knownOperands[operandMarker.id] ?: return@forEach
             rebuiltOperands.getOrPut(fragmentId, ::mutableListOf).add(
@@ -287,6 +289,7 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                     repeat = Seq3Repeat.EVERY,
                     authoring = Seq3Authoring.EDITED,
                 )
+                importedRowOrder += Seq3RowRef(unmarkedMessages.last().id)
                 lifecycleBeforeArrow = null
                 lastMarkedArrow = null
                 lastUnmarkedMessageIndex = unmarkedMessages.lastIndex
@@ -364,6 +367,14 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             }
             if (marker.type != "message") {
                 fail(lineNo, "${marker.type} marker cannot annotate this note statement.")
+                return@forEachIndexed
+            }
+            if (marker.role == "elision") {
+                // FIRST_LAST writes an elision glyph as a marked annotation row. It is a renderer
+                // summary, not a NOTE message edit or omitted evidence, so preserve its parent and
+                // record only the stable summary-row position.
+                seenMarkedMessages += marker.id
+                recordEmission(marker)
                 return@forEachIndexed
             }
             val old = knownMessages[marker.id] ?: return@forEachIndexed
@@ -483,15 +494,17 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     }
     if (errors.isNotEmpty()) return Seq3SourceImportResult.Failure(errors)
 
-    // Relative reorder of marked evidence is unsafe: it changes the log story without changing an
-    // occurrence.  Compare only first appearances, because EVERY emits a message more than once.
+    // The exported row order is editable.  Compare full stable row refs (not only parent ids) so a
+    // source editor can reorder repeated emissions and preserve that order durably.
     val order = seenMarkedMessages.distinct()
-    val baseline = sourceMarkerMessageOrder(existing.toSource(dialect), dialect).filter { it in order }.distinct()
-    if (order != baseline) {
-        return Seq3SourceImportResult.Failure(
-            listOf(Seq3SourceDiagnostic(1, "Marked evidence emissions were reordered.")),
-        )
-    }
+    val baselineRows = sourceMarkerRowOrder(existing.toSource(dialect), dialect).distinct()
+    val baselineRowSet = baselineRows.toSet()
+    val observedRows = importedRowOrder.distinct()
+    val observedExistingRows = observedRows.filter { it in baselineRowSet }
+    val baselineSurvivors = baselineRows.filter { it in observedExistingRows.toSet() }
+    val orderChanged = observedExistingRows != baselineSurvivors || observedRows.any { it !in baselineRowSet }
+    val missingRows = baselineRowSet - observedRows.toSet()
+    val missingOccurrenceRows = missingRows.filter { it.occurrenceEntryId != null && it.messageId in order }
 
     val removedEvidence = existing.messages.filter { message ->
         message.visibility == Seq3Visibility.VISIBLE &&
@@ -500,12 +513,24 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     }
     val mergedLifelines = existing.lifelines.map { lifelineEdits[it.id] ?: it } +
         lifelineEdits.values.filter { it.id !in knownLifelines }
-    val result = existing.copy(
+    val importedMessages = existing.messages
+        .filter { it.id in order || it.visibility == Seq3Visibility.HIDDEN }
+        .map { message ->
+            val edited = messageEdits[message.id] ?: message
+            val removedEntries = missingOccurrenceRows.asSequence()
+                .filter { it.messageId == message.id }
+                .mapNotNull { it.occurrenceEntryId }
+                .toSet()
+            if (removedEntries.isEmpty()) edited else edited.copy(
+                occurrences = edited.occurrences.map { occurrence ->
+                    if (occurrence.entryId in removedEntries) occurrence.copy(visibility = Seq3Visibility.HIDDEN) else occurrence
+                },
+            )
+        } + unmarkedMessages
+    val resultBase = existing.copy(
         title = title ?: existing.title,
         lifelines = mergedLifelines,
-        messages = existing.messages
-            .filter { it.id in order || it.visibility == Seq3Visibility.HIDDEN }
-            .map { messageEdits[it.id] ?: it } + unmarkedMessages,
+        messages = importedMessages,
         fragments = existing.fragments.map { fragment ->
             (fragmentEdits[fragment.id] ?: fragment).let { edited ->
                 val withOperands = rebuiltOperands[fragment.id]
@@ -541,6 +566,12 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         stateInvariants = existing.stateInvariants.map { stateEdits[it.id] ?: it }
             .filter { it.visibility == Seq3Visibility.HIDDEN || it.id in seenMarkedStates },
     )
+    val orderedBase = if (orderChanged) {
+        resultBase.copy(rowOrder = mergeImportedRowOrder(existing, resultBase, baselineRows, observedRows, missingRows))
+    } else {
+        resultBase
+    }
+    val result = reconcileSeq3RowOrder(existing, orderedBase)
     seq3DocumentBoundsViolation(result)?.let { violation ->
         return Seq3SourceImportResult.Failure(listOf(Seq3SourceDiagnostic(1, violation)))
     }
@@ -563,7 +594,7 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     return Seq3SourceImportResult.Success(
         result,
         result.toSource(dialect).trimEnd('\n'),
-        removedEvidence.isNotEmpty(),
+        removedEvidence.isNotEmpty() || missingOccurrenceRows.isNotEmpty(),
     )
 }
 
@@ -729,9 +760,48 @@ private fun sourceMarkerLabels(source: String, dialect: Seq3Dialect): Map<Marker
     return result
 }
 
-private fun sourceMarkerMessageOrder(source: String, dialect: Seq3Dialect): List<String> = source.lineSequence().mapNotNull { line ->
-    parseSourceMarker(line.trim(), dialect)?.takeIf { it.type == "message" }?.id
+private fun sourceMarkerRowOrder(source: String, dialect: Seq3Dialect): List<Seq3RowRef> = source.lineSequence().mapNotNull { line ->
+    parseSourceMarker(line.trim(), dialect)?.takeIf { it.type == "message" }?.let { Seq3RowRef(it.id, it.entryId) }
 }.toList()
+
+/** Uses the complete observed source sequence, including new unmarked rows. Hidden, removed-but-
+ *  retained, and elided refs stay anchored to the nearest preceding old visible row, so they remain
+ *  near their prior position if that row becomes visible again. */
+private fun mergeImportedRowOrder(
+    existing: Seq3Document,
+    imported: Seq3Document,
+    baselineRows: List<Seq3RowRef>,
+    observedRows: List<Seq3RowRef>,
+    missingRows: Set<Seq3RowRef>,
+): List<Seq3RowRef> {
+    val knownMessages = imported.messages.associateBy { it.id }
+    fun isValid(ref: Seq3RowRef): Boolean {
+        val message = knownMessages[ref.messageId] ?: return false
+        return ref.occurrenceEntryId == null || message.occurrences.any { it.entryId == ref.occurrenceEntryId }
+    }
+    val baselineSet = baselineRows.toSet()
+    val oldOrder = (existing.rowOrder.ifEmpty { baselineRows }).distinct()
+    val preservedBeforeFirst = mutableListOf<Seq3RowRef>()
+    val preservedAfter = linkedMapOf<Seq3RowRef, MutableList<Seq3RowRef>>()
+    var previousBaseline: Seq3RowRef? = null
+    oldOrder.forEach { old ->
+        if (!isValid(old)) return@forEach
+        if (old !in baselineSet || old in missingRows) {
+            if (previousBaseline == null) preservedBeforeFirst += old
+            else preservedAfter.getOrPut(requireNotNull(previousBaseline)) { mutableListOf() } += old
+        }
+        if (old in baselineSet && old !in missingRows) previousBaseline = old
+    }
+    val merged = mutableListOf<Seq3RowRef>()
+    val present = hashSetOf<Seq3RowRef>()
+    fun append(ref: Seq3RowRef) { if (isValid(ref) && present.add(ref)) merged += ref }
+    preservedBeforeFirst.forEach(::append)
+    observedRows.forEach { ref ->
+        append(ref)
+        if (ref in baselineSet) preservedAfter[ref].orEmpty().forEach(::append)
+    }
+    return merged
+}
 
 private fun sourceDirectives(source: String): List<String> = source.lineSequence().map { it.trim() }
     .filter { it.startsWith("activate ") || it.startsWith("deactivate ") || it.startsWith("create ") || it.startsWith("destroy ") }

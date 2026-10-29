@@ -1,5 +1,7 @@
 package com.indagium.diagram3
 
+import com.indagium.model.LogEntry
+
 // ── Every mutation as a named, undoable command ─────────────────────────────────────────────
 //
 // The single choke point every document edit in v3 flows through, so `⌘Z` (spec §09) is always
@@ -58,6 +60,12 @@ sealed class Seq3Command {
     /** Adds a message with explicit endpoints, timestamp, and queue position as one undoable edit. */
     data class AddCustomMessage(val spec: Seq3CustomMessageSpec) : Seq3Command()
 
+    /** Adds a tokenizer-backed message from selected log rows at a precise row/parent position. */
+    data class AddSelectionMessage(
+        val selectedEntries: List<LogEntry>,
+        val position: Seq3InsertionPosition = Seq3InsertionPosition.End,
+    ) : Seq3Command()
+
     /** Updates an author-controlled timestamp without rewriting the message's log evidence. */
     data class SetMessageTimestamp(
         val messageId: String,
@@ -67,6 +75,9 @@ sealed class Seq3Command {
 
     /** Moves one queue row to an explicit position as one undoable edit. */
     data class MoveMessage(val messageId: String, val position: Seq3InsertionPosition) : Seq3Command()
+
+    /** Moves one exact canvas/emitter row without changing its parent or occurrence membership. */
+    data class MoveRow(val rowRef: Seq3RowRef, val position: Seq3InsertionPosition) : Seq3Command()
 
     /** Splits one occurrence out of a grouped generated message and places it at its evidence
      *  timestamp. The remaining grouped message stays in place; both rows remain undoable as one
@@ -94,6 +105,14 @@ sealed class Seq3Command {
         val width: Double,
         val height: Double,
     ) : Seq3Command()
+
+    data class SetNoteStyle(val noteId: String, val style: Seq3ArtifactStyle?) : Seq3Command()
+
+    data class SetFragmentStyle(val fragmentId: String, val style: Seq3ArtifactStyle?) : Seq3Command()
+
+    data class SetMessageNoteStyle(val messageId: String, val style: Seq3ArtifactStyle?) : Seq3Command()
+
+    data class SetTitle(val title: String) : Seq3Command()
 
     data class ReorderLifelines(val orderedLifelineIds: List<String>) : Seq3Command()
 
@@ -128,6 +147,8 @@ sealed class Seq3Command {
     /** Per-lifeline display-name override (item 3's "name ▾" control) — null resets to "inherit
      *  the diagram default" ([Seq3Document.lifelineDisplaySegments]). */
     data class SetLifelineDisplaySegments(val lifelineId: String, val segments: Int?) : Seq3Command()
+
+    data class SetLifelineHeaderWidth(val lifelineId: String, val widthDp: Double?) : Seq3Command()
 
     /** Diagram-wide default for every lifeline that doesn't set its own [SetLifelineDisplaySegments]
      *  override. */
@@ -182,11 +203,21 @@ fun applySeq3Command(document: Seq3Document, command: Seq3Command): Seq3CommandR
         // violations against the prior document so a legacy malformed diagram can still receive
         // unrelated edits, while any newly introduced defect rejects this entire command before it
         // reaches undo history.
-        val lifecycleViolation = seq3NewLifecycleViolation(document, outcome.document)
+        val normalized = reconcileSeq3RowOrder(document, outcome.document)
+        val boundsViolation = seq3RowOrderBoundsViolation(normalized)
+            .takeIf { normalized.rowOrder.size > document.rowOrder.size }
+        if (boundsViolation != null) {
+            return Seq3CommandResult(document, applied = false, reason = boundsViolation)
+        }
+        val lifecycleViolation = seq3NewLifecycleViolation(document, normalized)
         if (lifecycleViolation != null) {
             Seq3CommandResult(document, applied = false, reason = lifecycleViolation.rejectionReason())
         } else {
-            Seq3CommandResult(outcome.document, applied = true, undo = Seq3UndoEntry(outcome.label, document))
+            if (normalized == document) {
+                Seq3CommandResult(document, applied = false, reason = "No change")
+            } else {
+                Seq3CommandResult(normalized, applied = true, undo = Seq3UndoEntry(outcome.label, document))
+            }
         }
     }
 }
@@ -215,13 +246,19 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.ReplaceMessage -> dispatchReplaceMessage(document, command)
     is Seq3Command.ReplaceDocument -> dispatchReplaceDocument(document, command)
     is Seq3Command.AddCustomMessage -> dispatchAddCustomMessage(document, command)
+    is Seq3Command.AddSelectionMessage -> dispatchAddSelectionMessage(document, command)
     is Seq3Command.SetMessageTimestamp -> dispatchSetMessageTimestamp(document, command)
     is Seq3Command.MoveMessage -> dispatchMoveMessage(document, command)
+    is Seq3Command.MoveRow -> dispatchMoveRow(document, command)
     is Seq3Command.MoveOccurrenceOut -> dispatchMoveOccurrenceOut(document, command)
     is Seq3Command.MoveOccurrencesOut -> dispatchMoveOccurrencesOut(document, command)
     is Seq3Command.MoveOccurrenceBack -> dispatchMoveOccurrenceBack(document, command)
     is Seq3Command.SetOccurrenceVisibility -> dispatchSetOccurrenceVisibility(document, command)
     is Seq3Command.SetNoteGeometry -> dispatchSetNoteGeometry(document, command)
+    is Seq3Command.SetNoteStyle -> dispatchSetNoteStyle(document, command)
+    is Seq3Command.SetFragmentStyle -> dispatchSetFragmentStyle(document, command)
+    is Seq3Command.SetMessageNoteStyle -> dispatchSetMessageNoteStyle(document, command)
+    is Seq3Command.SetTitle -> dispatchSetTitle(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
@@ -232,6 +269,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SplitLifeline -> dispatchSplitLifeline(document, command)
     is Seq3Command.SetLifelineKind -> dispatchSetLifelineKind(document, command)
     is Seq3Command.SetLifelineDisplaySegments -> dispatchSetLifelineDisplaySegments(document, command)
+    is Seq3Command.SetLifelineHeaderWidth -> dispatchSetLifelineHeaderWidth(document, command)
     is Seq3Command.SetDocumentDisplaySegments -> dispatchSetDocumentDisplaySegments(document, command)
     is Seq3Command.SetDocumentTheme -> dispatchSetDocumentTheme(document, command)
     is Seq3Command.SetShowSequenceNumbers -> dispatchSetShowSequenceNumbers(document, command)
@@ -329,6 +367,12 @@ private fun dispatchAddCustomMessage(document: Seq3Document, command: Seq3Comman
         is Seq3CustomMessageResult.Rejected -> unapplied(document, result.reason)
     }
 
+private fun dispatchAddSelectionMessage(document: Seq3Document, command: Seq3Command.AddSelectionMessage): Outcome =
+    when (val result = addSeq3MessageFromSelection(document, command.selectedEntries, command.position)) {
+        is Seq3AddResult.Added -> if (result.document == document) unapplied(document, "No change") else applied(result.document, "Add message")
+        is Seq3AddResult.Rejected -> unapplied(document, result.reason)
+    }
+
 private fun dispatchSetMessageTimestamp(document: Seq3Document, command: Seq3Command.SetMessageTimestamp): Outcome =
     when (val result = updateSeq3MessageTimestamp(document, command.messageId, command.timestampMillis, command.rawTimestamp)) {
         is Seq3MessageEditResult.Updated -> if (result.document == document) {
@@ -345,6 +389,16 @@ private fun dispatchMoveMessage(document: Seq3Document, command: Seq3Command.Mov
             unapplied(document, "No change")
         } else {
             applied(result.document, "Move message")
+        }
+        is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchMoveRow(document: Seq3Document, command: Seq3Command.MoveRow): Outcome =
+    when (val result = moveSeq3Row(document, command.rowRef, command.position)) {
+        is Seq3MessageEditResult.Updated -> if (result.document == document) {
+            unapplied(document, "No change")
+        } else {
+            applied(result.document, "Move row")
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
     }
@@ -406,6 +460,33 @@ private fun dispatchSetNoteGeometry(document: Seq3Document, command: Seq3Command
         },
     )
     return if (updated == document) unapplied(document, "No change") else applied(updated, "Move/resize note")
+}
+
+private fun dispatchSetNoteStyle(document: Seq3Document, command: Seq3Command.SetNoteStyle): Outcome {
+    if (document.notes.none { it.id == command.noteId }) return unapplied(document, "Unknown note")
+    val updated = document.copy(notes = document.notes.map { if (it.id == command.noteId) it.copy(style = command.style) else it })
+    return if (updated == document) unapplied(document, "No change") else applied(updated, "Style note")
+}
+
+private fun dispatchSetFragmentStyle(document: Seq3Document, command: Seq3Command.SetFragmentStyle): Outcome {
+    if (document.fragments.none { it.id == command.fragmentId }) return unapplied(document, "Unknown fragment")
+    val updated = document.copy(fragments = document.fragments.map { if (it.id == command.fragmentId) it.copy(style = command.style) else it })
+    return if (updated == document) unapplied(document, "No change") else applied(updated, "Style fragment")
+}
+
+private fun dispatchSetMessageNoteStyle(document: Seq3Document, command: Seq3Command.SetMessageNoteStyle): Outcome {
+    val message = document.messages.firstOrNull { it.id == command.messageId } ?: return unapplied(document, "Unknown message")
+    if (message.kind != Seq3Kind.NOTE) return unapplied(document, "Only note messages can be styled")
+    if (message.noteStyle == command.style) return unapplied(document, "No change")
+    return applied(
+        document.copy(messages = document.messages.map { if (it.id == command.messageId) it.copy(noteStyle = command.style) else it }),
+        "Style message note",
+    )
+}
+
+private fun dispatchSetTitle(document: Seq3Document, command: Seq3Command.SetTitle): Outcome {
+    if (document.title == command.title) return unapplied(document, "No change")
+    return applied(document.copy(title = command.title), "Set title")
 }
 
 private fun dispatchReorder(document: Seq3Document, command: Seq3Command.ReorderLifelines): Outcome {
@@ -575,6 +656,19 @@ private fun dispatchSetLifelineDisplaySegments(document: Seq3Document, command: 
             lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(displaySegments = command.segments) else it },
         ),
         "Set display name",
+    )
+}
+
+private fun dispatchSetLifelineHeaderWidth(document: Seq3Document, command: Seq3Command.SetLifelineHeaderWidth): Outcome {
+    val lifeline = document.lifelines.firstOrNull { it.id == command.lifelineId } ?: return unapplied(document, "Unknown lifeline")
+    val width = command.widthDp
+    if (width != null && (!width.isFinite() || width !in MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP..MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP)) {
+        return unapplied(document, "Header width must be between $MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP and $MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP dp")
+    }
+    if (lifeline.headerWidthDp == width) return unapplied(document, "No change")
+    return applied(
+        document.copy(lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(headerWidthDp = width) else it }),
+        if (width == null) "Reset header width" else "Set header width",
     )
 }
 

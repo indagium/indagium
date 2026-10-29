@@ -14,6 +14,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.reviewSeq3Regeneration
@@ -89,6 +90,23 @@ class Seq3LifecycleTest {
 
         assertFalse(result.applied)
         assertEquals(document, result.document, "a lifecycle rejection must not partially edit the document")
+        assertTrue(result.reason!!.contains("CREATE for B must be its first visible interaction"))
+    }
+
+    @Test
+    fun movingAnExactRowAcrossLifecycleBoundaryIsRejectedAtomically() {
+        val document = legalDocument()
+        val workEntry = "work".hashCode()
+        val createEntry = "create".hashCode()
+        val result = applySeq3Command(
+            document,
+            Seq3Command.MoveRow(
+                Seq3RowRef("work", workEntry),
+                Seq3InsertionPosition.BeforeRow(Seq3RowRef("create", createEntry)),
+            ),
+        )
+        assertFalse(result.applied)
+        assertEquals(document, result.document)
         assertTrue(result.reason!!.contains("CREATE for B must be its first visible interaction"))
     }
 

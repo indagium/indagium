@@ -69,11 +69,41 @@ private fun stateSortRank(state: Seq3State): Int = when (state) {
 fun seq3QueueRows(document: Seq3Document, filter: Seq3Filter, textFilter: String = "", sort: Seq3Sort = Seq3Sort.LOG_ORDER): List<Seq3Message> {
     val filtered = document.messages.filter { passesFilter(it, filter) && passesTextFilter(it, textFilter) }
     return when (sort) {
-        Seq3Sort.LOG_ORDER -> filtered
+        // Manual row order may split one repeated parent across the canvas. The queue keeps each
+        // parent intact and orders parents by their first represented row.
+        Seq3Sort.LOG_ORDER -> {
+            val rowRank = buildMap {
+                val messages = document.messages.associateBy { it.id }
+                document.rowOrder.forEachIndexed { index, ref ->
+                    val message = messages[ref.messageId] ?: return@forEachIndexed
+                    if (ref.occurrenceEntryId != null && message.occurrences.none { it.entryId == ref.occurrenceEntryId }) return@forEachIndexed
+                    if (ref.messageId !in this) put(ref.messageId, index)
+                }
+                seq3QueueExpandedRows(document, document.messages).forEachIndexed { index, ref ->
+                    if (ref.messageId !in this) put(ref.messageId, document.rowOrder.size + index)
+                }
+            }
+            filtered.withIndex().sortedWith(
+                compareBy<IndexedValue<Seq3Message>> { rowRank[it.value.id] ?: Int.MAX_VALUE }
+                    .thenBy { it.index },
+            ).map { it.value }
+        }
         Seq3Sort.LIFELINE -> filtered.sortedWith(compareBy({ it.fromLifelineId }, ::firstTimestamp))
         Seq3Sort.OCCURRENCES -> filtered.sortedWith(compareByDescending { it.occurrences.size })
         Seq3Sort.STATE -> filtered.sortedWith(compareBy({ stateSortRank(it.state) }, ::firstTimestamp))
     }
+}
+
+/** Stable row identity for queue expansion. Evidence-backed parents expand to every occurrence;
+ *  custom/evidence-free parents contribute one null-occurrence row. With a manual order this keeps
+ *  occurrence children in their authored row order, while an empty order preserves parent then
+ *  evidence order. Hidden occurrences stay addressable in the queue. */
+fun seq3QueueExpandedRows(document: Seq3Document, messages: List<Seq3Message> = document.messages): List<Seq3RowRef> {
+    val rows = messages.flatMap { message ->
+        message.occurrences.map { occurrence -> Seq3RowRef(message.id, occurrence.entryId) }
+            .ifEmpty { listOf(Seq3RowRef(message.id)) }
+    }
+    return seq3ResolveRowOrder(document, rows)
 }
 
 // ── Selection (spec §06: click / ⇧click range / ⌘click additive) ───────────────────────────────

@@ -19,6 +19,7 @@ import com.indagium.diagram3.Seq3NoteSeed
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
 import com.indagium.diagram3.Seq3SourceImportResult
+import com.indagium.diagram3.Seq3SourceDiagnostic
 import com.indagium.diagram3.Seq3UndoEntry
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
@@ -30,6 +31,7 @@ import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.diagram3.seq3NoteHasHandEdit
+import com.indagium.diagram3.toPlantUml
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.utils.computeLogFingerprint
@@ -656,6 +658,7 @@ class Seq3Session(
                 exportMode = exportMode,
             )
         }
+        updateSourceDraftForDocument(id, document)
         syncLiveLinkedNote(id)
     }
 
@@ -686,6 +689,76 @@ class Seq3Session(
         replace(id) { it.copy(generateOptions = transform(it.generateOptions)) }
     }
 
+    /** Loads canonical PlantUML into the detached draft on first open, or follows the current
+     *  diagram while the draft is clean. Dirty and stale drafts are preserved. */
+    fun prepareSourceDraft(id: String): Boolean {
+        val current = session(id) ?: return false
+        val view = viewState(id) ?: return false
+        if (!view.sourceDraftInitialized) {
+            refreshSourceDraft(view, current.document)
+            view.sourceFocusRequestGeneration++
+        } else if (!view.sourceDraftDirty && !view.sourceDraftStale) {
+            refreshSourceDraft(view, current.document)
+        }
+        return true
+    }
+
+    /** Explicitly discards the draft and reloads the latest diagram source. */
+    fun reloadSourceDraft(id: String): Boolean {
+        val current = session(id) ?: return false
+        val view = viewState(id) ?: return false
+        refreshSourceDraft(view, current.document, force = true)
+        return true
+    }
+
+    /** Records field edits and keeps dirty/stale status derived from the current document. */
+    fun updateSourceDraftText(id: String, source: String) {
+        val current = session(id) ?: return
+        val view = viewState(id) ?: return
+        view.sourceDraft = source
+        view.sourceDraftDirty = source != view.sourceDraftCanonical
+        val currentCanonical = current.document.toPlantUml()
+        if (view.sourceDraftDirty) {
+            view.sourceDraftStale = currentCanonical != view.sourceDraftCanonical
+            if (view.sourceDraftStale) view.sourceEvidenceLossPending = false
+        } else if (currentCanonical != view.sourceDraftCanonical) {
+            // The user reverted every source edit. The clean draft can now follow the diagram.
+            refreshSourceDraft(view, current.document)
+        } else {
+            view.sourceDraftStale = false
+        }
+    }
+
+    private fun refreshSourceDraft(view: Seq3ViewState, document: Seq3Document, force: Boolean = false) {
+        val canonical = document.toPlantUml()
+        if (force || !view.sourceDraftInitialized || view.sourceDraftCanonical != canonical) {
+            view.sourceDraft = canonical
+            view.sourceDraftCanonical = canonical
+            view.sourceEditorGeneration++
+        }
+        view.sourceDraftInitialized = true
+        view.sourceDraftDirty = false
+        view.sourceDraftStale = false
+        view.sourceDiagnostics = emptyList()
+        view.sourceEvidenceLossPending = false
+    }
+
+    private fun updateSourceDraftForDocument(id: String, document: Seq3Document) {
+        val view = workspaceViewStates[id] ?: return
+        if (!view.sourceDraftInitialized) return
+        val currentCanonical = document.toPlantUml()
+        val hasDraft = view.sourceDraft != view.sourceDraftCanonical
+        view.sourceDraftDirty = hasDraft
+        if (hasDraft) {
+            view.sourceDraftStale = currentCanonical != view.sourceDraftCanonical
+            if (view.sourceDraftStale) view.sourceEvidenceLossPending = false
+        } else {
+            // The draft now matches its base exactly, so there is no user-authored source left to
+            // preserve. Follow the latest document even if the tile was previously stale.
+            refreshSourceDraft(view, document)
+        }
+    }
+
     /**
      * Title is pure metadata — [Seq3GenerateOptions.title] only ever seeds a BRAND NEW document
      * (see [publishGenerated]'s `ifBlank` above), it is never read back out of one — so this
@@ -698,11 +771,9 @@ class Seq3Session(
      * ([Seq3TitleField]'s commit included).
      */
     fun updateTitle(id: String, title: String) {
-        if (session(id) == null) return
         val trimmed = title.trim()
         if (trimmed.isEmpty()) return
-        replace(id) { it.copy(document = it.document.copy(title = trimmed)) }
-        markDirty(id)
+        applyCommand(id, Seq3Command.SetTitle(trimmed))
     }
 
     /** Changes only the source dialect used by the explicit note action. */
@@ -733,6 +804,7 @@ class Seq3Session(
         // create a misleading undo entry.
         if (document == current.document) return false
         replace(id) { it.copy(document = document, undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH)) }
+        updateSourceDraftForDocument(id, document)
         markDirty(id)
         return true
     }
@@ -746,6 +818,13 @@ class Seq3Session(
      */
     fun importSource(id: String, source: String, dialect: Seq3Dialect, confirmEvidenceLoss: Boolean = false): Seq3SourceImportResult {
         val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val view = viewState(id)
+        val currentCanonical = current.document.toPlantUml()
+        val stale = view?.sourceDraftInitialized == true && view.sourceDraft != view.sourceDraftCanonical &&
+            view.sourceDraftCanonical != currentCanonical
+        if (stale) {
+            return Seq3SourceImportResult.Failure(listOf(Seq3SourceDiagnostic(1, "Diagram changed. Reload source to continue.")))
+        }
         val result = importSeq3Source(source, dialect, current.document)
         val success = result as? Seq3SourceImportResult.Success ?: return result
         if (success.evidenceLoss && !confirmEvidenceLoss) return success
@@ -758,6 +837,7 @@ class Seq3Session(
         // A same-document import is still an explicit reconciliation: canonicalize all matching
         // linked notes/library snapshots now, without manufacturing a no-op ReplaceDocument undo.
         syncLiveLinkedNote(id)
+        reloadSourceDraft(id)
         return success
     }
 
@@ -790,6 +870,7 @@ class Seq3Session(
         val current = session(id) ?: return false
         val entry = current.undoStack.lastOrNull() ?: return false
         replace(id) { it.copy(document = entry.before, undoStack = it.undoStack.dropLast(1)) }
+        updateSourceDraftForDocument(id, entry.before)
         markDirty(id)
         return true
     }

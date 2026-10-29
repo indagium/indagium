@@ -709,7 +709,11 @@ sealed class Seq3AddResult {
  * default [inferTarget] leaves an unresolved message at; a user-picked row selection has no adjacent-
  * entry evidence of its own to infer from, so this function never attempts to.
  */
-fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<LogEntry>): Seq3AddResult {
+fun addSeq3MessageFromSelection(
+    document: Seq3Document,
+    selectedEntries: List<LogEntry>,
+    position: Seq3InsertionPosition = Seq3InsertionPosition.End,
+): Seq3AddResult {
     if (selectedEntries.isEmpty()) return Seq3AddResult.Rejected("Select at least one log row")
     val tags = selectedEntries.mapTo(linkedSetOf()) { it.tag }
     if (tags.size > 1) return Seq3AddResult.Rejected("Select rows from a single tag")
@@ -753,7 +757,15 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
         repeat = withLifeline.defaultRepeat,
         occurrences = occurrences,
     )
-    return Seq3AddResult.Added(withLifeline.copy(messages = withLifeline.messages + message), newMessageId)
+    val insertionIndex = resolveSeq3InsertionIndex(withLifeline.messages, position)
+        ?: return Seq3AddResult.Rejected("Invalid message insertion position")
+    val insertedMessages = withLifeline.messages.toMutableList().apply { add(insertionIndex, message) }
+    val inserted = withLifeline.copy(messages = insertedMessages)
+    val withOrder = insertSeq3RowRefsForNewMessage(document, inserted, message, position)
+    return Seq3AddResult.Added(
+        inheritSeq3FragmentMembership(document, withOrder, message, position),
+        newMessageId,
+    )
 }
 
 /**
@@ -851,8 +863,10 @@ fun addSeq3CustomMessage(document: Seq3Document, spec: Seq3CustomMessageSpec): S
             current.copy(messageIds = ids.sortedBy { id -> messages.indexOfFirst { it.id == id } })
         }
     }
+    val updated = document.copy(messages = messages, fragments = updatedFragments)
+    val withOrder = insertSeq3RowRefsForNewMessage(document, updated, message, spec.position)
     return Seq3CustomMessageResult.Added(
-        document = document.copy(messages = messages, fragments = updatedFragments),
+        document = inheritSeq3FragmentMembership(document, withOrder, message, spec.position),
         newMessageId = newMessageId,
         insertionIndex = insertionIndex,
     )
@@ -1030,17 +1044,336 @@ fun parseSeq3Timestamp(rawTimestamp: String): Long? =
 fun moveSeq3Message(document: Seq3Document, messageId: String, position: Seq3InsertionPosition): Seq3MessageEditResult {
     val currentIndex = document.messages.indexOfFirst { it.id == messageId }
     if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown message")
-    if (!document.messages[currentIndex].isCustom) {
-        return Seq3MessageEditResult.Rejected("Only custom messages can be moved")
-    }
+    val message = document.messages[currentIndex]
     val remaining = document.messages.toMutableList().apply { removeAt(currentIndex) }
     val insertionIndex = resolveSeq3InsertionIndex(remaining, position)
         ?: return Seq3MessageEditResult.Rejected("Invalid message insertion position")
-    if (insertionIndex == currentIndex && currentIndex <= remaining.size) {
-        return Seq3MessageEditResult.Updated(document)
+    remaining.add(insertionIndex, message)
+
+    val startingOrder = if (document.rowOrder.isEmpty()) seq3DefaultRowOrder(document) else seq3ReconcileRowOrder(document)
+    val movingRows = startingOrder.filter { it.messageId == messageId }
+    if (movingRows.isEmpty()) return Seq3MessageEditResult.Rejected("Message has no rows to move")
+    val rowsWithoutMessage = startingOrder.filterNot { it.messageId == messageId }
+    val rowIndex = resolveSeq3RowInsertionIndex(document.copy(messages = remaining), rowsWithoutMessage, position)
+        ?: return Seq3MessageEditResult.Rejected("Invalid message insertion position")
+    val reorderedRows = rowsWithoutMessage.toMutableList().apply { addAll(rowIndex, movingRows) }
+    if (remaining == document.messages && reorderedRows == startingOrder) return Seq3MessageEditResult.Updated(document)
+    val updated = document.copy(messages = remaining, rowOrder = reorderedRows)
+    return Seq3MessageEditResult.Updated(if (updated == document) document else updated)
+}
+
+/** Reorders an exact occurrence row, materializing legacy chronology only when the first manual
+ *  row move is made. A null occurrence ref on an evidence-backed summary moves the whole parent;
+ *  custom rows with no evidence still move as their single row. Every other ref stays present,
+ *  including hidden evidence rows. */
+fun moveSeq3Row(document: Seq3Document, rowRef: Seq3RowRef, position: Seq3InsertionPosition): Seq3MessageEditResult {
+    val message = document.messages.firstOrNull { it.id == rowRef.messageId }
+        ?: return Seq3MessageEditResult.Rejected("Unknown message")
+    return moveSeq3RowForMessage(document, rowRef, position, message)
+}
+
+private fun moveSeq3RowForMessage(
+    document: Seq3Document,
+    rowRef: Seq3RowRef,
+    position: Seq3InsertionPosition,
+    message: Seq3Message,
+): Seq3MessageEditResult {
+    if (rowRef.occurrenceEntryId != null && message.occurrences.none { it.entryId == rowRef.occurrenceEntryId }) {
+        return Seq3MessageEditResult.Rejected("Unknown occurrence")
     }
-    remaining.add(insertionIndex, document.messages[currentIndex])
-    return Seq3MessageEditResult.Updated(document.copy(messages = remaining))
+    if (rowRef.occurrenceEntryId == null && message.occurrences.isNotEmpty()) {
+        if (position.targetsMessage(message.id)) return Seq3MessageEditResult.Updated(document)
+        return moveSeq3Message(document, message.id, position)
+    }
+    return moveSeq3ExactRow(document, rowRef, position)
+}
+
+private fun moveSeq3ExactRow(
+    document: Seq3Document,
+    rowRef: Seq3RowRef,
+    position: Seq3InsertionPosition,
+): Seq3MessageEditResult {
+    val startingOrder = if (document.rowOrder.isEmpty()) seq3DefaultRowOrder(document) else seq3ReconcileRowOrder(document)
+    val resolvedRef = if (rowRef.occurrenceEntryId == null && rowRef !in startingOrder) {
+        startingOrder.firstOrNull { it.messageId == rowRef.messageId } ?: rowRef
+    } else rowRef
+    val currentIndex = startingOrder.indexOf(resolvedRef)
+    if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown row")
+    if ((position is Seq3InsertionPosition.BeforeRow && position.rowRef == rowRef) ||
+        (position is Seq3InsertionPosition.AfterRow && position.rowRef == rowRef)
+    ) return Seq3MessageEditResult.Updated(document)
+    val remaining = startingOrder.toMutableList().apply { removeAt(currentIndex) }
+    val insertionIndex = resolveSeq3RowInsertionIndex(document, remaining, position)
+        ?: return Seq3MessageEditResult.Rejected("Invalid row insertion position")
+    remaining.add(insertionIndex, resolvedRef)
+    return if (remaining == startingOrder) {
+        Seq3MessageEditResult.Updated(document)
+    } else {
+        Seq3MessageEditResult.Updated(document.copy(rowOrder = remaining))
+    }
+}
+
+private fun Seq3InsertionPosition.targetsMessage(messageId: String): Boolean = when (this) {
+    is Seq3InsertionPosition.BeforeMessage -> this.messageId == messageId
+    is Seq3InsertionPosition.AfterMessage -> this.messageId == messageId
+    is Seq3InsertionPosition.BeforeRow -> rowRef.messageId == messageId
+    is Seq3InsertionPosition.AfterRow -> rowRef.messageId == messageId
+    else -> false
+}
+
+private fun insertSeq3RowRefsForNewMessage(
+    original: Seq3Document,
+    updated: Seq3Document,
+    message: Seq3Message,
+    position: Seq3InsertionPosition,
+): Seq3Document {
+    // A plain append on a legacy document keeps the old implicit chronology. Targeted insertions
+    // and edits to an already-manually-ordered document materialize and preserve row order.
+    val targeted = position !is Seq3InsertionPosition.End
+    if (original.rowOrder.isEmpty() && !targeted) return updated
+    val rows = if (original.rowOrder.isEmpty()) seq3DefaultRowOrder(original) else seq3ReconcileRowOrder(original)
+    val newRows = message.occurrences.map { Seq3RowRef(message.id, it.entryId) }
+        .ifEmpty { listOf(Seq3RowRef(message.id)) }
+    val insertionIndex = resolveSeq3RowInsertionIndex(original, rows, position) ?: return updated
+    val rowOrder = rows.toMutableList().apply { addAll(insertionIndex, newRows) }
+    return updated.copy(rowOrder = rowOrder)
+}
+
+private fun inheritSeq3FragmentMembership(
+    original: Seq3Document,
+    updated: Seq3Document,
+    message: Seq3Message,
+    position: Seq3InsertionPosition,
+): Seq3Document {
+    val rows = seq3CurrentCanvasRowRefs(original)
+    val boundary = resolveSeq3VisibleInsertionBoundary(original, rows, position) ?: return updated
+    val before = rows.getOrNull(boundary - 1)
+    val after = rows.getOrNull(boundary)
+    if (before == null || after == null) return updated
+    val inherited = original.fragments.filter { fragment ->
+        fragmentContainsRow(fragment, before) && fragmentContainsRow(fragment, after)
+    }.mapTo(HashSet()) { it.id }
+    if (inherited.isEmpty()) return updated
+    val messagePositions = updated.messages.withIndex().associate { (index, current) -> current.id to index }
+    val fragments = updated.fragments.map { fragment ->
+        if (fragment.id !in inherited) fragment else {
+            val ids = (fragment.messageIds + message.id).distinct().sortedBy { id -> messagePositions[id] ?: Int.MAX_VALUE }
+            val refs = if (fragment.occurrenceRefs.isEmpty()) fragment.occurrenceRefs else {
+                (fragment.occurrenceRefs + message.occurrences.map { Seq3OccurrenceRef(message.id, it.entryId) }).distinct()
+            }
+            fragment.copy(messageIds = ids, occurrenceRefs = refs)
+        }
+    }
+    return updated.copy(fragments = fragments)
+}
+
+/** Resolve list-position insertions against the full parent list, then map the boundary to a
+ *  currently visible row. Hidden parents still occupy canonical queue positions; skipping them
+ *  before mapping keeps insertion at index N from drifting past the next visible group member. */
+private fun resolveSeq3VisibleInsertionBoundary(
+    document: Seq3Document,
+    visibleRows: List<Seq3RowRef>,
+    position: Seq3InsertionPosition,
+): Int? = when (position) {
+    is Seq3InsertionPosition.AtIndex ->
+        resolveSeq3CanonicalBoundaryToVisible(document, visibleRows, position.index)
+    is Seq3InsertionPosition.BeforeMessage ->
+        resolveSeq3VisibleMessageBoundary(document, visibleRows, position.messageId, after = false)
+    is Seq3InsertionPosition.AfterMessage ->
+        resolveSeq3VisibleMessageBoundary(document, visibleRows, position.messageId, after = true)
+    else -> resolveSeq3RowInsertionIndex(document, visibleRows, position)
+}
+
+private fun resolveSeq3VisibleMessageBoundary(
+    document: Seq3Document,
+    visibleRows: List<Seq3RowRef>,
+    messageId: String,
+    after: Boolean,
+): Int? {
+    if (visibleRows.any { it.messageId == messageId }) {
+        val position = if (after) Seq3InsertionPosition.AfterMessage(messageId) else Seq3InsertionPosition.BeforeMessage(messageId)
+        return resolveSeq3RowInsertionIndex(document, visibleRows, position)
+    }
+    val messageIndex = document.messages.indexOfFirst { it.id == messageId }.takeIf { it >= 0 } ?: return null
+    val boundary = messageIndex + if (after) 1 else 0
+    return resolveSeq3CanonicalBoundaryToVisible(document, visibleRows, boundary)
+}
+
+private fun resolveSeq3CanonicalBoundaryToVisible(
+    document: Seq3Document,
+    rows: List<Seq3RowRef>,
+    index: Int,
+): Int? {
+    if (index !in 0..document.messages.size) return null
+    val nextVisibleRow = document.messages.drop(index).firstNotNullOfOrNull { message ->
+        rows.indexOfFirst { it.messageId == message.id }.takeIf { it >= 0 }
+    }
+    val previousVisibleRow = document.messages.take(index).asReversed().firstNotNullOfOrNull { message ->
+        rows.indexOfLast { it.messageId == message.id }.takeIf { it >= 0 }
+    }
+    return nextVisibleRow ?: previousVisibleRow?.plus(1) ?: 0
+}
+
+private fun fragmentContainsRow(fragment: Seq3Fragment, row: Seq3RowRef): Boolean {
+    val hasSpecificRowsForMessage = fragment.occurrenceRefs.any { it.messageId == row.messageId }
+    return if (hasSpecificRowsForMessage) {
+        fragment.occurrenceRefs.any { it.messageId == row.messageId && it.entryId == row.occurrenceEntryId }
+    } else {
+        row.messageId in fragment.messageIds
+    }
+}
+
+/** The current visible row projection, used only to find insertion boundaries and group
+ *  containment. [seq3DefaultRowOrder] deliberately includes hidden evidence for persistence. */
+private fun seq3CurrentCanvasRowRefs(document: Seq3Document): List<Seq3RowRef> {
+    val rows = document.messages.flatMap(::seq3VisibleCanvasRowRefs)
+    val occurrenceByRef = document.messages.flatMap { message ->
+        message.occurrences.map { Seq3RowRef(message.id, it.entryId) to it }
+    }.toMap()
+    val messagesById = document.messages.associateBy { it.id }
+    val elapsedByRef = rows.associateWith { ref ->
+        val message = messagesById[ref.messageId]
+        val occurrence = ref.occurrenceEntryId?.let { occurrenceByRef[Seq3RowRef(ref.messageId, it)] }
+        if (occurrence == null) message?.primaryElapsedMillis ?: message?.primaryTimestampMillis
+        else message?.let { seq3EmissionElapsed(it, occurrence.elapsedMillis) ?: seq3EmissionTimestamp(it, occurrence.timestampMillis) }
+    }
+    return seq3ChronologicalOrder(
+        document,
+        rows,
+        messageIdOf = { it.messageId },
+        timestampMillisOf = { elapsedByRef[it] },
+        entryIdOf = { it.occurrenceEntryId },
+    )
+}
+
+private fun seq3VisibleCanvasRowRefs(message: Seq3Message): List<Seq3RowRef> {
+    if (message.visibility == Seq3Visibility.HIDDEN) return emptyList()
+    val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+    if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
+    if (occurrences.isEmpty()) return listOf(Seq3RowRef(message.id))
+    return seq3VisibleCanvasOccurrenceRows(message, occurrences)
+}
+
+private fun seq3VisibleCanvasOccurrenceRows(
+    message: Seq3Message,
+    occurrences: List<Seq3Occurrence>,
+): List<Seq3RowRef> = when {
+    message.kind == Seq3Kind.NOTE || message.toLifelineId == null ->
+        listOf(Seq3RowRef(message.id, occurrences.first().entryId))
+    message.repeat == Seq3Repeat.EVERY -> occurrences.map { Seq3RowRef(message.id, it.entryId) }
+    message.repeat == Seq3Repeat.FIRST_LAST -> buildList {
+        add(Seq3RowRef(message.id, occurrences.first().entryId))
+        if (occurrences.size >= 2 && (message.totalOccurrenceCount ?: occurrences.size) > 2) {
+            add(Seq3RowRef(message.id))
+        }
+        if (occurrences.size >= 2) add(Seq3RowRef(message.id, occurrences.last().entryId))
+    }
+    occurrences.size > message.repeatThreshold -> listOf(Seq3RowRef(message.id, occurrences.first().entryId))
+    else -> occurrences.map { Seq3RowRef(message.id, it.entryId) }
+}
+
+/** Materializes the old shared chronology as stable row refs. All stored evidence rows are
+ *  included, even when a message is currently collapsed or hidden, so a later visibility/repeat
+ *  edit can reveal rows at their original relative position. */
+private fun seq3DefaultRowOrder(document: Seq3Document): List<Seq3RowRef> {
+    val rows = document.messages.flatMap { message ->
+        val occurrenceRows = message.occurrences.map { Seq3RowRef(message.id, it.entryId) }
+        val visibleCount = message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE }
+        val hasFirstLastElision = message.repeat == Seq3Repeat.FIRST_LAST && visibleCount >= 2 &&
+            (message.totalOccurrenceCount ?: visibleCount) > 2
+        when {
+            occurrenceRows.isEmpty() -> listOf(Seq3RowRef(message.id))
+            hasFirstLastElision -> occurrenceRows + Seq3RowRef(message.id)
+            else -> occurrenceRows
+        }
+    }
+    val messages = document.messages.associateBy { it.id }
+    val occurrences = document.messages.flatMap { message -> message.occurrences.map { Seq3OccurrenceRef(message.id, it.entryId) to it } }.toMap()
+    val legacy = document.copy(rowOrder = emptyList())
+    return seq3ChronologicalOrder(
+        legacy,
+        rows,
+        messageIdOf = { it.messageId },
+        timestampMillisOf = { ref ->
+            val message = messages[ref.messageId]
+            if (ref.occurrenceEntryId == null) {
+                message?.primaryElapsedMillis ?: message?.primaryTimestampMillis
+            } else {
+                val occurrence = occurrences[Seq3OccurrenceRef(ref.messageId, ref.occurrenceEntryId)]
+                message?.let { current ->
+                    occurrence?.let { seq3EmissionElapsed(current, it.elapsedMillis) ?: seq3EmissionTimestamp(current, it.timestampMillis) }
+                }
+            }
+        },
+        entryIdOf = { it.occurrenceEntryId },
+    )
+}
+
+/** Keep still-valid refs (including hidden evidence), drop deleted evidence refs, then append
+ *  newly-created refs in deterministic legacy order. */
+private fun seq3ReconcileRowOrder(document: Seq3Document): List<Seq3RowRef> {
+    val messages = document.messages.associateBy { it.id }
+    val ownerByEntry = document.messages.flatMap { message -> message.occurrences.map { it.entryId to message.id } }
+        .groupBy({ it.first }, { it.second })
+        .mapNotNull { (entryId, owners) -> owners.distinct().singleOrNull()?.let { entryId to it } }
+        .toMap()
+    val retained = linkedSetOf<Seq3RowRef>()
+    document.rowOrder.forEach { ref ->
+        val originalMessage = messages[ref.messageId]
+        val resolvedId = when {
+            originalMessage != null && (
+                ref.occurrenceEntryId == null ||
+                    originalMessage.occurrences.any { it.entryId == ref.occurrenceEntryId }
+                ) -> ref.messageId
+            ref.occurrenceEntryId != null -> ownerByEntry[ref.occurrenceEntryId] ?: return@forEach
+            else -> return@forEach
+        }
+        val message = messages[resolvedId] ?: return@forEach
+        if (ref.occurrenceEntryId == null || message.occurrences.any { it.entryId == ref.occurrenceEntryId }) {
+            retained += ref.copy(messageId = resolvedId)
+        }
+    }
+    seq3DefaultRowOrder(document).forEach { if (it !in retained) retained += it }
+    return retained.toList()
+}
+
+/** Shared command choke-point reconciliation: preserve an existing manual order through document
+ *  replacement/regeneration, remap occurrence refs when evidence moves between parent messages,
+ *  prune stale refs, then append any newly-visible identities deterministically. */
+internal fun reconcileSeq3RowOrder(before: Seq3Document, after: Seq3Document): Seq3Document {
+    val requestedOrder = after.rowOrder.ifEmpty { before.rowOrder }
+    if (requestedOrder.isEmpty()) return after
+    val withOrder = after.copy(rowOrder = requestedOrder)
+    return withOrder.copy(rowOrder = seq3ReconcileRowOrder(withOrder))
+}
+
+private fun resolveSeq3RowInsertionIndex(
+    document: Seq3Document,
+    rows: List<Seq3RowRef>,
+    position: Seq3InsertionPosition,
+): Int? = when (position) {
+    Seq3InsertionPosition.Start -> 0
+    Seq3InsertionPosition.End -> rows.size
+    is Seq3InsertionPosition.AtIndex -> {
+        if (position.index !in 0..document.messages.size) null
+        else {
+            resolveSeq3VisibleInsertionBoundary(document, rows, position)
+        }
+    }
+    is Seq3InsertionPosition.BeforeMessage -> rows.indexOfFirst { it.messageId == position.messageId }.takeIf { it >= 0 }
+    is Seq3InsertionPosition.AfterMessage -> rows.indexOfLast { it.messageId == position.messageId }.takeIf { it >= 0 }?.plus(1)
+    is Seq3InsertionPosition.BeforeRow -> {
+        val exact = rows.indexOf(position.rowRef)
+        if (exact >= 0) exact else if (position.rowRef.occurrenceEntryId == null) {
+            rows.indexOfFirst { it.messageId == position.rowRef.messageId }.takeIf { it >= 0 }
+        } else null
+    }
+    is Seq3InsertionPosition.AfterRow -> {
+        val exact = rows.indexOf(position.rowRef)
+        if (exact >= 0) exact + 1 else if (position.rowRef.occurrenceEntryId == null) {
+            rows.indexOfLast { it.messageId == position.rowRef.messageId }.takeIf { it >= 0 }?.plus(1)
+        } else null
+    }
 }
 
 private fun resolveSeq3InsertionIndex(
@@ -1054,6 +1387,14 @@ private fun resolveSeq3InsertionIndex(
     is Seq3InsertionPosition.AfterMessage -> messages.indexOfFirst { it.id == position.messageId }
         .takeIf { it >= 0 }
         ?.plus(1)
+    is Seq3InsertionPosition.BeforeRow -> messages.indexOfFirst { message ->
+        message.id == position.rowRef.messageId &&
+            (position.rowRef.occurrenceEntryId == null || message.occurrences.any { it.entryId == position.rowRef.occurrenceEntryId })
+    }.takeIf { it >= 0 }
+    is Seq3InsertionPosition.AfterRow -> messages.indexOfFirst { message ->
+        message.id == position.rowRef.messageId &&
+            (position.rowRef.occurrenceEntryId == null || message.occurrences.any { it.entryId == position.rowRef.occurrenceEntryId })
+    }.takeIf { it >= 0 }?.plus(1)
 }
 
 /** The next free `"msg-N"` id — [generateSeq3]'s own naming scheme (`"msg-${index + 1}"`), extended

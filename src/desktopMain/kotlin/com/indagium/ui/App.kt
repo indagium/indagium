@@ -2934,6 +2934,9 @@ private fun handleGlobalKey(
         navigateTab(state, if (ev.isShiftPressed) -1 else +1)
         return true
     }
+    // Diagram undo accepts either platform chord even when it is received through a nested
+    // editor. Text controls and the detached source draft keep their own undo history.
+    if (handleDiagramUndoKey(ev, state)) return true
     if (!ev.isActionKey) return false
     return when {
         ev.isShiftPressed && ev.key == Key.F -> { state.updateFilterVisible(!state.filterVisible); true }
@@ -2952,14 +2955,23 @@ private fun handleGlobalKey(
         ev.key == Key.W && state.testsSurfaceActive -> { state.closeTestsTab(); true }
         ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
         ev.key == Key.Slash                  -> { state.shortcutsOpen = true; true }
-        // Diagram-surface undo (ui/Seq3Session.kt): every mutation there is one applySeq3Command
-        // step, so this is a plain pop off that session's own undo stack.
-        (ev.isCtrlPressed || ev.isMetaPressed) && !ev.isShiftPressed &&
-            ev.key == Key.Z && state.activeSurface is ActiveSurface.Diagram3 -> {
-            state.seq3Sessions.undoActive(); true
-        }
         else -> false
     }
+}
+
+private fun isDiagramUndoChord(event: KeyEvent): Boolean =
+    (event.isCtrlPressed || event.isMetaPressed) && !event.isShiftPressed && event.key == Key.Z
+
+/** Shared by the app key router and its focused Compose interaction tests. Returning false lets
+ *  text fields and detached source drafts own the same platform undo chord. */
+internal fun handleDiagramUndoKey(event: KeyEvent, state: AppState): Boolean {
+    if (event.type != KeyEventType.KeyDown || !isDiagramUndoChord(event)) return false
+    if (state.activeSurface !is ActiveSurface.Diagram3) return false
+    val sessionId = state.seq3Sessions.activeSessionId
+    val view = sessionId?.let(state.seq3Sessions::viewState)
+    if (view?.textFieldFocused == true) return false
+    state.seq3Sessions.undoActive()
+    return true
 }
 
 private fun navigateTab(state: AppState, delta: Int) {

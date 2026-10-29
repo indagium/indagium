@@ -218,16 +218,29 @@ fun unlockSeq3RegenRow(review: Seq3RegenReview, rowId: String): Seq3RegenReview 
 // ── Apply — ONE new document (spec §08: "one undoable transaction, not 15") ───────────────────
 
 /**
- * Resolves every row's decision into the final message list. [Seq3Document.lifelines] is taken
- * from [Seq3RegenReview.freshDocument] — a lifeline gained or lost by the fresh scan is always
- * reflected, independent of any one row's decision, since lifelines are not themselves reviewable
- * rows. [current]'s title/sourceFile/range/fragments/notes/defaultRepeat are preserved: a fragment
- * or note bracket around a message that this apply removes is left dangling rather than silently
- * deleted — a later phase's fragment/note editing affordances are the place to clean that up
- * deliberately, not a side effect buried in this function.
+ * Resolves every row's decision into the final message list. The lifeline set, order, names, and
+ * represented tags come from [Seq3RegenReview.freshDocument] — a lifeline gained or lost by the
+ * fresh scan is always reflected, independent of any one row's decision, since lifelines are not
+ * themselves reviewable rows. Presentation overrides on lifelines matched by stable id are kept.
+ * [current]'s title/sourceFile/range/fragments/notes/defaultRepeat are preserved: a fragment or note
+ * bracket around a message that this apply removes is left dangling rather than silently deleted —
+ * a later phase's fragment/note editing affordances are the place to clean that up deliberately,
+ * not a side effect buried in this function.
  */
-fun applySeq3Regeneration(current: Seq3Document, review: Seq3RegenReview): Seq3Document =
-    current.copy(lifelines = review.freshDocument.lifelines, messages = review.rows.mapNotNull(::resolveRow))
+fun applySeq3Regeneration(current: Seq3Document, review: Seq3RegenReview): Seq3Document {
+    val currentById = current.lifelines.associateBy { it.id }
+    val refreshedLifelines = review.freshDocument.lifelines.map { fresh ->
+        val previous = currentById[fresh.id] ?: return@map fresh
+        fresh.copy(
+            visibility = previous.visibility,
+            kind = previous.kind,
+            displaySegments = previous.displaySegments,
+            headerWidthDp = previous.headerWidthDp,
+        )
+    }
+    val updated = current.copy(lifelines = refreshedLifelines, messages = review.rows.mapNotNull(::resolveRow))
+    return reconcileSeq3RowOrder(current, updated)
+}
 
 private fun resolveRow(row: Seq3RegenRow): Seq3Message? = when (row.kind) {
     Seq3RegenChangeKind.UNCHANGED -> row.current

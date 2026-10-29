@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -50,6 +51,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -135,47 +137,59 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
         Column(
             Modifier.fillMaxSize().background(tc.bg)
                 .focusRequester(view.focusRequester).focusable()
+                .testTag("seq3-workspace-root")
                 .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },
         ) {
             Seq3TitleBar(state, session, view)
             // The identity bar stays outside the resizable tile surface; messages, lifelines,
             // artifacts and the canvas now participate in one saved layout tree.
             Divider()
-            if (view.guidedPass != null) {
-                Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
-            } else {
-                DiagramWorkspaceTilingHost(
-                    state = state,
-                    session = session,
-                    view = view,
-                    onReclaimFocus = { runCatching { view.focusRequester.requestFocus() } },
-                    modifier = Modifier.weight(1f).fillMaxSize(),
-                ) { id ->
-                    when (id) {
-                        DiagramWorkspaceSectionId.MESSAGES -> Seq3MessagesTileBody(state, session, view, Modifier.fillMaxSize())
-                        DiagramWorkspaceSectionId.LIFELINES -> Seq3LifelinesSection(
-                            state,
-                            session,
-                            view,
-                            Modifier.fillMaxSize(),
-                            showSectionHeader = false,
-                            forceExpanded = true,
-                        )
-                        DiagramWorkspaceSectionId.ARTIFACTS -> Seq3FragmentsAndNotesSection(
-                            state,
-                            session,
-                            view,
-                            session.document,
-                            Modifier.fillMaxSize(),
-                            showSectionHeader = false,
-                            forceExpanded = true,
-                        )
-                        DiagramWorkspaceSectionId.PREVIEW -> Seq3Canvas(state, session, view, Modifier.fillMaxSize())
+            Row(Modifier.weight(1f).fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    if (view.guidedPass != null) {
+                        Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
+                    } else {
+                        DiagramWorkspaceTilingHost(
+                            state = state,
+                            session = session,
+                            view = view,
+                            onReclaimFocus = {
+                                view.textFieldFocused = false
+                                runCatching { view.focusRequester.requestFocus() }
+                            },
+                            modifier = Modifier.fillMaxSize(),
+                        ) { id ->
+                            when (id) {
+                                DiagramWorkspaceSectionId.MESSAGES -> Seq3MessagesTileBody(state, session, view, Modifier.fillMaxSize())
+                                DiagramWorkspaceSectionId.LIFELINES -> Seq3LifelinesSection(
+                                    state,
+                                    session,
+                                    view,
+                                    Modifier.fillMaxSize(),
+                                    showSectionHeader = false,
+                                    forceExpanded = true,
+                                )
+                                DiagramWorkspaceSectionId.ARTIFACTS -> Seq3FragmentsAndNotesSection(
+                                    state,
+                                    session,
+                                    view,
+                                    session.document,
+                                    Modifier.fillMaxSize(),
+                                    showSectionHeader = false,
+                                    forceExpanded = true,
+                                )
+                                DiagramWorkspaceSectionId.PREVIEW -> Seq3Canvas(state, session, view, Modifier.fillMaxSize())
+                                DiagramWorkspaceSectionId.SOURCE -> Seq3SourceEditorPane(state, session, view, Modifier.fillMaxSize())
+                            }
+                        }
                     }
                 }
             }
         }
         if (view.regenerateSheetOpen) Seq3RegenerateSheet(state, session, view)
+        if (view.pendingInsertRequest != null) {
+            Seq3PendingInsertFlow(state, session, view)
+        }
     }
 }
 
@@ -203,7 +217,7 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
         // ("bugreport-2026-08-21-113355-…​.log · 128400 rows") would otherwise stretch the whole
         // identity block past the title's own cap and squeeze the right cluster.
         Column(Modifier.widthIn(max = TITLE_FIELD_MAX_WIDTH)) {
-            Seq3TitleField(state, session)
+            Seq3TitleField(state, session, view)
             AppText(subtitle, color = tc.ts, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
         }
         Row(
@@ -231,7 +245,7 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
             // are about to have something to act on", not as a stray note mid-cluster.
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
             Seq3HeaderHairline()
-            Seq3OutputGroup(state, session)
+            Seq3OutputGroup(state, session, view)
         }
     }
 }
@@ -345,13 +359,25 @@ internal fun seq3ToggleMessageLabelStyle(state: AppState, session: Seq3Workspace
  *  old bare "+" icon button). Both go dim/disabled the same way when there is nothing to copy or
  *  attach yet ([Seq3Document.lifelines] empty). */
 @Composable
-private fun Seq3OutputGroup(state: AppState, session: Seq3WorkspaceSession) {
+private fun Seq3OutputGroup(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        Seq3EditPlantUmlButton(state, session, view)
         Seq3CopyDropdown(state, session)
         Seq3AttachmentAction(state, session)
+    }
+}
+
+@Composable
+private fun Seq3EditPlantUmlButton(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
+    TooltipArea(tooltip = { ToolbarTooltip("Edit PlantUML source") }) {
+        ToolbarBtn(
+            label = "Edit",
+            modifier = Modifier.height(28.dp).testTag("seq3-source-edit"),
+            onClick = { openSeq3SourceEditor(state, session, view) },
+        )
     }
 }
 
@@ -855,13 +881,13 @@ private fun seq3TitleWidth(title: String): androidx.compose.ui.unit.Dp {
  *  already-existing [Seq3Session.updateTitle] — which already marks the session dirty and now
  *  note action — never a new session method. */
 @Composable
-private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
+private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     val tc = tc()
     var editing by remember(session.id) { mutableStateOf(false) }
     val fullTitle = session.document.title.ifBlank { "Sequence diagram v3" }
     val titleWidth = seq3TitleWidth(fullTitle)
     if (editing) {
-        Seq3TitleEditor(state, session, titleWidth) { editing = false }
+        Seq3TitleEditor(state, session, view, titleWidth) { editing = false }
     } else {
         val titleBox: @Composable () -> Unit = {
             Box(
@@ -898,7 +924,13 @@ private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
             } else {
                 titleBox()
             }
-            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp)
+            SquareIconButton(
+                "✎",
+                fontSize = 10.sp,
+                onClick = { editing = true },
+                modifier = Modifier.testTag("seq3-title-edit"),
+                size = 16.dp,
+            )
         }
     }
 }
@@ -907,17 +939,27 @@ private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
 private fun Seq3TitleEditor(
     state: AppState,
     session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
     titleWidth: androidx.compose.ui.unit.Dp,
     onDone: () -> Unit,
 ) {
     var text by remember(session.id) { mutableStateOf(session.document.title) }
+    val editorFocusRequester = remember(session.id) { FocusRequester() }
+    LaunchedEffect(session.id) {
+        runCatching { editorFocusRequester.requestFocus() }
+    }
 
     // A blank commit keeps the PREVIOUS value rather than saving an empty title — enforced by
     // [Seq3Session.updateTitle] itself (a blank-after-trim title is silently ignored there), so
     // this editor doesn't duplicate that check.
+    fun finishEditing() {
+        view.textFieldFocused = false
+        onDone()
+        runCatching { view.focusRequester.requestFocus() }
+    }
     fun commit() {
         state.seq3Sessions.updateTitle(session.id, text)
-        onDone()
+        finishEditing()
     }
     Row(
         modifier = Modifier.height(TITLE_FIELD_HEIGHT),
@@ -928,14 +970,18 @@ private fun Seq3TitleEditor(
             value = text,
             onValue = { text = it },
             fontSize = 13.sp,
-            modifier = Modifier.width(titleWidth).height(TITLE_FIELD_HEIGHT),
+            modifier = Modifier.width(titleWidth).height(TITLE_FIELD_HEIGHT)
+                .focusRequester(editorFocusRequester)
+                .onFocusChanged { view.textFieldFocused = it.hasFocus }
+                .testTag("seq3-title-editor"),
             centerTextVertically = true,
             onSubmit = ::commit,
+            onCancel = ::finishEditing,
         )
         // Reuse the same small, unbordered note-action controls for save/cancel so the title
         // editor does not introduce a second button language in the title strip.
         SquareIconButton("✓", fontSize = 12.sp, onClick = ::commit, size = 18.dp)
-        SquareIconButton("×", fontSize = 14.sp, onClick = onDone, size = 18.dp)
+        SquareIconButton("×", fontSize = 14.sp, onClick = ::finishEditing, size = 18.dp)
     }
 }
 
@@ -972,6 +1018,14 @@ internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryI
  * Nothing else here changes: selection/hover/zoom/filter/sort still reset to defaults on reopen,
  * same as before.
  */
+internal enum class Seq3CanvasEditorKind { MESSAGE_LABEL, FRAGMENT_LABEL, DELAY_LABEL, NOTE_TEXT, LIFELINE_NAME }
+
+internal data class Seq3CanvasEditorTarget(
+    val kind: Seq3CanvasEditorKind,
+    val id: String,
+    val occurrenceEntryId: Int? = null,
+)
+
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
 
@@ -1027,6 +1081,10 @@ internal class Seq3ViewState {
      *  occurrence when a message is expanded on the canvas. */
     var editingLabelOccurrenceEntryId by mutableStateOf<Int?>(null)
 
+    /** All canvas text editors share one owner so switching from a delay to a message or fragment
+     * closes the previous editor and its draft instead of leaving several inline fields visible. */
+    var activeCanvasEditorTarget by mutableStateOf<Seq3CanvasEditorTarget?>(null)
+
     /** The lifeline header chip drawn in the accent color (spec §04's "the selected one in
      *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target.
      *  WP3 reuses this as the lifeline PANEL row's "focused" state (Seq3QueueRow's own
@@ -1077,6 +1135,32 @@ internal class Seq3ViewState {
      *  two context menus is ever open at once. */
     var canvasEmptyContextMenuOpen by mutableStateOf(false)
 
+    /** A shared add-after request produced by either the message queue or canvas context menu. */
+    var pendingInsertRequest by mutableStateOf<Seq3PendingInsertRequest?>(null)
+
+    /** The queue moves a whole parent message only after release; these are transient preview flags. */
+    var queueReorderDraggedId by mutableStateOf<String?>(null)
+    var queueReorderVisualIds by mutableStateOf<List<String>>(emptyList())
+    var queueReorderCancelled by mutableStateOf(false)
+    var queueReorderPointerY by mutableStateOf(0f)
+    var queueReorderOffsetY by mutableStateOf(0f)
+    var canvasNoticeMessage by mutableStateOf<String?>(null)
+
+    /** Pointer-gesture previews owned by Seq3Canvas; Escape cancels them before normal selection handling. */
+    var rowReorderPreview by mutableStateOf<Seq3RowReorderPreview?>(null)
+    var headerResizePreview by mutableStateOf<Seq3HeaderResizePreview?>(null)
+
+    /** Source text stays a detached draft until Apply, independent of tile visibility. */
+    var sourceDraftInitialized by mutableStateOf(false)
+    var sourceDraft by mutableStateOf("")
+    var sourceDraftCanonical by mutableStateOf("")
+    var sourceDraftDirty by mutableStateOf(false)
+    var sourceDraftStale by mutableStateOf(false)
+    var sourceDiagnostics by mutableStateOf<List<com.indagium.diagram3.Seq3SourceDiagnostic>>(emptyList())
+    var sourceEvidenceLossPending by mutableStateOf(false)
+    var sourceEditorGeneration by mutableStateOf(0)
+    var sourceFocusRequestGeneration by mutableStateOf(0)
+
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT_WIDTH)
 
@@ -1125,7 +1209,7 @@ internal class Seq3ViewState {
     var diagramTileLayout by mutableStateOf(diagramWorkspaceDefaultLayout())
 
     /** Hidden tiles keep their nodes in [diagramTileLayout], so showing one restores its place. */
-    var diagramHiddenTiles by mutableStateOf<List<DiagramWorkspaceSectionId>>(emptyList())
+    var diagramHiddenTiles by mutableStateOf(listOf(DiagramWorkspaceSectionId.SOURCE))
 
     /** Collapsed tiles are distinct from hidden tiles and keep their normal headers visible. */
     var diagramCollapsedTiles by mutableStateOf(listOf(DiagramWorkspaceSectionId.ARTIFACTS))
@@ -1366,11 +1450,48 @@ internal fun seq3ToggleLifelineSelection(view: Seq3ViewState, lifelineId: String
 internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, messageId: String): Boolean {
     val message = document.messages.firstOrNull { it.id == messageId } ?: return false
     view.focusedMessageId = messageId
-    view.editingLabelMessageId = messageId
-    view.editingLabelOccurrenceEntryId = message.occurrences.firstOrNull()?.entryId
+    seq3ActivateCanvasEditor(
+        view,
+        Seq3CanvasEditorTarget(
+            Seq3CanvasEditorKind.MESSAGE_LABEL,
+            messageId,
+            message.occurrences.firstOrNull()?.entryId,
+        ),
+    )
     view.canvasContextMenuMessageId = null
     view.canvasContextMenuOccurrenceEntryId = null
     return true
+}
+
+internal fun seq3ActivateCanvasEditor(view: Seq3ViewState, target: Seq3CanvasEditorTarget) {
+    view.activeCanvasEditorTarget = target
+    if (target.kind == Seq3CanvasEditorKind.MESSAGE_LABEL) {
+        view.editingLabelMessageId = target.id
+        view.editingLabelOccurrenceEntryId = target.occurrenceEntryId
+    } else {
+        view.editingLabelMessageId = null
+        view.editingLabelOccurrenceEntryId = null
+    }
+}
+
+/** Keep callers that still set the original message-only editor fields working while canvas
+ *  editing uses the shared target for every inline editor. New entry points should always use
+ *  [seq3ActivateCanvasEditor], which also closes any previously active editor. */
+internal fun seq3ActiveCanvasEditorTarget(view: Seq3ViewState): Seq3CanvasEditorTarget? =
+    view.activeCanvasEditorTarget ?: view.editingLabelMessageId?.let { messageId ->
+        Seq3CanvasEditorTarget(
+            Seq3CanvasEditorKind.MESSAGE_LABEL,
+            messageId,
+            view.editingLabelOccurrenceEntryId,
+        )
+    }
+
+internal fun seq3CloseCanvasEditor(view: Seq3ViewState, target: Seq3CanvasEditorTarget) {
+    if (view.activeCanvasEditorTarget == target) view.activeCanvasEditorTarget = null
+    if (target.kind == Seq3CanvasEditorKind.MESSAGE_LABEL && view.editingLabelMessageId == target.id) {
+        view.editingLabelMessageId = null
+        view.editingLabelOccurrenceEntryId = null
+    }
 }
 
 // Default size for a free-floating note placed via a click (canvas empty-context-menu or the
@@ -1948,7 +2069,24 @@ private fun applySeq3KeyAction(
 // fragment/note/lifeline Esc branch needs to invoke this directly, the same reason
 // seq3ClearSelection/seq3AddNote/seq3BeginLabelRename above are already internal rather than
 // private.
-internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
+internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean =
+    applySeq3EscapeTransient(view) ?: applySeq3EscapeWorkspace(state, session, view)
+
+private fun applySeq3EscapeTransient(view: Seq3ViewState): Boolean? = when {
+    view.sourceEvidenceLossPending -> {
+        view.sourceEvidenceLossPending = false
+        true
+    }
+    view.queueReorderDraggedId != null -> {
+        view.queueReorderCancelled = true
+        view.queueReorderDraggedId = null
+        view.queueReorderVisualIds = emptyList()
+        true
+    }
+    view.rowReorderPreview != null || view.headerResizePreview != null -> {
+        view.cancelCanvasGesture()
+        true
+    }
     // Manual-activation-bar drag cancel: checked first because it's the most transient state of
     // all (a live pointer gesture) and must win over every other Esc branch below, including
     // textFieldFocused. Clearing the preview here (not just marking cancelled) is what makes it
@@ -1976,6 +2114,14 @@ internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, vie
         true
     }
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
+    else -> null
+}
+
+private fun applySeq3EscapeWorkspace(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+): Boolean = when {
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
     // Item 4 (WP-panel-toggle): the panel-only selections (fragment/note/delay/lifeline) can't

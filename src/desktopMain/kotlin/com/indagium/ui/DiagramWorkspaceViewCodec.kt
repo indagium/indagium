@@ -76,6 +76,7 @@ private fun restoreLegacyDiagramWorkspaceViewState(view: Seq3ViewState) {
         if (!view.messagesSectionOpen) add(DiagramWorkspaceSectionId.MESSAGES)
         if (!view.lifelinesSectionOpen) add(DiagramWorkspaceSectionId.LIFELINES)
         if (!view.artifactsSectionOpen) add(DiagramWorkspaceSectionId.ARTIFACTS)
+        add(DiagramWorkspaceSectionId.SOURCE)
     }
     val collapsed = buildList {
         if (!view.messagesExpanded) add(DiagramWorkspaceSectionId.MESSAGES)
@@ -99,8 +100,15 @@ private fun restoreTiledDiagramWorkspaceViewState(view: Seq3ViewState, fields: L
             )
         }.getOrNull()
     }
-    val hidden = fields.getOrNull(DIAGRAM_HIDDEN_TILES_FIELD).orEmpty().split(',')
+    val storedHidden = fields.getOrNull(DIAGRAM_HIDDEN_TILES_FIELD).orEmpty().split(',')
         .mapNotNull(DiagramWorkspaceSectionId::fromKey)
+    // Earlier tiled tokens contain four sections. Add the new source tile to the saved tree but
+    // keep it hidden so opening an older workspace preserves its previous canvas geometry.
+    val hidden = if (decodedLayout?.let { DiagramWorkspaceSectionId.SOURCE in tileLeafSections(it) } == true) {
+        storedHidden
+    } else {
+        (storedHidden + DiagramWorkspaceSectionId.SOURCE).distinct()
+    }
     val collapsed = fields.getOrNull(DIAGRAM_COLLAPSED_TILES_FIELD).orEmpty().split(',')
         .mapNotNull(DiagramWorkspaceSectionId::fromKey)
     val restored = sanitizeDiagramWorkspaceLayoutState(decodedLayout, hidden, collapsed)
