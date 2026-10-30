@@ -3520,6 +3520,7 @@ private fun LogRow(
     val latestIsSelected by rememberUpdatedState(isSel)
     val latestSelection by rememberUpdatedState(sel)
     val latestOnSelRow by rememberUpdatedState(onSelRow)
+    val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
     val fontSize = baseSp()
     DisposableEffect(entry.id, rowBoundsAbs) {
         onDispose { rowBoundsAbs.remove(entry.id) }
@@ -3676,7 +3677,7 @@ private fun LogRow(
                                             }.getOrElse { "" }
                                         else ""
                                         val ch = ev.changes.firstOrNull() ?: continue
-                                        onCtxMenu(
+                                        latestOnCtxMenu(
                                             entry.id,
                                             (rowRoot.x + ch.position.x) / density,
                                             (rowRoot.y + ch.position.y) / density,
@@ -4327,6 +4328,7 @@ private fun SeqHeaderRow(
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
+    val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
     val sc  = item.color
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4370,7 +4372,7 @@ private fun SeqHeaderRow(
                                     ev.buttons.isSecondaryPressed -> {
                                         ev.changes.forEach { it.consume() }
                                         val ch = ev.changes.firstOrNull() ?: continue
-                                        onCtxMenu(
+                                        latestOnCtxMenu(
                                             item.entry.id,
                                             (rowRoot.x + ch.position.x) / density,
                                             (rowRoot.y + ch.position.y) / density,
@@ -4439,6 +4441,7 @@ private fun ManualHeaderRow(
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
+    val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
     val sc = item.color
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4482,7 +4485,7 @@ private fun ManualHeaderRow(
                                     ev.buttons.isSecondaryPressed -> {
                                         ev.changes.forEach { it.consume() }
                                         val ch = ev.changes.firstOrNull() ?: continue
-                                        onCtxMenu(item.entry.id, (rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density, "")
+                                        latestOnCtxMenu(item.entry.id, (rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density, "")
                                     }
                                     ev.buttons.isPrimaryPressed && (mods.isShiftPressed || mods.isCtrlPressed || mods.isMetaPressed) -> {
                                         ev.changes.forEach { it.consume() }
@@ -4552,6 +4555,7 @@ private fun StackTraceHeaderRow(
 ) {
     val density = LocalDensity.current.density
     val latestOnSelRow by rememberUpdatedState(onSelRow)
+    val latestOnCtxMenu by rememberUpdatedState(onCtxMenu)
     val sc = DANGER_RED
     val isSel = item.entry.id in tab.selected
     var hov by remember { mutableStateOf(false) }
@@ -4595,7 +4599,7 @@ private fun StackTraceHeaderRow(
                                     ev.buttons.isSecondaryPressed -> {
                                         ev.changes.forEach { it.consume() }
                                         val ch = ev.changes.firstOrNull() ?: continue
-                                        onCtxMenu(
+                                        latestOnCtxMenu(
                                             item.entry.id,
                                             (rowRoot.x + ch.position.x) / density,
                                             (rowRoot.y + ch.position.y) / density,

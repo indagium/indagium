@@ -30,18 +30,26 @@ import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.text.TextRange
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.Filter
+import com.indagium.model.HighlightTarget
+import com.indagium.model.Highlighter
+import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
+import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.ManualCollapseBlock
+import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.SearchMode
 import com.indagium.model.SearchScope
 import com.indagium.model.SequenceDef
+import com.indagium.model.StackTraceGroup
 import com.indagium.model.searchFor
 import com.indagium.ui.AppState
 import com.indagium.ui.CompareView
 import com.indagium.ui.LogViewer
 import com.indagium.ui.SearchNavigationRequest
 import com.indagium.ui.mkTab
+import com.indagium.utils.computeItems
 import org.junit.Rule
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -105,6 +113,200 @@ class LogViewerSearchSessionsUiTest {
             assertEquals(5, capturedRowId, "right-click target remains separate from the anchor")
             assertEquals("+0.100", capturedDelta, "Original uses its own displayed predecessor")
             assertEquals(setOf(2), state.tab(tabId)!!.selected, "Original selection stays panel-local")
+        }
+        state.close()
+    }
+
+    @Test
+    fun annotationContextCaptureUsesFreshSelectionAfterThreeSelectedRows() {
+        assertContextCaptureUsesFreshSelection(initialSelection = setOf(2, 3, 4))
+    }
+
+    @Test
+    fun annotationContextCaptureUsesFreshSelectionAfterTwoSelectedRows() {
+        assertContextCaptureUsesFreshSelection(initialSelection = setOf(2, 3))
+    }
+
+    @Test
+    fun annotationContextCaptureUsesFreshSelectionAfterEmptySelection() {
+        assertContextCaptureUsesFreshSelection(initialSelection = emptySet())
+    }
+
+    @Test
+    fun annotationContextCaptureUsesFreshSelectionAcrossOriginalRowKindsAndFollowLifecycle() {
+        val tabId = "annotation-original-fresh-context-ui"
+        val rows = listOf(
+            LogEntry(1, "10:00:00.001", LogLevel.I, "FilteredOnly", "needle filtered one"),
+            LogEntry(2, "10:00:00.002", LogLevel.I, "Seq", "needle sequence start"),
+            LogEntry(3, "10:00:00.003", LogLevel.I, "Seq", "sequence interior"),
+            LogEntry(4, "10:00:00.004", LogLevel.I, "Seq", "needle sequence end"),
+            LogEntry(5, "10:00:00.005", LogLevel.I, "App", "needle five"),
+            LogEntry(6, "10:00:00.006", LogLevel.I, "App", "needle six"),
+            LogEntry(7, "10:00:00.007", LogLevel.I, "App", "needle manual anchor"),
+            LogEntry(8, "10:00:00.008", LogLevel.I, "App", "manual interior"),
+            LogEntry(9, "10:00:00.009", LogLevel.I, "FilteredOnly", "needle filtered nine"),
+            LogEntry(10, "10:00:00.010", LogLevel.E, "AndroidRuntime", "needle exception root"),
+            LogEntry(11, "10:00:00.011", LogLevel.E, "AndroidRuntime", "at com.app.Main.run(Main.java:10)"),
+            LogEntry(12, "10:00:00.012", LogLevel.I, "App", "tail"),
+        )
+        val sequence = SequenceDef(
+            "annotation-context-seq", "sequence start", priority = 1, color = Color.Red,
+            tag = "Seq", endMatchText = "sequence end", endTag = "Seq",
+        )
+        val analysis = LogAnalysis(
+            stackTraceGroups = listOf(StackTraceGroup("st_10", rid = 10, memberIds = listOf(11))),
+            pending = false,
+        )
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(tabId, "original-fresh-context.log", rows, analysis = analysis).copy(
+                showUnfiltered = true,
+                manualBlocks = listOf(
+                    ManualCollapseBlock(
+                        id = "annotation-context-manual",
+                        anchorId = 7,
+                        direction = ManualCollapseDirection.RANGE,
+                        endId = 8,
+                    ),
+                ),
+                filter = Filter(
+                    activeTags = setOf("FilteredOnly"),
+                    sequences = listOf(sequence),
+                    highlighters = listOf(
+                        Highlighter(
+                            "annotation-context-needle", "needle", regex = false,
+                            color = Color.Yellow, on = true, wholeLine = true,
+                            target = HighlightTarget.MESSAGE,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val originalItems = computeItems(state.tab(tabId)!!, applyFilter = false)
+        assertTrue(originalItems.any { it is LogItem.Row && it.entry.id == 5 })
+        assertTrue(originalItems.any { it is LogItem.SeqHeader && it.entry.id == 2 })
+        assertTrue(originalItems.any { it is LogItem.ManualHeader && it.entry.id == 7 })
+        assertTrue(originalItems.any { it is LogItem.StackTraceHeader && it.entry.id == 10 })
+        state.setSearchMode(tabId, SearchMode.TWO_SEARCHES)
+        SearchScope.entries.forEach { state.setSearchQuery(tabId, "needle", it) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) {
+            SearchScope.entries.all { state.tab(tabId)?.searchFor(it)?.matchIds?.isNotEmpty() == true }
+        }
+
+        val captured = mutableListOf<Pair<Int, List<Int>>>()
+        rule.setContent {
+            StateBackedLogViewer(state, tabId) { target, _, capture ->
+                captured += target to capture.rows.map { it.id }
+            }
+        }
+
+        val originalRow5 = rule.onNodeWithTag("log-row-$tabId:original-5")
+        val originalRow6 = rule.onNodeWithTag("log-row-$tabId:original-6")
+        val originalSeqHeader = rule.onNodeWithText("needle sequence start", substring = true)
+        val originalManualHeader = rule.onNodeWithText("needle manual anchor", substring = true)
+        val originalStackHeader = rule.onNodeWithText("needle exception root", substring = true)
+
+        // Initialize every handler while Original's own selection is empty. Later selections must
+        // flow through these still-mounted pointer coroutines.
+        listOf(originalRow5, originalSeqHeader, originalManualHeader, originalStackHeader).forEach {
+            it.performMouseInput { rightClick() }
+        }
+        originalRow5.performClick()
+        rule.onRoot().performKeyInput { keyDown(Key.CtrlLeft) }
+        originalRow6.performClick()
+        rule.onRoot().performKeyInput { keyUp(Key.CtrlLeft) }
+        originalRow5.assertIsSelected()
+        originalRow6.assertIsSelected()
+        rule.runOnIdle {
+            assertTrue(state.tab(tabId)!!.selected.isEmpty(), "Original selection stays independent")
+            assertTrue(state.tab(tabId)!!.searchFor(SearchScope.UNFILTERED).matchIds.isNotEmpty())
+            assertTrue(state.tab(tabId)!!.filter.highlighters.single().on)
+        }
+
+        listOf(
+            originalRow5 to 5,
+            originalSeqHeader to 2,
+            originalManualHeader to 7,
+            originalStackHeader to 10,
+        ).forEach { (node, targetId) ->
+            node.performMouseInput { rightClick() }
+            rule.runOnIdle {
+                assertEquals(targetId to listOf(5, 6), captured.last(), "target $targetId sees Original's latest selection")
+            }
+        }
+
+        // Turning Follow off leaves Original's local selection alone. Turning it back on does not
+        // replay the current Filtered selection; the mounted context handlers still see Original's
+        // current selection through their refreshed callbacks.
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Independent").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("log-row-$tabId:main-9").performClick()
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)!!.selected == setOf(9) }
+        originalRow5.assertIsSelected()
+        originalRow6.assertIsSelected()
+        originalManualHeader.performMouseInput { rightClick() }
+        rule.runOnIdle { assertEquals(7 to listOf(5, 6), captured.last()) }
+
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        rule.onNodeWithTag("search-link-toggle").performClick()
+        rule.onNodeWithText("Linked").assertExists()
+        rule.onNodeWithTag("search-mode-dropdown").performClick()
+        originalStackHeader.performMouseInput { rightClick() }
+        rule.runOnIdle { assertEquals(10 to listOf(5, 6), captured.last()) }
+
+        // Closing and reopening Original preserves its panel-local selection.
+        rule.runOnIdle { state.toggleUnfiltered(tabId) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)?.showUnfiltered == false }
+        rule.runOnIdle { state.toggleUnfiltered(tabId) }
+        rule.waitUntil(UI_WAIT_TIMEOUT_MS) { state.tab(tabId)?.showUnfiltered == true }
+        originalRow5.assertIsSelected()
+        originalRow6.assertIsSelected()
+        originalSeqHeader.performMouseInput { rightClick() }
+        rule.runOnIdle { assertEquals(2 to listOf(5, 6), captured.last()) }
+        rule.runOnIdle { state.close() }
+    }
+
+    private fun assertContextCaptureUsesFreshSelection(initialSelection: Set<Int>) {
+        val tabId = "annotation-fresh-selection-ui"
+        val rows = (1..12).map { id ->
+            LogEntry(id, "10:00:00.$id", LogLevel.I, "App", "row $id")
+        }
+        val state = AppState()
+        state.tabs = listOf(mkTab(tabId, "fresh-selection.log", rows).copy(selected = initialSelection))
+        var capturedTarget = 0
+        var capturedRows = emptyList<Int>()
+        rule.setContent {
+            StateBackedLogViewer(state, tabId) { target, _, capture ->
+                capturedTarget = target
+                capturedRows = capture.rows.map { it.id }
+            }
+        }
+
+        val target = rule.onNodeWithTag("log-row-$tabId:main-5")
+        target.performMouseInput { rightClick() } // starts pointerInput before changing selection
+        val initialTargetRows = if (initialSelection.size > 1) initialSelection.sorted() else listOf(5)
+        rule.runOnIdle {
+            assertEquals(5, capturedTarget)
+            assertEquals(initialTargetRows, capturedRows, "empty and single selections still target the clicked row")
+            state.setSelectedRows(tabId, listOf(5, 6))
+        }
+        target.assertIsSelected()
+        rule.onNodeWithTag("log-row-$tabId:main-6").assertIsSelected()
+        target.performMouseInput { rightClick() }
+        rule.runOnIdle {
+            assertEquals(setOf(5, 6), state.tab(tabId)!!.selected)
+            assertEquals(5, capturedTarget)
+            assertEquals(listOf(5, 6), capturedRows, "capture follows the latest visible selection")
+            state.setSelectedRows(tabId, listOf(2))
+        }
+        rule.onNodeWithTag("log-row-$tabId:main-2").assertIsSelected()
+        target.performMouseInput { rightClick() }
+        rule.runOnIdle {
+            assertEquals(setOf(2), state.tab(tabId)!!.selected)
+            assertEquals(5, capturedTarget)
+            assertEquals(listOf(5), capturedRows, "a single anchor still targets the clicked row")
         }
         state.close()
     }
