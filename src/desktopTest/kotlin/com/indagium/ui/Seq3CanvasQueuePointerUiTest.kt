@@ -166,8 +166,7 @@ class Seq3CanvasQueuePointerUiTest {
     @Test
     fun heldSequenceDragAtViewportEdgeKeepsAutoscrollingAndKeepsDraggedRowVirtualized() {
         val sessionId = startWorkspace("queue-held-edge-scroll")
-        // Enough rows that the list still has room to scroll once the dragged row has crossed its
-        // neighbours (the list re-anchors on that row's new slot).
+        // Enough rows that the list has room to keep scrolling under the held pointer.
         val document = diagramDocument(messageCount = 200)
         replaceDocument(sessionId, document)
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
@@ -191,9 +190,11 @@ class Seq3CanvasQueuePointerUiTest {
         }
         rule.waitForIdle()
         assertEquals(rowId, view.queueReorderDraggedId)
-        val offsetBeforeHeldScroll = view.queueReorderOffsetY
-
-        rule.waitUntil(1_500) { view.queueReorderOffsetY > offsetBeforeHeldScroll + 8f }
+        // The list keeps its own order while a row is lifted, so the held edge scroll is not cut short by
+        // the list re-anchoring on the dragged row's new slot: by the time the clock is idle it has run on
+        // well past the pointer's own travel.
+        val pointerTravel = edgeTarget.y - start.y
+        rule.waitUntil(1_500) { view.queueReorderOffsetY > pointerTravel + 8f }
         rule.onNodeWithTag("seq3-sequence-row-$rowId", useUnmergedTree = true).fetchSemanticsNode()
         assertEquals(document.messages.map { it.id }, currentSession(sessionId).document.messages.map { it.id })
 

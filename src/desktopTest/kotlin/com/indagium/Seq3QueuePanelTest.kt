@@ -20,12 +20,17 @@ import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.seq3DrawnRowRefs
+import com.indagium.diagram3.seq3FilterCounts
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.ui.DARK_GITHUB
+import com.indagium.ui.LIGHT_THEME
 import com.indagium.ui.Seq3ArtifactHeading
 import com.indagium.ui.Seq3CanvasRowRef
+import com.indagium.ui.Seq3MessagesMode
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.Seq3ViewState
+import com.indagium.ui.TileHeaderParts
 import com.indagium.ui.blockOrderDuringDrag
 import com.indagium.ui.cumulativeBlockOffsets
 import com.indagium.ui.seq3ArtifactHeading
@@ -37,7 +42,9 @@ import com.indagium.ui.seq3FragmentMessageCount
 import com.indagium.ui.seq3FragmentRailLabel
 import com.indagium.ui.seq3FragmentRails
 import com.indagium.ui.seq3LifelineDisplaySegmentsLabel
+import com.indagium.ui.seq3MessagesHeaderParts
 import com.indagium.ui.seq3MessagesModeLabels
+import com.indagium.ui.seq3MessagesSummaryCount
 import com.indagium.ui.seq3ParseRowNumbers
 import com.indagium.ui.seq3ParseSequenceRowKey
 import com.indagium.ui.seq3ParseTemplateCaptures
@@ -48,6 +55,8 @@ import com.indagium.ui.seq3ResolveSelectedEntries
 import com.indagium.ui.seq3SelectSequenceRow
 import com.indagium.ui.seq3SequenceDropCommand
 import com.indagium.ui.seq3SequenceFilterActive
+import com.indagium.ui.seq3SequenceFilterCounts
+import com.indagium.ui.seq3SequenceGhostBackground
 import com.indagium.ui.seq3SequenceGripHit
 import com.indagium.ui.seq3SequenceRowCaption
 import com.indagium.ui.seq3SequenceRowCount
@@ -615,5 +624,47 @@ class Seq3QueuePanelTest {
     fun footerTextCountsTemplatesMessagesAndMissingTargets() {
         assertEquals("11 templates · 45 messages · 0 need a target", seq3QueueFooterText(11, 45, 0))
         assertEquals("1 template · 1 message · 1 need a target", seq3QueueFooterText(1, 1, 1))
+    }
+
+    @Test
+    fun theGhostFillIsOpaqueSoTheRowsUnderItNeverShowThrough() {
+        listOf(LIGHT_THEME, DARK_GITHUB).forEach { theme ->
+            val fill = seq3SequenceGhostBackground(theme)
+            assertEquals(1f, fill.alpha, "the lifted row paints an opaque fill")
+            assertTrue(fill != theme.abg, "it is the accent tint over the panel colour, not the bare translucent tint")
+        }
+    }
+
+    @Test
+    fun sequencePillCountsCountTheRowsOfTheMatchingMessages() {
+        val base = sequenceDocument()
+        val withHidden = base.copy(
+            messages = base.messages.map { message ->
+                if (message.id == "rep") {
+                    message.copy(occurrences = message.occurrences.map { if (it.entryId == 2) it.copy(visibility = Seq3Visibility.HIDDEN) else it })
+                } else {
+                    message
+                }
+            },
+        )
+        val counts = seq3SequenceFilterCounts(withHidden, seq3SequenceRows(withHidden))
+        assertEquals(4, counts.all, "all counts drawn rows (the hidden occurrence draws none), not the three templates")
+        assertEquals(2, counts.hidden, "the hidden pill counts the rows of the message that has hidden content")
+        assertEquals(3, seq3FilterCounts(withHidden).all, "the Templates pills keep counting messages")
+    }
+
+    @Test
+    fun theMessagesHeaderCountFollowsTheMode() {
+        val document = sequenceDocument()
+        assertEquals(3, seq3MessagesSummaryCount(document, Seq3MessagesMode.TEMPLATES))
+        assertEquals(5, seq3MessagesSummaryCount(document, Seq3MessagesMode.SEQUENCE))
+    }
+
+    @Test
+    fun theMessagesHeaderDropsItsCountAndIconBeforeTheTitleCanShrink() {
+        assertEquals(TileHeaderParts(showIcon = true, showSummary = true), seq3MessagesHeaderParts(460f))
+        // The standard ~370dp tile: the title keeps its room, so no count there.
+        assertEquals(TileHeaderParts(showIcon = true, showSummary = false), seq3MessagesHeaderParts(370f))
+        assertEquals(TileHeaderParts(showIcon = false, showSummary = false), seq3MessagesHeaderParts(340f))
     }
 }

@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
@@ -18,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
@@ -185,6 +187,45 @@ class Seq3MessagesModeUiTest {
         rule.waitUntil(3_000) { view.scrollRequestId == null }
         rule.waitForIdle()
         rule.onNodeWithTag("seq3-sequence-row-m100::*", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun pillsCountRowsInSequenceModeAndTemplatesInTemplatesMode() {
+        val sessionId = startWorkspace("mode-pills", repeatedDocument())
+        showWorkspace(sessionId)
+        rule.onNodeWithText("All 2", useUnmergedTree = true).assertIsDisplayed()
+
+        switchTo("Sequence")
+        rule.onNodeWithText("All 4", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithText("All 2", useUnmergedTree = true).assertDoesNotExist()
+
+        switchTo("Templates")
+        rule.onNodeWithText("All 2", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun theHeaderAtTheStandardTileWidthKeepsItsTitleReadableAndTheSwitchCompact() {
+        val sessionId = startWorkspace("mode-header", manyDocument(45))
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
+        // A wider side column puts the Messages tile at about the standard 370dp.
+        view.diagramTileLayout = diagramWorkspaceLayout(sideWeight = 1.4f)
+        showWorkspace(sessionId)
+
+        val header = rule.onNodeWithTag("diagram-tile-header-messages", useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertTrue(header.width in 340f..420f, "the tile is near the standard width: ${header.width}")
+        val title = rule.onNode(
+            hasText("Messages") and hasAnyAncestor(hasTestTag("diagram-tile-header-messages")),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val layouts = mutableListOf<TextLayoutResult>()
+        title.config.getOrNull(SemanticsActions.GetTextLayoutResult)?.action?.invoke(layouts)
+        assertEquals(false, layouts.single().didOverflowWidth, "the title is not shortened")
+        assertTrue(title.boundsInRoot.width >= 40f, "and keeps its room: ${title.boundsInRoot}")
+        // No counts in the switch and no header count beside the title at this width.
+        rule.onNode(hasText("Templates") and hasAnyAncestor(hasTestTag("seq3-messages-mode")), useUnmergedTree = true).assertIsDisplayed()
+        rule.onNode(hasText("Templates 45", substring = true), useUnmergedTree = true).assertDoesNotExist()
+        rule.onNode(hasText("Sequence 45", substring = true), useUnmergedTree = true).assertDoesNotExist()
     }
 
     private fun switchTo(labelPrefix: String) {

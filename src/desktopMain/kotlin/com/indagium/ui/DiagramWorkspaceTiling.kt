@@ -21,6 +21,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
@@ -206,12 +208,14 @@ internal fun diagramWorkspaceTitle(id: DiagramWorkspaceSectionId): String = when
 private fun diagramWorkspaceSlot(
     id: DiagramWorkspaceSectionId,
     session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
     canHide: Boolean,
     headerAction: (@Composable RowScope.() -> Unit)?,
     body: @Composable () -> Unit,
 ): TileSlot {
     val summary = when (id) {
-        DiagramWorkspaceSectionId.MESSAGES -> session.document.messages.size
+        // Templates mode counts templates; Sequence mode counts the rows it lists.
+        DiagramWorkspaceSectionId.MESSAGES -> seq3MessagesSummaryCount(session.document, view.messagesMode)
         DiagramWorkspaceSectionId.LIFELINES -> session.document.lifelines.size
         DiagramWorkspaceSectionId.ARTIFACTS -> session.document.fragments.size + session.document.notes.size +
             session.document.delays.size + session.document.manualActivations.size
@@ -234,9 +238,23 @@ private fun diagramWorkspaceSlot(
         maximizable = true,
         sizing = TileBodySizing.FILL,
         headerAction = headerAction,
+        headerParts = if (id == DiagramWorkspaceSectionId.MESSAGES) ::seq3MessagesHeaderParts else null,
         body = { _ -> body() },
     )
 }
+
+/** The Messages header carries the mode switch and the add button, so below [SEQ3_MESSAGES_SUMMARY_MIN_DP]
+ *  the count goes (the footer and the switch already say it) and below [SEQ3_MESSAGES_ICON_MIN_DP] the icon,
+ *  rather than letting the title shrink to "Me…". */
+internal fun seq3MessagesHeaderParts(widthDp: Float): TileHeaderParts =
+    TileHeaderParts(showIcon = widthDp >= SEQ3_MESSAGES_ICON_MIN_DP, showSummary = widthDp >= SEQ3_MESSAGES_SUMMARY_MIN_DP)
+
+/** The Messages header's count: templates in Templates mode, the drawn rows the Sequence list shows in Sequence mode. */
+internal fun seq3MessagesSummaryCount(document: Seq3Document, mode: Seq3MessagesMode): Int =
+    if (mode == Seq3MessagesMode.SEQUENCE) seq3DrawnRowRefs(document).size else document.messages.size
+
+internal const val SEQ3_MESSAGES_SUMMARY_MIN_DP = 400f
+internal const val SEQ3_MESSAGES_ICON_MIN_DP = 360f
 
 /**
  * Diagram equivalent of [LogViewTilingHost]: the saved view tree is the actual layout source for four live tiles, not a set of
@@ -302,7 +320,7 @@ internal fun DiagramWorkspaceTilingHost(
                             DiagramWorkspaceSectionId.SOURCE -> ({ Seq3SourceHeaderActions(state, session, view) })
                             DiagramWorkspaceSectionId.PREVIEW -> null
                         }
-                        val slot = diagramWorkspaceSlot(id, session, visible.size > 1, headerAction) { content(id) }
+                        val slot = diagramWorkspaceSlot(id, session, view, visible.size > 1, headerAction) { content(id) }
                         Tile(id, slot)
                     }
                 }

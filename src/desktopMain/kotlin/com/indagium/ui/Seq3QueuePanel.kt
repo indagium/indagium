@@ -432,7 +432,8 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
                 },
             )
         }
-        Seq3FilterChipsRow(view, counts)
+        // The pills filter by parent message; in the sequence list they count the rows they leave.
+        Seq3FilterChipsRow(view, if (sequenceMode) seq3SequenceFilterCounts(document, sequenceRows) else counts)
         // Sort orders the template list only; the sequence list is always the diagram order.
         Seq3FilterTextAndSortRow(view, showSort = !sequenceMode)
         if (sequenceMode) {
@@ -776,10 +777,14 @@ private fun Seq3SequenceList(
     }
     val visibleKeys = remember(rows) { rows.map(Seq3SequenceRow::key) }
     val rowsByKey = remember(rows) { rows.associateBy(Seq3SequenceRow::key) }
-    val railsByKey = remember(document, allRows) {
-        allRows.map(Seq3SequenceRow::key).zip(seq3FragmentRails(document, allRows.map(Seq3SequenceRow::ref))).toMap()
+    val draggedKeyNow = view.queueReorderDraggedId
+    // While a row is lifted out, the labels and rails are worked out over the rows that stay, so a
+    // run whose first row is being dragged hands its label to the next row instead of losing it.
+    val railRows = remember(allRows, draggedKeyNow) { allRows.filter { it.key != draggedKeyNow } }
+    val railsByKey = remember(document, railRows) {
+        railRows.map(Seq3SequenceRow::key).zip(seq3FragmentRails(document, railRows.map(Seq3SequenceRow::ref))).toMap()
     }
-    val gutterDp = remember(railsByKey) { seq3RailGutterDp(railsByKey.values.toList()) }
+    val gutterDp = remember(document, allRows) { seq3RailGutterDp(seq3FragmentRails(document, allRows.map(Seq3SequenceRow::ref))) }
     val listState = rememberLazyListState()
     val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
     val currentVisibleKeys = rememberUpdatedState(visibleKeys)
@@ -787,19 +792,21 @@ private fun Seq3SequenceList(
     val currentReorderEnabled = rememberUpdatedState(reorderEnabled)
     val currentGutterDp = rememberUpdatedState(gutterDp)
     var justReleasedKey by remember(session.id) { mutableStateOf<String?>(null) }
-    var dragStartKeys by remember(session.id) { mutableStateOf(emptyList<String>()) }
     var dragGrabOffsetY by remember(session.id) { mutableStateOf(0f) }
     val visibleKeySet = remember(visibleKeys) { visibleKeys.toHashSet() }
     val queuedVisualKeySet = remember(view.queueReorderVisualIds) { view.queueReorderVisualIds.toHashSet() }
-    val dragStartKeySet = remember(dragStartKeys) { dragStartKeys.toHashSet() }
     val visualKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && view.queueReorderVisualIds.isNotEmpty()) {
         view.queueReorderVisualIds.filter { it in visibleKeySet } + visibleKeys.filterNot { it in queuedVisualKeySet }
     } else {
         visibleKeys
     }
-    val renderRows = remember(rows, visualKeys) { visualKeys.mapNotNull(rowsByKey::get) }
 
-    fun heightOf(key: String): Float = rowHeights[key] ?: (SEQ3_SUBMESSAGE_ROW_HEIGHT.value * density)
+    val bodyHeightPx = SEQ3_SUBMESSAGE_ROW_HEIGHT.value * density
+
+    // The lifted row leaves only its 44dp body as the hole (its fragment label, if any, moved to the
+    // next row of the run), every other row is as tall as it was measured, label included.
+    fun heightOf(key: String): Float =
+        if (key == view.queueReorderDraggedId) bodyHeightPx else rowHeights[key] ?: bodyHeightPx
 
     fun advanceOf(key: String): Float = heightOf(key) + SEQ3_SEQUENCE_ROW_GAP.value * density
 
@@ -815,7 +822,6 @@ private fun Seq3SequenceList(
 
     fun resetDragState() {
         justReleasedKey = null
-        dragStartKeys = emptyList()
         view.queueReorderVisualIds = emptyList()
         view.queueReorderOffsetY = 0f
         view.queueReorderPointerY = 0f
@@ -840,7 +846,6 @@ private fun Seq3SequenceList(
         }
         if (committed && movedKey != null) {
             justReleasedKey = movedKey
-            dragStartKeys = liveKeys
             view.queueReorderVisualIds = finalOrder
         } else {
             resetDragState()
@@ -861,7 +866,6 @@ private fun Seq3SequenceList(
             view.queueReorderCancelled = true
             view.queueReorderDraggedId = null
             view.queueReorderVisualIds = emptyList()
-            dragStartKeys = emptyList()
         }
     }
 
@@ -870,7 +874,6 @@ private fun Seq3SequenceList(
             view.queueReorderCancelled = true
             view.queueReorderDraggedId = null
             view.queueReorderVisualIds = emptyList()
-            dragStartKeys = emptyList()
         }
         if (view.queueReorderDraggedId == null && justReleasedKey == null) resetDragState()
     }
@@ -926,6 +929,9 @@ private fun Seq3SequenceList(
                     clearLocalState()
                 }
 
+                fun primaryDown(change: PointerInputChange, event: PointerEvent): Boolean =
+                    if (change.type == PointerType.Mouse) event.buttons.isPrimaryPressed else change.pressed
+
                 fun handleMove(change: PointerInputChange, event: PointerEvent) {
                     val rowKey = candidateKey ?: return
                     val start = pressPosition ?: return
@@ -933,24 +939,21 @@ private fun Seq3SequenceList(
                         cancelPointerGesture()
                         return
                     }
-                    val primaryPressed = if (change.type == PointerType.Mouse) {
-                        event.buttons.isPrimaryPressed
-                    } else {
-                        change.pressed
-                    }
-                    if (!primaryPressed) {
+                    if (!primaryDown(change, event)) {
                         cancelPointerGesture()
                         return
                     }
-                    val current = change.position
-                    val crossedSlop = (current - start).getDistance() > dragSlop
+                    // A held button keeps the gesture past the list's edge (the pointer may wander onto
+                    // the footer during an edge scroll): slots and auto-scroll use the position clamped
+                    // to the list, and only a release or Escape ends it.
+                    val current = Offset(change.position.x, change.position.y.coerceIn(0f, size.height.toFloat()))
+                    val crossedSlop = (change.position - start).getDistance() > dragSlop
                     if (!active && crossedSlop) {
                         active = true
                         view.queueReorderCancelled = false
                         view.queueReorderDraggedId = rowKey
                         view.queueReorderOffsetY = current.y - start.y
                         view.queueReorderPointerY = current.y
-                        dragStartKeys = currentVisibleKeys.value
                         view.queueReorderVisualIds = currentVisibleKeys.value
                         view.textFieldFocused = false
                         runCatching { view.focusRequester.requestFocus() }
@@ -979,12 +982,7 @@ private fun Seq3SequenceList(
                         when (event.type) {
                             PointerEventType.Press -> {
                                 if (candidateKey != null) cancelPointerGesture()
-                                val primaryPressed = if (change.type == PointerType.Mouse) {
-                                    event.buttons.isPrimaryPressed
-                                } else {
-                                    change.pressed
-                                }
-                                if (primaryPressed && currentReorderEnabled.value &&
+                                if (primaryDown(change, event) && currentReorderEnabled.value &&
                                     seq3SequenceGripHit(change.position.x, density, currentGutterDp.value)
                                 ) {
                                     val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
@@ -996,7 +994,9 @@ private fun Seq3SequenceList(
                                         candidatePointerId = change.id
                                         pressPosition = change.position
                                         lastPosition = change.position
-                                        dragGrabOffsetY = change.position.y - item.offset.toFloat()
+                                        // Measured from the row's shell: a fragment label above it stays in the list.
+                                        val labelPx = (item.size - bodyHeightPx).coerceAtLeast(0f)
+                                        dragGrabOffsetY = change.position.y - (item.offset.toFloat() + labelPx)
                                     }
                                 }
                             }
@@ -1009,7 +1009,8 @@ private fun Seq3SequenceList(
                                 clearLocalState()
                             }
                             PointerEventType.Exit -> {
-                                if (candidateKey != null) cancelPointerGesture()
+                                // Leaving the list with the button still held is not a cancel.
+                                if (candidateKey != null && !primaryDown(change, event)) cancelPointerGesture()
                             }
                             else -> Unit
                         }
@@ -1020,12 +1021,10 @@ private fun Seq3SequenceList(
             }
         },
     ) {
-        val startKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && dragStartKeys.isNotEmpty()) {
-            dragStartKeys.filter { it in visibleKeySet } + visibleKeys.filterNot { it in dragStartKeySet }
-        } else {
-            visibleKeys
-        }
-        val startOffsets = cumulativeBlockOffsets(startKeys, ::advanceOf)
+        // The LazyColumn always lays the rows out in the list's own order. Reordering its items live
+        // makes it follow the first visible key to its new index and scroll the rows above out of
+        // view, so the visual order is only ever applied as per-row offsets from that fixed layout.
+        val layoutOffsets = cumulativeBlockOffsets(visibleKeys, ::advanceOf)
         val targetOffsets = cumulativeBlockOffsets(visualKeys, ::advanceOf)
         LazyColumn(
             Modifier.fillMaxSize().padding(end = 6.dp).testTag("seq3-sequence-list"),
@@ -1042,11 +1041,9 @@ private fun Seq3SequenceList(
                     )
                 }
             }
-            items(renderRows, key = Seq3SequenceRow::key) { row ->
-                val draggedKey = view.queueReorderDraggedId
-                val startY = startOffsets[row.key] ?: 0f
-                val slotY = targetOffsets[row.key] ?: startY
-                val targetY = targetOffsets[row.key] ?: startY
+            items(rows, key = Seq3SequenceRow::key) { row ->
+                val layoutY = layoutOffsets[row.key] ?: 0f
+                val targetY = targetOffsets[row.key] ?: layoutY
                 val animatedY by key(row.key) {
                     animateFloatAsState(
                         targetValue = targetY,
@@ -1054,50 +1051,22 @@ private fun Seq3SequenceList(
                         label = "seq3-sequence-row-y-${row.key}",
                     )
                 }
-                val isDragging = draggedKey == row.key
-                val isJustReleased = justReleasedKey == row.key
-                val renderY = sequenceRenderY(
-                    isDragging = isDragging,
-                    isJustReleased = isJustReleased,
-                    pointerY = startY + view.queueReorderOffsetY,
-                    targetY = targetY,
-                    animatedY = animatedY,
-                )
-                if (isDragging) {
-                    // The row's slot stays as a gap with the insertion bar at its top; the rail runs
-                    // through it when the drop would land inside a fragment.
-                    val slot = visualKeys.indexOf(row.key)
-                    val inside = seq3DropInsideFragments(
-                        document,
-                        visualKeys.getOrNull(slot - 1)?.let(rowsByKey::get)?.ref,
-                        visualKeys.getOrNull(slot + 1)?.let(rowsByKey::get)?.ref,
+                if (view.queueReorderDraggedId == row.key) {
+                    // The lifted row's own slot stays an empty hole; the neighbours slide over it and
+                    // the insertion gap is drawn over the list at the row's visual slot.
+                    Spacer(Modifier.fillMaxWidth().height((bodyHeightPx / density).dp))
+                } else {
+                    val isJustReleased = justReleasedKey == row.key
+                    val renderY = sequenceRenderY(
+                        isDragging = false,
+                        isJustReleased = isJustReleased,
+                        pointerY = 0f,
+                        targetY = targetY,
+                        animatedY = animatedY,
                     )
                     Box(
                         Modifier.fillMaxWidth()
-                            .height((heightOf(row.key) / density).dp)
-                            .onSizeChanged { rowHeights[row.key] = it.height.toFloat() },
-                    ) {
-                        if (inside.isNotEmpty()) {
-                            Seq3FragmentRail(inside, inside.mapTo(HashSet()) { it.id }, gutterDp, docTheme.seq1)
-                        }
-                        Box(
-                            Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopStart)
-                                .background(tc.ac, RoundedCornerShape(1.dp))
-                                .testTag("seq3-sequence-drop-bar"),
-                        )
-                        inside.firstOrNull()?.let { fragment ->
-                            AppText(
-                                "inside ${seq3FragmentRailLabel(fragment)}",
-                                color = tc.ac,
-                                fontSize = 9.sp,
-                                modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 8.dp),
-                            )
-                        }
-                    }
-                } else {
-                    Box(
-                        Modifier.fillMaxWidth()
-                            .offset { IntOffset(0, (renderY - slotY).roundToInt()) }
+                            .offset { IntOffset(0, (renderY - layoutY).roundToInt()) }
                             .zIndex(if (isJustReleased) 1f else 0f)
                             .graphicsLayer {
                                 if (isJustReleased) {
@@ -1117,6 +1086,48 @@ private fun Seq3SequenceList(
         }
         val draggingRow = view.queueReorderDraggedId?.let(rowsByKey::get)
         if (draggingRow != null) {
+            // Where the dragged row would land: the gap the neighbours leave, with the insertion bar
+            // at its top. The list's scroll shows through the first visible row's layout offset.
+            val slot = visualKeys.indexOf(draggingRow.key)
+            val inside = seq3DropInsideFragments(
+                document,
+                visualKeys.getOrNull(slot - 1)?.let(rowsByKey::get)?.ref,
+                visualKeys.getOrNull(slot + 1)?.let(rowsByKey::get)?.ref,
+            )
+            val gapContentY by animateFloatAsState(
+                targetValue = targetOffsets[draggingRow.key] ?: 0f,
+                animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                label = "seq3-sequence-gap-y",
+            )
+            Box(
+                Modifier.fillMaxWidth()
+                    .padding(end = 6.dp)
+                    .height((bodyHeightPx / density).dp)
+                    .offset {
+                        // Read here, in the placement phase: reading the list's layout info while
+                        // composing re-composes the list after every one of its own measures.
+                        val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { (it.key as? String) in layoutOffsets }
+                        val scrollShift = anchor?.let { it.offset - (layoutOffsets[it.key as String] ?: 0f) } ?: 0f
+                        IntOffset(0, (gapContentY + scrollShift).roundToInt())
+                    },
+            ) {
+                if (inside.isNotEmpty()) {
+                    Seq3FragmentRail(inside, inside.mapTo(HashSet()) { it.id }, gutterDp, docTheme.seq1)
+                }
+                Box(
+                    Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopStart)
+                        .background(tc.ac, RoundedCornerShape(1.dp))
+                        .testTag("seq3-sequence-drop-bar"),
+                )
+                inside.firstOrNull()?.let { fragment ->
+                    AppText(
+                        "inside ${seq3FragmentRailLabel(fragment)}",
+                        color = tc.ac,
+                        fontSize = 9.sp,
+                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 8.dp),
+                    )
+                }
+            }
             Box(
                 Modifier.fillMaxWidth()
                     .padding(end = 6.dp)
@@ -1125,7 +1136,7 @@ private fun Seq3SequenceList(
                     .testTag("seq3-sequence-drag-ghost-${draggingRow.key}"),
             ) {
                 Seq3SequenceRowItem(
-                    state, session, view, document, draggingRow, railsByKey[draggingRow.key], gutterDp, docTheme.seq1,
+                    state, session, view, document, draggingRow, null, gutterDp, docTheme.seq1,
                     reorderEnabled = reorderEnabled, isDragging = true,
                 )
             }
@@ -1163,7 +1174,8 @@ private fun Seq3SequenceRowItem(
     val hidden = row.occurrence?.visibility == Seq3Visibility.HIDDEN
     val count = seq3SequenceRowCount(row)
     Column(Modifier.fillMaxWidth()) {
-        rails?.starting?.forEach { fragment ->
+        // The lifted ghost is the row alone: its fragment label and rail stay with the run in the list.
+        if (!isDragging) rails?.starting?.forEach { fragment ->
             AppText(
                 seq3FragmentRailLabel(fragment),
                 color = seq3FragmentRailColor(fragment, defaultRailColor),
@@ -1174,10 +1186,14 @@ private fun Seq3SequenceRowItem(
             )
         }
         Row(Modifier.fillMaxWidth()) {
-            if (rails != null) Seq3FragmentRail(rails.containing, rails.continuing, gutterDp, defaultRailColor)
+            if (isDragging) {
+                Spacer(Modifier.width(gutterDp.dp))
+            } else if (rails != null) {
+                Seq3FragmentRail(rails.containing, rails.continuing, gutterDp, defaultRailColor)
+            }
             Seq3EvidenceRowShell(
                 background = when {
-                    isDragging -> tc.abg
+                    isDragging -> seq3SequenceGhostBackground(tc)
                     selected -> tc.sl
                     hovered -> tc.hv
                     else -> tc.p2
