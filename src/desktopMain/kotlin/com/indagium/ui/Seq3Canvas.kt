@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +40,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Height
@@ -98,6 +100,7 @@ import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3FontRole
+import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentBox
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
@@ -124,6 +127,8 @@ import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.seq3ActivationSpans
 import com.indagium.diagram3.seq3ArrowStyle
+import com.indagium.diagram3.fragmentContainsRow
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3IsValidManualActivationEnd
 import com.indagium.diagram3.seq3LifelineSegments
 import com.indagium.diagram3.seq3ManualActivationEndLimit
@@ -571,6 +576,11 @@ private fun Seq3CanvasContent(
                         // doc for why this one needs no edit/delete chrome of its own.
                         layout.stateInvariants.forEach { marker -> Seq3StateInvariantTextOverlay(marker, docTheme) }
                         layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density, docTheme) }
+                        // Drop feedback for the arrow reorder drag (the ghost itself is drawn by
+                        // drawSeq3Diagram): the insertion line at the resolved boundary plus a chip.
+                        view.rowReorderPreview?.takeIf { it.active }?.let { preview ->
+                            Seq3ReorderDropOverlay(document, layout, preview, hScroll, density * zoom)
+                        }
                     }
                 }
             }
@@ -1311,6 +1321,129 @@ internal fun seq3RowReorderPreviewAt(
     val last = targets.last()
     return Seq3RowReorderPreview(source, Seq3InsertionPosition.AfterRow(last.first))
 }
+
+/** Where a row-reorder drop lands, ready to draw: the insertion line's y in diagram space, and the
+ *  chip text ("Inside <fragment>" and/or "Moves all N"), null when there is nothing to say. */
+internal data class Seq3ReorderDropIndicator(val lineY: Double, val insideLabel: String?, val movesAll: Int?) {
+    val chipText: String?
+        get() = listOfNotNull(
+            insideLabel?.let { "Inside $it" },
+            movesAll?.let { "Moves all $it" },
+        ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+private const val SEQ3_DROP_LINE_EDGE_GAP = 21.0 // half a layout row: the line sits this far outside the first/last row
+
+/** Resolves the drop boundary of [preview] (a Before/After/Start/End position) against the rows the
+ *  canvas draws, excluding the dragged row exactly like [seq3RowReorderPreviewAt] does. The line sits
+ *  midway between the two neighbour rows, above the first / below the last row at the ends. */
+internal fun seq3ReorderDropIndicator(
+    document: Seq3Document,
+    layout: Seq3Layout,
+    preview: Seq3RowReorderPreview,
+): Seq3ReorderDropIndicator? {
+    val targets = layout.rows
+        .filterNot { it is Seq3ElisionRow }
+        .map { row -> seq3CanvasRowRef(document, row) to row }
+        .filterNot { (ref, _) -> ref == preview.rowRef }
+    if (targets.isEmpty()) return null
+    val (previous, next) = when (val position = preview.position) {
+        is Seq3InsertionPosition.BeforeRow -> {
+            val index = targets.indexOfFirst { it.first == position.rowRef }.takeIf { it >= 0 } ?: return null
+            targets.getOrNull(index - 1) to targets[index]
+        }
+        is Seq3InsertionPosition.AfterRow -> {
+            val index = targets.indexOfFirst { it.first == position.rowRef }.takeIf { it >= 0 } ?: return null
+            targets[index] to targets.getOrNull(index + 1)
+        }
+        is Seq3InsertionPosition.Start -> null to targets.first()
+        is Seq3InsertionPosition.End -> targets.last() to null
+        else -> return null
+    }
+    val lineY = when {
+        previous != null && next != null -> (previous.second.y + next.second.y) / 2.0
+        next != null -> next.second.y - SEQ3_DROP_LINE_EDGE_GAP
+        previous != null -> previous.second.y + SEQ3_DROP_LINE_EDGE_GAP
+        else -> return null
+    }.coerceAtLeast(0.0)
+    val innermost = seq3DropInsideFragments(document, previous?.first, next?.first).minWithOrNull(
+        compareBy<Seq3Fragment> { fragment -> targets.count { fragmentContainsRow(fragment, it.first) } }
+            .thenByDescending { fragment -> document.fragments.indexOf(fragment) },
+    )
+    val movesAll = if (preview.rowRef.occurrenceEntryId == null) {
+        document.messages.firstOrNull { it.id == preview.rowRef.messageId }?.let(::seq3CollapsedOccurrenceCount)
+    } else {
+        null
+    }
+    return Seq3ReorderDropIndicator(lineY, innermost?.let(::seq3FragmentRailLabel), movesAll)
+}
+
+/** The Move submenu's four targets. */
+internal enum class Seq3RowMove(val label: String) { UP("Up"), DOWN("Down"), TO_START("To start"), TO_END("To end") }
+
+/** Where [row] goes for [move], as a `MoveRow` position over the drawn rows, or null when it is not
+ *  drawn or already there (Up/To start on the first row, Down/To end on the last). */
+internal fun seq3RowMovePosition(
+    row: Seq3RowRef,
+    drawnRows: List<Seq3RowRef>,
+    move: Seq3RowMove,
+): Seq3InsertionPosition? {
+    val index = drawnRows.indexOf(row)
+    if (index < 0) return null
+    return when (move) {
+        Seq3RowMove.UP -> drawnRows.getOrNull(index - 1)?.let(Seq3InsertionPosition::BeforeRow)
+        Seq3RowMove.DOWN -> drawnRows.getOrNull(index + 1)?.let(Seq3InsertionPosition::AfterRow)
+        Seq3RowMove.TO_START -> if (index == 0) null else Seq3InsertionPosition.BeforeRow(drawnRows.first())
+        Seq3RowMove.TO_END -> if (index == drawnRows.lastIndex) null else Seq3InsertionPosition.AfterRow(drawnRows.last())
+    }
+}
+
+/** The insertion line and the "Inside <fragment>" / "Moves all N" chip of an active arrow reorder drag. */
+@Composable
+private fun Seq3ReorderDropOverlay(
+    document: Seq3Document,
+    layout: Seq3Layout,
+    preview: Seq3RowReorderPreview,
+    hScroll: ScrollState,
+    scale: Float,
+) {
+    val tc = tc()
+    val indicator = remember(document, layout, preview.rowRef, preview.position) {
+        seq3ReorderDropIndicator(document, layout, preview)
+    } ?: return
+    Box(
+        Modifier.offset(0.dp, (indicator.lineY - 1.0).dp)
+            .size(layout.width.dp, 2.dp)
+            .background(tc.ac)
+            .testTag("seq3-reorder-drop-line"),
+    )
+    val chipText = indicator.chipText ?: return
+    val safeScale = scale.coerceAtLeast(SEQ3_MIN_SAFE_DENSITY_OR_ZOOM)
+    // Same chip look as the tiling drop-preview label. Read the pointer/scroll inside the offset
+    // lambda (layout phase) so a scroll tick moves the chip without recomposing the canvas.
+    Box(
+        Modifier
+            .offset {
+                val pointerX = (preview.pointerViewportX + hScroll.value) / safeScale
+                val x = (pointerX + SEQ3_DROP_CHIP_POINTER_GAP).coerceIn(0.0, (layout.width - SEQ3_DROP_CHIP_MIN_ROOM).coerceAtLeast(0.0))
+                val above = indicator.lineY - SEQ3_DROP_CHIP_ABOVE
+                val y = if (above >= 0.0) above else indicator.lineY + SEQ3_DROP_CHIP_BELOW
+                IntOffset((x * safeScale).roundToInt(), (y * safeScale).roundToInt())
+            }
+            .widthIn(max = SEQ3_DROP_CHIP_MAX_WIDTH.dp)
+            .background(tc.ac, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .testTag("seq3-reorder-drop-chip"),
+    ) {
+        AppText(chipText, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+private const val SEQ3_DROP_CHIP_POINTER_GAP = 14.0
+private const val SEQ3_DROP_CHIP_MIN_ROOM = 120.0
+private const val SEQ3_DROP_CHIP_ABOVE = 24.0
+private const val SEQ3_DROP_CHIP_BELOW = 6.0
+private const val SEQ3_DROP_CHIP_MAX_WIDTH = 260
 
 internal fun seq3CanvasEdgeAutoScroll(
     viewportPosition: Offset,
@@ -2921,7 +3054,7 @@ private fun Seq3CanvasContextMenu(
                     placement = view.canvasContextMenuCanvasPoint,
                 )
             }
-            CtxItem(Icons.Outlined.Edit, "Add message after this") {
+            CtxItem(Icons.Outlined.Add, "Add message after this…") {
                 view.pendingInsertRequest = Seq3PendingInsertRequest(
                     after = seq3CanvasRowRef(document, messageId, occurrenceEntryId),
                     canvasPointX = view.canvasContextMenuCanvasPoint.x,
@@ -2930,6 +3063,27 @@ private fun Seq3CanvasContextMenu(
                 view.canvasContextMenuMessageId = null
                 view.canvasContextMenuOccurrenceEntryId = null
             }
+            // Move ▸ Up / Down / To start / To end: the same MoveRow the drag and Alt+↑/↓ send,
+            // aimed at the neighbouring DRAWN rows. Disabled options keep their place (greyed).
+            val drawnRows = remember(document) { seq3DrawnRowRefs(document) }
+            val movedRow = seq3CanvasRowRef(document, messageId, occurrenceEntryId)
+            CtxItemWithSubmenu(
+                icon = Icons.Outlined.OpenWith,
+                label = "Move",
+                submenu = Seq3RowMove.entries.map { move ->
+                    val position = seq3RowMovePosition(movedRow, drawnRows, move)
+                    CtxSubmenuOption(move.label, enabled = position != null) {
+                        if (position != null) {
+                            state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveRow(movedRow, position))
+                        }
+                        view.canvasContextMenuMessageId = null
+                        view.canvasContextMenuOccurrenceEntryId = null
+                        runCatching { view.focusRequester.requestFocus() }
+                    }
+                },
+                preferLeft = submenuOpensLeft,
+                onClick = {},
+            )
             CtxItem(Icons.Outlined.Schedule, "Insert delay after this") {
                 // User-observed correction: pass the exact occurrence the right-click hit
                 // (`occurrenceEntryId`, resolved above) rather than only `messageId` — a message

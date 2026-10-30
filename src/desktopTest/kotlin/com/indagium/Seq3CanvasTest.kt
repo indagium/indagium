@@ -47,7 +47,11 @@ import com.indagium.ui.seq3NearestLifelineId
 import com.indagium.ui.seq3NoteIsEmphasized
 import com.indagium.ui.seq3PointInBox
 import com.indagium.ui.seq3PointerPxToLayoutUnits
+import com.indagium.ui.Seq3RowMove
+import com.indagium.ui.Seq3RowReorderPreview
+import com.indagium.ui.seq3ReorderDropIndicator
 import com.indagium.ui.seq3ReorderLifelineIds
+import com.indagium.ui.seq3RowMovePosition
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
 import com.indagium.ui.seq3RowReorderPreviewAt
@@ -863,5 +867,122 @@ class Seq3CanvasTest {
         assertEquals(145.0, seq3HeaderWidthAfterPhysicalDrag(120.0, 100f, density = 2f, zoom = 2f))
         assertEquals(360.0, seq3HeaderWidthAfterPhysicalDrag(350.0, 100f, density = 2f, zoom = 0.5f))
         assertEquals(70.0, seq3HeaderWidthAfterPhysicalDrag(80.0, -100f, density = 2f, zoom = 0.5f))
+    }
+
+    // ── Move ▸ Up / Down / To start / To end ────────────────────────────────────────────────────
+
+    private val r1 = Seq3RowRef("m1", 1)
+    private val r2 = Seq3RowRef("m2", 2)
+    private val r3 = Seq3RowRef("m3", 3)
+    private val summary = Seq3RowRef("m4")
+    private val drawn = listOf(r1, r2, r3, summary)
+
+    @Test
+    fun rowMovePositionTargetsTheNeighbouringDrawnRows() {
+        assertEquals(Seq3InsertionPosition.BeforeRow(r1), seq3RowMovePosition(r2, drawn, Seq3RowMove.UP))
+        assertEquals(Seq3InsertionPosition.AfterRow(r3), seq3RowMovePosition(r2, drawn, Seq3RowMove.DOWN))
+        assertEquals(Seq3InsertionPosition.BeforeRow(r1), seq3RowMovePosition(r3, drawn, Seq3RowMove.TO_START))
+        assertEquals(Seq3InsertionPosition.AfterRow(summary), seq3RowMovePosition(r2, drawn, Seq3RowMove.TO_END))
+    }
+
+    @Test
+    fun rowMovePositionIsNullWhereTheRowCannotGo() {
+        assertNull(seq3RowMovePosition(r1, drawn, Seq3RowMove.UP))
+        assertNull(seq3RowMovePosition(r1, drawn, Seq3RowMove.TO_START))
+        assertNull(seq3RowMovePosition(summary, drawn, Seq3RowMove.DOWN))
+        assertNull(seq3RowMovePosition(summary, drawn, Seq3RowMove.TO_END))
+        assertEquals(Seq3InsertionPosition.AfterRow(r2), seq3RowMovePosition(r1, drawn, Seq3RowMove.DOWN))
+        assertEquals(Seq3InsertionPosition.BeforeRow(r3), seq3RowMovePosition(summary, drawn, Seq3RowMove.UP))
+    }
+
+    @Test
+    fun rowMovePositionIsNullForARowThatIsNotDrawnOrAloneInTheDiagram() {
+        assertNull(seq3RowMovePosition(Seq3RowRef("ghost", 9), drawn, Seq3RowMove.UP))
+        Seq3RowMove.entries.forEach { move -> assertNull(seq3RowMovePosition(r1, listOf(r1), move), "$move on a lone row") }
+    }
+
+    // ── Reorder drop feedback: the insertion line and its chip ──────────────────────────────────
+
+    private fun threeRowDoc(): Seq3Document = Seq3Document(
+        lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+        messages = listOf(
+            message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+            message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+        ),
+    )
+
+    @Test
+    fun dropLineSitsMidwayBetweenTheNeighbourRowsAndOutsideAtTheEnds() {
+        val doc = threeRowDoc()
+        val layout = layoutSeq3(doc, opts())
+        val ys = layout.rows.map { it.y }
+        val source = Seq3RowRef("m3", 3)
+
+        val between = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(source, Seq3InsertionPosition.AfterRow(r1)))
+        assertEquals((ys[0] + ys[1]) / 2.0, between?.lineY)
+        assertNull(between?.chipText, "no fragment and no summary: the line alone")
+
+        val top = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(source, Seq3InsertionPosition.BeforeRow(r1)))
+        assertTrue(requireNotNull(top).lineY < ys[0], "above the first row")
+
+        val bottom = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(r1, Seq3InsertionPosition.AfterRow(Seq3RowRef("m3", 3))))
+        assertTrue(requireNotNull(bottom).lineY > ys[2], "below the last row")
+    }
+
+    @Test
+    fun dropChipNamesTheInnermostFragmentTheBoundaryIsInside() {
+        val doc = threeRowDoc().copy(
+            messages = threeRowDoc().messages + message("m4", "A", "B", occurrences = listOf(occurrence(4, ts = 4_000L))),
+            fragments = listOf(
+                Seq3Fragment("outer", Seq3FragmentKind.LOOP, "retry", listOf("m1", "m2", "m3")),
+                Seq3Fragment("inner", Seq3FragmentKind.OPT, "slow path", listOf("m2", "m3")),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val source = Seq3RowRef("m4", 4)
+
+        // Between m2 and m3 both fragments contain both neighbours: the smaller one wins.
+        val inside = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(source, Seq3InsertionPosition.AfterRow(r2)))
+        assertEquals("Inside opt: slow path", inside?.chipText)
+
+        // Between m1 and m2 only the outer fragment contains both.
+        val outer = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(source, Seq3InsertionPosition.AfterRow(r1)))
+        assertEquals("Inside loop: retry", outer?.chipText)
+
+        // After the fragment's last row the next neighbour is outside: no chip.
+        val outside = seq3ReorderDropIndicator(doc, layout, Seq3RowReorderPreview(Seq3RowRef("m1", 1), Seq3InsertionPosition.AfterRow(r3)))
+        assertNull(outside?.chipText)
+    }
+
+    @Test
+    fun dropChipSaysMovesAllForACollapsedSummaryAndJoinsItWithTheFragment() {
+        val collapsed = message("m1", "A", "B", occurrences = (1..4).map { occurrence(it, ts = it * 1000L) })
+            .copy(repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 2)
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                collapsed,
+                message("m2", "A", "B", occurrences = listOf(occurrence(10, ts = 5_000L))),
+                message("m3", "A", "B", occurrences = listOf(occurrence(11, ts = 6_000L))),
+            ),
+            fragments = listOf(Seq3Fragment("f", Seq3FragmentKind.LOOP, "loop", listOf("m2", "m3"))),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val summaryRef = Seq3RowRef("m1")
+
+        val plain = seq3ReorderDropIndicator(
+            doc,
+            layout,
+            Seq3RowReorderPreview(summaryRef, Seq3InsertionPosition.AfterRow(Seq3RowRef("m3", 11))),
+        )
+        assertEquals("Moves all 4", plain?.chipText)
+
+        val joined = seq3ReorderDropIndicator(
+            doc,
+            layout,
+            Seq3RowReorderPreview(summaryRef, Seq3InsertionPosition.AfterRow(Seq3RowRef("m2", 10))),
+        )
+        assertEquals("Inside loop · Moves all 4", joined?.chipText)
     }
 }

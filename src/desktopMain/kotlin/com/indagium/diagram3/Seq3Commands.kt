@@ -79,6 +79,9 @@ sealed class Seq3Command {
     /** Moves one exact canvas/emitter row without changing its parent or occurrence membership. */
     data class MoveRow(val rowRef: Seq3RowRef, val position: Seq3InsertionPosition) : Seq3Command()
 
+    /** Drops the manual row order, so every row returns to its chronological position. */
+    data object ResetRowOrder : Seq3Command()
+
     /** Splits one occurrence out of a grouped generated message and places it at its evidence
      *  timestamp. The remaining grouped message stays in place; both rows remain undoable as one
      *  queue edit. */
@@ -203,7 +206,10 @@ fun applySeq3Command(document: Seq3Document, command: Seq3Command): Seq3CommandR
         // violations against the prior document so a legacy malformed diagram can still receive
         // unrelated edits, while any newly introduced defect rejects this entire command before it
         // reaches undo history.
-        val normalized = reconcileSeq3RowOrder(document, outcome.document)
+        // ResetRowOrder is the one command whose result legitimately has an EMPTY rowOrder while the
+        // prior document had a manual one; reconcile would read that as "not specified" and carry
+        // the old order back in, so it is applied as-is.
+        val normalized = if (command == Seq3Command.ResetRowOrder) outcome.document else reconcileSeq3RowOrder(document, outcome.document)
         val boundsViolation = seq3RowOrderBoundsViolation(normalized)
             .takeIf { normalized.rowOrder.size > document.rowOrder.size }
         if (boundsViolation != null) {
@@ -250,6 +256,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetMessageTimestamp -> dispatchSetMessageTimestamp(document, command)
     is Seq3Command.MoveMessage -> dispatchMoveMessage(document, command)
     is Seq3Command.MoveRow -> dispatchMoveRow(document, command)
+    Seq3Command.ResetRowOrder -> dispatchResetRowOrder(document)
     is Seq3Command.MoveOccurrenceOut -> dispatchMoveOccurrenceOut(document, command)
     is Seq3Command.MoveOccurrencesOut -> dispatchMoveOccurrencesOut(document, command)
     is Seq3Command.MoveOccurrenceBack -> dispatchMoveOccurrenceBack(document, command)
@@ -401,6 +408,13 @@ private fun dispatchMoveRow(document: Seq3Document, command: Seq3Command.MoveRow
             applied(result.document, "Move row")
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
+    }
+
+private fun dispatchResetRowOrder(document: Seq3Document): Outcome =
+    if (document.rowOrder.isEmpty()) {
+        unapplied(document, "No change")
+    } else {
+        applied(document.copy(rowOrder = emptyList()), "Reset message order")
     }
 
 private fun dispatchMoveOccurrenceOut(document: Seq3Document, command: Seq3Command.MoveOccurrenceOut): Outcome =

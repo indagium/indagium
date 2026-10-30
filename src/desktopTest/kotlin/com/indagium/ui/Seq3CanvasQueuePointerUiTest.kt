@@ -123,16 +123,17 @@ class Seq3CanvasQueuePointerUiTest {
     }
 
     @Test
-    fun queueRowTracksSmallPointerMovementBeforeAnyOrderCommit() {
+    fun sequenceRowTracksSmallPointerMovementBeforeAnyOrderCommit() {
         val sessionId = startWorkspace("queue-live-row-follow")
         val document = diagramDocument()
         replaceDocument(sessionId, document)
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
         showWorkspace(sessionId)
 
-        val rowId = document.messages.first().id
-        val rowTag = "seq3-queue-row-$rowId"
-        val handle = bounds("seq3-queue-drag-$rowId")
+        val rowId = seq3SequenceRowKey(Seq3RowRef(document.messages.first().id))
+        val rowTag = "seq3-sequence-row-$rowId"
+        val handle = bounds("seq3-sequence-drag-$rowId")
         val start = rootPoint(centerX(handle), centerY(handle))
         val workspace = rule.onNodeWithTag("seq3-workspace-root")
         val activationDeltaPx = 24f
@@ -159,19 +160,23 @@ class Seq3CanvasQueuePointerUiTest {
         assertNull(view.queueReorderDraggedId)
         assertEquals(0f, view.queueReorderOffsetY)
         assertEquals(document.messages.map { it.id }, currentSession(sessionId).document.messages.map { it.id })
+        assertEquals(document.rowOrder, currentSession(sessionId).document.rowOrder, "a drag that never crossed a neighbour moves nothing")
     }
 
     @Test
-    fun heldQueueDragAtViewportEdgeKeepsAutoscrollingAndKeepsDraggedRowVirtualized() {
+    fun heldSequenceDragAtViewportEdgeKeepsAutoscrollingAndKeepsDraggedRowVirtualized() {
         val sessionId = startWorkspace("queue-held-edge-scroll")
-        val document = diagramDocument(messageCount = 14)
+        // Enough rows that the list still has room to scroll once the dragged row has crossed its
+        // neighbours (the list re-anchors on that row's new slot).
+        val document = diagramDocument(messageCount = 200)
         replaceDocument(sessionId, document)
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
         showWorkspace(sessionId)
 
-        val rowId = document.messages.first().id
-        val handle = bounds("seq3-queue-drag-$rowId")
-        val viewport = bounds("seq3-message-list")
+        val rowId = seq3SequenceRowKey(Seq3RowRef(document.messages.first().id))
+        val handle = bounds("seq3-sequence-drag-$rowId")
+        val viewport = bounds("seq3-sequence-list")
         val start = rootPoint(centerX(handle), centerY(handle))
         val root = bounds("seq3-workspace-root")
         val edgeTarget = Offset(
@@ -189,7 +194,7 @@ class Seq3CanvasQueuePointerUiTest {
         val offsetBeforeHeldScroll = view.queueReorderOffsetY
 
         rule.waitUntil(1_500) { view.queueReorderOffsetY > offsetBeforeHeldScroll + 8f }
-        rule.onNodeWithTag("seq3-queue-row-$rowId", useUnmergedTree = true).fetchSemanticsNode()
+        rule.onNodeWithTag("seq3-sequence-row-$rowId", useUnmergedTree = true).fetchSemanticsNode()
         assertEquals(document.messages.map { it.id }, currentSession(sessionId).document.messages.map { it.id })
 
         workspace.performMouseInput { release() }

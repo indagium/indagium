@@ -66,7 +66,7 @@ class Seq3EmptyDiagramAuthoringUiTest {
         addLifeline("Client")
         addLifeline("Server")
 
-        rule.onNodeWithText("+ message", useUnmergedTree = true).performClick()
+        rule.onNode(hasText("+ message") or hasContentDescription("Add message"), useUnmergedTree = true).performClick()
         rule.onNodeWithText("Custom message…", useUnmergedTree = true).performClick()
         val textInputs = rule.onAllNodes(
             hasSetTextAction() and hasAnyAncestor(isDialog()),

@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CustomMessageSpec
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3RowRef
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.toPlantUml
 import org.junit.After
 import org.junit.Rule
@@ -191,7 +193,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
 
         rule.onNodeWithTag("seq3-queue-row-$firstId", useUnmergedTree = true)
             .performMouseInput { rightClick() }
-        rule.onNodeWithText("Add message after this", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.onNodeWithText("Add message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Add message after this row", useUnmergedTree = true).assertIsDisplayed()
         rule.onNodeWithText("Custom message…", useUnmergedTree = true).performClick()
@@ -209,57 +211,66 @@ class Seq3SourceAndQueueInteractionsUiTest {
     }
 
     @Test
-    fun queueDragPreviewsUntilReleaseThenCommitsOneParentMove() {
+    fun sequenceDragPreviewsUntilReleaseThenCommitsOneRowMove() {
         val sessionId = startEmptyWorkspace("queue-reorder")
         seedTwoLifelines(sessionId)
         state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "First")))
         state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "Second")))
         val firstId = currentSession(sessionId).document.messages.first().id
         val secondId = currentSession(sessionId).document.messages.last().id
+        val firstKey = seq3SequenceRowKey(Seq3RowRef(firstId))
+        requireNotNull(state.seq3Sessions.viewState(sessionId)).messagesMode = Seq3MessagesMode.SEQUENCE
         showWorkspace(sessionId)
 
-        val handle = rule.onNodeWithTag("seq3-queue-drag-$firstId", useUnmergedTree = true)
+        val handle = rule.onNodeWithTag("seq3-sequence-drag-$firstKey", useUnmergedTree = true)
         handle.performTouchInput {
             down(center)
             moveBy(Offset(0f, 220f * rule.density.density))
         }
         rule.waitForIdle()
-        assertEquals(listOf(firstId, secondId), currentSession(sessionId).document.messages.map { it.id }, "drag preview does not mutate the document")
-        assertEquals(firstId, requireNotNull(state.seq3Sessions.viewState(sessionId)).queueReorderDraggedId)
+        assertEquals(
+            listOf(Seq3RowRef(firstId), Seq3RowRef(secondId)),
+            seq3DrawnRowRefs(currentSession(sessionId).document),
+            "drag preview does not mutate the document",
+        )
+        assertEquals(firstKey, requireNotNull(state.seq3Sessions.viewState(sessionId)).queueReorderDraggedId)
+        rule.onNodeWithTag("seq3-sequence-drop-bar", useUnmergedTree = true).assertIsDisplayed()
 
         rule.onNodeWithTag("seq3-workspace-root").performTouchInput { up() }
         rule.waitForIdle()
-        assertEquals(listOf(secondId, firstId), currentSession(sessionId).document.messages.map { it.id })
+        assertEquals(listOf(Seq3RowRef(secondId), Seq3RowRef(firstId)), seq3DrawnRowRefs(currentSession(sessionId).document))
+        assertEquals(listOf(firstId, secondId), currentSession(sessionId).document.messages.map { it.id }, "the template list keeps its own order")
         assertEquals(5, currentSession(sessionId).undoStack.size, "two lifelines and two inserts precede one reorder undo entry")
         assertEquals(null, requireNotNull(state.seq3Sessions.viewState(sessionId)).queueReorderDraggedId)
     }
 
     @Test
-    fun escapeCancelsAQueueReorderPreviewWithoutChangingUndoHistory() {
+    fun escapeCancelsASequenceReorderPreviewWithoutChangingUndoHistory() {
         val sessionId = startEmptyWorkspace("queue-reorder-cancel")
         seedTwoLifelines(sessionId)
         state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "First")))
         state.seq3Sessions.applyCommand(sessionId, Seq3Command.AddCustomMessage(Seq3CustomMessageSpec("a", "b", "Second")))
         val before = currentSession(sessionId)
-        val firstId = before.document.messages.first().id
-        val beforeIds = before.document.messages.map { it.id }
+        val firstKey = seq3SequenceRowKey(Seq3RowRef(before.document.messages.first().id))
+        val beforeRows = seq3DrawnRowRefs(before.document)
         val beforeUndoCount = before.undoStack.size
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
         showWorkspace(sessionId)
 
-        rule.onNodeWithTag("seq3-queue-drag-$firstId", useUnmergedTree = true).performTouchInput {
+        rule.onNodeWithTag("seq3-sequence-drag-$firstKey", useUnmergedTree = true).performTouchInput {
             down(center)
             moveBy(Offset(0f, 220f * rule.density.density))
         }
         rule.waitForIdle()
-        assertEquals(firstId, view.queueReorderDraggedId)
+        assertEquals(firstKey, view.queueReorderDraggedId)
         rule.onNodeWithTag("seq3-workspace-root").performKeyInput { pressKey(Key.Escape) }
         rule.waitForIdle()
         assertEquals(null, view.queueReorderDraggedId)
 
         rule.onNodeWithTag("seq3-workspace-root").performTouchInput { up() }
         rule.waitForIdle()
-        assertEquals(beforeIds, currentSession(sessionId).document.messages.map { it.id })
+        assertEquals(beforeRows, seq3DrawnRowRefs(currentSession(sessionId).document))
         assertEquals(beforeUndoCount, currentSession(sessionId).undoStack.size)
     }
 
@@ -292,7 +303,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
         rule.onNodeWithTag("seq3-queue-context-add-after", useUnmergedTree = true).assertIsDisplayed()
             .performKeyInput { pressKey(Key.Escape) }
         rule.waitForIdle()
-        rule.onNodeWithText("Add message after this", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithTag("seq3-queue-context-add-after", useUnmergedTree = true).assertDoesNotExist()
         rule.onNodeWithTag("seq3-workspace-root").assertIsFocused()
 
         rule.onNodeWithTag("seq3-workspace-root").performKeyInput {

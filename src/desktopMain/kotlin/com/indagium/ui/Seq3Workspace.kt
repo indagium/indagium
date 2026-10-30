@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.isShiftPressed
@@ -77,10 +78,12 @@ import com.indagium.diagram3.Seq3MessageLabelStyle
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Operand
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.seq3DefaultManualActivationEnd
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.ThemePreset
@@ -1026,6 +1029,9 @@ internal data class Seq3CanvasEditorTarget(
     val occurrenceEntryId: Int? = null,
 )
 
+/** The two lists the Messages tile can show — see [Seq3ViewState.messagesMode]. */
+internal enum class Seq3MessagesMode { TEMPLATES, SEQUENCE }
+
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
 
@@ -1061,13 +1067,20 @@ internal class Seq3ViewState {
     var textFilter by mutableStateOf("")
     var sort by mutableStateOf(Seq3Sort.LOG_ORDER)
 
+    /** Which list the Messages tile shows: the editable templates, or one row per drawn arrow (the
+     *  only place the diagram order is changed from the list). View-only like [sort], so the
+     *  selection fields above carry over a switch untouched. */
+    var messagesMode by mutableStateOf(Seq3MessagesMode.TEMPLATES)
+
     /** Two-way row<->arrow hover (spec §04): set by whichever surface the pointer is over, read by
      *  the other. */
     var hoveredMessageId by mutableStateOf<String?>(null)
 
     /** Set by [Seq3Canvas] when an arrow is clicked; [Seq3MessagesTileBody] consumes it to scroll that
      *  row into view "even when the current filter hides it" (spec §04) — the canvas clears the
-     *  filter itself before setting this, so the panel only ever needs to scroll. */
+     *  filter itself before setting this, so the panel only ever needs to scroll. In Sequence mode
+     *  the list resolves the exact row from [selectedOccurrenceMessageId]/[selectedOccurrenceEntryId]
+     *  the canvas set in the same click. */
     var scrollRequestId by mutableStateOf<String?>(null)
 
     /** The message currently focused by a queue/canvas click. This drives the cross-surface
@@ -1138,7 +1151,8 @@ internal class Seq3ViewState {
     /** A shared add-after request produced by either the message queue or canvas context menu. */
     var pendingInsertRequest by mutableStateOf<Seq3PendingInsertRequest?>(null)
 
-    /** The queue moves a whole parent message only after release; these are transient preview flags. */
+    /** The Sequence list moves a row only after release; these are transient preview flags. The
+     *  "id" is a row key (see `seq3SequenceRowKey`), not a message id. */
     var queueReorderDraggedId by mutableStateOf<String?>(null)
     var queueReorderVisualIds by mutableStateOf<List<String>>(emptyList())
     var queueReorderCancelled by mutableStateOf(false)
@@ -1974,6 +1988,9 @@ internal sealed class Seq3KeyAction {
 
     data object FocusFilter : Seq3KeyAction()
 
+    /** Alt+↑ / Alt+↓: move the selected arrow one drawn row up / down. */
+    data class MoveRow(val move: Seq3RowMove) : Seq3KeyAction()
+
     data object SkipGuided : Seq3KeyAction()
 
     data object ConfirmGuided : Seq3KeyAction()
@@ -1991,15 +2008,22 @@ private const val DIGIT_KEY_MAX = 9
  * the filter box would hide a message. Only [Seq3KeyAction.Escape] survives a focused text field
  * (it blurs/cancels), matching how every other panel in this app treats Esc.
  */
-@Suppress("CyclomaticComplexMethod")
+@Suppress("CyclomaticComplexMethod", "ReturnCount")
 internal fun seq3KeyAction(
     keyLabel: String,
     shift: Boolean,
     textFieldFocused: Boolean,
     guidedActive: Boolean,
+    alt: Boolean = false,
 ): Seq3KeyAction? {
     if (keyLabel == "Escape") return Seq3KeyAction.Escape
     if (textFieldFocused) return null
+    if (alt) {
+        when (keyLabel) {
+            "ArrowUp" -> return Seq3KeyAction.MoveRow(Seq3RowMove.UP)
+            "ArrowDown" -> return Seq3KeyAction.MoveRow(Seq3RowMove.DOWN)
+        }
+    }
     keyLabel.toIntOrNull()?.takeIf { it in DIGIT_KEY_MIN..DIGIT_KEY_MAX }?.let { digit ->
         return if (shift) Seq3KeyAction.SetSource(digit) else Seq3KeyAction.SetTarget(digit)
     }
@@ -2022,6 +2046,8 @@ internal fun seq3KeyAction(
 private fun keyLabelOf(event: KeyEvent): String = when (event.key) {
     Key.Escape -> "Escape"
     Key.Enter, Key.NumPadEnter -> "Enter"
+    Key.DirectionUp -> "ArrowUp"
+    Key.DirectionDown -> "ArrowDown"
     else -> {
         val code = event.utf16CodePoint
         if (code in 1..Char.MAX_VALUE.code) code.toChar().toString() else ""
@@ -2032,8 +2058,9 @@ private fun handleSeq3Key(state: AppState, session: Seq3WorkspaceSession, view: 
     if (event.type != KeyEventType.KeyDown) return false
     // ⌘/Ctrl chords belong to the global handler in App.kt (⌘Z undo) — never claim them here.
     if (event.isMetaPressed || event.isCtrlPressed) return false
-    val action = seq3KeyAction(keyLabelOf(event), event.isShiftPressed, view.textFieldFocused, view.guidedPass != null)
-        ?: return false
+    val action = seq3KeyAction(
+        keyLabelOf(event), event.isShiftPressed, view.textFieldFocused, view.guidedPass != null, alt = event.isAltPressed,
+    ) ?: return false
     return applySeq3KeyAction(state, session, view, action)
 }
 
@@ -2062,7 +2089,34 @@ private fun applySeq3KeyAction(
         is Seq3KeyAction.EditLabel -> applySeq3EditLabel(view, document)
         is Seq3KeyAction.JumpToLog -> applySeq3JumpToLog(state, session, view, document)
         is Seq3KeyAction.FocusFilter -> { view.textFieldFocused = true; true }
+        is Seq3KeyAction.MoveRow -> applySeq3MoveSelectedRow(state, session, view, document, action.move)
     }
+}
+
+/** The one arrow the canvas (or the Sequence list) has selected, as the durable row identity the
+ *  model orders by; null for no selection or a multi-selection. */
+internal fun seq3SelectedSingleRowRef(document: Seq3Document, view: Seq3ViewState): Seq3RowRef? {
+    val canvasRow = view.selectedCanvasRows.singleOrNull()
+    if (canvasRow != null) return seq3CanvasRowRef(document, canvasRow.messageId, canvasRow.occurrenceEntryId)
+    if (view.selectedCanvasRows.isNotEmpty()) return null
+    val messageId = view.selectedOccurrenceMessageId ?: return null
+    val entryId = view.selectedOccurrenceEntryId ?: return null
+    return seq3CanvasRowRef(document, messageId, entryId)
+}
+
+/** Alt+↑/↓: the same `MoveRow` the context menu's Move submenu sends. The row ref is unchanged by the
+ *  move, so the selection follows the row. False (key passes through) when nothing single is selected
+ *  or the row is already at that end. */
+private fun applySeq3MoveSelectedRow(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    move: Seq3RowMove,
+): Boolean {
+    val row = seq3SelectedSingleRowRef(document, view) ?: return false
+    val position = seq3RowMovePosition(row, seq3DrawnRowRefs(document), move) ?: return false
+    return state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveRow(row, position))
 }
 
 // internal (not private): WP-panel-toggle's own Seq3KeyActionTest-style coverage of the

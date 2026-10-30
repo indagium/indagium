@@ -1,9 +1,13 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
@@ -12,9 +16,15 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowRef
+import com.indagium.diagram3.Seq3Selection
+import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.Seq3ArtifactHeading
+import com.indagium.ui.Seq3CanvasRowRef
+import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.blockOrderDuringDrag
 import com.indagium.ui.cumulativeBlockOffsets
@@ -24,7 +34,26 @@ import com.indagium.ui.seq3CollapsedOccurrenceCount
 import com.indagium.ui.seq3DocumentDisplaySegmentsLabel
 import com.indagium.ui.seq3FragmentMessageCount
 import com.indagium.ui.seq3LifelineDisplaySegmentsLabel
+import com.indagium.ui.seq3DropInsideFragments
+import com.indagium.ui.seq3FragmentRailLabel
+import com.indagium.ui.seq3FragmentRails
+import com.indagium.ui.seq3MessagesModeLabels
 import com.indagium.ui.seq3ParseRowNumbers
+import com.indagium.ui.seq3ParseSequenceRowKey
+import com.indagium.ui.seq3QueueFooterText
+import com.indagium.ui.seq3RailGutterDp
+import com.indagium.ui.seq3SelectSequenceRow
+import com.indagium.ui.seq3SequenceDropCommand
+import com.indagium.ui.seq3SequenceFilterActive
+import com.indagium.ui.seq3SequenceGripHit
+import com.indagium.ui.seq3SequenceRowCaption
+import com.indagium.ui.seq3SequenceRowCount
+import com.indagium.ui.seq3SequenceRowKey
+import com.indagium.ui.seq3SequenceRowSelected
+import com.indagium.ui.seq3SequenceRowText
+import com.indagium.ui.seq3SequenceRows
+import com.indagium.ui.seq3SequenceScrollIndex
+import com.indagium.ui.seq3SequenceVisibleRows
 import com.indagium.ui.seq3ParseTemplateCaptures
 import com.indagium.ui.seq3PinnableDirections
 import com.indagium.ui.seq3ResolveSelectedEntries
@@ -300,5 +329,291 @@ class Seq3QueuePanelTest {
             heightOf = ::lifelineRowHeight,
         )
         assertEquals(listOf("A", "B", "C", "D"), order)
+    }
+
+    // ── Sequence mode: one row per drawn arrow ──────────────────────────────────────────────────
+
+    private val abLifelines = listOf(Seq3Lifeline("A", "com.acme.A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1))
+
+    /** `rep` draws as three exact rows, `big` as one collapsed summary, `solo` as one custom row. */
+    @Suppress("MagicNumber") // Fixture entry ids, timestamps and repeat threshold.
+    private fun sequenceDocument(fragments: List<Seq3Fragment> = emptyList()) = Seq3Document(
+        lifelines = abLifelines,
+        messages = listOf(
+            msg("rep", (1..3).map { occ(it, it * 100L, "send $it") }, repeat = Seq3Repeat.EVERY),
+            msg("big", (11..15).map { occ(it, 1_000L + it, "tick $it") }, repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3),
+            Seq3Message("solo", Seq3Match("B", "reply"), "B", "A", "reply"),
+        ),
+        fragments = fragments,
+    )
+
+    @Test
+    fun sequenceRowKeyRoundTripsExactAndSummaryRefs() {
+        listOf(Seq3RowRef("m1", 7), Seq3RowRef("m1"), Seq3RowRef("a::b", 3)).forEach { ref ->
+            assertEquals(ref, seq3ParseSequenceRowKey(seq3SequenceRowKey(ref)))
+        }
+        assertEquals("m1::*", seq3SequenceRowKey(Seq3RowRef("m1")))
+        assertEquals("m1::7", seq3SequenceRowKey(Seq3RowRef("m1", 7)))
+    }
+
+    @Test
+    fun parseSequenceRowKeyRejectsMalformedKeys() {
+        assertEquals(null, seq3ParseSequenceRowKey("m1"))
+        assertEquals(null, seq3ParseSequenceRowKey("::3"))
+        assertEquals(null, seq3ParseSequenceRowKey("m1::x"))
+    }
+
+    @Test
+    fun sequenceRowCountEqualsTheDrawnRowsAndSummaryRowsCarryNoOccurrence() {
+        val document = sequenceDocument()
+        val rows = seq3SequenceRows(document)
+        assertEquals(seq3DrawnRowRefs(document), rows.map { it.ref })
+        assertEquals((1..rows.size).toList(), rows.map { it.number })
+        assertEquals(5, rows.size, "three exact rows, one collapsed summary, one custom row")
+        val summary = rows.single { it.message.id == "big" }
+        assertEquals(null, summary.occurrence)
+        assertEquals(Seq3RowRef("big"), summary.ref)
+        assertEquals(5, seq3SequenceRowCount(summary))
+        assertEquals(null, seq3SequenceRowCount(rows.first { it.message.id == "rep" }))
+        assertEquals("send 2", seq3SequenceRowText(rows.first { it.ref == Seq3RowRef("rep", 2) }))
+        assertEquals("big-label", seq3SequenceRowText(summary))
+    }
+
+    @Test
+    fun sequenceRowCaptionUsesTimestampAndDisplayNames() {
+        val document = sequenceDocument().copy(lifelineDisplaySegments = 1)
+        val rows = seq3SequenceRows(document)
+        assertEquals("10:00:00.000 · A → B", seq3SequenceRowCaption(document, rows.first()))
+        // A custom row has no evidence timestamp: just the endpoints.
+        assertEquals("B → A", seq3SequenceRowCaption(document, rows.last()))
+    }
+
+    @Test
+    fun sequenceRowCaptionMarksAnUnresolvedTarget() {
+        val message = Seq3Message("m", Seq3Match("A", "x"), "A", null, "x")
+        val document = Seq3Document(lifelines = abLifelines, messages = listOf(message))
+        assertEquals("com.acme.A → ?", seq3SequenceRowCaption(document, seq3SequenceRows(document).single()))
+    }
+
+    // Drop → MoveRow: the final order is the list order with the dragged row in its new slot.
+
+    private val dropKeys = listOf("a::*", "b::*", "c::*", "d::*")
+
+    @Test
+    fun droppingARowDownMovesItAfterTheRowNowAboveIt() {
+        val command = seq3SequenceDropCommand("a::*", dropKeys, listOf("b::*", "c::*", "a::*", "d::*"))
+        assertEquals(Seq3Command.MoveRow(Seq3RowRef("a"), Seq3InsertionPosition.AfterRow(Seq3RowRef("c"))), command)
+    }
+
+    @Test
+    fun droppingARowUpMovesItBeforeTheRowItDisplaced() {
+        val command = seq3SequenceDropCommand("d::*", dropKeys, listOf("a::*", "d::*", "b::*", "c::*"))
+        assertEquals(Seq3Command.MoveRow(Seq3RowRef("d"), Seq3InsertionPosition.BeforeRow(Seq3RowRef("b"))), command)
+    }
+
+    @Test
+    fun droppingAtTheTopAndBottomUsesTheOnlyNeighbour() {
+        assertEquals(
+            Seq3Command.MoveRow(Seq3RowRef("c"), Seq3InsertionPosition.BeforeRow(Seq3RowRef("a"))),
+            seq3SequenceDropCommand("c::*", dropKeys, listOf("c::*", "a::*", "b::*", "d::*")),
+        )
+        assertEquals(
+            Seq3Command.MoveRow(Seq3RowRef("a"), Seq3InsertionPosition.AfterRow(Seq3RowRef("d"))),
+            seq3SequenceDropCommand("a::*", dropKeys, listOf("b::*", "c::*", "d::*", "a::*")),
+        )
+    }
+
+    @Test
+    fun droppingAnExactOccurrenceKeepsItsEntryId() {
+        val keys = listOf("m::1", "m::2", "n::*")
+        assertEquals(
+            Seq3Command.MoveRow(Seq3RowRef("m", 1), Seq3InsertionPosition.AfterRow(Seq3RowRef("n"))),
+            seq3SequenceDropCommand("m::1", keys, listOf("m::2", "n::*", "m::1")),
+        )
+    }
+
+    @Test
+    fun aDropThatChangedNothingIsNoCommand() {
+        assertEquals(null, seq3SequenceDropCommand("b::*", dropKeys, dropKeys))
+        assertEquals(null, seq3SequenceDropCommand(null, dropKeys, dropKeys))
+        assertEquals(null, seq3SequenceDropCommand("zzz::*", dropKeys, dropKeys))
+    }
+
+    @Test
+    fun theDroppedCommandMovesTheRowInTheDocument() {
+        val document = sequenceDocument()
+        val keys = seq3SequenceRows(document).map { it.key }
+        val moved = keys.toMutableList().apply { add(0, removeAt(2)) }
+        val command = requireNotNull(seq3SequenceDropCommand(keys[2], keys, moved))
+        val result = com.indagium.diagram3.applySeq3Command(document, command)
+        assertTrue(result.applied)
+        assertEquals(moved, seq3SequenceRows(result.document).map { it.key })
+    }
+
+    @Test
+    fun gripHitFollowsTheRailGutter() {
+        assertTrue(seq3SequenceGripHit(10f, 1f, 0f))
+        assertFalse(seq3SequenceGripHit(60f, 1f, 0f))
+        assertFalse(seq3SequenceGripHit(10f, 1f, 14f), "a rail gutter pushes the grip right")
+        assertTrue(seq3SequenceGripHit(30f, 1f, 14f))
+        assertTrue(seq3SequenceGripHit(26f, 2f, 0f), "pixels scale with the density")
+    }
+
+    // Filters
+
+    @Test
+    fun noFilterKeepsEveryRowAndAnyFilterIsActive() {
+        val document = sequenceDocument()
+        val rows = seq3SequenceRows(document)
+        assertFalse(seq3SequenceFilterActive(Seq3Filter.ALL, "  "))
+        assertTrue(seq3SequenceFilterActive(Seq3Filter.EDITED, ""))
+        assertTrue(seq3SequenceFilterActive(Seq3Filter.ALL, "x"))
+        assertEquals(rows, seq3SequenceVisibleRows(document, rows, Seq3Filter.ALL, ""))
+    }
+
+    @Test
+    fun pillFiltersFilterRowsByTheirParentMessage() {
+        val needs = Seq3Message("needs", Seq3Match("A", "n"), "A", null, "n", occurrences = listOf(occ(30, 3_000L)))
+        val document = sequenceDocument().let { it.copy(messages = it.messages + needs) }
+        val rows = seq3SequenceRows(document)
+        val visible = seq3SequenceVisibleRows(document, rows, Seq3Filter.NEEDS_TARGET, "")
+        assertTrue(visible.isNotEmpty())
+        assertEquals(setOf("needs"), visible.map { it.message.id }.toSet())
+    }
+
+    @Test
+    fun textFilterMatchesTheParentTemplateOrTheOccurrenceText() {
+        val document = sequenceDocument()
+        val rows = seq3SequenceRows(document)
+        // "reply" is solo's label.
+        assertEquals(listOf("solo"), seq3SequenceVisibleRows(document, rows, Seq3Filter.ALL, "reply").map { it.message.id })
+        // "tick 12" is only in one occurrence's log text: the collapsed summary row of its parent is kept.
+        assertEquals(listOf("big"), seq3SequenceVisibleRows(document, rows, Seq3Filter.ALL, "tick 12").map { it.message.id }.distinct())
+        // The parent's template matches, so all three of its rows stay.
+        assertEquals(3, seq3SequenceVisibleRows(document, rows, Seq3Filter.ALL, "rep-label").size)
+    }
+
+    // Fragment rail
+
+    private fun loop(vararg ids: String, refs: List<Seq3OccurrenceRef> = emptyList(), style: Seq3ArtifactStyle? = null) =
+        Seq3Fragment("loop1", Seq3FragmentKind.LOOP, "retry", ids.toList(), occurrenceRefs = refs, style = style)
+
+    @Test
+    fun railsMarkMembershipRunStartsAndContinuation() {
+        val fragment = loop("rep")
+        val document = sequenceDocument(listOf(fragment))
+        val rows = seq3SequenceRows(document)
+        val rails = seq3FragmentRails(document, rows.map { it.ref })
+        assertEquals(listOf(1, 1, 1, 0, 0), rails.map { it.containing.size })
+        assertEquals(listOf(true, false, false, false, false), rails.map { it.starting.isNotEmpty() })
+        assertEquals(listOf(true, true, false, false, false), rails.map { "loop1" in it.continuing })
+        assertEquals(6f, seq3RailGutterDp(rails))
+    }
+
+    @Test
+    fun railsAreAbsentWithoutVisibleFragmentsAndAHiddenFragmentDrawsNoRail() {
+        val document = sequenceDocument(listOf(loop("rep").copy(visibility = Seq3Visibility.HIDDEN)))
+        val rails = seq3FragmentRails(document, seq3SequenceRows(document).map { it.ref })
+        assertTrue(rails.all { it.containing.isEmpty() })
+        assertEquals(0f, seq3RailGutterDp(rails))
+    }
+
+    @Test
+    fun nestedFragmentsWidenTheGutterUpToThreeBars() {
+        val outer = loop("rep")
+        val inner = Seq3Fragment("opt1", Seq3FragmentKind.OPT, "x", listOf("rep"))
+        val document = sequenceDocument(listOf(outer, inner))
+        val rails = seq3FragmentRails(document, seq3SequenceRows(document).map { it.ref })
+        assertEquals(10f, seq3RailGutterDp(rails))
+    }
+
+    @Test
+    fun aDropBetweenTwoMembersIsInsideTheFragmentAndAnEdgeDropIsNot() {
+        val document = sequenceDocument(listOf(loop("rep")))
+        val first = Seq3RowRef("rep", 1)
+        val second = Seq3RowRef("rep", 2)
+        val third = Seq3RowRef("rep", 3)
+        assertEquals(listOf("loop1"), seq3DropInsideFragments(document, first, second).map { it.id })
+        assertEquals(listOf("loop1"), seq3DropInsideFragments(document, second, third).map { it.id })
+        assertTrue(seq3DropInsideFragments(document, third, Seq3RowRef("big")).isEmpty())
+        assertTrue(seq3DropInsideFragments(document, null, first).isEmpty())
+    }
+
+    @Test
+    fun railLabelFollowsTheCanvasKindPrefixRule() {
+        assertEquals("loop: retry", seq3FragmentRailLabel(loop("rep")))
+        assertEquals("retry", seq3FragmentRailLabel(loop("rep").copy(hideKindLabel = true)))
+        assertEquals("Loop", seq3FragmentRailLabel(loop("rep").copy(label = "Loop")))
+    }
+
+    // Selection sync
+
+    @Test
+    fun anExactRowIsSelectedByItsOwnArrowOrByAWholeMessageSelection() {
+        val ref = Seq3RowRef("rep", 2)
+        val none = Seq3Selection()
+        assertTrue(seq3SequenceRowSelected(ref, none, setOf(Seq3CanvasRowRef("rep", 2)), null, null))
+        assertTrue(seq3SequenceRowSelected(ref, none, emptySet(), "rep", 2))
+        assertFalse(seq3SequenceRowSelected(ref, none, setOf(Seq3CanvasRowRef("rep", 3)), "rep", 3))
+        assertFalse(seq3SequenceRowSelected(ref, none, emptySet(), null, null))
+        // The Templates list selected the whole message and no arrow in particular: every arrow shows.
+        assertTrue(seq3SequenceRowSelected(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null))
+        // ...but a focused arrow of that message narrows it to that arrow.
+        assertFalse(seq3SequenceRowSelected(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), "rep", 3))
+    }
+
+    @Test
+    fun aSummaryRowIsSelectedByItsMessage() {
+        val summary = Seq3RowRef("big")
+        assertTrue(seq3SequenceRowSelected(summary, Seq3Selection(setOf("big"), "big"), emptySet(), null, null))
+        assertFalse(seq3SequenceRowSelected(summary, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null))
+    }
+
+    @Test
+    fun selectingARowSetsWhatAnArrowClickSets() {
+        val view = Seq3ViewState()
+        view.selectedOccurrenceIds = setOf("rep::1")
+        seq3SelectSequenceRow(view, Seq3RowRef("rep", 2))
+        assertEquals(setOf(Seq3CanvasRowRef("rep", 2)), view.selectedCanvasRows)
+        assertEquals(Seq3Selection(setOf("rep"), "rep"), view.selection)
+        assertEquals("rep", view.selectedOccurrenceMessageId)
+        assertEquals(2, view.selectedOccurrenceEntryId)
+        assertEquals("rep", view.focusedMessageId)
+        assertEquals(emptySet(), view.selectedOccurrenceIds)
+        assertTrue("rep" in view.expandedOccurrenceMessageIds, "the template card is open when the user switches back")
+    }
+
+    @Test
+    fun selectingASummaryRowSelectsTheMessageWithoutAnExactOccurrence() {
+        val view = Seq3ViewState()
+        seq3SelectSequenceRow(view, Seq3RowRef("big"))
+        assertEquals(Seq3Selection(setOf("big"), "big"), view.selection)
+        assertEquals(null, view.selectedOccurrenceMessageId)
+        assertEquals(null, view.selectedOccurrenceEntryId)
+        assertEquals("big", view.focusedMessageId)
+    }
+
+    @Test
+    fun scrollIndexPrefersTheExactArrowThenTheSummaryThenTheFirstRow() {
+        val rows = seq3SequenceRows(sequenceDocument())
+        assertEquals(1, seq3SequenceScrollIndex(rows, "rep", "rep", 2))
+        // A summary click names an occurrence the list does not draw: fall back to the summary row.
+        assertEquals(3, seq3SequenceScrollIndex(rows, "big", "big", 11))
+        assertEquals(0, seq3SequenceScrollIndex(rows, "rep", null, null))
+        assertEquals(-1, seq3SequenceScrollIndex(rows, "nope", null, null))
+    }
+
+    // Header and footer copy
+
+    @Test
+    fun modeLabelsCarryTheTemplateAndRowCounts() {
+        assertEquals(listOf("Templates 11", "Sequence 45"), seq3MessagesModeLabels(11, 45, compact = false))
+        assertEquals(listOf("Templates", "Sequence"), seq3MessagesModeLabels(11, 45, compact = true))
+    }
+
+    @Test
+    fun footerTextCountsTemplatesMessagesAndMissingTargets() {
+        assertEquals("11 templates · 45 messages · 0 need a target", seq3QueueFooterText(11, 45, 0))
+        assertEquals("1 template · 1 message · 1 need a target", seq3QueueFooterText(1, 1, 1))
     }
 }

@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.ui.Seq3KeyAction
 import com.indagium.ui.Seq3PanelSection
+import com.indagium.ui.Seq3RowMove
 import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.seq3ClampArtifactsHeight
 import com.indagium.ui.seq3ClampDividerWidth
@@ -18,8 +19,34 @@ import kotlin.test.assertNull
  *  wiring) is untested here, matching this phase's other Seq3*Test files — only the mapping
  *  function itself, which is the whole point of `seq3KeyAction` being split out. */
 class Seq3KeyActionTest {
-    private fun action(key: String, shift: Boolean = false, textFieldFocused: Boolean = false, guidedActive: Boolean = false) =
-        seq3KeyAction(key, shift, textFieldFocused, guidedActive)
+    private fun action(
+        key: String,
+        shift: Boolean = false,
+        textFieldFocused: Boolean = false,
+        guidedActive: Boolean = false,
+        alt: Boolean = false,
+    ) = seq3KeyAction(key, shift, textFieldFocused, guidedActive, alt)
+
+    // ── Alt+↑ / Alt+↓ move the selected arrow ────────────────────────────────────────────────────
+
+    @Test
+    fun altArrowsMapToMoveRowUpAndDown() {
+        assertEquals(Seq3KeyAction.MoveRow(Seq3RowMove.UP), action("ArrowUp", alt = true))
+        assertEquals(Seq3KeyAction.MoveRow(Seq3RowMove.DOWN), action("ArrowDown", alt = true))
+    }
+
+    @Test
+    fun plainArrowsAreNotOurs() {
+        assertNull(action("ArrowUp"))
+        assertNull(action("ArrowDown"))
+        assertNull(action("ArrowUp", shift = true))
+    }
+
+    @Test
+    fun altArrowsAreIgnoredWhileATextFieldHasFocus() {
+        assertNull(action("ArrowUp", textFieldFocused = true, alt = true))
+        assertNull(action("ArrowDown", textFieldFocused = true, alt = true))
+    }
 
     // ── The spec §09 table, one key at a time ────────────────────────────────────────────────
 

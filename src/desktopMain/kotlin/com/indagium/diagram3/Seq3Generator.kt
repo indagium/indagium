@@ -1041,6 +1041,7 @@ fun parseSeq3Timestamp(rawTimestamp: String): Long? =
 /** Moves one message to an explicit queue position without changing its endpoints, text, evidence,
  *  or timestamp. The position is resolved after removing the message, so `AtIndex(0)` always means
  *  the first final row and moving relative to the message itself is rejected safely. */
+@Suppress("ReturnCount") // One early return per rejection reason reads clearer than a nested result chain.
 fun moveSeq3Message(document: Seq3Document, messageId: String, position: Seq3InsertionPosition): Seq3MessageEditResult {
     val currentIndex = document.messages.indexOfFirst { it.id == messageId }
     if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown message")
@@ -1059,7 +1060,8 @@ fun moveSeq3Message(document: Seq3Document, messageId: String, position: Seq3Ins
     val reorderedRows = rowsWithoutMessage.toMutableList().apply { addAll(rowIndex, movingRows) }
     if (remaining == document.messages && reorderedRows == startingOrder) return Seq3MessageEditResult.Updated(document)
     val updated = document.copy(messages = remaining, rowOrder = reorderedRows)
-    return Seq3MessageEditResult.Updated(if (updated == document) document else updated)
+    if (updated == document) return Seq3MessageEditResult.Updated(document)
+    return Seq3MessageEditResult.Updated(reassignSeq3FragmentMembership(document, updated, movingRows))
 }
 
 /** Reorders an exact occurrence row, materializing legacy chronology only when the first manual
@@ -1106,11 +1108,82 @@ private fun moveSeq3ExactRow(
     val insertionIndex = resolveSeq3RowInsertionIndex(document, remaining, position)
         ?: return Seq3MessageEditResult.Rejected("Invalid row insertion position")
     remaining.add(insertionIndex, resolvedRef)
-    return if (remaining == startingOrder) {
-        Seq3MessageEditResult.Updated(document)
-    } else {
-        Seq3MessageEditResult.Updated(document.copy(rowOrder = remaining))
+    if (remaining == startingOrder) return Seq3MessageEditResult.Updated(document)
+    val updated = document.copy(rowOrder = remaining)
+    return Seq3MessageEditResult.Updated(reassignSeq3FragmentMembership(document, updated, listOf(resolvedRef)))
+}
+
+/** Lets a drop decide fragment membership. A fragment box spans its earliest member row to its
+ *  latest, so a moved row that stays a member while landing outside the box would stretch it over
+ *  everything in between. After a move, [movedRows] (every moved row of one parent message — a
+ *  single exact row, or a whole-template block) take the same interior-boundary rule as
+ *  [inheritSeq3FragmentMembership]: a fragment contains the moved rows only when BOTH visible
+ *  neighbours of the drop (the rows just outside the moved block) are members of it.
+ *
+ *  - **Leaves** F (member, not interior): the rows' refs are removed. A fragment holding the message
+ *    only through `messageIds` first materialises `occurrenceRefs` for the message's other rows,
+ *    because an exact ref for a message takes precedence over `messageIds` for that message in
+ *    [fragmentContainsRow] and `fragmentRowIndices`. When no exact ref is left the message id is
+ *    removed too, otherwise precedence would fall back to `messageIds` and pull every row back in.
+ *  - **Joins** G (not a member, interior): refs are added (a template-level fragment covering the
+ *    whole moved message just gains the id), and the id is inserted in message order.
+ *  - **Last member:** a fragment whose only visible members are the moved rows is left unchanged —
+ *    it travels with them rather than being emptied.
+ *  - `elseOperands` are untouched; an operand whose anchor left the fragment already falls back
+ *    through the anchor-resolution contract.
+ *  A moved row that is not drawn (hidden) has no neighbours, so nothing changes. */
+@Suppress("CyclomaticComplexMethod") // The join and leave branches mirror each other; splitting them hides the shared rule.
+private fun reassignSeq3FragmentMembership(
+    original: Seq3Document,
+    updated: Seq3Document,
+    movedRows: List<Seq3RowRef>,
+): Seq3Document {
+    if (original.fragments.isEmpty() || movedRows.isEmpty()) return updated
+    val messageId = movedRows.first().messageId
+    val movedSet = movedRows.toSet()
+    val rows = seq3CurrentCanvasRowRefs(updated)
+    val movedIndices = rows.indices.filter { rows[it] in movedSet }
+    if (movedIndices.isEmpty() || movedIndices.last() - movedIndices.first() != movedIndices.size - 1) return updated
+    val before = rows.getOrNull(movedIndices.first() - 1)
+    val after = rows.getOrNull(movedIndices.last() + 1)
+    val allMessageRows = updated.rowOrder.filter { it.messageId == messageId }
+    val coversWholeMessage = allMessageRows.all { it in movedSet }
+    val messagePositions = updated.messages.withIndex().associate { (index, message) -> message.id to index }
+    val fragments = updated.fragments.map { fragment ->
+        if (rows.none { it !in movedSet && fragmentContainsRow(fragment, it) }) return@map fragment
+        val interior = before != null && after != null &&
+            fragmentContainsRow(fragment, before) && fragmentContainsRow(fragment, after)
+        val hasExactRefs = fragment.occurrenceRefs.any { it.messageId == messageId }
+        if (interior) {
+            val joining = movedRows.filterNot { fragmentContainsRow(fragment, it) }
+            if (joining.isEmpty()) return@map fragment
+            val addedRefs = if (!hasExactRefs && coversWholeMessage) emptyList() else {
+                joining.mapNotNull { row -> row.occurrenceEntryId?.let { Seq3OccurrenceRef(messageId, it) } }
+            }
+            val ids = (fragment.messageIds + messageId).distinct()
+                .sortedBy { id -> messagePositions[id] ?: Int.MAX_VALUE }
+            fragment.copy(messageIds = ids, occurrenceRefs = (fragment.occurrenceRefs + addedRefs).distinct())
+        } else {
+            val leaving = movedRows.filter { fragmentContainsRow(fragment, it) }
+            if (leaving.isEmpty()) return@map fragment
+            val leavingEntries = leaving.mapNotNullTo(HashSet()) { it.occurrenceEntryId }
+            val keptRefs = if (hasExactRefs) {
+                fragment.occurrenceRefs.filterNot { it.messageId == messageId && it.entryId in leavingEntries }
+            } else {
+                // Template-level membership: every row of the message is a member, so the rows that
+                // stay become explicit refs before the moved one is dropped.
+                fragment.occurrenceRefs + allMessageRows.filter { it !in movedSet }.mapNotNull { row ->
+                    row.occurrenceEntryId?.let { Seq3OccurrenceRef(messageId, it) }
+                }
+            }
+            val messageStillExact = keptRefs.any { it.messageId == messageId }
+            fragment.copy(
+                messageIds = if (messageStillExact) fragment.messageIds else fragment.messageIds.filterNot { it == messageId },
+                occurrenceRefs = keptRefs.distinct(),
+            )
+        }
     }
+    return updated.copy(fragments = fragments)
 }
 
 private fun Seq3InsertionPosition.targetsMessage(messageId: String): Boolean = when (this) {
@@ -1214,7 +1287,9 @@ private fun resolveSeq3CanonicalBoundaryToVisible(
     return nextVisibleRow ?: previousVisibleRow?.plus(1) ?: 0
 }
 
-private fun fragmentContainsRow(fragment: Seq3Fragment, row: Seq3RowRef): Boolean {
+/** Whether [row] belongs to [fragment]: exact refs for the row's message take precedence over the
+ *  template-level `messageIds` entry, mirroring `fragmentRowIndices` in the layout. */
+internal fun fragmentContainsRow(fragment: Seq3Fragment, row: Seq3RowRef): Boolean {
     val hasSpecificRowsForMessage = fragment.occurrenceRefs.any { it.messageId == row.messageId }
     return if (hasSpecificRowsForMessage) {
         fragment.occurrenceRefs.any { it.messageId == row.messageId && it.entryId == row.occurrenceEntryId }
@@ -1222,6 +1297,28 @@ private fun fragmentContainsRow(fragment: Seq3Fragment, row: Seq3RowRef): Boolea
         row.messageId in fragment.messageIds
     }
 }
+
+/** The rows the canvas draws, in drawn order, as durable row identities: one ref per arrow, with a
+ *  null [Seq3RowRef.occurrenceEntryId] for a summary row (a collapsed `×N` message, a NOTE or
+ *  unresolved stub, a FIRST_LAST elision). Equals the layout's rows mapped through the canvas'
+ *  `seq3CanvasRowRef`, so a list built from it matches the diagram row for row. */
+internal fun seq3DrawnRowRefs(document: Seq3Document): List<Seq3RowRef> {
+    val messagesById = document.messages.associateBy { it.id }
+    return seq3CurrentCanvasRowRefs(document).map { ref ->
+        val message = messagesById[ref.messageId]
+        if (ref.occurrenceEntryId != null && message != null && seq3DrawsAsSummaryRow(message)) {
+            Seq3RowRef(ref.messageId)
+        } else {
+            ref
+        }
+    }
+}
+
+/** True when the layout draws the message as one summary row regardless of its occurrences. */
+private fun seq3DrawsAsSummaryRow(message: Seq3Message): Boolean =
+    message.kind == Seq3Kind.NOTE || message.toLifelineId == null ||
+        (message.repeat == Seq3Repeat.COLLAPSE_ABOVE &&
+            message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE } > message.repeatThreshold)
 
 /** The current visible row projection, used only to find insertion boundaries and group
  *  containment. [seq3DefaultRowOrder] deliberately includes hidden evidence for persistence. */

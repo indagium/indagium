@@ -100,9 +100,11 @@ import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.applySeq3Command
+import com.indagium.diagram3.fragmentContainsRow
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3DisplayName
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3FilterCounts
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
@@ -394,154 +396,16 @@ internal fun seq3PanelWeightedSectionFor(view: Seq3ViewState): Seq3PanelSection?
  *  in place of the row list) — see `Seq3FragmentsAndNotesSection`. */
 internal fun seq3ArtifactsSectionVisible(view: Seq3ViewState): Boolean = view.artifactsSectionOpen
 
-/** The Messages tile body. The title and add action live in the shared tile header; all queue
- *  editing, filtering, selection and canvas handoff paths stay the same as the former panel. */
+/** The Messages tile body. The title and add action live in the shared tile header; the banners,
+ *  filters and footer are shared by both lists, and [Seq3ViewState.messagesMode] picks the editable
+ *  template list or the draggable sequence list under them. */
 @Composable
 internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
     val tc = tc()
     val document = session.document
     val counts = seq3FilterCounts(document)
-    val rows = remember(document, view.filter, view.textFilter, view.sort) {
-        seq3QueueRows(document, view.filter, view.textFilter, view.sort)
-    }
-    val visibleIds = remember(rows) { rows.map(Seq3Message::id) }
-    val listState = rememberLazyListState()
-    val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
-    val density = LocalDensity.current.density
-    val reorderEnabled = view.sort == Seq3Sort.LOG_ORDER
-    val currentVisibleIds = rememberUpdatedState(visibleIds)
-    val currentDocument = rememberUpdatedState(document)
-    val currentReorderEnabled = rememberUpdatedState(reorderEnabled)
-    var justReleasedId by remember(session.id) { mutableStateOf<String?>(null) }
-    var dragStartIds by remember(session.id) { mutableStateOf(emptyList<String>()) }
-    var dragGrabOffsetY by remember(session.id) { mutableStateOf(0f) }
-    val rowsById = remember(rows) { rows.associateBy(Seq3Message::id) }
-    val visibleIdSet = remember(visibleIds) { visibleIds.toHashSet() }
-    val queuedVisualIdSet = remember(view.queueReorderVisualIds) { view.queueReorderVisualIds.toHashSet() }
-    val dragStartIdSet = remember(dragStartIds) { dragStartIds.toHashSet() }
-    val visualIds = if ((view.queueReorderDraggedId != null || justReleasedId != null) && view.queueReorderVisualIds.isNotEmpty()) {
-        view.queueReorderVisualIds.filter { it in visibleIdSet } + visibleIds.filterNot { it in queuedVisualIdSet }
-    } else visibleIds
-    val renderRows = remember(rows, visualIds) {
-        visualIds.mapNotNull(rowsById::get)
-    }
-
-    fun heightOf(id: String): Float = rowHeights[id] ?: (94f * density)
-    fun advanceOf(id: String): Float = heightOf(id) + 4f * density
-
-    fun updateReorderPreview() {
-        val draggedId = view.queueReorderDraggedId ?: return
-        val liveVisibleIds = currentVisibleIds.value
-        view.queueReorderVisualIds = blockOrderDuringDrag(
-            liveVisibleIds,
-            draggedId,
-            view.queueReorderOffsetY,
-            ::advanceOf,
-        )
-    }
-
-    fun finishQueueReorder(commit: Boolean) {
-        val movedId = view.queueReorderDraggedId
-        val finalOrder = view.queueReorderVisualIds
-        val liveVisibleIds = currentVisibleIds.value
-        val command = if (commit && !view.queueReorderCancelled) {
-            seq3QueueReorderCommand(movedId, liveVisibleIds, finalOrder)
-        } else {
-            null
-        }
-        var committed = false
-        if (command != null && movedId != null) {
-            val dropDocument = currentDocument.value
-            val preview = applySeq3Command(dropDocument, command)
-            if (!preview.applied) {
-                view.messageAddHint = preview.reason ?: "Message order was not changed"
-            } else if (!state.seq3Sessions.applyCommand(session.id, command)) {
-                view.messageAddHint = "Message order could not be saved"
-            } else {
-                committed = true
-            }
-        }
-        if (committed && movedId != null) {
-            justReleasedId = movedId
-            dragStartIds = liveVisibleIds
-            view.queueReorderVisualIds = finalOrder
-        } else {
-            justReleasedId = null
-            dragStartIds = emptyList()
-            view.queueReorderVisualIds = emptyList()
-            view.queueReorderOffsetY = 0f
-            view.queueReorderPointerY = 0f
-            dragGrabOffsetY = 0f
-        }
-        view.queueReorderDraggedId = null
-        view.queueReorderCancelled = false
-    }
-
-    LaunchedEffect(view.scrollRequestId, rows) {
-        val targetId = view.scrollRequestId ?: return@LaunchedEffect
-        val index = rows.indexOfFirst { it.id == targetId }
-        if (index >= 0) {
-            listState.animateScrollToItem(index)
-            view.scrollRequestId = null
-        }
-    }
-
-    LaunchedEffect(view.sort) {
-        if (view.sort != Seq3Sort.LOG_ORDER && view.queueReorderDraggedId != null) {
-            view.queueReorderCancelled = true
-            view.queueReorderDraggedId = null
-            view.queueReorderVisualIds = emptyList()
-            dragStartIds = emptyList()
-        }
-    }
-
-    LaunchedEffect(visibleIds, view.queueReorderDraggedId, justReleasedId) {
-        if (view.queueReorderDraggedId != null && view.queueReorderDraggedId !in visibleIds) {
-            view.queueReorderCancelled = true
-            view.queueReorderDraggedId = null
-            view.queueReorderVisualIds = emptyList()
-            dragStartIds = emptyList()
-        }
-        if (view.queueReorderDraggedId == null && justReleasedId == null) {
-            view.queueReorderVisualIds = emptyList()
-            dragStartIds = emptyList()
-            view.queueReorderOffsetY = 0f
-            view.queueReorderPointerY = 0f
-            dragGrabOffsetY = 0f
-        }
-    }
-
-    LaunchedEffect(justReleasedId) {
-        if (justReleasedId != null) {
-            delay(120)
-            justReleasedId = null
-            view.queueReorderVisualIds = emptyList()
-            dragStartIds = emptyList()
-            view.queueReorderOffsetY = 0f
-            view.queueReorderPointerY = 0f
-            dragGrabOffsetY = 0f
-        }
-    }
-
-    LaunchedEffect(view.queueReorderDraggedId) {
-        val dragId = view.queueReorderDraggedId ?: return@LaunchedEffect
-        while (view.queueReorderDraggedId == dragId) {
-            val viewportHeight = listState.layoutInfo.viewportSize.height.toFloat()
-            val edge = 36f * density
-            val scrollDelta = when {
-                viewportHeight <= 0f -> 0f
-                view.queueReorderPointerY < edge -> -14f
-                view.queueReorderPointerY > viewportHeight - edge -> 14f
-                else -> 0f
-            }
-            if (scrollDelta != 0f) {
-                val consumed = listState.scrollBy(scrollDelta)
-                view.queueReorderOffsetY += consumed
-                updateReorderPreview()
-            }
-            delay(24)
-        }
-    }
+    val sequenceRows = remember(document) { seq3SequenceRows(document) }
+    val sequenceMode = view.messagesMode == Seq3MessagesMode.SEQUENCE
 
     Column(modifier.background(tc.p)) {
         view.messageAddHint?.let { hint ->
@@ -569,236 +433,859 @@ internal fun Seq3MessagesTileBody(state: AppState, session: Seq3WorkspaceSession
             )
         }
         Seq3FilterChipsRow(view, counts)
-        Seq3FilterTextAndSortRow(view)
-        Box(
-            Modifier.weight(1f).fillMaxWidth().clipToBounds().pointerInput(session.id) {
-                val dragSlop = viewConfiguration.touchSlop
-                awaitPointerEventScope {
-                    var candidateId: String? = null
-                    var candidatePointerId: PointerId? = null
-                    var pressPosition: Offset? = null
-                    var lastPosition: Offset? = null
-                    var active = false
-
-                    fun clearLocalState() {
-                        candidateId = null
-                        candidatePointerId = null
-                        pressPosition = null
-                        lastPosition = null
-                        active = false
-                        releaseMoveDragCursor()
-                    }
-
-                    fun cancelPointerGesture() {
-                        if (active) finishQueueReorder(commit = false)
-                        clearLocalState()
-                    }
-
-                    fun handleMove(change: PointerInputChange, event: PointerEvent) {
-                        val messageId = candidateId ?: return
-                        val start = pressPosition ?: return
-                        if (active && (view.queueReorderDraggedId != messageId || view.queueReorderCancelled)) {
-                            cancelPointerGesture()
-                            return
-                        }
-                        val primaryPressed = if (change.type == PointerType.Mouse) {
-                            event.buttons.isPrimaryPressed
-                        } else {
-                            change.pressed
-                        }
-                        if (!primaryPressed) {
-                            cancelPointerGesture()
-                            return
-                        }
-                        val current = change.position
-                        val crossedSlop = (current - start).getDistance() > dragSlop
-                        if (!active && crossedSlop) {
-                            active = true
-                            view.queueReorderCancelled = false
-                            view.queueReorderDraggedId = messageId
-                            view.queueReorderOffsetY = current.y - start.y
-                            view.queueReorderPointerY = current.y
-                            dragStartIds = currentVisibleIds.value
-                            view.queueReorderVisualIds = currentVisibleIds.value
-                            view.textFieldFocused = false
-                            runCatching { view.focusRequester.requestFocus() }
-                            holdMoveDragCursor()
-                            updateReorderPreview()
-                            change.consume()
-                        } else if (active) {
-                            val previous = lastPosition ?: current
-                            view.queueReorderOffsetY += current.y - previous.y
-                            view.queueReorderPointerY = current.y
-                            updateReorderPreview()
-                            change.consume()
-                        }
-                        lastPosition = current
-                    }
-
-                    try {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            val pointerId = candidatePointerId
-                            val change = if (pointerId == null) {
-                                event.changes.firstOrNull()
-                            } else {
-                                event.changes.firstOrNull { it.id == pointerId }
-                            } ?: continue
-                            when (event.type) {
-                                PointerEventType.Press -> {
-                                    if (candidateId != null) cancelPointerGesture()
-                                    val primaryPressed = if (change.type == PointerType.Mouse) {
-                                        event.buttons.isPrimaryPressed
-                                    } else {
-                                        change.pressed
-                                    }
-                                    val handleLeft = 4f * density
-                                    val handleRight = 18f * density
-                                    if (primaryPressed && currentReorderEnabled.value &&
-                                        change.position.x in handleLeft..handleRight
-                                    ) {
-                                        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
-                                            change.position.y >= info.offset && change.position.y < info.offset + info.size
-                                        }
-                                        val messageId = item?.key as? String
-                                        if (messageId != null && messageId in currentVisibleIds.value) {
-                                            candidateId = messageId
-                                            candidatePointerId = change.id
-                                            pressPosition = change.position
-                                            lastPosition = change.position
-                                            dragGrabOffsetY = change.position.y - item.offset.toFloat()
-                                        }
-                                    }
-                                }
-                                PointerEventType.Move -> handleMove(change, event)
-                                PointerEventType.Release -> {
-                                    if (active) {
-                                        change.consume()
-                                        finishQueueReorder(commit = true)
-                                    }
-                                    clearLocalState()
-                                }
-                                PointerEventType.Exit -> {
-                                    if (candidateId != null) cancelPointerGesture()
-                                }
-                                else -> Unit
-                            }
-                        }
-                    } finally {
-                        cancelPointerGesture()
-                    }
-                }
-            },
-        ) {
-            val startIds = if ((view.queueReorderDraggedId != null || justReleasedId != null) && dragStartIds.isNotEmpty()) {
-                dragStartIds.filter { it in visibleIdSet } + visibleIds.filterNot { it in dragStartIdSet }
-            } else visibleIds
-            val startOffsets = cumulativeBlockOffsets(startIds, ::advanceOf)
-            val targetOffsets = cumulativeBlockOffsets(visualIds, ::advanceOf)
-            LazyColumn(
-                Modifier.fillMaxSize().padding(end = 6.dp).testTag("seq3-message-list"),
-                state = listState,
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                items(renderRows, key = Seq3Message::id) { message ->
-                    val draggedId = view.queueReorderDraggedId
-                    val startY = startOffsets[message.id] ?: 0f
-                    val slotY = targetOffsets[message.id] ?: startY
-                    val targetY = targetOffsets[message.id] ?: startY
-                    val animatedY by key(message.id) {
-                        animateFloatAsState(
-                            targetValue = targetY,
-                            animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
-                            label = "seq3-queue-row-y-${message.id}",
-                        )
-                    }
-                    val isDragging = draggedId == message.id
-                    val isJustReleased = justReleasedId == message.id
-                    val renderY = sequenceRenderY(
-                        isDragging = isDragging,
-                        isJustReleased = isJustReleased,
-                        pointerY = startY + view.queueReorderOffsetY,
-                        targetY = targetY,
-                        animatedY = animatedY,
-                    )
-                    if (isDragging) {
-                        Spacer(
-                            Modifier.fillMaxWidth()
-                                .height((heightOf(message.id) / density).dp)
-                                .onSizeChanged { rowHeights[message.id] = it.height.toFloat() },
-                        )
-                    } else {
-                        Box(
-                            Modifier.fillMaxWidth()
-                                .offset { IntOffset(0, (renderY - slotY).roundToInt()) }
-                                .zIndex(if (isJustReleased) 1f else 0f)
-                                .graphicsLayer {
-                                    if (isJustReleased) {
-                                        scaleX = 1.015f
-                                        scaleY = 1.015f
-                                    }
-                                }
-                                .onSizeChanged { rowHeights[message.id] = it.height.toFloat() },
-                        ) {
-                            Seq3QueueRow(
-                                state, session, view, document, message, visibleIds,
-                                dragHandleModifier = Modifier,
-                                reorderEnabled = reorderEnabled,
-                                isDragging = false,
-                                onRightClickAddAfter = {
-                                    view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(message.id))
-                                },
-                            )
-                        }
-                    }
+        // Sort orders the template list only; the sequence list is always the diagram order.
+        Seq3FilterTextAndSortRow(view, showSort = !sequenceMode)
+        if (sequenceMode) {
+            if (document.rowOrder.isNotEmpty()) {
+                Seq3CustomOrderStrip {
+                    state.seq3Sessions.applyCommand(session.id, Seq3Command.ResetRowOrder)
+                    runCatching { view.focusRequester.requestFocus() }
                 }
             }
-            val draggingMessage = view.queueReorderDraggedId?.let(rowsById::get)
-            if (draggingMessage != null) {
-                Box(
-                    Modifier.fillMaxWidth()
-                        .padding(end = 6.dp)
-                        .offset {
-                            IntOffset(
-                                0,
-                                (view.queueReorderPointerY - dragGrabOffsetY).roundToInt(),
-                            )
-                        }
-                        .zIndex(2f)
-                        .testTag("seq3-queue-drag-ghost-${draggingMessage.id}"),
-                ) {
-                    Seq3QueueRow(
-                        state = state,
-                        session = session,
-                        view = view,
-                        document = document,
-                        message = draggingMessage,
-                        visibleIds = visibleIds,
-                        reorderEnabled = reorderEnabled,
-                        isDragging = true,
-                        onRightClickAddAfter = {
-                            view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(draggingMessage.id))
-                        },
-                    )
-                }
-            }
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(listState),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                style = appScrollbarStyle(tc),
-            )
+            Seq3SequenceList(state, session, view, sequenceRows, Modifier.weight(1f).fillMaxWidth())
+        } else {
+            Seq3TemplateList(state, session, view, Modifier.weight(1f).fillMaxWidth())
         }
-        Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
+        Seq3QueueFooter(counts, sequenceRows.size) { view.regenerateSheetOpen = true }
     }
 }
 
-/** Header action only, used by the tile chrome while keeping its Add menu and dialog state local
- *  to the fixed Messages tile composition. */
+/** The editable template list (one card per [Seq3Message]). It has no drag: the diagram order is
+ *  changed from the sequence list, where each row is one drawn arrow. */
+@Composable
+private fun Seq3TemplateList(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
+    val tc = tc()
+    val document = session.document
+    val rows = remember(document, view.filter, view.textFilter, view.sort) {
+        seq3QueueRows(document, view.filter, view.textFilter, view.sort)
+    }
+    val visibleIds = remember(rows) { rows.map(Seq3Message::id) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(view.scrollRequestId, rows) {
+        val targetId = view.scrollRequestId ?: return@LaunchedEffect
+        val index = rows.indexOfFirst { it.id == targetId }
+        if (index >= 0) {
+            listState.animateScrollToItem(index)
+            view.scrollRequestId = null
+        }
+    }
+
+    Box(modifier.clipToBounds()) {
+        LazyColumn(
+            Modifier.fillMaxSize().padding(end = 6.dp).testTag("seq3-message-list"),
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            items(rows, key = Seq3Message::id) { message ->
+                Seq3QueueRow(
+                    state, session, view, document, message, visibleIds,
+                    onRightClickAddAfter = {
+                        view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(message.id))
+                    },
+                )
+            }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(listState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc),
+        )
+    }
+}
+
+/** Header actions: the Templates | Sequence switch and the add control, used by the tile chrome
+ *  while keeping the Add menu and dialog state local to the fixed Messages tile composition. */
 @Composable
 internal fun Seq3QueueHeaderActions(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     Box {
         Seq3QueueHeader(state, session, seq3FilterCounts(session.document), view, showTitle = false)
     }
+}
+
+// ── Sequence mode (one row per drawn arrow) ─────────────────────────────────────────────────────
+//
+// The Templates list edits what a message IS; this list is the diagram order. Its rows come from
+// `seq3DrawnRowRefs`, the same projection the canvas draws, so row N here is arrow N there. Dragging
+// a row dispatches `MoveRow` — the only list-side way to change the order — and a drop decides
+// fragment membership in the model (`moveSeq3Row`), so the rail beside the rows is a preview of it.
+
+private val SEQ3_SEQUENCE_ROW_GAP = 3.dp
+private const val SEQ3_RAIL_BAR_DP = 3f
+private const val SEQ3_RAIL_STEP_DP = 4f
+private const val SEQ3_RAIL_MAX_BARS = 3
+private const val SEQ3_MESSAGES_TOGGLE_LABELS_MIN_WIDTH_DP = 460f
+private const val SEQ3_MESSAGES_ADD_LABEL_MIN_WIDTH_DP = 330f
+private const val SEQ3_SEQUENCE_GRIP_LEFT_DP = 3f
+private const val SEQ3_SEQUENCE_GRIP_RIGHT_DP = 23f
+
+/** One drawn arrow of the diagram: [ref] is its durable identity (null entry for a summary row),
+ *  [number] its 1-based position among ALL drawn rows (stable under filtering) and [occurrence] the
+ *  evidence it shows, or null for a summary row (collapsed `×N`, NOTE, unresolved stub, elision). */
+internal data class Seq3SequenceRow(
+    val key: String,
+    val ref: Seq3RowRef,
+    val number: Int,
+    val message: Seq3Message,
+    val occurrence: Seq3Occurrence?,
+)
+
+/** Row key for a [Seq3RowRef]: `"$messageId::$entryId"`, or `"$messageId::*"` for a summary row. */
+internal fun seq3SequenceRowKey(ref: Seq3RowRef): String = "${ref.messageId}::${ref.occurrenceEntryId ?: "*"}"
+
+/** Inverse of [seq3SequenceRowKey]; null for a malformed key. */
+internal fun seq3ParseSequenceRowKey(key: String): Seq3RowRef? {
+    val split = key.lastIndexOf("::")
+    if (split <= 0) return null
+    val entry = key.substring(split + 2)
+    val entryId = if (entry == "*") null else (entry.toIntOrNull() ?: return null)
+    return Seq3RowRef(key.substring(0, split), entryId)
+}
+
+/** The sequence list's rows: one per ref of [seq3DrawnRowRefs], in drawn order. */
+internal fun seq3SequenceRows(document: Seq3Document): List<Seq3SequenceRow> {
+    val messages = document.messages.associateBy { it.id }
+    return seq3DrawnRowRefs(document).mapIndexedNotNull { index, ref ->
+        val message = messages[ref.messageId] ?: return@mapIndexedNotNull null
+        val occurrence = ref.occurrenceEntryId?.let { entryId -> message.occurrences.firstOrNull { it.entryId == entryId } }
+        Seq3SequenceRow(seq3SequenceRowKey(ref), ref, index + 1, message, occurrence)
+    }
+}
+
+internal fun seq3SequenceFilterActive(filter: Seq3Filter, textFilter: String): Boolean =
+    filter != Seq3Filter.ALL || textFilter.isNotBlank()
+
+/** The rows the active filters leave. The pills filter by parent message, exactly as in the
+ *  Templates list; the text filter matches the parent's template/label like there, or log text of
+ *  the occurrence the row shows (any of the message's occurrences, for a summary row). */
+internal fun seq3SequenceVisibleRows(
+    document: Seq3Document,
+    rows: List<Seq3SequenceRow>,
+    filter: Seq3Filter,
+    textFilter: String,
+): List<Seq3SequenceRow> {
+    if (!seq3SequenceFilterActive(filter, textFilter)) return rows
+    val byPill = seq3QueueRows(document, filter).mapTo(HashSet()) { it.id }
+    val byParentText = if (textFilter.isBlank()) null else seq3QueueRows(document, Seq3Filter.ALL, textFilter).mapTo(HashSet()) { it.id }
+    return rows.filter { row ->
+        row.message.id in byPill && (
+            byParentText == null || row.message.id in byParentText ||
+                (row.occurrence?.let(::listOf) ?: row.message.occurrences).any { it.text.contains(textFilter, ignoreCase = true) }
+            )
+    }
+}
+
+/** The `MoveRow` a drop produces. [originalKeys] is the list order when the drag began and
+ *  [finalKeys] the order with the dragged row in its new slot. A row that moved up lands before the
+ *  row it displaced, one that moved down lands after the row now above it; null when nothing moved. */
+internal fun seq3SequenceDropCommand(
+    movedKey: String?,
+    originalKeys: List<String>,
+    finalKeys: List<String>,
+): Seq3Command.MoveRow? {
+    if (movedKey == null) return null
+    val newIndex = finalKeys.indexOf(movedKey)
+    val oldIndex = originalKeys.indexOf(movedKey)
+    if (newIndex < 0 || oldIndex < 0 || newIndex == oldIndex || finalKeys.size < 2) return null
+    val moved = seq3ParseSequenceRowKey(movedKey) ?: return null
+    val position = if (newIndex < oldIndex) {
+        Seq3InsertionPosition.BeforeRow(seq3ParseSequenceRowKey(finalKeys[newIndex + 1]) ?: return null)
+    } else {
+        Seq3InsertionPosition.AfterRow(seq3ParseSequenceRowKey(finalKeys[newIndex - 1]) ?: return null)
+    }
+    return Seq3Command.MoveRow(moved, position)
+}
+
+/** Whether a press at [xPx] (inside the list) is on a row's grip, given the fragment rail gutter. */
+internal fun seq3SequenceGripHit(xPx: Float, density: Float, gutterDp: Float): Boolean =
+    xPx in (gutterDp + SEQ3_SEQUENCE_GRIP_LEFT_DP) * density..(gutterDp + SEQ3_SEQUENCE_GRIP_RIGHT_DP) * density
+
+/** The visible fragments that would contain a row dropped between [previous] and [next]: the model's
+ *  interior-boundary rule (both neighbours are members), shown as a hint before the drop. */
+internal fun seq3DropInsideFragments(document: Seq3Document, previous: Seq3RowRef?, next: Seq3RowRef?): List<Seq3Fragment> {
+    if (previous == null || next == null) return emptyList()
+    return document.fragments.filter {
+        it.visibility == Seq3Visibility.VISIBLE && fragmentContainsRow(it, previous) && fragmentContainsRow(it, next)
+    }
+}
+
+/** Per drawn row: the visible fragments containing it, those that start a run at it (the label goes
+ *  above that row) and those that continue into the next row (the rail bridges the gap). */
+internal data class Seq3RowRails(val containing: List<Seq3Fragment>, val starting: List<Seq3Fragment>, val continuing: Set<String>)
+
+internal fun seq3FragmentRails(document: Seq3Document, rows: List<Seq3RowRef>): List<Seq3RowRails> {
+    val fragments = document.fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val membership = rows.map { row -> fragments.filter { fragmentContainsRow(it, row) } }
+    return rows.indices.map { index ->
+        val containing = membership[index]
+        val previous = membership.getOrNull(index - 1).orEmpty().mapTo(HashSet()) { it.id }
+        val next = membership.getOrNull(index + 1).orEmpty().mapTo(HashSet()) { it.id }
+        Seq3RowRails(
+            containing = containing,
+            starting = containing.filter { it.id !in previous },
+            continuing = containing.mapNotNullTo(HashSet()) { it.id.takeIf { id -> id in next } },
+        )
+    }
+}
+
+/** Width of the rail gutter: wide enough for the most deeply nested fragment (capped), 0 when no
+ *  row is inside a fragment so the list wastes no room. */
+internal fun seq3RailGutterDp(rails: List<Seq3RowRails>): Float {
+    val bars = (rails.maxOfOrNull { it.containing.size } ?: 0).coerceAtMost(SEQ3_RAIL_MAX_BARS)
+    return if (bars == 0) 0f else bars * SEQ3_RAIL_STEP_DP + 2f
+}
+
+/** A fragment's rail/label text, with the canvas' own rule for the kind prefix. */
+internal fun seq3FragmentRailLabel(fragment: Seq3Fragment): String {
+    val kindLabel = fragment.kind.name.lowercase()
+    return if (fragment.hideKindLabel || fragment.label.equals(kindLabel, ignoreCase = true)) fragment.label else "$kindLabel: ${fragment.label}"
+}
+
+/** The "timestamp · From → To" caption of a row. */
+internal fun seq3SequenceRowCaption(document: Seq3Document, row: Seq3SequenceRow): String {
+    val message = row.message
+    val occurrence = row.occurrence
+    val timestamp = if (occurrence != null) {
+        occurrence.rawTimestamp.ifBlank { "line ${occurrence.entryId}" }
+    } else {
+        message.occurrences.firstOrNull()?.rawTimestamp?.ifBlank { null }
+    }
+    val from = seq3LifelineDisplayLabel(document, message.fromLifelineId)
+    val to = message.toLifelineId?.let { seq3LifelineDisplayLabel(document, it) } ?: if (message.kind == Seq3Kind.NOTE) null else "?"
+    val endpoints = if (to == null) from else "$from → $to"
+    return if (timestamp == null) endpoints else "$timestamp · $endpoints"
+}
+
+/** The message text of a row: the occurrence's own log text for an exact row, the label for a summary row. */
+internal fun seq3SequenceRowText(row: Seq3SequenceRow): String = row.occurrence?.text ?: row.message.labelTemplate
+
+/** The `×N` badge of a summary row, null for an exact row or a single occurrence. */
+internal fun seq3SequenceRowCount(row: Seq3SequenceRow): Int? {
+    if (row.occurrence != null) return null
+    val message = row.message
+    val count = seq3CollapsedOccurrenceCount(message)
+        ?: message.totalOccurrenceCount
+        ?: message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE }
+    return count.takeIf { it > 1 }
+}
+
+private fun seq3LifelineDisplayLabel(document: Seq3Document, lifelineId: String): String =
+    document.lifelines.firstOrNull { it.id == lifelineId }
+        ?.let { seq3DisplayName(it.name, it.displaySegments, document.lifelineDisplaySegments) }
+        ?: lifelineId
+
+/** Whether the row is the one the user has selected, by either surface: the exact arrow
+ *  ([selectedOccurrenceMessageId]/[canvasRows], set by an arrow click or a row click) or, with no
+ *  exact focus, the whole message the Templates list selected. */
+internal fun seq3SequenceRowSelected(
+    ref: Seq3RowRef,
+    selection: Seq3Selection,
+    canvasRows: Set<Seq3CanvasRowRef>,
+    selectedOccurrenceMessageId: String?,
+    selectedOccurrenceEntryId: Int?,
+): Boolean {
+    val entryId = ref.occurrenceEntryId
+    if (entryId == null) return ref.messageId in selection.selectedIds
+    if (selectedOccurrenceMessageId == ref.messageId && selectedOccurrenceEntryId == entryId) return true
+    if (Seq3CanvasRowRef(ref.messageId, entryId) in canvasRows) return true
+    return canvasRows.isEmpty() && selectedOccurrenceMessageId == null && ref.messageId in selection.selectedIds
+}
+
+/** Selecting a row sets what an arrow click sets, so the canvas highlight follows. */
+internal fun seq3SelectSequenceRow(view: Seq3ViewState, ref: Seq3RowRef) {
+    val entryId = ref.occurrenceEntryId
+    view.selectedCanvasRows = setOf(Seq3CanvasRowRef(ref.messageId, entryId))
+    view.selection = Seq3Selection(selectedIds = linkedSetOf(ref.messageId), anchorId = ref.messageId)
+    view.selectionFromMarquee = false
+    view.selectedOccurrenceIds = emptySet()
+    view.selectedOccurrenceMessageId = entryId?.let { ref.messageId }
+    view.selectedOccurrenceEntryId = entryId
+    view.focusedMessageId = ref.messageId
+    if (entryId != null) seq3AutoExpandOccurrences(view, ref.messageId)
+}
+
+/** Index of the row an arrow click on [messageId] should scroll to: the exact arrow when the click
+ *  named one, else the message's summary row, else its first row; -1 when it has no row. */
+internal fun seq3SequenceScrollIndex(
+    rows: List<Seq3SequenceRow>,
+    messageId: String,
+    selectedOccurrenceMessageId: String?,
+    selectedOccurrenceEntryId: Int?,
+): Int {
+    if (selectedOccurrenceMessageId == messageId && selectedOccurrenceEntryId != null) {
+        val exact = rows.indexOfFirst { it.ref.messageId == messageId && it.ref.occurrenceEntryId == selectedOccurrenceEntryId }
+        if (exact >= 0) return exact
+    }
+    val summary = rows.indexOfFirst { it.ref.messageId == messageId && it.ref.occurrenceEntryId == null }
+    return if (summary >= 0) summary else rows.indexOfFirst { it.ref.messageId == messageId }
+}
+
+/** Labels of the Templates | Sequence switch. A narrow tile header ([compact]) drops the counts
+ *  rather than abbreviating the words: the footer already shows both counts. */
+internal fun seq3MessagesModeLabels(templates: Int, rows: Int, compact: Boolean): List<String> =
+    if (compact) listOf("Templates", "Sequence") else listOf("Templates $templates", "Sequence $rows")
+
+/** The footer line shared by both lists. */
+internal fun seq3QueueFooterText(templates: Int, rows: Int, needsTarget: Int): String =
+    "$templates ${if (templates == 1) "template" else "templates"} · " +
+        "$rows ${if (rows == 1) "message" else "messages"} · $needsTarget need a target"
+
+@Composable
+private fun Seq3CustomOrderStrip(onReset: () -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp).testTag("seq3-custom-order"),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText("Custom order", color = tc.warn, fontSize = 10.sp)
+        AppButton(
+            "Reset",
+            onClick = onReset,
+            variant = ButtonVariant.Ghost,
+            textColor = tc.ac,
+            horizontalPadding = 0.dp,
+            modifier = Modifier.testTag("seq3-custom-order-reset").pointerHoverIcon(
+                PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
+                overrideDescendants = true,
+            ),
+        )
+    }
+}
+
+/** The draggable list of drawn rows. The pointer gesture and its row animation are the ones the
+ *  Templates list used to carry: a press on a grip arms a drag, the dragged row is lifted into a
+ *  ghost while its slot stays as a gap, neighbours slide by block-centre crossing over measured row
+ *  heights, and a release dispatches one `MoveRow`. */
+@Composable
+private fun Seq3SequenceList(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    allRows: List<Seq3SequenceRow>,
+    modifier: Modifier,
+) {
+    val tc = tc()
+    val document = session.document
+    val density = LocalDensity.current.density
+    val docTheme = resolveSeq3ThemeColors(document, state.settings)
+    val filterActive = seq3SequenceFilterActive(view.filter, view.textFilter)
+    val reorderEnabled = !filterActive
+    val rows = remember(document, allRows, view.filter, view.textFilter) {
+        seq3SequenceVisibleRows(document, allRows, view.filter, view.textFilter)
+    }
+    val visibleKeys = remember(rows) { rows.map(Seq3SequenceRow::key) }
+    val rowsByKey = remember(rows) { rows.associateBy(Seq3SequenceRow::key) }
+    val railsByKey = remember(document, allRows) {
+        allRows.map(Seq3SequenceRow::key).zip(seq3FragmentRails(document, allRows.map(Seq3SequenceRow::ref))).toMap()
+    }
+    val gutterDp = remember(railsByKey) { seq3RailGutterDp(railsByKey.values.toList()) }
+    val listState = rememberLazyListState()
+    val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
+    val currentVisibleKeys = rememberUpdatedState(visibleKeys)
+    val currentDocument = rememberUpdatedState(document)
+    val currentReorderEnabled = rememberUpdatedState(reorderEnabled)
+    val currentGutterDp = rememberUpdatedState(gutterDp)
+    var justReleasedKey by remember(session.id) { mutableStateOf<String?>(null) }
+    var dragStartKeys by remember(session.id) { mutableStateOf(emptyList<String>()) }
+    var dragGrabOffsetY by remember(session.id) { mutableStateOf(0f) }
+    val visibleKeySet = remember(visibleKeys) { visibleKeys.toHashSet() }
+    val queuedVisualKeySet = remember(view.queueReorderVisualIds) { view.queueReorderVisualIds.toHashSet() }
+    val dragStartKeySet = remember(dragStartKeys) { dragStartKeys.toHashSet() }
+    val visualKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && view.queueReorderVisualIds.isNotEmpty()) {
+        view.queueReorderVisualIds.filter { it in visibleKeySet } + visibleKeys.filterNot { it in queuedVisualKeySet }
+    } else visibleKeys
+    val renderRows = remember(rows, visualKeys) { visualKeys.mapNotNull(rowsByKey::get) }
+
+    fun heightOf(key: String): Float = rowHeights[key] ?: (SEQ3_SUBMESSAGE_ROW_HEIGHT.value * density)
+    fun advanceOf(key: String): Float = heightOf(key) + SEQ3_SEQUENCE_ROW_GAP.value * density
+
+    fun updateReorderPreview() {
+        val draggedKey = view.queueReorderDraggedId ?: return
+        view.queueReorderVisualIds = blockOrderDuringDrag(
+            currentVisibleKeys.value,
+            draggedKey,
+            view.queueReorderOffsetY,
+            ::advanceOf,
+        )
+    }
+
+    fun resetDragState() {
+        justReleasedKey = null
+        dragStartKeys = emptyList()
+        view.queueReorderVisualIds = emptyList()
+        view.queueReorderOffsetY = 0f
+        view.queueReorderPointerY = 0f
+        dragGrabOffsetY = 0f
+    }
+
+    fun finishReorder(commit: Boolean) {
+        val movedKey = view.queueReorderDraggedId
+        val finalOrder = view.queueReorderVisualIds
+        val liveKeys = currentVisibleKeys.value
+        val command = if (commit && !view.queueReorderCancelled) seq3SequenceDropCommand(movedKey, liveKeys, finalOrder) else null
+        var committed = false
+        if (command != null && movedKey != null) {
+            val preview = applySeq3Command(currentDocument.value, command)
+            if (!preview.applied) {
+                view.messageAddHint = preview.reason ?: "Message order was not changed"
+            } else if (!state.seq3Sessions.applyCommand(session.id, command)) {
+                view.messageAddHint = "Message order could not be saved"
+            } else {
+                committed = true
+            }
+        }
+        if (committed && movedKey != null) {
+            justReleasedKey = movedKey
+            dragStartKeys = liveKeys
+            view.queueReorderVisualIds = finalOrder
+        } else {
+            resetDragState()
+        }
+        view.queueReorderDraggedId = null
+        view.queueReorderCancelled = false
+    }
+
+    LaunchedEffect(view.scrollRequestId, rows) {
+        val targetId = view.scrollRequestId ?: return@LaunchedEffect
+        val index = seq3SequenceScrollIndex(rows, targetId, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId)
+        if (index >= 0) listState.animateScrollToItem(index)
+        view.scrollRequestId = null
+    }
+
+    LaunchedEffect(reorderEnabled) {
+        if (!reorderEnabled && view.queueReorderDraggedId != null) {
+            view.queueReorderCancelled = true
+            view.queueReorderDraggedId = null
+            view.queueReorderVisualIds = emptyList()
+            dragStartKeys = emptyList()
+        }
+    }
+
+    LaunchedEffect(visibleKeys, view.queueReorderDraggedId, justReleasedKey) {
+        if (view.queueReorderDraggedId != null && view.queueReorderDraggedId !in visibleKeys) {
+            view.queueReorderCancelled = true
+            view.queueReorderDraggedId = null
+            view.queueReorderVisualIds = emptyList()
+            dragStartKeys = emptyList()
+        }
+        if (view.queueReorderDraggedId == null && justReleasedKey == null) resetDragState()
+    }
+
+    LaunchedEffect(justReleasedKey) {
+        if (justReleasedKey != null) {
+            delay(120)
+            resetDragState()
+        }
+    }
+
+    LaunchedEffect(view.queueReorderDraggedId) {
+        val dragKey = view.queueReorderDraggedId ?: return@LaunchedEffect
+        while (view.queueReorderDraggedId == dragKey) {
+            val viewportHeight = listState.layoutInfo.viewportSize.height.toFloat()
+            val edge = 36f * density
+            val scrollDelta = when {
+                viewportHeight <= 0f -> 0f
+                view.queueReorderPointerY < edge -> -14f
+                view.queueReorderPointerY > viewportHeight - edge -> 14f
+                else -> 0f
+            }
+            if (scrollDelta != 0f) {
+                val consumed = listState.scrollBy(scrollDelta)
+                view.queueReorderOffsetY += consumed
+                updateReorderPreview()
+            }
+            delay(24)
+        }
+    }
+
+    Box(
+        modifier.clipToBounds().pointerInput(session.id) {
+            val dragSlop = viewConfiguration.touchSlop
+            awaitPointerEventScope {
+                var candidateKey: String? = null
+                var candidatePointerId: PointerId? = null
+                var pressPosition: Offset? = null
+                var lastPosition: Offset? = null
+                var active = false
+
+                fun clearLocalState() {
+                    candidateKey = null
+                    candidatePointerId = null
+                    pressPosition = null
+                    lastPosition = null
+                    active = false
+                    releaseMoveDragCursor()
+                }
+
+                fun cancelPointerGesture() {
+                    if (active) finishReorder(commit = false)
+                    clearLocalState()
+                }
+
+                fun handleMove(change: PointerInputChange, event: PointerEvent) {
+                    val rowKey = candidateKey ?: return
+                    val start = pressPosition ?: return
+                    if (active && (view.queueReorderDraggedId != rowKey || view.queueReorderCancelled)) {
+                        cancelPointerGesture()
+                        return
+                    }
+                    val primaryPressed = if (change.type == PointerType.Mouse) {
+                        event.buttons.isPrimaryPressed
+                    } else {
+                        change.pressed
+                    }
+                    if (!primaryPressed) {
+                        cancelPointerGesture()
+                        return
+                    }
+                    val current = change.position
+                    val crossedSlop = (current - start).getDistance() > dragSlop
+                    if (!active && crossedSlop) {
+                        active = true
+                        view.queueReorderCancelled = false
+                        view.queueReorderDraggedId = rowKey
+                        view.queueReorderOffsetY = current.y - start.y
+                        view.queueReorderPointerY = current.y
+                        dragStartKeys = currentVisibleKeys.value
+                        view.queueReorderVisualIds = currentVisibleKeys.value
+                        view.textFieldFocused = false
+                        runCatching { view.focusRequester.requestFocus() }
+                        holdMoveDragCursor()
+                        updateReorderPreview()
+                        change.consume()
+                    } else if (active) {
+                        val previous = lastPosition ?: current
+                        view.queueReorderOffsetY += current.y - previous.y
+                        view.queueReorderPointerY = current.y
+                        updateReorderPreview()
+                        change.consume()
+                    }
+                    lastPosition = current
+                }
+
+                try {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        val pointerId = candidatePointerId
+                        val change = if (pointerId == null) {
+                            event.changes.firstOrNull()
+                        } else {
+                            event.changes.firstOrNull { it.id == pointerId }
+                        } ?: continue
+                        when (event.type) {
+                            PointerEventType.Press -> {
+                                if (candidateKey != null) cancelPointerGesture()
+                                val primaryPressed = if (change.type == PointerType.Mouse) {
+                                    event.buttons.isPrimaryPressed
+                                } else {
+                                    change.pressed
+                                }
+                                if (primaryPressed && currentReorderEnabled.value &&
+                                    seq3SequenceGripHit(change.position.x, density, currentGutterDp.value)
+                                ) {
+                                    val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                                        change.position.y >= info.offset && change.position.y < info.offset + info.size
+                                    }
+                                    val rowKey = item?.key as? String
+                                    if (rowKey != null && rowKey in currentVisibleKeys.value) {
+                                        candidateKey = rowKey
+                                        candidatePointerId = change.id
+                                        pressPosition = change.position
+                                        lastPosition = change.position
+                                        dragGrabOffsetY = change.position.y - item.offset.toFloat()
+                                    }
+                                }
+                            }
+                            PointerEventType.Move -> handleMove(change, event)
+                            PointerEventType.Release -> {
+                                if (active) {
+                                    change.consume()
+                                    finishReorder(commit = true)
+                                }
+                                clearLocalState()
+                            }
+                            PointerEventType.Exit -> {
+                                if (candidateKey != null) cancelPointerGesture()
+                            }
+                            else -> Unit
+                        }
+                    }
+                } finally {
+                    cancelPointerGesture()
+                }
+            }
+        },
+    ) {
+        val startKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && dragStartKeys.isNotEmpty()) {
+            dragStartKeys.filter { it in visibleKeySet } + visibleKeys.filterNot { it in dragStartKeySet }
+        } else visibleKeys
+        val startOffsets = cumulativeBlockOffsets(startKeys, ::advanceOf)
+        val targetOffsets = cumulativeBlockOffsets(visualKeys, ::advanceOf)
+        LazyColumn(
+            Modifier.fillMaxSize().padding(end = 6.dp).testTag("seq3-sequence-list"),
+            state = listState,
+            verticalArrangement = Arrangement.spacedBy(SEQ3_SEQUENCE_ROW_GAP),
+        ) {
+            if (rows.isEmpty()) {
+                item(key = "empty") {
+                    AppText(
+                        if (filterActive) "No rows match the filters" else "No messages are drawn",
+                        color = tc.td,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+            items(renderRows, key = Seq3SequenceRow::key) { row ->
+                val draggedKey = view.queueReorderDraggedId
+                val startY = startOffsets[row.key] ?: 0f
+                val slotY = targetOffsets[row.key] ?: startY
+                val targetY = targetOffsets[row.key] ?: startY
+                val animatedY by key(row.key) {
+                    animateFloatAsState(
+                        targetValue = targetY,
+                        animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
+                        label = "seq3-sequence-row-y-${row.key}",
+                    )
+                }
+                val isDragging = draggedKey == row.key
+                val isJustReleased = justReleasedKey == row.key
+                val renderY = sequenceRenderY(
+                    isDragging = isDragging,
+                    isJustReleased = isJustReleased,
+                    pointerY = startY + view.queueReorderOffsetY,
+                    targetY = targetY,
+                    animatedY = animatedY,
+                )
+                if (isDragging) {
+                    // The row's slot stays as a gap with the insertion bar at its top; the rail runs
+                    // through it when the drop would land inside a fragment.
+                    val slot = visualKeys.indexOf(row.key)
+                    val inside = seq3DropInsideFragments(
+                        document,
+                        visualKeys.getOrNull(slot - 1)?.let(rowsByKey::get)?.ref,
+                        visualKeys.getOrNull(slot + 1)?.let(rowsByKey::get)?.ref,
+                    )
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .height((heightOf(row.key) / density).dp)
+                            .onSizeChanged { rowHeights[row.key] = it.height.toFloat() },
+                    ) {
+                        if (inside.isNotEmpty()) {
+                            Seq3FragmentRail(inside, inside.mapTo(HashSet()) { it.id }, gutterDp, docTheme.seq1)
+                        }
+                        Box(
+                            Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopStart)
+                                .background(tc.ac, RoundedCornerShape(1.dp))
+                                .testTag("seq3-sequence-drop-bar"),
+                        )
+                        inside.firstOrNull()?.let { fragment ->
+                            AppText(
+                                "inside ${seq3FragmentRailLabel(fragment)}",
+                                color = tc.ac,
+                                fontSize = 9.sp,
+                                modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 8.dp),
+                            )
+                        }
+                    }
+                } else {
+                    Box(
+                        Modifier.fillMaxWidth()
+                            .offset { IntOffset(0, (renderY - slotY).roundToInt()) }
+                            .zIndex(if (isJustReleased) 1f else 0f)
+                            .graphicsLayer {
+                                if (isJustReleased) {
+                                    scaleX = 1.015f
+                                    scaleY = 1.015f
+                                }
+                            }
+                            .onSizeChanged { rowHeights[row.key] = it.height.toFloat() },
+                    ) {
+                        Seq3SequenceRowItem(
+                            state, session, view, document, row, railsByKey[row.key], gutterDp, docTheme.seq1,
+                            reorderEnabled = reorderEnabled, isDragging = false,
+                        )
+                    }
+                }
+            }
+        }
+        val draggingRow = view.queueReorderDraggedId?.let(rowsByKey::get)
+        if (draggingRow != null) {
+            Box(
+                Modifier.fillMaxWidth()
+                    .padding(end = 6.dp)
+                    .offset { IntOffset(0, (view.queueReorderPointerY - dragGrabOffsetY).roundToInt()) }
+                    .zIndex(2f)
+                    .testTag("seq3-sequence-drag-ghost-${draggingRow.key}"),
+            ) {
+                Seq3SequenceRowItem(
+                    state, session, view, document, draggingRow, railsByKey[draggingRow.key], gutterDp, docTheme.seq1,
+                    reorderEnabled = reorderEnabled, isDragging = true,
+                )
+            }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(listState),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+            style = appScrollbarStyle(tc),
+        )
+    }
+}
+
+/** One sequence row: fragment labels above its first row of a fragment, the rail gutter, then the
+ *  shared evidence-row shell with a grip and the row number in front. */
+@Composable
+private fun Seq3SequenceRowItem(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    row: Seq3SequenceRow,
+    rails: Seq3RowRails?,
+    gutterDp: Float,
+    defaultRailColor: Color,
+    reorderEnabled: Boolean,
+    isDragging: Boolean,
+) {
+    val tc = tc()
+    val message = row.message
+    val selected = seq3SequenceRowSelected(
+        row.ref, view.selection, view.selectedCanvasRows, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId,
+    )
+    val hovered = view.hoveredMessageId == message.id
+    val entryId = row.ref.occurrenceEntryId
+    val hidden = row.occurrence?.visibility == Seq3Visibility.HIDDEN
+    val count = seq3SequenceRowCount(row)
+    Column(Modifier.fillMaxWidth()) {
+        rails?.starting?.forEach { fragment ->
+            AppText(
+                seq3FragmentRailLabel(fragment),
+                color = seq3FragmentRailColor(fragment, defaultRailColor),
+                fontSize = 9.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = gutterDp.dp, top = 2.dp, bottom = 1.dp),
+            )
+        }
+        Row(Modifier.fillMaxWidth()) {
+            if (rails != null) Seq3FragmentRail(rails.containing, rails.continuing, gutterDp, defaultRailColor)
+            Seq3EvidenceRowShell(
+                background = when {
+                    isDragging -> tc.abg
+                    selected -> tc.sl
+                    hovered -> tc.hv
+                    else -> tc.p2
+                },
+                modifier = Modifier.weight(1f)
+                    .onPointerEvent(PointerEventType.Enter) { view.hoveredMessageId = message.id }
+                    .onPointerEvent(PointerEventType.Exit) { if (view.hoveredMessageId == message.id) view.hoveredMessageId = null }
+                    .testTag("seq3-sequence-row-${row.key}"),
+                leading = {
+                    TooltipArea(tooltip = {
+                        ToolbarTooltip(if (reorderEnabled) "Drag to reorder" else "Clear filters to reorder")
+                    }) {
+                        Box(
+                            Modifier.width(14.dp).height(22.dp).testTag("seq3-sequence-drag-${row.key}")
+                                .then(if (reorderEnabled) Modifier.moveCursor() else Modifier),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            AppText("⠿", color = if (reorderEnabled) tc.td else tc.td.copy(alpha = .45f), fontSize = 12.sp)
+                        }
+                    }
+                    Box(Modifier.width(18.dp), contentAlignment = Alignment.CenterEnd) {
+                        AppText("${row.number}", color = tc.td, fontSize = 9.sp, fontFamily = MONO, maxLines = 1)
+                    }
+                },
+                bodyModifier = Modifier.pointerInput(row.key) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
+                                event.changes.none { it.isConsumed }
+                            ) {
+                                seq3SelectSequenceRow(view, row.ref)
+                                runCatching { view.focusRequester.requestFocus() }
+                            }
+                        }
+                    }
+                },
+                body = {
+                    DisableSelection {
+                        AppText(
+                            seq3SequenceRowCaption(document, row),
+                            color = tc.td,
+                            fontSize = 9.sp,
+                            fontFamily = MONO,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                            AppText(
+                                seq3SequenceRowText(row),
+                                color = if (hidden) tc.td else tc.tx,
+                                fontSize = 10.sp,
+                                fontFamily = MONO,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (count != null) AppText("×$count", color = tc.ts, fontSize = 10.sp)
+                        }
+                    }
+                },
+                trailing = {
+                    if (row.occurrence != null && entryId != null) {
+                        Seq3OccurrenceHideButton(hidden) {
+                            state.seq3Sessions.applyCommand(
+                                session.id,
+                                Seq3Command.SetOccurrenceVisibility(
+                                    message.id,
+                                    entryId,
+                                    if (hidden) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                                ),
+                            )
+                        }
+                        if (message.occurrences.size > 1) {
+                            Seq3OccurrenceMoveOutButton {
+                                state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveOccurrenceOut(message.id, entryId))
+                                view.selectedOccurrenceIds = view.selectedOccurrenceIds - occurrenceSelectionKey(message.id, entryId)
+                                view.selectedOccurrenceMessageId = null
+                                view.selectedOccurrenceEntryId = null
+                                runCatching { view.focusRequester.requestFocus() }
+                            }
+                        }
+                    } else {
+                        Seq3VisibilityButton(state, session, message)
+                    }
+                },
+            )
+        }
+    }
+}
+
+private fun seq3FragmentRailColor(fragment: Seq3Fragment, default: Color): Color =
+    fragment.style?.borderArgb?.let(::Color) ?: default
+
+/** The 3dp bars of the fragments a row is in, side by side (outermost first). A bar that continues
+ *  into the next row is stretched over the gap so a fragment reads as one rail. */
+@Composable
+private fun Seq3FragmentRail(fragments: List<Seq3Fragment>, continuing: Set<String>, gutterDp: Float, defaultColor: Color) {
+    if (gutterDp <= 0f) return
+    Box(
+        Modifier.width(gutterDp.dp).height(SEQ3_SUBMESSAGE_ROW_HEIGHT).drawBehind {
+            val barWidth = SEQ3_RAIL_BAR_DP.dp.toPx()
+            val step = SEQ3_RAIL_STEP_DP.dp.toPx()
+            fragments.take(SEQ3_RAIL_MAX_BARS).forEachIndexed { index, fragment ->
+                val extra = if (fragment.id in continuing) SEQ3_SEQUENCE_ROW_GAP.toPx() else 0f
+                drawRect(
+                    color = seq3FragmentRailColor(fragment, defaultColor),
+                    topLeft = Offset(index * step, 0f),
+                    size = Size(barWidth, size.height + extra),
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -1490,17 +1977,28 @@ private fun Seq3QueueHeader(
 
     val tab = session.sourceTabId?.let(state::tab)
     val boxModifier = if (showTitle) Modifier.fillMaxWidth() else Modifier
+    // A narrow tile header first shortens the switch labels, then turns "+ message" into an icon.
+    val headerWidth = LocalTileHeaderWidthDp.current
+    val shortLabels = headerWidth > 0f && headerWidth < SEQ3_MESSAGES_TOGGLE_LABELS_MIN_WIDTH_DP
+    val iconAdd = headerWidth > 0f && headerWidth < SEQ3_MESSAGES_ADD_LABEL_MIN_WIDTH_DP
+    val drawnRowCount = remember(session.document) { seq3DrawnRowRefs(session.document).size }
+    val headerControls: @Composable () -> Unit = {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(if (shortLabels) 3.dp else 6.dp)) {
+            Seq3MessagesModeToggle(view, counts.all, drawnRowCount, shortLabels)
+            Seq3MessageAddButton(iconAdd) { addMenuOpen = !addMenuOpen }
+        }
+    }
     Column(if (showTitle) Modifier.fillMaxWidth() else Modifier) {
         Box(boxModifier) {
             if (showTitle) {
                 SectionHeader(
                     title = "Messages · ${counts.all}",
-                    trailing = { Seq3MessageAddButton { addMenuOpen = !addMenuOpen } },
+                    trailing = { headerControls() },
                     expanded = view.messagesExpanded,
                     onToggle = { view.messagesExpanded = !view.messagesExpanded },
                 )
             } else {
-                Seq3MessageAddButton { addMenuOpen = !addMenuOpen }
+                headerControls()
             }
             if (addMenuOpen) {
                 Popup(
@@ -1558,8 +2056,36 @@ private fun Seq3QueueHeader(
     }
 }
 
+/** Templates | Sequence: which list the Messages tile shows. Switching only changes the view, so the
+ *  selection carries over; focus goes back to the workspace so its keys keep working. */
 @Composable
-private fun Seq3MessageAddButton(onClick: () -> Unit) {
+private fun Seq3MessagesModeToggle(view: Seq3ViewState, templates: Int, rows: Int, compact: Boolean) {
+    SegmentedControl(
+        options = seq3MessagesModeLabels(templates, rows, compact),
+        selectedIndices = setOf(view.messagesMode.ordinal),
+        onToggle = { index ->
+            view.messagesMode = Seq3MessagesMode.entries[index]
+            runCatching { view.focusRequester.requestFocus() }
+        },
+        segmentHeight = 18.dp,
+        segmentFontSize = 10.sp,
+        segmentHorizontalPadding = if (compact) 5.dp else 7.dp,
+        modifier = Modifier.testTag("seq3-messages-mode"),
+    )
+}
+
+@Composable
+private fun Seq3MessageAddButton(compact: Boolean = false, onClick: () -> Unit) {
+    if (compact) {
+        TileIconButton(
+            icon = Icons.Outlined.Add,
+            contentDescription = "Add message",
+            tooltip = "Add message",
+            tag = "diagram-message-add-compact",
+            onClick = onClick,
+        )
+        return
+    }
     LabelIconButton(
         text = "+ message",
         fontSize = 10.sp,
@@ -1956,14 +2482,14 @@ private fun Seq3FilterChipsRow(view: Seq3ViewState, counts: com.indagium.diagram
 }
 
 private val SORT_LABELS = mapOf(
-    Seq3Sort.LOG_ORDER to "Log order",
+    Seq3Sort.LOG_ORDER to "Diagram order",
     Seq3Sort.LIFELINE to "By lifeline",
     Seq3Sort.OCCURRENCES to "By occurrence count",
     Seq3Sort.STATE to "By state",
 )
 
 @Composable
-private fun Seq3FilterTextAndSortRow(view: Seq3ViewState) {
+private fun Seq3FilterTextAndSortRow(view: Seq3ViewState, showSort: Boolean = true) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1981,11 +2507,13 @@ private fun Seq3FilterTextAndSortRow(view: Seq3ViewState) {
         )
         // Sort is a VIEW, never an edit (spec §07) — Seq3QueuePanel's own header — so this only
         // ever writes `view.sort`, never dispatches a Seq3Command.
-        Seq3DropdownButton(label = SORT_LABELS.getValue(view.sort), menuWidth = 176.dp) { close ->
-            Seq3Sort.entries.forEach { option ->
-                Seq3DropdownMenuItem(SORT_LABELS.getValue(option), active = option == view.sort) {
-                    view.sort = option
-                    close()
+        if (showSort) {
+            Seq3DropdownButton(label = SORT_LABELS.getValue(view.sort), menuWidth = 176.dp) { close ->
+                Seq3Sort.entries.forEach { option ->
+                    Seq3DropdownMenuItem(SORT_LABELS.getValue(option), active = option == view.sort) {
+                        view.sort = option
+                        close()
+                    }
                 }
             }
         }
@@ -1993,14 +2521,14 @@ private fun Seq3FilterTextAndSortRow(view: Seq3ViewState) {
 }
 
 @Composable
-private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, onRegenerate: () -> Unit) {
+private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, drawnRowCount: Int, onRegenerate: () -> Unit) {
     val tc = tc()
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AppText("${counts.all} messages · ${counts.needsTarget} need a target", color = tc.ts, fontSize = 11.sp)
+        AppText(seq3QueueFooterText(counts.all, drawnRowCount, counts.needsTarget), color = tc.ts, fontSize = 11.sp)
         // Opens spec §08's review sheet — never a silent full rebuild, which is exactly what
         // "Regenerate is a reviewed proposal, never a wholesale replace" rules out.
         AppButton(
@@ -2876,9 +3404,6 @@ private fun Seq3QueueRow(
     document: Seq3Document,
     message: Seq3Message,
     visibleIds: List<String>,
-    dragHandleModifier: Modifier = Modifier,
-    reorderEnabled: Boolean = true,
-    isDragging: Boolean = false,
     onRightClickAddAfter: () -> Unit = {},
 ) {
     val tc = tc()
@@ -2909,7 +3434,7 @@ private fun Seq3QueueRow(
             .clip(CORNER_SM)
             .background(
                 when {
-                    focused || isDragging -> tc.abg
+                    focused -> tc.abg
                     selected -> tc.sl
                     needsTarget -> tc.warnBg
                     hovered -> tc.hv
@@ -2935,17 +3460,6 @@ private fun Seq3QueueRow(
             .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            TooltipArea(tooltip = {
-                ToolbarTooltip(if (reorderEnabled) "Drag to reorder message" else "Set sort to Log order to move messages")
-            }) {
-                Box(
-                    Modifier.width(14.dp).height(22.dp).testTag("seq3-queue-drag-${message.id}").then(dragHandleModifier)
-                        .then(if (reorderEnabled) Modifier.moveCursor() else Modifier),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    AppText("⠿", color = if (reorderEnabled) tc.td else tc.td.copy(alpha = .45f), fontSize = 12.sp)
-                }
-            }
             if (message.occurrences.size > 1) {
                 Seq3OccurrenceToggle(
                     expanded = message.id in view.expandedOccurrenceMessageIds,
@@ -3150,7 +3664,7 @@ private fun Seq3QueueRow(
                         },
                 ) {
                     AppButton(
-                        "Add message after this",
+                        "Add message after this…",
                         onClick = {
                             dismissContextMenu()
                             onRightClickAddAfter()
@@ -3303,6 +3817,63 @@ private fun Seq3OccurrenceToggle(expanded: Boolean, modifier: Modifier = Modifie
     }
 }
 
+/** The visual shell shared by every evidence row — the expanded occurrence sub-rows of a template
+ *  and the rows of the sequence list: the `p2` card, its fixed height, [leading] controls, the
+ *  two-line [body] column and the [trailing] buttons. [bodyModifier] carries the body's click
+ *  handling so a leading checkbox or grip never receives it. */
+@Composable
+private fun Seq3EvidenceRowShell(
+    background: Color,
+    modifier: Modifier = Modifier,
+    leading: @Composable RowScope.() -> Unit,
+    bodyModifier: Modifier = Modifier,
+    body: @Composable ColumnScope.() -> Unit,
+    trailing: @Composable RowScope.() -> Unit,
+) {
+    Row(
+        modifier.fillMaxWidth()
+            .clip(CORNER_SM)
+            .background(background, CORNER_SM)
+            .height(SEQ3_SUBMESSAGE_ROW_HEIGHT)
+            .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        leading()
+        Column(Modifier.weight(1f).then(bodyModifier), verticalArrangement = Arrangement.spacedBy(1.dp), content = body)
+        trailing()
+    }
+}
+
+@Composable
+private fun Seq3OccurrenceHideButton(hidden: Boolean, onClick: () -> Unit) {
+    ToolbarBtn(
+        label = if (hidden) "Show occurrence" else "Hide occurrence",
+        icon = if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
+        showLabel = false,
+        tooltip = if (hidden) "Show only this occurrence" else "Hide only this occurrence",
+        active = hidden,
+        contentPadding = PaddingValues(0.dp),
+        modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+        shape = CORNER_SM,
+        onClick = onClick,
+    )
+}
+
+@Composable
+private fun Seq3OccurrenceMoveOutButton(onClick: () -> Unit) {
+    ToolbarBtn(
+        label = "Move occurrence out",
+        icon = Icons.AutoMirrored.Outlined.OpenInNew,
+        showLabel = false,
+        tooltip = "Move this occurrence out as a separate message",
+        onClick = onClick,
+        contentPadding = PaddingValues(0.dp),
+        modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+        shape = CORNER_SM,
+    )
+}
+
 @Composable
 private fun Seq3OccurrenceSubRow(
     state: AppState,
@@ -3316,52 +3887,45 @@ private fun Seq3OccurrenceSubRow(
     val key = occurrenceSelectionKey(message.id, entryId)
     val checked = key in view.selectedOccurrenceIds
     val selected = view.selectedOccurrenceMessageId == message.id && view.selectedOccurrenceEntryId == entryId
-    Row(
-        Modifier.fillMaxWidth()
-            .clip(CORNER_SM)
-            .background(if (checked || selected) tc.sl else tc.p2, CORNER_SM)
-            .height(SEQ3_SUBMESSAGE_ROW_HEIGHT)
-            .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Seq3RowCheckbox(checked) {
-            view.selectedOccurrenceIds = if (checked) view.selectedOccurrenceIds - key else view.selectedOccurrenceIds + key
-            view.selectionFromMarquee = false
-            view.selectedCanvasRows = emptySet()
-            view.selectedOccurrenceMessageId = message.id
-            view.selectedOccurrenceEntryId = entryId
-            view.focusedMessageId = message.id
-            runCatching { view.focusRequester.requestFocus() }
-        }
-        Column(
-            Modifier.weight(1f).pointerInput(key) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
-                            event.changes.none { it.isConsumed }
-                        ) {
-                            // A body click is an exact occurrence focus, not a checkbox action.
-                            // Store it in the same exact-row representation the canvas marquee and
-                            // Cmd-click use, so the matching submessage is expanded/highlighted
-                            // on the diagram while its checkbox stays unchanged.
-                            view.selectedCanvasRows = setOf(Seq3CanvasRowRef(message.id, entryId))
-                            view.selectionFromMarquee = false
-                            // Keep the queue's exact-submessage focus as well as the canvas row
-                            // ref.  The former paints this submessage as selected; the latter
-                            // expands/highlights only its matching arrow on the diagram.
-                            view.selectedOccurrenceMessageId = message.id
-                            view.selectedOccurrenceEntryId = entryId
-                            view.focusedMessageId = message.id
-                            view.scrollRequestId = message.id
-                            runCatching { view.focusRequester.requestFocus() }
-                        }
+    Seq3EvidenceRowShell(
+        background = if (checked || selected) tc.sl else tc.p2,
+        leading = {
+            Seq3RowCheckbox(checked) {
+                view.selectedOccurrenceIds = if (checked) view.selectedOccurrenceIds - key else view.selectedOccurrenceIds + key
+                view.selectionFromMarquee = false
+                view.selectedCanvasRows = emptySet()
+                view.selectedOccurrenceMessageId = message.id
+                view.selectedOccurrenceEntryId = entryId
+                view.focusedMessageId = message.id
+                runCatching { view.focusRequester.requestFocus() }
+            }
+        },
+        bodyModifier = Modifier.pointerInput(key) {
+            awaitPointerEventScope {
+                while (true) {
+                    val event = awaitPointerEvent()
+                    if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
+                        event.changes.none { it.isConsumed }
+                    ) {
+                        // A body click is an exact occurrence focus, not a checkbox action.
+                        // Store it in the same exact-row representation the canvas marquee and
+                        // Cmd-click use, so the matching submessage is expanded/highlighted
+                        // on the diagram while its checkbox stays unchanged.
+                        view.selectedCanvasRows = setOf(Seq3CanvasRowRef(message.id, entryId))
+                        view.selectionFromMarquee = false
+                        // Keep the queue's exact-submessage focus as well as the canvas row
+                        // ref.  The former paints this submessage as selected; the latter
+                        // expands/highlights only its matching arrow on the diagram.
+                        view.selectedOccurrenceMessageId = message.id
+                        view.selectedOccurrenceEntryId = entryId
+                        view.focusedMessageId = message.id
+                        view.scrollRequestId = message.id
+                        runCatching { view.focusRequester.requestFocus() }
                     }
                 }
-            },
-            verticalArrangement = Arrangement.spacedBy(1.dp),
-        ) {
+            }
+        },
+        body = {
             DisableSelection {
                 AppText(
                     occurrence.rawTimestamp.ifBlank { "line $entryId" },
@@ -3372,18 +3936,10 @@ private fun Seq3OccurrenceSubRow(
                 )
                 AppText(occurrence.text, color = tc.tx, fontSize = 10.sp, fontFamily = MONO, maxLines = 2)
             }
-        }
-        val hidden = occurrence.visibility == Seq3Visibility.HIDDEN
-        ToolbarBtn(
-            label = if (hidden) "Show occurrence" else "Hide occurrence",
-            icon = if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
-            showLabel = false,
-            tooltip = if (hidden) "Show only this occurrence" else "Hide only this occurrence",
-            active = hidden,
-            contentPadding = PaddingValues(0.dp),
-            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
-            shape = CORNER_SM,
-            onClick = {
+        },
+        trailing = {
+            val hidden = occurrence.visibility == Seq3Visibility.HIDDEN
+            Seq3OccurrenceHideButton(hidden) {
                 state.seq3Sessions.applyCommand(
                     session.id,
                     Seq3Command.SetOccurrenceVisibility(
@@ -3392,25 +3948,16 @@ private fun Seq3OccurrenceSubRow(
                         if (hidden) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
                     ),
                 )
-            },
-        )
-        ToolbarBtn(
-            label = "Move occurrence out",
-            icon = Icons.AutoMirrored.Outlined.OpenInNew,
-            showLabel = false,
-            tooltip = "Move this occurrence out as a separate message",
-            onClick = {
+            }
+            Seq3OccurrenceMoveOutButton {
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveOccurrenceOut(message.id, entryId))
                 view.selectedOccurrenceIds = view.selectedOccurrenceIds - key
                 view.selectedOccurrenceMessageId = null
                 view.selectedOccurrenceEntryId = null
                 runCatching { view.focusRequester.requestFocus() }
-            },
-            contentPadding = PaddingValues(0.dp),
-            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
-            shape = CORNER_SM,
-        )
-    }
+            }
+        },
+    )
 }
 
 /** Item 11's original fix made this a PURE visual indicator with no hit target of its own, because
@@ -3762,23 +4309,6 @@ internal fun seq3PinnableDirections(document: Seq3Document, messageId: String): 
  *  jumps around between rows as a selection changes kind/target. */
 internal fun seq3CanSwapEndpoints(message: Seq3Message): Boolean =
     message.kind != Seq3Kind.NOTE && message.toLifelineId != null
-
-private fun seq3QueueReorderCommand(
-    movedId: String?,
-    originalOrder: List<String>,
-    finalOrder: List<String>,
-): Seq3Command.MoveMessage? {
-    if (movedId == null) return null
-    val newIndex = finalOrder.indexOf(movedId)
-    val oldIndex = originalOrder.indexOf(movedId)
-    if (newIndex < 0 || oldIndex < 0 || newIndex == oldIndex || finalOrder.isEmpty()) return null
-    val position = if (newIndex < oldIndex) {
-        Seq3InsertionPosition.BeforeMessage(finalOrder.getOrNull(newIndex + 1) ?: finalOrder.last())
-    } else {
-        Seq3InsertionPosition.AfterMessage(finalOrder.getOrNull(newIndex - 1) ?: finalOrder.first())
-    }
-    return Seq3Command.MoveMessage(movedId, position)
-}
 
 /** Non-null exactly when [message] is currently drawn as one collapsed/badged arrow (spec §04's
  *  third inset row line) — the same condition Seq3Layout's own `expandForLayout` uses for

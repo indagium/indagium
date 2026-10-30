@@ -1639,11 +1639,19 @@ its numbers into pixels.
 Manual sequence editing adds an optional `Seq3Document.rowOrder` of stable `Seq3RowRef` values
 (message id and optional occurrence entry id). An empty order retains chronological rendering;
 an authored order is resolved by the shared ordering helper used by layout, text emission, and
-lifecycle validation. Reordering never rewrites log timestamps or occurrence evidence. Canvas
-drags can move one occurrence, while a message-list drag moves the parent's occurrences together.
-Hidden references retain their positions and obsolete references are discarded during edits.
-The default message-list order follows the first represented row; its alternative sorts remain
-views rather than mutations.
+lifecycle validation. Reordering never rewrites log timestamps or occurrence evidence. The
+Messages tile has two views: Templates (one row per message, for editing; never reordered by drag)
+and Sequence (one row per drawn arrow, from `seq3DrawnRowRefs`, so it matches the canvas row for
+row). A Sequence drag, a canvas drag, the arrow menu's Move submenu and Alt+↑/↓ all dispatch
+`MoveRow` for one exact row; only a collapsed `×N` summary row moves its whole message.
+`Seq3Command.ResetRowOrder` clears `rowOrder` back to chronology. After a move, fragment
+membership follows the drop (`reassignSeq3FragmentMembership`): a row belongs to a fragment only
+when both of its new neighbours do, a template-level member is materialised into
+`occurrenceRefs` before one of its rows leaves, and a fragment's only member travels with it, so
+a fragment box never stretches to follow a moved member. Hidden references retain their positions
+and obsolete references are discarded during edits. The Templates list's default order
+("Diagram order") follows the first represented row; its alternative sorts remain views rather
+than mutations.
 
 Canvas inline editors share one active target across message labels, group labels, delays,
 notes, and lifeline names. Opening another editor discards the previous uncommitted draft;

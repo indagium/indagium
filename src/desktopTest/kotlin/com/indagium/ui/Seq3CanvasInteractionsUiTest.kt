@@ -18,6 +18,7 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -42,6 +43,7 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
+import com.indagium.diagram3.seq3DrawnRowRefs
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
@@ -233,6 +235,115 @@ class Seq3CanvasInteractionsUiTest {
     }
 
     @Test
+    fun dragShowsTheInsertionLineWhileActiveAndRemovesItOnRelease() {
+        val sessionId = startWorkspace("canvas-drop-line")
+        val document = repeatedRowsDocument()
+        replaceDocument(sessionId, document)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.zoomMode = Seq3ZoomMode.MANUAL
+        view.zoom = 1f
+        showWorkspace(sessionId)
+
+        val rows = Seq3RenderCache.layout(document).rows.filterIsInstance<Seq3ArrowRow>()
+        val source = rows.first()
+        val body = bounds("seq3-canvas-body")
+        val pixelScale = rule.density.density * view.zoom
+        val rowCenterX = ((source.fromX + source.toX) / 2.0 * pixelScale.toDouble()).toFloat()
+        val start = rootPoint(body.left + rowCenterX, body.top + source.y.toFloat() * pixelScale)
+        val destination = rootPoint(body.left + rowCenterX, body.top + (rows.last().y.toFloat() + 24f) * pixelScale)
+        val workspace = rule.onNodeWithTag("seq3-workspace-root")
+
+        workspace.performMouseInput {
+            moveTo(start)
+            press()
+            moveTo(destination, delayMillis = 100)
+        }
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-reorder-drop-line", useUnmergedTree = true).assertIsDisplayed()
+        // No fragment and not a collapsed summary: the line alone, no chip.
+        rule.onAllNodes(hasTestTag("seq3-reorder-drop-chip"), useUnmergedTree = true).assertCountEquals(0)
+
+        workspace.performMouseInput { release() }
+        rule.waitForIdle()
+        rule.onAllNodes(hasTestTag("seq3-reorder-drop-line"), useUnmergedTree = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun contextMenuMoveDownReordersTheRightClickedRowAndIsUndoable() {
+        val sessionId = startWorkspace("canvas-move-menu")
+        val document = repeatedRowsDocument()
+        replaceDocument(sessionId, document)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.zoomMode = Seq3ZoomMode.MANUAL
+        view.zoom = 1f
+        showWorkspace(sessionId)
+
+        val target = Seq3RenderCache.layout(document).rows
+            .filterIsInstance<Seq3ArrowRow>()
+            .single { it.messageId == "repeat" && it.occurrenceEntryId == FIRST_REPEAT_ENTRY_ID }
+        val body = bounds("seq3-canvas-body")
+        val clickAt = rootPoint(
+            body.left + (target.fromX + target.toX).toFloat() / 2f * rule.density.density * view.zoom,
+            body.top + target.y.toFloat() * rule.density.density * view.zoom,
+        )
+        val undoBefore = currentSession(sessionId).undoStack.size
+        rule.onNodeWithTag("seq3-workspace-root").performMouseInput { rightClick(clickAt) }
+        rule.waitForIdle()
+        rule.onNodeWithText("Move", useUnmergedTree = true).assertIsDisplayed()
+        // Move comes before "Group as" in the menu, so its ▶ trigger is the first one.
+        rule.onAllNodesWithText("▶", useUnmergedTree = true)[0].performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Down", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.waitForIdle()
+
+        assertEquals(
+            listOf(Seq3RowRef("other", OTHER_ENTRY_ID), Seq3RowRef("repeat", FIRST_REPEAT_ENTRY_ID), Seq3RowRef("repeat", SECOND_REPEAT_ENTRY_ID)),
+            currentSession(sessionId).document.rowOrder,
+            "Move > Down puts the first occurrence after the next drawn row",
+        )
+        assertEquals(undoBefore + 1, currentSession(sessionId).undoStack.size)
+        assertNull(view.canvasContextMenuMessageId, "choosing an option closes the menu")
+
+        assertTrue(state.seq3Sessions.undo(sessionId))
+        assertEquals(emptyList(), currentSession(sessionId).document.rowOrder, "undo restores the chronological order")
+    }
+
+    @Test
+    fun altArrowKeysMoveTheSelectedArrowAndTheSelectionFollowsIt() {
+        val sessionId = startWorkspace("canvas-alt-arrows")
+        val document = repeatedRowsDocument()
+        replaceDocument(sessionId, document)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.zoomMode = Seq3ZoomMode.MANUAL
+        view.zoom = 1f
+        showWorkspace(sessionId)
+        val selected = Seq3CanvasRowRef("repeat", FIRST_REPEAT_ENTRY_ID)
+        view.selectedCanvasRows = setOf(selected)
+        view.selectedOccurrenceMessageId = "repeat"
+        view.selectedOccurrenceEntryId = FIRST_REPEAT_ENTRY_ID
+        val workspace = rule.onNodeWithTag("seq3-workspace-root")
+
+        fun drawn() = seq3DrawnRowRefs(currentSession(sessionId).document).map { it.occurrenceEntryId }
+
+        workspace.performKeyInput { keyDown(Key.AltLeft); pressKey(Key.DirectionUp); keyUp(Key.AltLeft) }
+        rule.waitForIdle()
+        assertEquals(listOf(FIRST_REPEAT_ENTRY_ID, OTHER_ENTRY_ID, SECOND_REPEAT_ENTRY_ID), drawn(), "already first: Alt+Up changes nothing")
+
+        workspace.performKeyInput { keyDown(Key.AltLeft); pressKey(Key.DirectionDown); keyUp(Key.AltLeft) }
+        rule.waitForIdle()
+        assertEquals(listOf(OTHER_ENTRY_ID, FIRST_REPEAT_ENTRY_ID, SECOND_REPEAT_ENTRY_ID), drawn())
+        assertEquals(setOf(selected), view.selectedCanvasRows, "the selection follows the moved row")
+
+        workspace.performKeyInput { keyDown(Key.AltLeft); pressKey(Key.DirectionUp); keyUp(Key.AltLeft) }
+        rule.waitForIdle()
+        assertEquals(listOf(FIRST_REPEAT_ENTRY_ID, OTHER_ENTRY_ID, SECOND_REPEAT_ENTRY_ID), drawn())
+
+        workspace.performKeyInput { pressKey(Key.DirectionDown) }
+        rule.waitForIdle()
+        assertEquals(listOf(FIRST_REPEAT_ENTRY_ID, OTHER_ENTRY_ID, SECOND_REPEAT_ENTRY_ID), drawn(), "a plain arrow key does not move rows")
+    }
+
+    @Test
     fun canvasContextMenuAddsAfterTheRightClickedRepeatedOccurrence() {
         val sessionId = startWorkspace("canvas-add-after")
         val document = repeatedRowsDocument()
@@ -252,7 +363,7 @@ class Seq3CanvasInteractionsUiTest {
         )
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { rightClick(clickAt) }
         rule.waitForIdle()
-        rule.onNodeWithText("Add message after this", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.onNodeWithText("Add message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
         rule.waitForIdle()
 
         assertEquals(Seq3RowRef("repeat", 102), view.pendingInsertRequest?.after)
