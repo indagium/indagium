@@ -5,6 +5,7 @@ package com.indagium.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -42,12 +43,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -55,12 +58,16 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -215,102 +222,39 @@ internal fun seq3InsertionPositionAfter(rowRef: Seq3RowRef): Seq3InsertionPositi
     rowRef.occurrenceEntryId?.let { Seq3InsertionPosition.AfterRow(rowRef) }
         ?: Seq3InsertionPosition.AfterMessage(rowRef.messageId)
 
-/** Shared queue/canvas "Add message after this" flow. The request remains view-only until one of
- *  the existing authoring paths produces a single command through Seq3Session.applyCommand. */
+/** Shared queue/canvas "Add message after this" flow: opens the dialog the request names
+ *  ([Seq3PendingInsertRequest.start]) with the placement after the clicked row already filled in.
+ *  Cancelling closes the request. The request remains view-only until one of the existing
+ *  authoring paths produces a single command through Seq3Session.applyCommand. */
 @Composable
 internal fun Seq3PendingInsertFlow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState) {
     val request = view.pendingInsertRequest ?: return
     val tab = session.sourceTabId?.let(state::tab)
-    var nextStep by remember(session.id, request) { mutableStateOf(Seq3AddDialogStep.CHOICE) }
     val position = remember(request) { seq3InsertionPositionAfter(request.after) }
 
-    fun applyInsertion(command: Seq3Command): Boolean {
-        val preview = applySeq3Command(session.document, command)
-        if (!preview.applied) {
-            view.messageAddHint = preview.reason ?: "The message could not be added after this row"
-            return false
-        }
-        val applied = state.seq3Sessions.applyCommand(session.id, command)
-        if (applied) {
-            view.pendingInsertRequest = null
-            view.messageAddHint = null
-            runCatching { view.focusRequester.requestFocus() }
-        } else {
-            view.messageAddHint = "The message could not be added after this row"
-            nextStep = Seq3AddDialogStep.CHOICE
-        }
-        return applied
+    fun close() {
+        view.pendingInsertRequest = null
+        runCatching { view.focusRequester.requestFocus() }
     }
 
-    when (nextStep) {
-        Seq3AddDialogStep.CHOICE -> {
-            val tc = tc()
-            Dialog(
-                onDismissRequest = { view.pendingInsertRequest = null; runCatching { view.focusRequester.requestFocus() } },
-                properties = DialogProperties(usePlatformDefaultWidth = false),
-            ) {
-                Column(
-                    Modifier.width(310.dp).clip(RoundedCornerShape(10.dp))
-                        .background(tc.p).border(1.dp, tc.br, RoundedCornerShape(10.dp)).padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    AppText("Add message after this row", color = tc.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    AppText("Choose a log-backed message or author one manually.", color = tc.ts, fontSize = 10.sp)
-                    AppButton(
-                        "Selected log rows · ${tab?.selected?.size ?: 0}",
-                        onClick = {
-                            val entries = tab?.let { seq3ResolveSelectedEntries(it.logData, it.selected) }.orEmpty()
-                            applyInsertion(Seq3Command.AddSelectionMessage(entries, position))
-                        },
-                        enabled = !entriesEmpty(tab),
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalPadding = 8.dp,
-                    )
-                    AppButton(
-                        "Enter row numbers…",
-                        onClick = { nextStep = Seq3AddDialogStep.ROWS },
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    AppButton(
-                        "Open log view to select rows",
-                        onClick = { session.sourceTabId?.let(state::activateTab) },
-                        enabled = session.sourceTabId != null,
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    AppButton(
-                        "Custom message…",
-                        onClick = { nextStep = Seq3AddDialogStep.CUSTOM },
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    AppButton("Cancel", onClick = { view.pendingInsertRequest = null }, variant = ButtonVariant.Ghost, modifier = Modifier.align(Alignment.End))
-                }
-            }
-        }
-        Seq3AddDialogStep.ROWS -> Seq3AddRowsDialog(
+    fun applyInsertion(command: Seq3Command) {
+        if (seq3ApplyInsertion(state, session, view, command)) view.pendingInsertRequest = null
+    }
+
+    when (request.start) {
+        Seq3InsertStart.ROWS -> Seq3AddRowsDialog(
             entries = tab?.logData.orEmpty(),
-            onDismiss = { nextStep = Seq3AddDialogStep.CHOICE },
-            onAdd = { entries ->
-                applyInsertion(Seq3Command.AddSelectionMessage(entries, position))
-            },
+            onDismiss = ::close,
+            onAdd = { entries -> applyInsertion(Seq3Command.AddSelectionMessage(entries, position)) },
         )
-        Seq3AddDialogStep.CUSTOM -> Seq3AddCustomDialog(
+        Seq3InsertStart.CUSTOM -> Seq3AddCustomDialog(
             document = session.document,
             positionOverride = position,
-            onDismiss = { nextStep = Seq3AddDialogStep.CHOICE },
-            onAdd = { spec ->
-                applyInsertion(Seq3Command.AddCustomMessage(spec.copy(position = position)))
-            },
+            onDismiss = ::close,
+            onAdd = { spec -> applyInsertion(Seq3Command.AddCustomMessage(spec.copy(position = position))) },
         )
     }
 }
-
-private enum class Seq3AddDialogStep { CHOICE, ROWS, CUSTOM }
-
-private fun entriesEmpty(tab: com.indagium.model.LogTab?): Boolean = tab?.selected.isNullOrEmpty()
 
 private enum class Seq3CustomPositionMode {
     START,
@@ -479,12 +423,7 @@ private fun Seq3TemplateList(state: AppState, session: Seq3WorkspaceSession, vie
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             items(rows, key = Seq3Message::id) { message ->
-                Seq3QueueRow(
-                    state, session, view, document, message, visibleIds,
-                    onRightClickAddAfter = {
-                        view.pendingInsertRequest = Seq3PendingInsertRequest(Seq3RowRef(message.id))
-                    },
-                )
+                Seq3QueueRow(state, session, view, document, message, visibleIds)
             }
         }
         VerticalScrollbar(
@@ -511,7 +450,8 @@ internal fun Seq3QueueHeaderActions(state: AppState, session: Seq3WorkspaceSessi
 // a row dispatches `MoveRow` — the only list-side way to change the order — and a drop decides
 // fragment membership in the model (`moveSeq3Row`), so the rail beside the rows is a preview of it.
 
-private val SEQ3_SEQUENCE_ROW_GAP = 3.dp
+// Rows sit flush, separated by a hairline, like the Lifelines list; a drag still advances by row height + gap.
+private val SEQ3_SEQUENCE_ROW_GAP = 0.dp
 private const val SEQ3_RAIL_BAR_DP = 3f
 private const val SEQ3_RAIL_STEP_DP = 4f
 private const val SEQ3_RAIL_MAX_BARS = 3
@@ -675,21 +615,33 @@ private fun seq3LifelineDisplayLabel(document: Seq3Document, lifelineId: String)
         ?.let { seq3DisplayName(it.name, it.displaySegments, document.lifelineDisplaySegments) }
         ?: lifelineId
 
-/** Whether the row is the one the user has selected, by either surface: the exact arrow
- *  ([selectedOccurrenceMessageId]/[canvasRows], set by an arrow click or a row click) or, with no
- *  exact focus, the whole message the Templates list selected. */
-internal fun seq3SequenceRowSelected(
+/** How a Sequence row relates to the current selection: [EXACT] is the one arrow (or summary row)
+ *  that is selected and takes the selection fill; [SIBLING] is another row of a selected message
+ *  and only gets an accent mark on its left edge; [NONE] is unrelated. */
+internal enum class Seq3SequenceRowEmphasis { NONE, SIBLING, EXACT }
+
+/** Classifies a row against both selection surfaces: the exact arrow
+ *  ([selectedOccurrenceMessageId]/[canvasRows], set by an arrow click or a row click) and the whole
+ *  message the Templates list selected. A whole-message selection with no focused arrow marks every
+ *  arrow of the message as a [Seq3SequenceRowEmphasis.SIBLING]; only its summary row is [EXACT]. */
+internal fun seq3SequenceRowEmphasis(
     ref: Seq3RowRef,
     selection: Seq3Selection,
     canvasRows: Set<Seq3CanvasRowRef>,
     selectedOccurrenceMessageId: String?,
     selectedOccurrenceEntryId: Int?,
-): Boolean {
+): Seq3SequenceRowEmphasis {
     val entryId = ref.occurrenceEntryId
-    if (entryId == null) return ref.messageId in selection.selectedIds
-    if (selectedOccurrenceMessageId == ref.messageId && selectedOccurrenceEntryId == entryId) return true
-    if (Seq3CanvasRowRef(ref.messageId, entryId) in canvasRows) return true
-    return canvasRows.isEmpty() && selectedOccurrenceMessageId == null && ref.messageId in selection.selectedIds
+    val messageSelected = ref.messageId in selection.selectedIds
+    if (entryId == null) return if (messageSelected) Seq3SequenceRowEmphasis.EXACT else Seq3SequenceRowEmphasis.NONE
+    val exact = (selectedOccurrenceMessageId == ref.messageId && selectedOccurrenceEntryId == entryId) ||
+        Seq3CanvasRowRef(ref.messageId, entryId) in canvasRows
+    return when {
+        exact -> Seq3SequenceRowEmphasis.EXACT
+        messageSelected || selectedOccurrenceMessageId == ref.messageId || canvasRows.any { it.messageId == ref.messageId } ->
+            Seq3SequenceRowEmphasis.SIBLING
+        else -> Seq3SequenceRowEmphasis.NONE
+    }
 }
 
 /** Selecting a row sets what an arrow click sets, so the canvas highlight follows. */
@@ -1166,7 +1118,7 @@ private fun Seq3SequenceRowItem(
 ) {
     val tc = tc()
     val message = row.message
-    val selected = seq3SequenceRowSelected(
+    val emphasis = seq3SequenceRowEmphasis(
         row.ref, view.selection, view.selectedCanvasRows, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId,
     )
     val hovered = view.hoveredMessageId == message.id
@@ -1194,18 +1146,28 @@ private fun Seq3SequenceRowItem(
             Seq3EvidenceRowShell(
                 background = when {
                     isDragging -> seq3SequenceGhostBackground(tc)
-                    selected -> tc.sl
+                    emphasis == Seq3SequenceRowEmphasis.EXACT -> tc.sl
                     hovered -> tc.hv
-                    else -> tc.p2
+                    else -> Color.Transparent
                 },
+                marked = emphasis == Seq3SequenceRowEmphasis.SIBLING,
+                lifted = isDragging,
                 modifier = Modifier.weight(1f)
                     .onPointerEvent(PointerEventType.Enter) { view.hoveredMessageId = message.id }
                     .onPointerEvent(PointerEventType.Exit) { if (view.hoveredMessageId == message.id) view.hoveredMessageId = null }
                     .testTag("seq3-sequence-row-${row.key}"),
                 leading = {
-                    TooltipArea(tooltip = {
-                        ToolbarTooltip(if (reorderEnabled) "Drag to reorder" else "Clear filters to reorder")
-                    }) {
+                    // To the left of the grip and after a pause: the row's number and text lie to its right,
+                    // and a tooltip there hid them.
+                    TooltipArea(
+                        tooltip = { ToolbarTooltip(if (reorderEnabled) "Drag to reorder" else "Clear filters to reorder") },
+                        delayMillis = SEQ3_GRIP_TOOLTIP_DELAY_MS,
+                        tooltipPlacement = TooltipPlacement.ComponentRect(
+                            anchor = Alignment.CenterStart,
+                            alignment = Alignment.CenterEnd,
+                            offset = DpOffset((-SEQ3_GRIP_TOOLTIP_GAP_DP).dp, 0.dp),
+                        ),
+                    ) {
                         Box(
                             Modifier.width(14.dp).height(22.dp).testTag("seq3-sequence-drag-${row.key}")
                                 .then(if (reorderEnabled) Modifier.moveCursor() else Modifier),
@@ -1279,11 +1241,18 @@ private fun Seq3SequenceRowItem(
                     } else {
                         Seq3VisibilityButton(state, session, message)
                     }
+                    // The ↗ slot is always reserved so the right-hand column lines up on every row.
+                    if (!(row.occurrence != null && entryId != null && message.occurrences.size > 1)) {
+                        Spacer(Modifier.size(SEQ3_ACTION_BADGE_SIZE))
+                    }
                 },
             )
         }
     }
 }
+
+private const val SEQ3_GRIP_TOOLTIP_DELAY_MS = 700
+private const val SEQ3_GRIP_TOOLTIP_GAP_DP = 4f
 
 private fun seq3FragmentRailColor(fragment: Seq3Fragment, default: Color): Color =
     fragment.style?.borderArgb?.let(::Color) ?: default
@@ -1714,25 +1683,26 @@ private fun Seq3LifelineRow(
         runCatching { view.focusRequester.requestFocus() }
     }
 
+    // The same flat row as the Sequence list: the focused lifeline takes the selection fill and
+    // accent mark, a checked one only the mark, hover tints, and a hairline closes every row.
     Column(
         Modifier.fillMaxWidth()
-            .clip(CORNER_SM)
             .background(
                 when {
-                    focused -> tc.abg
-                    selected -> tc.sl
+                    focused -> tc.sl
                     hovered -> tc.hv
                     else -> Color.Transparent
                 },
-                CORNER_SM,
             )
-            .then(if (focused) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
             .drawBehind {
-                if (selected) drawRect(color = tc.ac, size = Size(3.dp.toPx(), size.height))
+                val line = 1.dp.toPx()
+                drawRect(tc.br, topLeft = Offset(0f, size.height - line), size = Size(size.width, line))
+                if (focused || selected) drawRect(tc.ac, size = Size(SEQ3_ROW_MARK_DP.dp.toPx(), size.height))
             }
             .onPointerEvent(PointerEventType.Enter) { view.hoveredLifelineId = lifeline.id }
             .onPointerEvent(PointerEventType.Exit) { if (view.hoveredLifelineId == lifeline.id) view.hoveredLifelineId = null }
-            .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+            .testTag("seq3-lifeline-row-${lifeline.id}")
+            .padding(start = 6.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             AppText(
@@ -2727,6 +2697,13 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
                 fillDefault = defaults.seq1.copy(alpha = .07f),
                 borderDefault = defaults.seq1,
                 textDefault = defaults.seq1,
+                showKindWord = !fragment.hideKindLabel,
+                onShowKindWordChange = { show ->
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentHideKindLabel(fragment.id, !show)),
+                    )
+                },
             )
         },
         fragmentKind = fragment.kind,
@@ -2734,13 +2711,6 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
             state.seq3Sessions.applyCommand(
                 session.id,
                 Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentKind(fragment.id, kind)),
-            )
-        },
-        hideKindLabel = fragment.hideKindLabel,
-        onToggleHideKindLabel = {
-            state.seq3Sessions.applyCommand(
-                session.id,
-                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentHideKindLabel(fragment.id, !fragment.hideKindLabel)),
             )
         },
         operands = fragment.elseOperands,
@@ -3009,11 +2979,10 @@ private fun Seq3ArtifactRow(
     view: Seq3ViewState,
     styleAction: (@Composable () -> Unit)? = null,
     // WP12: fragment-only controls (null/no-op for a note row). [fragmentKind] non-null is what
-    // gates rendering the kind dropdown + hide-operator-word toggle below — a note has neither.
+    // gates rendering the kind dropdown below — a note has none; the kind-word checkbox lives in
+    // the style popover ([styleAction]).
     fragmentKind: Seq3FragmentKind? = null,
     onSetFragmentKind: ((Seq3FragmentKind) -> Unit)? = null,
-    hideKindLabel: Boolean = false,
-    onToggleHideKindLabel: (() -> Unit)? = null,
     // WP7: the `else`/`and`/`option` operand child rows — null/no-op for a note or delay row, and
     // for a fragment kind (OPT/LOOP/BREAK/GROUP) UML gives no `else` divider at all. Renders below
     // the Row above rather than inside it (see this function's own doc for why appending after the
@@ -3119,7 +3088,7 @@ private fun Seq3ArtifactRow(
                             )
                         }
                         if (styleAction != null) styleAction()
-                        // WP12: fragment kind change + hide-operator-word toggle — mirrors the
+                        // WP12: fragment kind change — mirrors the
                         // lifeline-kind Seq3DropdownButton above (`Seq3LifelineRow`). Absent for a
                         // note row, which has no kind at all.
                         if (fragmentKind != null && onSetFragmentKind != null) {
@@ -3136,25 +3105,6 @@ private fun Seq3ArtifactRow(
                                         close()
                                     }
                                 }
-                            }
-                            if (onToggleHideKindLabel != null) {
-                                // Deliberately a text badge, not the eye icon used two buttons over
-                                // for the fragment's own show/hide-on-canvas toggle — this toggles
-                                // only the "$kind: " prefix on the label, not the fragment itself.
-                                ToolbarBtn(
-                                    label = "Op",
-                                    showLabel = true,
-                                    tooltip = if (hideKindLabel) {
-                                        "Kind word hidden on canvas — click to show it"
-                                    } else {
-                                        "Kind word shown on canvas — click to hide it"
-                                    },
-                                    active = hideKindLabel,
-                                    contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
-                                    modifier = Modifier.height(SEQ3_ACTION_BADGE_SIZE),
-                                    shape = CORNER_SM,
-                                    onClick = onToggleHideKindLabel,
-                                )
                             }
                         }
                         Spacer(Modifier.weight(1f))
@@ -3427,11 +3377,13 @@ private fun Seq3QueueRow(
     document: Seq3Document,
     message: Seq3Message,
     visibleIds: List<String>,
-    onRightClickAddAfter: () -> Unit = {},
 ) {
     val tc = tc()
     var contextMenuOpen by remember(session.id, message.id) { mutableStateOf(false) }
     val menuFocusRequester = remember(session.id, message.id) { FocusRequester() }
+    var menuLeftPx by remember(session.id, message.id) { mutableStateOf(0f) }
+    val menuDensity = LocalDensity.current
+    val menuWindowWidthPx = LocalWindowInfo.current.containerSize.width
     LaunchedEffect(session.id, message.id, contextMenuOpen) {
         if (contextMenuOpen) runCatching { menuFocusRequester.requestFocus() }
     }
@@ -3674,8 +3626,10 @@ private fun Seq3QueueRow(
                 properties = PopupProperties(focusable = true),
             ) {
                 Column(
-                    Modifier.width(210.dp).clip(RoundedCornerShape(7.dp)).background(tc.p)
-                        .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(5.dp)
+                    Modifier.width(SEQ3_QUEUE_MENU_WIDTH).shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp)).padding(vertical = 4.dp)
+                        .onGloballyPositioned { menuLeftPx = it.positionInWindow().x }
                         .focusRequester(menuFocusRequester)
                         .focusable()
                         .onPreviewKeyEvent { event ->
@@ -3687,21 +3641,22 @@ private fun Seq3QueueRow(
                             }
                         },
                 ) {
-                    AppButton(
-                        "Add message after this…",
-                        onClick = {
-                            dismissContextMenu()
-                            onRightClickAddAfter()
-                        },
-                        variant = ButtonVariant.Ghost,
-                        modifier = Modifier.fillMaxWidth().testTag("seq3-queue-context-add-after"),
-                        horizontalPadding = 8.dp,
+                    Seq3AddAfterMenuItems(
+                        state = state,
+                        session = session,
+                        view = view,
+                        after = Seq3RowRef(message.id),
+                        preferLeft = with(menuDensity) { menuLeftPx + SEQ3_QUEUE_MENU_WIDTH.toPx() + CTX_SUBMENU_WIDTH.toPx() } > menuWindowWidthPx,
+                        dismiss = ::dismissContextMenu,
+                        customItemTag = "seq3-queue-context-add-after",
                     )
                 }
             }
         }
     }
 }
+
+private val SEQ3_QUEUE_MENU_WIDTH = 264.dp
 
 @Composable
 private fun Seq3MessageInfo(
@@ -3842,23 +3797,43 @@ private fun Seq3OccurrenceToggle(expanded: Boolean, modifier: Modifier = Modifie
 }
 
 /** The visual shell shared by every evidence row — the expanded occurrence sub-rows of a template
- *  and the rows of the sequence list: the `p2` card, its fixed height, [leading] controls, the
- *  two-line [body] column and the [trailing] buttons. [bodyModifier] carries the body's click
- *  handling so a leading checkbox or grip never receives it. */
+ *  and the rows of the sequence list. It is a flat row like the Lifelines list: a transparent
+ *  [background] by default, a hairline divider along the bottom, its fixed height, [leading]
+ *  controls, the two-line [body] column and the [trailing] buttons. [marked] draws the 2dp accent
+ *  mark on the left edge (a row related to the selection without being the selected one);
+ *  [lifted] is a dragged ghost: rounded and without the divider. [hoverTint] lets the shell tint
+ *  itself on hover when the caller tracks no hover of its own. [bodyModifier] carries the body's
+ *  click handling so a leading checkbox or grip never receives it. */
 @Composable
 private fun Seq3EvidenceRowShell(
     background: Color,
     modifier: Modifier = Modifier,
+    marked: Boolean = false,
+    lifted: Boolean = false,
+    hoverTint: Boolean = false,
     leading: @Composable RowScope.() -> Unit,
     bodyModifier: Modifier = Modifier,
     body: @Composable ColumnScope.() -> Unit,
     trailing: @Composable RowScope.() -> Unit,
 ) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val fill = if (hoverTint && hovered && background == Color.Transparent) tc.hv else background
+    val shape = if (lifted) CORNER_SM else RectangleShape
     Row(
         modifier.fillMaxWidth()
-            .clip(CORNER_SM)
-            .background(background, CORNER_SM)
+            .clip(shape)
+            .background(fill)
             .height(SEQ3_SUBMESSAGE_ROW_HEIGHT)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .drawBehind {
+                if (!lifted) {
+                    val line = 1.dp.toPx()
+                    drawRect(tc.br, topLeft = Offset(0f, size.height - line), size = Size(size.width, line))
+                }
+                if (marked) drawRect(tc.ac, size = Size(SEQ3_ROW_MARK_DP.dp.toPx(), size.height))
+            }
             .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -3868,6 +3843,9 @@ private fun Seq3EvidenceRowShell(
         trailing()
     }
 }
+
+/** Width of the accent mark on a flat list row's left edge. */
+private const val SEQ3_ROW_MARK_DP = 2f
 
 @Composable
 private fun Seq3OccurrenceHideButton(hidden: Boolean, onClick: () -> Unit) {
@@ -3912,7 +3890,8 @@ private fun Seq3OccurrenceSubRow(
     val checked = key in view.selectedOccurrenceIds
     val selected = view.selectedOccurrenceMessageId == message.id && view.selectedOccurrenceEntryId == entryId
     Seq3EvidenceRowShell(
-        background = if (checked || selected) tc.sl else tc.p2,
+        background = if (checked || selected) tc.sl else Color.Transparent,
+        hoverTint = true,
         leading = {
             Seq3RowCheckbox(checked) {
                 view.selectedOccurrenceIds = if (checked) view.selectedOccurrenceIds - key else view.selectedOccurrenceIds + key

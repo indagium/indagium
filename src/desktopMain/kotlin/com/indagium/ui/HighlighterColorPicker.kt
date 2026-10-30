@@ -84,6 +84,8 @@ internal fun HighlighterColorPicker(
     testTagPrefix: String = "highlighter-color",
     customColorEditorExpanded: Boolean? = null,
     onCustomColorEditorExpandedChange: ((Boolean) -> Unit)? = null,
+    swatchBackdrop: Color? = null,
+    swatchOutline: Color? = null,
 ) {
     val density = androidx.compose.ui.platform.LocalDensity.current
     val windowSize = LocalWindowInfo.current.containerSize
@@ -99,7 +101,14 @@ internal fun HighlighterColorPicker(
     val popupWidth = minOf(preferredWidth, widthLimit)
     val popupHeight = minOf(560.dp, heightLimit)
     Box(Modifier.testTag("$testTagPrefix-trigger")) {
-        ColorPickerSwatch(color, pickerOpen, { onPickerOpenChange(!pickerOpen) }, size = 16.dp)
+        ColorPickerSwatch(
+            color,
+            pickerOpen,
+            { onPickerOpenChange(!pickerOpen) },
+            size = 16.dp,
+            backdrop = swatchBackdrop,
+            outline = swatchOutline,
+        )
         if (pickerOpen) {
             Popup(
                 alignment = Alignment.TopStart,

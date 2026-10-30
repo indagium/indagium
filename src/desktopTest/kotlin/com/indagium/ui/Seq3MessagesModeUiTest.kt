@@ -5,11 +5,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
@@ -226,6 +231,107 @@ class Seq3MessagesModeUiTest {
         rule.onNode(hasText("Templates") and hasAnyAncestor(hasTestTag("seq3-messages-mode")), useUnmergedTree = true).assertIsDisplayed()
         rule.onNode(hasText("Templates 45", substring = true), useUnmergedTree = true).assertDoesNotExist()
         rule.onNode(hasText("Sequence 45", substring = true), useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun onlyTheExactSelectedArrowIsFilledAndItsSiblingsGetAnAccentMark() {
+        val sessionId = startWorkspace("mode-emphasis", repeatedDocument())
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
+        view.selection = Seq3Selection(setOf("rep"), "rep")
+        view.selectedCanvasRows = setOf(Seq3CanvasRowRef("rep", 2))
+        view.selectedOccurrenceMessageId = "rep"
+        view.selectedOccurrenceEntryId = 2
+        showWorkspace(sessionId)
+
+        val accent = LIGHT_THEME.ac.toArgb()
+        // 1px in is inside the 2dp mark; 4dp in is past it but still left of the grip (padding only).
+        val markX = 1
+        val fillX = (4 * rule.density.density).toInt()
+        val exactFill = pixel("seq3-sequence-row-rep::2", fillX)
+        val siblingFill = pixel("seq3-sequence-row-rep::1", fillX)
+        val unrelatedFill = pixel("seq3-sequence-row-solo::*", fillX)
+
+        assertEquals(LIGHT_THEME.sl.compositeOver(LIGHT_THEME.p).toArgb(), exactFill, "the exact arrow takes the selection fill")
+        assertEquals(unrelatedFill, siblingFill, "a sibling arrow has no fill of its own")
+        assertEquals(accent, pixel("seq3-sequence-row-rep::1", markX), "a sibling arrow carries the 2dp accent mark")
+        assertEquals(accent, pixel("seq3-sequence-row-rep::3", markX))
+        assertTrue(pixel("seq3-sequence-row-rep::2", markX) != accent, "the exact arrow is filled, not marked")
+        assertTrue(pixel("seq3-sequence-row-solo::*", markX) != accent, "an unrelated message is unmarked")
+    }
+
+    @Test
+    fun everySequenceRowReservesTheMoveOutSlotSoTheTrailingColumnAligns() {
+        val document = repeatedDocument().let { doc ->
+            doc.copy(
+                messages = doc.messages + Seq3Message(
+                    id = "one",
+                    match = Seq3Match("Client", "ping"),
+                    fromLifelineId = "a",
+                    toLifelineId = "b",
+                    labelTemplate = "ping",
+                    occurrences = listOf(Seq3Occurrence(9, 900L, "10:00:00.9", 1, 1, 'I', "ping")),
+                ),
+            )
+        }
+        val sessionId = startWorkspace("mode-slots", document)
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
+        showWorkspace(sessionId)
+
+        fun visibilityLeft(rowTag: String, description: String): Float = rule.onNode(
+            hasContentDescription(description) and hasAnyAncestor(hasTestTag(rowTag)),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot.left
+        val lefts = listOf(
+            visibilityLeft("seq3-sequence-row-rep::1", "Hide only this occurrence"),
+            visibilityLeft("seq3-sequence-row-rep::3", "Hide only this occurrence"),
+            visibilityLeft("seq3-sequence-row-one::9", "Hide only this occurrence"),
+            visibilityLeft("seq3-sequence-row-solo::*", "Hide this message and all of its occurrences"),
+        )
+        assertEquals(1, lefts.map { it.toInt() }.distinct().size, "the hide button sits at the same x on every row: $lefts")
+        rule.onAllNodes(
+            hasContentDescription("Move occurrence out") and hasAnyAncestor(hasTestTag("seq3-sequence-row-one::9")),
+            useUnmergedTree = true,
+        ).assertCountEquals(0)
+    }
+
+    @Test
+    fun sequenceRowsAreFlatWithAHairlineBetweenThem() {
+        val sessionId = startWorkspace("mode-flat", repeatedDocument())
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.messagesMode = Seq3MessagesMode.SEQUENCE
+        showWorkspace(sessionId)
+
+        val (firstTag, secondTag) = tagsWithPrefix("seq3-sequence-row-")
+        val first = rule.onNodeWithTag(firstTag, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        val second = rule.onNodeWithTag(secondTag, useUnmergedTree = true).fetchSemanticsNode().boundsInRoot
+        assertEquals(first.bottom, second.top, 1f, "rows sit flush, no gaps between cards")
+        val image = rule.onNodeWithTag(firstTag, useUnmergedTree = true).captureToImage().toPixelMap()
+        assertEquals(LIGHT_THEME.br.toArgb(), image[image.width / 2, image.height - 1].toArgb(), "a hairline closes the row")
+        assertTrue(image[image.width / 2, image.height / 2].toArgb() != LIGHT_THEME.p2.toArgb(), "and the row is not a filled p2 card")
+    }
+
+    @Test
+    fun theFocusedLifelineRowTakesTheSameFillAndAccentMarkAsASelectedSequenceRow() {
+        val sessionId = startWorkspace("mode-lifelines", repeatedDocument())
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        view.selectedLifelineId = "a"
+        showWorkspace(sessionId)
+
+        val accent = LIGHT_THEME.ac.toArgb()
+        assertEquals(accent, pixel("seq3-lifeline-row-a", 1), "the focused lifeline carries the accent mark")
+        assertTrue(pixel("seq3-lifeline-row-b", 1) != accent, "another lifeline does not")
+        val focusedFill = pixel("seq3-lifeline-row-a", (4 * rule.density.density).toInt())
+        assertEquals(LIGHT_THEME.sl.compositeOver(LIGHT_THEME.p).toArgb(), focusedFill)
+        val image = rule.onNodeWithTag("seq3-lifeline-row-b", useUnmergedTree = true).captureToImage().toPixelMap()
+        assertEquals(LIGHT_THEME.br.toArgb(), image[image.width / 2, image.height - 1].toArgb(), "lifeline rows share the hairline divider")
+    }
+
+    /** The ARGB of the vertically centred pixel [x] px in from the left edge of a tagged node. */
+    private fun pixel(tag: String, x: Int): Int {
+        val image = rule.onNodeWithTag(tag, useUnmergedTree = true).captureToImage().toPixelMap()
+        return image[x.coerceIn(0, image.width - 1), image.height / 2].toArgb()
     }
 
     private fun switchTo(labelPrefix: String) {

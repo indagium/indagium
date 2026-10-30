@@ -161,7 +161,6 @@ class Seq3SourceAndQueueInteractionsUiTest {
         rule.onNodeWithTag("seq3-queue-row-$firstId", useUnmergedTree = true)
             .performMouseInput { rightClick() }
         rule.onNodeWithTag("seq3-queue-context-add-after", useUnmergedTree = true).performClick()
-        rule.onNodeWithText("Custom message…", useUnmergedTree = true).performClick()
         val fields = rule.onAllNodes(hasSetTextAction() and hasAnyAncestor(isDialog()), useUnmergedTree = true)
         fields[1].performClick().performTextReplacement("Visual insert")
         rule.onNode(hasText("Add message") and hasClickAction() and hasAnyAncestor(isDialog())).performClick()
@@ -192,11 +191,9 @@ class Seq3SourceAndQueueInteractionsUiTest {
 
         rule.onNodeWithTag("seq3-queue-row-$firstId", useUnmergedTree = true)
             .performMouseInput { rightClick() }
-        rule.onNodeWithText("Add message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.onNodeWithText("Add custom message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("Add message after this row", useUnmergedTree = true).assertIsDisplayed()
-        rule.onNodeWithText("Custom message…", useUnmergedTree = true).performClick()
-        rule.waitForIdle()
+        rule.onNodeWithText("Add message after this row", useUnmergedTree = true).assertDoesNotExist()
         rule.onNodeWithText("After clicked row", useUnmergedTree = true).assertIsDisplayed()
 
         val fields = rule.onAllNodes(hasSetTextAction() and hasAnyAncestor(isDialog()), useUnmergedTree = true)

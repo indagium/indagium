@@ -295,6 +295,36 @@ class Seq3CommandsTest {
     }
 
     @Test
+    fun renamingOneOccurrenceSplitsItOutAndRelabelsOnlyTheNewMessageInOneUndoStep() {
+        val grouped = message("m1", "A", "B", 1).copy(occurrences = listOf(occ(1), occ(2), occ(3)), labelTemplate = "request")
+        val doc = baseDocument().copy(messages = listOf(grouped))
+
+        val result = applySeq3Command(doc, Seq3Command.MoveOccurrenceOutAndRename("m1", 2, "retry request"))
+
+        assertTrue(result.applied)
+        val group = result.document.messages.single { it.id == "m1" }
+        assertEquals("request", group.labelTemplate, "the siblings keep the shared label")
+        assertEquals(listOf(1, 3), group.occurrences.map { it.entryId })
+        val standalone = result.document.messages.single { it.id != "m1" }
+        assertEquals("retry request", standalone.labelTemplate)
+        assertEquals(listOf(2), standalone.occurrences.map { it.entryId })
+        assertEquals("m1", standalone.movedOutFromMessageId)
+        val undo = requireNotNull(result.undo)
+        assertEquals(doc, undoSeq3Command(undo), "a single undo restores the pre-split document")
+    }
+
+    @Test
+    fun renamingOneOccurrenceIsRefusedForABlankLabelOrASingleOccurrenceMessage() {
+        val grouped = message("m1", "A", "B", 1).copy(occurrences = listOf(occ(1), occ(2)))
+        val single = message("m2", "A", "B", 5)
+        val doc = baseDocument().copy(messages = listOf(grouped, single))
+
+        assertFalseApplied(applySeq3Command(doc, Seq3Command.MoveOccurrenceOutAndRename("m1", 2, "  ")))
+        assertFalseApplied(applySeq3Command(doc, Seq3Command.MoveOccurrenceOutAndRename("m2", 5, "solo")))
+        assertFalseApplied(applySeq3Command(doc, Seq3Command.MoveOccurrenceOutAndRename("m1", 99, "ghost")))
+    }
+
+    @Test
     fun checkedOccurrencesMoveOutAsOneCommandAndKeepOneGroupOccurrence() {
         val grouped = message("m1", "A", "B", 1).copy(occurrences = listOf(occ(1), occ(2), occ(3)))
         val doc = baseDocument().copy(messages = listOf(grouped))

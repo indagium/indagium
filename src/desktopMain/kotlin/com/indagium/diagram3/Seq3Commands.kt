@@ -87,6 +87,15 @@ sealed class Seq3Command {
      *  queue edit. */
     data class MoveOccurrenceOut(val messageId: String, val entryId: Int) : Seq3Command()
 
+    /** [MoveOccurrenceOut] followed by renaming the new standalone message to [labelTemplate], as
+     *  ONE undo step — the canvas label editor's "Rename only this arrow". The grouped message and
+     *  its remaining occurrences keep their label. */
+    data class MoveOccurrenceOutAndRename(
+        val messageId: String,
+        val entryId: Int,
+        val labelTemplate: String,
+    ) : Seq3Command()
+
     /** Splits several checked occurrences in one undoable queue edit. */
     data class MoveOccurrencesOut(val occurrences: List<Seq3OccurrenceRef>) : Seq3Command()
 
@@ -258,6 +267,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.MoveRow -> dispatchMoveRow(document, command)
     Seq3Command.ResetRowOrder -> dispatchResetRowOrder(document)
     is Seq3Command.MoveOccurrenceOut -> dispatchMoveOccurrenceOut(document, command)
+    is Seq3Command.MoveOccurrenceOutAndRename -> dispatchMoveOccurrenceOutAndRename(document, command)
     is Seq3Command.MoveOccurrencesOut -> dispatchMoveOccurrencesOut(document, command)
     is Seq3Command.MoveOccurrenceBack -> dispatchMoveOccurrenceBack(document, command)
     is Seq3Command.SetOccurrenceVisibility -> dispatchSetOccurrenceVisibility(document, command)
@@ -426,6 +436,23 @@ private fun dispatchMoveOccurrenceOut(document: Seq3Document, command: Seq3Comma
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
     }
+
+private fun dispatchMoveOccurrenceOutAndRename(document: Seq3Document, command: Seq3Command.MoveOccurrenceOutAndRename): Outcome {
+    if (command.labelTemplate.isBlank()) return unapplied(document, "Label is required")
+    val split = when (val result = moveSeq3OccurrenceOut(document, command.messageId, command.entryId)) {
+        is Seq3MessageEditResult.Updated -> result.document
+        is Seq3MessageEditResult.Rejected -> return unapplied(document, result.reason)
+    }
+    val extracted = split.messages.firstOrNull { message ->
+        message.movedOutFromMessageId == command.messageId && message.occurrences.singleOrNull()?.entryId == command.entryId
+    } ?: return unapplied(document, "Unknown occurrence")
+    val renamed = applySeq3BulkAction(split, setOf(extracted.id), Seq3BulkAction.SetLabel(command.labelTemplate))
+    return if (renamed.applied) {
+        applied(renamed.document, "Rename occurrence")
+    } else {
+        unapplied(document, renamed.reason ?: "Rename was rejected")
+    }
+}
 
 private fun dispatchMoveOccurrencesOut(document: Seq3Document, command: Seq3Command.MoveOccurrencesOut): Outcome =
     when (val result = moveSeq3OccurrencesOut(document, command.occurrences)) {

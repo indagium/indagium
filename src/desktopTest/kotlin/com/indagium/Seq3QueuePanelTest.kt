@@ -28,6 +28,7 @@ import com.indagium.ui.LIGHT_THEME
 import com.indagium.ui.Seq3ArtifactHeading
 import com.indagium.ui.Seq3CanvasRowRef
 import com.indagium.ui.Seq3MessagesMode
+import com.indagium.ui.Seq3SequenceRowEmphasis
 import com.indagium.ui.Seq3TemplateSegment
 import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.TileHeaderParts
@@ -60,8 +61,8 @@ import com.indagium.ui.seq3SequenceGhostBackground
 import com.indagium.ui.seq3SequenceGripHit
 import com.indagium.ui.seq3SequenceRowCaption
 import com.indagium.ui.seq3SequenceRowCount
+import com.indagium.ui.seq3SequenceRowEmphasis
 import com.indagium.ui.seq3SequenceRowKey
-import com.indagium.ui.seq3SequenceRowSelected
 import com.indagium.ui.seq3SequenceRowText
 import com.indagium.ui.seq3SequenceRows
 import com.indagium.ui.seq3SequenceScrollIndex
@@ -558,24 +559,34 @@ class Seq3QueuePanelTest {
     // Selection sync
 
     @Test
-    fun anExactRowIsSelectedByItsOwnArrowOrByAWholeMessageSelection() {
+    fun onlyTheExactArrowIsSelectedAndItsSiblingsAreMarked() {
         val ref = Seq3RowRef("rep", 2)
         val none = Seq3Selection()
-        assertTrue(seq3SequenceRowSelected(ref, none, setOf(Seq3CanvasRowRef("rep", 2)), null, null))
-        assertTrue(seq3SequenceRowSelected(ref, none, emptySet(), "rep", 2))
-        assertFalse(seq3SequenceRowSelected(ref, none, setOf(Seq3CanvasRowRef("rep", 3)), "rep", 3))
-        assertFalse(seq3SequenceRowSelected(ref, none, emptySet(), null, null))
-        // The Templates list selected the whole message and no arrow in particular: every arrow shows.
-        assertTrue(seq3SequenceRowSelected(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null))
-        // ...but a focused arrow of that message narrows it to that arrow.
-        assertFalse(seq3SequenceRowSelected(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), "rep", 3))
+        val exact = Seq3SequenceRowEmphasis.EXACT
+        val sibling = Seq3SequenceRowEmphasis.SIBLING
+        assertEquals(exact, seq3SequenceRowEmphasis(ref, none, setOf(Seq3CanvasRowRef("rep", 2)), null, null))
+        assertEquals(exact, seq3SequenceRowEmphasis(ref, none, emptySet(), "rep", 2))
+        assertEquals(sibling, seq3SequenceRowEmphasis(ref, none, setOf(Seq3CanvasRowRef("rep", 3)), "rep", 3))
+        assertEquals(Seq3SequenceRowEmphasis.NONE, seq3SequenceRowEmphasis(ref, none, emptySet(), null, null))
+        // The Templates list selected the whole message and no arrow in particular: every arrow is marked, none filled.
+        assertEquals(sibling, seq3SequenceRowEmphasis(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null))
+        // A focused arrow of that message takes the fill; this one keeps only the mark.
+        assertEquals(sibling, seq3SequenceRowEmphasis(ref, Seq3Selection(setOf("rep"), "rep"), emptySet(), "rep", 3))
+        // Another message's arrow stays unmarked.
+        assertEquals(Seq3SequenceRowEmphasis.NONE, seq3SequenceRowEmphasis(ref, none, setOf(Seq3CanvasRowRef("other", 9)), "other", 9))
     }
 
     @Test
     fun aSummaryRowIsSelectedByItsMessage() {
         val summary = Seq3RowRef("big")
-        assertTrue(seq3SequenceRowSelected(summary, Seq3Selection(setOf("big"), "big"), emptySet(), null, null))
-        assertFalse(seq3SequenceRowSelected(summary, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null))
+        assertEquals(
+            Seq3SequenceRowEmphasis.EXACT,
+            seq3SequenceRowEmphasis(summary, Seq3Selection(setOf("big"), "big"), emptySet(), null, null),
+        )
+        assertEquals(
+            Seq3SequenceRowEmphasis.NONE,
+            seq3SequenceRowEmphasis(summary, Seq3Selection(setOf("rep"), "rep"), emptySet(), null, null),
+        )
     }
 
     @Test

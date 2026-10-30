@@ -48,7 +48,9 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -86,6 +88,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.LogLevel
 import kotlinx.coroutines.delay
 import java.awt.KeyboardFocusManager
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import java.awt.Cursor as AwtCursor
 
@@ -1404,9 +1407,20 @@ fun Modifier.hoverPill(): Modifier {
 // blend with the hover tint — so the affordance lives OUTSIDE the color itself: a hover highlight
 // and, when the picker is open, a colored ring, both drawn in the surrounding box.
 @Composable
-fun ColorPickerSwatch(color: Color, pickerOpen: Boolean, onClick: () -> Unit, size: Dp = 12.dp) {
+fun ColorPickerSwatch(
+    color: Color,
+    pickerOpen: Boolean,
+    onClick: () -> Unit,
+    size: Dp = 12.dp,
+    // When set, a translucent [color] is shown laid over this opaque backdrop (so a 7%-alpha wash is not
+    // invisible) and gets a 1dp [outline] when it would otherwise vanish into the backdrop.
+    backdrop: Color? = null,
+    outline: Color? = null,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
+    val shown = if (backdrop != null) color.compositeOver(backdrop) else color
+    val outlined = backdrop != null && outline != null && colorSwatchNeedsOutline(shown, backdrop)
     Box(
         Modifier
             .size(size + 8.dp)
@@ -1418,9 +1432,19 @@ fun ColorPickerSwatch(color: Color, pickerOpen: Boolean, onClick: () -> Unit, si
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
     ) {
-        Box(Modifier.size(size).background(color, CORNER_SM))
+        Box(
+            Modifier.size(size).background(shown, CORNER_SM)
+                .then(if (outlined && outline != null) Modifier.border(1.dp, outline, CORNER_SM) else Modifier),
+        )
     }
 }
+
+private const val SWATCH_MIN_LUMINANCE_GAP = 0.12f
+
+/** True when a swatch showing [shown] on [backdrop] is too close in lightness to read as a
+ *  distinct square (a near-white swatch on a light panel, a near-black one on a dark panel). */
+internal fun colorSwatchNeedsOutline(shown: Color, backdrop: Color): Boolean =
+    abs(shown.luminance() - backdrop.luminance()) < SWATCH_MIN_LUMINANCE_GAP
 
 // ── Underline tabs ────────────────────────────────────────────────────
 // Extracted from FilterPanel's original "Tags / Regex" filter-mode switcher (now built on this
@@ -1697,10 +1721,17 @@ internal fun StepperButton(symbol: String, enabled: Boolean, onClick: () -> Unit
 // "Auto" is a plain on/off chip, not a two-way select, so the field beside it is reachable by
 // toggling it off rather than by picking "Manual" from a second option.
 @Composable
-internal fun CtxItem(icon: ImageVector, label: String, highlighted: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+internal fun CtxItem(
+    icon: ImageVector,
+    label: String,
+    highlighted: Boolean = false,
+    enabled: Boolean = true,
+    tag: String? = null,
+    onClick: () -> Unit,
+) {
     val tc = tc()
     HoverBox(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().then(if (tag != null) Modifier.testTag(tag) else Modifier),
         hoverBg = if (enabled) tc.hv else Color.Transparent,
         forceHover = highlighted && enabled,
         onClick = if (enabled) onClick else null,
@@ -2320,6 +2351,7 @@ internal fun CtxItemWithSubmenu(
     submenu: List<CtxSubmenuOption>,
     highlighted: Boolean = false,
     preferLeft: Boolean = false,
+    triggerTag: String? = null,
     onClick: () -> Unit,
 ) {
     val tc = tc()
@@ -2355,6 +2387,7 @@ internal fun CtxItemWithSubmenu(
                 // separate, more-specific hit target than the rest of the row.
                 HoverBox(
                     modifier = Modifier.size(24.dp).clip(RoundedCornerShape(6.dp))
+                        .then(if (triggerTag != null) Modifier.testTag(triggerTag) else Modifier)
                         .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
                         .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
                     onClick = { submenuOpen = true },

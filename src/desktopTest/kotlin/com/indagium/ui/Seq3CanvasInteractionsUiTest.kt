@@ -15,8 +15,6 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
-import androidx.compose.ui.test.hasAnyAncestor
-import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -30,7 +28,6 @@ import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.unit.dp
-import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Delay
@@ -290,8 +287,8 @@ class Seq3CanvasInteractionsUiTest {
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { rightClick(clickAt) }
         rule.waitForIdle()
         rule.onNodeWithText("Move", useUnmergedTree = true).assertIsDisplayed()
-        // Move comes before "Group as" in the menu, so its ▶ trigger is the first one.
-        rule.onAllNodesWithText("▶", useUnmergedTree = true)[0].performClick()
+        // "From log" and Move come before "Group as" in the menu, so Move's ▶ trigger is the second one.
+        rule.onAllNodesWithText("▶", useUnmergedTree = true)[1].performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Down", useUnmergedTree = true).assertIsDisplayed().performClick()
         rule.waitForIdle()
@@ -363,11 +360,13 @@ class Seq3CanvasInteractionsUiTest {
         )
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { rightClick(clickAt) }
         rule.waitForIdle()
-        rule.onNodeWithText("Add message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
+        rule.onNodeWithText("Add custom message after this…", useUnmergedTree = true).assertIsDisplayed().performClick()
         rule.waitForIdle()
 
         assertEquals(Seq3RowRef("repeat", 102), view.pendingInsertRequest?.after)
-        rule.onNodeWithText("Add message after this row", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals(Seq3InsertStart.CUSTOM, view.pendingInsertRequest?.start)
+        rule.onNodeWithText("Add message after this row", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithText("After clicked row", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test
@@ -390,14 +389,13 @@ class Seq3CanvasInteractionsUiTest {
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { doubleClick(rootPoint(doubleClickAt.x, doubleClickAt.y)) }
         rule.waitForIdle()
 
-        val groupEditor = rule.onNode(
-            hasSetTextAction() and hasAnyAncestor(hasTestTag(groupTag)),
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        rule.onAllNodes(
-            hasSetTextAction() and hasAnyAncestor(hasTestTag(delayTag)),
-            useUnmergedTree = true,
-        ).assertCountEquals(0)
+        val groupEditor = editorField().assertIsDisplayed()
+        rule.onAllNodes(hasTestTag("seq3-edit-popover"), useUnmergedTree = true).assertCountEquals(1)
+        assertEquals(
+            document.fragments.single().label,
+            groupEditor.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
+            "the single popover edits the group label, not the delay's",
+        )
         assertTrue(view.textFieldFocused, "the group editor receives keyboard focus on open")
         val undoBefore = currentSession(sessionId).undoStack.size
         groupEditor.performTextReplacement("checkout")
@@ -438,31 +436,44 @@ class Seq3CanvasInteractionsUiTest {
         val delayPoint = canvasPoint(delay.hitBox.x + delay.hitBox.width / 2, delay.hitBox.y + delay.hitBox.height / 2)
         workspace.performMouseInput { doubleClick(delayPoint) }
         rule.waitForIdle()
-        rule.onNodeWithTag("seq3-delay-editor-field-delay", useUnmergedTree = true).assertIsDisplayed()
+        assertEquals("delay", editorField().assertIsDisplayed().fetchSemanticsNode().config[SemanticsProperties.EditableText].text)
 
         val messagePoint = canvasPoint((firstRow.fromX + firstRow.toX) / 2, firstRow.y)
         workspace.performMouseInput { doubleClick(messagePoint) }
         rule.waitForIdle()
-        rule.onNodeWithTag("seq3-message-label-editor-repeat", useUnmergedTree = true).assertIsDisplayed()
-        rule.onNodeWithTag("seq3-delay-editor-field-delay", useUnmergedTree = true).assertDoesNotExist()
+        rule.onAllNodes(hasTestTag("seq3-edit-popover"), useUnmergedTree = true).assertCountEquals(1)
+        assertEquals(
+            "request()",
+            editorField().fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
+            "the message popover replaces the delay's and is seeded from the label template",
+        )
 
-        // This point is at the bottom-right side of the fragment header, horizontally over the
-        // message label and vertically inside the message editor's six-unit top overhang. The
-        // fragment header must win the real pointer hit even while that editor is open underneath.
+        // The message popover is laid out at UI scale above its label, so it can sit over part of the
+        // group header. Double-click the header where the popover is not: the header still wins the
+        // pointer hit over the message label underneath, and the group editor replaces the message one.
         val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0)
         val overlapLeft = maxOf(fragment.box.x, firstRow.labelBox.x)
         val overlapRight = minOf(fragment.box.x + fragment.box.width, firstRow.labelBox.x + firstRow.labelBox.width)
         assertTrue(overlapRight > overlapLeft, "the message label must extend horizontally through the group header")
-        val headerPoint = canvasPoint(overlapRight - 2.0, fragment.box.y + headerHeight - 2.0)
+        val popoverBounds = bounds("seq3-edit-popover")
+        val headerY = fragment.box.y + headerHeight - 2.0
+        val rootBounds = bounds("seq3-workspace-root")
+        val headerPoint = (0..20)
+            .map { step -> fragment.box.x + 4.0 + (fragment.box.width - 8.0) * step / 20.0 }
+            .map { x -> canvasPoint(x, headerY) }
+            .firstOrNull { point -> !popoverBounds.contains(Offset(point.x + rootBounds.left, point.y + rootBounds.top)) }
+        assertNotNull(headerPoint, "part of the group header stays clear of the message popover")
         workspace.performMouseInput { doubleClick(headerPoint) }
         rule.waitForIdle()
 
-        val groupTag = "seq3-fragment-label-${fragment.fragmentId}"
-        val groupEditorMatcher = hasSetTextAction() and hasAnyAncestor(hasTestTag(groupTag))
-        val groupEditor = rule.onNode(groupEditorMatcher, useUnmergedTree = true).assertIsDisplayed()
+        val groupEditor = editorField().assertIsDisplayed()
         assertTrue(view.textFieldFocused)
-        rule.onNodeWithTag("seq3-message-label-editor-repeat", useUnmergedTree = true).assertDoesNotExist()
-        rule.onNodeWithTag("seq3-delay-editor-field-delay", useUnmergedTree = true).assertDoesNotExist()
+        rule.onAllNodes(hasTestTag("seq3-edit-popover"), useUnmergedTree = true).assertCountEquals(1)
+        assertEquals(
+            originalGroupLabel,
+            groupEditor.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
+            "the group popover replaced the message popover",
+        )
 
         groupEditor.performTextReplacement("unsaved group draft")
         groupEditor.performKeyInput { pressKey(Key.Escape) }
@@ -471,7 +482,7 @@ class Seq3CanvasInteractionsUiTest {
 
         workspace.performMouseInput { doubleClick(headerPoint) }
         rule.waitForIdle()
-        val reopenedGroupEditor = rule.onNode(groupEditorMatcher, useUnmergedTree = true).assertIsDisplayed()
+        val reopenedGroupEditor = editorField().assertIsDisplayed()
         assertEquals(
             originalGroupLabel,
             reopenedGroupEditor.fetchSemanticsNode().config[SemanticsProperties.EditableText].text,
@@ -489,7 +500,7 @@ class Seq3CanvasInteractionsUiTest {
     }
 
     @Test
-    fun delayEditorAndCommitButtonsFitTheirHitTargetAtFitWidthZoom() {
+    fun delayEditorKeepsItsUiScaleSizeAtFitWidthZoomAndSavesOnEnter() {
         val sessionId = startWorkspace("delay-editor-fit-width")
         val document = groupAndDelayDocument().copy(
             delays = listOf(Seq3Delay("delay", "repeat", "delay")),
@@ -506,16 +517,14 @@ class Seq3CanvasInteractionsUiTest {
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { doubleClick(doubleClickAt) }
         rule.waitForIdle()
 
-        val editor = rule.onNode(
-            hasSetTextAction() and hasAnyAncestor(hasTestTag(delayTag)),
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
-        val editorFieldBounds = bounds("seq3-delay-editor-field-delay")
-        val expectedFieldWidth = SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP.toFloat() * rule.density.density * view.zoom
+        val editor = editorField().assertIsDisplayed()
+        val popover = bounds("seq3-edit-popover")
+        val viewportWidthPx = bounds("seq3-canvas-viewport").width
+        val minWidthPx = minOf(SEQ3_EDIT_POPOVER_MIN_WIDTH.value * rule.density.density, viewportWidthPx - 12f * rule.density.density)
         assertTrue(
-            editorFieldBounds.width >= expectedFieldWidth - 3f,
-            "the full 90dp delay text field must fit inside its hit target at fit-width zoom; " +
-                "field=${editorFieldBounds.width}px expectedAtLeast=${expectedFieldWidth}px",
+            popover.width >= minWidthPx - 1f,
+            "the delay popover is 280dp wide (or the viewport less its margins) whatever the zoom; " +
+                "popover=${popover.width}px min=${minWidthPx}px zoom=${view.zoom}",
         )
         assertTrue(view.textFieldFocused, "the delay editor receives focus when opened")
 
@@ -524,13 +533,11 @@ class Seq3CanvasInteractionsUiTest {
         rule.waitForIdle()
         assertEquals("delay", currentSession(sessionId).document.delays.single().label, "Escape cancels the draft")
         assertFalse(view.textFieldFocused)
+        rule.onAllNodes(hasTestTag("seq3-edit-popover"), useUnmergedTree = true).assertCountEquals(0)
 
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { doubleClick(doubleClickAt) }
         rule.waitForIdle()
-        val reopenedEditor = rule.onNode(
-            hasSetTextAction() and hasAnyAncestor(hasTestTag(delayTag)),
-            useUnmergedTree = true,
-        ).assertIsDisplayed()
+        val reopenedEditor = editorField().assertIsDisplayed()
 
         val undoBefore = currentSession(sessionId).undoStack.size
         reopenedEditor.performTextReplacement("wait for response")
@@ -541,6 +548,8 @@ class Seq3CanvasInteractionsUiTest {
         assertEquals(undoBefore + 1, currentSession(sessionId).undoStack.size)
         assertFalse(view.textFieldFocused, "committing the delay edit returns keyboard focus to the workspace")
     }
+
+    private fun editorField() = rule.onNodeWithTag("seq3-edit-popover-field", useUnmergedTree = true)
 
     private fun startWorkspace(tabId: String): String {
         tempRoot = createTempDirectory("$tabId-ui").toFile()
