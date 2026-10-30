@@ -148,7 +148,7 @@ internal fun AppState.matchesCustomLogViewLayout(layout: com.indagium.model.Cust
     return savedState.first == currentState.first &&
         layout.filterPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP) == current.filterPanelWidth &&
         layout.annotationPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP) == current.annotationPanelWidth &&
-        layout.rightSidebarSplit.coerceIn(0.1f, 0.9f) == current.rightSidebarSplit &&
+        layout.rightSidebarSplit.coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX) == current.rightSidebarSplit &&
         savedState.second.toSet() == currentState.second.toSet() &&
         layout.collapsed.filter { it in singleTileSet }.toSet() == current.collapsed.toSet() &&
         layout.tilesLocked == current.tilesLocked &&
@@ -181,7 +181,7 @@ internal fun AppState.applyCustomLogViewLayout(layout: com.indagium.model.Custom
     }
     filterPanelWidth = layout.filterPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP)
     annotationPanelWidth = layout.annotationPanelWidth.coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP)
-    rightSidebarSplit = layout.rightSidebarSplit.coerceIn(0.1f, 0.9f)
+    rightSidebarSplit = layout.rightSidebarSplit.coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX)
     updateFilterPanelUiState {
         filterTileSet.forEach { setExpandedFlag(it, it !in layout.collapsed) }
     }

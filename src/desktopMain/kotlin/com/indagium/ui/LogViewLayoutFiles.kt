@@ -20,10 +20,16 @@ import java.util.UUID
 internal const val LOG_VIEW_LAYOUT_FILE_FORMAT = "indagium-log-view-layout"
 internal const val LOG_VIEW_LAYOUT_FILE_VERSION = 1
 private const val CUSTOM_LAYOUT_ID_PREFIX = "custom-log-view-"
+private const val LAYOUT_NAME_MAX_LENGTH = 80
+
+// Fallbacks for a settings entry written without a value; they match AppState's own defaults.
+private const val DEFAULT_FILTER_PANEL_WIDTH_DP = 220f
+private const val DEFAULT_ANNOTATION_PANEL_WIDTH_DP = 360f
+private const val DEFAULT_RIGHT_SIDEBAR_SPLIT = 0.5f
 
 /** [base] made unique against [taken], case-insensitively. */
 internal fun uniqueLogViewLayoutName(base: String, taken: Collection<String>): String {
-    val cleaned = base.trim().ifBlank { "My layout" }.take(80)
+    val cleaned = base.trim().ifBlank { "My layout" }.take(LAYOUT_NAME_MAX_LENGTH)
     val used = taken.map { it.trim().lowercase() }.toSet()
     if (cleaned.lowercase() !in used) return cleaned
     var n = 2
@@ -53,7 +59,7 @@ private fun CustomLogViewLayout.toJsonObject(): JsonObject = buildJsonObject {
 internal fun customLogViewLayoutsJson(layouts: List<CustomLogViewLayout>): JsonArray =
     buildJsonArray { layouts.forEach { add(it.toJsonObject()) } }
 
-private fun readIds(element: JsonElement?, key: String, required: Boolean): List<LogViewSectionId>? {
+private fun readIds(element: JsonElement?, required: Boolean): List<LogViewSectionId>? {
     val array = element as? JsonArray ?: return if (required) null else emptyList()
     val ids = array.map { item ->
         val value = (item as? JsonPrimitive)?.contentOrNull ?: return null
@@ -74,11 +80,11 @@ private fun readCompatibleIds(element: JsonElement?, key: String): List<LogViewS
 /** Settings are tolerant: malformed custom entries are skipped and all accepted trees are sanitized. */
 private fun customLogViewLayoutFromJson(element: JsonElement): CustomLogViewLayout? = runCatching {
     val o = element as? JsonObject ?: return null
-    val name = (o["name"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(80).orEmpty()
+    val name = (o["name"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(LAYOUT_NAME_MAX_LENGTH).orEmpty()
     if (name.isBlank()) return null
     val tree = logViewTileTreeFromJson(o["tree"]) ?: return null
-    val hidden = readIds(o["hidden"], "hidden", required = false) ?: return null
-    val collapsed = readIds(o["collapsed"], "collapsed", required = false) ?: return null
+    val hidden = readIds(o["hidden"], required = false) ?: return null
+    val collapsed = readIds(o["collapsed"], required = false) ?: return null
     val state = sanitizeLogViewLayoutState(
         tree,
         hidden,
@@ -93,9 +99,11 @@ private fun customLogViewLayoutFromJson(element: JsonElement): CustomLogViewLayo
             ?: newCustomLogViewLayoutId(),
         name = name,
         tree = state.first,
-        filterPanelWidth = float("filterPanelWidth", 220f).coerceIn(80f, 2000f),
-        annotationPanelWidth = float("annotationPanelWidth", 360f).coerceIn(80f, 2000f),
-        rightSidebarSplit = float("rightSidebarSplit", 0.5f).coerceIn(0.1f, 0.9f),
+        filterPanelWidth = float("filterPanelWidth", DEFAULT_FILTER_PANEL_WIDTH_DP).coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP),
+        annotationPanelWidth = float("annotationPanelWidth", DEFAULT_ANNOTATION_PANEL_WIDTH_DP)
+            .coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP),
+        rightSidebarSplit = float("rightSidebarSplit", DEFAULT_RIGHT_SIDEBAR_SPLIT)
+            .coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX),
         hidden = state.second,
         collapsed = collapsed.filter { it in tileLeafSections(state.first) && !it.neverHidden }.distinct(),
         tilesLocked = bool("tilesLocked"),
@@ -129,7 +137,8 @@ internal fun encodeLogViewLayoutFile(layout: CustomLogViewLayout): String =
         put("layout", layout.toJsonObject())
     })
 
-internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> = runCatching {
+/** The `layout` object of a standalone file, after checking its format marker and version. */
+private fun layoutFileBody(text: String): JsonObject {
     val root = runCatching { Json.parseToJsonElement(text).jsonObject }
         .getOrElse { error("This file is not a log layout (it is not valid JSON).") }
     if ((root["format"] as? JsonPrimitive)?.contentOrNull != LOG_VIEW_LAYOUT_FILE_FORMAT) {
@@ -141,16 +150,26 @@ internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> 
         error("This layout was saved by a newer version of Indagium (file version $version). Update Indagium to import it.")
     }
     if (version != LOG_VIEW_LAYOUT_FILE_VERSION) error("This layout file version is not supported.")
-    val layout = root["layout"] as? JsonObject ?: error("This layout file has no layout in it.")
-    val name = (layout["name"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(80)
-        ?.takeIf { it.isNotBlank() } ?: error("This layout has no name.")
-    val treeElement = layout["tree"] ?: error("This layout has no tile arrangement.")
+    return root["layout"] as? JsonObject ?: error("This layout file has no layout in it.")
+}
+
+/** The known sections of a standalone file's tile tree, rejecting a tree a single log view cannot show. */
+private fun singleViewTreeSections(treeElement: JsonElement): List<LogViewSectionId> {
     val rawSections = strictTreeSections(treeElement) ?: error("This layout has an invalid tile arrangement.")
     val treeSections = rawSections.mapNotNull { LogViewSectionId.fromKey(it) }
     if (treeSections.any { it.scope == LogViewScope.COMPARE }) {
         error("This layout contains a tile that cannot be used in a single log view.")
     }
     if (treeSections.count { it == LogViewSectionId.TOOLBAR } > 1) error("This layout has an invalid toolbar tile.")
+    return treeSections
+}
+
+internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> = runCatching {
+    val layout = layoutFileBody(text)
+    val name = (layout["name"] as? JsonPrimitive)?.contentOrNull?.trim()?.take(LAYOUT_NAME_MAX_LENGTH)
+        ?.takeIf { it.isNotBlank() } ?: error("This layout has no name.")
+    val treeElement = layout["tree"] ?: error("This layout has no tile arrangement.")
+    val treeSections = singleViewTreeSections(treeElement)
     val tree = logViewTileTreeFromJson(treeElement)
     val hidden = readCompatibleIds(layout["hidden"], "hidden")
     if (hidden.any { (it.scope != LogViewScope.SINGLE && it.scope != LogViewScope.BOTH) || it.neverHidden }) {
@@ -175,9 +194,9 @@ internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> 
         id = newCustomLogViewLayoutId(),
         name = name,
         tree = sanitized.first,
-        filterPanelWidth = float("filterPanelWidth").coerceIn(80f, 2000f),
-        annotationPanelWidth = float("annotationPanelWidth").coerceIn(80f, 2000f),
-        rightSidebarSplit = float("rightSidebarSplit").coerceIn(0.1f, 0.9f),
+        filterPanelWidth = float("filterPanelWidth").coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP),
+        annotationPanelWidth = float("annotationPanelWidth").coerceIn(LOG_VIEW_PIN_MIN_DP, LOG_VIEW_PIN_MAX_DP),
+        rightSidebarSplit = float("rightSidebarSplit").coerceIn(RIGHT_SIDEBAR_SPLIT_MIN, RIGHT_SIDEBAR_SPLIT_MAX),
         hidden = sanitized.second,
         collapsed = collapsed.distinct(),
         tilesLocked = bool("tilesLocked"),
@@ -190,6 +209,7 @@ internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> 
 }
 
 /** Strict structural walk used only for standalone-file validation; settings migration remains tolerant. */
+@Suppress("ReturnCount") // Each structural rule rejects with its own early null; nesting them would hide which one failed.
 private fun strictTreeSections(element: JsonElement, depth: Int = 0): List<String>? {
     if (depth >= LOG_VIEW_LAYOUT_MAX_DEPTH) return null
     val o = element as? JsonObject ?: return null

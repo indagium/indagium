@@ -640,6 +640,7 @@ class LogViewTilingUiTest {
     }
 
     @OptIn(androidx.compose.ui.test.InternalTestApi::class, androidx.compose.ui.InternalComposeUiApi::class)
+    @Suppress("MagicNumber") // Visual thresholds for the evidence check: tab-strip height and minimum log share.
     private fun verifyPracticalPresetsAndSaveEvidence(width: Int, height: Int) {
         rule.runOnUiThread {
             (rule as androidx.compose.ui.test.junit4.DesktopComposeTestRule).scene.size = androidx.compose.ui.unit.IntSize(width, height)

@@ -22,6 +22,9 @@ import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -741,8 +744,9 @@ class ChromeScaffoldUiTest {
         rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performClick()
         rule.waitForIdle()
         assertEquals(ToolbarPlacement.WITH_TABS_END, state.settings.toolbarPlacement)
-        // The strip's position, in the order Top, Left, Right, Bottom.
-        rule.onNodeWithText("Left").performClick()
+        // The strip's position, in the order Top, Left, Right, Bottom. Scoped to that control: the
+        // Tabs section's "Close button position" also offers a "Left".
+        rule.onNode(hasText("Left") and hasAnyAncestor(hasTestTag("tab-position"))).performClick()
         rule.waitForIdle()
         assertEquals(TabStripPosition.LEFT, state.settings.tabStripPosition)
         rule.onNodeWithTag("toolbar-placement-BESIDE_TABS", useUnmergedTree = true).performClick()

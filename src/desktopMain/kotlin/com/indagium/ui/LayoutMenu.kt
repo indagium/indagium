@@ -661,7 +661,11 @@ internal fun LayoutMenuPopup(
                             enabled = !selectedCustomActive,
                             variant = ButtonVariant.Secondary,
                             horizontalPadding = 7.dp,
-                            tooltip = if (selectedCustomActive) "Saved layout already matches the current view" else "Update ${selectedCustom.name} with the current view",
+                            tooltip = if (selectedCustomActive) {
+                                "Saved layout already matches the current view"
+                            } else {
+                                "Update ${selectedCustom.name} with the current view"
+                            },
                             modifier = Modifier.testTag("layout-menu-update-existing"),
                         )
                     }

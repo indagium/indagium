@@ -133,6 +133,7 @@ class LogViewerSearchSessionsUiTest {
     }
 
     @Test
+    @Suppress("LongMethod") // One end-to-end scenario: each step depends on the selection the previous one left.
     fun annotationContextCaptureUsesFreshSelectionAcrossOriginalRowKindsAndFollowLifecycle() {
         val tabId = "annotation-original-fresh-context-ui"
         val rows = listOf(
