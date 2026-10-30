@@ -1,8 +1,8 @@
 package com.indagium
 
-import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3AwtTextMetrics
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
@@ -23,12 +23,12 @@ import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.toPngBytes
 import java.io.ByteArrayInputStream
+import java.io.File
 import javax.imageio.ImageIO
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import java.io.File
 
 class Seq3RasterTest {
     private companion object {
@@ -316,6 +316,7 @@ class Seq3RasterTest {
         val a = Seq3Lifeline("A", "com.example.client.gateway.PublicApi", setOf("A"), 0, headerWidthDp = 330.0)
         val b = Seq3Lifeline("B", "Orders Service", setOf("B"), 1)
         val c = Seq3Lifeline("C", "Database", setOf("C"), 2)
+
         fun message(id: String, from: String, to: String?, label: String, timestamp: Long, kind: Seq3Kind = Seq3Kind.CALL): Seq3Message {
             val occurrence = Seq3Occurrence(
                 entryId = timestamp.toInt(),

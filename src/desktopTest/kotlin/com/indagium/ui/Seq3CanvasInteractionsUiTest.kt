@@ -11,9 +11,10 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
@@ -28,8 +29,8 @@ import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.rightClick
-import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.unit.dp
+import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Delay
@@ -42,13 +43,12 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowRef
-import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.seq3DrawnRowRefs
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
-import java.io.File
 import java.awt.image.BufferedImage
+import java.io.File
 import javax.imageio.ImageIO
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals

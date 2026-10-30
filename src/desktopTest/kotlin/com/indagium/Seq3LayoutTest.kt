@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.diagram3.SEQ3_LAYOUT_MARGIN
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3Capture
@@ -32,7 +33,6 @@ import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.SEQ3_LAYOUT_MARGIN
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.seq3DefaultManualActivationEnd

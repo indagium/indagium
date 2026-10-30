@@ -7,9 +7,9 @@ import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
-import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.Seq3RegenChangeKind
 import com.indagium.diagram3.Seq3RegenDecision
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.acceptAllSeq3Regen
 import com.indagium.diagram3.applySeq3Regeneration
 import com.indagium.diagram3.matchOneMessage

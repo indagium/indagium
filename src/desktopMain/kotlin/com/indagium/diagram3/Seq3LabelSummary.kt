@@ -431,6 +431,7 @@ internal fun <T> seq3ChronologicalOrder(
     val explicitRanks = seq3RowOrderRanks(document)
     val firstRankByMessage = explicitRanks.entries.groupBy({ it.key.messageId }, { it.value })
         .mapValues { (_, ranks) -> ranks.minOrNull() ?: Int.MAX_VALUE }
+
     fun rank(item: T): Int? {
         val messageId = messageIdOf(item)
         val entryId = entryIdOf(item)
@@ -460,6 +461,7 @@ fun seq3ResolveRowOrder(document: Seq3Document, rows: List<Seq3RowRef>): List<Se
     val ranks = seq3RowOrderRanks(document)
     val firstByMessage = ranks.entries.groupBy({ it.key.messageId }, { it.value })
         .mapValues { (_, values) -> values.minOrNull() ?: Int.MAX_VALUE }
+
     fun rank(ref: Seq3RowRef): Int? = ranks[ref]
         ?: ranks[Seq3RowRef(ref.messageId)]
         ?: if (ref.occurrenceEntryId == null) firstByMessage[ref.messageId] else null

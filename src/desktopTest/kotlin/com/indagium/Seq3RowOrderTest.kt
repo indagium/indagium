@@ -1,10 +1,14 @@
 package com.indagium
 
-import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3AddResult
+import com.indagium.diagram3.Seq3ArrowRow
+import com.indagium.diagram3.Seq3Capture
+import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CustomMessageResult
 import com.indagium.diagram3.Seq3CustomMessageSpec
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
@@ -15,30 +19,26 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
-import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowRef
+import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3TextMetrics
-import com.indagium.diagram3.Seq3ArrowRow
-import com.indagium.diagram3.Seq3Capture
-import com.indagium.diagram3.Seq3CaptureSource
-import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.addSeq3CustomMessage
-import com.indagium.diagram3.fragmentContainsRow
-import com.indagium.diagram3.seq3DrawnRowRefs
-import com.indagium.diagram3.applySeq3Command
-import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.addSeq3MessageFromSelection
+import com.indagium.diagram3.applySeq3Command
+import com.indagium.diagram3.fragmentContainsRow
+import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.moveSeq3Message
+import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3QueueExpandedRows
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3ResolveRowOrder
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.undoSeq3Command
 import com.indagium.model.LogEntry
-import com.indagium.ui.seq3CanvasRowRef
 import com.indagium.model.LogLevel
+import com.indagium.ui.seq3CanvasRowRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -95,6 +95,7 @@ class Seq3RowOrderTest {
 
     private val metrics = object : Seq3TextMetrics {
         override fun width(role: Seq3FontRole, text: String): Double = text.length * 7.0
+
         override fun lineHeight(role: Seq3FontRole): Double = 16.0
     }
 
@@ -458,6 +459,7 @@ class Seq3RowOrderTest {
                 message("collapsed", listOf(11 to 160L, 13 to 260L), repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 1),
             ),
         )
+
         fun layoutRefs(doc: Seq3Document) = layoutSeq3(doc, Seq3LayoutOptions(metrics)).rows.map { seq3CanvasRowRef(doc, it) }
 
         val chronological = layoutRefs(document)

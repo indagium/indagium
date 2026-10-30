@@ -960,6 +960,7 @@ private fun Seq3TitleEditor(
         onDone()
         runCatching { view.focusRequester.requestFocus() }
     }
+
     fun commit() {
         state.seq3Sessions.updateTitle(session.id, text)
         finishEditing()

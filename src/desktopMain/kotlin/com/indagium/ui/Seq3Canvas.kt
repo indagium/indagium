@@ -88,6 +88,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.diagram3.MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP
+import com.indagium.diagram3.MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP
+import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.Seq3ActivationBar
 import com.indagium.diagram3.Seq3ActivationEvent
 import com.indagium.diagram3.Seq3ArrowRow
@@ -103,6 +106,7 @@ import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentBox
 import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Layout
 import com.indagium.diagram3.Seq3LifelineColumn
@@ -112,22 +116,18 @@ import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Repeat
-import com.indagium.diagram3.Seq3InsertionPosition
-import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3RowGeometry
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3StateInvariantBox
 import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.MIN_SEQ3_LIFELINE_HEADER_WIDTH_DP
-import com.indagium.diagram3.MAX_SEQ3_LIFELINE_HEADER_WIDTH_DP
-import com.indagium.diagram3.SEQ3_DELAY_EDITOR_FIELD_WIDTH_DP
 import com.indagium.diagram3.applySeq3Command
+import com.indagium.diagram3.fragmentContainsRow
 import com.indagium.diagram3.seq3ActivationSpans
 import com.indagium.diagram3.seq3ArrowStyle
-import com.indagium.diagram3.fragmentContainsRow
 import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3IsValidManualActivationEnd
 import com.indagium.diagram3.seq3LifelineSegments
@@ -757,403 +757,403 @@ private fun seq3CanvasGestureModifier(
 
             try {
                 while (true) {
-                // Let interactive overlays (lifeline chips, the inline label editor, and its
-                // buttons) see the press before the canvas decides to own it. The old Initial-pass
-                // handler consumed every primary press before those children could recognize a
-                // tap or focus a text field, which made click selection and double-click editing
-                // look broken while drag-to-reorder still appeared to work.
-                val event = awaitPointerEvent(PointerEventPass.Main)
-                val change = event.changes.firstOrNull() ?: continue
-                val activeLayout = currentLayout.value
-                val activeDensity = currentDensity.value
-                // Pointer positions are physical pixels on the zoomed wrapper (CLAUDE.md's own
-                // gotcha) — remove both density and zoom to get layout coordinates (1 unit == 1 dp).
-                val activeZoom = currentView.value.zoom
-                val xUnits = seq3PointerPxToLayoutUnits(change.position.x, activeDensity, activeZoom)
-                val yUnits = seq3PointerPxToLayoutUnits(change.position.y, activeDensity, activeZoom)
-                val mouseButtonDown = event.buttons.isPrimaryPressed || event.buttons.isSecondaryPressed || event.buttons.isTertiaryPressed
-                val pointerStillPressed = if (change.type == PointerType.Mouse) mouseButtonDown else change.pressed
-                if (event.type == PointerEventType.Move && !pointerStillPressed) {
-                    // Desktop delivers hover Move events continuously after mouse-up. Never let a
-                    // stale press-local flag turn those into a marquee, pan, endpoint preview, or
-                    // row reorder if a Release was consumed or missed by an overlay.
-                    clearStalePressState()
-                    currentView.value.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
-                    continue
-                }
-                when (event.type) {
-                    PointerEventType.Press -> {
-                        // A second down event is a new gesture even if a platform/child lost the
-                        // previous mouse-up. Clear all transient gesture state before arming it.
-                        clearPressState()
-                        val isMiddle = event.buttons.isTertiaryPressed
-                        view.hoveredMessageId = null
-                        if (event.buttons.isSecondaryPressed) {
-                            if (!change.isConsumed) {
+                    // Let interactive overlays (lifeline chips, the inline label editor, and its
+                    // buttons) see the press before the canvas decides to own it. The old Initial-pass
+                    // handler consumed every primary press before those children could recognize a
+                    // tap or focus a text field, which made click selection and double-click editing
+                    // look broken while drag-to-reorder still appeared to work.
+                    val event = awaitPointerEvent(PointerEventPass.Main)
+                    val change = event.changes.firstOrNull() ?: continue
+                    val activeLayout = currentLayout.value
+                    val activeDensity = currentDensity.value
+                    // Pointer positions are physical pixels on the zoomed wrapper (CLAUDE.md's own
+                    // gotcha) — remove both density and zoom to get layout coordinates (1 unit == 1 dp).
+                    val activeZoom = currentView.value.zoom
+                    val xUnits = seq3PointerPxToLayoutUnits(change.position.x, activeDensity, activeZoom)
+                    val yUnits = seq3PointerPxToLayoutUnits(change.position.y, activeDensity, activeZoom)
+                    val mouseButtonDown = event.buttons.isPrimaryPressed || event.buttons.isSecondaryPressed || event.buttons.isTertiaryPressed
+                    val pointerStillPressed = if (change.type == PointerType.Mouse) mouseButtonDown else change.pressed
+                    if (event.type == PointerEventType.Move && !pointerStillPressed) {
+                        // Desktop delivers hover Move events continuously after mouse-up. Never let a
+                        // stale press-local flag turn those into a marquee, pan, endpoint preview, or
+                        // row reorder if a Release was consumed or missed by an overlay.
+                        clearStalePressState()
+                        currentView.value.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
+                        continue
+                    }
+                    when (event.type) {
+                        PointerEventType.Press -> {
+                            // A second down event is a new gesture even if a platform/child lost the
+                            // previous mouse-up. Clear all transient gesture state before arming it.
+                            clearPressState()
+                            val isMiddle = event.buttons.isTertiaryPressed
+                            view.hoveredMessageId = null
+                            if (event.buttons.isSecondaryPressed) {
+                                if (!change.isConsumed) {
+                                    view.textFieldFocused = false
+                                    runCatching { view.focusRequester.requestFocus() }
+                                    val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
+                                    if (hitRow != null) {
+                                        val modifiers = event.keyboardModifiers
+                                        val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                                        val document = currentSession.value.document
+                                        // Right-clicking INSIDE an existing selection has to leave it
+                                        // alone — the menu acts on what is selected. This used to
+                                        // clear selectedCanvasRows unconditionally, so a marquee
+                                        // selection silently collapsed to bare message ids the instant
+                                        // the menu opened: "Group as" then had only ×N containers to
+                                        // work with and disappeared, and grouping from the header
+                                        // afterwards framed whole messages instead of the picked rows.
+                                        val rowRef = Seq3CanvasRowRef(hitRow.messageId, hitRow.occurrenceEntryId)
+                                        val insideSelection = if (view.selectedCanvasRows.isNotEmpty()) {
+                                            rowRef in view.selectedCanvasRows
+                                        } else {
+                                            hitRow.messageId in view.selection.selectedIds
+                                        }
+                                        if (!insideSelection || additive || modifiers.isShiftPressed) {
+                                            view.selection = seq3Select(
+                                                document.messages.map { it.id },
+                                                view.selection,
+                                                hitRow.messageId,
+                                                additive = additive,
+                                                range = modifiers.isShiftPressed,
+                                            )
+                                            // Keep the exact-row representation a left click already
+                                            // uses, so right-clicking one arrow and grouping it frames
+                                            // that arrow rather than every occurrence of its message.
+                                            view.selectedCanvasRows = if (additive) {
+                                                view.selectedCanvasRows + rowRef
+                                            } else {
+                                                setOf(rowRef)
+                                            }
+                                            view.selectionFromMarquee = false
+                                        }
+                                        view.focusedMessageId = hitRow.messageId
+                                        view.canvasContextMenuMessageId = hitRow.messageId
+                                        view.canvasContextMenuOccurrenceEntryId = hitRow.occurrenceEntryId
+                                        view.canvasEmptyContextMenuOpen = false
+                                        view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
+                                        view.canvasContextMenuOffset = seq3ContextMenuOffset(
+                                            change.position,
+                                            currentHScroll.value.value,
+                                            currentVScroll.value.value,
+                                        )
+                                        change.consume()
+                                    } else {
+                                        // WP7 item 5 (canvas half): right-clicking empty background —
+                                        // no message row under the cursor — still opens a menu, just
+                                        // the "Add note here" one instead of the row menu.
+                                        view.canvasContextMenuMessageId = null
+                                        view.canvasContextMenuOccurrenceEntryId = null
+                                        view.canvasEmptyContextMenuOpen = true
+                                        view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
+                                        view.canvasContextMenuOffset = seq3ContextMenuOffset(
+                                            change.position,
+                                            currentHScroll.value.value,
+                                            currentVScroll.value.value,
+                                        )
+                                        change.consume()
+                                    }
+                                }
+                                childOwnsGesture = true
+                                continue
+                            }
+                            if (event.buttons.isPrimaryPressed || isMiddle) {
+                                if (change.isConsumed) {
+                                    // A child owns this gesture (for example a lifeline chip or an
+                                    // already-open text editor). Keep the canvas completely out of its
+                                    // move/release sequence.
+                                    childOwnsGesture = true
+                                    dragEndpoint = null
+                                    downPosition = null
+                                    moved = false
+                                    panning = false
+                                    pressWasMiddle = false
+                                    selectingArea = false
+                                    selectionStart = null
+                                    continue
+                                }
+                                if (!isMiddle && seq3FragmentHeaderAt(activeLayout, xUnits, yUnits) != null) {
+                                    // Fragment headers own their whole painted strip. A long arrow label
+                                    // can extend underneath that strip at fit-width zoom; letting the
+                                    // canvas row hit test run as well turns a header double-click into
+                                    // a message rename. Keep the event with the header overlay even
+                                    // when its child detector has not consumed the down yet.
+                                    childOwnsGesture = true
+                                    change.consume()
+                                    continue
+                                }
+                                // A canvas-owned press transfers keyboard ownership away from a
+                                // neighboring SOURCE tile's editor. Child-consumed presses above
+                                // remain with their editor, so clicking inside text never loses focus.
                                 view.textFieldFocused = false
                                 runCatching { view.focusRequester.requestFocus() }
-                                val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
-                                if (hitRow != null) {
-                                    val modifiers = event.keyboardModifiers
-                                    val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
-                                    val document = currentSession.value.document
-                                    // Right-clicking INSIDE an existing selection has to leave it
-                                    // alone — the menu acts on what is selected. This used to
-                                    // clear selectedCanvasRows unconditionally, so a marquee
-                                    // selection silently collapsed to bare message ids the instant
-                                    // the menu opened: "Group as" then had only ×N containers to
-                                    // work with and disappeared, and grouping from the header
-                                    // afterwards framed whole messages instead of the picked rows.
-                                    val rowRef = Seq3CanvasRowRef(hitRow.messageId, hitRow.occurrenceEntryId)
-                                    val insideSelection = if (view.selectedCanvasRows.isNotEmpty()) {
-                                        rowRef in view.selectedCanvasRows
-                                    } else {
-                                        hitRow.messageId in view.selection.selectedIds
-                                    }
-                                    if (!insideSelection || additive || modifiers.isShiftPressed) {
-                                        view.selection = seq3Select(
-                                            document.messages.map { it.id },
-                                            view.selection,
-                                            hitRow.messageId,
-                                            additive = additive,
-                                            range = modifiers.isShiftPressed,
-                                        )
-                                        // Keep the exact-row representation a left click already
-                                        // uses, so right-clicking one arrow and grouping it frames
-                                        // that arrow rather than every occurrence of its message.
-                                        view.selectedCanvasRows = if (additive) {
-                                            view.selectedCanvasRows + rowRef
-                                        } else {
-                                            setOf(rowRef)
-                                        }
-                                        view.selectionFromMarquee = false
-                                    }
-                                    view.focusedMessageId = hitRow.messageId
-                                    view.canvasContextMenuMessageId = hitRow.messageId
-                                    view.canvasContextMenuOccurrenceEntryId = hitRow.occurrenceEntryId
-                                    view.canvasEmptyContextMenuOpen = false
-                                    view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
-                                    view.canvasContextMenuOffset = seq3ContextMenuOffset(
-                                        change.position,
-                                        currentHScroll.value.value,
-                                        currentVScroll.value.value,
-                                    )
-                                    change.consume()
-                                } else {
-                                    // WP7 item 5 (canvas half): right-clicking empty background —
-                                    // no message row under the cursor — still opens a menu, just
-                                    // the "Add note here" one instead of the row menu.
-                                    view.canvasContextMenuMessageId = null
-                                    view.canvasContextMenuOccurrenceEntryId = null
-                                    view.canvasEmptyContextMenuOpen = true
-                                    view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
-                                    view.canvasContextMenuOffset = seq3ContextMenuOffset(
-                                        change.position,
-                                        currentHScroll.value.value,
-                                        currentVScroll.value.value,
-                                    )
-                                    change.consume()
-                                }
-                            }
-                            childOwnsGesture = true
-                            continue
-                        }
-                        if (event.buttons.isPrimaryPressed || isMiddle) {
-                            if (change.isConsumed) {
-                                // A child owns this gesture (for example a lifeline chip or an
-                                // already-open text editor). Keep the canvas completely out of its
-                                // move/release sequence.
-                                childOwnsGesture = true
-                                dragEndpoint = null
-                                downPosition = null
+                                childOwnsGesture = false
+                                view.canvasContextMenuMessageId = null
+                                view.canvasContextMenuOccurrenceEntryId = null
+                                view.canvasEmptyContextMenuOpen = false
+                                downPosition = change.position
                                 moved = false
-                                panning = false
-                                pressWasMiddle = false
-                                selectingArea = false
-                                selectionStart = null
-                                continue
-                            }
-                            if (!isMiddle && seq3FragmentHeaderAt(activeLayout, xUnits, yUnits) != null) {
-                                // Fragment headers own their whole painted strip. A long arrow label
-                                // can extend underneath that strip at fit-width zoom; letting the
-                                // canvas row hit test run as well turns a header double-click into
-                                // a message rename. Keep the event with the header overlay even
-                                // when its child detector has not consumed the down yet.
-                                childOwnsGesture = true
-                                change.consume()
-                                continue
-                            }
-                            // A canvas-owned press transfers keyboard ownership away from a
-                            // neighboring SOURCE tile's editor. Child-consumed presses above
-                            // remain with their editor, so clicking inside text never loses focus.
-                            view.textFieldFocused = false
-                            runCatching { view.focusRequester.requestFocus() }
-                            childOwnsGesture = false
-                            view.canvasContextMenuMessageId = null
-                            view.canvasContextMenuOccurrenceEntryId = null
-                            view.canvasEmptyContextMenuOpen = false
-                            downPosition = change.position
-                            moved = false
-                            pressWasMiddle = isMiddle
-                            rowDragCandidate = null
-                            rowDragWasActivated = false
-                            rowDragCancelled = false
-                            val modifiers = event.keyboardModifiers
-                            selectionAdditive = modifiers.isCtrlPressed || modifiers.isMetaPressed
-                            selectionRange = modifiers.isShiftPressed
-                            dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
-                            val hitRow = if (isMiddle) null else seq3RowAt(activeLayout, xUnits, yUnits)
-                                ?.takeUnless { it is Seq3ElisionRow }
-                            if (hitRow != null && dragEndpoint == null) {
-                                val rowRef = seq3CanvasRowRef(currentSession.value.document, hitRow)
-                                rowDragCandidate = rowRef
-                                rowDragStartY = yUnits
-                                currentView.value.rowReorderPreview = Seq3RowReorderPreview(
-                                    rowRef = rowRef,
-                                    position = Seq3InsertionPosition.AfterRow(rowRef),
-                                    active = false,
-                                    pointerStartLayoutY = yUnits,
-                                )
-                            }
-                            val emptyBackground = seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
-                            val panBackground = !isMiddle && view.canvasPanMode && dragEndpoint == null && emptyBackground
-                            // Pan mode is unchanged: there a background press pans, so the band
-                            // never arms and the wider slot would only get in the way.
-                            val bandBackground = !view.canvasPanMode && rowDragCandidate == null &&
-                                seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits, SEQ3_BAND_START_Y_TOLERANCE)
-                            if (!isMiddle && !panBackground && dragEndpoint == null && bandBackground) {
-                                selectingArea = true
-                                selectionStart = Offset(xUnits.toFloat(), yUnits.toFloat())
-                                view.canvasSelectionRect = Seq3Box(xUnits, yUnits, 0.0, 0.0)
-                            }
-                            // The surrounding scroll modifiers must not take ownership of a
-                            // primary drag before this canvas has decided whether it is an
-                            // endpoint drag, a background pan, or a click. If an endpoint hit is
-                            // missed at a low zoom, competing scroll gestures move the coordinate
-                            // basis underneath the pointer and make the diagram visibly jump.
-                            if (!isMiddle) change.consume()
-                            val endpoint = dragEndpoint
-                            when {
-                                endpoint != null -> {
-                                    currentDragPreviewCallback.value(
-                                        seq3DragPreview(activeLayout, endpoint, xUnits),
+                                pressWasMiddle = isMiddle
+                                rowDragCandidate = null
+                                rowDragWasActivated = false
+                                rowDragCancelled = false
+                                val modifiers = event.keyboardModifiers
+                                selectionAdditive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                                selectionRange = modifiers.isShiftPressed
+                                dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
+                                val hitRow = if (isMiddle) null else seq3RowAt(activeLayout, xUnits, yUnits)
+                                    ?.takeUnless { it is Seq3ElisionRow }
+                                if (hitRow != null && dragEndpoint == null) {
+                                    val rowRef = seq3CanvasRowRef(currentSession.value.document, hitRow)
+                                    rowDragCandidate = rowRef
+                                    rowDragStartY = yUnits
+                                    currentView.value.rowReorderPreview = Seq3RowReorderPreview(
+                                        rowRef = rowRef,
+                                        position = Seq3InsertionPosition.AfterRow(rowRef),
+                                        active = false,
+                                        pointerStartLayoutY = yUnits,
                                     )
-                                    change.consume()
                                 }
-                                isMiddle -> {
-                                    panning = true
-                                    lastPanPosition = panViewportPosition(change.position)
-                                    change.consume()
+                                val emptyBackground = seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
+                                val panBackground = !isMiddle && view.canvasPanMode && dragEndpoint == null && emptyBackground
+                                // Pan mode is unchanged: there a background press pans, so the band
+                                // never arms and the wider slot would only get in the way.
+                                val bandBackground = !view.canvasPanMode && rowDragCandidate == null &&
+                                    seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits, SEQ3_BAND_START_Y_TOLERANCE)
+                                if (!isMiddle && !panBackground && dragEndpoint == null && bandBackground) {
+                                    selectingArea = true
+                                    selectionStart = Offset(xUnits.toFloat(), yUnits.toFloat())
+                                    view.canvasSelectionRect = Seq3Box(xUnits, yUnits, 0.0, 0.0)
                                 }
-                                panBackground -> {
-                                    panning = true
-                                    lastPanPosition = panViewportPosition(change.position)
-                                    change.consume()
+                                // The surrounding scroll modifiers must not take ownership of a
+                                // primary drag before this canvas has decided whether it is an
+                                // endpoint drag, a background pan, or a click. If an endpoint hit is
+                                // missed at a low zoom, competing scroll gestures move the coordinate
+                                // basis underneath the pointer and make the diagram visibly jump.
+                                if (!isMiddle) change.consume()
+                                val endpoint = dragEndpoint
+                                when {
+                                    endpoint != null -> {
+                                        currentDragPreviewCallback.value(
+                                            seq3DragPreview(activeLayout, endpoint, xUnits),
+                                        )
+                                        change.consume()
+                                    }
+                                    isMiddle -> {
+                                        panning = true
+                                        lastPanPosition = panViewportPosition(change.position)
+                                        change.consume()
+                                    }
+                                    panBackground -> {
+                                        panning = true
+                                        lastPanPosition = panViewportPosition(change.position)
+                                        change.consume()
+                                    }
                                 }
                             }
                         }
-                    }
-                    PointerEventType.Move -> {
-                        if (childOwnsGesture) continue
-                        val down = downPosition
-                        if (down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX) moved = true
-                        val drag = dragEndpoint
-                        val rowCandidate = rowDragCandidate
-                        when {
-                            rowCandidate != null -> {
-                                val view = currentView.value
-                                if (view.rowReorderPreview == null) {
-                                    rowDragCancelled = true
+                        PointerEventType.Move -> {
+                            if (childOwnsGesture) continue
+                            val down = downPosition
+                            if (down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX) moved = true
+                            val drag = dragEndpoint
+                            val rowCandidate = rowDragCandidate
+                            when {
+                                rowCandidate != null -> {
+                                    val view = currentView.value
+                                    if (view.rowReorderPreview == null) {
+                                        rowDragCancelled = true
+                                    }
+                                    val pointerMoved = down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX
+                                    if (pointerMoved) moved = true
+                                    if (rowDragCancelled) {
+                                        // Escape cleared the shared preview; never recreate it while the
+                                        // pointer remains down.
+                                        change.consume()
+                                    } else if (pointerMoved) {
+                                        val preview = seq3RowReorderPreviewAt(
+                                            currentSession.value.document,
+                                            activeLayout,
+                                            rowCandidate,
+                                            yUnits,
+                                        )
+                                        if (preview != null) {
+                                            rowDragWasActivated = true
+                                            val viewportPosition = panViewportPosition(change.position)
+                                            view.rowReorderPreview = preview.copy(
+                                                draggedOffsetY = yUnits - rowDragStartY,
+                                                pointerStartLayoutY = rowDragStartY,
+                                                pointerViewportX = viewportPosition.x.toDouble(),
+                                                pointerViewportY = viewportPosition.y.toDouble(),
+                                            )
+                                        }
+                                        change.consume()
+                                    }
                                 }
-                                val pointerMoved = down != null && (change.position - down).getDistance() > DRAG_CLICK_THRESHOLD_PX
-                                if (pointerMoved) moved = true
-                                if (rowDragCancelled) {
-                                    // Escape cleared the shared preview; never recreate it while the
-                                    // pointer remains down.
+                                drag != null -> {
                                     change.consume()
-                                } else if (pointerMoved) {
-                                    val preview = seq3RowReorderPreviewAt(
-                                        currentSession.value.document,
-                                        activeLayout,
-                                        rowCandidate,
-                                        yUnits,
-                                    )
-                                    if (preview != null) {
-                                        rowDragWasActivated = true
-                                        val viewportPosition = panViewportPosition(change.position)
-                                        view.rowReorderPreview = preview.copy(
-                                            draggedOffsetY = yUnits - rowDragStartY,
-                                            pointerStartLayoutY = rowDragStartY,
-                                            pointerViewportX = viewportPosition.x.toDouble(),
-                                            pointerViewportY = viewportPosition.y.toDouble(),
+                                    currentDragPreviewCallback.value(seq3DragPreview(activeLayout, drag, xUnits))
+                                }
+                                panning -> {
+                                    val last = lastPanPosition
+                                    if (last != null) {
+                                        val current = panViewportPosition(change.position)
+                                        currentHScroll.value.dispatchRawDelta(-(current.x - last.x))
+                                        currentVScroll.value.dispatchRawDelta(-(current.y - last.y))
+                                        lastPanPosition = current
+                                    }
+                                    change.consume()
+                                }
+                                selectingArea -> {
+                                    val start = selectionStart ?: Offset(xUnits.toFloat(), yUnits.toFloat())
+                                    view.canvasSelectionRect = seq3SelectionRect(start.x.toDouble(), start.y.toDouble(), xUnits, yUnits)
+                                    change.consume()
+                                }
+                                downPosition == null -> view.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
+                            }
+                        }
+                        PointerEventType.Release -> {
+                            if (childOwnsGesture) {
+                                clearPressState()
+                                continue
+                            }
+                            val drag = dragEndpoint
+                            val rowCandidate = rowDragCandidate
+                            when {
+                                rowCandidate != null -> {
+                                    val view = currentView.value
+                                    val preview = view.rowReorderPreview
+                                    view.rowReorderPreview = null
+                                    if (rowDragWasActivated && !rowDragCancelled && preview != null) {
+                                        val command = Seq3Command.MoveRow(rowCandidate, preview.position)
+                                        val document = currentSession.value.document
+                                        val result = applySeq3Command(document, command)
+                                        if (!result.applied && result.reason != null && result.reason != "No change") {
+                                            view.canvasNoticeMessage = result.reason
+                                        } else if (result.applied) {
+                                            currentState.value.seq3Sessions.applyCommand(currentSession.value.id, command)
+                                        }
+                                    } else if (!moved && !rowDragCancelled) {
+                                        seq3HandleCanvasClick(
+                                            view,
+                                            currentSession.value.document,
+                                            activeLayout,
+                                            xUnits,
+                                            yUnits,
+                                            selectionAdditive,
+                                            selectionRange,
+                                        ) { now, id -> registerMessageClick(now, id) }
+                                    }
+                                    change.consume()
+                                }
+                                drag != null && moved -> {
+                                    // Clear transient UI state before the command can trigger a
+                                    // document/layout recomposition and invalidate this pointer pass.
+                                    currentDragPreviewCallback.value(null)
+                                    dragEndpoint = null
+                                    seq3NearestLifelineId(activeLayout, xUnits)?.let { targetLifelineId ->
+                                        val action = when {
+                                            // WP7 item 2: a stub drop sets BOTH endpoints (from =
+                                            // dropped lifeline, to = the tag's own prior from) in one
+                                            // command — see Seq3BulkAction.SetCaller's own doc.
+                                            drag.isStub -> Seq3BulkAction.SetCaller(targetLifelineId)
+                                            drag.side == Seq3EndpointSide.FROM -> Seq3BulkAction.SetFrom(targetLifelineId)
+                                            else -> Seq3BulkAction.SetTo(targetLifelineId)
+                                        }
+                                        currentState.value.seq3Sessions.applyCommand(
+                                            currentSession.value.id,
+                                            Seq3Command.Bulk(setOf(drag.messageId), action),
                                         )
                                     }
-                                    change.consume()
+                                }
+                                drag != null -> {
+                                    // An endpoint hit is also a valid message click. Only a gesture
+                                    // that crossed the drag threshold should retarget the endpoint;
+                                    // a stationary Cmd/Ctrl-click must participate in multi-selection.
+                                    currentDragPreviewCallback.value(null)
+                                    dragEndpoint = null
+                                    seq3HandleCanvasClick(
+                                        view,
+                                        currentSession.value.document,
+                                        activeLayout,
+                                        xUnits,
+                                        yUnits,
+                                        selectionAdditive,
+                                        selectionRange,
+                                    ) { now, id ->
+                                        registerMessageClick(now, id)
+                                    }
+                                }
+                                panning -> {
+                                    val wasMoved = moved
+                                    panning = false
+                                    lastPanPosition = null
+                                    if (!wasMoved) seq3ClearSelection(view, clearFocus = true)
+                                }
+                                selectingArea -> {
+                                    val start = selectionStart
+                                    val rect = start?.let { seq3SelectionRect(it.x.toDouble(), it.y.toDouble(), xUnits, yUnits) }
+                                    val selectedRows = rect?.let { seq3RowRefsInSelection(activeLayout, it) }.orEmpty()
+                                    val ids = selectedRows.mapTo(linkedSetOf()) { it.messageId }
+                                    view.canvasSelectionRect = null
+                                    selectingArea = false
+                                    selectionStart = null
+                                    if (ids.isNotEmpty()) {
+                                        view.selection = if (selectionAdditive || selectionRange) {
+                                            Seq3Selection(view.selection.selectedIds + ids, ids.first())
+                                        } else {
+                                            Seq3Selection(ids, ids.first())
+                                        }
+                                        view.focusedMessageId = view.selection.selectedIds.firstOrNull()
+                                        view.selectedCanvasRows = if (selectionAdditive || selectionRange) {
+                                            view.selectedCanvasRows + selectedRows
+                                        } else {
+                                            selectedRows.toSet()
+                                        }
+                                        view.selectionFromMarquee = true
+                                        view.selectedOccurrenceIds = emptySet()
+                                        view.selectedOccurrenceMessageId = null
+                                        view.selectedOccurrenceEntryId = null
+                                    } else if (!moved) {
+                                        // Pressed and released without dragging: that is a click, not
+                                        // an empty band. Send it through the ordinary click path so the
+                                        // forgiving [SEQ3_ROW_HIT_Y_TOLERANCE] still picks up a nearby
+                                        // arrow — arming the band on a tighter tolerance must not cost
+                                        // the user the easy click they had before. That path clears the
+                                        // selection itself when nothing is under the cursor.
+                                        seq3HandleCanvasClick(
+                                            view,
+                                            currentSession.value.document,
+                                            activeLayout,
+                                            xUnits,
+                                            yUnits,
+                                            selectionAdditive,
+                                            selectionRange,
+                                        ) { now, id -> registerMessageClick(now, id) }
+                                    }
+                                }
+                                !moved && !pressWasMiddle -> {
+                                    seq3HandleCanvasClick(
+                                        view,
+                                        currentSession.value.document,
+                                        activeLayout,
+                                        xUnits,
+                                        yUnits,
+                                        selectionAdditive,
+                                        selectionRange,
+                                    ) { now, id -> registerMessageClick(now, id) }
                                 }
                             }
-                            drag != null -> {
-                                change.consume()
-                                currentDragPreviewCallback.value(seq3DragPreview(activeLayout, drag, xUnits))
-                            }
-                            panning -> {
-                                val last = lastPanPosition
-                                if (last != null) {
-                                    val current = panViewportPosition(change.position)
-                                    currentHScroll.value.dispatchRawDelta(-(current.x - last.x))
-                                    currentVScroll.value.dispatchRawDelta(-(current.y - last.y))
-                                    lastPanPosition = current
-                                }
-                                change.consume()
-                            }
-                            selectingArea -> {
-                                val start = selectionStart ?: Offset(xUnits.toFloat(), yUnits.toFloat())
-                                view.canvasSelectionRect = seq3SelectionRect(start.x.toDouble(), start.y.toDouble(), xUnits, yUnits)
-                                change.consume()
-                            }
-                            downPosition == null -> view.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
-                        }
-                    }
-                    PointerEventType.Release -> {
-                        if (childOwnsGesture) {
                             clearPressState()
-                            continue
                         }
-                        val drag = dragEndpoint
-                        val rowCandidate = rowDragCandidate
-                        when {
-                            rowCandidate != null -> {
-                                val view = currentView.value
-                                val preview = view.rowReorderPreview
-                                view.rowReorderPreview = null
-                                if (rowDragWasActivated && !rowDragCancelled && preview != null) {
-                                    val command = Seq3Command.MoveRow(rowCandidate, preview.position)
-                                    val document = currentSession.value.document
-                                    val result = applySeq3Command(document, command)
-                                    if (!result.applied && result.reason != null && result.reason != "No change") {
-                                        view.canvasNoticeMessage = result.reason
-                                    } else if (result.applied) {
-                                        currentState.value.seq3Sessions.applyCommand(currentSession.value.id, command)
-                                    }
-                                } else if (!moved && !rowDragCancelled) {
-                                    seq3HandleCanvasClick(
-                                        view,
-                                        currentSession.value.document,
-                                        activeLayout,
-                                        xUnits,
-                                        yUnits,
-                                        selectionAdditive,
-                                        selectionRange,
-                                    ) { now, id -> registerMessageClick(now, id) }
-                                }
-                                change.consume()
-                            }
-                            drag != null && moved -> {
-                                // Clear transient UI state before the command can trigger a
-                                // document/layout recomposition and invalidate this pointer pass.
-                                currentDragPreviewCallback.value(null)
-                                dragEndpoint = null
-                                seq3NearestLifelineId(activeLayout, xUnits)?.let { targetLifelineId ->
-                                    val action = when {
-                                        // WP7 item 2: a stub drop sets BOTH endpoints (from =
-                                        // dropped lifeline, to = the tag's own prior from) in one
-                                        // command — see Seq3BulkAction.SetCaller's own doc.
-                                        drag.isStub -> Seq3BulkAction.SetCaller(targetLifelineId)
-                                        drag.side == Seq3EndpointSide.FROM -> Seq3BulkAction.SetFrom(targetLifelineId)
-                                        else -> Seq3BulkAction.SetTo(targetLifelineId)
-                                    }
-                                    currentState.value.seq3Sessions.applyCommand(
-                                        currentSession.value.id,
-                                        Seq3Command.Bulk(setOf(drag.messageId), action),
-                                    )
-                                }
-                            }
-                            drag != null -> {
-                                // An endpoint hit is also a valid message click. Only a gesture
-                                // that crossed the drag threshold should retarget the endpoint;
-                                // a stationary Cmd/Ctrl-click must participate in multi-selection.
-                                currentDragPreviewCallback.value(null)
-                                dragEndpoint = null
-                                seq3HandleCanvasClick(
-                                    view,
-                                    currentSession.value.document,
-                                    activeLayout,
-                                    xUnits,
-                                    yUnits,
-                                    selectionAdditive,
-                                    selectionRange,
-                                ) { now, id ->
-                                    registerMessageClick(now, id)
-                                }
-                            }
-                            panning -> {
-                                val wasMoved = moved
-                                panning = false
-                                lastPanPosition = null
-                                if (!wasMoved) seq3ClearSelection(view, clearFocus = true)
-                            }
-                            selectingArea -> {
-                                val start = selectionStart
-                                val rect = start?.let { seq3SelectionRect(it.x.toDouble(), it.y.toDouble(), xUnits, yUnits) }
-                                val selectedRows = rect?.let { seq3RowRefsInSelection(activeLayout, it) }.orEmpty()
-                                val ids = selectedRows.mapTo(linkedSetOf()) { it.messageId }
-                                view.canvasSelectionRect = null
-                                selectingArea = false
-                                selectionStart = null
-                                if (ids.isNotEmpty()) {
-                                    view.selection = if (selectionAdditive || selectionRange) {
-                                        Seq3Selection(view.selection.selectedIds + ids, ids.first())
-                                    } else {
-                                        Seq3Selection(ids, ids.first())
-                                    }
-                                    view.focusedMessageId = view.selection.selectedIds.firstOrNull()
-                                    view.selectedCanvasRows = if (selectionAdditive || selectionRange) {
-                                        view.selectedCanvasRows + selectedRows
-                                    } else {
-                                        selectedRows.toSet()
-                                    }
-                                    view.selectionFromMarquee = true
-                                    view.selectedOccurrenceIds = emptySet()
-                                    view.selectedOccurrenceMessageId = null
-                                    view.selectedOccurrenceEntryId = null
-                                } else if (!moved) {
-                                    // Pressed and released without dragging: that is a click, not
-                                    // an empty band. Send it through the ordinary click path so the
-                                    // forgiving [SEQ3_ROW_HIT_Y_TOLERANCE] still picks up a nearby
-                                    // arrow — arming the band on a tighter tolerance must not cost
-                                    // the user the easy click they had before. That path clears the
-                                    // selection itself when nothing is under the cursor.
-                                    seq3HandleCanvasClick(
-                                        view,
-                                        currentSession.value.document,
-                                        activeLayout,
-                                        xUnits,
-                                        yUnits,
-                                        selectionAdditive,
-                                        selectionRange,
-                                    ) { now, id -> registerMessageClick(now, id) }
-                                }
-                            }
-                            !moved && !pressWasMiddle -> {
-                                seq3HandleCanvasClick(
-                                    view,
-                                    currentSession.value.document,
-                                    activeLayout,
-                                    xUnits,
-                                    yUnits,
-                                    selectionAdditive,
-                                    selectionRange,
-                                ) { now, id -> registerMessageClick(now, id) }
-                            }
+                        PointerEventType.Exit -> {
+                            clearPressState()
+                            view.hoveredMessageId = null
                         }
-                        clearPressState()
+                        else -> Unit
                     }
-                    PointerEventType.Exit -> {
-                        clearPressState()
-                        view.hoveredMessageId = null
-                    }
-                    else -> Unit
                 }
-            }
             } finally {
                 // The platform can cancel pointerInput without a Release/Exit event (for example,
                 // when the canvas leaves composition). Never carry an armed gesture into its next
@@ -1458,9 +1458,9 @@ internal fun seq3CanvasEdgeAutoScroll(
         val extent = rawExtent.toFloat()
         val edge = min(edgePx, extent / 2f)
         return when {
-        position < edge -> -maxStepPx * ((edge - position) / edge).coerceIn(0f, 1f)
-        position > extent - edge -> maxStepPx * ((position - (extent - edge)) / edge).coerceIn(0f, 1f)
-        else -> 0f
+            position < edge -> -maxStepPx * ((edge - position) / edge).coerceIn(0f, 1f)
+            position > extent - edge -> maxStepPx * ((position - (extent - edge)) / edge).coerceIn(0f, 1f)
+            else -> 0f
         }
     }
     val dx = edgeDelta(viewportPosition.x, viewportWidthPx)
@@ -3620,7 +3620,7 @@ private fun Seq3LifelineChip(
                             },
                             onDragCancel = { dragPx = 0f },
                         )
-                }
+                    }
                     .pointerInput(session.id, column.lifelineId) {
                         detectTapGestures(
                             // Select on press so a plain click gives immediate feedback even though

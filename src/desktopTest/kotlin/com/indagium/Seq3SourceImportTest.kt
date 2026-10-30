@@ -1,7 +1,7 @@
 package com.indagium
 
-import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3ArtifactStyle
+import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Delay

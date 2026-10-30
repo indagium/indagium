@@ -775,6 +775,7 @@ private fun mergeImportedRowOrder(
     missingRows: Set<Seq3RowRef>,
 ): List<Seq3RowRef> {
     val knownMessages = imported.messages.associateBy { it.id }
+
     fun isValid(ref: Seq3RowRef): Boolean {
         val message = knownMessages[ref.messageId] ?: return false
         return ref.occurrenceEntryId == null || message.occurrences.any { it.entryId == ref.occurrenceEntryId }
@@ -794,6 +795,7 @@ private fun mergeImportedRowOrder(
     }
     val merged = mutableListOf<Seq3RowRef>()
     val present = hashSetOf<Seq3RowRef>()
+
     fun append(ref: Seq3RowRef) { if (isValid(ref) && present.add(ref)) merged += ref }
     preservedBeforeFirst.forEach(::append)
     observedRows.forEach { ref ->

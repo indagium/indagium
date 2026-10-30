@@ -1098,7 +1098,9 @@ private fun moveSeq3ExactRow(
     val startingOrder = if (document.rowOrder.isEmpty()) seq3DefaultRowOrder(document) else seq3ReconcileRowOrder(document)
     val resolvedRef = if (rowRef.occurrenceEntryId == null && rowRef !in startingOrder) {
         startingOrder.firstOrNull { it.messageId == rowRef.messageId } ?: rowRef
-    } else rowRef
+    } else {
+        rowRef
+    }
     val currentIndex = startingOrder.indexOf(resolvedRef)
     if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown row")
     if ((position is Seq3InsertionPosition.BeforeRow && position.rowRef == rowRef) ||
@@ -1157,7 +1159,9 @@ private fun reassignSeq3FragmentMembership(
         if (interior) {
             val joining = movedRows.filterNot { fragmentContainsRow(fragment, it) }
             if (joining.isEmpty()) return@map fragment
-            val addedRefs = if (!hasExactRefs && coversWholeMessage) emptyList() else {
+            val addedRefs = if (!hasExactRefs && coversWholeMessage) {
+                emptyList()
+            } else {
                 joining.mapNotNull { row -> row.occurrenceEntryId?.let { Seq3OccurrenceRef(messageId, it) } }
             }
             val ids = (fragment.messageIds + messageId).distinct()
@@ -1229,9 +1233,13 @@ private fun inheritSeq3FragmentMembership(
     if (inherited.isEmpty()) return updated
     val messagePositions = updated.messages.withIndex().associate { (index, current) -> current.id to index }
     val fragments = updated.fragments.map { fragment ->
-        if (fragment.id !in inherited) fragment else {
+        if (fragment.id !in inherited) {
+            fragment
+        } else {
             val ids = (fragment.messageIds + message.id).distinct().sortedBy { id -> messagePositions[id] ?: Int.MAX_VALUE }
-            val refs = if (fragment.occurrenceRefs.isEmpty()) fragment.occurrenceRefs else {
+            val refs = if (fragment.occurrenceRefs.isEmpty()) {
+                fragment.occurrenceRefs
+            } else {
                 (fragment.occurrenceRefs + message.occurrences.map { Seq3OccurrenceRef(message.id, it.entryId) }).distinct()
             }
             fragment.copy(messageIds = ids, occurrenceRefs = refs)
@@ -1421,7 +1429,7 @@ private fun seq3ReconcileRowOrder(document: Seq3Document): List<Seq3RowRef> {
             originalMessage != null && (
                 ref.occurrenceEntryId == null ||
                     originalMessage.occurrences.any { it.entryId == ref.occurrenceEntryId }
-                ) -> ref.messageId
+            ) -> ref.messageId
             ref.occurrenceEntryId != null -> ownerByEntry[ref.occurrenceEntryId] ?: return@forEach
             else -> return@forEach
         }
@@ -1452,8 +1460,9 @@ private fun resolveSeq3RowInsertionIndex(
     Seq3InsertionPosition.Start -> 0
     Seq3InsertionPosition.End -> rows.size
     is Seq3InsertionPosition.AtIndex -> {
-        if (position.index !in 0..document.messages.size) null
-        else {
+        if (position.index !in 0..document.messages.size) {
+            null
+        } else {
             resolveSeq3VisibleInsertionBoundary(document, rows, position)
         }
     }
@@ -1461,15 +1470,23 @@ private fun resolveSeq3RowInsertionIndex(
     is Seq3InsertionPosition.AfterMessage -> rows.indexOfLast { it.messageId == position.messageId }.takeIf { it >= 0 }?.plus(1)
     is Seq3InsertionPosition.BeforeRow -> {
         val exact = rows.indexOf(position.rowRef)
-        if (exact >= 0) exact else if (position.rowRef.occurrenceEntryId == null) {
+        if (exact >= 0) {
+            exact
+        } else if (position.rowRef.occurrenceEntryId == null) {
             rows.indexOfFirst { it.messageId == position.rowRef.messageId }.takeIf { it >= 0 }
-        } else null
+        } else {
+            null
+        }
     }
     is Seq3InsertionPosition.AfterRow -> {
         val exact = rows.indexOf(position.rowRef)
-        if (exact >= 0) exact + 1 else if (position.rowRef.occurrenceEntryId == null) {
+        if (exact >= 0) {
+            exact + 1
+        } else if (position.rowRef.occurrenceEntryId == null) {
             rows.indexOfLast { it.messageId == position.rowRef.messageId }.takeIf { it >= 0 }?.plus(1)
-        } else null
+        } else {
+            null
+        }
     }
 }
 

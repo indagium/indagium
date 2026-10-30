@@ -2,10 +2,10 @@ package com.indagium
 
 import com.indagium.debug.Json
 import com.indagium.diagram3.DiagramExportMode
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3AttachmentMetadata
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
-import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Delay

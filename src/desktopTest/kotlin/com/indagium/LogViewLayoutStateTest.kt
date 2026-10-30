@@ -12,8 +12,8 @@ import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
-import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.applyCustomLogViewLayout
+import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.captureCustomLogViewLayout
 import com.indagium.ui.classicLogViewLayout
 import com.indagium.ui.columnTiles
@@ -27,8 +27,8 @@ import com.indagium.ui.logViewDefaultDp
 import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.logViewTileContext
 import com.indagium.ui.logViewTileVisible
-import com.indagium.ui.mkTab
 import com.indagium.ui.matchesCustomLogViewLayout
+import com.indagium.ui.mkTab
 import com.indagium.ui.resetLogViewLayout
 import com.indagium.ui.revealFilterTiles
 import com.indagium.ui.showLogViewTile
@@ -189,6 +189,7 @@ class LogViewLayoutStateTest {
 
         assertTrue(state.matchesCustomLogViewLayout(saved.copy(hidden = saved.hidden.reversed(), collapsed = saved.collapsed.reversed())))
         assertTrue(state.matchesCustomLogViewLayout(saved.copy(filterBarVisible = null)), "legacy snapshots leave the current filter-bar state alone")
+
         fun resizeTags(node: TileNode<LogViewSectionId>): TileNode<LogViewSectionId> = when (node) {
             is TileLeaf -> if (node.section == LogViewSectionId.TAGS) node.copy(sizeDp = 260f) else node
             is TileSplit -> node.copy(children = node.children.map(::resizeTags))

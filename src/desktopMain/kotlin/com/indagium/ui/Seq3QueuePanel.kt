@@ -6,11 +6,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
-import androidx.compose.foundation.focusable
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -64,8 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.SEQ3_OPERAND_FRAGMENT_KINDS
@@ -87,12 +87,12 @@ import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
-import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3State
@@ -571,7 +571,7 @@ internal fun seq3SequenceVisibleRows(
         row.message.id in byPill && (
             byParentText == null || row.message.id in byParentText ||
                 (row.occurrence?.let(::listOf) ?: row.message.occurrences).any { it.text.contains(textFilter, ignoreCase = true) }
-            )
+        )
     }
 }
 
@@ -794,10 +794,13 @@ private fun Seq3SequenceList(
     val dragStartKeySet = remember(dragStartKeys) { dragStartKeys.toHashSet() }
     val visualKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && view.queueReorderVisualIds.isNotEmpty()) {
         view.queueReorderVisualIds.filter { it in visibleKeySet } + visibleKeys.filterNot { it in queuedVisualKeySet }
-    } else visibleKeys
+    } else {
+        visibleKeys
+    }
     val renderRows = remember(rows, visualKeys) { visualKeys.mapNotNull(rowsByKey::get) }
 
     fun heightOf(key: String): Float = rowHeights[key] ?: (SEQ3_SUBMESSAGE_ROW_HEIGHT.value * density)
+
     fun advanceOf(key: String): Float = heightOf(key) + SEQ3_SEQUENCE_ROW_GAP.value * density
 
     fun updateReorderPreview() {
@@ -1019,7 +1022,9 @@ private fun Seq3SequenceList(
     ) {
         val startKeys = if ((view.queueReorderDraggedId != null || justReleasedKey != null) && dragStartKeys.isNotEmpty()) {
             dragStartKeys.filter { it in visibleKeySet } + visibleKeys.filterNot { it in dragStartKeySet }
-        } else visibleKeys
+        } else {
+            visibleKeys
+        }
         val startOffsets = cumulativeBlockOffsets(startKeys, ::advanceOf)
         val targetOffsets = cumulativeBlockOffsets(visualKeys, ::advanceOf)
         LazyColumn(
@@ -2307,28 +2312,30 @@ private fun Seq3AddCustomDialog(
                 )
                 if (positionOverride != null) {
                     AppText(positionLabel, color = tc.ac, fontSize = 11.sp, modifier = Modifier.weight(1f).padding(8.dp))
-                } else Seq3DropdownButton(positionLabel, modifier = Modifier.weight(1f), menuWidth = 330.dp) { close ->
-                    Seq3DropdownMenuItem("At start", active = positionMode == Seq3CustomPositionMode.START) {
-                        positionMode = Seq3CustomPositionMode.START; positionValue = ""; close()
-                    }
-                    Seq3DropdownMenuItem("At end", active = positionMode == Seq3CustomPositionMode.END) {
-                        positionMode = Seq3CustomPositionMode.END; positionValue = ""; close()
-                    }
-                    Seq3DropdownMenuItem("At exact index (0 = first)", active = positionMode == Seq3CustomPositionMode.INDEX) {
-                        positionMode = Seq3CustomPositionMode.INDEX; positionValue = ""; close()
-                    }
-                    document.messages.forEachIndexed { index, candidate ->
-                        Seq3DropdownMenuItem(
-                            "Before ${index + 1}: ${candidate.labelTemplate}",
-                            active = positionMode == Seq3CustomPositionMode.BEFORE && positionValue == candidate.id,
-                        ) {
-                            positionMode = Seq3CustomPositionMode.BEFORE; positionValue = candidate.id; close()
+                } else {
+                    Seq3DropdownButton(positionLabel, modifier = Modifier.weight(1f), menuWidth = 330.dp) { close ->
+                        Seq3DropdownMenuItem("At start", active = positionMode == Seq3CustomPositionMode.START) {
+                            positionMode = Seq3CustomPositionMode.START; positionValue = ""; close()
                         }
-                        Seq3DropdownMenuItem(
-                            "After ${index + 1}: ${candidate.labelTemplate}",
-                            active = positionMode == Seq3CustomPositionMode.AFTER && positionValue == candidate.id,
-                        ) {
-                            positionMode = Seq3CustomPositionMode.AFTER; positionValue = candidate.id; close()
+                        Seq3DropdownMenuItem("At end", active = positionMode == Seq3CustomPositionMode.END) {
+                            positionMode = Seq3CustomPositionMode.END; positionValue = ""; close()
+                        }
+                        Seq3DropdownMenuItem("At exact index (0 = first)", active = positionMode == Seq3CustomPositionMode.INDEX) {
+                            positionMode = Seq3CustomPositionMode.INDEX; positionValue = ""; close()
+                        }
+                        document.messages.forEachIndexed { index, candidate ->
+                            Seq3DropdownMenuItem(
+                                "Before ${index + 1}: ${candidate.labelTemplate}",
+                                active = positionMode == Seq3CustomPositionMode.BEFORE && positionValue == candidate.id,
+                            ) {
+                                positionMode = Seq3CustomPositionMode.BEFORE; positionValue = candidate.id; close()
+                            }
+                            Seq3DropdownMenuItem(
+                                "After ${index + 1}: ${candidate.labelTemplate}",
+                                active = positionMode == Seq3CustomPositionMode.AFTER && positionValue == candidate.id,
+                            ) {
+                                positionMode = Seq3CustomPositionMode.AFTER; positionValue = candidate.id; close()
+                            }
                         }
                     }
                 }
@@ -3412,6 +3419,7 @@ private fun Seq3QueueRow(
     LaunchedEffect(session.id, message.id, contextMenuOpen) {
         if (contextMenuOpen) runCatching { menuFocusRequester.requestFocus() }
     }
+
     fun dismissContextMenu() {
         contextMenuOpen = false
         runCatching { view.focusRequester.requestFocus() }

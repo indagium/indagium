@@ -481,6 +481,7 @@ private const val NOTE_ROW_GAP = 8.0
 private const val ELISION_BOX_W = 40.0
 
 private const val FRAGMENT_PAD = 10.0
+
 // The canvas label control (label plus edit/delete actions) is up to 28 logical units tall. Use
 // that actual extent for brackets and shared row spacing, not just the text baseline height.
 private const val FRAGMENT_LABEL_H = 28.0
@@ -499,6 +500,7 @@ private const val DELAY_CONTROL_PAD_V = 2.0
 private const val DELAY_DELETE_BUTTON_W = 14.0
 private const val DELAY_CONTROL_GAP = 2.0
 private const val DELAY_CONTROL_MIN_H = 20.0
+
 // The delay editor is wider than a short label such as "delay": 90dp text field + two 16dp
 // buttons + two 2dp gaps + 6dp horizontal padding. Keep hitBox wide enough for both display and
 // edit states so Compose's parent bounds do not squeeze the field or leave the commit buttons
@@ -1607,6 +1609,7 @@ private fun wrapFixedText(
 ): List<String> {
     val width = maxWidth.coerceAtLeast(1.0)
     val result = mutableListOf<String>()
+
     fun splitLongWord(word: String): List<String> {
         val pieces = mutableListOf<String>()
         var start = 0

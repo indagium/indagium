@@ -17,8 +17,8 @@ import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
-import com.indagium.diagram3.toSource
 import com.indagium.diagram3.toPlantUml
+import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
 import com.indagium.model.LogEntry

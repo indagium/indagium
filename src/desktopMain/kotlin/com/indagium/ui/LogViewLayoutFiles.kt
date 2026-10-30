@@ -91,8 +91,10 @@ private fun customLogViewLayoutFromJson(element: JsonElement): CustomLogViewLayo
         LogViewScope.SINGLE,
         toolbarInLayout = LogViewSectionId.TOOLBAR in tileLeafSections(tree),
     )
+
     fun float(key: String, fallback: Float): Float =
         ((o[key] as? JsonPrimitive)?.floatOrNull ?: fallback).takeIf { it.isFinite() } ?: fallback
+
     fun bool(key: String): Boolean = (o[key] as? JsonPrimitive)?.booleanOrNull ?: true
     CustomLogViewLayout(
         id = (o["id"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.startsWith(CUSTOM_LAYOUT_ID_PREFIX) }
@@ -177,11 +179,13 @@ internal fun decodeLogViewLayoutFile(text: String): Result<CustomLogViewLayout> 
     }
     val collapsed = readCompatibleIds(layout["collapsed"], "collapsed")
     if (collapsed.any { it.scope == LogViewScope.COMPARE || it.neverHidden }) error("This layout collapses a tile that cannot be collapsed.")
+
     fun float(key: String): Float {
         val value = (layout[key] as? JsonPrimitive)?.floatOrNull ?: error("This layout is missing $key.")
         if (!value.isFinite()) error("This layout has an invalid $key value.")
         return value
     }
+
     fun bool(key: String): Boolean = (layout[key] as? JsonPrimitive)?.booleanOrNull
         ?: error("This layout is missing $key.")
     val sanitized = sanitizeLogViewLayoutState(
@@ -221,4 +225,3 @@ private fun strictTreeSections(element: JsonElement, depth: Int = 0): List<Strin
     val sections = children.map { strictTreeSections(it, depth + 1) ?: return null }
     return sections.flatten()
 }
-

@@ -320,6 +320,7 @@ enum class LogViewLayoutPreset(
     val hidden: Set<LogViewSectionId>,
 ) {
     CLASSIC(LogViewPresetId.CLASSIC, "Classic", LogViewScope.SINGLE, ::classicLogViewLayout, emptySet()),
+
     // Kept for settings written by older releases. These legacy presets remain decodable/resettable but aren't in the current menu.
     REVIEW(LogViewPresetId.REVIEW, "Review", LogViewScope.SINGLE, { reviewLayout() }, emptySet()),
     LOG_FOCUS(

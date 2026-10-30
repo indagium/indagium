@@ -4,12 +4,12 @@ package com.indagium.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -20,7 +20,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.text.input.TextFieldDecorator
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
@@ -30,16 +29,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -48,9 +45,10 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -239,43 +237,43 @@ internal fun Seq3SourceEditorPane(
                 }
             }
             BasicTextField(
-                        state = editorState,
-                        textStyle = TextStyle(color = tc.tx, fontSize = 11.sp, lineHeight = 18.sp, fontFamily = MONO),
-                        cursorBrush = SolidColor(tc.ac),
-                        lineLimits = TextFieldLineLimits.MultiLine(),
-                        scrollState = scroll,
-                        modifier = Modifier.weight(1f).fillMaxHeight().padding(top = 8.dp, bottom = 8.dp)
-                            .testTag("seq3-source-editor")
-                            .focusRequester(requester)
-                            .onFocusChanged { view.textFieldFocused = it.hasFocus }
-                            .horizontalScroll(rememberScrollState())
-                            .onPreviewKeyEvent { event ->
-                            if (event.type != KeyEventType.KeyDown || !(event.isCtrlPressed || event.isMetaPressed)) return@onPreviewKeyEvent false
-                            when {
-                                event.key == Key.Z && event.isShiftPressed || event.key == Key.Y -> {
-                                    if (redo.isNotEmpty()) {
-                                        undo += currentEditorValue()
-                                        setEditorValue(redo.removeAt(redo.lastIndex), record = false)
-                                    }
-                                    true
+                state = editorState,
+                textStyle = TextStyle(color = tc.tx, fontSize = 11.sp, lineHeight = 18.sp, fontFamily = MONO),
+                cursorBrush = SolidColor(tc.ac),
+                lineLimits = TextFieldLineLimits.MultiLine(),
+                scrollState = scroll,
+                modifier = Modifier.weight(1f).fillMaxHeight().padding(top = 8.dp, bottom = 8.dp)
+                    .testTag("seq3-source-editor")
+                    .focusRequester(requester)
+                    .onFocusChanged { view.textFieldFocused = it.hasFocus }
+                    .horizontalScroll(rememberScrollState())
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown || !(event.isCtrlPressed || event.isMetaPressed)) return@onPreviewKeyEvent false
+                        when {
+                            event.key == Key.Z && event.isShiftPressed || event.key == Key.Y -> {
+                                if (redo.isNotEmpty()) {
+                                    undo += currentEditorValue()
+                                    setEditorValue(redo.removeAt(redo.lastIndex), record = false)
                                 }
-                                event.key == Key.Z -> {
-                                    if (undo.isNotEmpty()) {
-                                        redo += currentEditorValue()
-                                        setEditorValue(undo.removeAt(undo.lastIndex), record = false)
-                                    }
-                                    true
+                                true
+                            }
+                            event.key == Key.Z -> {
+                                if (undo.isNotEmpty()) {
+                                    redo += currentEditorValue()
+                                    setEditorValue(undo.removeAt(undo.lastIndex), record = false)
                                 }
-                                else -> false
+                                true
                             }
-                            },
-                        decorator = TextFieldDecorator { inner ->
-                            Box {
-                                if (editorState.text.isEmpty()) AppText("@startuml", color = tc.td, fontSize = 11.sp, fontFamily = MONO)
-                                inner()
-                            }
-                        },
-                    )
+                            else -> false
+                        }
+                    },
+                decorator = TextFieldDecorator { inner ->
+                    Box {
+                        if (editorState.text.isEmpty()) AppText("@startuml", color = tc.td, fontSize = 11.sp, fontFamily = MONO)
+                        inner()
+                    }
+                },
+            )
         }
     }
 

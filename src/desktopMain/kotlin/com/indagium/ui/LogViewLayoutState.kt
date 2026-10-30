@@ -3,8 +3,8 @@ package com.indagium.ui
 import com.indagium.model.AppSettings
 import com.indagium.model.FilterMode
 import com.indagium.model.LogTab
-import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewPresetId
+import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.LogViewTileGroup
 import com.indagium.model.TileAxis

@@ -18,8 +18,8 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3NoteSeed
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
-import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3SourceDiagnostic
+import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3UndoEntry
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
