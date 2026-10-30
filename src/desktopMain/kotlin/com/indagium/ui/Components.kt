@@ -2337,7 +2337,13 @@ internal val CTX_SUBMENU_WIDTH = 240.dp
 // but currently not actionable, e.g. "End" in the "Set sequence ▶" flyout (App.kt) while no
 // sequence start is pending — rendered greyed-out and non-clickable, mirroring CtxItem's own
 // enabled-vs-disabled styling rather than inventing a second convention for the same idea.
-internal data class CtxSubmenuOption(val label: String, val enabled: Boolean = true, val onClick: () -> Unit)
+// [swatch], when set, draws a small filled dot of that colour before the label (a group's colour in "Move to group").
+internal data class CtxSubmenuOption(
+    val label: String,
+    val enabled: Boolean = true,
+    val swatch: Color? = null,
+    val onClick: () -> Unit,
+)
 
 // Grace period between the pointer leaving both the ▶ trigger and the popup, and the popup
 // actually closing — without it, crossing the (small) visual gap between trigger and popup would
@@ -2442,11 +2448,19 @@ internal fun CtxItemWithSubmenu(
                             var isTruncated by remember(option.label) { mutableStateOf(false) }
                             val optionTextColor = if (option.enabled) tc.tx else tc.td
                             val labelText: @Composable () -> Unit = {
-                                Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    option.swatch?.let { swatch ->
+                                        Box(Modifier.size(8.dp).background(swatch, RoundedCornerShape(50)))
+                                        Spacer(Modifier.width(8.dp))
+                                    }
                                     AppText(
                                         option.label, color = optionTextColor, fontSize = 12.sp, maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         onTextLayout = { result -> isTruncated = result.hasVisualOverflow },
+                                        modifier = Modifier.weight(1f),
                                     )
                                 }
                             }

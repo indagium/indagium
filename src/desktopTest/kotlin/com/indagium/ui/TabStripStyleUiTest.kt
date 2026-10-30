@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.RectangleShape
@@ -78,6 +79,9 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalTestApi::class)
 class TabStripStyleUiTest {
     private companion object {
+        const val RAIL_MIDDLE_DP = 1.5f
+        const val RAIL_BAND_DP = 3f
+        const val ACCENT_MIDDLE_DP = 1f
         const val TAB_ACCENT_PIXEL_TOLERANCE = 32
         const val TAB_CAPSULE_SOURCE_PIXEL_TOLERANCE = 12
         const val RAISED_CORNER_RADIUS_DP = 8f
@@ -284,7 +288,7 @@ class TabStripStyleUiTest {
     }
 
     @Composable
-    private fun roundedContourPreview(styles: List<TabStripStyle>, withGroupIndicator: Boolean = false) {
+    private fun roundedContourPreview(styles: List<TabStripStyle>, groupColor: Color? = null, showStripe: Boolean = true) {
         CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
             Column(Modifier.width(720.dp).testTag("tab-rounded-contour-preview")) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -298,13 +302,6 @@ class TabStripStyleUiTest {
                         AppText(style.name, color = LIGHT_THEME.ts, fontSize = 9.sp, modifier = Modifier.width(54.dp))
                         TabStripPosition.entries.forEach { position ->
                             val key = "${style.name}-${position.name}"
-                            val group = TabGroup(
-                                id = "contour-group",
-                                name = "Group",
-                                color = TabGroupColor.GREEN,
-                                collapsed = false,
-                                members = listOf(TabRef.Log("contour")),
-                            )
                             Box(Modifier.width(160.dp).background(tabStripBackground(style, LIGHT_THEME))) {
                                 TabShell(
                                     pointerKey = key,
@@ -314,16 +311,11 @@ class TabStripStyleUiTest {
                                     showClose = false,
                                     onClick = {},
                                     onClose = {},
-                                    groupIndicator = if (withGroupIndicator) {
-                                        { TabGroupHeaderIcon(group, testTagValue = "group-indicator-$key") }
-                                    } else {
-                                        null
-                                    },
                                     appearance = TabAppearance(
                                         style = style,
-                                        showStripe = true,
+                                        showStripe = showStripe,
                                         position = position,
-                                        groupIndicatorWidthDp = if (withGroupIndicator) tabGroupIndicatorWidthDp(group) else 0f,
+                                        groupColor = groupColor,
                                     ),
                                 )
                             }
@@ -945,23 +937,53 @@ class TabStripStyleUiTest {
     }
 
     @Test
-    fun groupIndicatorStaysInsideRoundedTabShapeAndLeavesExistingAccentsVisible() {
-        directory = createTempDirectory("tab-strip-group-indicator-shapes").toFile()
+    fun groupRailFollowsTheOuterEdgeContourOfEveryStyleOnEveryEdgeAndLeavesTheAccentAndSourceStripeVisible() {
+        directory = createTempDirectory("tab-strip-group-rail").toFile()
         val roundedStyles = listOf(TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL)
-        rule.setContent { roundedContourPreview(roundedStyles, withGroupIndicator = true) }
-        rule.waitForIdle()
+        val groupColor = Color(0xFFEC4899)
+        // The rectangular styles' source stripe fills the height it is given in this unbounded preview, so they are checked without it.
+        listOf(roundedStyles to true, (TabStripStyle.entries - roundedStyles.toSet()) to false).forEach { (styles, withStripe) ->
+            rule.setContent { roundedContourPreview(styles, groupColor = groupColor, showStripe = withStripe) }
+            rule.waitForIdle()
+            assertGroupRails(styles, groupColor.toArgb(), tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb(), withStripe)
+        }
+    }
 
+    private fun assertGroupRails(styles: List<TabStripStyle>, rail: Int, blue: Int, withStripe: Boolean) {
         val density = rule.density.density
-        val blue = tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb()
-        val accent = LIGHT_THEME.ac.toArgb()
-        assertRoundedContours(roundedStyles, density, blue, accent)
-        roundedStyles.forEach { style ->
+        styles.forEach { style ->
             TabStripPosition.entries.forEach { position ->
                 val key = "${style.name}-${position.name}"
                 val tab = rule.onNodeWithTag("tab-$key").getBoundsInRoot()
-                val marker = rule.onNodeWithTag("group-indicator-$key", useUnmergedTree = true).getBoundsInRoot()
-                assertTrue(marker.left >= tab.left && marker.right <= tab.right, "$style on $position keeps the group marker inside the tab width")
-                assertTrue(marker.top >= tab.top && marker.bottom <= tab.bottom, "$style on $position keeps the group marker inside the tab height")
+                val marker = rule.onNodeWithTag("tab-group-rail-$key", useUnmergedTree = true).getBoundsInRoot()
+                assertTrue(marker.left >= tab.left && marker.right <= tab.right, "$style on $position keeps the rail inside the tab width")
+                assertTrue(marker.top >= tab.top && marker.bottom <= tab.bottom, "$style on $position keeps the rail inside the tab height")
+                val image = rule.onNodeWithTag("tab-$key").captureToImage().toPixelMap()
+                // Depth (px from the tab's edge) of the middle of each 3dp band: the rail, the source stripe, the active accent.
+                val stripeMid = (RAIL_MIDDLE_DP * density).toInt()
+                val railMid = ((if (withStripe) RAIL_MIDDLE_DP + RAIL_BAND_DP else RAIL_MIDDLE_DP) * density).toInt()
+                val accentMid = (ACCENT_MIDDLE_DP * density).toInt()
+
+                // The pixel [depth] in from the OUTER edge (the strip's own side) or the CONTENT edge, mid-way along it.
+                fun at(depth: Int, outer: Boolean) = when (position to outer) {
+                    TabStripPosition.TOP to true, TabStripPosition.BOTTOM to false -> image[image.width / 2, depth]
+                    TabStripPosition.TOP to false, TabStripPosition.BOTTOM to true -> image[image.width / 2, image.height - 1 - depth]
+                    TabStripPosition.LEFT to true, TabStripPosition.RIGHT to false -> image[depth, image.height / 2]
+                    else -> image[image.width - 1 - depth, image.height / 2]
+                }
+                assertEquals(rail, at(railMid, outer = true).toArgb(), "$style on $position: the rail is drawn in the group colour on the outer edge")
+                // A pill's ends are half circles, so its bands are not flat at the edge's midpoint (sourceAndActiveAccents... pins them).
+                if (style == TabStripStyle.PILL && (position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT)) return@forEach
+                if (withStripe) {
+                    assertEquals(blue, at(stripeMid, outer = true).toArgb(), "$style on $position: the source stripe stays the outermost band")
+                }
+                // The preview tab is active: where the style marks the active tab with the accent, it is still there on the content side.
+                if (style != TabStripStyle.RAISED && style != TabStripStyle.SEGMENTED) {
+                    assertEquals(
+                        LIGHT_THEME.ac.toArgb(), at(accentMid, outer = false).toArgb(),
+                        "$style on $position: the active accent on the content side is not covered by the group rail",
+                    )
+                }
             }
         }
     }

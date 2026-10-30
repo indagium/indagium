@@ -991,15 +991,22 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
   `browserTabOrderDuringDragVariable` (the dragged centre plus the same quarter-width bias against each other tab's resting centre; equal widths
   give the fixed result) with `tabOffsets` for where every tab sits during the drag.
 - **Tab groups** (`ui/TabGroups.kt`, `ui/TabGroupsUi.kt`). The strip's persisted `TabRef` order is the source for both rendering and reorder commits;
-  groups keep an ordered, contiguous set of log and diagram members, while Tests and capture-launcher tabs stay outside groups. A group header shows
-  its name, member count and color, and collapses or expands its members without changing the active surface. Its context menu edits the name/color,
-  ungroups while preserving order, or closes every member. Tab context menus create a group, move a tab between groups, or remove its membership.
-  The member marker is independent of the source stripe. Grouped overflow keeps group labels and selecting a hidden member reveals it in the strip
-  without changing order or membership; drag-and-drop can add a tab to a group or move a whole group block. Viewport projection reserves room for
-  group headers and overflow controls, including on vertical strips, where entries retain the configured tab height. `tabGroups` and the canonical
-  merged tab order are saved with autosave (`ui/TabGroupsCodec.kt`, `ui/AutosaveCodec.kt`). Each group also persists its `TabGroupTextSize` (SMALL,
-  MEDIUM by default, LARGE) and `TabGroupIcon` (NONE by default, FOLDER, BOOKMARK, BUG, CODE, DEVICE, FLAG, STAR or SEARCH); codec values use stable
-  enum names, while absent, malformed or unknown text-size/icon values restore to their defaults.
+  groups keep an ordered, contiguous set of log and diagram members, while Tests and capture-launcher tabs stay outside groups. A group header is a
+  tinted badge ("▾ name · N", the optional icon only here) that collapses or expands its members without changing the active surface; a collapsed
+  group still shows its active member beside the header and folds fully once another tab is active. The header menu offers Rename…, Colour ▸,
+  Collapse/Expand, Edit group…, Ungroup (order preserved) and Close group; tab menus create a group ("Add to new group" opens the dialog as new, and
+  Cancel removes it), add or move a tab through a "Add to group ▸"/"Move to group ▸" submenu with colour swatches ending in "New group…", or remove
+  its membership. Group colours come from the shared highlighter palette (`HL_COLORS` plus custom colours, via `HighlighterColorPicker`); a new group
+  takes the first palette colour no other group uses and its first tab's file name. Members carry a 3dp rail in the group colour on the tab's outer
+  edge (inside the source stripe when it is shown), so the content-side active accent stays visible; the rail is 55% when idle and solid on the
+  active member or while the group is hovered during a drag, and a hairline follows the last member. A tab drag keeps the strip's layout order and
+  only offsets items; the dragged tab draws over an opaque backdrop and a 2dp accent bar marks the target gap. Grouped overflow keeps group labels and
+  selecting a hidden member reveals it in the strip without changing order or membership; drag-and-drop can add a tab to a group or move a whole
+  group block. Viewport projection reserves room for group headers and overflow controls, including on vertical strips, where entries retain the
+  configured tab height. `tabGroups` and the canonical merged tab order are saved with autosave (`ui/TabGroupsCodec.kt`, `ui/AutosaveCodec.kt`). Each
+  group persists `colorArgb` plus the nearest legacy colour name (so older builds still restore it) and its `TabGroupIcon` (NONE by default, FOLDER,
+  BOOKMARK, BUG, CODE, DEVICE, FLAG, STAR or SEARCH). On restore `colorArgb` wins, then the legacy name; an old `textSize` value is ignored, and
+  absent, malformed or unknown icon values restore to their defaults.
 - **Persistence.** `tabStripStyle`, `tabSizeMode`, `tabLabelMode`, `tabShowTypeBadge`, `tabShowSourceStripe`, `tabCloseOnEvery` and the
   placement fields (`chromeLocked`, `tabStripPosition`, `toolbarPlacement`, `toolbarEdge`, `toolbarOuter`, `toolbarAlign`, `verticalTabBarWidthDp`, `toolbarFallbackPlacement`, used by §6.6) are JSON-only settings
   (`ui/ChromeSettingsJson.kt`, never throws, an unknown or mistyped value keeps the default).

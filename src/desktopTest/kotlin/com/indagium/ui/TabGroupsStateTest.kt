@@ -1,7 +1,14 @@
 package com.indagium.ui
 
+import androidx.compose.ui.graphics.toArgb
 import com.indagium.model.LogFormat
 import com.indagium.utils.ParsedLog
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -13,6 +20,12 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TabGroupsStateTest {
+    private companion object {
+        // Not in any palette: only a colorArgb can carry it.
+        const val CUSTOM_GROUP_COLOR = 0xFF123456.toInt()
+        const val NEAR_LEGACY_BLUE = 0xFF3A80F0.toInt()
+    }
+
     private fun stateFor(
         dir: File,
         restore: Boolean = false,
@@ -48,9 +61,8 @@ class TabGroupsStateTest {
             state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
 
             val id = state.createTabGroup(TabRef.Log("a"))!!
-            assertEquals("Group 1", state.tabGroups.single().name)
-            assertEquals(TabGroupColor.BLUE, state.tabGroups.single().color)
-            assertEquals(TabGroupTextSize.MEDIUM, state.tabGroups.single().textSize)
+            assertEquals("a", state.tabGroups.single().name, "a new group is named after its tab")
+            assertEquals(HL_COLORS.first().toArgb(), state.tabGroups.single().colorArgb)
             assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon)
             state.assignTabToGroup(TabRef.Log("c"), id, before = TabRef.Log("a"))
             state.assignTabToGroup(TabRef.Log("b"), id)
@@ -124,15 +136,13 @@ class TabGroupsStateTest {
             assertEquals(2, state.tabGroups.size)
             val keep = state.tabGroups.single { it.id == "keep" }
             assertEquals("Keep", keep.name)
-            assertEquals(TabGroupColor.PURPLE, keep.color)
+            assertEquals(LegacyTabGroupColor.PURPLE.argb, keep.colorArgb, "an old file's palette name maps to its old colour")
             assertTrue(keep.collapsed)
-            assertEquals(TabGroupTextSize.MEDIUM, keep.textSize)
             assertEquals(TabGroupIcon.NONE, keep.icon)
             assertEquals(listOf(TabRef.Log("log")), keep.members)
             val malformed = state.tabGroups.single { it.id == "malformed" }
-            assertEquals(TabGroupColor.BLUE, malformed.color)
+            assertEquals(LegacyTabGroupColor.BLUE.argb, malformed.colorArgb)
             assertFalse(malformed.collapsed)
-            assertEquals(TabGroupTextSize.MEDIUM, malformed.textSize)
             assertEquals(TabGroupIcon.NONE, malformed.icon)
             assertEquals(listOf(TabRef.Log("other")), malformed.members)
         } finally {
@@ -181,8 +191,7 @@ class TabGroupsStateTest {
             val groupId = state.createTabGroup(TabRef.Log("log"))!!
             val diagramSessionId = state.seq3Sessions.beginEmpty("log")!!
             val savedLibraryId = state.seq3Sessions.sessions.single { it.id == diagramSessionId }.libraryItemId!!
-            state.setTabGroupColor(groupId, TabGroupColor.ORANGE)
-            state.setTabGroupTextSize(groupId, TabGroupTextSize.LARGE)
+            state.setTabGroupColor(groupId, CUSTOM_GROUP_COLOR)
             state.setTabGroupIcon(groupId, TabGroupIcon.DEVICE)
             state.renameTabGroup(groupId, "Investigation")
             state.toggleTabGroupCollapsed(groupId)
@@ -195,8 +204,7 @@ class TabGroupsStateTest {
                 val group = restored.tabGroups.single()
                 assertEquals(groupId, group.id)
                 assertEquals("Investigation", group.name)
-                assertEquals(TabGroupColor.ORANGE, group.color)
-                assertEquals(TabGroupTextSize.LARGE, group.textSize)
+                assertEquals(CUSTOM_GROUP_COLOR, group.colorArgb)
                 assertEquals(TabGroupIcon.DEVICE, group.icon)
                 assertTrue(group.collapsed)
                 assertEquals(
@@ -290,5 +298,132 @@ class TabGroupsStateTest {
         } finally {
             state.close()
         }
+    }
+
+    @Test
+    fun newGroupsTakeTheFirstUnusedPaletteColourAndTheirTabsNameDeduplicated() {
+        val dir = createTempDirectory("tab-groups-defaults").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = listOf(workspace("a"), workspace("b"), workspace("c"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
+            state.tabs = state.tabs.map { it.copy(filename = "logcat.log") }
+
+            val first = state.createTabGroup(TabRef.Log("a"))!!
+            val second = state.createTabGroup(TabRef.Log("b"))!!
+            val third = state.createTabGroup(TabRef.Log("c"))!!
+
+            val byId = state.tabGroups.associateBy { it.id }
+            assertEquals(listOf("logcat.log", "logcat.log 2", "logcat.log 3"), listOf(first, second, third).map { byId.getValue(it).name })
+            assertEquals(
+                HL_COLORS.take(3).map { it.toArgb() },
+                listOf(first, second, third).map { byId.getValue(it).colorArgb },
+                "each group takes the first palette colour no other group uses",
+            )
+
+            // A colour freed by removing a group is the next one handed out again.
+            state.ungroupTabs(second)
+            state.assignTabToGroup(TabRef.Log("b"), third)
+            val reused = state.createTabGroup(TabRef.Log("b"))!!
+            assertEquals(HL_COLORS[1].toArgb(), state.tabGroups.single { it.id == reused }.colorArgb)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun regroupingTheOnlyMemberOfAGroupReusesItsNameAndColour() {
+        val dir = createTempDirectory("tab-groups-regroup").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = listOf(workspace("solo"))
+            state.commitTabOrder(listOf(TabRef.Log("solo")))
+            state.createTabGroup(TabRef.Log("solo"))!!
+            val again = state.createTabGroup(TabRef.Log("solo"))!!
+            val group = state.tabGroups.single()
+            assertEquals(again, group.id)
+            assertEquals("solo", group.name, "the emptied group no longer counts as taken")
+            assertEquals(HL_COLORS.first().toArgb(), group.colorArgb)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun colorArgbRoundTripsAndOlderBuildsStillGetTheNearestPaletteName() {
+        val dir = createTempDirectory("tab-groups-codec").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = listOf(workspace("log"))
+            state.commitTabOrder(listOf(TabRef.Log("log")))
+            val groupId = state.createTabGroup(TabRef.Log("log"))!!
+            state.setTabGroupColor(groupId, NEAR_LEGACY_BLUE)
+
+            val written = Json.parseToJsonElement(state.tabGroupsJson()).jsonObject.getValue("groups").jsonArray.single().jsonObject
+            assertEquals(NEAR_LEGACY_BLUE, written.getValue("colorArgb").jsonPrimitive.int)
+            assertEquals("BLUE", written.getValue("color").jsonPrimitive.contentOrNull, "older builds get the closest palette name")
+            assertFalse("textSize" in written, "the retired text size is no longer written")
+
+            state.restoreTabGroups(state.tabGroupsJson())
+            assertEquals(NEAR_LEGACY_BLUE, state.tabGroups.single().colorArgb)
+            assertEquals(LegacyTabGroupColor.GREEN, LegacyTabGroupColor.nearest(LegacyTabGroupColor.GREEN.argb))
+            assertEquals(LegacyTabGroupColor.RED, LegacyTabGroupColor.nearest(0xFFFF0000.toInt()))
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun colorArgbWinsOverTheLegacyNameAndAnOldTextSizeIsIgnored() {
+        val dir = createTempDirectory("tab-groups-legacy").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = listOf(workspace("a"), workspace("b"), workspace("c"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
+            state.restoreTabGroups(
+                """
+                {"groups":[
+                  {"id":"new","name":"New","color":"GREEN","colorArgb":$CUSTOM_GROUP_COLOR,"collapsed":false,
+                   "members":[{"kind":"L","id":"a"}]},
+                  {"id":"old","name":"Old","color":"ORANGE","textSize":"LARGE","icon":"BUG","collapsed":false,
+                   "members":[{"kind":"L","id":"b"}]},
+                  {"id":"junk","name":"Junk","colorArgb":"red","collapsed":false,"members":[{"kind":"L","id":"c"}]}
+                ]}
+                """.trimIndent(),
+            )
+            val byId = state.tabGroups.associateBy { it.id }
+            assertEquals(CUSTOM_GROUP_COLOR, byId.getValue("new").colorArgb)
+            assertEquals(LegacyTabGroupColor.ORANGE.argb, byId.getValue("old").colorArgb)
+            assertEquals(TabGroupIcon.BUG, byId.getValue("old").icon)
+            assertEquals(LegacyTabGroupColor.BLUE.argb, byId.getValue("junk").colorArgb, "a malformed colorArgb falls back to the default")
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun aCollapsedGroupKeepsItsActiveMemberAndFoldsFullyOnceAnotherTabIsActive() {
+        val order = listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c"), TabRef.Log("d"))
+        val collapsed = TabGroup("g", "G", 0xFF336699.toInt(), collapsed = true, members = listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
+        val expanded = collapsed.copy(collapsed = false)
+
+        fun refs(items: List<TabStripItem>) = items.map { item ->
+            when (item) {
+                is TabStripItem.GroupHeader -> "header"
+                is TabStripItem.Tab -> (item.ref as TabRef.Log).tabId
+            }
+        }
+
+        assertEquals(listOf("header", "b", "d"), refs(projectTabStripItems(order, listOf(collapsed), active = TabRef.Log("b"))))
+        assertEquals(listOf("header", "d"), refs(projectTabStripItems(order, listOf(collapsed), active = TabRef.Log("d"))))
+        assertEquals(listOf("header", "d"), refs(projectTabStripItems(order, listOf(collapsed), active = null)))
+        assertEquals(listOf("header", "a", "b", "c", "d"), refs(projectTabStripItems(order, listOf(expanded), active = TabRef.Log("d"))))
+
+        // The kept member still carries the group: an overflowed header is re-added beside it.
+        val items = projectTabStripItems(order, listOf(collapsed), active = TabRef.Log("b"))
+        val withoutHeader = items.filterNot { it is TabStripItem.GroupHeader }
+        assertEquals(listOf("header", "b", "d"), refs(associateGroupHeaders(withoutHeader, listOf(collapsed))))
+        assertEquals(setOf(TabRef.Log("b")), tabGroupRunEnds(items, listOf(collapsed)), "the lone visible member closes the run")
+        assertEquals(setOf(TabRef.Log("c")), tabGroupRunEnds(projectTabStripItems(order, listOf(expanded)), listOf(expanded)))
     }
 }

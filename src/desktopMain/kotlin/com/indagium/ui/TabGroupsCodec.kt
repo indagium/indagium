@@ -7,7 +7,49 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import kotlin.math.abs
+
+/** The fixed palette older builds stored by name in a group's `color` field. Kept only to read those
+ * files and to write the nearest name back, so an older build still opens a file saved by this one. */
+internal enum class LegacyTabGroupColor(val argb: Int) {
+    BLUE(LEGACY_BLUE),
+    GREEN(LEGACY_GREEN),
+    YELLOW(LEGACY_YELLOW),
+    ORANGE(LEGACY_ORANGE),
+    RED(LEGACY_RED),
+    PURPLE(LEGACY_PURPLE),
+    PINK(LEGACY_PINK),
+    GRAY(LEGACY_GRAY),
+    ;
+
+    companion object {
+        /** The legacy name closest to [argb] by RGB distance. */
+        fun nearest(argb: Int): LegacyTabGroupColor = entries.minBy { distance(it.argb, argb) }
+
+        private fun distance(a: Int, b: Int): Int {
+            fun channel(value: Int, shift: Int) = (value shr shift) and CHANNEL_MASK
+            return listOf(RED_SHIFT, GREEN_SHIFT, BLUE_SHIFT).sumOf { shift ->
+                val delta = channel(a, shift) - channel(b, shift)
+                abs(delta * delta)
+            }
+        }
+    }
+}
+
+private const val LEGACY_BLUE = 0xFF3B82F6.toInt()
+private const val LEGACY_GREEN = 0xFF22A06B.toInt()
+private const val LEGACY_YELLOW = 0xFFE3A008.toInt()
+private const val LEGACY_ORANGE = 0xFFF97316.toInt()
+private const val LEGACY_RED = 0xFFEF4444.toInt()
+private const val LEGACY_PURPLE = 0xFF8B5CF6.toInt()
+private const val LEGACY_PINK = 0xFFEC4899.toInt()
+private const val LEGACY_GRAY = 0xFF8B949E.toInt()
+private const val CHANNEL_MASK = 0xFF
+private const val RED_SHIFT = 16
+private const val GREEN_SHIFT = 8
+private const val BLUE_SHIFT = 0
 
 /** Keyed JSON payload for strip groups. Log ids are stable in their own autosave shells; diagram
  * members use their durable library item id because Seq3Session ids are regenerated on restore. */
@@ -31,10 +73,11 @@ internal fun AppState.tabGroupsJson(): String {
         buildJsonObject {
             put("id", group.id)
             put("name", group.name)
-            put("color", group.color.name)
+            put("colorArgb", group.colorArgb)
+            // Older builds read the palette name and know nothing of colorArgb.
+            put("color", LegacyTabGroupColor.nearest(group.colorArgb).name)
             put("collapsed", group.collapsed)
             put("members", JsonArray(encodedMembers))
-            put("textSize", group.textSize.name)
             put("icon", group.icon.name)
         }
     }
@@ -64,9 +107,10 @@ internal fun AppState.restoreTabGroups(json: String) {
         val id = item.stringValue("id")?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
         if (!seenGroupIds.add(id)) return@mapNotNull null
         val name = item.stringValue("name")?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-        val color = item.enumValueOrDefault("color", TabGroupColor.BLUE)
+        // colorArgb wins; a file from an older build has only the palette name. The old `textSize` is ignored.
+        val colorArgb = item.intValue("colorArgb")
+            ?: item.enumValueOrDefault("color", LegacyTabGroupColor.BLUE).argb
         val collapsed = item.booleanValue("collapsed") ?: false
-        val textSize = item.enumValueOrDefault("textSize", TabGroupTextSize.MEDIUM)
         val icon = item.enumValueOrDefault("icon", TabGroupIcon.NONE)
         val memberElements = item["members"] as? JsonArray ?: return@mapNotNull null
         val members = memberElements.mapNotNull { memberElement ->
@@ -80,7 +124,7 @@ internal fun AppState.restoreTabGroups(json: String) {
             ref.takeIf { seenMembers.add(it) }
         }.distinct()
         members.takeIf { it.isNotEmpty() }?.let {
-            TabGroup(id, name, color, collapsed, it, textSize = textSize, icon = icon)
+            TabGroup(id, name, colorArgb, collapsed, it, icon = icon)
         }
     }
     synchronized(stateLock) {
@@ -94,6 +138,9 @@ private fun JsonObject.stringValue(key: String): String? =
 
 private inline fun <reified E : Enum<E>> JsonObject.enumValueOrDefault(key: String, default: E): E =
     stringValue(key)?.let { value -> enumValues<E>().firstOrNull { it.name == value } } ?: default
+
+private fun JsonObject.intValue(key: String): Int? =
+    (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull?.toInt()
 
 private fun JsonObject.booleanValue(key: String): Boolean? =
     (this[key] as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull

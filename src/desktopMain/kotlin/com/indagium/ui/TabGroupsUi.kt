@@ -1,31 +1,62 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class, androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.indagium.ui
 
-import androidx.compose.foundation.*
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.CreateNewFolder
+import androidx.compose.material.icons.outlined.DriveFileRenameOutline
+import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.RemoveCircleOutline
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.UnfoldLess
+import androidx.compose.material.icons.outlined.UnfoldMore
 import androidx.compose.material3.Icon
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
@@ -37,18 +68,35 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import kotlin.math.roundToInt
 
-internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(String) -> Unit> { {} }
+/** Opens the group editor: the group id, and whether the group was just created (the dialog then reads
+ * "New tab group" and its Cancel removes the group again). */
+internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(String, Boolean) -> Unit> { { _, _ -> } }
 
-private const val TAB_GROUP_HEADER_CHEVRON_FONT_SIZE_SP = 11f
-private const val TAB_GROUP_HEADER_HORIZONTAL_PADDING_DP = 26f
+private const val TAB_GROUP_HEADER_FONT_SIZE_SP = 12f
+private const val TAB_GROUP_HEADER_HORIZONTAL_PADDING_DP = 20f
 private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 180f
+private const val TAB_GROUP_HEADER_MIN_WIDTH_DP = 64f
+private const val TAB_GROUP_CHIP_ICON_DP = 14f
+private const val TAB_GROUP_CHIP_ICON_GAP_DP = 4f
+private const val CHIP_FILL_ALPHA = 0.13f
+private const val CHIP_FILL_HOVER_ALPHA = 0.2f
+private const val CHIP_BORDER_ALPHA = 0.27f
+
+/** How strongly a member tab's group rail shows while the tab is idle; the active tab and a hovered drop target show it solid. */
+internal const val GROUP_RAIL_IDLE_ALPHA = 0.55f
+
+/** A group's colour as a Compose colour. */
+internal val TabGroup.color: Color get() = Color(colorArgb)
+
+/** What a group's chip reads: the chevron, the name and the number of members ("▾ name · 3"). */
+internal fun tabGroupChipLabel(group: TabGroup): String =
+    "${if (group.collapsed) "▸" else "▾"} ${group.name} · ${group.members.size}"
 
 internal sealed interface TabStripItem {
     val key: String
@@ -87,8 +135,12 @@ internal fun tabGroupDropBefore(
     null -> null
 }
 
-/** Group members appear together at their first persisted order position; all other refs keep their order. */
-internal fun projectTabStripItems(order: List<TabRef>, groups: List<TabGroup>): List<TabStripItem> {
+/**
+ * Group members appear together at their first persisted order position; all other refs keep their order. A collapsed group
+ * keeps its [active] member visible after the chip (so the tab being viewed never disappears); once another tab outside the group
+ * is active, the collapsed group folds fully.
+ */
+internal fun projectTabStripItems(order: List<TabRef>, groups: List<TabGroup>, active: TabRef? = null): List<TabStripItem> {
     val liveRefs = order.toSet()
     val byMember = groups.flatMap { group -> group.members.filter { it in liveRefs }.map { it to group } }.toMap()
     val result = mutableListOf<TabStripItem>()
@@ -99,9 +151,8 @@ internal fun projectTabStripItems(order: List<TabRef>, groups: List<TabGroup>): 
             result += TabStripItem.Tab(ref)
         } else if (emittedGroups.add(group.id)) {
             result += TabStripItem.GroupHeader(group)
-            if (!group.collapsed) {
-                order.filter { it in group.members }.forEach { member -> result += TabStripItem.Tab(member) }
-            }
+            order.filter { it in group.members && (!group.collapsed || it == active) }
+                .forEach { member -> result += TabStripItem.Tab(member) }
         }
     }
     return result
@@ -285,13 +336,25 @@ private fun trimViewportToBudget(
     anchorRef: TabRef?,
     widthByKey: Map<String, Float>,
 ) {
+    var lastRemoved: TabRef? = null
     while (viewportExceedsBudget(visible, limit, budget, widthByKey) && visible.hasRemovableTab(anchorRef)) {
         val removed = visible.removeAt(visible.indexOfFirst { it is TabStripItem.Tab && it.ref != anchorRef }) as TabStripItem.Tab
+        lastRemoved = removed.ref
         items.indexOfFirst { it is TabStripItem.Tab && it.ref == removed.ref }
             .takeIf { it >= 0 }?.let(overflowIndexes::add)
         val associated = associateGroupHeaders(visible, groups)
         visible.clear()
         visible.addAll(associated)
+    }
+    // A strip too short for a collapsed group's chip and its active member must not end up empty: the chip stays.
+    if (visible.isEmpty()) {
+        val headerIndex = lastRemoved?.let { ref ->
+            items.indexOfFirst { it is TabStripItem.GroupHeader && ref in it.group.members }
+        }?.takeIf { it >= 0 }
+        if (headerIndex != null) {
+            visible += items[headerIndex]
+            overflowIndexes -= headerIndex
+        }
     }
 }
 
@@ -311,22 +374,14 @@ private fun itemWidth(item: TabStripItem, widthByKey: Map<String, Float>): Float
 private fun List<TabStripItem>.hasRemovableTab(anchorRef: TabRef?): Boolean =
     any { it is TabStripItem.Tab && it.ref != anchorRef }
 
-@Suppress("MagicNumber")
-internal fun TabGroupColor.uiColor(): Color = when (this) {
-    TabGroupColor.BLUE -> Color(0xFF3B82F6)
-    TabGroupColor.GREEN -> Color(0xFF22A06B)
-    TabGroupColor.YELLOW -> Color(0xFFE3A008)
-    TabGroupColor.ORANGE -> Color(0xFFF97316)
-    TabGroupColor.RED -> Color(0xFFEF4444)
-    TabGroupColor.PURPLE -> Color(0xFF8B5CF6)
-    TabGroupColor.PINK -> Color(0xFFEC4899)
-    TabGroupColor.GRAY -> Color(0xFF8B949E)
-}
-
-internal fun TabGroupTextSize.fontSize(): TextUnit = when (this) {
-    TabGroupTextSize.SMALL -> 10.sp
-    TabGroupTextSize.MEDIUM -> 12.sp
-    TabGroupTextSize.LARGE -> 14.sp
+/** The tabs of [items] that end a group's run: the last visible member of each group, which gets the hairline divider after it. */
+internal fun tabGroupRunEnds(items: List<TabStripItem>, groups: List<TabGroup>): Set<TabRef> {
+    val groupOf = groups.flatMap { group -> group.members.map { it to group.id } }.toMap()
+    val tabs = items.filterIsInstance<TabStripItem.Tab>()
+    return tabs.filterIndexed { index, item ->
+        val group = groupOf[item.ref]
+        group != null && groupOf[tabs.getOrNull(index + 1)?.ref] != group
+    }.mapTo(HashSet()) { it.ref }
 }
 
 internal fun TabGroupIcon.imageVector(): ImageVector? = when (this) {
@@ -341,8 +396,9 @@ internal fun TabGroupIcon.imageVector(): ImageVector? = when (this) {
     TabGroupIcon.SEARCH -> Icons.Outlined.Search
 }
 
-internal fun tabGroupIndicatorWidthDp(group: TabGroup): Float =
-    if (group.icon == TabGroupIcon.NONE) 7f else 14f
+/** Width a chip's icon adds (icon plus its gap); none when the group has no icon. */
+internal fun tabGroupChipIconWidthDp(group: TabGroup): Float =
+    if (group.icon == TabGroupIcon.NONE) 0f else TAB_GROUP_CHIP_ICON_DP + TAB_GROUP_CHIP_ICON_GAP_DP
 
 internal fun tabGroupHeaderWidthPx(
     group: TabGroup,
@@ -350,42 +406,45 @@ internal fun tabGroupHeaderWidthPx(
     uiFont: androidx.compose.ui.text.font.FontFamily,
     density: Density,
 ): Float {
-    val label = "${group.name} (${group.members.size})"
     val labelWidth = textMeasurer.measure(
-        AnnotatedString(label),
-        style = TextStyle(fontSize = group.textSize.fontSize(), fontFamily = uiFont, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold),
-    ).size.width.toFloat()
-    val chevron = if (group.collapsed) "▸" else "▾"
-    val chevronWidth = textMeasurer.measure(
-        AnnotatedString(chevron),
-        style = TextStyle(fontSize = TAB_GROUP_HEADER_CHEVRON_FONT_SIZE_SP.sp, fontFamily = MONO),
+        AnnotatedString(tabGroupChipLabel(group)),
+        style = TextStyle(
+            fontSize = TAB_GROUP_HEADER_FONT_SIZE_SP.sp,
+            fontFamily = uiFont,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+        ),
     ).size.width.toFloat()
     val contentPadding = with(density) { TAB_GROUP_HEADER_HORIZONTAL_PADDING_DP.dp.toPx() }
-    val iconWidth = with(density) { tabGroupIndicatorWidthDp(group).dp.toPx() }
-    return (labelWidth + chevronWidth + contentPadding + iconWidth)
-        .coerceIn(with(density) { 64.dp.toPx() }, with(density) { TAB_GROUP_HEADER_MAX_WIDTH_DP.dp.toPx() })
+    val iconWidth = with(density) { tabGroupChipIconWidthDp(group).dp.toPx() }
+    return (labelWidth + contentPadding + iconWidth)
+        .coerceIn(
+            with(density) { TAB_GROUP_HEADER_MIN_WIDTH_DP.dp.toPx() },
+            with(density) { TAB_GROUP_HEADER_MAX_WIDTH_DP.dp.toPx() },
+        )
 }
 
+/**
+ * A group's chip: the app's tinted badge (the group colour at 13% fill and 27% border, full-strength label, small radius) reading
+ * "▾ name · N", with the group's icon when it has one. The whole cell is the click and right-click target.
+ */
 @Composable
 internal fun TabGroupHeader(
     group: TabGroup,
     vertical: Boolean,
-    activeMember: Boolean,
     width: androidx.compose.ui.unit.Dp,
     height: androidx.compose.ui.unit.Dp,
     supporting: Boolean = false,
     onClick: () -> Unit,
     onContextMenu: (IntRect) -> Unit,
 ) {
-    val tc = tc()
-    val color = group.color.uiColor()
+    val color = group.color
     var headerBounds by remember(group.id) { mutableStateOf(IntRect.Zero) }
+    var hovered by remember(group.id) { mutableStateOf(false) }
     val sizeModifier = if (vertical) Modifier.fillMaxWidth().height(height) else Modifier.width(width).height(height)
-    Row(
-        sizeModifier.padding(horizontal = 2.dp, vertical = 1.dp)
-            .clip(RoundedCornerShape(5.dp))
-            .background(if (activeMember) color.copy(alpha = if (tc.p.luminance() > 0.5f) 0.16f else 0.25f) else tc.p2)
-            .border(if (activeMember) 1.dp else 0.5.dp, if (activeMember) color else tc.br, RoundedCornerShape(5.dp))
+    val chipHeight = (height - TAB_GROUP_CHIP_VERTICAL_MARGIN_DP.dp).coerceIn(TAB_GROUP_CHIP_MIN_HEIGHT_DP.dp, TAB_GROUP_CHIP_MAX_HEIGHT_DP.dp)
+    Box(
+        sizeModifier
+            .padding(horizontal = 2.dp, vertical = 1.dp)
             .testTag("tab-group-header-${group.id}${if (supporting) "-support" else ""}")
             .onGloballyPositioned { coordinates ->
                 val bounds = coordinates.boundsInWindow()
@@ -396,6 +455,8 @@ internal fun TabGroupHeader(
                     bounds.bottom.roundToInt(),
                 )
             }
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .pointerInput(group.id) {
                 awaitPointerEventScope {
                     while (true) {
@@ -407,45 +468,144 @@ internal fun TabGroupHeader(
                     }
                 }
             }
-            .clickable(onClick = onClick)
-            .padding(horizontal = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        TabGroupHeaderIcon(group, color, "tab-group-header-icon-${group.id}")
-        AppText(if (group.collapsed) "▸" else "▾", color = color, fontSize = 11.sp, fontFamily = MONO)
-        AppText(
-            "${group.name} (${group.members.size})",
-            color = if (activeMember) tc.tx else tc.ts,
-            fontSize = group.textSize.fontSize(),
-            fontWeight = if (activeMember) androidx.compose.ui.text.font.FontWeight.SemiBold else androidx.compose.ui.text.font.FontWeight.Normal,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
+        Row(
+            Modifier.fillMaxWidth().height(chipHeight)
+                .background(color.copy(alpha = if (hovered) CHIP_FILL_HOVER_ALPHA else CHIP_FILL_ALPHA), CORNER_SM)
+                .border(1.dp, color.copy(alpha = CHIP_BORDER_ALPHA), CORNER_SM)
+                .testTag("tab-group-chip-${group.id}${if (supporting) "-support" else ""}")
+                .padding(horizontal = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(TAB_GROUP_CHIP_ICON_GAP_DP.dp),
+        ) {
+            TabGroupHeaderIcon(group, color, "tab-group-header-icon-${group.id}")
+            AppText(
+                tabGroupChipLabel(group),
+                color = color,
+                fontSize = TAB_GROUP_HEADER_FONT_SIZE_SP.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
 }
 
+private const val TAB_GROUP_CHIP_VERTICAL_MARGIN_DP = 14f
+private const val TAB_GROUP_CHIP_MIN_HEIGHT_DP = 18f
+private const val TAB_GROUP_CHIP_MAX_HEIGHT_DP = 24f
+
+/** The group's icon in [color]; nothing when the group has none (a chip never shows a stand-in dot). */
 @Composable
-internal fun TabGroupHeaderIcon(group: TabGroup, color: Color = group.color.uiColor(), testTagValue: String? = null) {
-    val tagModifier = if (testTagValue == null) Modifier else Modifier.testTag(testTagValue)
-    val icon = group.icon.imageVector()
-    if (icon == null) {
+internal fun TabGroupHeaderIcon(group: TabGroup, color: Color = group.color, testTagValue: String? = null) {
+    val icon = group.icon.imageVector() ?: return
+    Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = color,
+        modifier = Modifier.size(TAB_GROUP_CHIP_ICON_DP.dp).then(if (testTagValue == null) Modifier else Modifier.testTag(testTagValue)),
+    )
+}
+
+/**
+ * The shared highlighter picker (palette, saved custom colours, "Custom color") wired to the app settings the way every other
+ * colour row is. A group's colour is always opaque, so the picker's alpha is dropped.
+ */
+@Composable
+internal fun SettingsColorPicker(
+    state: AppState,
+    color: Color,
+    onColorChange: (Color) -> Unit,
+    pickerOpen: Boolean,
+    onPickerOpenChange: (Boolean) -> Unit,
+    testTagPrefix: String,
+) {
+    val tc = tc()
+    val customColors = remember(state.settings.highlighterCustomColors) {
+        customHighlightColors(state.settings.highlighterCustomColors)
+    }
+    HighlighterColorPicker(
+        color = color,
+        onColorChange = { onColorChange(it.copy(alpha = 1f)) },
+        customColors = customColors,
+        onSaveCustomColor = { saved ->
+            val hex = highlightColorHex(saved)
+            state.updateSettings { settings ->
+                val colors = customHighlightColors(settings.highlighterCustomColors)
+                if (saved !in colors && colors.size < MAX_CUSTOM_HIGHLIGHT_COLORS) {
+                    settings.copy(
+                        highlighterCustomColors = (colors.map(::highlightColorHex) + hex).take(MAX_CUSTOM_HIGHLIGHT_COLORS),
+                    )
+                } else {
+                    settings
+                }
+            }
+        },
+        onDeleteCustomColor = { removed ->
+            state.updateSettings { settings ->
+                settings.copy(highlighterCustomColors = settings.highlighterCustomColors.filterNot { parseHighlightHex(it) == removed })
+            }
+        },
+        paletteColumns = state.settings.highlighterPaletteColumns,
+        onPaletteColumnsChange = { columns ->
+            state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }
+        },
+        pickerOpen = pickerOpen,
+        onPickerOpenChange = onPickerOpenChange,
+        testTagPrefix = testTagPrefix,
+        customColorEditorExpanded = state.settings.highlighterCustomColorEditorExpanded,
+        onCustomColorEditorExpandedChange = { expanded ->
+            state.updateSettings { it.copy(highlighterCustomColorEditorExpanded = expanded) }
+        },
+        swatchBackdrop = tc.p,
+        swatchOutline = tc.br,
+    )
+}
+
+@Composable
+private fun DialogField(label: String, content: @Composable () -> Unit) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        AppText(label, color = tc.ts, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
+        content()
+    }
+}
+
+private val GROUP_ICON_BUTTON_SIZE = 26.dp
+
+@Composable
+private fun GroupIconOption(icon: TabGroupIcon, selected: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    val shape = CORNER_MD
+    TooltipArea(tooltip = { ToolbarTooltip(icon.name.lowercase().replaceFirstChar(Char::uppercase)) }) {
         Box(
-            Modifier.size(7.dp).clip(CircleShape).background(color).then(tagModifier),
-        )
-    } else {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = color,
-            modifier = Modifier.size(14.dp).then(tagModifier),
-        )
+            Modifier.size(GROUP_ICON_BUTTON_SIZE)
+                .background(if (selected) tc.abg else Color.Transparent, shape)
+                .border(1.dp, if (selected) tc.ac else tc.br, shape)
+                .clip(shape)
+                .clickable(onClick = onClick)
+                .testTag("tab-group-icon-${icon.name.lowercase()}"),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon.imageVector() ?: Icons.Outlined.Block,
+                contentDescription = icon.name.lowercase().replaceFirstChar(Char::uppercase),
+                tint = if (selected) tc.ac else tc.ts,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }
 
+/**
+ * Creates (isNew) or edits a group: name, colour from the shared picker, optional icon. A new group reads "New tab group" with a
+ * "Create group" button, and cancelling it (Cancel or Esc) removes the group again; an existing one reads "Edit tab group" / "Save".
+ */
 @Composable
-internal fun TabGroupEditorDialog(state: AppState, groupId: String, onDismiss: () -> Unit) {
+internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boolean = false, onDismiss: () -> Unit) {
     val group = state.tabGroups.firstOrNull { it.id == groupId }
     if (group == null) {
         LaunchedEffect(groupId) { onDismiss() }
@@ -453,115 +613,194 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, onDismiss: (
     }
     var name by remember(group.id) { mutableStateOf(TextFieldValue(group.name, selection = TextRange(0, group.name.length))) }
     var selectedColor by remember(group.id) { mutableStateOf(group.color) }
-    var selectedTextSize by remember(group.id) { mutableStateOf(group.textSize) }
     var selectedIcon by remember(group.id) { mutableStateOf(group.icon) }
+    var pickerOpen by remember(group.id) { mutableStateOf(false) }
     val nameFocus = remember(group.id) { FocusRequester() }
     LaunchedEffect(group.id) { runCatching { nameFocus.requestFocus() } }
     val tc = tc()
+
+    fun cancel() {
+        if (isNew) state.ungroupTabs(groupId)
+        onDismiss()
+    }
+
+    fun save() {
+        state.renameTabGroup(groupId, name.text.trim().ifBlank { group.name })
+        state.setTabGroupColor(groupId, selectedColor.toArgb())
+        state.setTabGroupIcon(groupId, selectedIcon)
+        onDismiss()
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = ::cancel,
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
         Column(
-            Modifier.widthIn(min = 300.dp, max = 380.dp).background(tc.p, RoundedCornerShape(10.dp))
+            Modifier.widthIn(min = 320.dp, max = 380.dp).background(tc.p, RoundedCornerShape(10.dp))
                 .border(1.dp, tc.br, RoundedCornerShape(10.dp)).padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            AppText("Edit tab group", color = tc.tx, fontSize = 16.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-            androidx.compose.material3.OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { AppText("Group name", color = tc.ts, fontSize = 12.sp) },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).testTag("tab-group-name"),
+            AppText(
+                if (isNew) "New tab group" else "Edit tab group",
+                color = tc.tx,
+                fontSize = 16.sp,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                modifier = Modifier.testTag("tab-group-title"),
             )
-            AppText("Color", color = tc.ts, fontSize = 12.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TabGroupColor.entries.forEach { color ->
-                    val selected = selectedColor == color
-                    Box(
-                        Modifier.size(29.dp).clip(CircleShape).background(color.uiColor())
-                            .then(if (selected) Modifier.border(3.dp, tc.tx, CircleShape) else Modifier)
-                            .testTag("tab-group-color-${color.name.lowercase()}")
-                            .clickable { selectedColor = color },
+            DialogField("Name") {
+                InlineField(
+                    value = name,
+                    onValue = { name = it },
+                    modifier = Modifier.fillMaxWidth().focusRequester(nameFocus).testTag("tab-group-name"),
+                    onSubmit = ::save,
+                    onCancel = ::cancel,
+                )
+            }
+            DialogField("Colour") {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SettingsColorPicker(
+                        state = state,
+                        color = selectedColor,
+                        onColorChange = { selectedColor = it },
+                        pickerOpen = pickerOpen,
+                        onPickerOpenChange = { pickerOpen = it },
+                        testTagPrefix = "tab-group-color",
+                    )
+                    AppText(
+                        seq3ArtifactHexLabel(selectedColor),
+                        color = tc.td,
+                        fontSize = 11.sp,
+                        fontFamily = MONO,
+                        modifier = Modifier.testTag("tab-group-color-readout"),
                     )
                 }
             }
-            AppText("Text size", color = tc.ts, fontSize = 12.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TabGroupTextSize.entries.forEach { size ->
-                    val selected = selectedTextSize == size
-                    Box(
-                        Modifier.weight(1f).height(32.dp).clip(RoundedCornerShape(6.dp))
-                            .background(if (selected) selectedColor.uiColor().copy(alpha = 0.16f) else tc.p2)
-                            .border(1.dp, if (selected) selectedColor.uiColor() else tc.br, RoundedCornerShape(6.dp))
-                            .testTag("tab-group-text-size-${size.name.lowercase()}")
-                            .clickable { selectedTextSize = size },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        AppText(
-                            "${size.name.lowercase().replaceFirstChar(Char::uppercase)} (${size.fontSize().value.toInt()})",
-                            color = tc.tx,
-                            fontSize = 10.sp,
-                        )
+            DialogField("Icon (optional)") {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TabGroupIcon.entries.forEach { icon ->
+                        GroupIconOption(icon, selected = selectedIcon == icon) { selectedIcon = icon }
                     }
                 }
             }
-            AppText("Icon", color = tc.ts, fontSize = 12.sp)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TabGroupIcon.entries.forEach { icon ->
-                    val selected = selectedIcon == icon
-                    Box(
-                        Modifier.size(28.dp).clip(CircleShape)
-                            .background(if (selected) selectedColor.uiColor().copy(alpha = 0.16f) else tc.p2)
-                            .border(1.dp, if (selected) selectedColor.uiColor() else tc.br, CircleShape)
-                            .testTag("tab-group-icon-${icon.name.lowercase()}")
-                            .clickable { selectedIcon = icon },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        TabGroupHeaderIcon(group.copy(icon = icon), selectedColor.uiColor())
-                    }
+            Row(
+                Modifier.fillMaxWidth().padding(top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.testTag("tab-group-save")) {
+                    DialogActionButton(if (isNew) "Create group" else "Save", active = true, onClick = ::save)
                 }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-                ToolbarBtn("Cancel", active = false) { onDismiss() }
-                Spacer(Modifier.width(8.dp))
-                ToolbarBtn("Save", active = true, modifier = Modifier.testTag("tab-group-save")) {
-                    state.renameTabGroup(groupId, name.text.trim().ifBlank { group.name })
-                    state.setTabGroupColor(groupId, selectedColor)
-                    state.setTabGroupTextSize(groupId, selectedTextSize)
-                    state.setTabGroupIcon(groupId, selectedIcon)
-                    onDismiss()
+                Box(Modifier.testTag("tab-group-cancel")) {
+                    DialogActionButton("Cancel", active = false, onClick = ::cancel)
                 }
             }
         }
     }
 }
 
+/** The "Colour ▸" row of the chip menu: a swatch that opens the shared picker and recolours the group as you pick. */
+@Composable
+private fun TabGroupMenuColorRow(state: AppState, group: TabGroup, onDone: () -> Unit) {
+    val tc = tc()
+    var pickerOpen by remember(group.id) { mutableStateOf(false) }
+    HoverBox(
+        modifier = Modifier.fillMaxWidth().testTag("tab-group-menu-colour"),
+        onClick = { pickerOpen = true },
+    ) {
+        Row(Modifier.fillMaxWidth().height(32.dp).padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Palette, contentDescription = null, modifier = Modifier.size(16.dp), tint = tc.td.copy(alpha = 0.65f))
+            }
+            Spacer(Modifier.width(8.dp))
+            AppText("Colour", color = tc.tx, fontSize = 12.sp, modifier = Modifier.weight(1f))
+            SettingsColorPicker(
+                state = state,
+                color = group.color,
+                onColorChange = { state.setTabGroupColor(group.id, it.toArgb()) },
+                pickerOpen = pickerOpen,
+                onPickerOpenChange = { open ->
+                    pickerOpen = open
+                    if (!open) onDone()
+                },
+                testTagPrefix = "tab-group-menu-color",
+            )
+            AppText("▸", color = tc.td.copy(alpha = 0.65f), fontSize = 10.sp)
+        }
+    }
+}
+
+/**
+ * The chip's right-click menu: Rename…, Colour ▸, Collapse / Expand, then Edit group…, Ungroup and Close group.
+ * [onEdit] opens the editor for the group (never as a new one); every action ends in [onDismiss].
+ */
+@Composable
+internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () -> Unit, onEdit: (String, Boolean) -> Unit) {
+    val tc = tc()
+    Column(
+        Modifier.width(200.dp).background(tc.p, RoundedCornerShape(7.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(7.dp)).testTag("tab-group-context-menu")
+            .padding(vertical = 4.dp),
+    ) {
+        CtxItem(icon = Icons.Outlined.DriveFileRenameOutline, label = "Rename…", tag = "tab-group-menu-rename") {
+            onEdit(group.id, false)
+            onDismiss()
+        }
+        TabGroupMenuColorRow(state, group, onDone = onDismiss)
+        CtxItem(
+            icon = if (group.collapsed) Icons.Outlined.UnfoldMore else Icons.Outlined.UnfoldLess,
+            label = if (group.collapsed) "Expand" else "Collapse",
+            tag = "tab-group-menu-toggle",
+        ) {
+            state.toggleTabGroupCollapsed(group.id)
+            onDismiss()
+        }
+        CtxDivider()
+        CtxItem(icon = Icons.Outlined.Edit, label = "Edit group…", tag = "tab-group-menu-edit") {
+            onEdit(group.id, false)
+            onDismiss()
+        }
+        CtxItem(icon = Icons.Outlined.Block, label = "Ungroup", tag = "tab-group-menu-ungroup") {
+            state.ungroupTabs(group.id)
+            onDismiss()
+        }
+        CtxItem(icon = Icons.Outlined.Close, label = "Close group", tag = "tab-group-menu-close") {
+            state.closeTabGroup(group.id)
+            onDismiss()
+        }
+    }
+}
+
+/**
+ * The group entries of a tab's context menu: "Add to new group", "Add to group ▸" / "Move to group ▸" (the other groups, each with
+ * its colour, ending in "New group…") and "Remove from group". A new group opens the editor with [onEdit]'s isNew set.
+ */
 @Composable
 internal fun TabGroupContextActions(
     state: AppState,
     ref: TabRef,
     onDismiss: () -> Unit,
-    onEdit: (String) -> Unit,
+    onEdit: (String, Boolean) -> Unit,
 ) {
     val groups = state.tabGroups
     val current = state.tabGroupOf(ref)
     if (ref is TabRef.Log && state.tab(ref.tabId)?.isCaptureLauncher == true) return
-    CtxItem(icon = Icons.Outlined.CreateNewFolder, label = "Add to new group") {
-        state.createTabGroup(ref)?.let(onEdit)
+
+    fun newGroup() {
+        state.createTabGroup(ref)?.let { onEdit(it, true) }
         onDismiss()
     }
+    CtxItem(icon = Icons.Outlined.CreateNewFolder, label = "Add to new group") { newGroup() }
     if (groups.isNotEmpty()) {
         CtxItemWithSubmenu(
             icon = Icons.Outlined.FolderOpen,
-            label = "Move to group",
+            label = if (current == null) "Add to group" else "Move to group",
             submenu = groups.filterNot { it.id == current?.id }.map { group ->
-                CtxSubmenuOption("${group.name} (${group.members.size})") {
+                CtxSubmenuOption("${group.name} (${group.members.size})", swatch = group.color) {
                     state.assignTabToGroup(ref, group.id)
                     onDismiss()
                 }
-            }.ifEmpty { listOf(CtxSubmenuOption("No other groups", enabled = false) {}) },
+            } + CtxSubmenuOption("New group…") { newGroup() },
+            triggerTag = "tab-group-move-trigger",
             onClick = {},
         )
     }

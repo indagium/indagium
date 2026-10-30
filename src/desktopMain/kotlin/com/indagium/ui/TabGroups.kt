@@ -1,25 +1,7 @@
 package com.indagium.ui
 
+import androidx.compose.ui.graphics.toArgb
 import java.util.UUID
-
-/** The persisted palette used by tab groups. */
-internal enum class TabGroupColor {
-    BLUE,
-    GREEN,
-    YELLOW,
-    ORANGE,
-    RED,
-    PURPLE,
-    PINK,
-    GRAY,
-}
-
-/** Font size options for a group header. */
-internal enum class TabGroupTextSize {
-    SMALL,
-    MEDIUM,
-    LARGE,
-}
 
 /** Optional semantic icon shown in a group header. */
 internal enum class TabGroupIcon {
@@ -38,12 +20,29 @@ internal enum class TabGroupIcon {
 internal data class TabGroup(
     val id: String,
     val name: String,
-    val color: TabGroupColor,
+    /** The group's colour as packed ARGB: any colour of the app's shared picker, not a fixed palette. */
+    val colorArgb: Int,
     val collapsed: Boolean,
     val members: List<TabRef>,
-    val textSize: TabGroupTextSize = TabGroupTextSize.MEDIUM,
     val icon: TabGroupIcon = TabGroupIcon.NONE,
 )
+
+/** The first colour of the shared highlighter palette that no group in [groups] uses; the palette is
+ * reused from its start once every entry is taken. */
+internal fun defaultTabGroupColorArgb(groups: List<TabGroup>): Int {
+    val used = groups.mapTo(HashSet()) { it.colorArgb }
+    return HL_COLORS.firstOrNull { it.toArgb() !in used }?.toArgb()
+        ?: HL_COLORS[groups.size % HL_COLORS.size].toArgb()
+}
+
+/** [base] when no name in [taken] equals it, else "[base] 2", "[base] 3", ... the first free one. */
+internal fun uniqueTabGroupName(base: String, taken: Collection<String>): String {
+    val clean = base.trim().ifEmpty { DEFAULT_TAB_GROUP_NAME }
+    if (clean !in taken) return clean
+    return generateSequence(2) { it + 1 }.map { "$clean $it" }.first { it !in taken }
+}
+
+private const val DEFAULT_TAB_GROUP_NAME = "Group"
 
 /** A group id captured when an open operation begins. It intentionally does not keep the group
  * alive: if the user removes it before a background open finishes, publication stays ungrouped. */
@@ -134,6 +133,13 @@ private fun AppState.isLiveGroupableRef(ref: TabRef): Boolean = when (ref) {
     TabRef.Tests -> false
 }
 
+/** A new group's default name: the tab's short display label (the file name, or the diagram's title). */
+private fun AppState.defaultTabGroupName(ref: TabRef): String = when (ref) {
+    is TabRef.Log -> tabs.firstOrNull { it.id == ref.tabId }?.filename
+    is TabRef.Diagram -> seq3Sessions.sessions.firstOrNull { it.id == ref.sessionId }?.document?.title
+    TabRef.Tests -> null
+}.orEmpty()
+
 /** Creates a one-member group. Home/capture-launcher and Tests tabs are deliberately not groupable. */
 internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateLock) {
     if (!isLiveGroupableRef(ref)) return@synchronized null
@@ -142,12 +148,11 @@ internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateL
         val members = existing.members.filterNot { it == ref }
         existing.takeIf { members.isNotEmpty() }?.copy(members = members)
     }
-    val usedNames = tabGroups.map { it.name }.toSet()
-    val number = generateSequence(1) { it + 1 }.first { "Group $it" !in usedNames }
+    // The groups the tab leaves behind (an emptied one disappears) do not count as taken.
     val group = TabGroup(
         id = UUID.randomUUID().toString(),
-        name = "Group $number",
-        color = TabGroupColor.BLUE,
+        name = uniqueTabGroupName(defaultTabGroupName(ref), groupsWithoutRef.map { it.name }),
+        colorArgb = defaultTabGroupColorArgb(groupsWithoutRef),
         collapsed = false,
         members = listOf(ref),
     )
@@ -216,12 +221,8 @@ internal fun AppState.renameTabGroup(id: String, name: String) = synchronized(st
     tabGroups = tabGroups.map { if (it.id == id) it.copy(name = cleaned) else it }
 }
 
-internal fun AppState.setTabGroupColor(id: String, color: TabGroupColor) = synchronized(stateLock) {
-    tabGroups = tabGroups.map { if (it.id == id) it.copy(color = color) else it }
-}
-
-internal fun AppState.setTabGroupTextSize(id: String, size: TabGroupTextSize) = synchronized(stateLock) {
-    tabGroups = tabGroups.map { if (it.id == id) it.copy(textSize = size) else it }
+internal fun AppState.setTabGroupColor(id: String, colorArgb: Int) = synchronized(stateLock) {
+    tabGroups = tabGroups.map { if (it.id == id) it.copy(colorArgb = colorArgb) else it }
 }
 
 internal fun AppState.setTabGroupIcon(id: String, icon: TabGroupIcon) = synchronized(stateLock) {

@@ -9,6 +9,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -78,6 +79,8 @@ private val SEGMENT_RADIUS = 6.dp
 private val STRIPE_HEIGHT = 3.dp
 private val ACCENT_UNDERLINE = 2.dp
 private val SEGMENT_DOT = 5.dp
+private val GROUP_RAIL = 3.dp
+private val GROUP_DIVIDER = 1.dp
 private val CLOSE_SLOT = 24.dp
 private const val PILL_CORNER_PERCENT = 50
 private const val QUARTER_CIRCLE_CUBIC = 0.55228475f
@@ -380,7 +383,6 @@ internal fun TabShell(
     showClose: Boolean,
     dragging: Boolean = false,
     leading: (@Composable () -> Unit)? = null,
-    groupIndicator: (@Composable () -> Unit)? = null,
     onClick: () -> Unit,
     onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
@@ -399,74 +401,83 @@ internal fun TabShell(
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc)
     Box(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
-                .padding(metrics.inset)
-                .testTag("tab-$pointerKey")
-                .tabChrome(style, isActive, hov, dragging, tc, position)
-                // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
-                // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.
-                .then(if (shape == RectangleShape) Modifier else Modifier.clip(shape))
-                .onGloballyPositioned { rowRoot = it.positionInRoot() }
-                .onPointerEvent(PointerEventType.Enter) { hov = true }
-                .onPointerEvent(PointerEventType.Exit) { hov = false }
-                .pointerInput(pointerKey) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val ev = awaitPointerEvent(PointerEventPass.Initial)
-                            if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
-                                val ch = ev.changes.firstOrNull() ?: continue
-                                ch.consume()
-                                onCtxMenu((rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density)
+        // The tab itself and what is drawn over it (group rail, divider) share this box, so the overlays match the tab, not the cell.
+        Box(Modifier.fillMaxWidth()) {
+            Row(
+                Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
+                    .padding(metrics.inset)
+                    .testTag("tab-$pointerKey")
+                    .tabChrome(style, isActive, hov, dragging, tc, position)
+                    // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
+                    // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.
+                    .then(if (shape == RectangleShape) Modifier else Modifier.clip(shape))
+                    .onGloballyPositioned { rowRoot = it.positionInRoot() }
+                    .onPointerEvent(PointerEventType.Enter) { hov = true }
+                    .onPointerEvent(PointerEventType.Exit) { hov = false }
+                    .pointerInput(pointerKey) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val ev = awaitPointerEvent(PointerEventPass.Initial)
+                                if (ev.type == PointerEventType.Press && ev.buttons.isSecondaryPressed) {
+                                    val ch = ev.changes.firstOrNull() ?: continue
+                                    ch.consume()
+                                    onCtxMenu((rowRoot.x + ch.position.x) / density, (rowRoot.y + ch.position.y) / density)
+                                }
                             }
                         }
                     }
+                    .clickable(onClick = onClick)
+                    .then(
+                        if (drawSourceContour) {
+                            Modifier.testTag("tab-stripe-$pointerKey")
+                                .drawWithContent {
+                                    drawContent()
+                                    drawEdgeContour(position, STRIPE_HEIGHT.toPx(), tabEdgeRadius(style, position, position), sourceColor)
+                                }
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .padding(start = metrics.padStart, end = metrics.padEnd),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(metrics.gap),
+            ) {
+                if (appearance.closeButtonPosition == TabCloseButtonPosition.LEFT) {
+                    TabCloseSlot(
+                        pointerKey = pointerKey,
+                        showClose = showClose,
+                        visible = appearance.closeAlways || lit || hov,
+                        style = style,
+                        position = position,
+                        onClose = onClose,
+                    )
                 }
-                .clickable(onClick = onClick)
-                .then(
-                    if (drawSourceContour) {
-                        Modifier.testTag("tab-stripe-$pointerKey")
-                            .drawWithContent {
-                                drawContent()
-                                drawEdgeContour(position, STRIPE_HEIGHT.toPx(), tabEdgeRadius(style, position, position), sourceColor)
-                            }
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(start = metrics.padStart, end = metrics.padEnd),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(metrics.gap),
-        ) {
-            if (appearance.closeButtonPosition == TabCloseButtonPosition.LEFT) {
-                TabCloseSlot(
-                    pointerKey = pointerKey,
-                    showClose = showClose,
-                    visible = appearance.closeAlways || lit || hov,
-                    style = style,
-                    position = position,
-                    onClose = onClose,
-                )
+                leading?.invoke()
+                if (style == TabStripStyle.SEGMENTED && isActive) {
+                    Box(Modifier.testTag("tab-dot-$pointerKey").size(SEGMENT_DOT).background(tc.ac, CircleShape))
+                }
+                if (appearance.showBadge) TabBadge(tabKindBadge(appearance.kind), "tab-badge-$pointerKey")
+                TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f).testTag("tab-label-$pointerKey")) {
+                    TabLabelText(label, appearance.secondLine, labelStyle)
+                }
+                if (appearance.closeButtonPosition == TabCloseButtonPosition.RIGHT) {
+                    TabCloseSlot(
+                        pointerKey = pointerKey,
+                        showClose = showClose,
+                        visible = appearance.closeAlways || lit || hov,
+                        style = style,
+                        position = position,
+                        onClose = onClose,
+                    )
+                }
             }
-            leading?.invoke()
-            groupIndicator?.invoke()
-            if (style == TabStripStyle.SEGMENTED && isActive) {
-                Box(Modifier.testTag("tab-dot-$pointerKey").size(SEGMENT_DOT).background(tc.ac, CircleShape))
-            }
-            if (appearance.showBadge) TabBadge(tabKindBadge(appearance.kind), "tab-badge-$pointerKey")
-            TooltipArea(tooltip = { TabTooltipBody(tooltip) }, modifier = Modifier.weight(1f).testTag("tab-label-$pointerKey")) {
-                TabLabelText(label, appearance.secondLine, labelStyle)
-            }
-            if (appearance.closeButtonPosition == TabCloseButtonPosition.RIGHT) {
-                TabCloseSlot(
-                    pointerKey = pointerKey,
-                    showClose = showClose,
-                    visible = appearance.closeAlways || lit || hov,
-                    style = style,
-                    position = position,
-                    onClose = onClose,
+            appearance.groupColor?.let { groupColor ->
+                TabGroupRail(
+                    pointerKey, style, position, metrics, groupColor.copy(alpha = appearance.groupRailAlpha),
+                    stripe = sourceColor.takeIf { appearance.showStripe },
                 )
             }
+            if (appearance.groupRunEnd) TabGroupDivider(pointerKey, position, tc.br)
         }
         if (appearance.showStripe && shape == RectangleShape) {
             TabSourceStripe(
@@ -484,6 +495,47 @@ internal fun TabShell(
             )
         }
     }
+}
+
+/**
+ * A member's group rail: [GROUP_RAIL] thick, in the group colour, along the tab's OUTER edge (the one facing away from the content), so
+ * it never covers the active accent on the content side. It is drawn over the tab through the same contour as that accent and the
+ * source stripe, so rounded styles bend it round their corners and every style on every strip edge keeps it inside the tab. When the
+ * source stripe is shown ([stripe]) it stays the outermost band and the rail sits just inside it.
+ */
+@Composable
+private fun BoxScope.TabGroupRail(
+    pointerKey: Any,
+    style: TabStripStyle,
+    position: TabStripPosition,
+    metrics: TabMetrics,
+    color: Color,
+    stripe: Color?,
+) {
+    Box(
+        Modifier.matchParentSize().padding(metrics.inset).testTag("tab-group-rail-$pointerKey").drawBehind {
+            val radius = tabEdgeRadius(style, position, position)
+            val stripeThickness = if (stripe != null) STRIPE_HEIGHT.toPx() else 0f
+            drawEdgeContour(position, stripeThickness + GROUP_RAIL.toPx(), radius, color)
+            if (stripe != null) drawEdgeContour(position, stripeThickness, radius, stripe)
+        },
+    )
+}
+
+/** The hairline after the last member of a group: across the end of a horizontal strip's tab, under a vertical strip's. */
+@Composable
+private fun BoxScope.TabGroupDivider(pointerKey: Any, position: TabStripPosition, color: Color) {
+    val verticalStrip = position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT
+    Box(
+        Modifier.matchParentSize().testTag("tab-group-divider-$pointerKey").drawBehind {
+            val thickness = GROUP_DIVIDER.toPx()
+            if (verticalStrip) {
+                drawRect(color, Offset(0f, size.height - thickness), Size(size.width, thickness))
+            } else {
+                drawRect(color, Offset(size.width - thickness, 0f), Size(thickness, size.height))
+            }
+        },
+    )
 }
 
 /** The close hit target and its hover-only placeholder share one slot so the label never shifts. */
@@ -575,7 +627,6 @@ internal fun TabItem(
     dragging: Boolean = false, onClick: () -> Unit, onClose: () -> Unit,
     onCtxMenu: (Float, Float) -> Unit = { _, _ -> },
     appearance: TabAppearance = TabAppearance.Default,
-    groupIndicator: (@Composable () -> Unit)? = null,
 ) {
     val tc = tc()
     TabShell(
@@ -610,6 +661,5 @@ internal fun TabItem(
         onClose = onClose,
         onCtxMenu = onCtxMenu,
         appearance = appearance,
-        groupIndicator = groupIndicator,
     )
 }

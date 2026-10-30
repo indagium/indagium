@@ -178,8 +178,12 @@ internal data class TabAppearance(
     val tailing: Boolean = false,
     val position: TabStripPosition = TabStripPosition.TOP,
     val closeButtonPosition: TabCloseButtonPosition = TabCloseButtonPosition.RIGHT,
-    /** Extra content width for a strip-owned group dot or icon shown before the label. */
-    val groupIndicatorWidthDp: Float = 0f,
+    /** The colour of the group this tab belongs to: it draws a rail in it on the edge facing the content. Null for an ungrouped tab. */
+    val groupColor: Color? = null,
+    /** How strongly the group rail is drawn (full while the tab is active or a dragged tab hovers its group). */
+    val groupRailAlpha: Float = 1f,
+    /** True for the last visible member of a group, which gets a hairline divider after it. */
+    val groupRunEnd: Boolean = false,
 ) {
     companion object {
         val Default = TabAppearance()
@@ -236,9 +240,6 @@ internal fun tabFitContentDp(label: String, appearance: TabAppearance): Float {
     var width = TAB_PADDING_DP + longest * charDp + CLOSE_BUTTON_DP + TAB_GAP_DP
     if (appearance.showBadge) width += BADGE_DP + TAB_GAP_DP
     if (appearance.tailing) width += DOT_DP + TAB_GAP_DP
-    if (appearance.groupIndicatorWidthDp > 0f) {
-        width += appearance.groupIndicatorWidthDp + TAB_GAP_DP
-    }
     if (appearance.style == TabStripStyle.SEGMENTED) width += SEGMENT_DOT_DP
     return width
 }
