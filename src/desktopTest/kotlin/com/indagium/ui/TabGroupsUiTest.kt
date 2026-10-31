@@ -173,6 +173,21 @@ class TabGroupsUiTest {
         // Every line holds exactly nine icons: the icons of one line share their top edge, and each line is full.
         val rows = TabGroupIcon.entries.groupBy { rule.onNodeWithTag("tab-group-icon-${it.name.lowercase()}").getBoundsInRoot().top }
         assertEquals(listOf(9, 9, 9), rows.toSortedMap().values.map { it.size }, "the picker lays its icons out in rows of nine")
+        // Each row spans the whole field width (at least as wide as the name field's text area) and its icons run from
+        // its left edge to its right edge, so no gap is left at the dialog's right edge.
+        val nameText = rule.onNodeWithTag("tab-group-name").getBoundsInRoot()
+        for (rowIndex in 0..2) {
+            val row = rule.onNodeWithTag("tab-group-icon-row-$rowIndex").getBoundsInRoot()
+            val line = TabGroupIcon.entries.drop(rowIndex * 9).take(9)
+            val first = rule.onNodeWithTag("tab-group-icon-${line.first().name.lowercase()}").getBoundsInRoot()
+            val last = rule.onNodeWithTag("tab-group-icon-${line.last().name.lowercase()}").getBoundsInRoot()
+            assertTrue(row.width >= nameText.width, "row ${rowIndex + 1} spans the field: ${row.width} vs ${nameText.width}")
+            assertTrue(kotlin.math.abs((first.left - row.left).value) <= 1f, "row ${rowIndex + 1} starts at its left edge")
+            assertTrue(
+                kotlin.math.abs((last.right - row.right).value) <= 1f,
+                "row ${rowIndex + 1} ends at its right edge with no gap: icon ${last.right} row ${row.right}",
+            )
+        }
         assertEquals(TabGroupIcon.entries.chunked(9), rows.toSortedMap().values.toList(), "in declaration order, nine to a row")
         rule.onNodeWithText("New tab group").assertExists()
         rule.onNodeWithText("Create group").assertExists()

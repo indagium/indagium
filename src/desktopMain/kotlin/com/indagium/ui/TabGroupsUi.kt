@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -716,10 +717,14 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
                 }
             }
             DialogField("Icon (optional)") {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Rows of nine: every icon shows at once, none sits behind a scroll.
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Rows of nine: every icon shows at once, none sits behind a scroll. Each row spans the whole field
+                    // width so the grid ends at the dialog's right edge instead of leaving a gap there.
                     tabGroupIconRows().forEachIndexed { index, rowIcons ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.testTag("tab-group-icon-row-$index")) {
+                        Row(
+                            Modifier.fillMaxWidth().testTag("tab-group-icon-row-$index"),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
                             rowIcons.forEach { icon ->
                                 GroupIconOption(icon, selected = selectedIcon == icon) { selectedIcon = icon }
                             }
@@ -730,7 +735,8 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
             CheckRow(
                 checked = tintMembers,
                 onToggle = { tintMembers = !tintMembers },
-                modifier = Modifier.testTag("tab-group-tint-members"),
+                // CheckRow insets itself by 12 dp for menus; shift it back so the box lines up with the fields above.
+                modifier = Modifier.offset(x = (-12).dp).testTag("tab-group-tint-members"),
             ) {
                 AppText("Tint tabs in this group", color = tc.tx, fontSize = 12.sp)
             }
