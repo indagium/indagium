@@ -121,7 +121,7 @@ import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
-import com.indagium.diagram3.fragmentContainsRow
+import com.indagium.diagram3.fragmentContainsDrawnRow
 import com.indagium.diagram3.seq3ActivationSpans
 import com.indagium.diagram3.seq3ArrowStyle
 import com.indagium.diagram3.seq3DrawnRowRefs
@@ -1380,8 +1380,9 @@ internal fun seq3ReorderDropIndicator(
         previous != null -> previous.second.y + SEQ3_DROP_LINE_EDGE_GAP
         else -> return null
     }.coerceAtLeast(0.0)
+    val messagesById = document.messages.associateBy { it.id }
     val innermost = seq3DropInsideFragments(document, previous?.first, next?.first).minWithOrNull(
-        compareBy<Seq3Fragment> { fragment -> targets.count { fragmentContainsRow(fragment, it.first) } }
+        compareBy<Seq3Fragment> { fragment -> targets.count { fragmentContainsDrawnRow(fragment, it.first, messagesById) } }
             .thenByDescending { fragment -> document.fragments.indexOf(fragment) },
     )
     val movesAll = if (preview.rowRef.occurrenceEntryId == null) {

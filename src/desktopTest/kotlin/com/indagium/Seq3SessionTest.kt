@@ -34,8 +34,13 @@ import com.indagium.ui.Seq3Session
 import com.indagium.ui.Seq3ZoomMode
 import com.indagium.ui.defaultSeq3Title
 import com.indagium.ui.mkTab
+import com.indagium.ui.seq3ViewToken
 import com.indagium.utils.computeLogFingerprint
 import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -66,6 +71,21 @@ class Seq3SessionTest {
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), "condition did not become true within ${timeoutMs}ms")
     }
+
+    private fun gatedOrder(ids: List<String>, snapshotted: CountDownLatch, release: CountDownLatch): List<String> =
+        object : AbstractList<String>() {
+            override val size: Int get() = ids.size
+            private var held = false
+
+            override fun get(index: Int): String {
+                if (!held) {
+                    held = true
+                    snapshotted.countDown()
+                    check(release.await(5, TimeUnit.SECONDS)) { "test did not release the reorder gate" }
+                }
+                return ids[index]
+            }
+        }
 
     // Same-thread (pid=7, tid=11), two-tag fixture: "Producer"/"Consumer" close enough in time for
     // Seq3Generator's thread-handoff inference to link them — mirrors Seq3GeneratorTest's own
@@ -341,6 +361,178 @@ class Seq3SessionTest {
         assertEquals(listOf(first), state.seq3Sessions.sessions.map { it.id })
         assertEquals(first, state.seq3Sessions.activeSessionId)
         assertEquals(ActiveSurface.Diagram3(first), state.activeSurface)
+    }
+
+    @Test
+    fun editWaitsForReorderSnapshotAndReorderingCannotReplaceItsDocumentOrUndoStack() {
+        val root = createTempDirectory("seq3-session-rmw").toFile()
+        val tab = mkTab("log", "sample.log", emptyList())
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        )
+        try {
+            state.tabs = listOf(tab)
+            state.activateTab(tab.id)
+            val first = state.seq3Sessions.beginEmpty(tab.id)!!
+            val second = state.seq3Sessions.beginEmpty(tab.id)!!
+            val snapshotTaken = CountDownLatch(1)
+            val releaseReorder = CountDownLatch(1)
+            val editStarted = CountDownLatch(1)
+            val editCompleted = CountDownLatch(1)
+            val reorder = CompletableFuture.runAsync {
+                state.seq3Sessions.reorderSessions(gatedOrder(listOf(second, first), snapshotTaken, releaseReorder))
+            }
+            lateinit var edit: CompletableFuture<Void>
+            val editCompletedBeforeRelease = try {
+                assertTrue(snapshotTaken.await(2, TimeUnit.SECONDS), "the reorder has already snapshotted both sessions")
+                edit = CompletableFuture.runAsync {
+                    editStarted.countDown()
+                    check(state.seq3Sessions.applyCommand(first, Seq3Command.SetTitle("edited")))
+                    editCompleted.countDown()
+                }
+                assertTrue(editStarted.await(2, TimeUnit.SECONDS))
+                editCompleted.await(150, TimeUnit.MILLISECONDS)
+            } finally {
+                releaseReorder.countDown()
+            }
+            assertFalse(editCompletedBeforeRelease, "the edit waits for stateLock while reorder owns its snapshot")
+            reorder.get(5, TimeUnit.SECONDS)
+            edit.get(5, TimeUnit.SECONDS)
+
+            assertEquals(setOf(first, second), state.seq3Sessions.sessions.map { it.id }.toSet())
+            assertEquals("edited", state.seq3Sessions.sessions.single { it.id == first }.document.title)
+            assertEquals(1, state.seq3Sessions.sessions.single { it.id == first }.undoStack.size, "reorder must not replace the edited undo stack")
+        } finally {
+            state.seq3Sessions.sessions.toList().forEach { state.seq3Sessions.close(it.id) }
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aConcurrentReorderCannotLoseAnOpenSessionOrResurrectAClosedOne() {
+        val root = createTempDirectory("seq3-session-open-close").toFile()
+        val tab = mkTab("log", "sample.log", emptyList())
+        val state = AppState(
+            File(root, "state.cache"),
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        )
+        try {
+            state.tabs = listOf(tab)
+            state.activateTab(tab.id)
+            val original = state.seq3Sessions.beginEmpty(tab.id)!!
+            val libraryId = state.seq3Sessions.sessions.single { it.id == original }.libraryItemId!!
+            state.seq3Sessions.close(original)
+
+            val openSnapshot = CountDownLatch(1)
+            val releaseOpenReorder = CountDownLatch(1)
+            val openStarted = CountDownLatch(1)
+            val openCompleted = CountDownLatch(1)
+            val openReorder = CompletableFuture.runAsync {
+                state.seq3Sessions.reorderSessions(gatedOrder(listOf("not-open-yet"), openSnapshot, releaseOpenReorder))
+            }
+            lateinit var open: CompletableFuture<Boolean>
+            val openCompletedBeforeRelease = try {
+                assertTrue(openSnapshot.await(2, TimeUnit.SECONDS), "the stale reorder captured an empty session list")
+                open = CompletableFuture.supplyAsync {
+                    openStarted.countDown()
+                    state.seq3Sessions.openLibraryItem(libraryId, tab.id).also { openCompleted.countDown() }
+                }
+                assertTrue(openStarted.await(2, TimeUnit.SECONDS))
+                openCompleted.await(150, TimeUnit.MILLISECONDS)
+            } finally {
+                releaseOpenReorder.countDown()
+            }
+            assertFalse(openCompletedBeforeRelease, "open publication waits for the reorder's stateLock")
+            openReorder.get(5, TimeUnit.SECONDS)
+            assertTrue(open.get(5, TimeUnit.SECONDS))
+            val reopened = state.seq3Sessions.sessions.single { it.libraryItemId == libraryId }
+
+            val closeSnapshot = CountDownLatch(1)
+            val releaseCloseReorder = CountDownLatch(1)
+            val closeStarted = CountDownLatch(1)
+            val closeCompleted = CountDownLatch(1)
+            val closeReorder = CompletableFuture.runAsync {
+                state.seq3Sessions.reorderSessions(gatedOrder(listOf(reopened.id), closeSnapshot, releaseCloseReorder))
+            }
+            lateinit var close: CompletableFuture<Void>
+            val closeCompletedBeforeRelease = try {
+                assertTrue(closeSnapshot.await(2, TimeUnit.SECONDS), "the reorder captured the open session")
+                close = CompletableFuture.runAsync {
+                    closeStarted.countDown()
+                    state.seq3Sessions.close(reopened.id)
+                    closeCompleted.countDown()
+                }
+                assertTrue(closeStarted.await(2, TimeUnit.SECONDS))
+                closeCompleted.await(150, TimeUnit.MILLISECONDS)
+            } finally {
+                releaseCloseReorder.countDown()
+            }
+            assertFalse(closeCompletedBeforeRelease, "close waits for the reorder's stateLock")
+            closeReorder.get(5, TimeUnit.SECONDS)
+            close.get(5, TimeUnit.SECONDS)
+
+            assertTrue(
+                state.seq3Sessions.sessions.none { it.libraryItemId == libraryId },
+                "a close committed after the reorder cannot be overwritten by its stale session snapshot",
+            )
+        } finally {
+            state.seq3Sessions.sessions.toList().forEach { state.seq3Sessions.close(it.id) }
+            state.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun autosaveSerializesALibraryBackedDiagramWithoutWaitingForStateLock() {
+        val root = createTempDirectory("seq3-autosave-lock-order").toFile()
+        val autosave = File(root, "state.cache")
+        val tab = mkTab("log", "sample.log", emptyList())
+        val state = AppState(
+            autosave,
+            notesDir = File(root, "notes"),
+            diagramLibraryStore = DiagramLibraryStore(File(root, "library.cache")),
+        )
+        val releaseLock = CountDownLatch(1)
+        val lockHeld = CountDownLatch(1)
+        val lockHolder = Thread {
+            synchronized(state.stateLock) {
+                lockHeld.countDown()
+                releaseLock.await(5, TimeUnit.SECONDS)
+            }
+        }
+        try {
+            state.tabs = listOf(tab)
+            state.activateTab(tab.id)
+            state.seq3Sessions.beginEmpty(tab.id)
+            assertTrue(state.seq3ViewToken().isNotBlank(), "the persisted library-backed session participates in seq3ViewToken")
+
+            lockHolder.start()
+            assertTrue(lockHeld.await(2, TimeUnit.SECONDS), "the competing thread holds stateLock")
+            val save = CompletableFuture.runAsync(state::autosaveNow)
+            val completedWhileLocked = try {
+                save.get(2, TimeUnit.SECONDS)
+                true
+            } catch (_: TimeoutException) {
+                false
+            } finally {
+                releaseLock.countDown()
+            }
+            save.get(5, TimeUnit.SECONDS)
+            lockHolder.join(5_000)
+
+            assertTrue(completedWhileLocked, "autosave's writer lock must not wait on stateLock during immutable session lookup")
+            assertTrue(autosave.readText().contains("seq3View\t"))
+        } finally {
+            releaseLock.countDown()
+            if (lockHolder.isAlive) lockHolder.join(5_000)
+            state.seq3Sessions.sessions.toList().forEach { state.seq3Sessions.close(it.id) }
+            state.close()
+            root.deleteRecursively()
+        }
     }
 
     // ── From notes (Diagram library's "+ diagram" → "From notes") ──────────────────────────────

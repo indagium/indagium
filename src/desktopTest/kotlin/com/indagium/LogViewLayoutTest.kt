@@ -55,6 +55,7 @@ import com.indagium.ui.logViewDropLabel
 import com.indagium.ui.logViewFocusOrder
 import com.indagium.ui.logViewLoneColumn
 import com.indagium.ui.logViewPresetIsActive
+import com.indagium.ui.logViewPresetTree
 import com.indagium.ui.logViewScrollsInColumn
 import com.indagium.ui.logViewTileApplicable
 import com.indagium.ui.logViewTileTitle
@@ -394,16 +395,18 @@ class LogViewLayoutTest {
     @Test
     fun everyPresetHoldsEveryTileOfItsScopeExactlyOnceAndSurvivesSanitizing() {
         for (preset in LogViewLayoutPreset.entries) {
-            val layout = preset.layout(sizes)
+            val layout = logViewPresetTree(preset, sizes)
             val ids = leafIds(layout)
             assertEquals(ids.size, ids.toSet().size, "${preset.label}: a tile appears twice")
             val expected = if (preset.scope == LogViewScope.COMPARE) compareIds else singleIds
             assertEquals(expected, ids.toSet() + preset.hidden, preset.label)
+            if (preset == LogViewLayoutPreset.FILTER_BAR) assertEquals(1, ids.count { it == NOTES }, "Filter bar's completed tree includes Notes once")
             assertTrue(preset.hidden.none { it.isLogTile }, "${preset.label}: hides a log tile")
 
             val (sanitized, hidden) = sanitizeLogViewLayoutState(layout, preset.hidden.toList(), preset.scope)
             assertComplete(sanitized, preset.scope)
             assertEquals(preset.hidden, hidden.toSet(), preset.label)
+            assertEquals(expected - preset.hidden, leafIds(sanitized).toSet() - hidden.toSet(), "${preset.label}: sanitized visible tiles")
 
             // The arrangement without the one-tile columns that lone tiles are kept in (Review's Sequences, say), as the Layout menu compares it.
             fun shown(tree: TileNode<LogViewSectionId>) =
@@ -482,10 +485,8 @@ class LogViewLayoutTest {
             assertEquals(preset.id, s.lastLogViewPreset)
             assertEquals(preset.hidden, s.logViewHidden.toSet())
             assertComplete(s.logViewLayout!!, LogViewScope.SINGLE)
-            // Log focus and Filter bar share one arrangement; only AppState.logViewPresetActive tells them apart (by the filter bar flag).
-            val logFocusPair = setOf(LogViewLayoutPreset.LOG_FOCUS, LogViewLayoutPreset.FILTER_BAR)
             LogViewLayoutPreset.forScope(LogViewScope.SINGLE).forEach {
-                val expected = it == preset || (it in logFocusPair && preset in logFocusPair)
+                val expected = it == preset
                 assertEquals(expected, logViewPresetIsActive(it, s, sizes), "${it.label} while ${preset.label} is applied")
             }
         }

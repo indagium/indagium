@@ -242,8 +242,7 @@ fun App(
     }
     val rootFocusRequester = remember { FocusRequester() }
     val chromeAnchors = remember { ChromeAnchors() }
-    // The group being created or edited (id to isNew): a new group's dialog reads "New tab group" and its Cancel removes the group.
-    var editingTabGroup by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    var editingTabGroup by remember { mutableStateOf<TabGroupEditorRequest?>(null) }
     var pendingPanelFocus by remember { mutableStateOf<KeyboardPanel?>(null) }
     var nextFilterSearchRequestNonce by remember { mutableStateOf(0L) }
     var pendingFilterSearchRequest by remember { mutableStateOf<FilterSearchRequest?>(null) }
@@ -450,7 +449,7 @@ fun App(
                 }
             }
             // The tab strip and the toolbar sit on the edges Settings > Appearance > Tabs chooses; everything else is the content.
-            CompositionLocalProvider(LocalOpenTabGroupEditor provides { id, isNew -> editingTabGroup = id to isNew }) {
+            CompositionLocalProvider(LocalOpenTabGroupEditor provides { request -> editingTabGroup = request }) {
                 ChromeScaffold(
                     state = state,
                     onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
@@ -1261,7 +1260,7 @@ fun App(
                                     state.tabCtx = null
                                     runCatching { rootFocusRequester.requestFocus() }
                                 },
-                                onEdit = { id, isNew -> editingTabGroup = id to isNew },
+                                onEdit = { request -> editingTabGroup = request },
                             )
                             CtxDivider()
                             CtxItem(
@@ -1301,11 +1300,10 @@ fun App(
                 }
             }
 
-            editingTabGroup?.let { (groupId, isNew) ->
+            editingTabGroup?.let { request ->
                 TabGroupEditorDialog(
                     state = state,
-                    groupId = groupId,
-                    isNew = isNew,
+                    request = request,
                     onDismiss = {
                         editingTabGroup = null
                         runCatching { rootFocusRequester.requestFocus() }

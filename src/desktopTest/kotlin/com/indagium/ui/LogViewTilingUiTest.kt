@@ -883,6 +883,13 @@ class LogViewTilingUiTest {
         rule.waitForIdle()
         assertTrue(state.filterBarVisible)
         assertFalse(state.filterVisible)
+        assertFalse(state.logViewLayoutModified(), "the sanitized Filter bar preset stays unmodified")
+        assertTrue(exists("tile-card-notes"), "Filter bar's actual tile tree contains Notes")
+        assertTrue(bounds("tile-card-notes").height.value > 0f, "Notes has a visible viewport in Filter bar")
+        assertTrue(
+            LogViewSectionId.NOTES in tileLeafSections(assertNotNull(presetThumbTree(LogViewLayoutPreset.FILTER_BAR))),
+            "Filter bar's thumbnail uses the same completed tree and includes Notes",
+        )
         rule.onNodeWithTag("layout-menu-preset-FILTER_BAR").assertIsSelected()
         rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").assertIsNotSelected()
         assertFalse(exists("layout-menu-modified-label"))
@@ -894,7 +901,9 @@ class LogViewTilingUiTest {
         rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").performClick()
         rule.waitForIdle()
         assertFalse(state.filterBarVisible)
+        assertFalse(state.logViewLayoutModified(), "the Focused preset also remains unmodified")
         rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").assertIsSelected()
+        assertFalse(exists("tile-card-notes"), "Log focus hides Notes in its actual tile tree")
     }
 
     @Test

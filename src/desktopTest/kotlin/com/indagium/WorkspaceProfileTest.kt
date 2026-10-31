@@ -5,6 +5,7 @@ import com.indagium.model.ChromeEdge
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.CustomWorkspaceProfile
 import com.indagium.model.LogViewPresetId
+import com.indagium.model.LogViewSectionId
 import com.indagium.model.ProfileAppearance
 import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
@@ -21,7 +22,11 @@ import com.indagium.ui.activeLogViewLayoutRef
 import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.currentProfileAppearance
 import com.indagium.ui.currentProfileBehavior
+import com.indagium.ui.logViewLayoutModified
 import com.indagium.ui.logViewPresetActive
+import com.indagium.ui.logViewTileContext
+import com.indagium.ui.logViewTileVisible
+import com.indagium.ui.mkTab
 import com.indagium.ui.profileDifferences
 import com.indagium.ui.profileSpecFromJson
 import com.indagium.ui.resolved
@@ -86,6 +91,9 @@ class WorkspaceProfileTest {
     @Test
     fun focusedProfileTurnsTheFilterBarAndNotesOnAndTheRestOff() {
         val state = AppState()
+        val tab = mkTab("profile-log", "profile.log", emptyList())
+        state.tabs = listOf(tab)
+        state.activateTab(tab.id)
         state.updateVideoPanelVisible(true)
         state.updateAiPanelVisible(true)
         state.applyWorkspaceProfile(WorkspaceProfile.FOCUSED)
@@ -97,6 +105,11 @@ class WorkspaceProfileTest {
         assertFalse(state.aiPanelVisible)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS), "Filter bar and Log focus share a tree; the flags tell them apart")
+        assertTrue(
+            logViewTileVisible(LogViewSectionId.NOTES, state.logViewTileContext(tab), state.settings.logViewHidden),
+            "the actual sanitized tile tree and active tab context make Notes visible",
+        )
+        assertFalse(state.logViewLayoutModified(), "applying Focused leaves the layout unmodified")
     }
 
     @Test

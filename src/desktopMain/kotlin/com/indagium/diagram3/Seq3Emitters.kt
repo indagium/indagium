@@ -415,6 +415,7 @@ private fun firstAndLastEmissions(
 private class Seq3EmissionPlan(
     val lifelineIndex: Map<String, Int>,
     val emissions: List<Seq3Emission>,
+    val messagesById: Map<String, Seq3Message>,
     val firstIndexByMessage: Map<String, Int>,
     val lastIndexByMessage: Map<String, Int>,
     val indexByOccurrence: Map<Seq3OccurrenceRef, Int>,
@@ -463,7 +464,7 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
         }
     }
     val prefixed = prefixSeq3EmissionLabels(emissions, document.showSequenceNumbers, document.showTimestamps, document.showElapsed, elapsedByEntryId)
-    return Seq3EmissionPlan(lifelineIndex, prefixed, firstIndex, lastIndex, indexByOccurrence)
+    return Seq3EmissionPlan(lifelineIndex, prefixed, document.messages.associateBy { it.id }, firstIndex, lastIndex, indexByOccurrence)
 }
 
 // ── WP10 (item 7): inline call numbering / timestamps ───────────────────────────────────────
@@ -589,14 +590,18 @@ private fun emissionParticipants(emission: Seq3Emission): List<Int> = when (emis
 private class Seq3Bracket(val fragment: Seq3Fragment, val range: IntRange, val depth: Int)
 
 private fun fragmentBounds(fragment: Seq3Fragment, plan: Seq3EmissionPlan): IntRange? {
-    val exactMessageIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
-    val exact = fragment.occurrenceRefs.mapNotNull { plan.indexByOccurrence[it] }
-    val messageIds = fragment.messageIds.filterNot { it in exactMessageIds }
-    val starts = messageIds.mapNotNull { plan.firstIndexByMessage[it] }
-    val ends = messageIds.mapNotNull { plan.lastIndexByMessage[it] }
-    if (exact.isEmpty() && (starts.isEmpty() || ends.isEmpty())) return null
-    val all = exact + starts + ends
-    return all.min()..all.max()
+    val indices = plan.emissions.indices.filter { index ->
+        val row = plan.emissions[index].membershipRowRef()
+        fragmentContainsDrawnRow(fragment, row, plan.messagesById[row.messageId])
+    }
+    val first = indices.minOrNull() ?: return null
+    val last = indices.maxOrNull() ?: return null
+    return first..last
+}
+
+private fun Seq3Emission.membershipRowRef(): Seq3RowRef = when (this) {
+    is Seq3Emission.Arrow -> Seq3RowRef(messageId, occurrenceEntryId.takeUnless { repeatCount > 1 })
+    is Seq3Emission.NeedsTarget, is Seq3Emission.NoteLine, is Seq3Emission.Elided -> Seq3RowRef(messageId)
 }
 
 private fun normalizedBrackets(fragments: List<Seq3Fragment>, plan: Seq3EmissionPlan): List<Seq3Bracket> {

@@ -100,7 +100,7 @@ internal fun SetupAssistantDialog(state: AppState) {
     fun applyChoiceIfNeeded() {
         val picked = (choice as? WorkspaceChoice.Profile)?.profile ?: return
         if (picked.id != applied) {
-            state.applyResolvedProfile(picked)
+            state.applySetupAssistantProfile(picked)
             applied = picked.id
         }
     }
@@ -114,7 +114,7 @@ internal fun SetupAssistantDialog(state: AppState) {
 
     fun finish() {
         applyChoiceIfNeeded()
-        state.finishSetupAssistant()
+        state.finishSetupAssistant(keepCurrent = choice == WorkspaceChoice.KeepCurrent)
     }
 
     fun next() {
@@ -128,7 +128,7 @@ internal fun SetupAssistantDialog(state: AppState) {
             .clip(shape).background(tc.p).border(1.dp, tc.br, shape)
             .onPreviewKeyEvent { ev ->
                 if (ev.type == KeyEventType.KeyDown && ev.key == Key.Escape) {
-                    state.skipSetupAssistant()
+                    state.skipSetupAssistant(keepCurrent = choice == WorkspaceChoice.KeepCurrent)
                     true
                 } else {
                     false
@@ -159,7 +159,11 @@ internal fun SetupAssistantDialog(state: AppState) {
                         color = tc.td, fontSize = 11.sp, maxLines = 1,
                     )
                 }
-                AppButton("Skip for now", onClick = { state.skipSetupAssistant() }, variant = ButtonVariant.Ghost)
+                AppButton(
+                    "Skip for now",
+                    onClick = { state.skipSetupAssistant(keepCurrent = choice == WorkspaceChoice.KeepCurrent) },
+                    variant = ButtonVariant.Ghost,
+                )
             }
             Divider()
             Row(Modifier.weight(1f).fillMaxWidth()) {
@@ -193,6 +197,7 @@ internal fun SetupAssistantDialog(state: AppState) {
                             onImported = { imported ->
                                 choice = WorkspaceChoice.Profile(imported)
                                 applied = imported.id
+                                state.recordSetupAssistantProfileApplied(imported)
                             },
                         )
                         SetupStep.Look -> LookStep(state)

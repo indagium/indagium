@@ -307,13 +307,18 @@ private val RIGHT_ARTIFACTS = setOf(LogViewSectionId.DIAGRAMS, LogViewSectionId.
 private val FILTERING_HIDDEN = RIGHT_ARTIFACTS
 private val LOG_FOCUS_HIDDEN = LOG_VIEW_FILTER_TILES.toSet() + RIGHT_ARTIFACTS
 
+// Filter bar turns the Notes group on, so Notes must remain in the layout's visible tile set.
+private val FILTER_BAR_HIDDEN = LOG_FOCUS_HIDDEN - LogViewSectionId.NOTES
+
 /** The tab-strip panel flags of the single log view: filter sidebar, filter bar above the log, Notes, Video and AI. */
 data class LogViewPanels(val filter: Boolean, val filterBar: Boolean, val notes: Boolean, val video: Boolean, val ai: Boolean)
 
 /**
- * A ready-made arrangement. [layout] is the tree, [hidden] the tiles the preset hides: layout + hidden together cover every
- * tile of [scope], and a hidden tile either keeps its place in [layout] (for example, Filters on top's Diagram library) or is left out of it (Log
- * focus's filter tiles), in which case sanitizing re-inserts it at its default anchor when the preset is applied.
+ * A ready-made arrangement. [layout] is the compact raw template; [logViewPresetTree] completes it
+ * with tiles that sanitizing inserts at their default anchors. The completed tree plus [hidden]
+ * covers every tile of [scope]. A hidden tile either keeps its place in the template (for example,
+ * Filters on top's Diagram library) or is left out (Log focus's filter tiles), in which case
+ * sanitizing inserts it before applying the hidden projection.
  */
 enum class LogViewLayoutPreset(
     val id: LogViewPresetId,
@@ -340,7 +345,7 @@ enum class LogViewLayoutPreset(
     ANALYSIS(LogViewPresetId.ANALYSIS, "Analysis", LogViewScope.SINGLE, ::analysisLayout, emptySet()),
 
     // Log focus with the regex filter bar above the log (the bar is a view flag, not a tile: see AppState.applyLogViewPreset).
-    FILTER_BAR(LogViewPresetId.FILTER_BAR, "Filter bar", LogViewScope.SINGLE, { logFocusLayout() }, LOG_FOCUS_HIDDEN),
+    FILTER_BAR(LogViewPresetId.FILTER_BAR, "Filter bar", LogViewScope.SINGLE, { logFocusLayout() }, FILTER_BAR_HIDDEN),
     ;
 
     /**
@@ -399,7 +404,12 @@ internal fun logViewPresetIsActive(preset: LogViewLayoutPreset, settings: AppSet
     val hidden = if (compare) settings.compareHidden else settings.logViewHidden
     if (hidden.toSet() != preset.hidden) return false
     val shown = withoutHidden(tree, hidden + LogViewSectionId.TOOLBAR) ?: return false
-    val expected = withoutHidden(preset.layout(sizes), preset.hidden) ?: return false
+    val expectedState = logViewPresetTree(
+        preset,
+        sizes,
+        toolbarInLayout = !compare && settings.toolbarPlacement == ToolbarPlacement.IN_LAYOUT,
+    )
+    val expected = withoutHidden(expectedState, preset.hidden + LogViewSectionId.TOOLBAR) ?: return false
     return tileLayoutShapeEquals(shown, expected)
 }
 
@@ -552,6 +562,19 @@ internal fun sanitizeLogViewLayoutState(
     return complete to hiddenKept
 }
 
+/** A preset's completed tree, including tiles that sanitizing re-inserts at their normal anchors.
+ * Application, activity checks and thumbnails share this projection. */
+internal fun logViewPresetTree(
+    preset: LogViewLayoutPreset,
+    sizes: LogViewLegacySizes,
+    toolbarInLayout: Boolean = false,
+): LogViewNode = sanitizeLogViewLayoutState(
+    preset.layout(sizes),
+    preset.hidden.toList(),
+    preset.scope,
+    toolbarInLayout,
+).first
+
 // ---------------------------------------------------------------------------------------------------------------
 // The toolbar tile
 // ---------------------------------------------------------------------------------------------------------------
@@ -613,7 +636,7 @@ internal fun AppSettings.withLogViewTileHidden(id: LogViewSectionId, hidden: Boo
 /** Applies [preset] to the single log view: its layout (from [sizes]), its hidden tiles, and remembers it as the last preset. */
 internal fun AppSettings.withLogViewPreset(preset: LogViewLayoutPreset, sizes: LogViewLegacySizes): AppSettings {
     if (preset.scope != LogViewScope.SINGLE) return this
-    val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.SINGLE, toolbarPlacement == ToolbarPlacement.IN_LAYOUT)
+    val state = logViewPresetTree(preset, sizes, toolbarPlacement == ToolbarPlacement.IN_LAYOUT) to preset.hidden.toList()
     val collapsed = if (preset == LogViewLayoutPreset.CLASSIC) {
         (logViewCollapsed + LogViewSectionId.DIAGRAMS).distinct()
     } else {
@@ -649,7 +672,7 @@ internal fun AppSettings.withCompareTileHidden(id: LogViewSectionId, hidden: Boo
 /** Applies the compare [preset]; see [withLogViewPreset]. */
 internal fun AppSettings.withComparePreset(preset: LogViewLayoutPreset, sizes: LogViewLegacySizes): AppSettings {
     if (preset.scope != LogViewScope.COMPARE) return this
-    val state = sanitizeLogViewLayoutState(preset.layout(sizes), preset.hidden.toList(), LogViewScope.COMPARE)
+    val state = logViewPresetTree(preset, sizes) to preset.hidden.toList()
     val collapsed = (logViewCollapsed + LogViewSectionId.DIAGRAMS).distinct()
     return copy(
         compareLayout = state.first,

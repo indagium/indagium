@@ -7,6 +7,7 @@ import com.indagium.model.ThemePreset
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
 import com.indagium.ui.AppState
 import com.indagium.ui.WorkspaceProfile
+import com.indagium.ui.resolved
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import java.io.File
@@ -150,15 +151,58 @@ class SetupAssistantTest {
 
     private fun freshAssistant(): AppState = AppState().also { it.maybeShowSetupAssistantOnStartup() }
 
+    private fun AppState.applyAssistantProfile(profile: WorkspaceProfile) =
+        applySetupAssistantProfile(profile.resolved(settings.customLogViewLayouts))
+
     @Test
     fun pickingABuiltInAndChangingNothingElseCreatesNoProfileAndKeepsTheBuiltInSelected() {
         val state = freshAssistant()
-        state.applyWorkspaceProfile(WorkspaceProfile.MINIMAL) // what leaving step 1 does
+        state.applyAssistantProfile(WorkspaceProfile.MINIMAL) // what leaving step 1 does
 
         state.finishSetupAssistant()
 
         assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
         assertEquals("minimal", state.settings.workspaceProfileId)
+    }
+
+    @Test
+    fun reapplyingTheSameClassicIdComparesAgainstTheProfileActuallyApplied() {
+        val state = AppState()
+        state.updateSettings { it.copy(setupAssistantDone = true, workspaceProfileId = "classic", theme = ThemePreset.DRACULA) }
+        state.rerunSetupAssistant()
+
+        state.applyAssistantProfile(WorkspaceProfile.CLASSIC)
+        state.finishSetupAssistant()
+
+        assertTrue(state.settings.customWorkspaceProfiles.isEmpty(), "same-ID reapply is still tracked as the selected profile")
+        assertEquals("classic", state.settings.workspaceProfileId)
+    }
+
+    @Test
+    fun choosingKeepCurrentAfterApplyingAProfileUsesTheOpeningBaseline() {
+        val state = freshAssistant()
+        state.applyAssistantProfile(WorkspaceProfile.MINIMAL)
+        val selectedLook = state.settings.theme
+
+        state.finishSetupAssistant(keepCurrent = true)
+
+        val created = state.settings.customWorkspaceProfiles.single()
+        assertEquals("My setup", created.name)
+        assertEquals(selectedLook, created.spec.theme)
+        assertEquals(created.id, state.settings.workspaceProfileId)
+    }
+
+    @Test
+    fun anImportedProfileAlreadyAppliedByTheImportFlowIsRecordedWithoutASecondCustomProfile() {
+        val state = freshAssistant()
+        val imported = state.saveCurrentAsWorkspaceProfile("Imported")
+        state.applyResolvedProfile(imported.resolved())
+        state.recordSetupAssistantProfileApplied(imported.resolved())
+
+        state.finishSetupAssistant()
+
+        assertEquals(listOf("Imported"), state.settings.customWorkspaceProfiles.map { it.name })
+        assertEquals(imported.id, state.settings.workspaceProfileId)
     }
 
     @Test
@@ -183,7 +227,7 @@ class SetupAssistantTest {
         )
         changes.forEachIndexed { index, change ->
             val state = freshAssistant()
-            state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
+            state.applyAssistantProfile(WorkspaceProfile.CLASSIC)
             state.updateSettings(change)
             val chosen = state.settings
 
@@ -202,7 +246,7 @@ class SetupAssistantTest {
     @Test
     fun theThemeAMinimalProfileGivesIsNotACustomChoice() {
         val state = freshAssistant()
-        state.applyWorkspaceProfile(WorkspaceProfile.MINIMAL)
+        state.applyAssistantProfile(WorkspaceProfile.MINIMAL)
         assertEquals(ThemePreset.GRAPHITE_DIM, state.settings.theme)
 
         state.finishSetupAssistant()
@@ -213,7 +257,7 @@ class SetupAssistantTest {
     @Test
     fun rerunningCreatesAnotherUniquelyNamedProfileOnlyWhenTheChoicesDifferAgain() {
         val state = freshAssistant()
-        state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
+        state.applyAssistantProfile(WorkspaceProfile.CLASSIC)
         state.updateSettings { it.copy(ctrlFTarget = CtrlFTarget.TAGS) }
         state.finishSetupAssistant()
         assertEquals(listOf("My setup"), state.settings.customWorkspaceProfiles.map { it.name })
@@ -235,11 +279,11 @@ class SetupAssistantTest {
     fun pickingACustomProfileInTheAssistantIsNotAChoiceThatNeedsAnotherProfile() {
         val state = AppState()
         val mine = state.saveCurrentAsWorkspaceProfile("Mine")
-        state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
+        state.applyAssistantProfile(WorkspaceProfile.CLASSIC)
         state.updateSettings { it.copy(setupAssistantDone = true) }
         state.rerunSetupAssistant()
 
-        state.applyResolvedProfile(state.resolveWorkspaceProfile(mine.id)!!) // leaving step 1 with that card picked
+        state.applySetupAssistantProfile(state.resolveWorkspaceProfile(mine.id)!!) // leaving step 1 with that card picked
         state.finishSetupAssistant()
 
         assertEquals(listOf("Mine"), state.settings.customWorkspaceProfiles.map { it.name })

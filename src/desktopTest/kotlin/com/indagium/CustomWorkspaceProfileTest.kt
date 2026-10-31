@@ -33,6 +33,7 @@ import com.indagium.ui.currentProfileBehavior
 import com.indagium.ui.customProfilesFromJson
 import com.indagium.ui.decodeWorkspaceProfileFile
 import com.indagium.ui.describeProfileSpec
+import com.indagium.ui.encodeLogViewLayoutFile
 import com.indagium.ui.encodeWorkspaceProfileFile
 import com.indagium.ui.hideLogViewTile
 import com.indagium.ui.matchesCustomLogViewLayout
@@ -46,6 +47,7 @@ import com.indagium.ui.uniqueProfileName
 import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -110,6 +112,112 @@ class CustomWorkspaceProfileTest {
         assertEquals("Night shift", decoded.name)
         assertEquals(spec, decoded.spec)
         assertEquals("indagium-workspace-profile", Json.parseToJsonElement(text).let { (it as JsonObject)["format"].toString().trim('"') })
+        assertNull(decodeWorkspaceProfileFile(text).getOrThrow().bundledLayout, "legacy/ref-only profile files remain valid")
+    }
+
+    @Test
+    fun savedLayoutBundleImportsIntoAnIndependentWorkspaceWithFreshLocalIdentity() {
+        val sourceDir = createTempDirectory("profile-bundle-source").toFile()
+        val targetDir = createTempDirectory("profile-bundle-target").toFile()
+        var sourceState: AppState? = null
+        var targetState: AppState? = null
+        try {
+            fun stateIn(dir: File) = AppState(
+                autosaveFile = File(dir, "state.cache"),
+                notesDir = File(dir, "notes"),
+                customCommandsDir = File(dir, "commands"),
+            )
+            val source = stateIn(sourceDir).also { sourceState = it }
+            val sourceLayout = source.saveCurrentAsLogViewLayout("Triage")
+            val sourceProfile = source.saveCurrentAsWorkspaceProfile("Portable")
+            assertEquals(ProfileLayoutRef.Saved(sourceLayout.id), sourceProfile.spec.layout)
+            val file = File(sourceDir, "portable.json")
+            assertTrue(source.writeWorkspaceProfileFile(file, sourceProfile.name, sourceProfile.spec, sourceLayout).isSuccess)
+            val target = stateIn(targetDir).also { targetState = it }
+            val collision = target.saveCurrentAsLogViewLayout("Triage")
+            val targetBefore = target.settings
+
+            val imported = target.importWorkspaceProfileFrom(file).getOrThrow()
+            val importedLayout = target.settings.customLogViewLayouts.single { it.id != collision.id }
+
+            assertNotEquals(sourceLayout.id, importedLayout.id)
+            assertEquals("Triage (2)", importedLayout.name)
+            assertEquals(sourceLayout.copy(id = importedLayout.id, name = importedLayout.name), importedLayout)
+            assertEquals(ProfileLayoutRef.Saved(importedLayout.id), imported.spec.layout)
+            assertEquals(ProfileLayoutRef.Saved(importedLayout.id), target.activeLogViewLayoutRef())
+            assertEquals(importedLayout.tree, target.settings.logViewLayout)
+            assertEquals(2, target.settings.customLogViewLayouts.size)
+            assertEquals(targetBefore.customLogViewLayouts.single(), target.settings.customLogViewLayouts.first(), "the target's local layout stays in place")
+            assertEquals(sourceLayout.id, source.settings.customLogViewLayouts.single().id, "export does not rewrite the source workspace's local reference")
+            assertEquals(ProfileLayoutRef.Saved(sourceLayout.id), source.settings.customWorkspaceProfiles.single().spec.layout)
+        } finally {
+            sourceState?.close()
+            targetState?.close()
+            sourceDir.deleteRecursively()
+            targetDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun malformedOrUnreferencedBundlesFailBeforeImportMutatesSettings() {
+        val dir = createTempDirectory("profile-bundle-invalid").toFile()
+        var state: AppState? = null
+        try {
+            val app = AppState(
+                autosaveFile = File(dir, "state.cache"),
+                notesDir = File(dir, "notes"),
+                customCommandsDir = File(dir, "commands"),
+            ).also { state = it }
+            val saved = layout("custom-log-view-bundle", "Bundle")
+            val referenced = spec.copy(layout = ProfileLayoutRef.Saved(saved.id))
+            val validOuter = Json.parseToJsonElement(encodeWorkspaceProfileFile("Bundle", referenced, saved)).jsonObject
+            val nested = Json.parseToJsonElement(encodeLogViewLayoutFile(saved)).jsonObject
+            val malformedNested = JsonObject(nested + ("version" to JsonPrimitive(99)))
+            val malformedFile = File(dir, "malformed.json").apply {
+                writeText(JsonObject(validOuter + ("bundledLayout" to malformedNested)).toString())
+            }
+            val unreferencedFile = File(dir, "unreferenced.json").apply {
+                writeText(encodeWorkspaceProfileFile("Unreferenced", spec.copy(layout = ProfileLayoutRef.Preset(LogViewPresetId.CLASSIC)), saved))
+            }
+            val before = app.settings
+
+            assertTrue(app.importWorkspaceProfileFrom(malformedFile).isFailure)
+            assertEquals(before, app.settings, "a malformed nested layout is rejected before profile/settings mutation")
+            assertTrue(app.importWorkspaceProfileFrom(unreferencedFile).isFailure)
+            assertEquals(before, app.settings, "a bundle without a Saved ref cannot create an orphan layout")
+        } finally {
+            state?.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacySavedReferenceWithoutBundleKeepsTheCurrentLayoutWhenUnresolved() {
+        val dir = createTempDirectory("profile-bundle-legacy").toFile()
+        var state: AppState? = null
+        try {
+            val app = AppState(
+                autosaveFile = File(dir, "state.cache"),
+                notesDir = File(dir, "notes"),
+                customCommandsDir = File(dir, "commands"),
+            ).also { state = it }
+            app.applyLogViewPreset(com.indagium.ui.LogViewLayoutPreset.ANALYSIS)
+            val layoutBefore = app.settings.logViewLayout
+            val presetBefore = app.settings.lastLogViewPreset
+            val file = File(dir, "legacy.json").apply {
+                writeText(encodeWorkspaceProfileFile("Legacy", spec.copy(layout = ProfileLayoutRef.Saved("custom-log-view-missing"))))
+            }
+
+            val imported = app.importWorkspaceProfileFrom(file).getOrThrow()
+
+            assertEquals(ProfileLayoutRef.Saved("custom-log-view-missing"), imported.spec.layout)
+            assertEquals(layoutBefore, app.settings.logViewLayout)
+            assertEquals(presetBefore, app.settings.lastLogViewPreset)
+            assertNull(decodeWorkspaceProfileFile(file.readText()).getOrThrow().bundledLayout)
+        } finally {
+            state?.close()
+            dir.deleteRecursively()
+        }
     }
 
     @Test

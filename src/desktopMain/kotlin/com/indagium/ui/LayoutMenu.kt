@@ -921,7 +921,7 @@ private fun MenuLabel(text: String) {
 
 /** The tiles a preset shows, as a tree for [LayoutThumbCanvas]; null when nothing is left. */
 internal fun presetThumbTree(preset: LogViewLayoutPreset): TileNode<LogViewSectionId>? =
-    preset.hidden.fold(preset.layout(LogViewLegacySizes()) as LogViewNode?) { acc, id -> acc?.let { removeTile(it, id) } }
+    preset.hidden.fold(logViewPresetTree(preset, LogViewLegacySizes()) as LogViewNode?) { acc, id -> acc?.let { removeTile(it, id) } }
 
 /** The tiles a saved layout shows: its tree minus the hidden list, the tiles of a switched-off panel group and the toolbar. */
 internal fun savedLayoutThumbTree(layout: CustomLogViewLayout): TileNode<LogViewSectionId>? {

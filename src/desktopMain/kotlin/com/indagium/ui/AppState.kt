@@ -7092,13 +7092,20 @@ class AppState(
         }
     }
 
-    internal fun writeWorkspaceProfileFile(file: File, name: String, spec: ProfileSpec): Result<Unit> =
-        runCatching { file.writeText(encodeWorkspaceProfileFile(name, spec)) }
+    internal fun writeWorkspaceProfileFile(
+        file: File,
+        name: String,
+        spec: ProfileSpec,
+        bundledLayout: com.indagium.model.CustomLogViewLayout? = null,
+    ): Result<Unit> = runCatching { file.writeText(encodeWorkspaceProfileFile(name, spec, bundledLayout)) }
 
     /** Save dialog + write. A null [profile] exports the current setup, named after the selected profile if any. */
     internal fun exportWorkspaceProfile(profile: ResolvedProfile?) {
         val name = profile?.title ?: selectedWorkspaceProfile?.title ?: "My setup"
         val spec = profile?.spec ?: currentProfileSpec(settings, activeLogViewLayoutRef())
+        val bundledLayout = (spec.layout as? com.indagium.model.ProfileLayoutRef.Saved)?.let { ref ->
+            settings.customLogViewLayouts.firstOrNull { it.id == ref.id }
+        }
         val dlg = FileDialog(null as Frame?, "Export workspace profile", FileDialog.SAVE).apply {
             file = "indagium_profile_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "profile" }}.json"
             isVisible = true
@@ -7107,7 +7114,7 @@ class AppState(
         val dir = dlg.directory ?: return
         val target = File(dir, path)
         ioScope.launch {
-            writeWorkspaceProfileFile(target, name, spec).fold(
+            writeWorkspaceProfileFile(target, name, spec, bundledLayout).fold(
                 onSuccess = { AppLogger.info("profiles", "Exported workspace profile to ${target.absolutePath}") },
                 onFailure = { e ->
                     workspaceProfileError = "Could not save the profile file: ${e.message ?: "unknown error"}"
@@ -7125,13 +7132,29 @@ class AppState(
             error("Could not read ${file.name}.")
         }
         val decoded = decodeWorkspaceProfileFile(text).getOrThrow()
+        val importedLayout = decoded.bundledLayout?.let { layout ->
+            layout.copy(
+                id = newCustomLogViewLayoutId(),
+                name = uniqueLogViewLayoutName(layout.name, settings.customLogViewLayouts.map { it.name }),
+            )
+        }
+        val importedSpec = when (val ref = decoded.spec.layout) {
+            is com.indagium.model.ProfileLayoutRef.Saved -> importedLayout?.let { decoded.spec.copy(layout = ref.copy(id = it.id)) } ?: decoded.spec
+            else -> decoded.spec
+        }
         val profile = CustomWorkspaceProfile(
             id = newCustomProfileId(),
             name = uniqueProfileName(decoded.name, workspaceProfileNames()),
-            spec = decoded.spec,
+            spec = importedSpec,
         )
-        addCustomWorkspaceProfile(profile)
-        applyResolvedProfile(profile.resolved())
+        updateSettings { current ->
+            current.copy(
+                customLogViewLayouts = current.customLogViewLayouts + listOfNotNull(importedLayout),
+                customWorkspaceProfiles = current.customWorkspaceProfiles + profile,
+                workspaceProfileId = profile.id,
+            ).withProfileSpec(importedSpec)
+        }
+        applyProfileLayout(importedSpec.layout)
         profile
     }
 
@@ -7352,6 +7375,9 @@ class AppState(
     /** The settings the assistant opened with: what its choices are compared against when it closes. Null while it is closed. */
     private var setupAssistantBaseline: AppSettings? = null
 
+    /** The last profile the wizard actually applied, including a same-ID reapply. */
+    private var setupAssistantAppliedProfile: ResolvedProfile? = null
+
     /** Called once at startup (see Main.kt). App.kt holds the dialog back until the license and
      *  update dialogs are out of the way. */
     fun maybeShowSetupAssistantOnStartup() {
@@ -7359,11 +7385,13 @@ class AppState(
             !settings.setupAssistantDone -> {
                 setupAssistantStartsAtSearch = false
                 setupAssistantBaseline = settings
+                setupAssistantAppliedProfile = null
                 setupAssistantOpen = true
             }
             settings.setupAssistantRevision < SETUP_ASSISTANT_CURRENT_REVISION -> {
                 setupAssistantStartsAtSearch = true
                 setupAssistantBaseline = settings
+                setupAssistantAppliedProfile = null
                 setupAssistantOpen = true
             }
         }
@@ -7377,15 +7405,16 @@ class AppState(
     fun shouldSetupAssistantStartAtSearch(): Boolean = setupAssistantStartsAtSearch
 
     /** Finishing and skipping both count as done, so the assistant never comes back on its own. */
-    fun finishSetupAssistant() = closeSetupAssistant()
+    fun finishSetupAssistant(keepCurrent: Boolean = false) = closeSetupAssistant(keepCurrent)
 
-    fun skipSetupAssistant() = closeSetupAssistant()
+    fun skipSetupAssistant(keepCurrent: Boolean = false) = closeSetupAssistant(keepCurrent)
 
-    private fun closeSetupAssistant() {
+    private fun closeSetupAssistant(keepCurrent: Boolean) {
         setupAssistantOpen = false
         setupAssistantStartsAtSearch = false
-        saveSetupAssistantChoicesAsProfileIfCustom()
+        saveSetupAssistantChoicesAsProfileIfCustom(setupAssistantAppliedProfile.takeUnless { keepCurrent })
         setupAssistantBaseline = null
+        setupAssistantAppliedProfile = null
         updateSettings {
             it.copy(
                 setupAssistantDone = true,
@@ -7399,7 +7428,19 @@ class AppState(
         settingsOpen = false
         setupAssistantStartsAtSearch = false
         setupAssistantBaseline = settings
+        setupAssistantAppliedProfile = null
         setupAssistantOpen = true
+    }
+
+    /** Applies a wizard selection and records that it was applied even when its id already matched. */
+    internal fun applySetupAssistantProfile(profile: ResolvedProfile) {
+        recordSetupAssistantProfileApplied(profile)
+        applyResolvedProfile(profile)
+    }
+
+    /** Imported profiles are already applied by the import flow, so record without applying twice. */
+    internal fun recordSetupAssistantProfileApplied(profile: ResolvedProfile) {
+        setupAssistantAppliedProfile = profile
     }
 
     /**
@@ -7408,10 +7449,9 @@ class AppState(
      * profile "My setup" (made unique by the usual name helper) captured from the current setup and selected. Otherwise the selected
      * profile stays as it is. The reference is the opening settings, with the profile applied during the assistant laid over them.
      */
-    private fun saveSetupAssistantChoicesAsProfileIfCustom() {
+    private fun saveSetupAssistantChoicesAsProfileIfCustom(appliedProfile: ResolvedProfile?) {
         val baseline = setupAssistantBaseline ?: AppSettings()
-        val pickedDuringSetup = settings.workspaceProfileId != baseline.workspaceProfileId
-        val reference = selectedWorkspaceProfile?.takeIf { pickedDuringSetup }?.let { baseline.withProfileSpec(it.spec) } ?: baseline
+        val reference = appliedProfile?.let { baseline.withProfileSpec(it.spec) } ?: baseline
         if (setupChoicesDiffer(reference, settings)) saveCurrentAsWorkspaceProfile(SETUP_PROFILE_NAME)
     }
 

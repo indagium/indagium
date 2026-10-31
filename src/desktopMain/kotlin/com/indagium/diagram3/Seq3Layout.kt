@@ -654,7 +654,13 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
             ?: candidateIndices.last()
         delaysByRowIndex.getOrPut(targetIndex) { mutableListOf() } += delay
     }
-    val siblingBoundaryPadding = fragmentSiblingBoundaryPadding(doc.fragments, emissions, requirements, delaysByRowIndex)
+    val siblingBoundaryPadding = fragmentSiblingBoundaryPadding(
+        doc.fragments,
+        emissions,
+        requirements,
+        delaysByRowIndex,
+        doc.messages.associateBy { it.id },
+    )
     val bandLeft = lefts.firstOrNull() ?: MARGIN
     val rowBuild = buildRows(
         emissions,
@@ -689,7 +695,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // derived from row x-extents — an unrewritten `toX` would size those against the wrong edge.
     val rowsWithCreateStop = applyCreateArrowStops(rowBuild.rows, lifelineIndex, centers, headerWidths)
 
-    val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowsWithCreateStop, headerHeight)
+    val fragments = layoutFragments(doc, rowBuild.firstRowIndex, rowsWithCreateStop, headerHeight)
     val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowsWithCreateStop, centers, tm)
 
     // WP2: UML activation bars — see buildActivationBars' own doc. Pulled into its own function
@@ -1944,9 +1950,10 @@ private fun fragmentSiblingBoundaryPadding(
     emissions: List<Emission>,
     requirements: List<RowRequirement>,
     delaysByRowIndex: Map<Int, List<Seq3Delay>>,
+    messagesById: Map<String, Seq3Message>,
 ): Map<Int, Double> {
     if (fragments.isEmpty() || emissions.isEmpty()) return emptyMap()
-    val spans = fragmentEmissionSpans(fragments, emissions)
+    val spans = fragmentEmissionSpans(fragments, emissions, messagesById)
     val nested = nestFragmentEmissionSpans(spans)
     return nested.mapNotNull { closing ->
         val isSiblingBoundary = nested.any { next -> next.depth == closing.depth && next.start == closing.end + 1 }
@@ -1962,25 +1969,30 @@ private fun fragmentSiblingBoundaryPadding(
 
 private data class FragmentEmissionSpan(val start: Int, val end: Int, val depth: Int)
 
-private fun fragmentEmissionSpans(fragments: List<Seq3Fragment>, emissions: List<Emission>): List<IntRange> {
-    val rowsByMessage = emissions.indices.groupBy { emissions[it].messageId }
+private fun fragmentEmissionSpans(
+    fragments: List<Seq3Fragment>,
+    emissions: List<Emission>,
+    messagesById: Map<String, Seq3Message>,
+): List<IntRange> {
     return fragments.asSequence()
         .filter { it.visibility == Seq3Visibility.VISIBLE }
         .mapNotNull { fragment ->
-            val exactIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
-            val exactIndices = fragment.occurrenceRefs.mapNotNull { ref ->
-                emissions.indices.firstOrNull { index ->
-                    emissions[index].messageId == ref.messageId && emissions[index].entryId == ref.entryId
-                }
+            val indices = emissions.indices.filter { index ->
+                val row = emissionMembershipRowRef(emissions[index])
+                fragmentContainsDrawnRow(fragment, row, messagesById[row.messageId])
             }
-            val messageIndices = fragment.messageIds.filterNot { it in exactIds }.flatMap { rowsByMessage[it].orEmpty() }
-            val indices = (exactIndices + messageIndices).distinct()
             val first = indices.minOrNull() ?: return@mapNotNull null
             val last = indices.maxOrNull() ?: return@mapNotNull null
             first..last
         }
         .sortedWith(compareBy<IntRange>({ it.first }, { -it.last }))
         .toList()
+}
+
+private fun emissionMembershipRowRef(emission: Emission): Seq3RowRef = when (emission) {
+    is Emission.Arrow -> Seq3RowRef(emission.messageId, emission.entryId.takeUnless { emission.repeatCount > 1 })
+    is Emission.Self -> Seq3RowRef(emission.messageId, emission.entryId.takeUnless { emission.repeatCount > 1 })
+    is Emission.Stub, is Emission.Note, is Emission.Elision -> Seq3RowRef(emission.messageId)
 }
 
 private fun nestFragmentEmissionSpans(spans: List<IntRange>): List<FragmentEmissionSpan> {
@@ -2201,9 +2213,8 @@ private fun buildElisionRow(e: Emission.Elision, lifelineIndex: Map<String, Int>
 // invariant (never let a child's clamped range escape its parent's) is identical.
 
 private fun layoutFragments(
-    fragments: List<Seq3Fragment>,
+    document: Seq3Document,
     firstRowIndex: Map<String, Int>,
-    lastRowIndex: Map<String, Int>,
     rows: List<Seq3RowGeometry>,
     // Item 5's DEFENSIVE half: fragmentBoxFrom clamps its computed `top` to never rise above
     // `MARGIN + headerHeight + 4` regardless of what buildRows already reserved above the first
@@ -2216,14 +2227,15 @@ private fun layoutFragments(
     // Item 5 (hidden fragments): skip a HIDDEN fragment's bracket entirely — same "drop the box,
     // keep the row" contract Seq3Fragment.visibility documents, and the same filter hidden
     // lifelines/messages already get earlier in layoutSeq3.
-    val visibleFragments = fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val visibleFragments = document.fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (visibleFragments.isEmpty() || rows.isEmpty()) return emptyList()
     val minTop = MARGIN + headerHeight + 4.0
+    val messagesById = document.messages.associateBy { it.id }
 
     data class Bounds(val fragment: Seq3Fragment, val range: IntRange)
 
     val withBounds = visibleFragments.mapNotNull { f ->
-        val indices = fragmentRowIndices(f, firstRowIndex, lastRowIndex, rows)
+        val indices = fragmentRowIndices(messagesById, f, rows)
         if (indices.isEmpty()) null else Bounds(f, indices.min()..indices.max())
     }
     if (withBounds.isEmpty()) return emptyList()
@@ -2261,9 +2273,9 @@ private val DIVIDER_FRAGMENT_KINDS = setOf(Seq3FragmentKind.ALT, Seq3FragmentKin
 /** [Seq3Operand.startsAtMessageId]/[Seq3Operand.startsAtOccurrenceEntryId] resolved to a ROW index
  *  — this file's OWN index space, [rows] itself (only successfully built rows, i.e. resolved
  *  lifelines — see [buildRows]' own doc), not `Seq3Emitters`' emission-index space. Mirrors
- *  [fragmentRowIndices]'s own `exact`-vs-message-id split, one field at a time instead of a whole
- *  fragment: a pinned occurrence resolves via the identical row-list scan for the exact
- *  (messageId, entryId) pair that function's `exact` branch already does for a
+ *  [fragmentRowIndices]'s exact-versus-template membership rule, one field at a time instead of a
+ *  whole fragment: a pinned occurrence resolves via the identical row-list scan for the exact
+ *  (messageId, entryId) pair that function uses for a
  *  [Seq3OccurrenceRef]; the un-pinned fallback is [firstRowIndex] — [Seq3Operand
  *  .startsAtMessageId]'s own documented contract ("begins at the FIRST drawn row of its anchor
  *  message") is the exact same contract `Seq3Emitters.operandAnchorIndex` resolves via
@@ -2332,27 +2344,18 @@ private fun fragmentDividers(
 
 /** Resolves a fragment to the drawn rows it actually references. Ordinary queue-created
  * fragments only have message IDs and therefore include every rendered row for those messages.
- * Marquee-created fragments additionally carry occurrence refs; those refs narrow the span to the
- * exact arrows inside the selection rectangle instead of pulling in every similar occurrence. */
+ * Marquee-created fragments additionally carry occurrence refs; those refs narrow membership to
+ * selected arrows and to visible evidence represented by selected summary rows. */
 private fun fragmentRowIndices(
+    messagesById: Map<String, Seq3Message>,
     fragment: Seq3Fragment,
-    firstRowIndex: Map<String, Int>,
-    lastRowIndex: Map<String, Int>,
     rows: List<Seq3RowGeometry>,
 ): List<Int> {
-    val exactMessageIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
-    val exact = fragment.occurrenceRefs.mapNotNull { ref ->
-        rows.indexOfFirst { row -> row.messageId == ref.messageId && row.occurrenceEntryId == ref.entryId }
-            .takeIf { it >= 0 }
+    return rows.indices.filter { index ->
+        val row = rows[index]
+        val ref = seq3MembershipRowRef(messagesById[row.messageId], row.messageId, row.occurrenceEntryId)
+        fragmentContainsDrawnRow(fragment, ref, messagesById[row.messageId])
     }
-    val messageIndices = fragment.messageIds
-        .filterNot { it in exactMessageIds }
-        .flatMap { id ->
-            val first = firstRowIndex[id] ?: return@flatMap emptyList()
-            val last = lastRowIndex[id] ?: return@flatMap emptyList()
-            (first..last).toList()
-        }
-    return (exact + messageIndices).distinct().sorted()
 }
 
 // Item 5: `top` is clamped to at least [minTop] — the raw formula (ROW_H/2 + FRAGMENT_LABEL_H

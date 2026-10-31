@@ -52,6 +52,14 @@ internal data class TabGroup(
     val tintMembers: Boolean = true,
 )
 
+/** Metadata edited locally before a new group is committed. */
+internal data class TabGroupDraft(
+    val name: String,
+    val colorArgb: Int,
+    val icon: TabGroupIcon = TabGroupIcon.NONE,
+    val tintMembers: Boolean = true,
+)
+
 /** The first colour of the shared highlighter palette that no group in [groups] uses; the palette is
  * reused from its start once every entry is taken. */
 internal fun defaultTabGroupColorArgb(groups: List<TabGroup>): Int {
@@ -187,8 +195,23 @@ private fun placeAfter(order: List<TabRef>, anchor: TabRef, moved: List<TabRef>)
 internal fun orderWithFollowersAfter(order: List<TabRef>, anchor: TabRef, followers: List<TabRef>): List<TabRef> =
     placeAfter(order, anchor, followers)
 
+/** Creates the draft shown by the editor without changing group membership, order or metadata. */
+internal fun AppState.newTabGroupDraft(ref: TabRef): TabGroupDraft? = synchronized(stateLock) {
+    if (!isLiveGroupableRef(ref)) return@synchronized null
+    // The log's open diagrams join it, right after it.
+    val block = listOf(ref) + diagramRefsOfLogLocked(ref)
+    val groupsWithoutRef = tabGroups.mapNotNull { existing ->
+        val members = existing.members.filterNot { it in block }
+        existing.takeIf { members.isNotEmpty() }?.copy(members = members)
+    }
+    TabGroupDraft(
+        name = uniqueTabGroupName(defaultTabGroupName(ref), groupsWithoutRef.map { it.name }),
+        colorArgb = defaultTabGroupColorArgb(groupsWithoutRef),
+    )
+}
+
 /** Creates a one-member group. Home/capture-launcher and Tests tabs are deliberately not groupable. */
-internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateLock) {
+internal fun AppState.createTabGroup(ref: TabRef, draft: TabGroupDraft? = null): String? = synchronized(stateLock) {
     if (!isLiveGroupableRef(ref)) return@synchronized null
     // The log's open diagrams join it, right after it.
     val block = listOf(ref) + diagramRefsOfLogLocked(ref)
@@ -200,10 +223,12 @@ internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateL
     // The groups the tab leaves behind (an emptied one disappears) do not count as taken.
     val group = TabGroup(
         id = UUID.randomUUID().toString(),
-        name = uniqueTabGroupName(defaultTabGroupName(ref), groupsWithoutRef.map { it.name }),
-        colorArgb = defaultTabGroupColorArgb(groupsWithoutRef),
+        name = uniqueTabGroupName(draft?.name ?: defaultTabGroupName(ref), groupsWithoutRef.map { it.name }),
+        colorArgb = draft?.colorArgb ?: defaultTabGroupColorArgb(groupsWithoutRef),
         collapsed = false,
         members = block,
+        icon = draft?.icon ?: TabGroupIcon.NONE,
+        tintMembers = draft?.tintMembers ?: true,
     )
     tabGroups = groupsWithoutRef + group
     commitTabOrderLocked(currentOrder)
@@ -282,6 +307,16 @@ internal fun AppState.renameTabGroup(id: String, name: String) = synchronized(st
     val cleaned = name.trim()
     if (cleaned.isEmpty()) return@synchronized
     tabGroups = tabGroups.map { if (it.id == id) it.copy(name = cleaned) else it }
+}
+
+/** Applies all editor fields in one stateLock transaction. */
+internal fun AppState.updateTabGroupMetadata(id: String, draft: TabGroupDraft) = synchronized(stateLock) {
+    val cleaned = draft.name.trim()
+    if (cleaned.isEmpty()) return@synchronized
+    if (tabGroups.none { it.id == id }) return@synchronized
+    tabGroups = tabGroups.map {
+        if (it.id == id) it.copy(name = cleaned, colorArgb = draft.colorArgb, icon = draft.icon, tintMembers = draft.tintMembers) else it
+    }
 }
 
 internal fun AppState.setTabGroupColor(id: String, colorArgb: Int) = synchronized(stateLock) {

@@ -105,12 +105,12 @@ import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.applySeq3Command
-import com.indagium.diagram3.fragmentContainsRow
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3DisplayName
 import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3FilterCounts
+import com.indagium.diagram3.seq3FragmentDrawnMembershipRows
 import com.indagium.diagram3.seq3FragmentDrawnRowCount
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
@@ -544,8 +544,14 @@ internal fun seq3SequenceGripHit(xPx: Float, density: Float, gutterDp: Float): B
  *  interior-boundary rule (both neighbours are members), shown as a hint before the drop. */
 internal fun seq3DropInsideFragments(document: Seq3Document, previous: Seq3RowRef?, next: Seq3RowRef?): List<Seq3Fragment> {
     if (previous == null || next == null) return emptyList()
+    val messagesById = document.messages.associateBy { it.id }
+    val drawnRows = seq3DrawnRowRefs(document)
+    val memberships = document.fragments.associate { fragment ->
+        fragment.id to seq3FragmentDrawnMembershipRows(fragment, drawnRows, messagesById)
+    }
     return document.fragments.filter {
-        it.visibility == Seq3Visibility.VISIBLE && fragmentContainsRow(it, previous) && fragmentContainsRow(it, next)
+        it.visibility == Seq3Visibility.VISIBLE &&
+            previous in memberships[it.id].orEmpty() && next in memberships[it.id].orEmpty()
     }
 }
 
@@ -555,7 +561,12 @@ internal data class Seq3RowRails(val containing: List<Seq3Fragment>, val startin
 
 internal fun seq3FragmentRails(document: Seq3Document, rows: List<Seq3RowRef>): List<Seq3RowRails> {
     val fragments = document.fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
-    val membership = rows.map { row -> fragments.filter { fragmentContainsRow(it, row) } }
+    val messagesById = document.messages.associateBy { it.id }
+    val drawnRows = seq3DrawnRowRefs(document)
+    val memberRowsByFragment = fragments.associate { fragment ->
+        fragment.id to seq3FragmentDrawnMembershipRows(fragment, drawnRows, messagesById)
+    }
+    val membership = rows.map { row -> fragments.filter { row in memberRowsByFragment[it.id].orEmpty() } }
     return rows.indices.map { index ->
         val containing = membership[index]
         val previous = membership.getOrNull(index - 1).orEmpty().mapTo(HashSet()) { it.id }

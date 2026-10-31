@@ -1124,9 +1124,9 @@ private fun moveSeq3ExactRow(
  *
  *  - **Leaves** F (member, not interior): the rows' refs are removed. A fragment holding the message
  *    only through `messageIds` first materialises `occurrenceRefs` for the message's other rows,
- *    because an exact ref for a message takes precedence over `messageIds` for that message in
- *    [fragmentContainsRow] and `fragmentRowIndices`. When no exact ref is left the message id is
- *    removed too, otherwise precedence would fall back to `messageIds` and pull every row back in.
+ *    because exact refs constrain that message's membership in both exact-row checks and the
+ *    drawn-row projection (including represented summaries). When no exact ref is left the message
+ *    id is removed too, otherwise membership would fall back to `messageIds` and pull every row back in.
  *  - **Joins** G (not a member, interior): refs are added (a template-level fragment covering the
  *    whole moved message just gains the id), and the id is inserted in message order.
  *  - **Last member:** a fragment whose only visible members are the moved rows is left unchanged —
@@ -1144,6 +1144,10 @@ private fun reassignSeq3FragmentMembership(
     val messageId = movedRows.first().messageId
     val movedSet = movedRows.toSet()
     val rows = seq3CurrentCanvasRowRefs(updated)
+    val messagesById = updated.messages.associateBy { it.id }
+    val membershipByFragment = original.fragments.associate { fragment ->
+        fragment.id to seq3FragmentDrawnMembershipRows(fragment, rows, messagesById)
+    }
     val movedIndices = rows.indices.filter { rows[it] in movedSet }
     if (movedIndices.isEmpty() || movedIndices.last() - movedIndices.first() != movedIndices.size - 1) return updated
     val before = rows.getOrNull(movedIndices.first() - 1)
@@ -1152,12 +1156,13 @@ private fun reassignSeq3FragmentMembership(
     val coversWholeMessage = allMessageRows.all { it in movedSet }
     val messagePositions = updated.messages.withIndex().associate { (index, message) -> message.id to index }
     val fragments = updated.fragments.map { fragment ->
-        if (rows.none { it !in movedSet && fragmentContainsRow(fragment, it) }) return@map fragment
+        val membership = membershipByFragment[fragment.id].orEmpty()
+        if (rows.none { it !in movedSet && it in membership }) return@map fragment
         val interior = before != null && after != null &&
-            fragmentContainsRow(fragment, before) && fragmentContainsRow(fragment, after)
+            before in membership && after in membership
         val hasExactRefs = fragment.occurrenceRefs.any { it.messageId == messageId }
         if (interior) {
-            val joining = movedRows.filterNot { fragmentContainsRow(fragment, it) }
+            val joining = movedRows.filterNot { it in membership }
             if (joining.isEmpty()) return@map fragment
             val addedRefs = if (!hasExactRefs && coversWholeMessage) {
                 emptyList()
@@ -1168,7 +1173,7 @@ private fun reassignSeq3FragmentMembership(
                 .sortedBy { id -> messagePositions[id] ?: Int.MAX_VALUE }
             fragment.copy(messageIds = ids, occurrenceRefs = (fragment.occurrenceRefs + addedRefs).distinct())
         } else {
-            val leaving = movedRows.filter { fragmentContainsRow(fragment, it) }
+            val leaving = movedRows.filter { it in membership }
             if (leaving.isEmpty()) return@map fragment
             val leavingEntries = leaving.mapNotNullTo(HashSet()) { it.occurrenceEntryId }
             val keptRefs = if (hasExactRefs) {
@@ -1223,12 +1228,17 @@ private fun inheritSeq3FragmentMembership(
     position: Seq3InsertionPosition,
 ): Seq3Document {
     val rows = seq3CurrentCanvasRowRefs(original)
+    val messagesById = original.messages.associateBy { it.id }
+    val memberships = original.fragments.associate { fragment ->
+        fragment.id to seq3FragmentDrawnMembershipRows(fragment, rows, messagesById)
+    }
     val boundary = resolveSeq3VisibleInsertionBoundary(original, rows, position) ?: return updated
     val before = rows.getOrNull(boundary - 1)
     val after = rows.getOrNull(boundary)
     if (before == null || after == null) return updated
     val inherited = original.fragments.filter { fragment ->
-        fragmentContainsRow(fragment, before) && fragmentContainsRow(fragment, after)
+        val membership = memberships[fragment.id].orEmpty()
+        before in membership && after in membership
     }.mapTo(HashSet()) { it.id }
     if (inherited.isEmpty()) return updated
     val messagePositions = updated.messages.withIndex().associate { (index, current) -> current.id to index }
@@ -1295,15 +1305,88 @@ private fun resolveSeq3CanonicalBoundaryToVisible(
     return nextVisibleRow ?: previousVisibleRow?.plus(1) ?: 0
 }
 
-/** Whether [row] belongs to [fragment]: exact refs for the row's message take precedence over the
- *  template-level `messageIds` entry, mirroring `fragmentRowIndices` in the layout. */
+/** Exact membership check for an occurrence row. Drawn summary rows must use
+ *  [fragmentContainsDrawnRow], which resolves the evidence represented by that row. */
 internal fun fragmentContainsRow(fragment: Seq3Fragment, row: Seq3RowRef): Boolean {
     val hasSpecificRowsForMessage = fragment.occurrenceRefs.any { it.messageId == row.messageId }
     return if (hasSpecificRowsForMessage) {
-        fragment.occurrenceRefs.any { it.messageId == row.messageId && it.entryId == row.occurrenceEntryId }
+        row.occurrenceEntryId != null && fragment.occurrenceRefs.any { it.messageId == row.messageId && it.entryId == row.occurrenceEntryId }
     } else {
         row.messageId in fragment.messageIds
     }
+}
+
+/** Whether [fragment] contains a row that is actually drawn for [message]. A null occurrence ID
+ *  can mean a collapsed/annotation summary or a FIRST_LAST elision. Exact refs only hold a summary
+ *  when they intersect the visible evidence represented by that row; FIRST_LAST elisions represent
+ *  only the middle evidence, never the first or last displayed arrows. */
+internal fun fragmentContainsDrawnRow(
+    fragment: Seq3Fragment,
+    row: Seq3RowRef,
+    message: Seq3Message?,
+): Boolean {
+    val exactRefs = fragment.occurrenceRefs.filter { it.messageId == row.messageId }
+    if (row.occurrenceEntryId != null) {
+        return if (exactRefs.isNotEmpty()) exactRefs.any { it.entryId == row.occurrenceEntryId }
+        else row.messageId in fragment.messageIds
+    }
+    if (exactRefs.isEmpty()) return row.messageId in fragment.messageIds
+    if (message == null) return false
+
+    val isFirstLastElision = message.kind != Seq3Kind.NOTE && message.toLifelineId != null &&
+        message.repeat == Seq3Repeat.FIRST_LAST
+    val representedIds = seq3SummaryEvidenceEntryIds(message, isFirstLastElision)
+    return exactRefs.any { ref -> ref.entryId in representedIds }
+}
+
+/** Evidence represented by a drawn null-occurrence summary row. FIRST_LAST elisions cover only the
+ *  middle; other summary rows stand for currently visible evidence of their message. */
+internal fun seq3SummaryEvidenceEntryIds(message: Seq3Message, firstLastElision: Boolean): Set<Int> {
+    val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val represented = if (
+        firstLastElision && visibleOccurrences.size >= 2 &&
+        (message.totalOccurrenceCount ?: visibleOccurrences.size) > 2
+    ) {
+        visibleOccurrences.drop(1).dropLast(1)
+    } else {
+        visibleOccurrences
+    }
+    return represented.mapTo(HashSet()) { it.entryId }
+}
+
+/** Document-aware form used by drawn-row consumers so hidden or dangling refs cannot create a
+ *  visible summary member. */
+internal fun fragmentContainsDrawnRow(
+    fragment: Seq3Fragment,
+    row: Seq3RowRef,
+    messagesById: Map<String, Seq3Message>,
+): Boolean = fragmentContainsDrawnRow(fragment, row, messagesById[row.messageId])
+
+/** Direct membership plus a FIRST_LAST elision without stored middle evidence when that drawn row
+ *  falls inside the fragment's already established box span. This keeps rails, drops and document
+ *  normalization aligned without fabricating occurrence references. */
+internal fun seq3FragmentDrawnMembershipRows(
+    fragment: Seq3Fragment,
+    rows: List<Seq3RowRef>,
+    messagesById: Map<String, Seq3Message>,
+): Set<Seq3RowRef> {
+    fun canonical(index: Int): Seq3RowRef {
+        val row = rows[index]
+        return seq3MembershipRowRef(messagesById[row.messageId], row.messageId, row.occurrenceEntryId)
+    }
+    val directIndices = rows.indices.filter { index -> fragmentContainsDrawnRow(fragment, canonical(index), messagesById) }
+    if (directIndices.size < 2) return directIndices.mapTo(LinkedHashSet()) { rows[it] }
+    val direct = directIndices.mapTo(LinkedHashSet()) { rows[it] }
+    for (index in directIndices.first()..directIndices.last()) {
+        val row = canonical(index)
+        if (rows[index] in direct || row.occurrenceEntryId != null) continue
+        val message = messagesById[row.messageId] ?: continue
+        if (
+            message.kind != Seq3Kind.NOTE && message.toLifelineId != null && message.repeat == Seq3Repeat.FIRST_LAST &&
+            seq3SummaryEvidenceEntryIds(message, firstLastElision = true).isEmpty()
+        ) direct += row
+    }
+    return direct
 }
 
 /** The rows the canvas draws, in drawn order, as durable row identities: one ref per arrow, with a
@@ -1323,7 +1406,7 @@ internal fun seq3DrawnRowRefs(document: Seq3Document): List<Seq3RowRef> {
 }
 
 /** True when the layout draws the message as one summary row regardless of its occurrences. */
-private fun seq3DrawsAsSummaryRow(message: Seq3Message): Boolean =
+internal fun seq3DrawsAsSummaryRow(message: Seq3Message): Boolean =
     message.kind == Seq3Kind.NOTE || message.toLifelineId == null ||
         (message.repeat == Seq3Repeat.COLLAPSE_ABOVE &&
             message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE } > message.repeatThreshold)
@@ -1331,7 +1414,10 @@ private fun seq3DrawsAsSummaryRow(message: Seq3Message): Boolean =
 /** The current visible row projection, used only to find insertion boundaries and group
  *  containment. [seq3DefaultRowOrder] deliberately includes hidden evidence for persistence. */
 private fun seq3CurrentCanvasRowRefs(document: Seq3Document): List<Seq3RowRef> {
-    val rows = document.messages.flatMap(::seq3VisibleCanvasRowRefs)
+    val visibleLifelineIds = document.lifelines.asSequence()
+        .filter { it.visibility == Seq3Visibility.VISIBLE }
+        .mapTo(HashSet()) { it.id }
+    val rows = document.messages.flatMap { message -> seq3VisibleCanvasRowRefs(message, visibleLifelineIds) }
     val occurrenceByRef = document.messages.flatMap { message ->
         message.occurrences.map { Seq3RowRef(message.id, it.entryId) to it }
     }.toMap()
@@ -1351,8 +1437,17 @@ private fun seq3CurrentCanvasRowRefs(document: Seq3Document): List<Seq3RowRef> {
     )
 }
 
-private fun seq3VisibleCanvasRowRefs(message: Seq3Message): List<Seq3RowRef> {
+/** Stable membership identity for a drawn canvas row. Messages rendered as one summary row use
+ *  null even when the layout keeps the first occurrence as its click target. */
+internal fun seq3MembershipRowRef(message: Seq3Message?, messageId: String, occurrenceEntryId: Int?): Seq3RowRef {
+    val summary = message?.let(::seq3DrawsAsSummaryRow) == true
+    return Seq3RowRef(messageId, if (summary) null else occurrenceEntryId)
+}
+
+private fun seq3VisibleCanvasRowRefs(message: Seq3Message, visibleLifelineIds: Set<String>): List<Seq3RowRef> {
     if (message.visibility == Seq3Visibility.HIDDEN) return emptyList()
+    if (message.fromLifelineId !in visibleLifelineIds) return emptyList()
+    if (message.toLifelineId != null && message.toLifelineId !in visibleLifelineIds) return emptyList()
     val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
     if (occurrences.isEmpty()) return listOf(Seq3RowRef(message.id))

@@ -912,8 +912,9 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
 - **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `MainToolbar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): five preset
   thumbnails (Classic, Log focus, Filter bar, Filtering, Analysis) and the saved layouts as a second row of thumbnails, both drawn from `tileGeometry`
   (right-click a saved one for Rename / Export / Delete, a dashed "+" saves the view), one strip naming the current layout with Update / Revert
-  ("Save as new…" for a preset), a Panels checklist of the applicable tiles and "Lock tiles" (hides grips). **Filter bar** is Log focus plus
-  the filter bar. Every current single-view preset sets all five panel flags (sidebar, filter bar, Notes, Video, AI) from one table,
+  ("Save as new…" for a preset), a Panels checklist of the applicable tiles and "Lock tiles" (hides grips). **Filter bar** uses Log focus's
+  compact tree, keeps the Notes tile visible at its sanitized default anchor, and turns on the filter bar. The sanitized preset tree is shared
+  by application, active-state matching and thumbnails. Every current single-view preset sets all five panel flags (sidebar, filter bar, Notes, Video, AI) from one table,
   `LogViewLayoutPreset.panels`, in `applyLogViewPreset`; `logViewPresetActive` compares them too, so a tab-strip panel toggle shows the
   preset as Modified and Revert restores it. The legacy Review / Filters on top presets (`panels == null`) leave Notes, Video and AI alone.
   The Layout button shows no count: a small dot appears only while the layout is Modified against its selected preset or saved layout
@@ -928,7 +929,10 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   every field of both groups, and a missing group or field (older custom profiles) means the `AppSettings()` default, never "keep current".
   Built-in profiles carry both groups in full at the defaults; "Save as new profile…", "Update from current setup" and the setup assistant's
   "My setup" profile (created when its choices differ from the picked profile) capture the live values. "Customized" compares the same
-  resolved values, so it matches exactly what applying would change.
+  resolved values, so it matches exactly what applying would change. Standalone profile files keep envelope version 1 and may append an
+  optional bundled saved-layout snapshot using the standalone layout codec. Export resolves the referenced local layout before writing;
+  import validates the whole bundle, creates a saved layout with a fresh ID and unique name, and remaps the profile to it before changing
+  settings. Older reference-only files still import; if their local layout cannot be resolved, applying the profile keeps the current layout.
   `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
   Filter group off instead of listing eight hidden tiles (the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
@@ -1011,8 +1015,10 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
   full-height tab cell drawn with the current tab style's shell and a 1dp border in the group colour (8dp colour dot, the optional icon,
   "▾ name · N", sized from all of these up to 280dp) that collapses or expands its members without changing the active surface; a collapsed
   group still shows its active member beside the header and folds fully once another tab is active. The header menu offers Rename…, Colour ▸,
-  Collapse/Expand, Edit group…, Ungroup (order preserved) and Close group; tab menus create a group ("Add to new group" opens the dialog as new, and
-  Cancel removes it), add or move a tab through a "Add to group ▸"/"Move to group ▸" submenu with colour swatches ending in "New group…", or remove
+  Collapse/Expand, Edit group…, Ungroup (order preserved) and Close group; "Add to new group" opens a local draft seeded from the source `TabRef`.
+  Confirm creates the group and moves the source plus its diagram followers in one state transaction; Cancel, Escape and dismissal leave group
+  metadata, members and strip order untouched. Existing group edits use the same draft editor and commit atomically. Other tab menus add or move
+  a tab through an "Add to group ▸"/"Move to group ▸" submenu with colour swatches ending in "New group…", or remove
   its membership. Group colours come from the shared highlighter palette (`HL_COLORS` plus custom colours, via `HighlighterColorPicker`); a new group
   takes the first palette colour no other group uses and its first tab's file name. Unless the group's "Tint tabs in this group" option
   (`tintMembers`, persisted, default on) is off, member tabs are tinted with the group colour inside their own
@@ -1613,8 +1619,11 @@ Search step: an unfinished assistant starts at Workspace, a completed assistant 
 opens at Search with the current profile kept, and revision 2 or later stays closed. Finish, Skip,
 Escape and window close acknowledge revision 2 while preserving any higher revision. The Search
 controls write settings as they are changed, and completed older users start with Keep Current
-selected. Manually running the assistant always starts at Workspace. The legacy positional settings
-decoder remains frozen.
+selected. Manually running the assistant always starts at Workspace. The wizard records the profile
+actually applied, even when it has the same ID as the opening selection; Finish compares final
+choices with the opening settings overlaid by that applied profile. Keep Current compares with the
+opening settings. Importing a profile records it as applied after the import flow applies it, without
+applying it twice. The legacy positional settings decoder remains frozen.
 
 `LogItem` is the render model — the output of the filter pipeline and the input to the `LazyColumn`.
 It is never persisted and never leaves the process.
@@ -1670,15 +1679,20 @@ Messages tile has two views: Templates (one row per message, for editing; never 
 and Sequence (one row per drawn arrow, from `seq3DrawnRowRefs`, so it matches the canvas row for
 row). A Sequence drag, a canvas drag, the arrow menu's Move submenu and Alt+↑/↓ all dispatch
 `MoveRow` for one exact row; only a collapsed `×N` summary row moves its whole message.
-`Seq3Command.ResetRowOrder` clears `rowOrder` back to chronology. After a move, fragment
-membership follows the drop (`reassignSeq3FragmentMembership`): a row belongs to a fragment only
-when both of its new neighbours do, a template-level member is materialised into
-`occurrenceRefs` before one of its rows leaves, and a fragment's only member travels with it, so
-a fragment box never stretches to follow a moved member. `normalizeSeq3FragmentSpans`
-(`diagram3/Seq3FragmentSpans.kt`) keeps membership equal to the drawn box: every visible fragment holds every drawn
-row from its first to its last member (children clamped to their parent, hidden rows ignored but their refs kept).
-It runs after every command and when a diagram is opened, so the Artifacts "×N arrows" count, the Sequence list
-rail and the canvas box always agree. Both Messages-list views drag like the Lifelines list (shared
+`Seq3Command.ResetRowOrder` clears `rowOrder` back to chronology. `rowOrder` keeps hidden messages,
+occurrences and endpoint evidence in storage; the drawn-row projection excludes messages whose source
+or non-null target lifeline is hidden. After a move, fragment membership follows the drop
+(`reassignSeq3FragmentMembership`): a row belongs to a fragment only when both of its new neighbours
+do, a template-level member is materialised into `occurrenceRefs` before one of its rows leaves, and
+a fragment's only member travels with it, so a fragment box never stretches to follow a moved member.
+`normalizeSeq3FragmentSpans` (`diagram3/Seq3FragmentSpans.kt`) keeps membership equal to the drawn box:
+every visible fragment holds every drawn row from its first to its last member (children clamped to
+their parent, hidden rows ignored but their refs kept). Collapsed messages, NOTE/unresolved summaries
+and FIRST_LAST elisions use the same visible-evidence rules in the canvas, normalizer, emitter,
+Sequence rails and drop hints; an elision with no stored middle occurrence is represented by its
+containing span and does not get a fabricated occurrence ID. It runs after every command and when a
+diagram is opened, so the Artifacts "×N arrows" count, the Sequence list rail and the canvas box
+always agree. Both Messages-list views drag like the Lifelines list (shared
 `seq3DragLift`: the row moves in its own slot, neighbours slide). Hidden references retain their positions
 and obsolete references are discarded during edits. The Templates list's default order
 ("Diagram order") follows the first represented row; its alternative sorts remain views rather
@@ -2077,29 +2091,35 @@ is the project's dependency-injection mechanism and its test seam ([D4](#d4--tes
 
 ### 11.2 The `stateLock` invariant
 
-> **Every read-modify-write of the `tabs` list goes through `synchronized(stateLock)`.**
+> **Every read-modify-write of session, tab and group collections, and every session document/history read-compute-commit, goes through `synchronized(stateLock)`.**
 
-`stateLock` is a plain monitor object (`ui/AppState.kt:1276`). The guarded mutators are:
+`stateLock` is a plain monitor object (`ui/AppState.kt:3235`). The guarded mutators are:
 
 | Function | Line | Purpose |
 |---|---|---|
-| `upTab(tabId) { LogTab -> LogTab }` | `ui/AppState.kt:1884` | The universal tab mutator |
-| `upFlt(tabId) { Filter -> Filter }` | `ui/AppState.kt:1904` → `:1918` | Filter mutation; also demotes an active preset to a draft |
-| `upAnn(tabId) { ... }` | `ui/AppState.kt:5436` | Annotation mutation |
+| `upTab(tabId) { LogTab -> LogTab }` | `ui/AppState.kt:7514` | The universal tab mutator |
+| `upFlt(tabId) { Filter -> Filter }` | `ui/AppState.kt:7559` → `:7573` | Filter mutation; also demotes an active preset to a draft |
+| `upAnn(tabId) { ... }` | `ui/AppState.kt:15542` | Annotation mutation |
+| `Seq3Session.replace`, session open/close/reorder and command/undo commits | `ui/Seq3Session.kt:289`, `:514`, `:816`, `:897` | Prevent a reorder snapshot from overwriting a concurrent document edit or resurrecting a closed session |
+| `TabGroups` collection/order mutations and group editor confirmation | `ui/TabGroups.kt` | Keep group metadata, membership and canonical strip order atomic |
 
 The lock is **reentrant** by design — `upFlt` calls `upTab` inside its own `synchronized` block so
 that the before-state read, the mutation, and the draft-tracking write cannot be interleaved by a
 concurrent tail flush (`ui/AppState.kt:1913-1917`). The same applies to `closeTabsById`,
 `reorderTabs`, the loading counters, `publishSourceIndex`, the source-index merge, `resolveLogSource`,
-and `restoreTabsFromAutosave`.
+and `restoreTabsFromAutosave`. Session transforms inside the monitor are in-memory only; encoding,
+persistence, autosave scheduling and other IO or side effects happen after it is released. Read-only
+session lookups stay lock-free because autosave holds its writer lock while serializing and must not
+acquire `stateLock` through a getter.
 
 Why a lock at all, when Compose snapshot state is thread-safe? Because snapshot safety protects a
 *single* field write, not a read-modify-write across several fields. `tabs = tabs.map { ... }` is
 three operations, and the control server, the tailer, and the UI can all issue one concurrently.
 
-**Lock ordering rule.** `AutosaveScheduler` uses two locks of its own and is documented as never
-holding either while `stateLock` is held (`ui/AutosaveScheduler.kt:44-47`). This is the only
-lock-ordering constraint in the system, and it is what keeps a slow disk write from blocking the UI.
+**Lock ordering rule.** `AutosaveScheduler` uses two locks of its own; no path may acquire them
+while `stateLock` is held, and its serializer must not take `stateLock` while its writer lock is held
+(`ui/AutosaveScheduler.kt:44-47`). Persistence and scheduling therefore happen after state commits,
+which keeps a slow disk write from blocking state mutation.
 
 ### 11.3 Delegation to coordinators
 
@@ -2152,7 +2172,9 @@ request would be equal to the first and would not trigger recomposition.
 
 `AppState.tabs` remains log-only. Diagram workspace sessions (`Seq3WorkspaceSession`, owned by
 `AppState.seq3Sessions`) live in a separate collection selected through `ActiveSurface`, so log-tab
-code cannot accidentally treat a diagram as a log with an empty body. Each session owns its
+code cannot accidentally treat a diagram as a log with an empty body. Session collection replacement,
+publication, close, reorder, command application and undo are atomic under `stateLock`; serialization,
+draft persistence and autosave scheduling run after release. Each session owns its
 source-log id (nullable), the generated/edited `Seq3Document`, its own undo stack, dirty/draft-saved
 state, the confirmed note block id, and the library item id it's backed by. Closing a v3 session is
 a plain, immediate close (`Seq3Session.close`) — unlike the deleted v1/v2 coordinator's three-way
@@ -2233,7 +2255,7 @@ rows, so an early count can only mean the loop genuinely stopped.
 
 | Lock | Where | Guards |
 |---|---|---|
-| `stateLock` | `ui/AppState.kt:1276` | Every `tabs` read-modify-write, source-index publication, loading counters |
+| `stateLock` | `ui/AppState.kt:3235` | Tab/session/group collection RMW; session document/history commits; source-index publication; loading counters |
 | `schedulingLock` | `ui/AutosaveScheduler.kt:46` | Replacing or invalidating the debounce job |
 | `writerLock` (fair `ReentrantLock`) | `ui/AutosaveScheduler.kt:47` | Serialise + disk write, so all callers observe one total write order |
 | `lifecycleLock` | `ui/ControlServerManager.kt` | Server start/stop |

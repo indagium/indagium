@@ -243,6 +243,8 @@ class Seq3Session(
     var activeSessionId by mutableStateOf<String?>(null)
         private set
 
+    // Read immutable Compose snapshots lock-free. In particular autosave serialization runs while
+    // AutosaveScheduler owns its writer lock and must never wait for stateLock.
     val activeSession: Seq3WorkspaceSession? get() = activeSessionId?.let(::session)
 
     /**
@@ -282,8 +284,33 @@ class Seq3Session(
 
     private fun session(id: String): Seq3WorkspaceSession? = sessions.firstOrNull { it.id == id }
 
-    private fun replace(id: String, fn: (Seq3WorkspaceSession) -> Seq3WorkspaceSession) {
+    /** [fn] must be a pure in-memory copy; persistence, autosave scheduling and other side effects
+     *  belong after this list update so AppState.stateLock never covers IO or scheduler locks. */
+    private fun replace(id: String, fn: (Seq3WorkspaceSession) -> Seq3WorkspaceSession): Boolean = synchronized(appState.stateLock) {
+        if (sessions.none { it.id == id }) return@synchronized false
         sessions = sessions.map { if (it.id == id) fn(it) else it }
+        true
+    }
+
+    /** Publishes one freshly-built workspace and its mixed-strip membership as one state change.
+     *  Caller performs library IO and generation only after this critical section returns. */
+    private fun publishSession(session: Seq3WorkspaceSession, originGroupId: String?, baseline: Seq3Document? = null) {
+        synchronized(appState.stateLock) {
+            sessions = sessions + session
+            appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(session.id))
+            appState.revealTabGroupForActivation(TabRef.Diagram(session.id))
+            activeSessionId = session.id
+            appState.activeSurface = ActiveSurface.Diagram3(session.id)
+            if (baseline != null) generatedBaselines[session.id] = baseline
+        }
+    }
+
+    private fun activateLocked(id: String): Boolean {
+        if (sessions.none { it.id == id }) return false
+        appState.revealTabGroupForActivation(TabRef.Diagram(id))
+        activeSessionId = id
+        appState.activeSurface = ActiveSurface.Diagram3(id)
+        return true
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────────────────
@@ -329,12 +356,7 @@ class Seq3Session(
             // generation actually runs.
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
         )
-        sessions = sessions + session
-        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
-        appState.revealTabGroupForActivation(TabRef.Diagram(id))
-        activeSessionId = id
-        appState.activeSurface = ActiveSurface.Diagram3(id)
-        generatedBaselines[id] = document
+        publishSession(session, originGroupId, document)
 
         val exportMode = appState.settings.diagramDefaultExportMode
         val encoded = encodeSeq3Note(document, session.dialect, exportMode = exportMode)
@@ -391,11 +413,7 @@ class Seq3Session(
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
             noteSeeds = seeds,
         )
-        sessions = sessions + session
-        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
-        appState.revealTabGroupForActivation(TabRef.Diagram(id))
-        activeSessionId = id
-        appState.activeSurface = ActiveSurface.Diagram3(id)
+        publishSession(session, originGroupId)
         requestGenerate(id)
         return id
     }
@@ -419,14 +437,15 @@ class Seq3Session(
         val openedDocument = normalizeSeq3FragmentSpans(parsed.document)
         val attachmentLibraryId = parsed.attachment?.diagramId
         val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
-        sessions.firstOrNull { existing ->
+        val existing = synchronized(appState.stateLock) { sessions.firstOrNull { existing ->
             existing.sourceTabId == tabId &&
                 (!isSnapshot || existing.document == openedDocument) &&
                 (existing.confirmedBlockId == blockId ||
                     (attachmentLibraryId != null && existing.libraryItemId == attachmentLibraryId))
-        }?.let { existing ->
-            activate(existing.id)
-            return existing.id
+        } }
+        existing?.let {
+            activate(it.id)
+            return it.id
         }
         val id = "seq3-${UUID.randomUUID()}"
         val session = Seq3WorkspaceSession(
@@ -445,23 +464,14 @@ class Seq3Session(
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
         )
-        sessions = sessions + session
-        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
-        appState.revealTabGroupForActivation(TabRef.Diagram(id))
-        generatedBaselines[id] = openedDocument
-        activeSessionId = id
-        appState.activeSurface = ActiveSurface.Diagram3(id)
+        publishSession(session, originGroupId, openedDocument)
         return id
     }
 
     /** Selects an existing workspace without touching [AppState.tabs] — the v3 counterpart of
      *  [SeqDiagramCoordinator.activateWorkspace]. */
     fun activate(id: String): Boolean {
-        if (session(id) == null) return false
-        appState.revealTabGroupForActivation(TabRef.Diagram(id))
-        activeSessionId = id
-        appState.activeSurface = ActiveSurface.Diagram3(id)
-        return true
+        return synchronized(appState.stateLock) { activateLocked(id) }
     }
 
     /** Closes [id] outright. Phase 3 has no dirty-close confirmation UI yet (that's a phase 4/5
@@ -480,14 +490,16 @@ class Seq3Session(
         workspaceViewStates.remove(id)
         generatedBaselines.remove(id)
         lastReportedRejectionKey.remove(id)
-        sessions = sessions.filterNot { it.id == id }
-        appState.stripTabClosed(TabRef.Diagram(id))
-        if (activeSessionId == id) {
-            val next = sessions.lastOrNull()?.id
-            activeSessionId = next
-            // The Tests workspace may be the surface on screen while this (background) session closes.
-            if (appState.activeSurface !is ActiveSurface.Tests) {
-                appState.activeSurface = next?.let(ActiveSurface::Diagram3) ?: appState.activeTab()?.id?.let(ActiveSurface::Log)
+        synchronized(appState.stateLock) {
+            sessions = sessions.filterNot { it.id == id }
+            appState.stripTabClosed(TabRef.Diagram(id))
+            if (activeSessionId == id) {
+                val next = sessions.lastOrNull()?.id
+                activeSessionId = next
+                // The Tests workspace may be the surface on screen while this (background) session closes.
+                if (appState.activeSurface !is ActiveSurface.Tests) {
+                    appState.activeSurface = next?.let(ActiveSurface::Diagram3) ?: appState.activeTab()?.id?.let(ActiveSurface::Log)
+                }
             }
         }
     }
@@ -500,10 +512,13 @@ class Seq3Session(
      *  [activeSessionId] nor [AppState.activeSurface] is touched — reordering never changes what's
      *  selected. */
     fun reorderSessions(orderedIds: List<String>) {
-        val byId = sessions.associateBy { it.id }
-        val reordered = orderedIds.mapNotNull(byId::get)
-        val omitted = sessions.filter { it.id !in orderedIds }
-        sessions = reordered + omitted
+        synchronized(appState.stateLock) {
+            val byId = sessions.associateBy { it.id }
+            val reordered = orderedIds.mapNotNull(byId::get)
+            val orderedSet = orderedIds.toHashSet()
+            val omitted = sessions.filter { it.id !in orderedSet }
+            sessions = reordered + omitted
+        }
     }
 
     /**
@@ -515,7 +530,8 @@ class Seq3Session(
      * which in turn makes [requestGenerate] and [confirm] no-ops until [relink].
      */
     fun sourceTabClosed(tabId: String) {
-        sessions.filter { it.sourceTabId == tabId }.forEach { s ->
+        val affected = synchronized(appState.stateLock) { sessions.filter { it.sourceTabId == tabId } }
+        affected.forEach { s ->
             generateJobs.remove(s.id)?.cancel()
             // Regen-review and revert jobs also read the source tab's rows (they looked the tab up
             // once, at launch). Cancel them too so none outlives the tab into the release of its rows;
@@ -798,16 +814,24 @@ class Seq3Session(
      *  merge, group, hide, regenerate-apply, …) must route through this, never mutate
      *  [Seq3WorkspaceSession.document] directly, or ⌘Z silently stops covering that verb. */
     fun applyCommand(id: String, command: Seq3Command): Boolean {
-        val current = session(id) ?: return false
-        val result = applySeq3Command(current.document, command)
-        val undo = result.undo
-        if (!result.applied || undo == null) return false
-        val document = restoreGeneratedAuthoring(result.document, generatedBaselines[id])
-        // Tolerant command paths may report success even when the requested value is already
-        // present. Once authoring normalization is applied, that is a true no-op and must not
-        // create a misleading undo entry.
-        if (document == current.document) return false
-        replace(id) { it.copy(document = document, undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH)) }
+        val document = synchronized(appState.stateLock) {
+            val current = sessions.firstOrNull { it.id == id } ?: return@synchronized null
+            val result = applySeq3Command(current.document, command)
+            val undo = result.undo
+            if (!result.applied || undo == null) return@synchronized null
+            val updatedDocument = restoreGeneratedAuthoring(result.document, generatedBaselines[id])
+            // Tolerant command paths may report success even when the requested value is already
+            // present. Once authoring normalization is applied, that is a true no-op and must not
+            // create a misleading undo entry.
+            if (updatedDocument == current.document) return@synchronized null
+            sessions = sessions.map {
+                if (it.id == id) it.copy(
+                    document = updatedDocument,
+                    undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH),
+                ) else it
+            }
+            updatedDocument
+        } ?: return false
         updateSourceDraftForDocument(id, document)
         markDirty(id)
         return true
@@ -871,10 +895,15 @@ class Seq3Session(
     /** Pops and restores the most recent [Seq3UndoEntry]. Silently does nothing on an empty stack —
      *  matches [SeqDiagramCoordinator.revertManualSeed]'s own "already safely no-ops" contract. */
     fun undo(id: String): Boolean {
-        val current = session(id) ?: return false
-        val entry = current.undoStack.lastOrNull() ?: return false
-        replace(id) { it.copy(document = entry.before, undoStack = it.undoStack.dropLast(1)) }
-        updateSourceDraftForDocument(id, entry.before)
+        val document = synchronized(appState.stateLock) {
+            val current = sessions.firstOrNull { it.id == id } ?: return@synchronized null
+            val entry = current.undoStack.lastOrNull() ?: return@synchronized null
+            sessions = sessions.map {
+                if (it.id == id) it.copy(document = entry.before, undoStack = it.undoStack.dropLast(1)) else it
+            }
+            entry.before
+        } ?: return false
+        updateSourceDraftForDocument(id, document)
         markDirty(id)
         return true
     }
@@ -889,8 +918,7 @@ class Seq3Session(
     // never creates or rewrites a note until the user explicitly presses the title-strip note
     // action. The separate diagram-library draft is synchronized by [autoSaveDraftToLibrary].
     private fun markDirty(id: String) {
-        replace(id) { it.copy(dirty = true) }
-        scheduleDraftSave(id)
+        if (replace(id) { it.copy(dirty = true) }) scheduleDraftSave(id)
     }
 
     // W3: autoSaveDraftToLibrary (encode + validate + rewrite the WHOLE library file) plus
@@ -1417,12 +1445,13 @@ class Seq3Session(
         // the opened workspace remains offline-capable and does not inherit the referenced item's
         // unrelated source log.
         val originGroupId = appState.tabGroupIdForOrigin(origin)
-        sessions.firstOrNull { existing ->
+        val existing = synchronized(appState.stateLock) { sessions.firstOrNull { existing ->
             existing.libraryItemId == id && (tabId == null || existing.sourceTabId == tabId)
-        }?.let { existing ->
+        } }
+        existing?.let {
             libraryStore.markOpened(id)
             libraryRevision++
-            activate(existing.id)
+            activate(it.id)
             return true
         }
         val item = libraryStore.markOpened(id) ?: return false
@@ -1444,19 +1473,28 @@ class Seq3Session(
             exportMode = parsed.exportMode,
             dialect = parsed.dialect,
         )
-        sessions = sessions + session
-        appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(sessionId))
-        appState.revealTabGroupForActivation(TabRef.Diagram(sessionId))
-        generatedBaselines[sessionId] = openedDocument
-        activeSessionId = sessionId
-        appState.activeSurface = ActiveSurface.Diagram3(sessionId)
+        synchronized(appState.stateLock) {
+            val duplicate = sessions.firstOrNull { existing ->
+                existing.libraryItemId == id && (usableTabId == null || existing.sourceTabId == usableTabId)
+            }
+            if (duplicate != null) {
+                activateLocked(duplicate.id)
+            } else {
+                sessions = sessions + session
+                appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(sessionId))
+                appState.revealTabGroupForActivation(TabRef.Diagram(sessionId))
+                generatedBaselines[sessionId] = openedDocument
+                activeSessionId = sessionId
+                appState.activeSurface = ActiveSurface.Diagram3(sessionId)
+            }
+        }
         return true
     }
 
     /** Deletes a saved diagram, closing any open session it backs (matches
      *  [SeqDiagramCoordinator.deleteLibraryItem]'s "the workspace can't outlive its own record"). */
     fun deleteLibraryItem(id: String): Boolean {
-        sessions.filter { it.libraryItemId == id }.forEach { close(it.id) }
+        synchronized(appState.stateLock) { sessions.filter { it.libraryItemId == id } }.forEach { close(it.id) }
         return libraryStore.delete(id).also { deleted -> if (deleted) libraryRevision++ }
     }
 

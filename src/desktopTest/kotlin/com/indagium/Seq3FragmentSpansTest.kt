@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3ArrowRow
+import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
@@ -8,6 +9,7 @@ import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3InsertionPosition
+import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
@@ -20,18 +22,25 @@ import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.encodeSeq3Note
+import com.indagium.diagram3.fragmentContainsDrawnRow
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.normalizeSeq3FragmentSpans
 import com.indagium.diagram3.seq3DrawnRowRefs
+import com.indagium.diagram3.seq3FragmentDrawnRowCount
+import com.indagium.diagram3.seq3FragmentMemberIndices
+import com.indagium.diagram3.seq3MembershipRowRef
 import com.indagium.model.AnnBlock
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.mkTab
+import com.indagium.ui.seq3DropInsideFragments
 import com.indagium.ui.seq3FragmentMessageCount
+import com.indagium.ui.seq3FragmentRails
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -98,7 +107,8 @@ class Seq3FragmentSpansTest {
 
     private fun held(document: Seq3Document, fragmentId: String): List<Seq3RowRef> {
         val fragment = document.fragments.single { it.id == fragmentId }
-        return seq3DrawnRowRefs(document).filter { com.indagium.diagram3.fragmentContainsRow(fragment, it) }
+        val messagesById = document.messages.associateBy { it.id }
+        return seq3DrawnRowRefs(document).filter { fragmentContainsDrawnRow(fragment, it, messagesById) }
     }
 
     @Test
@@ -200,11 +210,337 @@ class Seq3FragmentSpansTest {
     }
 
     @Test
+    fun templateMembershipKeepsImplicitHiddenEvidenceWhenAParentClampMakesItExact() {
+        val repeated = message("x", 2, 3, 5, 7).copy(
+            occurrences = listOf(
+                occurrence(2, "x"), occurrence(3, "x"), occurrence(5, "x"),
+                occurrence(7, "x").copy(visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+        val doc = document(
+            listOf(message("a", 1), repeated, message("b", 4)),
+            listOf(
+                fragment("parent", listOf("a", "b")),
+                fragment("child", listOf("x")),
+            ),
+        ).copy(
+            rowOrder = listOf(
+                Seq3RowRef("a", 1), Seq3RowRef("x", 2), Seq3RowRef("x", 3),
+                Seq3RowRef("b", 4), Seq3RowRef("x", 5), Seq3RowRef("x", 7),
+            ),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val child = normalized.fragments.single { it.id == "child" }
+
+        assertEquals(
+            listOf(Seq3OccurrenceRef("x", 2), Seq3OccurrenceRef("x", 3), Seq3OccurrenceRef("x", 7)),
+            child.occurrenceRefs.filter { it.messageId == "x" }.sortedBy { it.entryId },
+            "the visible row outside the parent is removed while template-held hidden evidence materializes",
+        )
+        assertTrue(Seq3OccurrenceRef("x", 7) in child.occurrenceRefs)
+        assertEquals(listOf(Seq3RowRef("x", 2), Seq3RowRef("x", 3), Seq3RowRef("b", 4)), held(normalized, "child"))
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized))
+    }
+
+    @Test
+    fun exactMembershipDoesNotAdoptAnExcludedHiddenOccurrenceWhenItFillsADrawnGap() {
+        val repeated = message("x", 1, 3, 5).copy(
+            occurrences = listOf(
+                occurrence(1, "x"), occurrence(3, "x"),
+                occurrence(5, "x").copy(visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+        val doc = document(
+            listOf(repeated, message("gap", 2)),
+            listOf(fragment("f", ids = listOf("x"), refs = listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 3)))),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val result = normalized.fragments.single()
+
+        assertEquals(
+            listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 3)),
+            result.occurrenceRefs.filter { it.messageId == "x" }.sortedBy { it.entryId },
+            "filling a visible gap preserves an exact selection's exclusion of hidden evidence",
+        )
+        assertFalse(Seq3OccurrenceRef("x", 5) in result.occurrenceRefs)
+        assertEquals(listOf(Seq3RowRef("x", 1), Seq3RowRef("gap", 2), Seq3RowRef("x", 3)), held(normalized, "f"))
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized))
+    }
+
+    @Test
     fun hiddenFragmentsAndFragmentsWithoutADrawnMemberAreLeftAlone() {
         val hidden = fragment("hidden", listOf("a", "e"), visibility = Seq3Visibility.HIDDEN)
         val empty = fragment("empty", listOf("gone"))
         val document = document(fiveMessages(), listOf(hidden, empty))
         assertSame(document, normalizeSeq3FragmentSpans(document))
+    }
+
+    @Test
+    fun hiddenOnlyExactRefsDoNotHoldCollapsedNoteOrUnresolvedSummaryRows() {
+        val visible = occurrence(1, "visible")
+        val hidden = occurrence(2, "hidden").copy(visibility = Seq3Visibility.HIDDEN)
+        val messages = listOf(
+            message("collapsed", 1, 2).copy(
+                repeat = Seq3Repeat.COLLAPSE_ABOVE,
+                repeatThreshold = 0,
+                occurrences = listOf(visible, hidden),
+            ),
+            message("note", 1, 2).copy(
+                kind = Seq3Kind.NOTE,
+                repeat = Seq3Repeat.FIRST_LAST,
+                occurrences = listOf(visible, hidden),
+            ),
+            message("unresolved", 1, 2).copy(
+                toLifelineId = null,
+                repeat = Seq3Repeat.FIRST_LAST,
+                occurrences = listOf(visible, hidden),
+            ),
+        )
+        val fragments = messages.map { message ->
+            fragment("f-${message.id}", ids = listOf(message.id), refs = listOf(Seq3OccurrenceRef(message.id, 2)))
+        }
+        val doc = document(messages, fragments)
+        val rows = seq3DrawnRowRefs(doc)
+        val messagesById = messages.associateBy { it.id }
+
+        assertEquals(3, rows.size)
+        rows.forEach { row ->
+            val fragment = fragments.single { it.id == "f-${row.messageId}" }
+            assertFalse(fragmentContainsDrawnRow(fragment, row, messagesById))
+            assertEquals(0, seq3FragmentDrawnRowCount(doc, fragment))
+            assertTrue(fragment.occurrenceRefs.contains(Seq3OccurrenceRef(row.messageId, 2)), "hidden exact evidence stays stored")
+        }
+        assertSame(doc, normalizeSeq3FragmentSpans(doc), "hidden-only exact membership cannot start a visible span")
+        val rails = seq3FragmentRails(doc, rows)
+        assertTrue(rails.all { it.containing.isEmpty() })
+    }
+
+    @Test
+    fun aNewlyEnclosedCollapsedSummaryMaterializesVisibleEvidenceAndKeepsHiddenRefs() {
+        val collapsed = message("x", 1, 2).copy(
+            repeat = Seq3Repeat.COLLAPSE_ABOVE,
+            repeatThreshold = 0,
+            occurrences = listOf(
+                occurrence(2, "shown"),
+                occurrence(4, "hidden").copy(visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+        val doc = document(
+            listOf(message("a", 1), collapsed, message("b", 3)),
+            listOf(fragment("f", ids = listOf("a", "b", "x"), refs = listOf(Seq3OccurrenceRef("x", 4)))),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val result = normalized.fragments.single()
+
+        assertEquals(listOf(Seq3OccurrenceRef("x", 2), Seq3OccurrenceRef("x", 4)), result.occurrenceRefs.sortedBy { it.entryId })
+        assertEquals(listOf(Seq3RowRef("a", 1), Seq3RowRef("x"), Seq3RowRef("b", 3)), held(normalized, "f"))
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized), "summary membership remains stable")
+    }
+
+    @Test
+    fun firstLastElisionRepresentsMiddleEvidenceOnly() {
+        val repeated = message("x", 1, 2, 3).copy(
+            repeat = Seq3Repeat.FIRST_LAST,
+            totalOccurrenceCount = 5,
+        )
+        val doc = document(
+            listOf(repeated),
+            listOf(fragment("f", ids = listOf("x"), refs = listOf(Seq3OccurrenceRef("x", 1)))),
+        )
+        val rows = seq3DrawnRowRefs(doc)
+        val messagesById = doc.messages.associateBy { it.id }
+        val fragment = doc.fragments.single()
+        val first = rows.single { it.occurrenceEntryId == 1 }
+        val elision = rows.single { it.occurrenceEntryId == null }
+
+        assertTrue(fragmentContainsDrawnRow(fragment, first, messagesById))
+        assertFalse(fragmentContainsDrawnRow(fragment, elision, messagesById), "first/last arrow refs do not claim the middle elision")
+        assertEquals(listOf(first), rows.filter { fragmentContainsDrawnRow(fragment, it, messagesById) })
+        assertEquals(1, seq3FragmentDrawnRowCount(doc, fragment))
+        val rails = seq3FragmentRails(doc, rows)
+        assertEquals(listOf("f"), rails.first().containing.map { it.id })
+        assertTrue(rails.drop(1).all { it.containing.isEmpty() })
+    }
+
+    @Test
+    fun nestedFirstLastChildMaterializesOnlyRowsInsideItsClampedSpan() {
+        val a = message("a", 0)
+        val repeated = message("x", 1, 3, 5).copy(
+            repeat = Seq3Repeat.FIRST_LAST,
+            totalOccurrenceCount = 5,
+        )
+        val b = message("b", 4)
+        val doc = document(
+            listOf(a, repeated, b),
+            listOf(
+                fragment("parent", listOf("a", "b")),
+                fragment(
+                    "child",
+                    ids = listOf("x"),
+                    refs = listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 3), Seq3OccurrenceRef("x", 5)),
+                ),
+            ),
+        ).copy(
+            rowOrder = listOf(
+                Seq3RowRef("a", 0), Seq3RowRef("x", 1), Seq3RowRef("x"), Seq3RowRef("b", 4), Seq3RowRef("x", 5),
+            ),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val child = normalized.fragments.single { it.id == "child" }
+
+        assertEquals(listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 3)), child.occurrenceRefs.filter { it.messageId == "x" }.sortedBy { it.entryId })
+        assertEquals(listOf("x", "b"), child.messageIds)
+        assertEquals(
+            listOf(Seq3RowRef("x", 1), Seq3RowRef("x"), Seq3RowRef("b", 4)),
+            held(normalized, "child"),
+        )
+        assertFalse(held(normalized, "child").contains(Seq3RowRef("x", 5)), "the child stays inside its parent")
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized))
+    }
+
+    @Test
+    fun nestedFirstLastChildDropsMiddleEvidenceWhenItsElisionIsOutsideTheParent() {
+        val repeated = message("x", 1, 3, 5).copy(
+            repeat = Seq3Repeat.FIRST_LAST,
+            totalOccurrenceCount = 5,
+        )
+        val doc = document(
+            listOf(message("a", 0), repeated, message("b", 2)),
+            listOf(
+                fragment("parent", listOf("a", "b")),
+                fragment(
+                    "child",
+                    ids = listOf("x"),
+                    refs = listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 3), Seq3OccurrenceRef("x", 5)),
+                ),
+            ),
+        ).copy(
+            rowOrder = listOf(
+                Seq3RowRef("a", 0), Seq3RowRef("x", 1), Seq3RowRef("b", 2), Seq3RowRef("x"), Seq3RowRef("x", 5),
+            ),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val child = normalized.fragments.single { it.id == "child" }
+
+        assertEquals(listOf(Seq3OccurrenceRef("x", 1)), child.occurrenceRefs.filter { it.messageId == "x" })
+        assertEquals(
+            listOf(Seq3RowRef("x", 1), Seq3RowRef("b", 2)),
+            held(normalized, "child"),
+            "middle evidence represented by an outside elision must not survive as an apparently hidden ref",
+        )
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized))
+    }
+
+    @Test
+    fun trimmedFirstLastElisionInsideAClampedSpanUsesNoSyntheticEvidenceAndStaysStable() {
+        val trimmed = message("x", 1, 5).copy(
+            repeat = Seq3Repeat.FIRST_LAST,
+            totalOccurrenceCount = 5,
+        )
+        val doc = document(
+            listOf(message("a", 0), trimmed, message("b", 2)),
+            listOf(
+                fragment("parent", listOf("a", "b")),
+                fragment("child", ids = listOf("x"), refs = listOf(Seq3OccurrenceRef("x", 1), Seq3OccurrenceRef("x", 5))),
+            ),
+        ).copy(
+            rowOrder = listOf(
+                Seq3RowRef("a", 0), Seq3RowRef("x", 1), Seq3RowRef("x"), Seq3RowRef("b", 2), Seq3RowRef("x", 5),
+            ),
+        )
+
+        val normalized = normalizeSeq3FragmentSpans(doc)
+        val child = normalized.fragments.single { it.id == "child" }
+
+        assertEquals(listOf(Seq3OccurrenceRef("x", 1)), child.occurrenceRefs.filter { it.messageId == "x" })
+        assertEquals(listOf("x", "b"), child.messageIds)
+        val rows = seq3DrawnRowRefs(normalized)
+        val elisionIndex = rows.indexOf(Seq3RowRef("x"))
+        assertTrue(elisionIndex in seq3FragmentMemberIndices(normalized, child))
+        assertEquals(3, seq3FragmentDrawnRowCount(normalized, child), "the inside elision and b row are within the same box span")
+        val rails = seq3FragmentRails(normalized, rows)
+        assertTrue(child.id in rails[elisionIndex].containing.map { it.id }, "the Sequence rail includes the derived elision")
+        assertTrue(
+            child.id in seq3DropInsideFragments(normalized, Seq3RowRef("x"), Seq3RowRef("b", 2)).map { it.id },
+            "drop hints use the same span membership as the Sequence rail",
+        )
+        assertFalse(Seq3OccurrenceRef("x", 5) in child.occurrenceRefs, "the outside last arrow is removed")
+        assertSame(normalized, normalizeSeq3FragmentSpans(normalized))
+    }
+
+    @Test
+    fun firstLastSelectionWithOnlyTheFirstArrowDoesNotHoldTheElision() {
+        val trimmed = message("x", 1, 5).copy(
+            repeat = Seq3Repeat.FIRST_LAST,
+            totalOccurrenceCount = 5,
+        )
+        val doc = document(
+            listOf(trimmed),
+            listOf(fragment("f", ids = listOf("x"), refs = listOf(Seq3OccurrenceRef("x", 1)))),
+        ).copy(rowOrder = listOf(Seq3RowRef("x", 1), Seq3RowRef("x"), Seq3RowRef("x", 5)))
+
+        assertEquals(
+            listOf(Seq3RowRef("x", 1)),
+            seq3FragmentMemberIndices(doc, doc.fragments.single()).map { seq3DrawnRowRefs(doc)[it] },
+        )
+        assertEquals(1, seq3FragmentDrawnRowCount(doc, doc.fragments.single()))
+        assertSame(doc, normalizeSeq3FragmentSpans(doc))
+    }
+
+    @Test
+    fun exactAllOccurrenceRefsStayExactAcrossCollapsedAndFirstLastRepeatChanges() {
+        val exactRefs = listOf(1, 3, 4).map { Seq3OccurrenceRef("x", it) }
+        val doc = document(
+            listOf(message("x", 1, 3, 4), message("gap", 2)),
+            listOf(fragment("f", ids = listOf("x"), refs = exactRefs)),
+        ).copy(
+            rowOrder = listOf(
+                Seq3RowRef("x", 1), Seq3RowRef("gap", 2), Seq3RowRef("x", 3), Seq3RowRef("x", 4),
+            ),
+        )
+
+        val collapsed = applySeq3Command(
+            doc,
+            Seq3Command.Bulk(setOf("x"), Seq3BulkAction.SetRepeat(Seq3Repeat.COLLAPSE_ABOVE, 1)),
+        )
+        assertTrue(collapsed.applied)
+        assertEquals(exactRefs, collapsed.document.fragments.single().occurrenceRefs)
+
+        val firstLast = applySeq3Command(
+            collapsed.document,
+            Seq3Command.Bulk(setOf("x"), Seq3BulkAction.SetRepeat(Seq3Repeat.FIRST_LAST, 1)),
+        )
+        assertTrue(firstLast.applied)
+        assertEquals(exactRefs, firstLast.document.fragments.single().occurrenceRefs)
+        val rows = seq3DrawnRowRefs(firstLast.document)
+        assertTrue(rows.indexOf(Seq3RowRef("gap", 2)) in rows.indexOf(Seq3RowRef("x", 1)) + 1 until rows.indexOf(Seq3RowRef("x", 4)))
+        assertEquals(4, seq3FragmentDrawnRowCount(firstLast.document, firstLast.document.fragments.single()))
+        assertEquals(4, rows.size)
+    }
+
+    @Test
+    fun exactCollapsedSummaryHasOneCanvasBoxAndOneSequenceRail() {
+        val collapsed = message("x", 1, 2).copy(repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 0)
+        val doc = document(
+            listOf(collapsed),
+            listOf(fragment("f", refs = listOf(Seq3OccurrenceRef("x", 1)))),
+        )
+
+        val rows = seq3DrawnRowRefs(doc)
+        val layout = layoutSeq3(doc, Seq3LayoutOptions(metrics))
+        val arrow = layout.rows.filterIsInstance<Seq3ArrowRow>().single()
+        val box = layout.fragments.single { it.fragmentId == "f" }.box
+        val geometryMembership = seq3MembershipRowRef(collapsed, arrow.messageId, arrow.occurrenceEntryId)
+
+        assertEquals(listOf(Seq3RowRef("x")), rows)
+        assertEquals(listOf(geometryMembership), rows.filter { fragmentContainsDrawnRow(doc.fragments.single(), it, mapOf("x" to collapsed)) })
+        assertTrue(arrow.y >= box.y + LABEL_STRIP && arrow.y <= box.y + box.height, "the canvas draws the summary inside its fragment box")
+        assertEquals(listOf("f"), seq3FragmentRails(doc, rows).single().containing.map { it.id })
     }
 
     @Test

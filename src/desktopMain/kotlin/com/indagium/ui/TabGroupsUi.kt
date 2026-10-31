@@ -90,9 +90,14 @@ import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import kotlin.math.roundToInt
 
-/** Opens the group editor: the group id, and whether the group was just created (the dialog then reads
- * "New tab group" and its Cancel removes the group again). */
-internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(String, Boolean) -> Unit> { { _, _ -> } }
+/** Typed request: drafts identify their source ref but do not mutate state until confirmed. */
+internal sealed interface TabGroupEditorRequest {
+    data class Draft(val source: TabRef) : TabGroupEditorRequest
+
+    data class Edit(val groupId: String) : TabGroupEditorRequest
+}
+
+internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(TabGroupEditorRequest) -> Unit> { { } }
 
 // Wide enough for a ~25 character name beside the dot, an icon, the chevron and the count in the wider (monospace) styles.
 private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 280f
@@ -638,37 +643,41 @@ private fun GroupIconOption(icon: TabGroupIcon, selected: Boolean, onClick: () -
     }
 }
 
-/**
- * Creates (isNew) or edits a group: name, colour from the shared picker, optional icon, and whether the colour tints its member
- * tabs. A new group reads "New tab group" with a
- * "Create group" button, and cancelling it (Cancel or Esc) removes the group again; an existing one reads "Edit tab group" / "Save".
- */
 @Composable
-internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boolean = false, onDismiss: () -> Unit) {
-    val group = state.tabGroups.firstOrNull { it.id == groupId }
-    if (group == null) {
-        LaunchedEffect(groupId) { onDismiss() }
+internal fun TabGroupEditorDialog(state: AppState, request: TabGroupEditorRequest, onDismiss: () -> Unit) {
+    val editing = request as? TabGroupEditorRequest.Edit
+    val draftSource = (request as? TabGroupEditorRequest.Draft)?.source
+    val group = editing?.let { request -> state.tabGroups.firstOrNull { it.id == request.groupId } }
+    val initialDraft = remember(request) { draftSource?.let(state::newTabGroupDraft) }
+    val isNew = draftSource != null
+    if ((isNew && initialDraft == null) || (!isNew && group == null)) {
+        LaunchedEffect(request) { onDismiss() }
         return
     }
-    var name by remember(group.id) { mutableStateOf(TextFieldValue(group.name, selection = TextRange(0, group.name.length))) }
-    var selectedColor by remember(group.id) { mutableStateOf(group.color) }
-    var selectedIcon by remember(group.id) { mutableStateOf(group.icon) }
-    var tintMembers by remember(group.id) { mutableStateOf(group.tintMembers) }
-    var pickerOpen by remember(group.id) { mutableStateOf(false) }
-    val nameFocus = remember(group.id) { FocusRequester() }
-    LaunchedEffect(group.id) { runCatching { nameFocus.requestFocus() } }
+    val key = request
+    val startName = group?.name ?: initialDraft!!.name
+    var name by remember(key) { mutableStateOf(TextFieldValue(startName, selection = TextRange(0, startName.length))) }
+    var selectedColor by remember(key) { mutableStateOf(Color(group?.colorArgb ?: initialDraft!!.colorArgb)) }
+    var selectedIcon by remember(key) { mutableStateOf(group?.icon ?: initialDraft!!.icon) }
+    var tintMembers by remember(key) { mutableStateOf(group?.tintMembers ?: initialDraft!!.tintMembers) }
+    var pickerOpen by remember(key) { mutableStateOf(false) }
+    val nameFocus = remember(key) { FocusRequester() }
+    LaunchedEffect(key) { runCatching { nameFocus.requestFocus() } }
     val tc = tc()
 
     fun cancel() {
-        if (isNew) state.ungroupTabs(groupId)
         onDismiss()
     }
 
     fun save() {
-        state.renameTabGroup(groupId, name.text.trim().ifBlank { group.name })
-        state.setTabGroupColor(groupId, selectedColor.toArgb())
-        state.setTabGroupIcon(groupId, selectedIcon)
-        state.setTabGroupTintMembers(groupId, tintMembers)
+        val updatedDraft = TabGroupDraft(
+            name = name.text.trim().ifBlank { startName },
+            colorArgb = selectedColor.toArgb(),
+            icon = selectedIcon,
+            tintMembers = tintMembers,
+        )
+        if (draftSource != null) state.createTabGroup(draftSource, updatedDraft)
+        else state.updateTabGroupMetadata(requireNotNull(editing).groupId, updatedDraft)
         onDismiss()
     }
 
@@ -792,7 +801,7 @@ private fun TabGroupMenuColorRow(state: AppState, group: TabGroup, onDone: () ->
  * [onEdit] opens the editor for the group (never as a new one); every action ends in [onDismiss].
  */
 @Composable
-internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () -> Unit, onEdit: (String, Boolean) -> Unit) {
+internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () -> Unit, onEdit: (TabGroupEditorRequest) -> Unit) {
     val tc = tc()
     Column(
         Modifier.width(200.dp).background(tc.p, RoundedCornerShape(7.dp))
@@ -800,7 +809,7 @@ internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () ->
             .padding(vertical = 4.dp),
     ) {
         CtxItem(icon = Icons.Outlined.DriveFileRenameOutline, label = "Rename…", tag = "tab-group-menu-rename") {
-            onEdit(group.id, false)
+            onEdit(TabGroupEditorRequest.Edit(group.id))
             onDismiss()
         }
         TabGroupMenuColorRow(state, group, onDone = onDismiss)
@@ -814,7 +823,7 @@ internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () ->
         }
         CtxDivider()
         CtxItem(icon = Icons.Outlined.Edit, label = "Edit group…", tag = "tab-group-menu-edit") {
-            onEdit(group.id, false)
+            onEdit(TabGroupEditorRequest.Edit(group.id))
             onDismiss()
         }
         CtxItem(icon = Icons.Outlined.Block, label = "Ungroup", tag = "tab-group-menu-ungroup") {
@@ -830,21 +839,21 @@ internal fun TabGroupChipMenu(state: AppState, group: TabGroup, onDismiss: () ->
 
 /**
  * The group entries of a tab's context menu: "Add to new group", "Add to group ▸" / "Move to group ▸" (the other groups, each with
- * its colour, ending in "New group…") and "Remove from group". A new group opens the editor with [onEdit]'s isNew set.
+ * its colour, ending in "New group…") and "Remove from group". A new group opens an uncommitted draft in the editor.
  */
 @Composable
 internal fun TabGroupContextActions(
     state: AppState,
     ref: TabRef,
     onDismiss: () -> Unit,
-    onEdit: (String, Boolean) -> Unit,
+    onEdit: (TabGroupEditorRequest) -> Unit,
 ) {
     val groups = state.tabGroups
     val current = state.tabGroupOf(ref)
     if (ref is TabRef.Log && state.tab(ref.tabId)?.isCaptureLauncher == true) return
 
     fun newGroup() {
-        state.createTabGroup(ref)?.let { onEdit(it, true) }
+        onEdit(TabGroupEditorRequest.Draft(ref))
         onDismiss()
     }
     CtxItem(icon = Icons.Outlined.CreateNewFolder, label = "Add to new group") { newGroup() }

@@ -344,11 +344,19 @@ internal fun customProfilesFromJson(element: JsonElement?): List<CustomWorkspace
 
 // ── Profile file ─────────────────────────────────────────────────────
 
-internal data class WorkspaceProfileFile(val name: String, val spec: ProfileSpec)
+internal data class WorkspaceProfileFile(
+    val name: String,
+    val spec: ProfileSpec,
+    val bundledLayout: CustomLogViewLayout? = null,
+)
 
 private val profileFileJson = Json { prettyPrint = true }
 
-internal fun encodeWorkspaceProfileFile(name: String, spec: ProfileSpec): String =
+internal fun encodeWorkspaceProfileFile(
+    name: String,
+    spec: ProfileSpec,
+    bundledLayout: CustomLogViewLayout? = null,
+): String =
     profileFileJson.encodeToString(
         JsonObject.serializer(),
         buildJsonObject {
@@ -356,6 +364,11 @@ internal fun encodeWorkspaceProfileFile(name: String, spec: ProfileSpec): String
             put("version", WORKSPACE_PROFILE_FILE_VERSION)
             put("name", name)
             put("spec", profileSpecToJson(spec))
+            bundledLayout?.let { layout ->
+                // Embed the standalone envelope so import uses the same strict, versioned layout
+                // codec as a separately exported layout file.
+                put("bundledLayout", Json.parseToJsonElement(encodeLogViewLayoutFile(layout)))
+            }
         },
     )
 
@@ -371,5 +384,12 @@ internal fun decodeWorkspaceProfileFile(text: String): Result<WorkspaceProfileFi
     }
     val name = (root["name"] as? JsonPrimitive)?.contentOrNull?.trim().orEmpty().ifBlank { "Imported profile" }
     val spec = profileSpecFromJson(root["spec"]?.let { it as? JsonObject } ?: error("This profile file has no settings in it."))
-    WorkspaceProfileFile(name, spec)
+    val bundledLayout = root["bundledLayout"]?.let { layoutEnvelope ->
+        if (layoutEnvelope !is JsonObject) error("This profile file has an invalid bundled layout.")
+        decodeLogViewLayoutFile(layoutEnvelope.toString()).getOrElse { error(it.message ?: "This profile has an invalid bundled layout.") }
+    }
+    if (bundledLayout != null && spec.layout !is ProfileLayoutRef.Saved) {
+        error("This profile's bundled layout is not referenced by its settings.")
+    }
+    WorkspaceProfileFile(name, spec, bundledLayout)
 }

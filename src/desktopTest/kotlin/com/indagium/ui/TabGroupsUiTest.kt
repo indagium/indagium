@@ -135,33 +135,32 @@ class TabGroupsUiTest {
         val b = tab("b")
         newState(a, b)
         state.updateSettings { it.copy(tabSizeMode = TabSizeMode.FIT) }
-        var editing by mutableStateOf<Pair<String, Boolean>?>(null)
+        var editing by mutableStateOf<TabGroupEditorRequest?>(null)
         rule.setContent {
             CompositionLocalProvider(
                 LocalTheme provides LIGHT_THEME,
-                LocalOpenTabGroupEditor provides { id, isNew -> editing = id to isNew },
+                LocalOpenTabGroupEditor provides { request -> editing = request },
             ) {
                 Column {
                     TabGroupContextActions(
                         state = state,
                         ref = TabRef.Log("a"),
                         onDismiss = {},
-                        onEdit = { id, isNew -> editing = id to isNew },
+                        onEdit = { request -> editing = request },
                     )
                     TabStrip(state, ChromeOrientation.HORIZONTAL, Modifier.width(1000.dp).height(44.dp))
-                    editing?.let { (id, isNew) -> TabGroupEditorDialog(state, id, isNew) { editing = null } }
+                    editing?.let { request -> TabGroupEditorDialog(state, request) { editing = null } }
                 }
             }
         }
 
         rule.onNodeWithText("Add to new group").performClick()
         rule.waitForIdle()
-        val groupId = requireNotNull(editing).first
-        assertTrue(requireNotNull(editing).second, "a group made from the tab menu opens as a new group")
-        assertEquals("a.log", state.tabGroups.single().name, "the default name is the tab's file name")
-        assertEquals(HL_COLORS.first().toArgb(), state.tabGroups.single().colorArgb, "the default colour is the first palette colour")
-        assertEquals(listOf(TabRef.Log("a")), state.tabGroups.single().members)
-        assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon)
+        assertEquals(TabGroupEditorRequest.Draft(TabRef.Log("a")), editing)
+        assertTrue(state.tabGroups.isEmpty(), "opening the editor does not provisionally change groups")
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b")), state.reconciledTabOrder())
+        assertEquals("a.log", state.newTabGroupDraft(TabRef.Log("a"))?.name, "the default name is the tab's file name")
+        assertEquals(HL_COLORS.first().toArgb(), state.newTabGroupDraft(TabRef.Log("a"))?.colorArgb, "the default colour is the first palette colour")
         rule.onNodeWithTag("tab-group-name").assertExists()
         for (row in 0..2) rule.onNodeWithTag("tab-group-icon-row-$row").assertExists()
         assertFalse(exists("tab-group-icon-row-3"), "the icons wrap onto three full lines")
@@ -192,7 +191,6 @@ class TabGroupsUiTest {
         rule.onNodeWithText("New tab group").assertExists()
         rule.onNodeWithText("Create group").assertExists()
         assertFalse(exists("tab-group-text-size-large"), "the per-group text size is gone")
-        val initialHeaderWidth = rule.onNodeWithTag("tab-group-header-$groupId").getBoundsInRoot().width
         rule.onNodeWithTag("tab-group-color-trigger").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-color-swatch-3").performClick()
@@ -206,11 +204,20 @@ class TabGroupsUiTest {
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-save").performClick()
         rule.waitForIdle()
+        val groupId = state.tabGroups.single().id
+        val bugChipWidth = rule.onNodeWithTag("tab-group-header-$groupId").getBoundsInRoot().width
         assertEquals(HL_COLORS[3].toArgb(), state.tabGroups.single().colorArgb)
         assertEquals(TabGroupIcon.BUG, state.tabGroups.single().icon)
-        assertTrue(rule.onNodeWithTag("tab-group-header-$groupId").getBoundsInRoot().width > initialHeaderWidth)
         assertTrue(exists("tab-group-header-icon-$groupId"), "the saved pictogram renders on the chip")
         assertEquals(null, editing)
+
+        editing = TabGroupEditorRequest.Edit(groupId)
+        rule.waitForIdle()
+        rule.onNodeWithTag("tab-group-icon-none").performClick()
+        rule.onNodeWithTag("tab-group-save").performClick()
+        rule.waitForIdle()
+        val noIconChipWidth = rule.onNodeWithTag("tab-group-header-$groupId").getBoundsInRoot().width
+        assertTrue(bugChipWidth > noIconChipWidth, "the saved icon increases the measured chip width")
 
         val diagramId = requireNotNull(state.seq3Sessions.beginEmpty("a"))
         state.assignTabToGroup(TabRef.Log("b"), groupId)
@@ -251,26 +258,32 @@ class TabGroupsUiTest {
     }
 
     @Test
-    fun cancellingANewGroupRemovesItWhileCancellingAnEditKeepsTheGroupUntouched() {
+    fun cancellingANewGroupLeavesAllGroupsAndOrderUntouchedWhileCancellingAnEditKeepsItUntouched() {
         newState(tab("a"), tab("b"))
-        var editing by mutableStateOf<Pair<String, Boolean>?>(null)
+        val diagramId = requireNotNull(state.seq3Sessions.beginEmpty("a"))
+        val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
+        state.assignTabToGroup(TabRef.Log("b"), groupId)
+        val groupsBeforeDraft = state.tabGroups.toList()
+        val orderBeforeDraft = state.reconciledTabOrder()
+        assertTrue(groupsBeforeDraft.single().members.contains(TabRef.Diagram(diagramId)), "the existing group has a diagram follower")
+        var editing by mutableStateOf<TabGroupEditorRequest?>(null)
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
                 Column {
-                    TabGroupContextActions(state, TabRef.Log("a"), onDismiss = {}, onEdit = { id, isNew -> editing = id to isNew })
-                    editing?.let { (id, isNew) -> TabGroupEditorDialog(state, id, isNew) { editing = null } }
+                    TabGroupContextActions(state, TabRef.Log("a"), onDismiss = {}, onEdit = { request -> editing = request })
+                    editing?.let { request -> TabGroupEditorDialog(state, request) { editing = null } }
                 }
             }
         }
 
         rule.onNodeWithText("Add to new group").performClick()
         rule.waitForIdle()
-        assertEquals(1, state.tabGroups.size)
+        assertEquals(groupsBeforeDraft, state.tabGroups)
         rule.onNodeWithText("New tab group").assertExists()
         rule.onNodeWithTag("tab-group-cancel").performClick()
         rule.waitForIdle()
-        assertTrue(state.tabGroups.isEmpty(), "cancelling a new group removes it again")
-        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b")), state.reconciledTabOrder())
+        assertEquals(groupsBeforeDraft, state.tabGroups, "cancelling a draft leaves existing metadata and membership unchanged")
+        assertEquals(orderBeforeDraft, state.reconciledTabOrder(), "cancelling a draft leaves order and diagram followers unchanged")
         assertEquals(null, editing)
 
         // A new group closed with Esc counts as cancelled too.
@@ -278,11 +291,11 @@ class TabGroupsUiTest {
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-name").performKeyInput { pressKey(Key.Escape) }
         rule.waitForIdle()
-        assertTrue(state.tabGroups.isEmpty())
+        assertEquals(groupsBeforeDraft, state.tabGroups, "Esc cancels without moving members or diagram followers")
+        assertEquals(orderBeforeDraft, state.reconciledTabOrder())
 
-        val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
         val before = state.tabGroups.single()
-        editing = groupId to false
+        editing = TabGroupEditorRequest.Edit(groupId)
         rule.waitForIdle()
         rule.onNodeWithText("Edit tab group").assertExists()
         rule.onNodeWithText("Save").assertExists()
@@ -292,7 +305,7 @@ class TabGroupsUiTest {
         rule.waitForIdle()
         assertEquals(before, state.tabGroups.single(), "cancelling an edit changes nothing")
 
-        editing = groupId to false
+        editing = TabGroupEditorRequest.Edit(groupId)
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-name").performTextReplacement("Renamed")
         rule.onNodeWithTag("tab-group-icon-none").assertExists()
@@ -372,10 +385,10 @@ class TabGroupsUiTest {
     fun theEditorOffersATintCheckboxThatSavesTheFlag() {
         newState(tab("a"), tab("b"))
         val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
-        var editing by mutableStateOf<Pair<String, Boolean>?>(groupId to false)
+        var editing by mutableStateOf<TabGroupEditorRequest?>(TabGroupEditorRequest.Edit(groupId))
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
-                editing?.let { (id, isNew) -> TabGroupEditorDialog(state, id, isNew) { editing = null } }
+                editing?.let { request -> TabGroupEditorDialog(state, request) { editing = null } }
             }
         }
         rule.waitForIdle()
@@ -388,14 +401,14 @@ class TabGroupsUiTest {
         rule.waitForIdle()
         assertTrue(state.tabGroups.single().tintMembers, "cancelling changes nothing")
 
-        editing = groupId to false
+        editing = TabGroupEditorRequest.Edit(groupId)
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-tint-members").performClick()
         rule.onNodeWithTag("tab-group-save").performClick()
         rule.waitForIdle()
         assertFalse(state.tabGroups.single().tintMembers)
 
-        editing = groupId to false
+        editing = TabGroupEditorRequest.Edit(groupId)
         rule.waitForIdle()
         rule.onNodeWithTag("tab-group-tint-members").performClick()
         rule.onNodeWithTag("tab-group-save").performClick()
@@ -408,11 +421,11 @@ class TabGroupsUiTest {
         newState(tab("a"), tab("b"), tab("c"))
         val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
         state.assignTabToGroup(TabRef.Log("b"), groupId)
-        var requested: Pair<String, Boolean>? = null
+        var requested: TabGroupEditorRequest? = null
         rule.setContent {
             CompositionLocalProvider(
                 LocalTheme provides LIGHT_THEME,
-                LocalOpenTabGroupEditor provides { id, isNew -> requested = id to isNew },
+                LocalOpenTabGroupEditor provides { request -> requested = request },
             ) {
                 Box(Modifier.width(1000.dp).height(300.dp)) {
                     TabStrip(state, ChromeOrientation.HORIZONTAL, Modifier.fillMaxSize().height(44.dp))
@@ -432,7 +445,7 @@ class TabGroupsUiTest {
 
         rule.onNodeWithTag("tab-group-menu-rename").performClick()
         rule.waitForIdle()
-        assertEquals(groupId to false, requested, "Rename… opens the editor on the existing group")
+        assertEquals(TabGroupEditorRequest.Edit(groupId), requested, "Rename… opens the editor on the existing group")
         assertFalse(exists("tab-group-context-menu"), "an action closes the menu")
 
         openMenu()
@@ -459,7 +472,7 @@ class TabGroupsUiTest {
         openMenu()
         rule.onNodeWithTag("tab-group-menu-edit").performClick()
         rule.waitForIdle()
-        assertEquals(groupId to false, requested)
+        assertEquals(TabGroupEditorRequest.Edit(groupId), requested)
 
         openMenu()
         rule.onNodeWithTag("tab-group-menu-ungroup").performClick()
@@ -481,12 +494,12 @@ class TabGroupsUiTest {
     fun tabMenuAddsToOrMovesToAGroupThroughASubmenuWithSwatchesEndingInNewGroup() {
         newState(tab("a"), tab("b"), tab("c"))
         val firstGroup = requireNotNull(state.createTabGroup(TabRef.Log("a")))
-        var requested by mutableStateOf<Pair<String, Boolean>?>(null)
+        var requested by mutableStateOf<TabGroupEditorRequest?>(null)
         var target by mutableStateOf<TabRef>(TabRef.Log("c"))
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
                 Column(Modifier.width(300.dp)) {
-                    TabGroupContextActions(state, target, onDismiss = {}, onEdit = { id, isNew -> requested = id to isNew })
+                    TabGroupContextActions(state, target, onDismiss = {}, onEdit = { request -> requested = request })
                 }
             }
         }
@@ -507,11 +520,10 @@ class TabGroupsUiTest {
         rule.waitForIdle()
         rule.onNodeWithText("New group…").performClick()
         rule.waitForIdle()
-        assertEquals(2, state.tabGroups.size)
-        val created = requireNotNull(requested)
-        assertTrue(created.second, "New group… opens the editor as a new group")
-        assertEquals(created.first, state.tabGroupOf(TabRef.Log("c"))?.id)
-        assertEquals("c.log", state.tabGroups.single { it.id == created.first }.name)
+        assertEquals(1, state.tabGroups.size, "opening a draft does not create a group before confirmation")
+        assertEquals(TabGroupEditorRequest.Draft(TabRef.Log("c")), requested)
+        assertEquals(firstGroup, state.tabGroupOf(TabRef.Log("c"))?.id, "a draft leaves existing membership intact")
+        assertEquals("c.log", state.newTabGroupDraft(TabRef.Log("c"))?.name)
     }
 
     @Test

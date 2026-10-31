@@ -30,7 +30,9 @@ import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.fragmentContainsRow
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.moveSeq3Message
+import com.indagium.diagram3.normalizeSeq3FragmentSpans
 import com.indagium.diagram3.seq3DrawnRowRefs
+import com.indagium.diagram3.seq3FragmentDrawnRowCount
 import com.indagium.diagram3.seq3QueueExpandedRows
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3ResolveRowOrder
@@ -39,6 +41,7 @@ import com.indagium.diagram3.undoSeq3Command
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.seq3CanvasRowRef
+import com.indagium.ui.seq3DropInsideFragments
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -267,6 +270,36 @@ class Seq3RowOrderTest {
     }
 
     @Test
+    fun aCollapsedSummaryWithLaterExactEvidenceKeepsDropHintAndInsertionMembershipAligned() {
+        val lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1))
+        val a = message("a", listOf(1 to 100L))
+        val collapsed = message("x", listOf(2 to 200L, 4 to 400L, 6 to 600L), repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 0)
+        val b = message("b", listOf(3 to 300L))
+        val fragment = Seq3Fragment(
+            "f", Seq3FragmentKind.LOOP, "f", listOf("a", "x", "b"),
+            occurrenceRefs = listOf(Seq3OccurrenceRef("x", 4)),
+        )
+        val original = Seq3Document(
+            lifelines = lifelines,
+            messages = listOf(a, collapsed, b),
+            fragments = listOf(fragment),
+            rowOrder = listOf(Seq3RowRef("a", 1), Seq3RowRef("x", 2), Seq3RowRef("x", 4), Seq3RowRef("x", 6), Seq3RowRef("b", 3)),
+        )
+        val drawn = seq3DrawnRowRefs(original)
+        assertEquals(listOf(Seq3RowRef("a", 1), Seq3RowRef("x"), Seq3RowRef("b", 3)), drawn)
+        assertEquals(listOf("f"), seq3DropInsideFragments(original, Seq3RowRef("x"), Seq3RowRef("b", 3)).map { it.id })
+
+        val added = assertIs<Seq3CustomMessageResult.Added>(
+            addSeq3CustomMessage(
+                original,
+                Seq3CustomMessageSpec("A", "B", "inside", position = Seq3InsertionPosition.BeforeMessage("b")),
+            ),
+        )
+        assertTrue(added.newMessageId in added.document.fragments.single().messageIds)
+        assertTrue(Seq3RowRef(added.newMessageId) in added.document.rowOrder)
+    }
+
+    @Test
     fun atIndexFragmentInheritanceMapsAcrossHiddenParents() {
         val base = document()
         val hidden = Seq3Message(
@@ -485,5 +518,42 @@ class Seq3RowOrderTest {
         )
         assertEquals(layoutRefs(movedSummary), seq3DrawnRowRefs(movedSummary))
         assertEquals(Seq3RowRef("collapsed"), seq3DrawnRowRefs(movedSummary).last())
+    }
+
+    @Test
+    fun hiddenSourceAndTargetLifelinesDoNotDrawOrClampVisibleFragmentRows() {
+        val hiddenSource = message("hidden-source", listOf(10 to 100L)).copy(fromLifelineId = "H", toLifelineId = "A")
+        val childFirst = message("child-first", listOf(1 to 200L)).copy(fromLifelineId = "C", toLifelineId = "D")
+        val hiddenTarget = message("hidden-target", listOf(20 to 300L)).copy(fromLifelineId = "A", toLifelineId = "H")
+        val childLast = message("child-last", listOf(2 to 400L)).copy(fromLifelineId = "C", toLifelineId = "D")
+        val document = Seq3Document(
+            lifelines = listOf(
+                Seq3Lifeline("A", "A", setOf("A"), 0),
+                Seq3Lifeline("C", "C", setOf("C"), 1),
+                Seq3Lifeline("D", "D", setOf("D"), 2),
+                Seq3Lifeline("H", "Hidden", setOf("H"), 3, visibility = Seq3Visibility.HIDDEN),
+            ),
+            messages = listOf(hiddenSource, childFirst, hiddenTarget, childLast),
+            fragments = listOf(
+                fragment("invisible-parent", listOf("hidden-source", "hidden-target")),
+                fragment("visible-child", listOf("child-first", "child-last")),
+            ),
+            rowOrder = listOf(
+                Seq3RowRef("hidden-source", 10),
+                Seq3RowRef("child-first", 1),
+                Seq3RowRef("hidden-target", 20),
+                Seq3RowRef("child-last", 2),
+            ),
+        )
+
+        val drawn = seq3DrawnRowRefs(document)
+        val normalized = normalizeSeq3FragmentSpans(document)
+
+        assertEquals(listOf(Seq3RowRef("child-first", 1), Seq3RowRef("child-last", 2)), drawn)
+        assertEquals(drawn, renderedRows(document), "layout and Sequence rows omit either hidden endpoint")
+        assertEquals(document.rowOrder, normalized.rowOrder, "hidden endpoint evidence stays in durable row order")
+        assertEquals(0, seq3FragmentDrawnRowCount(normalized, normalized.fragments.single { it.id == "invisible-parent" }))
+        assertEquals(2, seq3FragmentDrawnRowCount(normalized, normalized.fragments.single { it.id == "visible-child" }))
+        assertEquals(listOf("child-first", "child-last"), normalized.fragments.single { it.id == "visible-child" }.messageIds)
     }
 }

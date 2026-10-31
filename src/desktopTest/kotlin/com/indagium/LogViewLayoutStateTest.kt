@@ -246,7 +246,9 @@ class LogViewLayoutStateTest {
 
         assertTrue(state.filterBarVisible)
         assertFalse(state.filterVisible, "the filter sidebar is off, like Log focus")
-        assertEquals(LogViewLayoutPreset.LOG_FOCUS.hidden, LogViewLayoutPreset.FILTER_BAR.hidden)
+        assertTrue(LogViewSectionId.NOTES in LogViewLayoutPreset.LOG_FOCUS.hidden)
+        assertFalse(LogViewSectionId.NOTES in LogViewLayoutPreset.FILTER_BAR.hidden)
+        assertTrue(visible(LogViewSectionId.NOTES), "Filter bar's sanitized tile tree includes visible Notes")
         assertEquals(LogViewLayoutPreset.FILTER_BAR.id, state.settings.lastLogViewPreset)
         assertEquals(LogViewPresetId.FILTER_BAR, LogViewLayoutPreset.of(LogViewPresetId.FILTER_BAR).id)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
@@ -266,13 +268,23 @@ class LogViewLayoutStateTest {
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
 
-        // The bar alone turns Log focus into neither preset (Filter bar also shows Notes); Notes as well makes it Filter bar.
+        // The bar alone turns Log focus into neither preset because Notes are still hidden.
         state.updateFilterBarVisible(true)
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
-        state.updateAnnotationVisible(true)
+        state.showLogViewTile(LogViewSectionId.NOTES)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+    }
+
+    @Test
+    fun filterBarPresetWithToolbarInLayoutStillMatchesItsCompletedTree() {
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.IN_LAYOUT) }
+        state.applyLogViewPreset(LogViewLayoutPreset.FILTER_BAR)
+
+        assertTrue(LogViewSectionId.TOOLBAR in tileLeafSections(state.currentLogViewLayout()))
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+        assertFalse(state.logViewLayoutModified())
     }
 
     @Test
