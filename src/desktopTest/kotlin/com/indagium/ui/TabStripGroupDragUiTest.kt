@@ -37,7 +37,7 @@ import kotlin.test.assertTrue
 /**
  * Real mouse drags of tabs into, within and out of a group. The state outcome of each drag is the long-standing behaviour; what these
  * pin is how it looks mid-drag: the dragged tab is opaque over its neighbours, a 2dp accent bar marks the gap it will land in, and
- * hovering a group's run shows that group's rail solid.
+ * hovering a group's run raises its members' tint.
  */
 @OptIn(ExperimentalTestApi::class)
 class TabStripGroupDragUiTest {
@@ -46,7 +46,7 @@ class TabStripGroupDragUiTest {
         const val PAST_SLOP_PX = 14f
         const val SLOP_STEP_MS = 50L
         const val DRAG_STEP_MS = 100L
-        const val RAIL_MIDDLE_DP = 1.5f
+        const val TINT_SAMPLE_Y_DP = 6f
     }
 
     @get:Rule
@@ -69,6 +69,7 @@ class TabStripGroupDragUiTest {
             archiveCacheDir = File(directory, "archives"),
             customCommandsDir = File(directory, "commands"),
             autoExportNotes = false,
+            diagramLibraryStore = DiagramLibraryStore(File(directory, "diagram-library.cache")),
         )
         val tabs: List<LogTab> = ids.map { mkTab(it, "$it.log", emptyList()) }
         state.tabs = tabs
@@ -114,10 +115,10 @@ class TabStripGroupDragUiTest {
         rule.waitForIdle()
     }
 
-    private fun railPixel(tabKey: String): Int {
+    private fun tintPixel(tabKey: String): Int {
         val image = rule.onNodeWithTag("tab-$tabKey").captureToImage().toPixelMap()
-        // The rail runs along the outer (top) edge of a top strip's tab; sample the middle of its 3dp band.
-        return image[image.width / 2, (RAIL_MIDDLE_DP * rule.density.density).toInt()].toArgb()
+        // Above the label and clear of the close button: the tab's own fill with the group tint over it.
+        return image[image.width / 2, (TINT_SAMPLE_Y_DP * rule.density.density).toInt()].toArgb()
     }
 
     private fun groupOfBandC(): String {
@@ -127,25 +128,64 @@ class TabStripGroupDragUiTest {
     }
 
     @Test
-    fun draggingATabOntoAGroupShowsTheBarAnOpaqueTabAndASolidRailThenJoinsTheGroup() {
+    fun draggingATabOntoAGroupShowsTheBarAnOpaqueTabAndAStrongerTintThenJoinsTheGroup() {
         newState(listOf("a", "b", "c", "d"))
         val groupId = groupOfBandC()
         setStrip()
-        val groupColor = Color(state.tabGroups.single().colorArgb).toArgb()
-        assertNotEquals(groupColor, railPixel("c"), "an idle member's rail is softer than the group colour")
+        val groupColor = Color(state.tabGroups.single().colorArgb)
+        // The classic style fills an idle tab with the panel tone; the group tint lies over it.
+        val idle = tintPixel("c")
+        assertArgbNear(tintedOver(LIGHT_THEME.p2, groupColor, GROUP_TINT_ALPHA_LIGHT), idle, "an idle member shows the resting tint")
         assertFalse(exists("tab-drop-bar"))
 
         pressAndDrag("tab-d", "tab-group-header-$groupId", fraction = 0.3f)
 
         assertTrue(exists("tab-drag-ghost-d"), "the dragged tab sits on an opaque backdrop")
         assertTrue(exists("tab-drop-bar"), "a bar marks the gap the tab will land in")
-        assertEquals(groupColor, railPixel("c"), "hovering the group's run shows its rail solid")
+        val hovered = tintPixel("c")
+        assertArgbNear(tintedOver(LIGHT_THEME.p2, groupColor, GROUP_TINT_ALPHA_DRAG), hovered, "hovering the group's run raises its tint")
+        assertNotEquals(idle, hovered, "the tint is stronger while a tab hovers the group")
 
         releaseMouse()
         assertEquals(groupId, state.tabGroupOf(TabRef.Log("d"))?.id)
         assertEquals(listOf(TabRef.Log("b"), TabRef.Log("c"), TabRef.Log("d")), state.tabGroups.single().members)
         assertFalse(exists("tab-drop-bar"), "the bar goes with the drag")
         assertFalse(exists("tab-drag-ghost-d"))
+    }
+
+    @Test
+    fun draggingALogOntoAGroupBringsItsDiagramAlongRightAfterIt() {
+        newState(listOf("a", "b", "c", "d"))
+        val groupId = groupOfBandC()
+        val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("d")!!)
+        setStrip()
+
+        pressAndDrag("tab-d", "tab-group-header-$groupId", fraction = 0.3f)
+        releaseMouse()
+
+        assertEquals(
+            listOf(TabRef.Log("b"), TabRef.Log("c"), TabRef.Log("d"), diagram),
+            state.tabGroups.single().members,
+            "the dragged log's diagram joins the group right after it",
+        )
+    }
+
+    @Test
+    fun draggingALogOutOfItsGroupTakesItsDiagramOutAndKeepsItRightAfterTheLog() {
+        newState(listOf("a", "b", "c", "d"))
+        groupOfBandC()
+        val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("c")!!)
+        setStrip()
+        assertEquals(listOf(TabRef.Log("b"), TabRef.Log("c"), diagram), state.tabGroups.single().members, "the diagram opened into the log's group")
+
+        pressAndDrag("tab-c", "tab-d", fraction = 0.8f)
+        releaseMouse()
+
+        assertEquals(null, state.tabGroupOf(TabRef.Log("c")))
+        assertEquals(null, state.tabGroupOf(diagram), "the diagram left the group with its log")
+        assertEquals(listOf(TabRef.Log("b")), state.tabGroups.single().members)
+        val order = state.reconciledTabOrder()
+        assertEquals(order.indexOf(TabRef.Log("c")) + 1, order.indexOf(diagram), "the diagram sits right after its log")
     }
 
     @Test

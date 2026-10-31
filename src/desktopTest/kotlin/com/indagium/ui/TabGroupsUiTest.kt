@@ -13,11 +13,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -35,6 +37,7 @@ import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.height
 import androidx.compose.ui.unit.width
 import com.indagium.model.LogTab
 import com.indagium.model.TabSizeMode
@@ -160,6 +163,14 @@ class TabGroupsUiTest {
         assertEquals(listOf(TabRef.Log("a")), state.tabGroups.single().members)
         assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon)
         rule.onNodeWithTag("tab-group-name").assertExists()
+        rule.onNodeWithTag("tab-group-icon-row-0").assertExists()
+        rule.onNodeWithTag("tab-group-icon-row-1").assertExists()
+        assertFalse(exists("tab-group-icon-row-2"), "the icons wrap onto two lines")
+        assertTrue(
+            rule.onNodeWithTag("tab-group-icon-row-1").getBoundsInRoot().top >= rule.onNodeWithTag("tab-group-icon-row-0").getBoundsInRoot().bottom,
+            "the second line sits under the first",
+        )
+        TabGroupIcon.entries.forEach { rule.onNodeWithTag("tab-group-icon-${it.name.lowercase()}").assertExists() }
         rule.onNodeWithText("New tab group").assertExists()
         rule.onNodeWithText("Create group").assertExists()
         assertFalse(exists("tab-group-text-size-large"), "the per-group text size is gone")
@@ -272,20 +283,30 @@ class TabGroupsUiTest {
         assertEquals("Renamed", state.tabGroups.single().name)
     }
 
+    private fun tintSample(tag: String): Int {
+        val image = rule.onNodeWithTag(tag).captureToImage().toPixelMap()
+        // Above the label and clear of the close button and the active accent: the tab's own fill with any tint over it.
+        return image[image.width / 2, (6f * rule.density.density).toInt()].toArgb()
+    }
+
     @Test
-    fun memberTabsDrawAGroupRailAndNoPerTabIconWhileTheChipCarriesTheIcon() {
+    fun memberTabsAreTintedWithNoRailOrDividerAndNoPerTabIconWhileTheChipCarriesTheIcon() {
         newState(tab("a"), tab("b"), tab("c"))
         val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
         state.assignTabToGroup(TabRef.Log("b"), groupId)
         state.setTabGroupIcon(groupId, TabGroupIcon.STAR)
         setStrip()
 
-        assertTrue(exists("tab-group-rail-a"))
-        assertTrue(exists("tab-group-rail-b"))
-        assertFalse(exists("tab-group-rail-c"), "an ungrouped tab has no rail")
-        assertFalse(exists("tab-group-divider-a"), "only the last member of a run is followed by the divider")
-        assertTrue(exists("tab-group-divider-b"))
-        assertFalse(exists("tab-group-divider-c"))
+        val groupColor = state.tabGroups.single().color
+        // b is an idle member and c an idle ungrouped tab: both are filled with the panel tone, b has the group colour over it.
+        assertArgbNear(tintedOver(LIGHT_THEME.p2, groupColor, GROUP_TINT_ALPHA_LIGHT), tintSample("tab-b"), "a member shows the tint")
+        assertEquals(LIGHT_THEME.p2.toArgb(), tintSample("tab-c"), "an ungrouped tab is not tinted")
+        // a is the active member: the style's active fill with the tint under its content.
+        assertArgbNear(tintedOver(LIGHT_THEME.bg, groupColor, GROUP_TINT_ALPHA_LIGHT), tintSample("tab-a"), "the active member is tinted too")
+        listOf("a", "b", "c").forEach {
+            assertFalse(exists("tab-group-rail-$it"), "the outer-edge rail is gone")
+            assertFalse(exists("tab-group-divider-$it"), "so is the trailing divider")
+        }
         assertTrue(rule.onAllNodesWithTag("tab-group-member-indicator-$groupId-a", useUnmergedTree = true).fetchSemanticsNodes().isEmpty())
         assertEquals(
             1,
@@ -293,14 +314,22 @@ class TabGroupsUiTest {
             "the icon shows on the chip only",
         )
         assertTrue(exists("tab-group-chip-$groupId"))
+        assertTrue(exists("tab-group-dot-$groupId"), "the chip carries the group colour as a dot")
         rule.onNodeWithText("▾ a.log · 2", useUnmergedTree = true).assertExists()
+        assertEquals(
+            rule.onNodeWithTag("tab-a").getBoundsInRoot().height,
+            rule.onNodeWithTag("tab-group-chip-$groupId", useUnmergedTree = true).getBoundsInRoot().height,
+            "the chip is as tall as a tab",
+        )
 
         state.toggleTabGroupCollapsed(groupId)
         rule.waitForIdle()
         rule.onNodeWithText("▸ a.log · 2", useUnmergedTree = true).assertExists()
-        assertTrue(exists("tab-group-rail-a"), "the active member keeps its rail when the group is collapsed")
-        assertTrue(exists("tab-group-divider-a"), "the lone visible member now closes the run")
-        assertFalse(exists("tab-group-rail-b"))
+        assertArgbNear(
+            tintedOver(LIGHT_THEME.bg, groupColor, GROUP_TINT_ALPHA_LIGHT), tintSample("tab-a"),
+            "the active member keeps its tint when the group is collapsed",
+        )
+        assertFalse(exists("tab-b"))
     }
 
     @Test

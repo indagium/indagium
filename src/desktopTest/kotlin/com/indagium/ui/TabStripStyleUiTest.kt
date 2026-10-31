@@ -79,8 +79,8 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalTestApi::class)
 class TabStripStyleUiTest {
     private companion object {
-        const val RAIL_MIDDLE_DP = 1.5f
-        const val RAIL_BAND_DP = 3f
+        const val STRIPE_MIDDLE_DP = 1.5f
+        const val GROUP_TINT_TEST_ALPHA = 0.1f
         const val ACCENT_MIDDLE_DP = 1f
         const val TAB_ACCENT_PIXEL_TOLERANCE = 32
         const val TAB_CAPSULE_SOURCE_PIXEL_TOLERANCE = 12
@@ -288,7 +288,13 @@ class TabStripStyleUiTest {
     }
 
     @Composable
-    private fun roundedContourPreview(styles: List<TabStripStyle>, groupColor: Color? = null, showStripe: Boolean = true) {
+    private fun roundedContourPreview(
+        styles: List<TabStripStyle>,
+        groupColor: Color? = null,
+        showStripe: Boolean = true,
+        groupTintAlpha: Float = 0f,
+        active: Boolean = true,
+    ) {
         CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
             Column(Modifier.width(720.dp).testTag("tab-rounded-contour-preview")) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -307,7 +313,7 @@ class TabStripStyleUiTest {
                                     pointerKey = key,
                                     label = "contour.log",
                                     tooltip = "contour.log",
-                                    isActive = true,
+                                    isActive = active,
                                     showClose = false,
                                     onClick = {},
                                     onClose = {},
@@ -316,6 +322,7 @@ class TabStripStyleUiTest {
                                         showStripe = showStripe,
                                         position = position,
                                         groupColor = groupColor,
+                                        groupTintAlpha = groupTintAlpha,
                                     ),
                                 )
                             }
@@ -936,55 +943,159 @@ class TabStripStyleUiTest {
         assertRoundedContours(roundedStyles, density, blue, accent)
     }
 
+    /** The pixels of every style x edge cell of the contour preview, keyed like the preview's own tags. */
+    private fun capturePreviewCells(styles: List<TabStripStyle>): Map<String, androidx.compose.ui.graphics.PixelMap> =
+        styles.flatMap { style ->
+            TabStripPosition.entries.map { position ->
+                val key = "${style.name}-${position.name}"
+                key to rule.onNodeWithTag("tab-$key").captureToImage().toPixelMap()
+            }
+        }.toMap()
+
     @Test
-    fun groupRailFollowsTheOuterEdgeContourOfEveryStyleOnEveryEdgeAndLeavesTheAccentAndSourceStripeVisible() {
-        directory = createTempDirectory("tab-strip-group-rail").toFile()
+    fun groupTintColoursEveryStyleOnEveryEdgeInsideItsShapeAndLeavesStripeAndAccentPixelsUnchanged() {
+        directory = createTempDirectory("tab-strip-group-tint").toFile()
         val roundedStyles = listOf(TabStripStyle.RAISED, TabStripStyle.SEGMENTED, TabStripStyle.OUTLINED, TabStripStyle.PILL)
         val groupColor = Color(0xFFEC4899)
         // The rectangular styles' source stripe fills the height it is given in this unbounded preview, so they are checked without it.
         listOf(roundedStyles to true, (TabStripStyle.entries - roundedStyles.toSet()) to false).forEach { (styles, withStripe) ->
-            rule.setContent { roundedContourPreview(styles, groupColor = groupColor, showStripe = withStripe) }
-            rule.waitForIdle()
-            assertGroupRails(styles, groupColor.toArgb(), tabSourceColor(TabKind.LOG, LIGHT_THEME).toArgb(), withStripe)
+            listOf(true, false).forEach { active ->
+                rule.setContent { roundedContourPreview(styles, showStripe = withStripe, active = active) }
+                rule.waitForIdle()
+                val plain = capturePreviewCells(styles)
+                rule.setContent {
+                    roundedContourPreview(
+                        styles, groupColor = groupColor, groupTintAlpha = GROUP_TINT_TEST_ALPHA, showStripe = withStripe, active = active,
+                    )
+                }
+                rule.waitForIdle()
+                assertGroupTint(styles, plain, capturePreviewCells(styles), groupColor, withStripe, active)
+            }
         }
     }
 
-    private fun assertGroupRails(styles: List<TabStripStyle>, rail: Int, blue: Int, withStripe: Boolean) {
+    private fun assertGroupTint(
+        styles: List<TabStripStyle>,
+        plain: Map<String, androidx.compose.ui.graphics.PixelMap>,
+        tinted: Map<String, androidx.compose.ui.graphics.PixelMap>,
+        groupColor: Color,
+        withStripe: Boolean,
+        active: Boolean,
+    ) {
         val density = rule.density.density
         styles.forEach { style ->
             TabStripPosition.entries.forEach { position ->
                 val key = "${style.name}-${position.name}"
-                val tab = rule.onNodeWithTag("tab-$key").getBoundsInRoot()
-                val marker = rule.onNodeWithTag("tab-group-rail-$key", useUnmergedTree = true).getBoundsInRoot()
-                assertTrue(marker.left >= tab.left && marker.right <= tab.right, "$style on $position keeps the rail inside the tab width")
-                assertTrue(marker.top >= tab.top && marker.bottom <= tab.bottom, "$style on $position keeps the rail inside the tab height")
-                val image = rule.onNodeWithTag("tab-$key").captureToImage().toPixelMap()
-                // Depth (px from the tab's edge) of the middle of each 3dp band: the rail, the source stripe, the active accent.
-                val stripeMid = (RAIL_MIDDLE_DP * density).toInt()
-                val railMid = ((if (withStripe) RAIL_MIDDLE_DP + RAIL_BAND_DP else RAIL_MIDDLE_DP) * density).toInt()
-                val accentMid = (ACCENT_MIDDLE_DP * density).toInt()
+                val without = plain.getValue(key)
+                val with = tinted.getValue(key)
+                val label = "$style on $position (active=$active)"
+                // Well inside the shape and clear of the label, the stripe and the accent: the tint over whatever the style fills there.
+                val inside = with.width * 4 / 5 to with.height / 2
+                assertArgbNear(
+                    tintedOver(Color(without[inside.first, inside.second].toArgb()), groupColor, GROUP_TINT_TEST_ALPHA),
+                    with[inside.first, inside.second].toArgb(),
+                    "$label: the group colour tints the inside of the shape",
+                )
+                assertNotEquals(without[inside.first, inside.second].toArgb(), with[inside.first, inside.second].toArgb(), label)
 
-                // The pixel [depth] in from the OUTER edge (the strip's own side) or the CONTENT edge, mid-way along it.
-                fun at(depth: Int, outer: Boolean) = when (position to outer) {
+                // The tint stays inside the shape: a corner the shape cuts off keeps the strip's own colour.
+                val rounded = roundedCorners(tabShape(style, position), with.width.toFloat(), with.height.toFloat())
+                val corners = mapOf(
+                    "tl" to (0 to 0), "tr" to (with.width - 1 to 0),
+                    "bl" to (0 to with.height - 1), "br" to (with.width - 1 to with.height - 1),
+                )
+                corners.filterKeys { it in rounded }.forEach { (name, at) ->
+                    assertEquals(without[at.first, at.second].toArgb(), with[at.first, at.second].toArgb(), "$label: the $name corner is outside the tint")
+                }
+
+                // Nothing is drawn over the source stripe and the active accent: their pixels are the ungrouped tab's.
+                // A pill's ends are half circles, so its bands are not flat at the edge's midpoint (sourceAndActiveAccents... pins them).
+                if (style == TabStripStyle.PILL && (position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT)) return@forEach
+
+                fun pixelAt(image: androidx.compose.ui.graphics.PixelMap, depth: Int, outer: Boolean) = when (position to outer) {
                     TabStripPosition.TOP to true, TabStripPosition.BOTTOM to false -> image[image.width / 2, depth]
                     TabStripPosition.TOP to false, TabStripPosition.BOTTOM to true -> image[image.width / 2, image.height - 1 - depth]
                     TabStripPosition.LEFT to true, TabStripPosition.RIGHT to false -> image[depth, image.height / 2]
                     else -> image[image.width - 1 - depth, image.height / 2]
                 }
-                assertEquals(rail, at(railMid, outer = true).toArgb(), "$style on $position: the rail is drawn in the group colour on the outer edge")
-                // A pill's ends are half circles, so its bands are not flat at the edge's midpoint (sourceAndActiveAccents... pins them).
-                if (style == TabStripStyle.PILL && (position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT)) return@forEach
+                val stripeMid = (STRIPE_MIDDLE_DP * density).toInt()
+                val accentMid = (ACCENT_MIDDLE_DP * density).toInt()
                 if (withStripe) {
-                    assertEquals(blue, at(stripeMid, outer = true).toArgb(), "$style on $position: the source stripe stays the outermost band")
-                }
-                // The preview tab is active: where the style marks the active tab with the accent, it is still there on the content side.
-                if (style != TabStripStyle.RAISED && style != TabStripStyle.SEGMENTED) {
                     assertEquals(
-                        LIGHT_THEME.ac.toArgb(), at(accentMid, outer = false).toArgb(),
-                        "$style on $position: the active accent on the content side is not covered by the group rail",
+                        pixelAt(without, stripeMid, outer = true).toArgb(), pixelAt(with, stripeMid, outer = true).toArgb(),
+                        "$label: the source stripe is unchanged by the tint",
+                    )
+                }
+                if (active && style != TabStripStyle.RAISED && style != TabStripStyle.SEGMENTED) {
+                    assertEquals(
+                        pixelAt(without, accentMid, outer = false).toArgb(), pixelAt(with, accentMid, outer = false).toArgb(),
+                        "$label: the active accent is unchanged by the tint",
                     )
                 }
             }
+        }
+    }
+
+    @Test
+    fun theGroupChipIsAFullHeightTabCellInEveryStyleOnEveryEdgeWithTheStylesShape() {
+        directory = createTempDirectory("tab-strip-group-chip").toFile()
+        val group = TabGroup("g", "Logs", 0xFFEC4899.toInt(), collapsed = false, members = listOf(TabRef.Log("x"), TabRef.Log("y")))
+        TabStripPosition.entries.forEach { position ->
+            rule.setContent {
+                CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                    Column(Modifier.width(420.dp)) {
+                        TabStripStyle.entries.forEach { style ->
+                            Row(Modifier.background(tabStripBackground(style, LIGHT_THEME))) {
+                                TabGroupHeader(
+                                    group = group.copy(id = "g-${style.name}"),
+                                    vertical = false,
+                                    width = 140.dp,
+                                    height = tabStripHeightDp(style).dp,
+                                    appearance = TabAppearance(style = style, position = position),
+                                    onClick = {},
+                                    onContextMenu = {},
+                                )
+                                Box(Modifier.width(140.dp)) {
+                                    TabShell(
+                                        pointerKey = style.name, label = "tab.log", tooltip = "t", isActive = false, showClose = true,
+                                        onClick = {}, onClose = {}, appearance = TabAppearance(style = style, position = position),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            rule.waitForIdle()
+            TabStripStyle.entries.forEach { style ->
+                val chip = rule.onNodeWithTag("tab-group-chip-g-${style.name}", useUnmergedTree = true).getBoundsInRoot()
+                val tab = rule.onNodeWithTag("tab-${style.name}").getBoundsInRoot()
+                assertEquals(tab.height, chip.height, "$style on $position: the chip is as tall as a tab")
+                assertEquals(tab.top, chip.top, "$style on $position: the chip sits at the tab's top")
+                assertEquals(
+                    tabStripHeightDp(style) - chipInsetDp(style, position), chip.height.value, 0.5f,
+                    "$style on $position: the chip is the style's own cell height",
+                )
+                assertTrue(exists("tab-group-dot-g-${style.name}"), "$style: the colour dot")
+
+                // The chip is cut to the style's shape like every tab: a rounded corner keeps the strip's colour.
+                val image = rule.onNodeWithTag("tab-group-chip-g-${style.name}", useUnmergedTree = true).captureToImage().toPixelMap()
+                val rounded = roundedCorners(tabShape(style, position), image.width.toFloat(), image.height.toFloat())
+                val behind = tabStripBackground(style, LIGHT_THEME).toArgb()
+                if ("tl" in rounded) assertEquals(behind, image[0, 0].toArgb(), "$style on $position: the chip's rounded corner")
+            }
+        }
+    }
+
+    // How much of a style's cell height the tab's own shape leaves out (the raised card's gap, the segmented item's margin).
+    private fun chipInsetDp(style: TabStripStyle, position: TabStripPosition): Float {
+        val vertical = position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT
+        return when (style) {
+            TabStripStyle.RAISED -> if (vertical) 2f else 4f
+            TabStripStyle.SEGMENTED -> 6f
+            TabStripStyle.OUTLINED -> 4f
+            TabStripStyle.PILL -> 6f
+            else -> 0f
         }
     }
 

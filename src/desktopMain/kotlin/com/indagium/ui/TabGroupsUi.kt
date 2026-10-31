@@ -6,7 +6,6 @@ import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,25 +17,34 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.CreateNewFolder
 import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Lock
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.RemoveCircleOutline
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material.icons.outlined.UnfoldLess
 import androidx.compose.material.icons.outlined.UnfoldMore
+import androidx.compose.material.icons.outlined.Warning
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -51,45 +59,49 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.isSecondaryPressed
-import androidx.compose.ui.input.pointer.onPointerEvent
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.model.TabStripStyle
 import kotlin.math.roundToInt
 
 /** Opens the group editor: the group id, and whether the group was just created (the dialog then reads
  * "New tab group" and its Cancel removes the group again). */
 internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(String, Boolean) -> Unit> { { _, _ -> } }
 
-private const val TAB_GROUP_HEADER_FONT_SIZE_SP = 12f
-private const val TAB_GROUP_HEADER_HORIZONTAL_PADDING_DP = 20f
-private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 180f
+private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 200f
 private const val TAB_GROUP_HEADER_MIN_WIDTH_DP = 64f
 private const val TAB_GROUP_CHIP_ICON_DP = 14f
 private const val TAB_GROUP_CHIP_ICON_GAP_DP = 4f
-private const val CHIP_FILL_ALPHA = 0.13f
-private const val CHIP_FILL_HOVER_ALPHA = 0.2f
-private const val CHIP_BORDER_ALPHA = 0.27f
+private const val TAB_GROUP_CHIP_DOT_DP = 8f
+private const val TAB_GROUP_CHIP_WIDTH_SLACK_DP = 2f
+private const val TAB_GROUP_ICONS_PER_ROW = 9
 
-/** How strongly a member tab's group rail shows while the tab is idle; the active tab and a hovered drop target show it solid. */
-internal const val GROUP_RAIL_IDLE_ALPHA = 0.55f
+/** The member tab tint on a light panel / a dark panel, and while a dragged tab hovers the group (any panel). */
+internal const val GROUP_TINT_ALPHA_LIGHT = 0.10f
+internal const val GROUP_TINT_ALPHA_DARK = 0.16f
+internal const val GROUP_TINT_ALPHA_DRAG = 0.22f
+private const val LIGHT_PANEL_LUMINANCE = 0.5f
+
+/** How strongly a group colours its member tabs: lighter on a light panel, stronger on a dark one, and strongest while a dragged tab hovers the group. */
+internal fun tabGroupTintAlpha(panel: Color, dragHover: Boolean): Float = when {
+    dragHover -> GROUP_TINT_ALPHA_DRAG
+    panel.luminance() > LIGHT_PANEL_LUMINANCE -> GROUP_TINT_ALPHA_LIGHT
+    else -> GROUP_TINT_ALPHA_DARK
+}
 
 /** A group's colour as a Compose colour. */
 internal val TabGroup.color: Color get() = Color(colorArgb)
@@ -374,16 +386,6 @@ private fun itemWidth(item: TabStripItem, widthByKey: Map<String, Float>): Float
 private fun List<TabStripItem>.hasRemovableTab(anchorRef: TabRef?): Boolean =
     any { it is TabStripItem.Tab && it.ref != anchorRef }
 
-/** The tabs of [items] that end a group's run: the last visible member of each group, which gets the hairline divider after it. */
-internal fun tabGroupRunEnds(items: List<TabStripItem>, groups: List<TabGroup>): Set<TabRef> {
-    val groupOf = groups.flatMap { group -> group.members.map { it to group.id } }.toMap()
-    val tabs = items.filterIsInstance<TabStripItem.Tab>()
-    return tabs.filterIndexed { index, item ->
-        val group = groupOf[item.ref]
-        group != null && groupOf[tabs.getOrNull(index + 1)?.ref] != group
-    }.mapTo(HashSet()) { it.ref }
-}
-
 internal fun TabGroupIcon.imageVector(): ImageVector? = when (this) {
     TabGroupIcon.NONE -> null
     TabGroupIcon.FOLDER -> Icons.Outlined.FolderOpen
@@ -394,6 +396,14 @@ internal fun TabGroupIcon.imageVector(): ImageVector? = when (this) {
     TabGroupIcon.FLAG -> Icons.Outlined.Flag
     TabGroupIcon.STAR -> Icons.Outlined.StarBorder
     TabGroupIcon.SEARCH -> Icons.Outlined.Search
+    TabGroupIcon.WARNING -> Icons.Outlined.Warning
+    TabGroupIcon.SCHEDULE -> Icons.Outlined.Schedule
+    TabGroupIcon.CLOUD -> Icons.Outlined.Cloud
+    TabGroupIcon.WIFI -> Icons.Outlined.Wifi
+    TabGroupIcon.BATTERY -> Icons.Outlined.BatteryFull
+    TabGroupIcon.MEMORY -> Icons.Outlined.Memory
+    TabGroupIcon.LOCK -> Icons.Outlined.Lock
+    TabGroupIcon.SCIENCE -> Icons.Outlined.Science
 }
 
 /** Width a chip's icon adds (icon plus its gap); none when the group has no icon. */
@@ -405,18 +415,14 @@ internal fun tabGroupHeaderWidthPx(
     textMeasurer: TextMeasurer,
     uiFont: androidx.compose.ui.text.font.FontFamily,
     density: Density,
+    style: TabStripStyle = TabStripStyle.CURRENT,
 ): Float {
     val labelWidth = textMeasurer.measure(
         AnnotatedString(tabGroupChipLabel(group)),
-        style = TextStyle(
-            fontSize = TAB_GROUP_HEADER_FONT_SIZE_SP.sp,
-            fontFamily = uiFont,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-        ),
+        style = tabLabelMeasureStyle(style, uiFont),
     ).size.width.toFloat()
-    val contentPadding = with(density) { TAB_GROUP_HEADER_HORIZONTAL_PADDING_DP.dp.toPx() }
-    val iconWidth = with(density) { tabGroupChipIconWidthDp(group).dp.toPx() }
-    return (labelWidth + contentPadding + iconWidth)
+    val chromeDp = tabChromeWidthDp(style) + TAB_GROUP_CHIP_DOT_DP + tabGroupChipIconWidthDp(group) + TAB_GROUP_CHIP_WIDTH_SLACK_DP
+    return (labelWidth + with(density) { chromeDp.dp.toPx() })
         .coerceIn(
             with(density) { TAB_GROUP_HEADER_MIN_WIDTH_DP.dp.toPx() },
             with(density) { TAB_GROUP_HEADER_MAX_WIDTH_DP.dp.toPx() },
@@ -424,8 +430,9 @@ internal fun tabGroupHeaderWidthPx(
 }
 
 /**
- * A group's chip: the app's tinted badge (the group colour at 13% fill and 27% border, full-strength label, small radius) reading
- * "▾ name · N", with the group's icon when it has one. The whole cell is the click and right-click target.
+ * A group's chip: a normal full-height tab cell drawn by [TabShell] in the current strip style ([appearance] carries the style and the
+ * strip edge, so height, outline and radius match every tab), reading "▾ name · N" after an 8dp dot in the group colour and the group's
+ * icon when it has one. The whole cell is the click (collapse), right-click ([onContextMenu] gets the cell's bounds) and drag target.
  */
 @Composable
 internal fun TabGroupHeader(
@@ -433,19 +440,18 @@ internal fun TabGroupHeader(
     vertical: Boolean,
     width: androidx.compose.ui.unit.Dp,
     height: androidx.compose.ui.unit.Dp,
+    appearance: TabAppearance,
     supporting: Boolean = false,
+    dragging: Boolean = false,
     onClick: () -> Unit,
     onContextMenu: (IntRect) -> Unit,
 ) {
-    val color = group.color
     var headerBounds by remember(group.id) { mutableStateOf(IntRect.Zero) }
-    var hovered by remember(group.id) { mutableStateOf(false) }
     val sizeModifier = if (vertical) Modifier.fillMaxWidth().height(height) else Modifier.width(width).height(height)
-    val chipHeight = (height - TAB_GROUP_CHIP_VERTICAL_MARGIN_DP.dp).coerceIn(TAB_GROUP_CHIP_MIN_HEIGHT_DP.dp, TAB_GROUP_CHIP_MAX_HEIGHT_DP.dp)
+    val suffix = if (supporting) "-support" else ""
     Box(
         sizeModifier
-            .padding(horizontal = 2.dp, vertical = 1.dp)
-            .testTag("tab-group-header-${group.id}${if (supporting) "-support" else ""}")
+            .testTag("tab-group-header-${group.id}$suffix")
             .onGloballyPositioned { coordinates ->
                 val bounds = coordinates.boundsInWindow()
                 headerBounds = IntRect(
@@ -454,49 +460,43 @@ internal fun TabGroupHeader(
                     bounds.right.roundToInt(),
                     bounds.bottom.roundToInt(),
                 )
-            }
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(group.id) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
-                            event.changes.firstOrNull()?.consume()
-                            onContextMenu(headerBounds)
-                        }
-                    }
-                }
-            }
-            .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null, onClick = onClick),
-        contentAlignment = Alignment.CenterStart,
+            },
     ) {
-        Row(
-            Modifier.fillMaxWidth().height(chipHeight)
-                .background(color.copy(alpha = if (hovered) CHIP_FILL_HOVER_ALPHA else CHIP_FILL_ALPHA), CORNER_SM)
-                .border(1.dp, color.copy(alpha = CHIP_BORDER_ALPHA), CORNER_SM)
-                .testTag("tab-group-chip-${group.id}${if (supporting) "-support" else ""}")
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(TAB_GROUP_CHIP_ICON_GAP_DP.dp),
-        ) {
-            TabGroupHeaderIcon(group, color, "tab-group-header-icon-${group.id}")
-            AppText(
-                tabGroupChipLabel(group),
-                color = color,
-                fontSize = TAB_GROUP_HEADER_FONT_SIZE_SP.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-        }
+        // The cell's own tag is "tab-group-chip-<id>" (TabShell prefixes "tab-").
+        TabShell(
+            pointerKey = "group-chip-${group.id}$suffix",
+            label = tabGroupChipLabel(group),
+            tooltip = "${group.name} · ${group.members.size} tab${if (group.members.size == 1) "" else "s"}",
+            isActive = false,
+            showClose = false,
+            dragging = dragging,
+            leading = { TabGroupChipLeading(group) },
+            onClick = onClick,
+            onClose = {},
+            onCtxMenu = { _, _ -> onContextMenu(headerBounds) },
+            appearance = appearance.copy(
+                showBadge = false,
+                showStripe = false,
+                secondLine = null,
+                tailing = false,
+                groupColor = null,
+                groupTintAlpha = 0f,
+            ),
+        )
     }
 }
 
-private const val TAB_GROUP_CHIP_VERTICAL_MARGIN_DP = 14f
-private const val TAB_GROUP_CHIP_MIN_HEIGHT_DP = 18f
-private const val TAB_GROUP_CHIP_MAX_HEIGHT_DP = 24f
+/** The colour dot and the optional icon before a chip's label. */
+@Composable
+private fun TabGroupChipLeading(group: TabGroup) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(TAB_GROUP_CHIP_ICON_GAP_DP.dp)) {
+        Box(
+            Modifier.size(TAB_GROUP_CHIP_DOT_DP.dp).background(group.color, CircleShape)
+                .testTag("tab-group-dot-${group.id}"),
+        )
+        TabGroupHeaderIcon(group, group.color, "tab-group-header-icon-${group.id}")
+    }
+}
 
 /** The group's icon in [color]; nothing when the group has none (a chip never shows a stand-in dot). */
 @Composable
@@ -676,9 +676,14 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
                 }
             }
             DialogField("Icon (optional)") {
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TabGroupIcon.entries.forEach { icon ->
-                        GroupIconOption(icon, selected = selectedIcon == icon) { selectedIcon = icon }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Two lines: every icon shows at once, none sits behind a scroll.
+                    TabGroupIcon.entries.chunked(TAB_GROUP_ICONS_PER_ROW).forEachIndexed { index, rowIcons ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.testTag("tab-group-icon-row-$index")) {
+                            rowIcons.forEach { icon ->
+                                GroupIconOption(icon, selected = selectedIcon == icon) { selectedIcon = icon }
+                            }
+                        }
                     }
                 }
             }

@@ -9,7 +9,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -56,6 +55,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -79,8 +79,6 @@ private val SEGMENT_RADIUS = 6.dp
 private val STRIPE_HEIGHT = 3.dp
 private val ACCENT_UNDERLINE = 2.dp
 private val SEGMENT_DOT = 5.dp
-private val GROUP_RAIL = 3.dp
-private val GROUP_DIVIDER = 1.dp
 private val CLOSE_SLOT = 24.dp
 private const val PILL_CORNER_PERCENT = 50
 private const val QUARTER_CIRCLE_CUBIC = 0.55228475f
@@ -127,6 +125,20 @@ private fun tabLabelStyle(style: TabStripStyle, active: Boolean, lit: Boolean, t
     }
 }
 
+/** The label font of an idle (not active) tab in [style], for measuring a label before it is drawn; [uiFont] is the interface family. */
+internal fun tabLabelMeasureStyle(style: TabStripStyle, uiFont: FontFamily): TextStyle = when (style) {
+    TabStripStyle.COMPACT -> TextStyle(fontSize = 11.sp, fontFamily = MONO, fontWeight = FontWeight.Normal)
+    TabStripStyle.SEGMENTED, TabStripStyle.QUIET, TabStripStyle.OUTLINED, TabStripStyle.PILL ->
+        TextStyle(fontSize = 12.sp, fontFamily = uiFont, fontWeight = FontWeight.Normal)
+    else -> TextStyle(fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Normal)
+}
+
+/** The width in dp a tab of [style] adds around its content: the start and end padding plus one gap (between a leading slot and the label). */
+internal fun tabChromeWidthDp(style: TabStripStyle): Float {
+    val metrics = tabMetrics(style, TabStripPosition.TOP)
+    return metrics.padStart.value + metrics.padEnd.value + metrics.gap.value
+}
+
 /** The strip's own background: the app background for QUIET, the panel tone for every other style. */
 internal fun tabStripBackground(style: TabStripStyle, tc: ThemeColors): Color = if (style == TabStripStyle.QUIET) tc.bg else tc.p2
 
@@ -157,9 +169,9 @@ private fun tabCloseButtonShape(style: TabStripStyle, position: TabStripPosition
     else -> CORNER_MD
 }
 
-private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition): Modifier {
+private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition, tint: Color?): Modifier {
     val shape = raisedShape(position)
-    return background(tc.bg, shape).drawBehind {
+    return background(tc.bg, shape).groupTint(tint, shape).drawBehind {
         val inset = 0.5.dp.toPx()
         val overshoot = RAISED_RADIUS.toPx() * 2
         // The outline is a rounded rect that runs past the open side, which the clip then cuts off.
@@ -249,7 +261,11 @@ private fun DrawScope.contentSideMark(style: TabStripStyle, position: TabStripPo
     drawEdgeContour(edge, thickness, tabEdgeRadius(style, position, edge), color)
 }
 
-// The chrome behind one tab: its fill, outline and the accent mark of the active tab.
+// A group member's tint: the group colour (already at its alpha) over the tab's own fill, inside its shape. It sits between the fill and
+// everything drawn after it (outline, accent mark, label, source stripe), so those keep their pixels.
+private fun Modifier.groupTint(tint: Color?, shape: Shape): Modifier = if (tint == null) this else background(tint, shape)
+
+// The chrome behind one tab: its fill, [tint] (a group member's), outline and the accent mark of the active tab.
 private fun Modifier.tabChrome(
     style: TabStripStyle,
     isActive: Boolean,
@@ -257,22 +273,28 @@ private fun Modifier.tabChrome(
     dragging: Boolean,
     tc: ThemeColors,
     position: TabStripPosition,
+    tint: Color? = null,
 ): Modifier {
     val accent = tc.ac
     val lit = hovered || dragging
     return when (style) {
-        TabStripStyle.RAISED -> raisedTabChrome(tc, position, isActive, lit)
-        TabStripStyle.SEGMENTED -> segmentedTabChrome(style, tc, position, isActive, lit)
-        TabStripStyle.OUTLINED -> outlinedTabChrome(style, tc, position, isActive, lit, accent)
-        TabStripStyle.PILL -> pillTabChrome(style, tc, position, isActive, lit, accent)
-        TabStripStyle.QUIET -> quietTabChrome(style, position, isActive, accent, tc.br)
-        else -> classicTabChrome(style, tc, position, isActive, lit, accent)
+        TabStripStyle.RAISED -> raisedTabChrome(tc, position, isActive, lit, tint)
+        TabStripStyle.SEGMENTED -> segmentedTabChrome(style, tc, position, isActive, lit, tint)
+        TabStripStyle.OUTLINED -> outlinedTabChrome(style, tc, position, isActive, lit, accent, tint)
+        TabStripStyle.PILL -> pillTabChrome(style, tc, position, isActive, lit, accent, tint)
+        TabStripStyle.QUIET -> quietTabChrome(style, position, isActive, accent, tc.br, tint)
+        else -> classicTabChrome(style, tc, position, isActive, lit, accent, tint)
     }
 }
 
 // The hovered raised tab keeps the card's open-sided shape (open toward the content).
-private fun Modifier.raisedTabChrome(tc: ThemeColors, position: TabStripPosition, isActive: Boolean, lit: Boolean): Modifier =
-    if (isActive) raisedCard(tc, position) else background(if (lit) tc.hv else Color.Transparent, tabShape(TabStripStyle.RAISED, position))
+private fun Modifier.raisedTabChrome(tc: ThemeColors, position: TabStripPosition, isActive: Boolean, lit: Boolean, tint: Color?): Modifier =
+    if (isActive) {
+        raisedCard(tc, position, tint)
+    } else {
+        val shape = tabShape(TabStripStyle.RAISED, position)
+        background(if (lit) tc.hv else Color.Transparent, shape).groupTint(tint, shape)
+    }
 
 private fun Modifier.segmentedTabChrome(
     style: TabStripStyle,
@@ -280,12 +302,13 @@ private fun Modifier.segmentedTabChrome(
     position: TabStripPosition,
     isActive: Boolean,
     lit: Boolean,
+    tint: Color?,
 ): Modifier {
     val shape = tabShape(style, position)
     return when {
-        isActive -> background(tc.p, shape).border(0.5.dp, tc.br, shape)
-        lit -> background(tc.hv, shape)
-        else -> this
+        isActive -> background(tc.p, shape).groupTint(tint, shape).border(0.5.dp, tc.br, shape)
+        lit -> background(tc.hv, shape).groupTint(tint, shape)
+        else -> groupTint(tint, shape)
     }
 }
 
@@ -296,10 +319,12 @@ private fun Modifier.outlinedTabChrome(
     isActive: Boolean,
     lit: Boolean,
     accent: Color,
+    tint: Color?,
 ): Modifier {
     val shape = tabShape(style, position)
     val border = if (isActive) accent else tc.br
     return background(if (isActive) tc.p else if (lit) tc.hv else Color.Transparent, shape)
+        .groupTint(tint, shape)
         .border(BorderStroke(1.dp, border), shape)
         .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 }
@@ -311,17 +336,26 @@ private fun Modifier.pillTabChrome(
     isActive: Boolean,
     lit: Boolean,
     accent: Color,
+    tint: Color?,
 ): Modifier {
     val shape = tabShape(style, position)
     val backgroundColor = if (isActive) accent.copy(alpha = 0.14f) else if (lit) tc.hv else tc.p
     val border = if (isActive) accent else tc.br.copy(alpha = 0.7f)
     return background(backgroundColor, shape)
+        .groupTint(tint, shape)
         .border(BorderStroke(1.dp, border), shape)
         .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 }
 
-private fun Modifier.quietTabChrome(style: TabStripStyle, position: TabStripPosition, isActive: Boolean, accent: Color, border: Color): Modifier =
-    drawBehind { contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), if (isActive) accent else border) }
+private fun Modifier.quietTabChrome(
+    style: TabStripStyle,
+    position: TabStripPosition,
+    isActive: Boolean,
+    accent: Color,
+    border: Color,
+    tint: Color?,
+): Modifier = groupTint(tint, tabShape(style, position))
+    .drawBehind { contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), if (isActive) accent else border) }
 
 private fun Modifier.classicTabChrome(
     style: TabStripStyle,
@@ -330,7 +364,9 @@ private fun Modifier.classicTabChrome(
     isActive: Boolean,
     lit: Boolean,
     accent: Color,
+    tint: Color?,
 ): Modifier = background(if (isActive) tc.bg else if (lit) tc.p else tc.p2)
+    .groupTint(tint, tabShape(style, position))
     .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
     .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 
@@ -400,14 +436,14 @@ internal fun TabShell(
     val sourceColor = if (appearance.showStripe) tabSourceColor(appearance.kind, tc) else Color.Transparent
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc)
+    val groupTint = appearance.groupColor?.takeIf { appearance.groupTintAlpha > 0f }?.copy(alpha = appearance.groupTintAlpha)
     Box(Modifier.fillMaxWidth()) {
-        // The tab itself and what is drawn over it (group rail, divider) share this box, so the overlays match the tab, not the cell.
         Box(Modifier.fillMaxWidth()) {
             Row(
                 Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
                     .padding(metrics.inset)
                     .testTag("tab-$pointerKey")
-                    .tabChrome(style, isActive, hov, dragging, tc, position)
+                    .tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
                     // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
                     // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.
                     .then(if (shape == RectangleShape) Modifier else Modifier.clip(shape))
@@ -471,13 +507,6 @@ internal fun TabShell(
                     )
                 }
             }
-            appearance.groupColor?.let { groupColor ->
-                TabGroupRail(
-                    pointerKey, style, position, metrics, groupColor.copy(alpha = appearance.groupRailAlpha),
-                    stripe = sourceColor.takeIf { appearance.showStripe },
-                )
-            }
-            if (appearance.groupRunEnd) TabGroupDivider(pointerKey, position, tc.br)
         }
         if (appearance.showStripe && shape == RectangleShape) {
             TabSourceStripe(
@@ -495,47 +524,6 @@ internal fun TabShell(
             )
         }
     }
-}
-
-/**
- * A member's group rail: [GROUP_RAIL] thick, in the group colour, along the tab's OUTER edge (the one facing away from the content), so
- * it never covers the active accent on the content side. It is drawn over the tab through the same contour as that accent and the
- * source stripe, so rounded styles bend it round their corners and every style on every strip edge keeps it inside the tab. When the
- * source stripe is shown ([stripe]) it stays the outermost band and the rail sits just inside it.
- */
-@Composable
-private fun BoxScope.TabGroupRail(
-    pointerKey: Any,
-    style: TabStripStyle,
-    position: TabStripPosition,
-    metrics: TabMetrics,
-    color: Color,
-    stripe: Color?,
-) {
-    Box(
-        Modifier.matchParentSize().padding(metrics.inset).testTag("tab-group-rail-$pointerKey").drawBehind {
-            val radius = tabEdgeRadius(style, position, position)
-            val stripeThickness = if (stripe != null) STRIPE_HEIGHT.toPx() else 0f
-            drawEdgeContour(position, stripeThickness + GROUP_RAIL.toPx(), radius, color)
-            if (stripe != null) drawEdgeContour(position, stripeThickness, radius, stripe)
-        },
-    )
-}
-
-/** The hairline after the last member of a group: across the end of a horizontal strip's tab, under a vertical strip's. */
-@Composable
-private fun BoxScope.TabGroupDivider(pointerKey: Any, position: TabStripPosition, color: Color) {
-    val verticalStrip = position == TabStripPosition.LEFT || position == TabStripPosition.RIGHT
-    Box(
-        Modifier.matchParentSize().testTag("tab-group-divider-$pointerKey").drawBehind {
-            val thickness = GROUP_DIVIDER.toPx()
-            if (verticalStrip) {
-                drawRect(color, Offset(0f, size.height - thickness), Size(size.width, thickness))
-            } else {
-                drawRect(color, Offset(size.width - thickness, 0f), Size(thickness, size.height))
-            }
-        },
-    )
 }
 
 /** The close hit target and its hover-only placeholder share one slot so the label never shifts. */

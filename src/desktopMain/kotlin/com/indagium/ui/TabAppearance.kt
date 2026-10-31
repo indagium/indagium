@@ -178,12 +178,10 @@ internal data class TabAppearance(
     val tailing: Boolean = false,
     val position: TabStripPosition = TabStripPosition.TOP,
     val closeButtonPosition: TabCloseButtonPosition = TabCloseButtonPosition.RIGHT,
-    /** The colour of the group this tab belongs to: it draws a rail in it on the edge facing the content. Null for an ungrouped tab. */
+    /** The colour of the group this tab belongs to: it tints the tab's own shape, under its content. Null for an ungrouped tab. */
     val groupColor: Color? = null,
-    /** How strongly the group rail is drawn (full while the tab is active or a dragged tab hovers its group). */
-    val groupRailAlpha: Float = 1f,
-    /** True for the last visible member of a group, which gets a hairline divider after it. */
-    val groupRunEnd: Boolean = false,
+    /** How strongly [groupColor] tints the tab (raised while a dragged tab hovers the group). */
+    val groupTintAlpha: Float = 0f,
 ) {
     companion object {
         val Default = TabAppearance()

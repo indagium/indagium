@@ -14,6 +14,17 @@ internal enum class TabGroupIcon {
     FLAG,
     STAR,
     SEARCH,
+
+    // Appended after the first release of groups: names are what the codec writes, so order is free,
+    // but keep new entries last (an older build ignores a name it does not know).
+    WARNING,
+    SCHEDULE,
+    CLOUD,
+    WIFI,
+    BATTERY,
+    MEMORY,
+    LOCK,
+    SCIENCE,
 }
 
 /** A named, contiguous run of ordinary log/capture and diagram tabs in the shared strip. */
@@ -140,12 +151,36 @@ private fun AppState.defaultTabGroupName(ref: TabRef): String = when (ref) {
     TabRef.Tests -> null
 }.orEmpty()
 
+/**
+ * The open diagram tabs made from the log [ref] (sessions whose `sourceTabId` is that log), in strip order. They follow the log into,
+ * between and out of groups; empty for anything but a log tab.
+ */
+internal fun AppState.diagramRefsOfLogLocked(ref: TabRef): List<TabRef> {
+    if (ref !is TabRef.Log) return emptyList()
+    val ids = seq3Sessions.sessions.filter { it.sourceTabId == ref.tabId }.mapTo(HashSet<TabRef>()) { TabRef.Diagram(it.id) }
+    return if (ids.isEmpty()) emptyList() else reconciledTabOrderLocked().filter { it in ids }
+}
+
+/** [order] with [moved] taken out and put directly after [anchor] (appended when [anchor] is missing). */
+private fun placeAfter(order: List<TabRef>, anchor: TabRef, moved: List<TabRef>): List<TabRef> {
+    if (moved.isEmpty()) return order
+    val rest = order.filterNot { it in moved }
+    val at = rest.indexOf(anchor).let { if (it < 0) rest.size else it + 1 }
+    return rest.take(at) + moved + rest.drop(at)
+}
+
+/** [order] with [followers] (the diagrams that left a group with the log [anchor]) moved to sit right after it. */
+internal fun orderWithFollowersAfter(order: List<TabRef>, anchor: TabRef, followers: List<TabRef>): List<TabRef> =
+    placeAfter(order, anchor, followers)
+
 /** Creates a one-member group. Home/capture-launcher and Tests tabs are deliberately not groupable. */
 internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateLock) {
     if (!isLiveGroupableRef(ref)) return@synchronized null
-    val currentOrder = reconciledTabOrderLocked()
+    // The log's open diagrams join it, right after it.
+    val block = listOf(ref) + diagramRefsOfLogLocked(ref)
+    val currentOrder = placeAfter(reconciledTabOrderLocked(), ref, block.drop(1))
     val groupsWithoutRef = tabGroups.mapNotNull { existing ->
-        val members = existing.members.filterNot { it == ref }
+        val members = existing.members.filterNot { it in block }
         existing.takeIf { members.isNotEmpty() }?.copy(members = members)
     }
     // The groups the tab leaves behind (an emptied one disappears) do not count as taken.
@@ -154,7 +189,7 @@ internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateL
         name = uniqueTabGroupName(defaultTabGroupName(ref), groupsWithoutRef.map { it.name }),
         colorArgb = defaultTabGroupColorArgb(groupsWithoutRef),
         collapsed = false,
-        members = listOf(ref),
+        members = block,
     )
     tabGroups = groupsWithoutRef + group
     commitTabOrderLocked(currentOrder)
@@ -162,38 +197,52 @@ internal fun AppState.createTabGroup(ref: TabRef): String? = synchronized(stateL
 }
 
 /** Moves [ref] into [id], inserting before [before] when it is already in that group, otherwise
- * appending it to the group's run. */
+ * appending it to the group's run. A log tab brings its open diagrams along, right after it. */
 internal fun AppState.assignTabToGroup(ref: TabRef, id: String, before: TabRef? = null) = synchronized(stateLock) {
     val target = tabGroups.firstOrNull { it.id == id } ?: return@synchronized
     if (!isLiveGroupableRef(ref)) return@synchronized
+    val block = listOf(ref) + diagramRefsOfLogLocked(ref)
     if (before == ref && ref in target.members) return@synchronized
-    if (before == null && target.members.lastOrNull() == ref) return@synchronized
+    if (before == null && target.members.takeLast(block.size) == block) return@synchronized
 
-    val withoutRefGroups = tabGroups.mapNotNull { group ->
-        val members = group.members.filterNot { it == ref }
+    val withoutBlockGroups = tabGroups.mapNotNull { group ->
+        val members = group.members.filterNot { it in block }
         when {
             members.isNotEmpty() -> group.copy(members = members)
             group.id == id -> group.copy(members = emptyList())
             else -> null
         }
     }
-    val baseOrder = canonicalGroupedOrder(reconciledTabOrderLocked(), withoutRefGroups).first.filterNot { it == ref }
+    val baseOrder = canonicalGroupedOrder(reconciledTabOrderLocked(), withoutBlockGroups).first.filterNot { it in block }
     val targetMembers = baseOrder.filter { candidate ->
-        withoutRefGroups.firstOrNull { it.id == id }?.members?.contains(candidate) == true
+        withoutBlockGroups.firstOrNull { it.id == id }?.members?.contains(candidate) == true
     }
     val insertionIndex = before?.takeIf { it in targetMembers }?.let(baseOrder::indexOf)
         ?: targetMembers.lastOrNull()?.let { baseOrder.indexOf(it) + 1 }
         ?: baseOrder.size
-    val nextOrder = baseOrder.toMutableList().apply { add(insertionIndex.coerceIn(0, size), ref) }
-    tabGroups = withoutRefGroups.map { group ->
-        if (group.id == id) group.copy(members = targetMembers + ref) else group
+    val nextOrder = baseOrder.toMutableList().apply { addAll(insertionIndex.coerceIn(0, size), block) }
+    tabGroups = withoutBlockGroups.map { group ->
+        if (group.id == id) group.copy(members = targetMembers + block) else group
     }
     commitTabOrderLocked(nextOrder)
 }
 
-/** Removes one tab from its group and drops the group if it becomes empty. */
-internal fun AppState.removeTabFromGroup(ref: TabRef) = synchronized(stateLock) {
-    removeTabFromGroupLocked(ref)
+/**
+ * Removes one tab from its group and drops the group if it becomes empty. A log tab takes the open diagrams it shares the group with
+ * along and puts them right after itself; those diagrams are returned so a drag that then places the log can keep them beside it.
+ */
+internal fun AppState.removeTabFromGroup(ref: TabRef): List<TabRef> = synchronized(stateLock) {
+    val group = tabGroups.firstOrNull { ref in it.members } ?: return@synchronized emptyList()
+    val followers = diagramRefsOfLogLocked(ref).filter { it in group.members }
+    val leaving = listOf(ref) + followers
+    val nextGroups = tabGroups.mapNotNull { existing ->
+        val members = existing.members.filterNot { it in leaving }
+        existing.takeIf { members.isNotEmpty() }?.copy(members = members)
+    }
+    tabGroups = nextGroups
+    // The remaining members compress together and the ungrouped tab follows that block, with its diagrams beside it.
+    commitTabOrderLocked(placeAfter(reconciledTabOrderLocked(), ref, followers))
+    followers
 }
 
 internal fun AppState.removeTabFromGroupLocked(ref: TabRef) {

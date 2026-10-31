@@ -423,7 +423,138 @@ class TabGroupsStateTest {
         val items = projectTabStripItems(order, listOf(collapsed), active = TabRef.Log("b"))
         val withoutHeader = items.filterNot { it is TabStripItem.GroupHeader }
         assertEquals(listOf("header", "b", "d"), refs(associateGroupHeaders(withoutHeader, listOf(collapsed))))
-        assertEquals(setOf(TabRef.Log("b")), tabGroupRunEnds(items, listOf(collapsed)), "the lone visible member closes the run")
-        assertEquals(setOf(TabRef.Log("c")), tabGroupRunEnds(projectTabStripItems(order, listOf(expanded)), listOf(expanded)))
+    }
+
+    // ---- diagrams follow their log -------------------------------------------------------------------------------------------------
+
+    private inline fun withDiagramState(prefix: String, block: (AppState) -> Unit) {
+        val dir = createTempDirectory(prefix).toFile()
+        val state = stateFor(dir)
+        try {
+            block(state)
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun groupingBothLogsPutsTheDiagramOfTheFirstInTheGroupRightAfterIt() {
+        withDiagramState("tab-groups-diagram-create") { state ->
+            state.tabs = listOf(workspace("a"), workspace("b"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b")))
+            val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("a")!!)
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), diagram), state.reconciledTabOrder())
+
+            val id = state.createTabGroup(TabRef.Log("a"))!!
+            assertEquals(listOf(TabRef.Log("a"), diagram), state.tabGroups.single().members, "the diagram joins when its log is grouped")
+            state.assignTabToGroup(TabRef.Log("b"), id)
+
+            assertEquals(listOf(TabRef.Log("a"), diagram, TabRef.Log("b")), state.tabGroups.single().members)
+            assertEquals(listOf(TabRef.Log("a"), diagram, TabRef.Log("b")), state.reconciledTabOrder())
+        }
+    }
+
+    @Test
+    fun movingALogIntoAnotherGroupTakesItsDiagramAlongRightAfterIt() {
+        withDiagramState("tab-groups-diagram-move") { state ->
+            state.tabs = listOf(workspace("a"), workspace("b"), workspace("c"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
+            val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("b")!!)
+            val first = state.createTabGroup(TabRef.Log("a"))!!
+            val second = state.createTabGroup(TabRef.Log("c"))!!
+
+            state.assignTabToGroup(TabRef.Log("b"), first)
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), diagram), state.tabGroups.single { it.id == first }.members)
+
+            state.assignTabToGroup(TabRef.Log("b"), second, before = TabRef.Log("c"))
+            assertEquals(listOf(TabRef.Log("a")), state.tabGroups.single { it.id == first }.members)
+            assertEquals(listOf(TabRef.Log("b"), diagram, TabRef.Log("c")), state.tabGroups.single { it.id == second }.members)
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), diagram, TabRef.Log("c")), state.reconciledTabOrder())
+        }
+    }
+
+    @Test
+    fun removingALogFromItsGroupTakesItsDiagramOutAndKeepsItRightAfterTheLog() {
+        withDiagramState("tab-groups-diagram-remove") { state ->
+            state.tabs = listOf(workspace("a"), workspace("b"), workspace("c"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("c")))
+            val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("b")!!)
+            val id = state.createTabGroup(TabRef.Log("a"))!!
+            state.assignTabToGroup(TabRef.Log("b"), id)
+            state.assignTabToGroup(TabRef.Log("c"), id)
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), diagram, TabRef.Log("c")), state.tabGroups.single().members)
+
+            val followers = state.removeTabFromGroup(TabRef.Log("b"))
+
+            assertEquals(listOf(diagram), followers)
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("c")), state.tabGroups.single().members)
+            assertNull(state.tabGroupOf(diagram))
+            val order = state.reconciledTabOrder()
+            assertEquals(order.indexOf(TabRef.Log("b")) + 1, order.indexOf(diagram), "the diagram sits right after its log")
+            assertEquals(listOf(TabRef.Log("a"), TabRef.Log("c")), order.take(2), "the group stays one run")
+        }
+    }
+
+    @Test
+    fun removingADiagramAloneLeavesItsLogInTheGroupAndAGroupedLogPullsADiagramOutOfAnotherGroup() {
+        withDiagramState("tab-groups-diagram-alone") { state ->
+            state.tabs = listOf(workspace("a"), workspace("b"))
+            state.commitTabOrder(listOf(TabRef.Log("a"), TabRef.Log("b")))
+            val diagram = TabRef.Diagram(state.seq3Sessions.beginEmpty("a")!!)
+            val first = state.createTabGroup(TabRef.Log("a"))!!
+            assertEquals(emptyList(), state.removeTabFromGroup(diagram), "a diagram has no diagrams of its own")
+            assertEquals(listOf(TabRef.Log("a")), state.tabGroups.single().members)
+
+            val other = state.createTabGroup(diagram)!!
+            assertEquals(listOf(diagram), state.tabGroups.single { it.id == other }.members)
+            state.assignTabToGroup(TabRef.Log("a"), first)
+            // The log came back to its group, so its diagram left the one it had been put in; that emptied group is gone.
+            assertEquals(listOf(TabRef.Log("a"), diagram), state.tabGroups.single().members)
+            assertNull(state.tabGroups.firstOrNull { it.id == other })
+        }
+    }
+
+    // ---- group icons ---------------------------------------------------------------------------------------------------------------
+
+    @Test
+    fun everyNewIconRoundTripsThroughTheCodecByNameAndAnUnknownNameFallsBackToNone() {
+        val appended = listOf(
+            TabGroupIcon.WARNING, TabGroupIcon.SCHEDULE, TabGroupIcon.CLOUD, TabGroupIcon.WIFI,
+            TabGroupIcon.BATTERY, TabGroupIcon.MEMORY, TabGroupIcon.LOCK, TabGroupIcon.SCIENCE,
+        )
+        assertEquals(appended, TabGroupIcon.entries.takeLast(appended.size), "new icons are appended after the original ones")
+        val dir = createTempDirectory("tab-groups-icons").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = appended.indices.map { workspace("t$it") }
+            state.commitTabOrder(state.tabs.map { TabRef.Log(it.id) })
+            appended.forEachIndexed { index, icon ->
+                val id = state.createTabGroup(TabRef.Log("t$index"))!!
+                state.setTabGroupIcon(id, icon)
+            }
+            val json = state.tabGroupsJson()
+            appended.forEach { assertTrue("\"icon\":\"${it.name}\"" in json.replace(" ", ""), "${it.name} is written by name") }
+
+            state.restoreTabGroups(json)
+            assertEquals(appended, state.tabGroups.map { it.icon })
+            appended.forEach { assertTrue(it.imageVector() != null, "${it.name} has a drawable") }
+
+            state.restoreTabGroups(
+                """{"groups":[{"id":"g","name":"G","colorArgb":-16777216,"collapsed":false,"icon":"HOLOGRAM","members":[{"kind":"L","id":"t0"}]}]}""",
+            )
+            assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon, "a name a build does not know reads as no icon")
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun tintAlphaIsLighterOnALightPanelStrongerOnADarkOneAndStrongestWhileADragHoversTheGroup() {
+        assertEquals(0.10f, tabGroupTintAlpha(LIGHT_THEME.p, dragHover = false))
+        assertEquals(0.16f, tabGroupTintAlpha(DARK_GITHUB.p, dragHover = false))
+        assertEquals(0.22f, tabGroupTintAlpha(LIGHT_THEME.p, dragHover = true))
+        assertEquals(0.22f, tabGroupTintAlpha(DARK_GITHUB.p, dragHover = true))
     }
 }

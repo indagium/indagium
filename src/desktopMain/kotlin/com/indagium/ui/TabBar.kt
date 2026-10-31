@@ -407,14 +407,21 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     val visibleTabLimit = state.settings.visibleTabLimit
     val settings = state.settings
     val position = settings.tabStripPosition
+    // A group chip is drawn by the same shell as a tab, so it takes the strip's style, edge and close-button side.
+    val chipAppearance = TabAppearance(
+        style = settings.tabStripStyle,
+        position = position,
+        closeButtonPosition = settings.tabCloseButtonPosition,
+        closeAlways = settings.tabCloseOnEvery,
+    )
     // The widths-differ maths (FIT) also serves a vertical strip, where every tab's length along the strip is one style height.
     val fit = vertical || settings.tabsFitLabel()
     val groupedFixedMode = groupedMode && !fit
     val textMeasurer = rememberTextMeasurer()
     val uiFont = LocalUiFontFamily.current
-    val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont) {
+    val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont, settings.tabStripStyle) {
         groups.associate { group ->
-            group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext)
+            group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext, settings.tabStripStyle)
         }
     }
     val logById = state.tabs.associateBy { it.id }
@@ -498,8 +505,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     val overflowRefs = if (groupedMode) renderOrder.filterNot { it in visibleRefSet } else overflowItems.filterIsInstance<TabStripItem.Tab>().map { it.ref }
     val visibleTabIds = visibleItems.map { it.key }
     val overflowTabIds = overflowItems.map { it.key }
-    val groupRunEnds = remember(visibleItems, groups) { tabGroupRunEnds(visibleItems, groups) }
-    // The group a dragged tab would join: the one under the pointer, whose rail then shows solid.
+    // The group a dragged tab would join: the one under the pointer, whose members' tint then rises.
     val draggedItem = visibleItems.firstOrNull { it.key == dragTabId }
     val hoveredGroupId = if (draggedItem is TabStripItem.Tab) {
         when (val target = visibleItems.firstOrNull { it.key == dropTargetKey }) {
@@ -511,13 +517,12 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         null
     }
 
-    // A member tab's look: its group's rail (full while it is the active tab or a dragged tab hovers the group) and the run's divider.
-    fun memberAppearance(ref: TabRef, base: TabAppearance, active: Boolean): TabAppearance {
+    // A member tab's look: a tint in its group's colour inside the tab's own shape (stronger while a dragged tab hovers the group).
+    fun memberAppearance(ref: TabRef, base: TabAppearance): TabAppearance {
         val group = groups.firstOrNull { ref in it.members } ?: return base
         return base.copy(
             groupColor = group.color,
-            groupRailAlpha = if (active || group.id == hoveredGroupId) 1f else GROUP_RAIL_IDLE_ALPHA,
-            groupRunEnd = ref in groupRunEnds,
+            groupTintAlpha = tabGroupTintAlpha(tc.p, dragHover = group.id == hoveredGroupId),
         )
     }
     LaunchedEffect(visibleTabIds, dragTabId) {
@@ -614,8 +619,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                     }
                     targetGroup != null -> state.assignTabToGroup(ref, targetGroup.id)
                     else -> {
-                        if (state.tabGroupOf(ref) != null) state.removeTabFromGroup(ref)
-                        state.commitTabOrder(reorderedRefs)
+                        // A log leaving its group takes its diagrams along and they stay right after it.
+                        val followers = if (state.tabGroupOf(ref) != null) state.removeTabFromGroup(ref) else emptyList()
+                        state.commitTabOrder(orderWithFollowersAfter(reorderedRefs, ref, followers))
                     }
                 }
             }
@@ -796,7 +802,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                                     vertical = vertical,
                                     width = tabLengthDp,
                                     height = stripHeightDp.dp,
+                                    appearance = chipAppearance,
                                     supporting = item.supporting,
+                                    dragging = isDragging,
                                     onClick = { state.toggleTabGroupCollapsed(item.group.id); onReclaimFocus() },
                                     onContextMenu = { bounds ->
                                         ctxMenuGroupId = item.group.id
@@ -811,11 +819,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                                         TabItem(
                                             tab = tab,
                                             label = described?.label ?: tabDisplayLabel(tab, state.tabs),
-                                            appearance = memberAppearance(
-                                                ref,
-                                                described?.appearance ?: TabAppearance.Default,
-                                                active = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
-                                            ),
+                                            appearance = memberAppearance(ref, described?.appearance ?: TabAppearance.Default),
                                             isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
                                             showClose = true,
                                             dragging = isDragging,
@@ -837,11 +841,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                                         TabShell(
                                             pointerKey = workspace.id,
                                             label = descriptors[ref.rawId()]?.label ?: workspace.document.title.ifBlank { "Diagram" },
-                                            appearance = memberAppearance(
-                                                ref,
-                                                descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default,
-                                                active = active,
-                                            ),
+                                            appearance = memberAppearance(ref, descriptors[ref.rawId()]?.appearance ?: TabAppearance.Default),
                                             tooltip = diagramTabTooltip(workspace),
                                             isActive = active,
                                             showClose = true,
@@ -951,7 +951,8 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
                         GroupHeaderPopupPositionProvider(
                             position,
                             headerBounds,
-                            ((stripHeightDp - 2) * density).roundToInt(),
+                            // The chip's bounds are the whole tab cell, so a top strip's menu opens right under it.
+                            (stripHeightDp * density).roundToInt(),
                         )
                     },
                     onDismissRequest = ::dismissGroupMenu,
