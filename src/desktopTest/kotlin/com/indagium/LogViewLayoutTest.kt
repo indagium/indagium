@@ -433,7 +433,7 @@ class LogViewLayoutTest {
     @Test
     fun presetScopesAndMenuGroups() {
         assertEquals(
-            listOf(LogViewPresetId.CLASSIC, LogViewPresetId.LOG_FOCUS, LogViewPresetId.FILTERING, LogViewPresetId.ANALYSIS),
+            listOf(LogViewPresetId.CLASSIC, LogViewPresetId.LOG_FOCUS, LogViewPresetId.FILTER_BAR, LogViewPresetId.FILTERING, LogViewPresetId.ANALYSIS),
             LogViewLayoutPreset.forScope(LogViewScope.SINGLE).map { it.id },
         )
         assertEquals(
@@ -500,8 +500,11 @@ class LogViewLayoutTest {
             assertEquals(preset.id, s.lastLogViewPreset)
             assertEquals(preset.hidden, s.logViewHidden.toSet())
             assertComplete(s.logViewLayout!!, LogViewScope.SINGLE)
+            // Log focus and Filter bar share one arrangement; only AppState.logViewPresetActive tells them apart (by the filter bar flag).
+            val logFocusPair = setOf(LogViewLayoutPreset.LOG_FOCUS, LogViewLayoutPreset.FILTER_BAR)
             LogViewLayoutPreset.forScope(LogViewScope.SINGLE).forEach {
-                assertEquals(it == preset, logViewPresetIsActive(it, s, sizes), "${it.label} while ${preset.label} is applied")
+                val expected = it == preset || (it in logFocusPair && preset in logFocusPair)
+                assertEquals(expected, logViewPresetIsActive(it, s, sizes), "${it.label} while ${preset.label} is applied")
             }
         }
         val classic = AppSettings().withLogViewPreset(LogViewLayoutPreset.CLASSIC, sizes)

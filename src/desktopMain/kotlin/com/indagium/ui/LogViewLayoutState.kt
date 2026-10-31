@@ -7,6 +7,7 @@ import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.LogViewTileGroup
+import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
@@ -103,7 +104,12 @@ internal fun AppState.applyLogViewPreset(preset: LogViewLayoutPreset) {
     }
     logViewMaximized = null
     updateFilterVisible(!filtersOff)
-    if (preset == LogViewLayoutPreset.ANALYSIS) updateAnnotationVisible(true)
+    updateFilterBarVisible(preset.showsFilterBar)
+    preset.panels?.let {
+        updateAnnotationVisible(it.notes)
+        updateVideoPanelVisible(it.video)
+        updateAiPanelVisible(it.ai)
+    }
 }
 
 /** Captures the single-log layout and its associated panel/collapse state as one named snapshot. */
@@ -235,12 +241,42 @@ private fun resettableSinglePreset(id: LogViewPresetId): LogViewLayoutPreset = w
 }
 
 /**
- * True when the view currently shows [preset]. A switched-off Filter group counts as the filter tiles being hidden, because that is
- * how the Log focus preset is applied (see [applyLogViewPreset]).
+ * True when the view currently shows [preset]: its arrangement and, for a preset that sets panels ([LogViewLayoutPreset.panels]),
+ * all five panel flags, so toggling a panel makes the preset read as modified (Revert restores it). A switched-off Filter group counts
+ * as the filter tiles being hidden, because that is how Log focus is applied (see [applyLogViewPreset]).
  */
 internal fun AppState.logViewPresetActive(preset: LogViewLayoutPreset): Boolean {
     val folded = settings.copy(logViewHidden = (settings.logViewHidden + if (filterVisible) emptyList() else LOG_VIEW_FILTER_TILES).distinct())
-    return logViewPresetIsActive(preset, folded, legacyLogViewSizes())
+    if (!logViewPresetIsActive(preset, folded, legacyLogViewSizes())) return false
+    val panels = preset.panels ?: return true
+    return panels == LogViewPanels(filterVisible, filterBarVisible, annotationVisible, videoPanelVisible, aiPanelVisible)
+}
+
+/**
+ * The layout a workspace profile saved right now would point at: the selected saved layout when it matches the view exactly, else
+ * the built-in preset that is active, else any saved layout that matches exactly; null when the view is none of them (the profile
+ * then keeps whatever layout is on screen when it is applied).
+ */
+internal fun AppState.activeLogViewLayoutRef(): ProfileLayoutRef? {
+    if (compareMode) return null
+    val saved = settings.customLogViewLayouts
+    saved.firstOrNull { it.id == settings.lastCustomLogViewLayoutId && matchesCustomLogViewLayout(it) }
+        ?.let { return ProfileLayoutRef.Saved(it.id) }
+    LogViewLayoutPreset.forScope(LogViewScope.SINGLE).firstOrNull(::logViewPresetActive)
+        ?.let { return ProfileLayoutRef.Preset(it.id) }
+    return saved.firstOrNull(::matchesCustomLogViewLayout)?.let { ProfileLayoutRef.Saved(it.id) }
+}
+
+/**
+ * Applies the layout a profile points at: a preset through [applyLogViewPreset], a saved layout through [applySavedLogViewLayout].
+ * Null, or a saved layout that no longer exists, keeps the current layout, silently.
+ */
+internal fun AppState.applyProfileLayout(ref: ProfileLayoutRef?) {
+    when (ref) {
+        null -> Unit
+        is ProfileLayoutRef.Preset -> LogViewLayoutPreset.of(ref.id).takeIf { it.scope == LogViewScope.SINGLE }?.let(::applyLogViewPreset)
+        is ProfileLayoutRef.Saved -> applySavedLogViewLayout(ref.id)
+    }
 }
 
 internal fun AppState.toggleLogViewTilesLocked() {

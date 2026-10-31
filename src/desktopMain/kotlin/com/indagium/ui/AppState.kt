@@ -6868,9 +6868,9 @@ class AppState(
     }
 
     // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
-    // The five panel toggles live on AppState rather than AppSettings, so a profile is applied as
-    // one updateSettings plus the existing layout setters (each persists via autosaveNow).
-    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved())
+    // A profile owns the look and the defaults and points at a layout. It is applied as one updateSettings for the look, then the
+    // layout through the Layout menu's own functions; the panel toggles are never written from here (the layout owns them).
+    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved(settings.customLogViewLayouts))
 
     internal fun applyResolvedProfile(profile: ResolvedProfile) {
         val spec = profile.spec
@@ -6887,33 +6887,26 @@ class AppState(
                 workspaceProfileId = profile.id,
             )
         }
-        updateFilterVisible(spec.filterVisible)
-        updateFilterBarVisible(spec.filterBarVisible)
-        updateAnnotationVisible(spec.annotationVisible)
-        updateVideoPanelVisible(spec.videoPanelVisible)
-        updateAiPanelVisible(spec.aiPanelVisible)
+        applyProfileLayout(spec.layout)
     }
-
-    internal fun layoutSnapshot() = LayoutSnapshot(
-        filterVisible = filterVisible,
-        filterBarVisible = filterBarVisible,
-        annotationVisible = annotationVisible,
-        videoPanelVisible = videoPanelVisible,
-        aiPanelVisible = aiPanelVisible,
-    )
 
     /** A built-in or custom profile by id; null for no id or one that no longer exists. */
     internal fun resolveWorkspaceProfile(id: String?): ResolvedProfile? =
-        WorkspaceProfile.fromId(id)?.resolved()
-            ?: settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.resolved()
+        WorkspaceProfile.fromId(id)?.resolved(settings.customLogViewLayouts)
+            ?: settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.resolved(settings.customLogViewLayouts)
 
     internal val selectedWorkspaceProfile: ResolvedProfile?
         get() = resolveWorkspaceProfile(settings.workspaceProfileId)
 
+    /** The panels a profile card's wireframe draws: those of the layout [spec] points at, or the live ones when it keeps the current layout. */
+    internal fun profilePanelsFor(spec: ProfileSpec): ProfilePanels =
+        profilePanelsOf(spec.layout, settings.customLogViewLayouts)
+            ?: ProfilePanels(filter = filterVisible, filterBar = filterBarVisible, notes = annotationVisible, video = videoPanelVisible)
+
     /** Labels of the profile values that no longer match; empty when no (known) profile is selected. */
     fun workspaceProfileDifferences(): List<String> {
         val profile = selectedWorkspaceProfile ?: return emptyList()
-        return profileDifferences(profile.spec, settings, layoutSnapshot())
+        return profileDifferences(profile.spec, settings)
     }
 
     /** Every profile name in use, built-in and custom, for keeping new names unique. */
@@ -6928,7 +6921,7 @@ class AppState(
         val profile = CustomWorkspaceProfile(
             id = newCustomProfileId(),
             name = uniqueProfileName(name, workspaceProfileNames()),
-            spec = currentProfileSpec(settings, layoutSnapshot()),
+            spec = currentProfileSpec(settings, activeLogViewLayoutRef()),
         )
         addCustomWorkspaceProfile(profile)
         return profile
@@ -6964,9 +6957,16 @@ class AppState(
         }
     }
 
+    /** Points custom profile [id] at [layout] (null = keep the current layout). A built-in profile's layout is not editable. */
+    internal fun setWorkspaceProfileLayout(id: String, layout: ProfileLayoutRef?) {
+        updateSettings { s ->
+            s.copy(customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(spec = it.spec.copy(layout = layout)) else it })
+        }
+    }
+
     /** Overwrites a custom profile with the current settings and layout, and selects it. */
     internal fun updateWorkspaceProfileFromCurrent(id: String) {
-        val spec = currentProfileSpec(settings, layoutSnapshot())
+        val spec = currentProfileSpec(settings, activeLogViewLayoutRef())
         updateSettings { s ->
             s.copy(
                 customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(spec = spec) else it },
@@ -7005,6 +7005,17 @@ class AppState(
             )
         }
         return updated
+    }
+
+    /** Renames a saved layout; the new name is made unique against the other saved layouts. A blank or unknown name/id does nothing. */
+    internal fun renameSavedLogViewLayout(id: String, name: String) {
+        val trimmed = name.trim()
+        val existing = settings.customLogViewLayouts.firstOrNull { it.id == id }
+        if (trimmed.isEmpty() || existing == null) return
+        val unique = uniqueLogViewLayoutName(trimmed, customLogViewLayoutNames() - existing.name)
+        updateSettings { current ->
+            current.copy(customLogViewLayouts = current.customLogViewLayouts.map { if (it.id == id) it.copy(name = unique) else it })
+        }
     }
 
     internal fun applySavedLogViewLayout(id: String) {
@@ -7094,7 +7105,7 @@ class AppState(
     /** Save dialog + write. A null [profile] exports the current setup, named after the selected profile if any. */
     internal fun exportWorkspaceProfile(profile: ResolvedProfile?) {
         val name = profile?.title ?: selectedWorkspaceProfile?.title ?: "My setup"
-        val spec = profile?.spec ?: currentProfileSpec(settings, layoutSnapshot())
+        val spec = profile?.spec ?: currentProfileSpec(settings, activeLogViewLayoutRef())
         val dlg = FileDialog(null as Frame?, "Export workspace profile", FileDialog.SAVE).apply {
             file = "indagium_profile_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "profile" }}.json"
             isVisible = true

@@ -1,22 +1,38 @@
 package com.indagium
 
 import com.indagium.model.AppSettings
+import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.CustomWorkspaceProfile
+import com.indagium.model.LogViewPresetId
+import com.indagium.model.LogViewSectionId
+import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.ThemePreset
 import com.indagium.ui.AppState
+import com.indagium.ui.LogViewLayoutPreset
+import com.indagium.ui.LogViewLegacySizes
+import com.indagium.ui.ProfilePanels
 import com.indagium.ui.WorkspaceProfile
+import com.indagium.ui.activeLogViewLayoutRef
+import com.indagium.ui.applyLogViewPreset
+import com.indagium.ui.classicLogViewLayout
 import com.indagium.ui.customProfilesFromJson
 import com.indagium.ui.decodeWorkspaceProfileFile
 import com.indagium.ui.describeProfileSpec
 import com.indagium.ui.encodeWorkspaceProfileFile
+import com.indagium.ui.hideLogViewTile
+import com.indagium.ui.matchesCustomLogViewLayout
+import com.indagium.ui.profilePanelsOf
 import com.indagium.ui.profileSpecFromJson
+import com.indagium.ui.profileSpecToJson
 import com.indagium.ui.resolved
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import com.indagium.ui.uniqueProfileName
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -109,7 +125,7 @@ class CustomWorkspaceProfileTest {
         assertEquals(classic.theme, decoded.spec.theme)
         assertEquals(classic.fontSize, decoded.spec.fontSize)
         assertEquals(classic.showMinimap, decoded.spec.showMinimap)
-        assertTrue(decoded.spec.filterBarVisible)
+        assertNull(decoded.spec.layout, "the old panel flags are ignored: the layout is whatever is on screen")
 
         val huge = profileSpecFromJson(Json.parseToJsonElement("""{"fontSize":9000}""").let { it as JsonObject })
         assertEquals(24, huge.fontSize)
@@ -123,6 +139,7 @@ class CustomWorkspaceProfileTest {
         state.updateAnnotationVisible(true)
 
         val saved = state.saveCurrentAsWorkspaceProfile("Mine")
+        assertNull(saved.spec.layout, "Notes was switched on after Minimal's Log focus, so the preset reads as modified and none is stored")
 
         assertTrue(saved.id.startsWith("custom-"))
         assertEquals(saved.id, state.settings.workspaceProfileId)
@@ -131,7 +148,6 @@ class CustomWorkspaceProfileTest {
         assertEquals(emptyList(), state.workspaceProfileDifferences())
         assertEquals(ThemePreset.DARK_GITHUB, saved.spec.theme)
         assertEquals(15, saved.spec.fontSize)
-        assertTrue(saved.spec.annotationVisible)
     }
 
     @Test
@@ -141,7 +157,7 @@ class CustomWorkspaceProfileTest {
         state.updateSettings { it.copy(theme = ThemePreset.DRACULA) }
         state.updateFilterVisible(!state.filterVisible)
 
-        assertEquals(listOf("Theme", "Filter sidebar"), state.workspaceProfileDifferences())
+        assertEquals(listOf("Theme"), state.workspaceProfileDifferences(), "a panel toggle is not a profile difference")
 
         state.applyResolvedProfile(saved.resolved())
         assertEquals(emptyList(), state.workspaceProfileDifferences())
@@ -266,15 +282,184 @@ class CustomWorkspaceProfileTest {
     }
 
     @Test
-    fun customCardDescriptionListsTheThemeAndPanels() {
-        assertEquals("Dark (GitHub) · filter bar", describeProfileSpec(WorkspaceProfile.LOGCAT_QUERY.spec))
-        assertEquals("Graphite Dim · log only", describeProfileSpec(WorkspaceProfile.MINIMAL.spec))
-        assertEquals(
-            "Warm Paper · filter sidebar · notes · video",
-            describeProfileSpec(WorkspaceProfile.CLASSIC.spec),
-        )
-        assertFalse(describeProfileSpec(WorkspaceProfile.COMPARE.spec).contains("sidebar"))
-        assertTrue(describeProfileSpec(WorkspaceProfile.COMPARE.spec).contains("original panel"))
+    fun cardDescriptionListsThemeSizeAndLayout() {
+        assertEquals("Dark (GitHub) · 12px · Layout: Filter bar", describeProfileSpec(WorkspaceProfile.LOGCAT_QUERY.spec))
+        assertEquals("Graphite Dim · 11px · Layout: Log focus", describeProfileSpec(WorkspaceProfile.MINIMAL.spec))
+        assertEquals("Warm Paper · 12px · Layout: Classic", describeProfileSpec(WorkspaceProfile.CLASSIC.spec))
+        assertEquals("Warm Paper · 12px · Layout: Keep current layout", describeProfileSpec(WorkspaceProfile.CLASSIC.spec.copy(layout = null)))
+        assertEquals(describeProfileSpec(WorkspaceProfile.FOCUSED.spec), WorkspaceProfile.FOCUSED.resolved().description)
+
+        val saved = layout("custom-log-view-a", "Triage")
+        val pointing = WorkspaceProfile.CLASSIC.spec.copy(layout = ProfileLayoutRef.Saved(saved.id))
+        assertEquals("Warm Paper · 12px · Layout: Triage", describeProfileSpec(pointing, listOf(saved)))
+        assertEquals("Warm Paper · 12px · Layout: Keep current layout", describeProfileSpec(pointing), "a missing saved layout reads as no layout")
         assertEquals(1, Json.parseToJsonElement("[1]").jsonArray.size)
+    }
+
+    // ---- layout reference ------------------------------------------------------------------------------------------
+
+    @Test
+    fun theLayoutReferenceRoundTripsThroughTheProfileFileAndSettings() {
+        val saved = ProfileLayoutRef.Saved("custom-log-view-xyz")
+        listOf(ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR), ProfileLayoutRef.Preset(LogViewPresetId.CLASSIC), saved, null).forEach { ref ->
+            val withLayout = spec.copy(layout = ref)
+            assertEquals(withLayout, decodeWorkspaceProfileFile(encodeWorkspaceProfileFile("N", withLayout)).getOrThrow().spec, "$ref")
+            val profile = CustomWorkspaceProfile("custom-a", "A", withLayout)
+            val decoded = settingsFromJson(AppSettings(customWorkspaceProfiles = listOf(profile)).settingsJson())!!
+            assertEquals(listOf(profile), decoded.customWorkspaceProfiles, "$ref")
+        }
+        val written = profileSpecToJson(spec.copy(layout = ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR)))
+        assertEquals("preset:FILTER_BAR", written["layout"]!!.jsonPrimitive.content)
+        assertEquals("saved:custom-log-view-xyz", profileSpecToJson(spec.copy(layout = saved))["layout"]!!.jsonPrimitive.content)
+        assertNull(profileSpecToJson(spec.copy(layout = null))["layout"], "no layout writes no key")
+    }
+
+    @Test
+    fun theFivePanelFlagsAreNoLongerWritten() {
+        val written = profileSpecToJson(WorkspaceProfile.CLASSIC.spec)
+        listOf("filterVisible", "filterBarVisible", "annotationVisible", "videoPanelVisible", "aiPanelVisible").forEach {
+            assertFalse(it in written, "$it must not be written")
+        }
+    }
+
+    @Test
+    fun oldJsonWithThePanelFlagsDecodesWithNoLayoutAndKeepsTheLook() {
+        val old = Json.parseToJsonElement(
+            """{"theme":"DRACULA","fontSize":15,"fontMono":false,"logFontFamily":"Menlo","showMinimap":false,
+               "toolbarIconOnlyButtons":false,"openNewFilesWithUnfiltered":true,
+               "filterVisible":true,"filterBarVisible":true,"annotationVisible":true,"videoPanelVisible":true,"aiPanelVisible":true}""",
+        ) as JsonObject
+
+        val decoded = profileSpecFromJson(old)
+
+        assertNull(decoded.layout)
+        assertEquals(ThemePreset.DRACULA, decoded.theme)
+        assertEquals(15, decoded.fontSize)
+        assertFalse(decoded.fontMono)
+        assertEquals("Menlo", decoded.logFontFamily)
+        assertFalse(decoded.showMinimap)
+        assertFalse(decoded.toolbarIconOnlyButtons)
+        assertTrue(decoded.openNewFilesWithUnfiltered)
+
+        val file = decodeWorkspaceProfileFile("""{"format":"indagium-workspace-profile","version":1,"name":"Old","spec":$old}""").getOrThrow()
+        assertNull(file.spec.layout)
+        assertEquals(ThemePreset.DRACULA, file.spec.theme)
+    }
+
+    @Test
+    fun anUnknownOrMalformedLayoutReferenceDecodesToNull() {
+        listOf("preset:FROM_THE_FUTURE", "preset:COMPARE_GRID", "preset:", "saved:", "saved:   ", "nonsense", "").forEach { text ->
+            val o = Json.parseToJsonElement("""{"layout":${Json.encodeToString(String.serializer(), text)}}""") as JsonObject
+            assertNull(profileSpecFromJson(o).layout, "'$text'")
+        }
+        assertNull(profileSpecFromJson(Json.parseToJsonElement("""{"layout":7}""") as JsonObject).layout)
+        assertEquals(
+            ProfileLayoutRef.Preset(LogViewPresetId.REVIEW),
+            profileSpecFromJson(Json.parseToJsonElement("""{"layout":"preset:REVIEW"}""") as JsonObject).layout,
+            "a legacy single-view preset is still a valid reference",
+        )
+    }
+
+    private fun layout(id: String, name: String) = CustomLogViewLayout(
+        id = id, name = name, tree = classicLogViewLayout(LogViewLegacySizes()),
+        filterPanelWidth = 220f, annotationPanelWidth = 360f, rightSidebarSplit = 0.5f,
+        hidden = emptyList(), collapsed = emptyList(), tilesLocked = false,
+        filterVisible = true, annotationVisible = true, aiPanelVisible = false, videoPanelVisible = true,
+    )
+
+    @Test
+    fun applyingAProfileWithoutALayoutLeavesTheLayoutAndSavedSelectionAlone() {
+        val state = AppState()
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
+        val saved = state.saveCurrentAsLogViewLayout("Mine")
+        val before = state.settings
+
+        state.applyResolvedProfile(WorkspaceProfile.MINIMAL.resolved().copy(spec = WorkspaceProfile.MINIMAL.spec.copy(layout = null)))
+
+        assertEquals(before.logViewLayout, state.settings.logViewLayout)
+        assertEquals(before.logViewHidden, state.settings.logViewHidden)
+        assertEquals(saved.id, state.settings.lastCustomLogViewLayoutId)
+        assertTrue(state.matchesCustomLogViewLayout(saved), "the saved layout is still exactly what is on screen")
+    }
+
+    @Test
+    fun applyingAPresetProfileDoesNotMarkAnUnrelatedSavedLayoutModified() {
+        val state = AppState()
+        val saved = state.saveCurrentAsLogViewLayout("Mine")
+        state.applyLogViewPreset(LogViewLayoutPreset.CLASSIC)
+        assertNull(state.settings.lastCustomLogViewLayoutId, "choosing a preset leaves the saved layout unselected")
+
+        state.applyWorkspaceProfile(WorkspaceProfile.MINIMAL)
+
+        assertNull(state.settings.lastCustomLogViewLayoutId, "no saved layout is selected, so none can read as Modified")
+        assertEquals(listOf(saved), state.settings.customLogViewLayouts, "the saved layout itself is untouched")
+    }
+
+    @Test
+    fun applyingAProfileThatPointsAtASavedLayoutAppliesThatLayout() {
+        val state = AppState()
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
+        val saved = state.saveCurrentAsLogViewLayout("Triage")
+        state.applyLogViewPreset(LogViewLayoutPreset.LOG_FOCUS)
+        val profile = state.saveCurrentAsWorkspaceProfile("Pointing")
+        state.updateSettings { s ->
+            s.copy(customWorkspaceProfiles = s.customWorkspaceProfiles.map { it.copy(spec = it.spec.copy(layout = ProfileLayoutRef.Saved(saved.id))) })
+        }
+
+        state.applyResolvedProfile(state.resolveWorkspaceProfile(profile.id)!!)
+
+        assertEquals(saved.id, state.settings.lastCustomLogViewLayoutId)
+        assertTrue(state.matchesCustomLogViewLayout(saved))
+        assertEquals(ProfileLayoutRef.Saved(saved.id), state.activeLogViewLayoutRef())
+    }
+
+    @Test
+    fun aMissingSavedLayoutBehavesLikeKeepCurrentLayoutSilently() {
+        val state = AppState()
+        state.applyLogViewPreset(LogViewLayoutPreset.FILTERING)
+        val before = state.settings.logViewLayout
+        val profile = CustomWorkspaceProfile("custom-x", "X", spec.copy(layout = ProfileLayoutRef.Saved("custom-log-view-gone")))
+
+        state.applyResolvedProfile(profile.resolved())
+
+        assertEquals(before, state.settings.logViewLayout)
+        assertEquals(LogViewPresetId.FILTERING, state.settings.lastLogViewPreset)
+        assertEquals(spec.theme, state.settings.theme, "the look is still applied")
+    }
+
+    @Test
+    fun saveAsNewProfileStoresTheActiveSavedLayoutElseThePresetElseNull() {
+        val state = AppState()
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
+        assertEquals(ProfileLayoutRef.Preset(LogViewPresetId.ANALYSIS), state.saveCurrentAsWorkspaceProfile("P").spec.layout)
+
+        val saved = state.saveCurrentAsLogViewLayout("Mine")
+        assertEquals(ProfileLayoutRef.Saved(saved.id), state.saveCurrentAsWorkspaceProfile("S").spec.layout)
+
+        state.hideLogViewTile(LogViewSectionId.NOTES)
+        assertNull(state.activeLogViewLayoutRef(), "a hand-edited layout matches nothing")
+        assertNull(state.saveCurrentAsWorkspaceProfile("N").spec.layout)
+    }
+
+    @Test
+    fun aCustomProfilesLayoutCanBeChanged() {
+        val state = AppState()
+        val saved = state.saveCurrentAsWorkspaceProfile("Mine")
+
+        state.setWorkspaceProfileLayout(saved.id, ProfileLayoutRef.Preset(LogViewPresetId.ANALYSIS))
+        assertEquals(ProfileLayoutRef.Preset(LogViewPresetId.ANALYSIS), state.settings.customWorkspaceProfiles.single().spec.layout)
+        state.setWorkspaceProfileLayout(saved.id, null)
+        assertNull(state.settings.customWorkspaceProfiles.single().spec.layout)
+    }
+
+    @Test
+    fun profilePanelsFollowTheReferencedLayout() {
+        assertEquals(ProfilePanels(filter = true, notes = true, video = true), profilePanelsOf(ProfileLayoutRef.Preset(LogViewPresetId.CLASSIC), emptyList()))
+        assertEquals(ProfilePanels(filterBar = true, notes = true), profilePanelsOf(ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR), emptyList()))
+        assertEquals(ProfilePanels(), profilePanelsOf(ProfileLayoutRef.Preset(LogViewPresetId.LOG_FOCUS), emptyList()))
+        val saved = layout("custom-log-view-a", "Triage").copy(filterVisible = false, filterBarVisible = true)
+        assertEquals(ProfilePanels(filterBar = true, notes = true, video = true), profilePanelsOf(ProfileLayoutRef.Saved(saved.id), listOf(saved)))
+        assertNull(profilePanelsOf(null, emptyList()))
+        assertNull(profilePanelsOf(ProfileLayoutRef.Saved("gone"), listOf(saved)))
     }
 }

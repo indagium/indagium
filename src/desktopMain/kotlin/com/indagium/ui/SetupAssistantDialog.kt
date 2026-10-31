@@ -284,7 +284,6 @@ private fun WorkspaceStep(
         "How do you like to read logs?",
         "Pick a starting layout. It sets panels, filter placement, theme and font size.",
     )
-    val layout = state.layoutSnapshot()
     val settings = state.settings
     val cards = buildList<@Composable (Modifier) -> Unit> {
         if (offerKeep) {
@@ -296,27 +295,23 @@ private fun WorkspaceStep(
                     onClick = { onChoice(WorkspaceChoice.KeepCurrent) },
                     modifier = modifier,
                 ) {
-                    ProfileWireframe(
-                        ProfileSpec(
-                            theme = settings.theme,
-                            fontSize = settings.fontSize,
-                            showMinimap = settings.showMinimap,
-                            toolbarIconOnlyButtons = settings.toolbarIconOnlyButtons,
-                            openNewFilesWithUnfiltered = settings.openNewFilesWithUnfiltered,
-                            filterVisible = layout.filterVisible,
-                            filterBarVisible = layout.filterBarVisible,
-                            annotationVisible = layout.annotationVisible,
-                            videoPanelVisible = layout.videoPanelVisible,
-                            aiPanelVisible = layout.aiPanelVisible,
-                        ),
+                    val keepSpec = ProfileSpec(
+                        theme = settings.theme,
+                        fontSize = settings.fontSize,
+                        showMinimap = settings.showMinimap,
+                        toolbarIconOnlyButtons = settings.toolbarIconOnlyButtons,
+                        openNewFilesWithUnfiltered = settings.openNewFilesWithUnfiltered,
                     )
+                    ProfileWireframe(keepSpec, state.profilePanelsFor(keepSpec))
                 }
             }
         }
-        (WorkspaceProfile.entries.map { it.resolved() } + settings.customWorkspaceProfiles.map { it.resolved() }).forEach { profile ->
+        val saved = settings.customLogViewLayouts
+        (WorkspaceProfile.entries.map { it.resolved(saved) } + settings.customWorkspaceProfiles.map { it.resolved(saved) }).forEach { profile ->
             add { modifier ->
                 ResolvedProfileCard(
                     profile = profile,
+                    panels = state.profilePanelsFor(profile.spec),
                     selected = (choice as? WorkspaceChoice.Profile)?.profile?.id == profile.id,
                     onClick = { onChoice(WorkspaceChoice.Profile(profile)) },
                     modifier = modifier,

@@ -307,6 +307,9 @@ private val RIGHT_ARTIFACTS = setOf(LogViewSectionId.DIAGRAMS, LogViewSectionId.
 private val FILTERING_HIDDEN = RIGHT_ARTIFACTS
 private val LOG_FOCUS_HIDDEN = LOG_VIEW_FILTER_TILES.toSet() + RIGHT_ARTIFACTS
 
+/** The tab-strip panel flags of the single log view: filter sidebar, filter bar above the log, Notes, Video and AI. */
+data class LogViewPanels(val filter: Boolean, val filterBar: Boolean, val notes: Boolean, val video: Boolean, val ai: Boolean)
+
 /**
  * A ready-made arrangement. [layout] is the tree, [hidden] the tiles the preset hides: layout + hidden together cover every
  * tile of [scope], and a hidden tile either keeps its place in [layout] (for example, Filters on top's Diagram library) or is left out of it (Log
@@ -335,14 +338,35 @@ enum class LogViewLayoutPreset(
     COMPARE_COLUMNS(LogViewPresetId.COMPARE_COLUMNS, "Compare rows", LogViewScope.COMPARE, ::compareColumnsLayout, emptySet()),
     FILTERING(LogViewPresetId.FILTERING, "Filtering", LogViewScope.SINGLE, ::filteringLayout, FILTERING_HIDDEN),
     ANALYSIS(LogViewPresetId.ANALYSIS, "Analysis", LogViewScope.SINGLE, ::analysisLayout, emptySet()),
+
+    // Log focus with the regex filter bar above the log (the bar is a view flag, not a tile: see AppState.applyLogViewPreset).
+    FILTER_BAR(LogViewPresetId.FILTER_BAR, "Filter bar", LogViewScope.SINGLE, { logFocusLayout() }, LOG_FOCUS_HIDDEN),
     ;
+
+    /**
+     * The five panel flags applying this preset sets (the one place they are listed). Null for the legacy Review and Filters on top
+     * presets and the compare presets: applying those leaves Notes, Video and AI as they are (and sets the filter group and bar as
+     * their tiles imply), and they are matched by arrangement alone.
+     */
+    val panels: LogViewPanels?
+        get() = when (this) {
+            CLASSIC -> LogViewPanels(filter = true, filterBar = false, notes = true, video = true, ai = false)
+            LOG_FOCUS -> LogViewPanels(filter = false, filterBar = false, notes = false, video = false, ai = false)
+            FILTER_BAR -> LogViewPanels(filter = false, filterBar = true, notes = true, video = false, ai = false)
+            FILTERING -> LogViewPanels(filter = true, filterBar = false, notes = false, video = false, ai = false)
+            ANALYSIS -> LogViewPanels(filter = true, filterBar = false, notes = true, video = false, ai = false)
+            REVIEW, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS -> null
+        }
+
+    /** True for the one single-view preset that also switches the filter bar above the log on. */
+    val showsFilterBar: Boolean get() = panels?.filterBar == true
 
     companion object {
         fun of(id: LogViewPresetId): LogViewLayoutPreset = entries.first { it.id == id }
 
         /** The presets that apply to a [scope] view, in menu order. */
         fun forScope(scope: LogViewScope): List<LogViewLayoutPreset> = when (scope) {
-            LogViewScope.SINGLE -> listOf(CLASSIC, LOG_FOCUS, FILTERING, ANALYSIS)
+            LogViewScope.SINGLE -> listOf(CLASSIC, LOG_FOCUS, FILTER_BAR, FILTERING, ANALYSIS)
             LogViewScope.COMPARE -> listOf(COMPARE_GRID, COMPARE_COLUMNS)
             LogViewScope.BOTH -> emptyList()
         }

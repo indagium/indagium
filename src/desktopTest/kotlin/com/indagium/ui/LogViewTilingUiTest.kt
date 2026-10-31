@@ -15,6 +15,8 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertTextEquals
@@ -38,10 +40,10 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
-import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.height
@@ -464,11 +466,11 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun singleLogMenuOffersTheFourCurrentPresetsAndLegacyResetIdsUseTheirReplacements() {
+    fun singleLogMenuOffersTheFiveCurrentPresetsAndLegacyResetIdsUseTheirReplacements() {
         setup()
         rule.onNodeWithTag("layout-menu-button").performClick()
         rule.waitForIdle()
-        listOf("CLASSIC", "LOG_FOCUS", "FILTERING", "ANALYSIS").forEach {
+        listOf("CLASSIC", "LOG_FOCUS", "FILTER_BAR", "FILTERING", "ANALYSIS").forEach {
             assertTrue(exists("layout-menu-preset-$it"), "$it is in the single-log menu")
         }
         assertFalse(exists("layout-menu-preset-REVIEW"))
@@ -586,17 +588,18 @@ class LogViewTilingUiTest {
 
         rule.onNodeWithTag("layout-menu-button").performClick()
         rule.waitForIdle()
-        rule.onNodeWithText("Modified").assertExists()
+        assertTrue(exists("layout-menu-status-${selected.id}"), "the Modified dot is on the selected thumbnail")
+        assertTrue(exists("layout-menu-modified-label"), "the strip says Modified")
+        rule.onNodeWithTag("layout-menu-apply-${selected.id}").assertIsNotSelected()
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
-        rule.onNodeWithTag("layout-menu-update-existing").assertExists()
+        rule.onNodeWithTag("layout-menu-update-existing").assertIsEnabled()
         assertTrue(
             bounds("layout-menu-custom-${selected.id}").bottom < bounds("layout-menu-panel-notes").top,
             "saved layouts appear above Panels",
         )
+        assertTrue(bounds("layout-menu-custom-${selected.id}").top >= bounds("layout-menu-preset-CLASSIC").bottom, "saved layouts are a second row")
+        assertTrue(bounds("layout-menu-strip").top >= bounds("layout-menu-custom-${selected.id}").bottom, "the strip sits under the rows")
         saveScreenshot("saved-layouts-modified.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
-
-        rule.onNodeWithTag("layout-menu-delete-${selected.id}").performMouseInput { moveTo(center) }
-        rule.waitUntil(5_000) { textCount("Delete saved layout") > 0 }
 
         rule.onNodeWithTag("layout-menu-update-existing").performClick()
         rule.waitForIdle()
@@ -604,16 +607,19 @@ class LogViewTilingUiTest {
         assertEquals(selected.id, updated.id, "updating preserves the stable ID")
         assertEquals(selected.name, updated.name, "updating preserves the name")
         assertTrue(state.matchesCustomLogViewLayout(updated), "the saved snapshot now matches the current view")
-        rule.onNodeWithText("Active").assertExists()
+        rule.onNodeWithTag("layout-menu-apply-${selected.id}").assertIsSelected()
+        assertFalse(exists("layout-menu-status-${selected.id}"))
+        assertFalse(exists("layout-menu-modified-label"))
+        rule.onNodeWithTag("layout-menu-update-existing").assertIsNotEnabled()
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
         saveScreenshot("saved-layouts-active.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
 
         rule.runOnIdle { state.filterPanelWidth = updated.filterPanelWidth + 1f }
-        rule.onNodeWithTag("layout-menu-reset").performScrollTo().performClick()
+        rule.onNodeWithTag("layout-menu-reset").performClick()
         rule.waitForIdle()
         assertEquals(selected.id, state.settings.lastCustomLogViewLayoutId)
-        assertEquals(updated.filterPanelWidth, state.filterPanelWidth, "Reset restores the updated custom width")
-        assertTrue(state.matchesCustomLogViewLayout(updated), "Reset reapplies the updated custom snapshot")
+        assertEquals(updated.filterPanelWidth, state.filterPanelWidth, "Revert restores the updated custom width")
+        assertTrue(state.matchesCustomLogViewLayout(updated), "Revert reapplies the updated custom snapshot")
     }
 
     @Test
@@ -626,17 +632,170 @@ class LogViewTilingUiTest {
 
         rule.onNodeWithTag("layout-menu-button").performClick()
         rule.waitForIdle()
-        assertEquals(1, textCount("Active"), "identical snapshots do not both claim the selected state")
-        assertTrue(exists("layout-menu-status-${second.id}"))
+        rule.onNodeWithTag("layout-menu-apply-${second.id}").assertIsSelected()
+        rule.onNodeWithTag("layout-menu-apply-${first.id}").assertIsNotSelected()
         assertFalse(exists("layout-menu-status-${first.id}"))
+        assertFalse(exists("layout-menu-status-${second.id}"))
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
 
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").performClick()
         rule.waitForIdle()
         assertEquals(null, state.settings.lastCustomLogViewLayoutId, "selecting a built-in clears the custom selection")
-        assertFalse(exists("layout-menu-status-${first.id}"))
-        assertFalse(exists("layout-menu-status-${second.id}"))
+        rule.onNodeWithTag("layout-menu-apply-${first.id}").assertIsNotSelected()
+        rule.onNodeWithTag("layout-menu-apply-${second.id}").assertIsNotSelected()
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsSelected()
+    }
+
+    @Test
+    fun savedLayoutsAreNamedThumbnailsWithADashedAddThumbnailAfterThem() {
+        setup(height = 900)
+        val saved = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Triage view") }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+
+        val thumb = bounds("layout-menu-apply-${saved.id}")
+        assertEquals(66f, thumb.width.value, 0.5f)
+        assertEquals(38f, thumb.height.value, 0.5f)
+        assertEquals(bounds("layout-menu-preset-CLASSIC").width.value, thumb.width.value, 0.5f, "saved thumbnails are preset-sized")
+        assertTrue(textCount("Triage view") >= 1, "the name is printed under the thumbnail")
+        val add = bounds("layout-menu-save-current")
+        assertTrue(add.left >= thumb.right, "the + thumbnail follows the saved layouts")
+        assertEquals(thumb.top.value, add.top.value, 0.5f, "and shares their row")
+        assertTrue(exists("layout-menu-import"), "Import… stays a link")
+        // The drawing is not blank: the active thumbnail paints accent-coloured tiles.
+        val image = rule.onNodeWithTag("layout-menu-apply-${saved.id}").captureToImage().toPixelMap()
+        val distinct = (0 until image.width).flatMap { x -> (0 until image.height).map { y -> image[x, y] } }.toSet()
+        assertTrue(distinct.size > 3, "the saved thumbnail draws its tiles")
+    }
+
+    @Test
+    fun theFilterBarPresetIsInTheMenuBetweenLogFocusAndFilteringAndAppliesTheBar() {
+        setup()
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        val order = listOf("CLASSIC", "LOG_FOCUS", "FILTER_BAR", "FILTERING", "ANALYSIS").map { bounds("layout-menu-preset-$it").left.value }
+        assertEquals(order.sorted(), order, "menu order is Classic, Log focus, Filter bar, Filtering, Analysis")
+
+        rule.onNodeWithTag("layout-menu-preset-FILTER_BAR").performClick()
+        rule.waitForIdle()
+        assertTrue(state.filterBarVisible)
+        assertFalse(state.filterVisible)
+        rule.onNodeWithTag("layout-menu-preset-FILTER_BAR").assertIsSelected()
+        rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").assertIsNotSelected()
+        assertFalse(exists("layout-menu-modified-label"))
+
+        // The thumbnail has a thin bar above the log that Log focus's does not.
+        fun pixels(tag: String) = rule.onNodeWithTag(tag).captureToImage().toPixelMap().let { m -> (0 until m.height).map { y -> m[m.width / 2, y] } }
+        assertTrue(pixels("layout-menu-preset-FILTER_BAR") != pixels("layout-menu-preset-LOG_FOCUS"))
+
+        rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").performClick()
+        rule.waitForIdle()
+        assertFalse(state.filterBarVisible)
+        rule.onNodeWithTag("layout-menu-preset-LOG_FOCUS").assertIsSelected()
+    }
+
+    @Test
+    fun aPresetStripOffersRevertAndSaveAsNewAndOnlySaysModifiedAfterAnEdit() {
+        setup(height = 900)
+        rule.runOnIdle { state.applyLogViewPreset(LogViewLayoutPreset.CLASSIC) }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-label"))
+        assertFalse(exists("layout-menu-update-existing"), "a preset has nothing to update")
+        assertTrue(exists("layout-menu-reset") && exists("layout-menu-save-as-new"))
+
+        rule.onNodeWithTag("layout-menu-panel-notes").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-label"))
+        rule.onNodeWithTag("layout-menu-reset").performClick()
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-label"))
+        assertFalse(LogViewSectionId.NOTES in state.settings.logViewHidden, "Revert re-applies the preset")
+
+        rule.onNodeWithTag("layout-menu-save-as-new").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("From strip")
+        rule.onNode(hasText("Save") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals("From strip", state.settings.customLogViewLayouts.single().name)
+    }
+
+    @Test
+    fun aTabStripPanelToggleMakesTheActivePresetModifiedAndRevertRestoresIt() {
+        setup(height = 900)
+        rule.runOnIdle { state.applyLogViewPreset(LogViewLayoutPreset.CLASSIC) }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsSelected()
+        assertFalse(exists("layout-menu-modified-label"))
+
+        rule.runOnIdle { state.updateAiPanelVisible(true) }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-label"), "the AI toggle is a modification of Classic")
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
+
+        rule.onNodeWithTag("layout-menu-reset").performClick()
+        rule.waitForIdle()
+        assertFalse(state.aiPanelVisible)
+        assertFalse(exists("layout-menu-modified-label"))
+        rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsSelected()
+    }
+
+    @Test
+    fun rightClickingASavedThumbnailRenamesItKeepingItsIdentity() {
+        setup(height = 900)
+        val saved = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Old name") }
+        rule.runOnIdle { state.saveCurrentAsLogViewLayout("Taken") }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-actions-${saved.id}"))
+
+        rule.onNodeWithTag("layout-menu-apply-${saved.id}").performMouseInput { rightClick() }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-actions-${saved.id}"), "right-click shows the thumbnail's actions")
+        assertTrue(exists("layout-menu-export-${saved.id}") && exists("layout-menu-delete-${saved.id}"))
+        assertEquals("Old name", state.settings.customLogViewLayouts.first().name, "right-click alone changes nothing")
+
+        rule.onNodeWithTag("layout-menu-rename-${saved.id}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("taken")
+        rule.waitForIdle()
+        rule.onNodeWithText("A layout with this name already exists.").assertExists()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("Better name")
+        rule.onNode(hasText("Rename") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+
+        val renamed = state.settings.customLogViewLayouts.first()
+        assertEquals(saved.id, renamed.id)
+        assertEquals("Better name", renamed.name)
+        rule.onNodeWithText("Better name", useUnmergedTree = true).assertExists()
+        assertFalse(exists("layout-menu-actions-${saved.id}"))
+    }
+
+    @Test
+    fun savedLayoutDialogsCanSaveCancelAndDeleteThroughTheMenu() {
+        setup(height = 900)
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.onNodeWithTag("layout-menu-save-current").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("Investigation")
+        rule.onNode(hasText("Save") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        val saved = state.settings.customLogViewLayouts.single()
+        assertEquals("Investigation", saved.name)
+        rule.onNodeWithTag("layout-menu-apply-${saved.id}").performMouseInput { rightClick() }
+        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(1, state.settings.customLogViewLayouts.size)
+        rule.onNodeWithTag("layout-menu-apply-${saved.id}").performMouseInput { rightClick() }
+        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.customLogViewLayouts.isEmpty())
+        assertEquals("Classic", state.lastLogViewResetLabel())
     }
 
     @OptIn(androidx.compose.ui.test.InternalTestApi::class, androidx.compose.ui.InternalComposeUiApi::class)
@@ -671,30 +830,6 @@ class LogViewTilingUiTest {
 
     @Test
     fun practicalPresetGeometryAtWideDesktopSize() = verifyPracticalPresetsAndSaveEvidence(1600, 900)
-
-    @Test
-    fun savedLayoutDialogsCanSaveCancelAndDeleteThroughTheMenu() {
-        setup(height = 900)
-        rule.onNodeWithTag("layout-menu-button").performClick()
-        rule.onNodeWithTag("layout-menu-save-current").performScrollTo().performClick()
-        rule.waitForIdle()
-        rule.onNodeWithTag("profile-name-field").performTextReplacement("Investigation")
-        rule.onNode(hasText("Save") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
-        rule.waitForIdle()
-        val saved = state.settings.customLogViewLayouts.single()
-        assertEquals("Investigation", saved.name)
-        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performScrollTo().performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
-        rule.waitForIdle()
-        assertEquals(1, state.settings.customLogViewLayouts.size)
-        rule.onNodeWithTag("layout-menu-delete-${saved.id}").performScrollTo().performClick()
-        rule.waitForIdle()
-        rule.onNodeWithText("Delete", useUnmergedTree = true).performClick()
-        rule.waitForIdle()
-        assertTrue(state.settings.customLogViewLayouts.isEmpty())
-        assertEquals("Classic", state.lastLogViewResetLabel())
-    }
 
     @Test
     fun lockingTilesRemovesTheGripsAndKeepsTheSplitters() {

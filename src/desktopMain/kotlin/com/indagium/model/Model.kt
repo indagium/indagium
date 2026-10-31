@@ -1716,7 +1716,7 @@ enum class LogViewSectionId(val key: String, val group: LogViewTileGroup, val sc
 enum class CompareFilterTarget { A, B, BOTH }
 
 /** The ready-made log-view arrangements (ui/LogViewLayout.kt's LogViewLayoutPreset); the legacy IDs stay stable for saved settings. */
-enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS, FILTERING, ANALYSIS }
+enum class LogViewPresetId { CLASSIC, REVIEW, LOG_FOCUS, FILTERS_ON_TOP, COMPARE_GRID, COMPARE_COLUMNS, FILTERING, ANALYSIS, FILTER_BAR }
 
 /** A named single-log layout saved from the Layout menu. */
 data class CustomLogViewLayout(
@@ -1804,21 +1804,27 @@ const val MIN_CAPTURE_MIRROR_SPLIT: Float = 0.18f
 const val MAX_CAPTURE_MIRROR_SPLIT: Float = 0.82f
 const val MAX_CAPTURE_MIRROR_LAYOUTS: Int = 32
 
-/** The settings and layout values a workspace profile applies (ui/WorkspaceProfiles.kt). */
+/**
+ * The log-view layout a workspace profile points at: a built-in [Preset] or one of the user's saved layouts ([Saved], by id).
+ * A profile without one (null) keeps whatever layout is on screen.
+ */
+sealed interface ProfileLayoutRef {
+    data class Preset(val id: LogViewPresetId) : ProfileLayoutRef
+
+    data class Saved(val id: String) : ProfileLayoutRef
+}
+
+/** The look and default settings a workspace profile applies (ui/WorkspaceProfiles.kt), plus the [layout] it points at (null = keep the current one). */
 data class ProfileSpec(
     val theme: ThemePreset,
     val fontSize: Int,
     val showMinimap: Boolean,
     val toolbarIconOnlyButtons: Boolean,
     val openNewFilesWithUnfiltered: Boolean,
-    val filterVisible: Boolean,
-    val filterBarVisible: Boolean,
-    val annotationVisible: Boolean,
-    val videoPanelVisible: Boolean,
-    val aiPanelVisible: Boolean,
     val fontMono: Boolean = true,
     val interfaceFontFamily: String? = null,
     val logFontFamily: String? = null,
+    val layout: ProfileLayoutRef? = null,
 )
 
 /** A user-made workspace profile. [id] is `custom-<uuid>`, so it can never collide with a built-in id. */

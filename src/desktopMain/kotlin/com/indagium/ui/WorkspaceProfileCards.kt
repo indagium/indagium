@@ -184,6 +184,7 @@ internal fun WorkspaceCardGrid(
 @Composable
 internal fun ResolvedProfileCard(
     profile: ResolvedProfile,
+    panels: ProfilePanels,
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -198,7 +199,7 @@ internal fun ResolvedProfileCard(
         modifier = modifier,
         menuActions = menuActions,
         onMenuClosed = onMenuClosed,
-    ) { ProfileWireframe(profile.spec) }
+    ) { ProfileWireframe(profile.spec, panels) }
 }
 
 /** The built-in profiles followed by the custom ones, five per row. [menuFor] gives a custom card its "⋯" menu. */
@@ -207,6 +208,7 @@ internal fun WorkspaceProfileCards(
     profiles: List<ResolvedProfile>,
     selectedId: String?,
     onSelect: (ResolvedProfile) -> Unit,
+    panelsFor: (ResolvedProfile) -> ProfilePanels,
     menuFor: (ResolvedProfile) -> List<ProfileMenuAction>,
     modifier: Modifier = Modifier,
     onMenuClosed: () -> Unit = {},
@@ -216,6 +218,7 @@ internal fun WorkspaceProfileCards(
             { cardModifier: Modifier ->
                 ResolvedProfileCard(
                     profile = profile,
+                    panels = panelsFor(profile),
                     selected = profile.id == selectedId,
                     onClick = { onSelect(profile) },
                     modifier = cardModifier,
@@ -230,10 +233,10 @@ internal fun WorkspaceProfileCards(
     )
 }
 
-/** A miniature window drawn in the profile's own theme: sidebar, inline filter bar, split or single
- *  log pane, notes/video column and minimap strip appear exactly when the spec turns them on. */
+/** A miniature window drawn in the profile's own theme: sidebar, inline filter bar, notes/video column (from [panels], i.e. from the
+ *  layout the profile points at), split or single log pane and minimap strip (from the spec). */
 @Composable
-internal fun ProfileWireframe(spec: ProfileSpec, modifier: Modifier = Modifier) {
+internal fun ProfileWireframe(spec: ProfileSpec, panels: ProfilePanels, modifier: Modifier = Modifier) {
     val c = remember(spec.theme) { themeColors(spec.theme) }
     val shape = RoundedCornerShape(5.dp)
     Row(
@@ -241,11 +244,11 @@ internal fun ProfileWireframe(spec: ProfileSpec, modifier: Modifier = Modifier) 
             .clip(shape).background(c.bg).border(0.5.dp, c.br, shape).padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        if (spec.filterVisible) {
+        if (panels.filter) {
             WireBlock(c.p, c, Modifier.width(20.dp).fillMaxHeight()) { WireLines(c, 4) }
         }
         Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            if (spec.filterBarVisible) {
+            if (panels.filterBar) {
                 WireBlock(c.p, c, Modifier.fillMaxWidth().height(8.dp)) {
                     Box(Modifier.padding(start = 3.dp).align(Alignment.CenterStart).size(3.dp).background(c.ac, CircleShape))
                 }
@@ -259,13 +262,13 @@ internal fun ProfileWireframe(spec: ProfileSpec, modifier: Modifier = Modifier) 
                 WireBlock(c.p2, c, Modifier.weight(1f).fillMaxWidth()) { WireLines(c, 7) }
             }
         }
-        if (spec.annotationVisible || spec.videoPanelVisible) {
+        if (panels.notes || panels.video) {
             Column(Modifier.width(22.dp).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                if (spec.videoPanelVisible) {
-                    val videoModifier = if (spec.annotationVisible) Modifier.height(18.dp) else Modifier.weight(1f)
+                if (panels.video) {
+                    val videoModifier = if (panels.notes) Modifier.height(18.dp) else Modifier.weight(1f)
                     WireBlock(c.seq1.copy(alpha = .35f), c, videoModifier.fillMaxWidth()) {}
                 }
-                if (spec.annotationVisible) {
+                if (panels.notes) {
                     WireBlock(c.p, c, Modifier.weight(1f).fillMaxWidth()) { WireLines(c, 4) }
                 }
             }

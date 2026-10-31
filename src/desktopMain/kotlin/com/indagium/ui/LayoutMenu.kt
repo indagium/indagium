@@ -7,6 +7,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -35,6 +37,11 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.isSecondaryPressed
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -57,15 +64,18 @@ import com.indagium.model.HomeSectionId
 import com.indagium.model.LogTab
 import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.LogViewTileGroup
+import com.indagium.model.TileNode
 
-// The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the four single-view presets (the two
-// compare presets in compare mode) as
-// thumbnails, a checklist of the panels that currently apply, a "Lock tiles" switch and "Reset to <preset>". The button carries a small
+// The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the five single-view presets (the two
+// compare presets in compare mode) as thumbnails, the user's saved layouts as a second row of thumbnails (right-click for Rename / Export /
+// Delete, a dashed "+" saves the current view), one strip naming the current layout with Update / Revert, a checklist of the panels
+// that currently apply and a "Lock tiles" switch. The button carries a small
 // badge counting the applicable tiles hidden through the menu or a tile's hide button. Every click and the dismissal hand keyboard focus
 // back to the root (CLAUDE.md: a clickable or a dismissed Popup steals it and never returns it).
 
 private const val MENU_WIDTH_DP = 320
-private const val LOG_LAYOUT_MENU_WIDTH_DP = 340
+private const val LOG_LAYOUT_MENU_WIDTH_DP = 400
 private const val THUMB_WIDTH_DP = 66
 private const val THUMB_HEIGHT_DP = 38
 private const val THUMB_VIRTUAL_WIDTH = 1200f
@@ -73,6 +83,9 @@ private const val THUMB_VIRTUAL_HEIGHT = 720f
 private const val THUMB_FILL_ALPHA = 0.55f
 private const val THUMB_LOG_FILL_ALPHA = 0.9f
 private const val BADGE_SIZE_DP = 14
+private const val MODIFIED_DOT_DP = 7
+private const val THUMB_FILTER_BAR_HEIGHT = 90f
+private const val THUMB_FILTER_BAR_GAP = 36f
 private const val MENU_GAP_PX = 4
 
 /** Height (dp) of a button in a wrapping toolbar (MainToolbar's flow layout), the same as a vertical toolbar's buttons. */
@@ -535,7 +548,11 @@ private fun DiagramPresetThumb(preset: DiagramWorkspacePreset, active: Boolean, 
     }
 }
 
-/** The popup itself: presets, Panels, Lock tiles, Reset. [onDismiss] must also reclaim focus; [onReclaimFocus] follows every click. */
+/**
+ * The popup itself: presets, saved layouts, the current-layout strip, Panels, Lock tiles. [onDismiss] must also reclaim focus;
+ * [onReclaimFocus] follows every click.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun LayoutMenuPopup(
     state: AppState,
@@ -548,6 +565,9 @@ internal fun LayoutMenuPopup(
     val shape = RoundedCornerShape(8.dp)
     var saveLayoutDialog by remember { mutableStateOf(false) }
     var deleteLayoutRequest by remember { mutableStateOf<CustomLogViewLayout?>(null) }
+    var renameLayoutRequest by remember { mutableStateOf<CustomLogViewLayout?>(null) }
+    // The saved layout whose right-click actions (Rename…, Export…, Delete…) are showing under the thumbnails.
+    var actionsLayoutId by remember { mutableStateOf<String?>(null) }
     val ctx = state.layoutMenuContext(tab)
     val compare = ctx.compare
     val settings = state.settings
@@ -569,118 +589,73 @@ internal fun LayoutMenuPopup(
                     val presetActive = if (compare) state.comparePresetActive(preset) else state.logViewPresetActive(preset) && selectedCustom == null
                     PresetThumb(preset, active = presetActive) {
                         if (compare) state.applyComparePreset(preset) else state.applyLogViewPreset(preset)
+                        actionsLayoutId = null
                         onReclaimFocus()
                     }
                 }
             }
             if (!compare) {
                 MenuLabel("Saved layouts")
-                if (settings.customLogViewLayouts.isEmpty()) {
-                    AppText(
-                        "No saved layouts yet.",
-                        color = tc.td,
-                        fontSize = 11.sp,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    settings.customLogViewLayouts.forEach { layout ->
+                        val isSelected = settings.lastCustomLogViewLayoutId == layout.id
+                        val isActive = isSelected && state.matchesCustomLogViewLayout(layout)
+                        SavedLayoutThumb(
+                            layout,
+                            active = isActive,
+                            modified = isSelected && !isActive,
+                            onClick = {
+                                state.applySavedLogViewLayout(layout.id)
+                                actionsLayoutId = null
+                                onReclaimFocus()
+                            },
+                            onSecondaryClick = {
+                                actionsLayoutId = layout.id.takeUnless { it == actionsLayoutId }
+                                onReclaimFocus()
+                            },
+                        )
+                    }
+                    AddLayoutThumb {
+                        saveLayoutDialog = true
+                    }
+                }
+                settings.customLogViewLayouts.firstOrNull { it.id == actionsLayoutId }?.let { layout ->
+                    SavedLayoutActions(
+                        layout,
+                        onRename = {
+                            renameLayoutRequest = layout
+                            actionsLayoutId = null
+                            onReclaimFocus()
+                        },
+                        onExport = {
+                            state.exportLogViewLayout(layout)
+                            actionsLayoutId = null
+                            onReclaimFocus()
+                        },
+                        onDelete = {
+                            deleteLayoutRequest = layout
+                            actionsLayoutId = null
+                            onReclaimFocus()
+                        },
                     )
                 }
-                settings.customLogViewLayouts.forEach { layout ->
-                    val isSelected = settings.lastCustomLogViewLayoutId == layout.id
-                    val isActive = isSelected && state.matchesCustomLogViewLayout(layout)
-                    val status = when {
-                        isActive -> "Active"
-                        isSelected -> "Modified"
-                        else -> null
-                    }
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
-                            .testTag("layout-menu-custom-${layout.id}"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Box(Modifier.weight(1f)) {
-                            AppButton(
-                                layout.name,
-                                onClick = {
-                                    state.applySavedLogViewLayout(layout.id)
-                                    onReclaimFocus()
-                                },
-                                variant = ButtonVariant.Ghost,
-                                horizontalPadding = 6.dp,
-                                tooltip = layout.name,
-                                tooltipMaxLines = 6,
-                                modifier = Modifier.fillMaxWidth().height(28.dp).testTag("layout-menu-apply-${layout.id}")
-                                    .semantics { selected = isActive },
-                                textColor = if (isActive) tc.ac else tc.tx,
-                                labelOverflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                        if (status != null) {
-                            AppText(
-                                status,
-                                color = if (isActive) tc.ac else tc.warn,
-                                fontSize = 9.sp,
-                                maxLines = 1,
-                                modifier = Modifier.testTag("layout-menu-status-${layout.id}")
-                                    .semantics { contentDescription = "$status saved layout" },
-                            )
-                        }
-                        AppButton(
-                            "Export",
-                            onClick = {
-                                state.exportLogViewLayout(layout)
-                                onReclaimFocus()
-                            },
-                            variant = ButtonVariant.Ghost,
-                            horizontalPadding = 5.dp,
-                            tooltip = "Export saved layout",
-                            modifier = Modifier.height(26.dp).testTag("layout-menu-export-${layout.id}"),
-                            textColor = tc.td,
-                        )
-                        SquareIconButton(
-                            "×",
-                            fontSize = 12.sp,
-                            onClick = {
-                                deleteLayoutRequest = layout
-                                onReclaimFocus()
-                            },
-                            size = 20.dp,
-                            tooltip = "Delete saved layout",
-                            modifier = Modifier.testTag("layout-menu-delete-${layout.id}")
-                                .semantics { contentDescription = "Delete saved layout ${layout.name}" },
-                        )
-                    }
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.End) {
+                    AccentLink("Import…", onClick = {
+                        state.importLogViewLayout()
+                        onReclaimFocus()
+                    }, modifier = Modifier.testTag("layout-menu-import"))
                 }
-                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (selectedCustom != null) {
-                        AppButton(
-                            "Update existing",
-                            onClick = {
-                                state.updateSavedLogViewLayoutFromCurrent(selectedCustom.id)
-                                onReclaimFocus()
-                            },
-                            enabled = !selectedCustomActive,
-                            variant = ButtonVariant.Secondary,
-                            horizontalPadding = 7.dp,
-                            tooltip = if (selectedCustomActive) {
-                                "Saved layout already matches the current view"
-                            } else {
-                                "Update ${selectedCustom.name} with the current view"
-                            },
-                            modifier = Modifier.testTag("layout-menu-update-existing"),
-                        )
-                    }
-                    Row(
-                        Modifier.weight(1f),
-                        horizontalArrangement = Arrangement.End,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        AccentLink("Save current…", onClick = { saveLayoutDialog = true }, modifier = Modifier.testTag("layout-menu-save-current"))
-                        AccentLink("Import…", onClick = {
-                            state.importLogViewLayout()
-                            onReclaimFocus()
-                        }, modifier = Modifier.padding(start = 10.dp).testTag("layout-menu-import"))
-                    }
-                }
+                CurrentLayoutStrip(
+                    state = state,
+                    selectedCustom = selectedCustom,
+                    selectedCustomActive = selectedCustomActive,
+                    onSaveAsNew = { saveLayoutDialog = true },
+                    onReclaimFocus = onReclaimFocus,
+                )
             }
             Divider()
             MenuLabel("Panels")
@@ -700,17 +675,18 @@ internal fun LayoutMenuPopup(
                     onReclaimFocus()
                 }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
             }
-            val resetTo = if (compare) state.lastComparePresetOrGrid().label else state.lastLogViewResetLabel()
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .clickable(role = Role.Button) {
-                        if (compare) state.resetCompareLayout() else state.resetLogViewLayout()
-                        onReclaimFocus()
-                    }
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-                    .testTag("layout-menu-reset"),
-            ) { AppText("Reset to $resetTo", color = tc.ac, fontSize = 12.sp) }
+            if (compare) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable(role = Role.Button) {
+                            state.resetCompareLayout()
+                            onReclaimFocus()
+                        }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("layout-menu-reset"),
+                ) { AppText("Reset to ${state.lastComparePresetOrGrid().label}", color = tc.ac, fontSize = 12.sp) }
+            }
         }
         if (saveLayoutDialog) {
             WorkspaceProfileNameDialog(
@@ -726,6 +702,24 @@ internal fun LayoutMenuPopup(
                 },
                 onDismiss = {
                     saveLayoutDialog = false
+                    onReclaimFocus()
+                },
+            )
+        }
+        renameLayoutRequest?.let { layout ->
+            WorkspaceProfileNameDialog(
+                title = "Rename saved layout",
+                confirmLabel = "Rename",
+                initialName = layout.name,
+                takenNames = state.customLogViewLayoutNames() - layout.name,
+                noun = "layout",
+                onConfirm = { name ->
+                    state.renameSavedLogViewLayout(layout.id, name)
+                    renameLayoutRequest = null
+                    onReclaimFocus()
+                },
+                onDismiss = {
+                    renameLayoutRequest = null
                     onReclaimFocus()
                 },
             )
@@ -753,53 +747,272 @@ internal fun LayoutMenuPopup(
     }
 }
 
+/**
+ * One strip under the thumbnails naming the layout the view started from ("‹name›", plus "· Modified" in the warning colour once the
+ * view no longer matches it). A saved layout offers Update (write the view into it; only while Modified) and Revert; a preset offers
+ * Revert and "Save as new…". Revert is always available, so tile sizes (which the preset match ignores) can still be put back.
+ */
+@Composable
+private fun CurrentLayoutStrip(
+    state: AppState,
+    selectedCustom: CustomLogViewLayout?,
+    selectedCustomActive: Boolean,
+    onSaveAsNew: () -> Unit,
+    onReclaimFocus: () -> Unit,
+) {
+    val tc = tc()
+    val preset = state.lastLogViewPresetOrClassic()
+    val name = selectedCustom?.name ?: preset.label
+    val modified = if (selectedCustom != null) !selectedCustomActive else !state.logViewPresetActive(preset)
+    val stripShape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .background(if (modified) tc.warnBg else tc.p2, stripShape)
+            .padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp)
+            .testTag("layout-menu-strip"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            AppText(
+                name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
+            if (modified) {
+                AppText(" · Modified", color = tc.warn, fontSize = 11.sp, maxLines = 1, modifier = Modifier.testTag("layout-menu-modified-label"))
+            }
+        }
+        if (selectedCustom != null) {
+            AppButton(
+                "Update",
+                onClick = {
+                    state.updateSavedLogViewLayoutFromCurrent(selectedCustom.id)
+                    onReclaimFocus()
+                },
+                enabled = modified,
+                variant = ButtonVariant.Ghost,
+                horizontalPadding = 7.dp,
+                tooltip = if (modified) "Update ${selectedCustom.name} with the current view" else "Saved layout already matches the current view",
+                modifier = Modifier.height(24.dp).testTag("layout-menu-update-existing"),
+                textColor = if (modified) tc.ac else null,
+            )
+        }
+        AppButton(
+            "Revert",
+            onClick = {
+                state.resetLogViewLayout()
+                onReclaimFocus()
+            },
+            variant = ButtonVariant.Ghost,
+            horizontalPadding = 7.dp,
+            tooltip = "Put the layout back to ${state.lastLogViewResetLabel()}",
+            modifier = Modifier.height(24.dp).testTag("layout-menu-reset"),
+            textColor = tc.ac,
+        )
+        if (selectedCustom == null) {
+            AppButton(
+                "Save as new…",
+                onClick = onSaveAsNew,
+                variant = ButtonVariant.Ghost,
+                horizontalPadding = 7.dp,
+                modifier = Modifier.height(24.dp).testTag("layout-menu-save-as-new"),
+                textColor = tc.ac,
+            )
+        }
+    }
+}
+
+/** The right-click actions of one saved layout, shown as a row under the thumbnails. */
+@Composable
+private fun SavedLayoutActions(layout: CustomLogViewLayout, onRename: () -> Unit, onExport: () -> Unit, onDelete: () -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp).testTag("layout-menu-actions-${layout.id}"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText(layout.name, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        AccentLink("Rename…", onClick = onRename, modifier = Modifier.testTag("layout-menu-rename-${layout.id}"))
+        AccentLink("Export…", onClick = onExport, modifier = Modifier.testTag("layout-menu-export-${layout.id}"))
+        HoverBox(modifier = Modifier.clip(RoundedCornerShape(4.dp)).testTag("layout-menu-delete-${layout.id}"), onClick = onDelete) {
+            Box(Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) { AppText("Delete…", color = DANGER_RED, fontSize = 11.sp, fontFamily = UI) }
+        }
+    }
+}
+
 @Composable
 private fun MenuLabel(text: String) {
     AppText(text, color = tc().td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
 }
 
-// A preset's arrangement as a thumbnail: the tree minus its hidden tiles laid out on a virtual host with the real geometry rules (so
-// pinned columns and Log level keep their proportions), scaled down; the log tile is drawn stronger.
+// A layout's arrangement as a thumbnail: the tree minus its hidden tiles laid out on a virtual host with the real geometry rules (so
+// pinned columns and Log level keep their proportions), scaled down; the log tile is drawn stronger, and a thin bar above it when the
+// layout shows the filter bar. Presets and saved layouts share this drawing; so does Settings › General's Layout row.
+
+/** The tiles a preset shows, as a tree for [LayoutThumbCanvas]; null when nothing is left. */
+internal fun presetThumbTree(preset: LogViewLayoutPreset): TileNode<LogViewSectionId>? =
+    preset.hidden.fold(preset.layout(LogViewLegacySizes()) as LogViewNode?) { acc, id -> acc?.let { removeTile(it, id) } }
+
+/** The tiles a saved layout shows: its tree minus the hidden list, the tiles of a switched-off panel group and the toolbar. */
+internal fun savedLayoutThumbTree(layout: CustomLogViewLayout): TileNode<LogViewSectionId>? {
+    val groupOff = LogViewSectionId.entries.filter {
+        when (it.group) {
+            LogViewTileGroup.NONE -> false
+            LogViewTileGroup.FILTERS -> !layout.filterVisible
+            LogViewTileGroup.NOTES -> !layout.annotationVisible
+            LogViewTileGroup.AI -> !layout.aiPanelVisible
+            LogViewTileGroup.VIDEO -> !layout.videoPanelVisible
+        }
+    }
+    val compareOnly = LogViewSectionId.entries.filter { it.scope == LogViewScope.COMPARE }
+    return (layout.hidden + groupOff + compareOnly + LogViewSectionId.TOOLBAR).distinct()
+        .fold(layout.tree as LogViewNode?) { acc, id -> acc?.let { removeTile(it, id) } }
+}
+
+/** The thumbnail drawing alone (no border or label): [tree]'s cards filled with [fill], and the filter bar above the log when [filterBar]. */
+@Composable
+internal fun LayoutThumbCanvas(tree: TileNode<LogViewSectionId>?, filterBar: Boolean, fill: Color, modifier: Modifier = Modifier) {
+    val geometry = remember(tree) { tree?.let { tileGeometry(it, THUMB_VIRTUAL_WIDTH, THUMB_VIRTUAL_HEIGHT, LOG_VIEW_TILE_SPEC) } }
+    Canvas(modifier) {
+        val sx = size.width / THUMB_VIRTUAL_WIDTH
+        val sy = size.height / THUMB_VIRTUAL_HEIGHT
+        val inset = 0.6.dp.toPx()
+
+        fun card(x: Float, y: Float, w: Float, h: Float, alpha: Float) = drawRoundRect(
+            color = fill.copy(alpha = alpha),
+            topLeft = Offset(x * sx + inset, y * sy + inset),
+            size = Size((w * sx - 2 * inset).coerceAtLeast(1f), (h * sy - 2 * inset).coerceAtLeast(1f)),
+            cornerRadius = CornerRadius(1.dp.toPx()),
+        )
+        geometry?.cards?.forEach { c ->
+            val r = c.rect
+            if (filterBar && c.section == LogViewSectionId.LOG) {
+                card(r.x, r.y, r.w, THUMB_FILTER_BAR_HEIGHT, THUMB_FILL_ALPHA)
+                val shift = THUMB_FILTER_BAR_HEIGHT + THUMB_FILTER_BAR_GAP
+                card(r.x, r.y + shift, r.w, (r.h - shift).coerceAtLeast(1f), THUMB_LOG_FILL_ALPHA)
+            } else {
+                card(r.x, r.y, r.w, r.h, if (c.section.isLogTile) THUMB_LOG_FILL_ALPHA else THUMB_FILL_ALPHA)
+            }
+        }
+    }
+}
+
+// The framed, labelled, clickable thumbnail the Layout menu's rows are made of. [active] fills it with the accent colour; [outlined]
+// gives a selected-but-modified one the accent border without the fill; [modifiedDotTag] draws the small warning dot.
+@Composable
+private fun LayoutThumb(
+    label: String,
+    tag: String,
+    tree: TileNode<LogViewSectionId>?,
+    filterBar: Boolean,
+    active: Boolean,
+    onClick: () -> Unit,
+    outlined: Boolean = false,
+    modifiedDotTag: String? = null,
+    onSecondaryClick: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    val fill = if (active || outlined) tc.ac else tc.td
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Box(Modifier.size(THUMB_WIDTH_DP.dp, THUMB_HEIGHT_DP.dp)) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .clip(CORNER_MD)
+                    .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
+                    .border(1.dp, if (active || outlined) tc.ac else tc.br, CORNER_MD)
+                    .testTag(tag)
+                    .semantics {
+                        contentDescription = label
+                        selected = active
+                    }
+                    .then(if (onSecondaryClick == null) Modifier else Modifier.secondaryClick(onSecondaryClick))
+                    .clickable(role = Role.Button, onClick = onClick)
+                    .padding(3.dp),
+            ) { LayoutThumbCanvas(tree, filterBar, fill, Modifier.fillMaxSize()) }
+            if (modifiedDotTag != null) {
+                // A sibling of the clickable thumbnail (not inside it) so the dot keeps its own semantics node.
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(2.dp).size(MODIFIED_DOT_DP.dp).background(tc.warn, CircleShape)
+                        .testTag(modifiedDotTag)
+                        .semantics { contentDescription = "Modified saved layout" },
+                )
+            }
+        }
+        Box(Modifier.width(THUMB_WIDTH_DP.dp), contentAlignment = Alignment.Center) {
+            AppText(label, color = if (active) tc.ac else tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
 @Composable
 private fun PresetThumb(preset: LogViewLayoutPreset, active: Boolean, onClick: () -> Unit) {
-    val tc = tc()
-    val fill = if (active) tc.ac else tc.td
-    val tree = remember(preset) {
-        preset.hidden.fold(preset.layout(LogViewLegacySizes()) as LogViewNode?) { acc, id -> acc?.let { removeTile(it, id) } }
+    val tree = remember(preset) { presetThumbTree(preset) }
+    LayoutThumb(preset.label, "layout-menu-preset-${preset.name}", tree, preset.showsFilterBar, active, onClick)
+}
+
+/** A saved layout's thumbnail. [active]: the view matches it; [modified]: it is the selected layout but the view has moved on. */
+@Composable
+private fun SavedLayoutThumb(
+    layout: CustomLogViewLayout,
+    active: Boolean,
+    modified: Boolean,
+    onClick: () -> Unit,
+    onSecondaryClick: () -> Unit,
+) {
+    val tree = remember(layout) { savedLayoutThumbTree(layout) }
+    Box(Modifier.testTag("layout-menu-custom-${layout.id}")) {
+        LayoutThumb(
+            label = layout.name,
+            tag = "layout-menu-apply-${layout.id}",
+            tree = tree,
+            filterBar = layout.filterBarVisible == true,
+            active = active,
+            onClick = onClick,
+            outlined = modified,
+            modifiedDotTag = if (modified) "layout-menu-status-${layout.id}" else null,
+            onSecondaryClick = onSecondaryClick,
+        )
     }
-    val geometry = remember(tree) { tree?.let { tileGeometry(it, THUMB_VIRTUAL_WIDTH, THUMB_VIRTUAL_HEIGHT, LOG_VIEW_TILE_SPEC) } }
+}
+
+/** The dashed "+" thumbnail that saves the current view as a new layout. */
+@Composable
+private fun AddLayoutThumb(onClick: () -> Unit) {
+    val tc = tc()
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Box(
             Modifier
                 .size(THUMB_WIDTH_DP.dp, THUMB_HEIGHT_DP.dp)
                 .clip(CORNER_MD)
-                .background(if (active) tc.ac.copy(alpha = 0.12f) else Color.Transparent)
-                .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
-                .testTag("layout-menu-preset-${preset.name}")
-                .semantics {
-                    contentDescription = preset.label
-                    selected = active
-                }
-                .clickable(role = Role.Button, onClick = onClick)
-                .padding(3.dp),
+                .testTag("layout-menu-save-current")
+                .semantics { contentDescription = "Save current layout" }
+                .clickable(role = Role.Button, onClick = onClick),
+            contentAlignment = Alignment.Center,
         ) {
             Canvas(Modifier.fillMaxSize()) {
-                val sx = size.width / THUMB_VIRTUAL_WIDTH
-                val sy = size.height / THUMB_VIRTUAL_HEIGHT
-                val inset = 0.6.dp.toPx()
-                geometry?.cards?.forEach { card ->
-                    val r = card.rect
-                    drawRoundRect(
-                        color = fill.copy(alpha = if (card.section.isLogTile) THUMB_LOG_FILL_ALPHA else THUMB_FILL_ALPHA),
-                        topLeft = Offset(r.x * sx + inset, r.y * sy + inset),
-                        size = Size((r.w * sx - 2 * inset).coerceAtLeast(1f), (r.h * sy - 2 * inset).coerceAtLeast(1f)),
-                        cornerRadius = CornerRadius(1.dp.toPx()),
-                    )
-                }
+                drawRoundRect(
+                    color = tc.td,
+                    cornerRadius = CornerRadius(6.dp.toPx()),
+                    style = Stroke(width = 1.dp.toPx(), pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx()))),
+                )
             }
+            AppText("+", color = tc.td, fontSize = 18.sp)
         }
         Box(Modifier.width(THUMB_WIDTH_DP.dp), contentAlignment = Alignment.Center) {
-            AppText(preset.label, color = if (active) tc.ac else tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            AppText("Save current…", color = tc.ts, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+// Calls [onClick] on a secondary-button press and consumes it, leaving the primary click alone.
+private fun Modifier.secondaryClick(onClick: () -> Unit): Modifier = pointerInput(onClick) {
+    awaitPointerEventScope {
+        while (true) {
+            val event = awaitPointerEvent()
+            if (event.type == PointerEventType.Press && event.buttons.isSecondaryPressed) {
+                event.changes.forEach { it.consume() }
+                onClick()
+            }
         }
     }
 }

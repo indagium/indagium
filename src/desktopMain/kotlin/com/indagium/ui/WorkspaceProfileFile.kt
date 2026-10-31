@@ -1,7 +1,11 @@
 package com.indagium.ui
 
 import com.indagium.model.AppSettings
+import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.CustomWorkspaceProfile
+import com.indagium.model.LogViewPresetId
+import com.indagium.model.LogViewScope
+import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.ProfileSpec
 import com.indagium.model.ThemePreset
 import kotlinx.serialization.json.Json
@@ -21,7 +25,7 @@ import java.util.UUID
 // Saved, imported and exported workspace profiles: the JSON forms of a [ProfileSpec] (inside the
 // settings JSON and in a standalone profile file), plus small pure helpers the General settings
 // page and AppState share. Everything here is tolerant on read — a missing or unknown value falls
-// back to the Indagium Classic value rather than failing — and strict only about the file envelope.
+// back to the Indagium Classic value (no layout for a missing one) rather than failing — and strict only about the file envelope.
 
 internal const val WORKSPACE_PROFILE_FILE_FORMAT = "indagium-workspace-profile"
 internal const val WORKSPACE_PROFILE_FILE_VERSION = 1
@@ -38,27 +42,28 @@ internal data class ResolvedProfile(
     val custom: Boolean,
 )
 
-internal fun WorkspaceProfile.resolved() = ResolvedProfile(id, title, description, spec, custom = false)
+internal fun WorkspaceProfile.resolved(savedLayouts: List<CustomLogViewLayout> = emptyList()) =
+    ResolvedProfile(id, title, describeProfileSpec(spec, savedLayouts), spec, custom = false)
 
-internal fun CustomWorkspaceProfile.resolved() = ResolvedProfile(id, name, describeProfileSpec(spec), spec, custom = true)
+internal fun CustomWorkspaceProfile.resolved(savedLayouts: List<CustomLogViewLayout> = emptyList()) =
+    ResolvedProfile(id, name, describeProfileSpec(spec, savedLayouts), spec, custom = true)
 
-/** Card subtitle for a custom profile, e.g. "Dark (GitHub) · filter bar · notes". */
-internal fun describeProfileSpec(spec: ProfileSpec): String {
-    val parts = buildList {
-        add(spec.theme.label)
-        if (spec.filterVisible) add("filter sidebar")
-        if (spec.filterBarVisible) add("filter bar")
-        if (spec.annotationVisible) add("notes")
-        if (spec.videoPanelVisible) add("video")
-        if (spec.aiPanelVisible) add("AI panel")
-        if (spec.openNewFilesWithUnfiltered) add("original panel")
-        if (size == 1) add("log only")
-    }
-    return parts.joinToString(" · ")
+/** The label of "no layout": the profile leaves the view as it is. */
+internal const val KEEP_CURRENT_LAYOUT_LABEL = "Keep current layout"
+
+/** The name of the layout [ref] points at; a saved layout that no longer exists behaves (and reads) like no layout at all. */
+internal fun profileLayoutName(ref: ProfileLayoutRef?, savedLayouts: List<CustomLogViewLayout>): String = when (ref) {
+    null -> KEEP_CURRENT_LAYOUT_LABEL
+    is ProfileLayoutRef.Preset -> LogViewLayoutPreset.of(ref.id).label
+    is ProfileLayoutRef.Saved -> savedLayouts.firstOrNull { it.id == ref.id }?.name ?: KEEP_CURRENT_LAYOUT_LABEL
 }
 
-/** The spec that captures the values a profile would apply right now. */
-internal fun currentProfileSpec(settings: AppSettings, layout: LayoutSnapshot) = ProfileSpec(
+/** Card subtitle, e.g. "Dark (GitHub) · 12px · Layout: Filter bar". */
+internal fun describeProfileSpec(spec: ProfileSpec, savedLayouts: List<CustomLogViewLayout> = emptyList()): String =
+    "${spec.theme.label} · ${spec.fontSize}px · Layout: ${profileLayoutName(spec.layout, savedLayouts)}"
+
+/** The spec that captures the values a profile would apply right now; [layout] is the active preset or saved layout, else null. */
+internal fun currentProfileSpec(settings: AppSettings, layout: ProfileLayoutRef?) = ProfileSpec(
     theme = settings.theme,
     fontSize = settings.fontSize,
     fontMono = settings.fontMono,
@@ -67,11 +72,7 @@ internal fun currentProfileSpec(settings: AppSettings, layout: LayoutSnapshot) =
     showMinimap = settings.showMinimap,
     toolbarIconOnlyButtons = settings.toolbarIconOnlyButtons,
     openNewFilesWithUnfiltered = settings.openNewFilesWithUnfiltered,
-    filterVisible = layout.filterVisible,
-    filterBarVisible = layout.filterBarVisible,
-    annotationVisible = layout.annotationVisible,
-    videoPanelVisible = layout.videoPanelVisible,
-    aiPanelVisible = layout.aiPanelVisible,
+    layout = layout,
 )
 
 /** [base] made unique against [taken] (case-insensitive): "Name", "Name (2)", "Name (3)"… */
@@ -97,11 +98,29 @@ internal fun profileSpecToJson(spec: ProfileSpec): JsonObject = buildJsonObject 
     put("showMinimap", spec.showMinimap)
     put("toolbarIconOnlyButtons", spec.toolbarIconOnlyButtons)
     put("openNewFilesWithUnfiltered", spec.openNewFilesWithUnfiltered)
-    put("filterVisible", spec.filterVisible)
-    put("filterBarVisible", spec.filterBarVisible)
-    put("annotationVisible", spec.annotationVisible)
-    put("videoPanelVisible", spec.videoPanelVisible)
-    put("aiPanelVisible", spec.aiPanelVisible)
+    // The five panel flags older builds wrote are gone: the layout owns the panels. Older builds fall back to their Classic
+    // values for the flags they no longer find, so a file written here still opens there.
+    spec.layout?.let { put("layout", profileLayoutRefToString(it)) }
+}
+
+private const val LAYOUT_PRESET_PREFIX = "preset:"
+private const val LAYOUT_SAVED_PREFIX = "saved:"
+
+internal fun profileLayoutRefToString(ref: ProfileLayoutRef): String = when (ref) {
+    is ProfileLayoutRef.Preset -> LAYOUT_PRESET_PREFIX + ref.id.name
+    is ProfileLayoutRef.Saved -> LAYOUT_SAVED_PREFIX + ref.id
+}
+
+/** Null for a missing, malformed or unknown reference (a preset from a newer build, a compare-only preset, a blank saved id). */
+internal fun profileLayoutRefFromString(text: String?): ProfileLayoutRef? = when {
+    text == null -> null
+    text.startsWith(LAYOUT_PRESET_PREFIX) ->
+        LogViewPresetId.entries.firstOrNull { it.name == text.removePrefix(LAYOUT_PRESET_PREFIX) }
+            ?.takeIf { LogViewLayoutPreset.of(it).scope == LogViewScope.SINGLE }
+            ?.let(ProfileLayoutRef::Preset)
+    text.startsWith(LAYOUT_SAVED_PREFIX) ->
+        text.removePrefix(LAYOUT_SAVED_PREFIX).takeIf { it.isNotBlank() }?.let(ProfileLayoutRef::Saved)
+    else -> null
 }
 
 /** Never throws: a missing, mistyped or unknown value (e.g. a theme from a newer version) takes the Classic value. */
@@ -120,11 +139,8 @@ internal fun profileSpecFromJson(o: JsonObject): ProfileSpec {
         showMinimap = bool("showMinimap", base.showMinimap),
         toolbarIconOnlyButtons = bool("toolbarIconOnlyButtons", base.toolbarIconOnlyButtons),
         openNewFilesWithUnfiltered = bool("openNewFilesWithUnfiltered", base.openNewFilesWithUnfiltered),
-        filterVisible = bool("filterVisible", base.filterVisible),
-        filterBarVisible = bool("filterBarVisible", base.filterBarVisible),
-        annotationVisible = bool("annotationVisible", base.annotationVisible),
-        videoPanelVisible = bool("videoPanelVisible", base.videoPanelVisible),
-        aiPanelVisible = bool("aiPanelVisible", base.aiPanelVisible),
+        // Old files carried five panel flags here; they are ignored (the layout owns the panels), so such a profile keeps the current layout.
+        layout = profileLayoutRefFromString((o["layout"] as? JsonPrimitive)?.contentOrNull),
     )
 }
 

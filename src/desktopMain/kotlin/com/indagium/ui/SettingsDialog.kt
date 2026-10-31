@@ -752,11 +752,12 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val selectedProfile = state.selectedWorkspaceProfile
     var nameRequest by remember { mutableStateOf<ProfileNameRequest?>(null) }
     var deleteRequest by remember { mutableStateOf<ResolvedProfile?>(null) }
-    val profiles = WorkspaceProfile.entries.map { it.resolved() } + state.settings.customWorkspaceProfiles.map { it.resolved() }
+    val savedLayouts = state.settings.customLogViewLayouts
+    val profiles = WorkspaceProfile.entries.map { it.resolved(savedLayouts) } + state.settings.customWorkspaceProfiles.map { it.resolved(savedLayouts) }
     Column(Modifier.settingsAnchor("Workspace profile"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         AppText(
-            "Sets panels, filter placement, theme and font size in one step. Every setting stays editable afterwards.",
+            "Sets the theme, font size and defaults, and applies a layout, in one step. Every setting stays editable afterwards.",
             color = tc.ts,
             fontSize = 11.sp,
             fontFamily = UI,
@@ -766,6 +767,7 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             profiles = profiles,
             selectedId = selectedProfile?.id,
             onSelect = state::applyResolvedProfile,
+            panelsFor = { state.profilePanelsFor(it.spec) },
             onMenuClosed = reclaimFocus,
             menuFor = { profile ->
                 listOf(
@@ -776,8 +778,9 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                 )
             },
         )
-        // Read straight from state on every recomposition: theme/font/layout edits made elsewhere
-        // (Appearance, the panel toggles) all show up here without any extra plumbing.
+        if (selectedProfile != null) ProfileLayoutRow(state, selectedProfile, reclaimFocus)
+        // Read straight from state on every recomposition: theme/font edits made elsewhere
+        // (Appearance) show up here without any extra plumbing. Panels belong to the layout, not the profile.
         val differences = state.workspaceProfileDifferences()
         val customized = selectedProfile != null && differences.isNotEmpty()
         if (selectedProfile != null && customized) {

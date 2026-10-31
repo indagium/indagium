@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.model.Filter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
@@ -12,6 +13,7 @@ import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
+import com.indagium.ui.LogViewPanels
 import com.indagium.ui.applyCustomLogViewLayout
 import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.captureCustomLogViewLayout
@@ -21,6 +23,7 @@ import com.indagium.ui.commitLogViewLayout
 import com.indagium.ui.currentLogViewLayout
 import com.indagium.ui.hideLogViewTile
 import com.indagium.ui.isLogViewTileCollapsed
+import com.indagium.ui.lastLogViewResetLabel
 import com.indagium.ui.legacyLogViewSizes
 import com.indagium.ui.logViewBadgeCount
 import com.indagium.ui.logViewDefaultDp
@@ -31,6 +34,8 @@ import com.indagium.ui.matchesCustomLogViewLayout
 import com.indagium.ui.mkTab
 import com.indagium.ui.resetLogViewLayout
 import com.indagium.ui.revealFilterTiles
+import com.indagium.ui.settingsFromJson
+import com.indagium.ui.settingsJson
 import com.indagium.ui.showLogViewTile
 import com.indagium.ui.tileLeafSections
 import com.indagium.ui.toggleLogViewTileCollapsed
@@ -233,6 +238,134 @@ class LogViewLayoutStateTest {
         assertTrue(visible(LogViewSectionId.NOTES))
         assertTrue(visible(LogViewSectionId.SEQUENCES))
         assertTrue(visible(LogViewSectionId.ISSUES))
+    }
+
+    @Test
+    fun theFilterBarPresetIsLogFocusWithTheBarOnAndSurvivesASettingsRoundTrip() {
+        state.applyLogViewPreset(LogViewLayoutPreset.FILTER_BAR)
+
+        assertTrue(state.filterBarVisible)
+        assertFalse(state.filterVisible, "the filter sidebar is off, like Log focus")
+        assertEquals(LogViewLayoutPreset.LOG_FOCUS.hidden, LogViewLayoutPreset.FILTER_BAR.hidden)
+        assertEquals(LogViewLayoutPreset.FILTER_BAR.id, state.settings.lastLogViewPreset)
+        assertEquals(LogViewPresetId.FILTER_BAR, LogViewLayoutPreset.of(LogViewPresetId.FILTER_BAR).id)
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
+        assertEquals(0, state.logViewBadgeCount(state.logViewTileContext(assertNotNull(state.tab(TAB)))))
+
+        val restored = assertNotNull(settingsFromJson(state.settings.settingsJson()))
+        assertEquals(LogViewPresetId.FILTER_BAR, restored.lastLogViewPreset)
+        assertEquals(state.settings.logViewHidden.toSet(), restored.logViewHidden.toSet())
+    }
+
+    @Test
+    fun theFilterBarFlagTellsFilterBarAndLogFocusApart() {
+        state.applyLogViewPreset(LogViewLayoutPreset.LOG_FOCUS)
+        assertFalse(state.filterBarVisible, "Log focus has no filter bar")
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+
+        // The bar alone turns Log focus into neither preset (Filter bar also shows Notes); Notes as well makes it Filter bar.
+        state.updateFilterBarVisible(true)
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+        state.updateAnnotationVisible(true)
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+        assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
+    }
+
+    @Test
+    fun everyPresetSetsItsFiveFlagsFromOnePlace() {
+        // filter sidebar, filter bar, Notes, Video, AI
+        val table = mapOf(
+            LogViewLayoutPreset.CLASSIC to LogViewPanels(filter = true, filterBar = false, notes = true, video = true, ai = false),
+            LogViewLayoutPreset.LOG_FOCUS to LogViewPanels(filter = false, filterBar = false, notes = false, video = false, ai = false),
+            LogViewLayoutPreset.FILTER_BAR to LogViewPanels(filter = false, filterBar = true, notes = true, video = false, ai = false),
+            LogViewLayoutPreset.FILTERING to LogViewPanels(filter = true, filterBar = false, notes = false, video = false, ai = false),
+            LogViewLayoutPreset.ANALYSIS to LogViewPanels(filter = true, filterBar = false, notes = true, video = false, ai = false),
+        )
+        assertEquals(table.keys, LogViewLayoutPreset.forScope(com.indagium.model.LogViewScope.SINGLE).toSet())
+        for ((preset, expected) in table) {
+            assertEquals(expected, preset.panels, preset.label)
+            // From the opposite state of every flag, so each one has to be written.
+            state.updateFilterVisible(!expected.filter)
+            state.updateFilterBarVisible(!expected.filterBar)
+            state.updateAnnotationVisible(!expected.notes)
+            state.updateVideoPanelVisible(!expected.video)
+            state.updateAiPanelVisible(!expected.ai)
+            state.applyLogViewPreset(preset)
+            assertEquals(
+                expected,
+                LogViewPanels(state.filterVisible, state.filterBarVisible, state.annotationVisible, state.videoPanelVisible, state.aiPanelVisible),
+                preset.label,
+            )
+            assertTrue(state.logViewPresetActive(preset), "${preset.label} is active right after applying it")
+        }
+        assertNull(LogViewLayoutPreset.REVIEW.panels, "the legacy presets leave Notes, Video and AI alone")
+        assertNull(LogViewLayoutPreset.FILTERS_ON_TOP.panels)
+    }
+
+    @Test
+    fun togglingAPanelMakesThePresetModifiedAndRevertRestoresIt() {
+        for (preset in LogViewLayoutPreset.forScope(com.indagium.model.LogViewScope.SINGLE)) {
+            state.applyLogViewPreset(preset)
+            assertTrue(state.logViewPresetActive(preset), preset.label)
+
+            state.updateAiPanelVisible(!state.aiPanelVisible)
+            assertFalse(state.logViewPresetActive(preset), "${preset.label}: an AI toggle is a modification")
+            state.resetLogViewLayout()
+            assertTrue(state.logViewPresetActive(preset), "${preset.label}: Revert restores the flags")
+
+            state.updateVideoPanelVisible(!state.videoPanelVisible)
+            assertFalse(state.logViewPresetActive(preset), "${preset.label}: a Video toggle is a modification")
+            state.resetLogViewLayout()
+            assertTrue(state.logViewPresetActive(preset))
+        }
+    }
+
+    @Test
+    fun everyOtherSinglePresetSwitchesTheFilterBarOff() {
+        for (preset in LogViewLayoutPreset.forScope(com.indagium.model.LogViewScope.SINGLE) - LogViewLayoutPreset.FILTER_BAR) {
+            state.applyLogViewPreset(LogViewLayoutPreset.FILTER_BAR)
+            assertTrue(state.filterBarVisible)
+            state.applyLogViewPreset(preset)
+            assertFalse(state.filterBarVisible, preset.label)
+        }
+        assertEquals(
+            listOf("Classic", "Log focus", "Filter bar", "Filtering", "Analysis"),
+            LogViewLayoutPreset.forScope(com.indagium.model.LogViewScope.SINGLE).map { it.label },
+        )
+    }
+
+    @Test
+    fun resettingToTheFilterBarPresetBringsTheBarBack() {
+        state.applyLogViewPreset(LogViewLayoutPreset.FILTER_BAR)
+        state.updateFilterBarVisible(false)
+        state.hideLogViewTile(LogViewSectionId.NOTES)
+        state.resetLogViewLayout()
+        assertTrue(state.filterBarVisible)
+        assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
+        assertEquals("Filter bar", state.lastLogViewResetLabel())
+    }
+
+    @Test
+    fun renamingASavedLayoutKeepsItsIdAndMakesTheNameUnique() {
+        val first = state.saveCurrentAsLogViewLayout("First")
+        val second = state.saveCurrentAsLogViewLayout("Second")
+
+        state.renameSavedLogViewLayout(second.id, "  Renamed  ")
+        assertEquals(listOf("First", "Renamed"), state.settings.customLogViewLayouts.map { it.name })
+        assertEquals(listOf(first.id, second.id), state.settings.customLogViewLayouts.map { it.id })
+
+        state.renameSavedLogViewLayout(second.id, "first")
+        assertEquals("first (2)", state.settings.customLogViewLayouts.last().name, "another layout's name is de-duplicated")
+        state.renameSavedLogViewLayout(second.id, "first (2)")
+        assertEquals("first (2)", state.settings.customLogViewLayouts.last().name, "its own name is not a clash")
+        state.renameSavedLogViewLayout(second.id, "   ")
+        state.renameSavedLogViewLayout("custom-log-view-gone", "X")
+        assertEquals(listOf("First", "first (2)"), state.settings.customLogViewLayouts.map { it.name })
+        assertTrue(state.matchesCustomLogViewLayout(state.settings.customLogViewLayouts.last()), "renaming leaves the layout's content alone")
     }
 
     @Test

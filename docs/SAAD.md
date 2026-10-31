@@ -909,11 +909,17 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   and a drag of the chrome's toolbar bar over the tiles is shown by the surface through `TileExternalDrag` (the same drop maths as a tile move).
 - **Maximize** is `AppState.logViewMaximized`, session-only; Esc restores it (handled on the host's preview pass because the log viewer
   consumes every Esc). F6 cycles `logViewFocusOrder` of the visible tiles (all filter tiles are one stop).
-- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `MainToolbar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): four preset
-  thumbnails drawn from `tileGeometry`, a Panels checklist of the applicable tiles, "Lock tiles" (hides grips) and "Reset to <preset>".
+- **Layout menu.** `LayoutMenuButton` (`ui/LayoutMenu.kt`) sits before Settings in `MainToolbar` (single log views; in compare it offers the two compare presets, the shared panels, Lock and Reset instead): five preset
+  thumbnails (Classic, Log focus, Filter bar, Filtering, Analysis) and the saved layouts as a second row of thumbnails, both drawn from `tileGeometry`
+  (right-click a saved one for Rename / Export / Delete, a dashed "+" saves the view), one strip naming the current layout with Update / Revert
+  ("Save as new…" for a preset), a Panels checklist of the applicable tiles and "Lock tiles" (hides grips). **Filter bar** is Log focus plus
+  the filter bar. Every current single-view preset sets all five panel flags (sidebar, filter bar, Notes, Video, AI) from one table,
+  `LogViewLayoutPreset.panels`, in `applyLogViewPreset`; `logViewPresetActive` compares them too, so a tab-strip panel toggle shows the
+  preset as Modified and Revert restores it. The legacy Review / Filters on top presets (`panels == null`) leave Notes, Video and AI alone.
   The badge counts applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the Diagram library
-  hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth (workspace profiles
-  and shortcuts included); `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
+  hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth for the strip and shortcuts; a workspace
+  profile (look + defaults) never writes them, it points at a layout (`ProfileLayoutRef`: a preset or a saved layout, null = keep) that it applies through
+  `applyLogViewPreset` / `applySavedLogViewLayout`; `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
   Filter group off instead of listing eight hidden tiles (the badge stays meaningful and the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
   switches the group on again. `revealFilterTiles` (Cmd+1, the filter-input Ctrl+F path, and the filter bar's residual chip) un-hides,
