@@ -25,6 +25,18 @@ internal enum class TabGroupIcon {
     MEMORY,
     LOCK,
     SCIENCE,
+
+    // The third picker row (27 = three rows of nine): log-triage pictograms.
+    SYNC,
+    STORAGE,
+    NETWORK,
+    CAMERA,
+    SPEED,
+    NOTIFICATIONS,
+    BUILD,
+    LOCATION,
+    TERMINAL,
+    HISTORY,
 }
 
 /** A named, contiguous run of ordinary log/capture and diagram tabs in the shared strip. */
@@ -36,6 +48,8 @@ internal data class TabGroup(
     val collapsed: Boolean,
     val members: List<TabRef>,
     val icon: TabGroupIcon = TabGroupIcon.NONE,
+    /** Whether the group's colour tints its member tabs. The chip keeps its colour either way. */
+    val tintMembers: Boolean = true,
 )
 
 /** The first colour of the shared highlighter palette that no group in [groups] uses; the palette is
@@ -276,6 +290,10 @@ internal fun AppState.setTabGroupColor(id: String, colorArgb: Int) = synchronize
 
 internal fun AppState.setTabGroupIcon(id: String, icon: TabGroupIcon) = synchronized(stateLock) {
     tabGroups = tabGroups.map { if (it.id == id) it.copy(icon = icon) else it }
+}
+
+internal fun AppState.setTabGroupTintMembers(id: String, tint: Boolean) = synchronized(stateLock) {
+    tabGroups = tabGroups.map { if (it.id == id) it.copy(tintMembers = tint) else it }
 }
 
 internal fun AppState.toggleTabGroupCollapsed(id: String) = synchronized(stateLock) {

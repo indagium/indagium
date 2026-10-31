@@ -182,6 +182,8 @@ internal data class TabAppearance(
     val groupColor: Color? = null,
     /** How strongly [groupColor] tints the tab (raised while a dragged tab hovers the group). */
     val groupTintAlpha: Float = 0f,
+    /** A 1 dp outline in this colour around the tab's own shape, over its chrome (a group chip's border). Null draws none. */
+    val outlineColor: Color? = null,
 ) {
     companion object {
         val Default = TabAppearance()

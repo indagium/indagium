@@ -24,6 +24,8 @@ import androidx.compose.material.icons.outlined.BatteryFull
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.Build
+import androidx.compose.material.icons.outlined.CameraAlt
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Code
@@ -32,15 +34,23 @@ import androidx.compose.material.icons.outlined.DriveFileRenameOutline
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Lan
+import androidx.compose.material.icons.outlined.LocationOn
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Memory
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.RemoveCircleOutline
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Speed
 import androidx.compose.material.icons.outlined.StarBorder
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.UnfoldLess
 import androidx.compose.material.icons.outlined.UnfoldMore
 import androidx.compose.material.icons.outlined.Warning
@@ -75,6 +85,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
 import kotlin.math.roundToInt
 
@@ -82,13 +93,14 @@ import kotlin.math.roundToInt
  * "New tab group" and its Cancel removes the group again). */
 internal val LocalOpenTabGroupEditor = staticCompositionLocalOf<(String, Boolean) -> Unit> { { _, _ -> } }
 
-private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 200f
+// Wide enough for a ~25 character name beside the dot, an icon, the chevron and the count in the wider (monospace) styles.
+private const val TAB_GROUP_HEADER_MAX_WIDTH_DP = 280f
 private const val TAB_GROUP_HEADER_MIN_WIDTH_DP = 64f
 private const val TAB_GROUP_CHIP_ICON_DP = 14f
 private const val TAB_GROUP_CHIP_ICON_GAP_DP = 4f
 private const val TAB_GROUP_CHIP_DOT_DP = 8f
 private const val TAB_GROUP_CHIP_WIDTH_SLACK_DP = 2f
-private const val TAB_GROUP_ICONS_PER_ROW = 9
+internal const val TAB_GROUP_ICONS_PER_ROW = 9
 
 /** The member tab tint on a light panel / a dark panel, and while a dragged tab hovers the group (any panel). */
 internal const val GROUP_TINT_ALPHA_LIGHT = 0.10f
@@ -386,42 +398,65 @@ private fun itemWidth(item: TabStripItem, widthByKey: Map<String, Float>): Float
 private fun List<TabStripItem>.hasRemovableTab(anchorRef: TabRef?): Boolean =
     any { it is TabStripItem.Tab && it.ref != anchorRef }
 
-internal fun TabGroupIcon.imageVector(): ImageVector? = when (this) {
-    TabGroupIcon.NONE -> null
-    TabGroupIcon.FOLDER -> Icons.Outlined.FolderOpen
-    TabGroupIcon.BOOKMARK -> Icons.Outlined.Bookmark
-    TabGroupIcon.BUG -> Icons.Outlined.BugReport
-    TabGroupIcon.CODE -> Icons.Outlined.Code
-    TabGroupIcon.DEVICE -> Icons.Outlined.PhoneAndroid
-    TabGroupIcon.FLAG -> Icons.Outlined.Flag
-    TabGroupIcon.STAR -> Icons.Outlined.StarBorder
-    TabGroupIcon.SEARCH -> Icons.Outlined.Search
-    TabGroupIcon.WARNING -> Icons.Outlined.Warning
-    TabGroupIcon.SCHEDULE -> Icons.Outlined.Schedule
-    TabGroupIcon.CLOUD -> Icons.Outlined.Cloud
-    TabGroupIcon.WIFI -> Icons.Outlined.Wifi
-    TabGroupIcon.BATTERY -> Icons.Outlined.BatteryFull
-    TabGroupIcon.MEMORY -> Icons.Outlined.Memory
-    TabGroupIcon.LOCK -> Icons.Outlined.Lock
-    TabGroupIcon.SCIENCE -> Icons.Outlined.Science
+private val TAB_GROUP_ICON_VECTORS: Map<TabGroupIcon, ImageVector> by lazy {
+    mapOf(
+        TabGroupIcon.FOLDER to Icons.Outlined.FolderOpen,
+        TabGroupIcon.BOOKMARK to Icons.Outlined.Bookmark,
+        TabGroupIcon.BUG to Icons.Outlined.BugReport,
+        TabGroupIcon.CODE to Icons.Outlined.Code,
+        TabGroupIcon.DEVICE to Icons.Outlined.PhoneAndroid,
+        TabGroupIcon.FLAG to Icons.Outlined.Flag,
+        TabGroupIcon.STAR to Icons.Outlined.StarBorder,
+        TabGroupIcon.SEARCH to Icons.Outlined.Search,
+        TabGroupIcon.WARNING to Icons.Outlined.Warning,
+        TabGroupIcon.SCHEDULE to Icons.Outlined.Schedule,
+        TabGroupIcon.CLOUD to Icons.Outlined.Cloud,
+        TabGroupIcon.WIFI to Icons.Outlined.Wifi,
+        TabGroupIcon.BATTERY to Icons.Outlined.BatteryFull,
+        TabGroupIcon.MEMORY to Icons.Outlined.Memory,
+        TabGroupIcon.LOCK to Icons.Outlined.Lock,
+        TabGroupIcon.SCIENCE to Icons.Outlined.Science,
+        TabGroupIcon.SYNC to Icons.Outlined.Sync,
+        TabGroupIcon.STORAGE to Icons.Outlined.Storage,
+        TabGroupIcon.NETWORK to Icons.Outlined.Lan,
+        TabGroupIcon.CAMERA to Icons.Outlined.CameraAlt,
+        TabGroupIcon.SPEED to Icons.Outlined.Speed,
+        TabGroupIcon.NOTIFICATIONS to Icons.Outlined.Notifications,
+        TabGroupIcon.BUILD to Icons.Outlined.Build,
+        TabGroupIcon.LOCATION to Icons.Outlined.LocationOn,
+        TabGroupIcon.TERMINAL to Icons.Outlined.Terminal,
+        TabGroupIcon.HISTORY to Icons.Outlined.History,
+    )
 }
 
-/** Width a chip's icon adds (icon plus its gap); none when the group has no icon. */
+/** The icon's Material Outlined drawable; null for [TabGroupIcon.NONE]. */
+internal fun TabGroupIcon.imageVector(): ImageVector? = TAB_GROUP_ICON_VECTORS[this]
+
+/** The icon picker's rows: [TAB_GROUP_ICONS_PER_ROW] to a row in declaration order, so a count that is not a multiple still wraps evenly. */
+internal fun tabGroupIconRows(): List<List<TabGroupIcon>> = TabGroupIcon.entries.chunked(TAB_GROUP_ICONS_PER_ROW)
+
+/** Width a chip's icon adds (icon plus its gap); none when the group has none. */
 internal fun tabGroupChipIconWidthDp(group: TabGroup): Float =
     if (group.icon == TabGroupIcon.NONE) 0f else TAB_GROUP_CHIP_ICON_DP + TAB_GROUP_CHIP_ICON_GAP_DP
 
+/**
+ * The width a chip needs to show everything it draws: the style's padding and card inset, the 8 dp dot, the optional icon and its
+ * gaps, the label ("▾/▸ name · N", measured in the style's own font) and a little rounding slack, clamped
+ * to [TAB_GROUP_HEADER_MIN_WIDTH_DP]..[TAB_GROUP_HEADER_MAX_WIDTH_DP]. Only a name longer than the cap is ever cut off.
+ */
 internal fun tabGroupHeaderWidthPx(
     group: TabGroup,
     textMeasurer: TextMeasurer,
     uiFont: androidx.compose.ui.text.font.FontFamily,
     density: Density,
     style: TabStripStyle = TabStripStyle.CURRENT,
+    position: TabStripPosition = TabStripPosition.TOP,
 ): Float {
     val labelWidth = textMeasurer.measure(
         AnnotatedString(tabGroupChipLabel(group)),
         style = tabLabelMeasureStyle(style, uiFont),
     ).size.width.toFloat()
-    val chromeDp = tabChromeWidthDp(style) + TAB_GROUP_CHIP_DOT_DP + tabGroupChipIconWidthDp(group) + TAB_GROUP_CHIP_WIDTH_SLACK_DP
+    val chromeDp = tabChromeWidthDp(style, position) + TAB_GROUP_CHIP_DOT_DP + tabGroupChipIconWidthDp(group) + TAB_GROUP_CHIP_WIDTH_SLACK_DP
     return (labelWidth + with(density) { chromeDp.dp.toPx() })
         .coerceIn(
             with(density) { TAB_GROUP_HEADER_MIN_WIDTH_DP.dp.toPx() },
@@ -481,6 +516,8 @@ internal fun TabGroupHeader(
                 tailing = false,
                 groupColor = null,
                 groupTintAlpha = 0f,
+                // The chip keeps the style's own fill and always wears the group colour as a 1 dp border.
+                outlineColor = group.color,
             ),
         )
     }
@@ -601,7 +638,8 @@ private fun GroupIconOption(icon: TabGroupIcon, selected: Boolean, onClick: () -
 }
 
 /**
- * Creates (isNew) or edits a group: name, colour from the shared picker, optional icon. A new group reads "New tab group" with a
+ * Creates (isNew) or edits a group: name, colour from the shared picker, optional icon, and whether the colour tints its member
+ * tabs. A new group reads "New tab group" with a
  * "Create group" button, and cancelling it (Cancel or Esc) removes the group again; an existing one reads "Edit tab group" / "Save".
  */
 @Composable
@@ -614,6 +652,7 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
     var name by remember(group.id) { mutableStateOf(TextFieldValue(group.name, selection = TextRange(0, group.name.length))) }
     var selectedColor by remember(group.id) { mutableStateOf(group.color) }
     var selectedIcon by remember(group.id) { mutableStateOf(group.icon) }
+    var tintMembers by remember(group.id) { mutableStateOf(group.tintMembers) }
     var pickerOpen by remember(group.id) { mutableStateOf(false) }
     val nameFocus = remember(group.id) { FocusRequester() }
     LaunchedEffect(group.id) { runCatching { nameFocus.requestFocus() } }
@@ -628,6 +667,7 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
         state.renameTabGroup(groupId, name.text.trim().ifBlank { group.name })
         state.setTabGroupColor(groupId, selectedColor.toArgb())
         state.setTabGroupIcon(groupId, selectedIcon)
+        state.setTabGroupTintMembers(groupId, tintMembers)
         onDismiss()
     }
 
@@ -677,8 +717,8 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
             }
             DialogField("Icon (optional)") {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Two lines: every icon shows at once, none sits behind a scroll.
-                    TabGroupIcon.entries.chunked(TAB_GROUP_ICONS_PER_ROW).forEachIndexed { index, rowIcons ->
+                    // Rows of nine: every icon shows at once, none sits behind a scroll.
+                    tabGroupIconRows().forEachIndexed { index, rowIcons ->
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.testTag("tab-group-icon-row-$index")) {
                             rowIcons.forEach { icon ->
                                 GroupIconOption(icon, selected = selectedIcon == icon) { selectedIcon = icon }
@@ -686,6 +726,13 @@ internal fun TabGroupEditorDialog(state: AppState, groupId: String, isNew: Boole
                         }
                     }
                 }
+            }
+            CheckRow(
+                checked = tintMembers,
+                onToggle = { tintMembers = !tintMembers },
+                modifier = Modifier.testTag("tab-group-tint-members"),
+            ) {
+                AppText("Tint tabs in this group", color = tc.tx, fontSize = 12.sp)
             }
             Row(
                 Modifier.fillMaxWidth().padding(top = 4.dp),

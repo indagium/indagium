@@ -60,6 +60,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -133,10 +134,15 @@ internal fun tabLabelMeasureStyle(style: TabStripStyle, uiFont: FontFamily): Tex
     else -> TextStyle(fontSize = 12.sp, fontFamily = MONO, fontWeight = FontWeight.Normal)
 }
 
-/** The width in dp a tab of [style] adds around its content: the start and end padding plus one gap (between a leading slot and the label). */
-internal fun tabChromeWidthDp(style: TabStripStyle): Float {
-    val metrics = tabMetrics(style, TabStripPosition.TOP)
-    return metrics.padStart.value + metrics.padEnd.value + metrics.gap.value
+/**
+ * The width in dp a tab of [style] on a strip at [position] adds around its content: the gap between the tab cell and the drawn tab
+ * (the card's inset on its two horizontal sides), the start and end padding, plus one gap (between a leading slot and the label).
+ * A group chip adds its own dot and icon on top; the 1 dp outline is drawn inside the shape and takes no room.
+ */
+internal fun tabChromeWidthDp(style: TabStripStyle, position: TabStripPosition = TabStripPosition.TOP): Float {
+    val metrics = tabMetrics(style, position)
+    val inset = metrics.inset.calculateLeftPadding(LayoutDirection.Ltr).value + metrics.inset.calculateRightPadding(LayoutDirection.Ltr).value
+    return inset + metrics.padStart.value + metrics.padEnd.value + metrics.gap.value
 }
 
 /** The strip's own background: the app background for QUIET, the panel tone for every other style. */
@@ -171,25 +177,27 @@ private fun tabCloseButtonShape(style: TabStripStyle, position: TabStripPosition
 
 private fun Modifier.raisedCard(tc: ThemeColors, position: TabStripPosition, tint: Color?): Modifier {
     val shape = raisedShape(position)
-    return background(tc.bg, shape).groupTint(tint, shape).drawBehind {
-        val inset = 0.5.dp.toPx()
-        val overshoot = RAISED_RADIUS.toPx() * 2
-        // The outline is a rounded rect that runs past the open side, which the clip then cuts off.
-        val (topLeft, outline) = when (position) {
-            TabStripPosition.TOP -> Offset(inset, inset) to Size(size.width - 2 * inset, size.height + overshoot)
-            TabStripPosition.BOTTOM -> Offset(inset, -overshoot) to Size(size.width - 2 * inset, size.height + overshoot - inset)
-            TabStripPosition.LEFT -> Offset(inset, inset) to Size(size.width + overshoot, size.height - 2 * inset)
-            TabStripPosition.RIGHT -> Offset(-overshoot, inset) to Size(size.width + overshoot - inset, size.height - 2 * inset)
-        }
-        clipRect {
-            drawRoundRect(
-                color = tc.br,
-                topLeft = topLeft,
-                size = outline,
-                cornerRadius = CornerRadius(RAISED_RADIUS.toPx()),
-                style = Stroke(1.dp.toPx()),
-            )
-        }
+    return background(tc.bg, shape).groupTint(tint, shape).drawBehind { drawRaisedOutline(position, tc.br) }
+}
+
+// The raised card's outline: a rounded rect that runs past the open side (the one facing the content), which the clip then cuts off.
+private fun DrawScope.drawRaisedOutline(position: TabStripPosition, color: Color) {
+    val inset = 0.5.dp.toPx()
+    val overshoot = RAISED_RADIUS.toPx() * 2
+    val (topLeft, outline) = when (position) {
+        TabStripPosition.TOP -> Offset(inset, inset) to Size(size.width - 2 * inset, size.height + overshoot)
+        TabStripPosition.BOTTOM -> Offset(inset, -overshoot) to Size(size.width - 2 * inset, size.height + overshoot - inset)
+        TabStripPosition.LEFT -> Offset(inset, inset) to Size(size.width + overshoot, size.height - 2 * inset)
+        TabStripPosition.RIGHT -> Offset(-overshoot, inset) to Size(size.width + overshoot - inset, size.height - 2 * inset)
+    }
+    clipRect {
+        drawRoundRect(
+            color = color,
+            topLeft = topLeft,
+            size = outline,
+            cornerRadius = CornerRadius(RAISED_RADIUS.toPx()),
+            style = Stroke(1.dp.toPx()),
+        )
     }
 }
 
@@ -370,6 +378,19 @@ private fun Modifier.classicTabChrome(
     .border(BorderStroke(1.dp, tc.br.copy(alpha = 0.95f)))
     .drawBehind { if (isActive) contentSideMark(style, position, ACCENT_UNDERLINE.toPx(), accent) }
 
+// A 1 dp outline in [color] in the tab's own shape, over its chrome (so it sits before the chrome in the chain: a modifier draws its
+// content, then its own border). The raised card is open toward the content, so its outline is the
+// card's own open-sided one.
+private fun Modifier.tabOutline(style: TabStripStyle, position: TabStripPosition, color: Color): Modifier =
+    if (style == TabStripStyle.RAISED) {
+        drawWithContent {
+            drawContent()
+            drawRaisedOutline(position, color)
+        }
+    } else {
+        border(1.dp, color, tabShape(style, position))
+    }
+
 @Composable
 private fun TabBadge(text: String, tag: String) {
     val tc = tc()
@@ -443,6 +464,7 @@ internal fun TabShell(
                 Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
                     .padding(metrics.inset)
                     .testTag("tab-$pointerKey")
+                    .then(if (appearance.outlineColor == null) Modifier else Modifier.tabOutline(style, position, appearance.outlineColor))
                     .tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
                     // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
                     // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.

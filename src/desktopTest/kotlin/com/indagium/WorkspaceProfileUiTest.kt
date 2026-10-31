@@ -171,7 +171,7 @@ class WorkspaceProfileUiTest {
     }
 
     @Test
-    fun theCustomizedStripNamesATabStyleChangeOnlyForACustomProfile() {
+    fun theCustomizedStripNamesATabStyleChangeForACustomProfileAndForABuiltIn() {
         val state = AppState()
         state.saveCurrentAsWorkspaceProfile("Mine")
         state.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) }
@@ -182,9 +182,10 @@ class WorkspaceProfileUiTest {
         rule.runOnIdle { state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC) }
         rule.waitForIdle()
         rule.onAllNodesWithText("Customized", substring = true).assertCountEquals(0)
+        // A built-in carries the whole look: a tab style that is not its (default) one is a difference, like for any profile.
         rule.runOnIdle { state.updateSettings { it.copy(tabStripStyle = TabStripStyle.QUIET) } }
         rule.waitForIdle()
-        rule.onAllNodesWithText("Customized", substring = true).assertCountEquals(0)
+        rule.onNodeWithText("Customized — 1 setting differs from Indagium Classic: Tab style").assertExists()
     }
 
     @Test

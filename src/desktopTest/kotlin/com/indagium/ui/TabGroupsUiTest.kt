@@ -163,14 +163,17 @@ class TabGroupsUiTest {
         assertEquals(listOf(TabRef.Log("a")), state.tabGroups.single().members)
         assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon)
         rule.onNodeWithTag("tab-group-name").assertExists()
-        rule.onNodeWithTag("tab-group-icon-row-0").assertExists()
-        rule.onNodeWithTag("tab-group-icon-row-1").assertExists()
-        assertFalse(exists("tab-group-icon-row-2"), "the icons wrap onto two lines")
-        assertTrue(
-            rule.onNodeWithTag("tab-group-icon-row-1").getBoundsInRoot().top >= rule.onNodeWithTag("tab-group-icon-row-0").getBoundsInRoot().bottom,
-            "the second line sits under the first",
-        )
+        for (row in 0..2) rule.onNodeWithTag("tab-group-icon-row-$row").assertExists()
+        assertFalse(exists("tab-group-icon-row-3"), "the icons wrap onto three full lines")
+        for (row in 1..2) {
+            val above = rule.onNodeWithTag("tab-group-icon-row-${row - 1}").getBoundsInRoot()
+            assertTrue(rule.onNodeWithTag("tab-group-icon-row-$row").getBoundsInRoot().top >= above.bottom, "line ${row + 1} sits under line $row")
+        }
         TabGroupIcon.entries.forEach { rule.onNodeWithTag("tab-group-icon-${it.name.lowercase()}").assertExists() }
+        // Every line holds exactly nine icons: the icons of one line share their top edge, and each line is full.
+        val rows = TabGroupIcon.entries.groupBy { rule.onNodeWithTag("tab-group-icon-${it.name.lowercase()}").getBoundsInRoot().top }
+        assertEquals(listOf(9, 9, 9), rows.toSortedMap().values.map { it.size }, "the picker lays its icons out in rows of nine")
+        assertEquals(TabGroupIcon.entries.chunked(9), rows.toSortedMap().values.toList(), "in declaration order, nine to a row")
         rule.onNodeWithText("New tab group").assertExists()
         rule.onNodeWithText("Create group").assertExists()
         assertFalse(exists("tab-group-text-size-large"), "the per-group text size is gone")
@@ -330,6 +333,59 @@ class TabGroupsUiTest {
             "the active member keeps its tint when the group is collapsed",
         )
         assertFalse(exists("tab-b"))
+    }
+
+    @Test
+    fun aGroupWithTintOffLeavesItsMembersUntintedButStillGroupedAndOrdered() {
+        newState(tab("a"), tab("b"), tab("c"))
+        val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
+        state.assignTabToGroup(TabRef.Log("b"), groupId)
+        setStrip()
+        val groupColor = state.tabGroups.single().color
+        assertArgbNear(tintedOver(LIGHT_THEME.p2, groupColor, GROUP_TINT_ALPHA_LIGHT), tintSample("tab-b"), "a tinted member shows the tint")
+
+        state.setTabGroupTintMembers(groupId, false)
+        rule.waitForIdle()
+        assertEquals(LIGHT_THEME.p2.toArgb(), tintSample("tab-b"), "an untinted member looks like an ungrouped tab")
+        assertEquals(tintSample("tab-c"), tintSample("tab-b"))
+        assertEquals(LIGHT_THEME.bg.toArgb(), tintSample("tab-a"), "the active member is untinted too")
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b")), state.tabGroups.single().members, "membership and order are kept")
+        assertTrue(exists("tab-group-chip-$groupId"), "the chip is still drawn")
+    }
+
+    @Test
+    fun theEditorOffersATintCheckboxThatSavesTheFlag() {
+        newState(tab("a"), tab("b"))
+        val groupId = requireNotNull(state.createTabGroup(TabRef.Log("a")))
+        var editing by mutableStateOf<Pair<String, Boolean>?>(groupId to false)
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                editing?.let { (id, isNew) -> TabGroupEditorDialog(state, id, isNew) { editing = null } }
+            }
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("Tint tabs in this group").assertExists()
+        rule.onNodeWithTag("tab-group-tint-members").assertExists()
+
+        // Cancel keeps the flag; toggling then saving writes it.
+        rule.onNodeWithTag("tab-group-tint-members").performClick()
+        rule.onNodeWithTag("tab-group-cancel").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tabGroups.single().tintMembers, "cancelling changes nothing")
+
+        editing = groupId to false
+        rule.waitForIdle()
+        rule.onNodeWithTag("tab-group-tint-members").performClick()
+        rule.onNodeWithTag("tab-group-save").performClick()
+        rule.waitForIdle()
+        assertFalse(state.tabGroups.single().tintMembers)
+
+        editing = groupId to false
+        rule.waitForIdle()
+        rule.onNodeWithTag("tab-group-tint-members").performClick()
+        rule.onNodeWithTag("tab-group-save").performClick()
+        rule.waitForIdle()
+        assertTrue(state.tabGroups.single().tintMembers)
     }
 
     @Test

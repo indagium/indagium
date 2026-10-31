@@ -924,9 +924,11 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   `applySavedLogViewLayout`. Besides its top-level look fields (theme, fonts, size, minimap, toolbar labels, Original for new files) a profile
   may define two optional groups covering the rest of the Appearance and Editor behavior pages: `ProfileAppearance` (interface scale, row
   numbers, tab strip style and options, tab-strip position and toolbar placement) and `ProfileBehavior` (Ctrl+F target and search scope, split
-  sync, row wrapping, tailing, scroll margin, list sizes and similar). Built-in profiles define neither, so applying one never resets them;
-  "Save as new profile…", "Update from current setup" and the setup assistant's "My setup" profile (created when its choices differ from the
-  picked profile) capture both in full. Applying sets only the fields a profile defines, and "Customized" compares only those.
+  sync, row wrapping, tailing, scroll margin, list sizes and similar). A profile is the whole look and behaviour: applying any profile sets
+  every field of both groups, and a missing group or field (older custom profiles) means the `AppSettings()` default, never "keep current".
+  Built-in profiles carry both groups in full at the defaults; "Save as new profile…", "Update from current setup" and the setup assistant's
+  "My setup" profile (created when its choices differ from the picked profile) capture the live values. "Customized" compares the same
+  resolved values, so it matches exactly what applying would change.
   `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
   Filter group off instead of listing eight hidden tiles (the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
@@ -1006,13 +1008,14 @@ is the default and draws exactly what the shell always drew (`TabStripStyleUiTes
   give the fixed result) with `tabOffsets` for where every tab sits during the drag.
 - **Tab groups** (`ui/TabGroups.kt`, `ui/TabGroupsUi.kt`). The strip's persisted `TabRef` order is the source for both rendering and reorder commits;
   groups keep an ordered, contiguous set of log and diagram members, while Tests and capture-launcher tabs stay outside groups. A group header is a
-  full-height tab cell drawn with the current tab style's shell (8dp colour dot, the optional icon, "▾ name · N") that collapses or expands its
-  members without changing the active surface; a collapsed
+  full-height tab cell drawn with the current tab style's shell and a 1dp border in the group colour (8dp colour dot, the optional icon,
+  "▾ name · N", sized from all of these up to 280dp) that collapses or expands its members without changing the active surface; a collapsed
   group still shows its active member beside the header and folds fully once another tab is active. The header menu offers Rename…, Colour ▸,
   Collapse/Expand, Edit group…, Ungroup (order preserved) and Close group; tab menus create a group ("Add to new group" opens the dialog as new, and
   Cancel removes it), add or move a tab through a "Add to group ▸"/"Move to group ▸" submenu with colour swatches ending in "New group…", or remove
   its membership. Group colours come from the shared highlighter palette (`HL_COLORS` plus custom colours, via `HighlighterColorPicker`); a new group
-  takes the first palette colour no other group uses and its first tab's file name. Member tabs are tinted with the group colour inside their own
+  takes the first palette colour no other group uses and its first tab's file name. Unless the group's "Tint tabs in this group" option
+  (`tintMembers`, persisted, default on) is off, member tabs are tinted with the group colour inside their own
   shape (10% on a light panel, 16% on a dark one, 22% while a dragged tab hovers the group), under the source stripe, active accent, badges and
   close button, which stay exactly as on an ungrouped tab. A log's open diagrams (sessions whose `sourceTabId` is that log) join, move and leave a
   group with it and sit right after it. A tab drag keeps the strip's layout order and

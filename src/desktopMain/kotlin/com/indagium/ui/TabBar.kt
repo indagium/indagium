@@ -419,9 +419,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     val groupedFixedMode = groupedMode && !fit
     val textMeasurer = rememberTextMeasurer()
     val uiFont = LocalUiFontFamily.current
-    val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont, settings.tabStripStyle) {
+    val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont, settings.tabStripStyle, position) {
         groups.associate { group ->
-            group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext, settings.tabStripStyle)
+            group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext, settings.tabStripStyle, position)
         }
     }
     val logById = state.tabs.associateBy { it.id }
@@ -520,6 +520,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     // A member tab's look: a tint in its group's colour inside the tab's own shape (stronger while a dragged tab hovers the group).
     fun memberAppearance(ref: TabRef, base: TabAppearance): TabAppearance {
         val group = groups.firstOrNull { ref in it.members } ?: return base
+        if (!group.tintMembers) return base
         return base.copy(
             groupColor = group.color,
             groupTintAlpha = tabGroupTintAlpha(tc.p, dragHover = group.id == hoveredGroupId),

@@ -19,12 +19,17 @@ import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.WorkspaceProfile
 import com.indagium.ui.activeLogViewLayoutRef
 import com.indagium.ui.applyLogViewPreset
+import com.indagium.ui.currentProfileAppearance
+import com.indagium.ui.currentProfileBehavior
 import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.profileDifferences
+import com.indagium.ui.profileSpecFromJson
 import com.indagium.ui.resolved
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import com.indagium.ui.withProfileSpec
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -202,36 +207,99 @@ class WorkspaceProfileTest {
         ),
     )
 
+    private fun customizedLiveSettings(s: AppSettings) = s.copy(
+        tabStripStyle = TabStripStyle.QUIET,
+        tabStripPosition = TabStripPosition.RIGHT,
+        toolbarPlacement = ToolbarPlacement.OWN_EDGE,
+        toolbarEdge = ChromeEdge.LEFT,
+        toolbarAlign = ToolbarAlign.END,
+        ctrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+        interfaceScalePercent = 140,
+        navScrollMargin = 12,
+        filterListRows = 9,
+        tabShowTypeBadge = true,
+        verticalTabBarWidthDp = 300f,
+    )
+
     @Test
-    fun builtInProfilesDefineNeitherGroupSoApplyingOneLeavesTabStyleChromeAndCtrlFAlone() {
+    fun builtInProfilesDefineBothGroupsInFullAsTheAppDefaults() {
+        val defaults = AppSettings()
         for (profile in WorkspaceProfile.entries) {
-            assertNull(profile.spec.appearance, profile.id)
-            assertNull(profile.spec.behavior, profile.id)
+            // currentProfile* sets every field, so equality also means the built-in leaves no null (keep-live) field.
+            assertEquals(currentProfileAppearance(defaults), profile.spec.appearance, "${profile.id}: appearance is the app default, field for field")
+            assertEquals(currentProfileBehavior(defaults), profile.spec.behavior, "${profile.id}: behavior is the app default, field for field")
         }
+    }
+
+    @Test
+    fun applyingAnyBuiltInProfileSetsEveryAppearanceAndBehaviorFieldToTheAppDefault() {
+        val defaults = AppSettings()
+        for (profile in WorkspaceProfile.entries) {
+            val state = AppState()
+            state.updateSettings { customizedLiveSettings(it).copy(chromeLocked = true) }
+
+            state.applyWorkspaceProfile(profile)
+
+            val after = state.settings
+            assertEquals(currentProfileAppearance(defaults), currentProfileAppearance(after), "${profile.id}: appearance returns to the defaults")
+            assertEquals(currentProfileBehavior(defaults), currentProfileBehavior(after), "${profile.id}: behavior returns to the defaults")
+            assertTrue(after.chromeLocked, "${profile.id}: the chrome lock is not part of a profile")
+            assertEquals(emptyList(), state.workspaceProfileDifferences(), "${profile.id}: nothing is Customized right after applying")
+        }
+    }
+
+    @Test
+    fun savingTheCurrentSetupAsANewProfileThenApplyingAClassicProfileAndTheSavedOneRestoresTheTabs() {
+        val defaults = AppSettings()
         val state = AppState()
         state.updateSettings {
             it.copy(
-                tabStripStyle = TabStripStyle.QUIET,
-                tabStripPosition = TabStripPosition.RIGHT,
+                tabStripStyle = TabStripStyle.PILL,
                 toolbarPlacement = ToolbarPlacement.OWN_EDGE,
-                toolbarEdge = ChromeEdge.LEFT,
-                ctrlFTarget = CtrlFTarget.KEYWORD_REGEX,
-                interfaceScalePercent = 140,
-                navScrollMargin = 12,
+                toolbarEdge = ChromeEdge.BOTTOM,
+                tabStripPosition = TabStripPosition.LEFT,
             )
         }
-        val before = state.settings
+        val saved = state.saveCurrentAsWorkspaceProfile("Tabs")
 
-        for (profile in WorkspaceProfile.entries) state.applyWorkspaceProfile(profile)
+        state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
+        assertEquals(defaults.tabStripStyle, state.settings.tabStripStyle, "a built-in puts the tab style back")
+        assertEquals(defaults.toolbarPlacement, state.settings.toolbarPlacement, "and the toolbar placement")
+        assertEquals(defaults.tabStripPosition, state.settings.tabStripPosition, "and the tab position")
+        assertEquals(defaults.toolbarEdge, state.settings.toolbarEdge)
 
-        val after = state.settings
-        assertEquals(before.tabStripStyle, after.tabStripStyle)
-        assertEquals(before.tabStripPosition, after.tabStripPosition)
-        assertEquals(before.toolbarPlacement, after.toolbarPlacement)
-        assertEquals(before.toolbarEdge, after.toolbarEdge)
-        assertEquals(before.ctrlFTarget, after.ctrlFTarget)
-        assertEquals(before.interfaceScalePercent, after.interfaceScalePercent)
-        assertEquals(before.navScrollMargin, after.navScrollMargin)
+        state.applyResolvedProfile(requireNotNull(state.resolveWorkspaceProfile(saved.id)))
+        assertEquals(TabStripStyle.PILL, state.settings.tabStripStyle)
+        assertEquals(ToolbarPlacement.OWN_EDGE, state.settings.toolbarPlacement)
+        assertEquals(ChromeEdge.BOTTOM, state.settings.toolbarEdge)
+        assertEquals(TabStripPosition.LEFT, state.settings.tabStripPosition)
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
+    }
+
+    @Test
+    fun anOldCustomProfileWithoutGroupsAppliesTheDefaultsAndIsNotCustomizedAfterwards() {
+        val old = profileSpecFromJson(
+            Json.parseToJsonElement(
+                """{"theme":"DRACULA","fontSize":15,"showMinimap":false,"toolbarIconOnlyButtons":false,"openNewFilesWithUnfiltered":true}""",
+            ) as JsonObject,
+        )
+        assertNull(old.appearance)
+        assertNull(old.behavior)
+        val profile = CustomWorkspaceProfile("custom-old", "Old", old)
+        val state = AppState()
+        state.updateSettings { customizedLiveSettings(it).copy(customWorkspaceProfiles = listOf(profile)) }
+
+        state.applyResolvedProfile(profile.resolved())
+
+        val defaults = AppSettings()
+        assertEquals(ThemePreset.DRACULA, state.settings.theme, "the always-applied look still applies")
+        assertEquals(currentProfileAppearance(defaults), currentProfileAppearance(state.settings), "a missing group means the defaults")
+        assertEquals(currentProfileBehavior(defaults), currentProfileBehavior(state.settings))
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
+
+        // And it counts as the defaults when compared: a changed tab style now shows.
+        state.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) }
+        assertEquals(listOf("Tab style"), state.workspaceProfileDifferences())
     }
 
     @Test
@@ -258,7 +326,7 @@ class WorkspaceProfileTest {
     }
 
     @Test
-    fun aGroupFieldThatIsNullKeepsTheLiveValueWhenApplied() {
+    fun aGroupFieldThatIsNullMeansTheAppDefaultWhenApplied() {
         val defaults = AppSettings()
         val live = defaults.copy(tabStripStyle = TabStripStyle.QUIET, ctrlFTarget = CtrlFTarget.MESSAGE_RULE, filterListRows = 9)
         val spec = WorkspaceProfile.CLASSIC.spec.copy(
@@ -269,9 +337,24 @@ class WorkspaceProfileTest {
         val applied = live.withProfileSpec(spec)
 
         assertEquals(TabStripPosition.BOTTOM, applied.tabStripPosition)
-        assertEquals(TabStripStyle.QUIET, applied.tabStripStyle)
-        assertEquals(CtrlFTarget.MESSAGE_RULE, applied.ctrlFTarget)
-        assertEquals(9, applied.filterListRows)
+        assertEquals(defaults.tabStripStyle, applied.tabStripStyle)
+        assertEquals(defaults.ctrlFTarget, applied.ctrlFTarget)
+        assertEquals(defaults.filterListRows, applied.filterListRows)
+    }
+
+    @Test
+    fun aMissingGroupAppliesAndComparesAsTheDefaults() {
+        val defaults = AppSettings()
+        val live = customizedLiveSettings(defaults)
+        val spec = WorkspaceProfile.CLASSIC.spec.copy(appearance = null, behavior = null)
+
+        val applied = live.withProfileSpec(spec)
+
+        assertEquals(currentProfileAppearance(defaults), currentProfileAppearance(applied))
+        assertEquals(currentProfileBehavior(defaults), currentProfileBehavior(applied))
+        assertEquals(emptyList(), profileDifferences(spec, applied))
+        assertTrue("Tab style" in profileDifferences(spec, live), "the live QUIET style differs from the default a missing group means")
+        assertTrue("Ctrl+F opens" in profileDifferences(spec, live))
     }
 
     @Test
@@ -287,25 +370,25 @@ class WorkspaceProfileTest {
     }
 
     @Test
-    fun customizedListsOnlyTheDifferencesOfGroupsTheProfileDefines() {
+    fun customizedListsEveryChangedValueWithAMissingOneMeaningItsDefault() {
         val state = AppState()
         val profile = CustomWorkspaceProfile("custom-g", "Grouped", groupedSpec)
         state.updateSettings { it.copy(customWorkspaceProfiles = listOf(profile)) }
         state.applyResolvedProfile(profile.resolved())
 
         state.updateSettings { it.copy(tabStripStyle = TabStripStyle.OUTLINED, ctrlFTarget = CtrlFTarget.FIND_BAR) }
-        // A value the profile leaves null (filterListRows) never counts, and neither does the chrome lock.
+        // A value the profile leaves null (filterListRows) counts as the default, so a changed one shows; the chrome lock never does.
         state.updateSettings { it.copy(filterListRows = 12, chromeLocked = true) }
 
-        assertEquals(listOf("Tab style", "Ctrl+F opens"), state.workspaceProfileDifferences())
+        assertEquals(listOf("Tab style", "Ctrl+F opens", "Filter list rows"), state.workspaceProfileDifferences())
     }
 
     @Test
-    fun aTabStyleChangeShowsForACustomProfileButNeverForABuiltIn() {
+    fun aTabStyleChangeShowsForABuiltInAndForACustomProfile() {
         val builtIn = AppState()
         builtIn.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
         builtIn.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL, ctrlFTarget = CtrlFTarget.TAGS, tabStripPosition = TabStripPosition.LEFT) }
-        assertEquals(emptyList(), builtIn.workspaceProfileDifferences())
+        assertEquals(listOf("Tab style", "Tab position", "Ctrl+F opens"), builtIn.workspaceProfileDifferences())
 
         val custom = AppState()
         val saved = custom.saveCurrentAsWorkspaceProfile("Mine")

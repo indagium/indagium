@@ -13,10 +13,15 @@ import com.indagium.model.ThemePreset
 // Built-in workspace profiles (Settings → General): one click sets the theme and log typography and
 // applies the log-view layout the profile points at. A profile owns the look and the defaults; the
 // panels belong to the layout it references (a preset or a saved layout), so toggling a panel never
-// makes a profile "Customized". Built-in profiles define only the theme/font look and defaults;
-// custom ones may also carry the Appearance and Editor behavior groups (ProfileSpec.appearance /
-// .behavior). Every value is still individually editable afterwards; the "Customized" strip in the
-// General section is driven by [profileDifferences].
+// makes a profile "Customized". A profile is the whole look and behaviour: applying one sets every field of both the Appearance and
+// the Editor behavior groups (ProfileSpec.appearance / .behavior), and a missing group or field means the app DEFAULT (AppSettings()),
+// never "keep what is on screen". The built-ins therefore carry both groups in full (the defaults); custom ones carry what they were
+// saved with, and older ones without groups read as the defaults. Every value is still individually editable afterwards; the
+// "Customized" strip in the General section is driven by [profileDifferences], which compares the same resolved values.
+
+/** Both groups of a profile that changes nothing from the app defaults: what every built-in carries. */
+internal val DEFAULT_PROFILE_APPEARANCE: ProfileAppearance = currentProfileAppearance(AppSettings())
+internal val DEFAULT_PROFILE_BEHAVIOR: ProfileBehavior = currentProfileBehavior(AppSettings())
 
 internal enum class WorkspaceProfile(
     val id: String,
@@ -30,6 +35,7 @@ internal enum class WorkspaceProfile(
             theme = ThemePreset.WARM_PAPER, fontSize = 12, showMinimap = true,
             toolbarIconOnlyButtons = true, openNewFilesWithUnfiltered = false,
             layout = ProfileLayoutRef.Preset(LogViewPresetId.CLASSIC),
+            appearance = DEFAULT_PROFILE_APPEARANCE, behavior = DEFAULT_PROFILE_BEHAVIOR,
         ),
     ),
     FOCUSED(
@@ -38,6 +44,7 @@ internal enum class WorkspaceProfile(
             theme = ThemePreset.WARM_PAPER, fontSize = 12, showMinimap = true,
             toolbarIconOnlyButtons = true, openNewFilesWithUnfiltered = false,
             layout = ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR),
+            appearance = DEFAULT_PROFILE_APPEARANCE, behavior = DEFAULT_PROFILE_BEHAVIOR,
         ),
     ),
     COMPARE(
@@ -46,6 +53,7 @@ internal enum class WorkspaceProfile(
             theme = ThemePreset.WARM_PAPER, fontSize = 12, showMinimap = true,
             toolbarIconOnlyButtons = true, openNewFilesWithUnfiltered = true,
             layout = ProfileLayoutRef.Preset(LogViewPresetId.LOG_FOCUS),
+            appearance = DEFAULT_PROFILE_APPEARANCE, behavior = DEFAULT_PROFILE_BEHAVIOR,
         ),
     ),
     MINIMAL(
@@ -54,6 +62,7 @@ internal enum class WorkspaceProfile(
             theme = ThemePreset.GRAPHITE_DIM, fontSize = 11, showMinimap = false,
             toolbarIconOnlyButtons = true, openNewFilesWithUnfiltered = false,
             layout = ProfileLayoutRef.Preset(LogViewPresetId.LOG_FOCUS),
+            appearance = DEFAULT_PROFILE_APPEARANCE, behavior = DEFAULT_PROFILE_BEHAVIOR,
         ),
     ),
     LOGCAT_QUERY(
@@ -62,6 +71,7 @@ internal enum class WorkspaceProfile(
             theme = ThemePreset.DARK_GITHUB, fontSize = 12, showMinimap = true,
             toolbarIconOnlyButtons = true, openNewFilesWithUnfiltered = false,
             layout = ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR),
+            appearance = DEFAULT_PROFILE_APPEARANCE, behavior = DEFAULT_PROFILE_BEHAVIOR,
         ),
     ),
     ;
@@ -73,9 +83,9 @@ internal enum class WorkspaceProfile(
 }
 
 /**
- * Human labels of every value in [spec] that the live [settings] no longer match: the always-applied look and defaults, plus those of
- * the [ProfileSpec.appearance] and [ProfileSpec.behavior] groups the profile defines (a null group, or a null field in one, is not
- * compared). The layout is never one of them.
+ * Human labels of every value in [spec] that the live [settings] no longer match: the always-applied look and defaults, plus every field
+ * of the [ProfileSpec.appearance] and [ProfileSpec.behavior] groups, where a missing group or field is compared as the app default (the
+ * value applying it would set). The layout, the chrome lock and the toolbar fallback placement are never among them.
  */
 internal fun profileDifferences(spec: ProfileSpec, settings: AppSettings): List<String> =
     buildList {
@@ -86,8 +96,8 @@ internal fun profileDifferences(spec: ProfileSpec, settings: AppSettings): List<
         if (settings.showMinimap != spec.showMinimap) add("Minimap")
         if (settings.toolbarIconOnlyButtons != spec.toolbarIconOnlyButtons) add("Toolbar labels")
         if (settings.openNewFilesWithUnfiltered != spec.openNewFilesWithUnfiltered) add("Original panel for new files")
-        spec.appearance?.let { addAll(appearanceDifferences(it, settings)) }
-        spec.behavior?.let { addAll(behaviorDifferences(it, settings)) }
+        addAll(appearanceDifferences(spec.appearance.orAppDefaults(), settings))
+        addAll(behaviorDifferences(spec.behavior.orAppDefaults(), settings))
     }.distinct()
 
 /** Adds [label] when the profile defines a value ([want] non-null) and it is not the live one ([have]). */
@@ -132,10 +142,59 @@ private fun behaviorDifferences(b: ProfileBehavior, s: AppSettings): List<String
     differs("Crash rows", b.highlightEntireCrashGroup, s.highlightEntireCrashGroup)
 }
 
+/** [this] with every null field replaced by the app default (a null group is all defaults): what applying or comparing it means. */
+internal fun ProfileAppearance?.orAppDefaults(): ProfileAppearance {
+    val d = DEFAULT_PROFILE_APPEARANCE
+    val a = this ?: return d
+    return ProfileAppearance(
+        interfaceScalePercent = a.interfaceScalePercent ?: d.interfaceScalePercent,
+        showRowNumbers = a.showRowNumbers ?: d.showRowNumbers,
+        tabStripStyle = a.tabStripStyle ?: d.tabStripStyle,
+        tabSizeMode = a.tabSizeMode ?: d.tabSizeMode,
+        tabLabelMode = a.tabLabelMode ?: d.tabLabelMode,
+        tabShowTypeBadge = a.tabShowTypeBadge ?: d.tabShowTypeBadge,
+        tabShowSourceStripe = a.tabShowSourceStripe ?: d.tabShowSourceStripe,
+        tabCloseOnEvery = a.tabCloseOnEvery ?: d.tabCloseOnEvery,
+        tabCloseButtonPosition = a.tabCloseButtonPosition ?: d.tabCloseButtonPosition,
+        visibleTabLimit = a.visibleTabLimit ?: d.visibleTabLimit,
+        tabStripPosition = a.tabStripPosition ?: d.tabStripPosition,
+        toolbarPlacement = a.toolbarPlacement ?: d.toolbarPlacement,
+        toolbarEdge = a.toolbarEdge ?: d.toolbarEdge,
+        toolbarOuter = a.toolbarOuter ?: d.toolbarOuter,
+        toolbarAlign = a.toolbarAlign ?: d.toolbarAlign,
+        verticalTabBarWidthDp = a.verticalTabBarWidthDp ?: d.verticalTabBarWidthDp,
+    )
+}
+
+/** See [orAppDefaults] for [ProfileAppearance]. */
+internal fun ProfileBehavior?.orAppDefaults(): ProfileBehavior {
+    val d = DEFAULT_PROFILE_BEHAVIOR
+    val b = this ?: return d
+    return ProfileBehavior(
+        ctrlFTarget = b.ctrlFTarget ?: d.ctrlFTarget,
+        openUnfilteredOnCtrlF = b.openUnfilteredOnCtrlF ?: d.openUnfilteredOnCtrlF,
+        searchScopeBehavior = b.searchScopeBehavior ?: d.searchScopeBehavior,
+        syncSplitPanelSelectionAndScroll = b.syncSplitPanelSelectionAndScroll ?: d.syncSplitPanelSelectionAndScroll,
+        autoLogRowWrap = b.autoLogRowWrap ?: d.autoLogRowWrap,
+        logRowWrapLimitChars = b.logRowWrapLimitChars ?: d.logRowWrapLimitChars,
+        autoScrollWhileTailing = b.autoScrollWhileTailing ?: d.autoScrollWhileTailing,
+        navScrollMargin = b.navScrollMargin ?: d.navScrollMargin,
+        filterListRows = b.filterListRows ?: d.filterListRows,
+        mostUsedTagLimit = b.mostUsedTagLimit ?: d.mostUsedTagLimit,
+        showProcessNamesInNewTabs = b.showProcessNamesInNewTabs ?: d.showProcessNamesInNewTabs,
+        showRegexFilterSummary = b.showRegexFilterSummary ?: d.showRegexFilterSummary,
+        showVideoFollowReadout = b.showVideoFollowReadout ?: d.showVideoFollowReadout,
+        enableDoubleClickVideoSeekOnLink = b.enableDoubleClickVideoSeekOnLink ?: d.enableDoubleClickVideoSeekOnLink,
+        highlightEntireCrashGroup = b.highlightEntireCrashGroup ?: d.highlightEntireCrashGroup,
+    )
+}
+
 /**
- * [this] with everything [spec] defines applied (the layout is applied separately): the always-applied look and defaults, then each
- * group's non-null fields. The toolbar placement goes through [withToolbarPlacement] last, so choosing "In the log view layout" records
- * its fallback and puts the toolbar tile into / out of the stored layout exactly as the Settings radio does.
+ * [this] with everything [spec] defines applied (the layout is applied separately): the always-applied look and defaults, then every
+ * field of both groups, a missing group or field being the app default (a profile is the whole look, never "keep the current value").
+ * `chromeLocked` and `toolbarFallbackPlacement` are not part of a profile. The toolbar placement goes through [withToolbarPlacement]
+ * last, so choosing "In the log view layout" records its fallback and puts the toolbar tile into / out of the stored layout exactly as
+ * the Settings radio does.
  */
 internal fun AppSettings.withProfileSpec(spec: ProfileSpec): AppSettings =
     copy(
@@ -147,8 +206,8 @@ internal fun AppSettings.withProfileSpec(spec: ProfileSpec): AppSettings =
         showMinimap = spec.showMinimap,
         toolbarIconOnlyButtons = spec.toolbarIconOnlyButtons,
         openNewFilesWithUnfiltered = spec.openNewFilesWithUnfiltered,
-    ).let { base -> spec.appearance?.let(base::withProfileAppearance) ?: base }
-        .let { base -> spec.behavior?.let(base::withProfileBehavior) ?: base }
+    ).withProfileAppearance(spec.appearance.orAppDefaults())
+        .withProfileBehavior(spec.behavior.orAppDefaults())
 
 private fun AppSettings.withProfileAppearance(a: ProfileAppearance): AppSettings =
     copy(

@@ -4,6 +4,7 @@ import androidx.compose.ui.graphics.toArgb
 import com.indagium.model.LogFormat
 import com.indagium.utils.ParsedLog
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
@@ -522,6 +523,9 @@ class TabGroupsStateTest {
         val appended = listOf(
             TabGroupIcon.WARNING, TabGroupIcon.SCHEDULE, TabGroupIcon.CLOUD, TabGroupIcon.WIFI,
             TabGroupIcon.BATTERY, TabGroupIcon.MEMORY, TabGroupIcon.LOCK, TabGroupIcon.SCIENCE,
+            // The third row of the picker: log-triage pictograms.
+            TabGroupIcon.SYNC, TabGroupIcon.STORAGE, TabGroupIcon.NETWORK, TabGroupIcon.CAMERA, TabGroupIcon.SPEED,
+            TabGroupIcon.NOTIFICATIONS, TabGroupIcon.BUILD, TabGroupIcon.LOCATION, TabGroupIcon.TERMINAL, TabGroupIcon.HISTORY,
         )
         assertEquals(appended, TabGroupIcon.entries.takeLast(appended.size), "new icons are appended after the original ones")
         val dir = createTempDirectory("tab-groups-icons").toFile()
@@ -544,6 +548,57 @@ class TabGroupsStateTest {
                 """{"groups":[{"id":"g","name":"G","colorArgb":-16777216,"collapsed":false,"icon":"HOLOGRAM","members":[{"kind":"L","id":"t0"}]}]}""",
             )
             assertEquals(TabGroupIcon.NONE, state.tabGroups.single().icon, "a name a build does not know reads as no icon")
+        } finally {
+            state.close()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun theIconCountFillsWholePickerRowsOfNine() {
+        assertEquals(27, TabGroupIcon.entries.size, "NONE plus 26 pictograms: three full rows")
+        assertEquals(0, TabGroupIcon.entries.size % TAB_GROUP_ICONS_PER_ROW)
+        assertEquals(listOf(9, 9, 9), tabGroupIconRows().map { it.size })
+        assertEquals(TabGroupIcon.entries.toList(), tabGroupIconRows().flatten(), "every icon is in the picker, in declaration order")
+        assertEquals(TabGroupIcon.entries.size, TabGroupIcon.entries.distinct().size)
+        assertEquals(
+            TabGroupIcon.entries.filter { it != TabGroupIcon.NONE }.size,
+            TabGroupIcon.entries.mapNotNull { it.imageVector() }.distinct().size,
+            "no two icons share a drawable",
+        )
+    }
+
+    // ---- per-group tint ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    fun tintMembersDefaultsToTrueRoundTripsAndAnOlderFileWithoutTheKeyReadsAsTinted() {
+        val dir = createTempDirectory("tab-groups-tint").toFile()
+        val state = stateFor(dir)
+        try {
+            state.tabs = listOf(workspace("a"), workspace("b"))
+            state.commitTabOrder(state.tabs.map { TabRef.Log(it.id) })
+            val first = state.createTabGroup(TabRef.Log("a"))!!
+            val second = state.createTabGroup(TabRef.Log("b"))!!
+            assertTrue(state.tabGroups.all { it.tintMembers }, "a new group tints its members")
+
+            state.setTabGroupTintMembers(first, false)
+            assertFalse(state.tabGroups.single { it.id == first }.tintMembers)
+            assertTrue(state.tabGroups.single { it.id == second }.tintMembers)
+
+            val written = Json.parseToJsonElement(state.tabGroupsJson()).jsonObject.getValue("groups").jsonArray
+            assertEquals(
+                listOf(false, true),
+                written.map { it.jsonObject.getValue("tintMembers").jsonPrimitive.boolean },
+                "the flag is written for every group",
+            )
+            state.restoreTabGroups(state.tabGroupsJson())
+            assertEquals(listOf(false, true), state.tabGroups.map { it.tintMembers })
+
+            state.restoreTabGroups(
+                """{"groups":[{"id":"old","name":"Old","colorArgb":-16777216,"collapsed":false,"members":[{"kind":"L","id":"a"}]},
+                    {"id":"junk","name":"Junk","colorArgb":-16777216,"collapsed":false,"tintMembers":"no","members":[{"kind":"L","id":"b"}]}]}""",
+            )
+            assertEquals(listOf(true, true), state.tabGroups.map { it.tintMembers }, "a missing or unreadable key means tinted")
         } finally {
             state.close()
             dir.deleteRecursively()

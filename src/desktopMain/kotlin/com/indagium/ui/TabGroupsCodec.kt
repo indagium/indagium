@@ -79,6 +79,7 @@ internal fun AppState.tabGroupsJson(): String {
             put("collapsed", group.collapsed)
             put("members", JsonArray(encodedMembers))
             put("icon", group.icon.name)
+            put("tintMembers", group.tintMembers)
         }
     }
     return buildJsonObject { put("groups", JsonArray(encodedGroups)) }.toString()
@@ -112,6 +113,8 @@ internal fun AppState.restoreTabGroups(json: String) {
             ?: item.enumValueOrDefault("color", LegacyTabGroupColor.BLUE).argb
         val collapsed = item.booleanValue("collapsed") ?: false
         val icon = item.enumValueOrDefault("icon", TabGroupIcon.NONE)
+        // Appended after the first release: a file without the key (or with an unreadable one) means tinted, as before.
+        val tintMembers = item.booleanValue("tintMembers") ?: true
         val memberElements = item["members"] as? JsonArray ?: return@mapNotNull null
         val members = memberElements.mapNotNull { memberElement ->
             val member = memberElement as? JsonObject ?: return@mapNotNull null
@@ -124,7 +127,7 @@ internal fun AppState.restoreTabGroups(json: String) {
             ref.takeIf { seenMembers.add(it) }
         }.distinct()
         members.takeIf { it.isNotEmpty() }?.let {
-            TabGroup(id, name, colorArgb, collapsed, it, icon = icon)
+            TabGroup(id, name, colorArgb, collapsed, it, icon = icon, tintMembers = tintMembers)
         }
     }
     synchronized(stateLock) {

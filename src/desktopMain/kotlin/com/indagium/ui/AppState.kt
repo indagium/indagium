@@ -6872,8 +6872,9 @@ class AppState(
 
     // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
     // A profile owns the look and the defaults and points at a layout. It is applied as one updateSettings for everything the profile
-    // defines (the always-applied look, plus its Appearance / Editor behavior groups when it has them; AppSettings.withProfileSpec),
-    // then the layout through the Layout menu's own functions; the panel toggles are never written from here (the layout owns them).
+    // defines (the always-applied look, plus every field of its Appearance / Editor behavior groups, a missing one being the app default;
+    // AppSettings.withProfileSpec), then the layout through the Layout menu's own functions; the panel toggles are never written from
+    // here (the layout owns them).
     internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved(settings.customLogViewLayouts))
 
     internal fun applyResolvedProfile(profile: ResolvedProfile) {
