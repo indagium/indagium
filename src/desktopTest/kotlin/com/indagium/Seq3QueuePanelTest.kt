@@ -23,8 +23,6 @@ import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3FilterCounts
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
-import com.indagium.ui.DARK_GITHUB
-import com.indagium.ui.LIGHT_THEME
 import com.indagium.ui.Seq3ArtifactHeading
 import com.indagium.ui.Seq3CanvasRowRef
 import com.indagium.ui.Seq3MessagesMode
@@ -39,6 +37,7 @@ import com.indagium.ui.seq3CanSwapEndpoints
 import com.indagium.ui.seq3CollapsedOccurrenceCount
 import com.indagium.ui.seq3DocumentDisplaySegmentsLabel
 import com.indagium.ui.seq3DropInsideFragments
+import com.indagium.ui.seq3FragmentArrowCountLabel
 import com.indagium.ui.seq3FragmentMessageCount
 import com.indagium.ui.seq3FragmentRailLabel
 import com.indagium.ui.seq3FragmentRails
@@ -57,7 +56,6 @@ import com.indagium.ui.seq3SelectSequenceRow
 import com.indagium.ui.seq3SequenceDropCommand
 import com.indagium.ui.seq3SequenceFilterActive
 import com.indagium.ui.seq3SequenceFilterCounts
-import com.indagium.ui.seq3SequenceGhostBackground
 import com.indagium.ui.seq3SequenceGripHit
 import com.indagium.ui.seq3SequenceRowCaption
 import com.indagium.ui.seq3SequenceRowCount
@@ -265,24 +263,52 @@ class Seq3QueuePanelTest {
         assertEquals("Last 9", seq3DocumentDisplaySegmentsLabel(9))
     }
 
-    // ── WP3 item 9: fragment ×N message count (occurrenceRefs ∪ messageIds, deduplicated) ──────
+    // ── Fragment count: drawn arrows inside the box ("×N arrows"), not message templates ─────────
 
     @Test
-    fun fragmentMessageCountUnionsMessageIdsAndOccurrenceRefMessageIds() {
-        val fragment = Seq3Fragment(
-            id = "f1",
-            kind = Seq3FragmentKind.LOOP,
-            label = "loop",
-            messageIds = listOf("m1", "m2"),
-            occurrenceRefs = listOf(Seq3OccurrenceRef("m2", 10), Seq3OccurrenceRef("m3", 11)),
-        )
-        assertEquals(3, seq3FragmentMessageCount(fragment))
+    fun fragmentCountIsTheDrawnArrowsInsideTheBoxNotTheTemplates() {
+        // One template (`rep`) drawn as three arrows: the old count said "×1 messages".
+        val document = sequenceDocument(listOf(loop("rep")))
+        assertEquals(3, seq3FragmentMessageCount(document, document.fragments.single()))
+        // `rep` (3 arrows) + `big` (one collapsed summary row) + `solo`.
+        val everything = sequenceDocument(listOf(loop("rep", "big", "solo")))
+        assertEquals(5, seq3FragmentMessageCount(everything, everything.fragments.single()))
     }
 
     @Test
-    fun fragmentMessageCountIsPlainSizeWhenThereAreNoOccurrenceRefs() {
-        val fragment = Seq3Fragment(id = "f1", kind = Seq3FragmentKind.ALT, label = "alt", messageIds = listOf("m1", "m2", "m3"))
-        assertEquals(3, seq3FragmentMessageCount(fragment))
+    fun fragmentCountFollowsTheBoxSpanEvenWhenMembershipIsScattered() {
+        // Members are the first and last arrow of `rep` only; the box still spans all three.
+        val scattered = loop("rep", refs = listOf(Seq3OccurrenceRef("rep", 1), Seq3OccurrenceRef("rep", 3)))
+        val document = sequenceDocument(listOf(scattered))
+        assertEquals(3, seq3FragmentMessageCount(document, scattered))
+    }
+
+    @Test
+    fun fragmentCountSkipsHiddenArrowsLikeTheBoxDoes() {
+        val base = sequenceDocument(listOf(loop("rep")))
+        val hidden = base.copy(
+            messages = base.messages.map { message ->
+                if (message.id == "rep") {
+                    message.copy(occurrences = message.occurrences.map { if (it.entryId == 2) it.copy(visibility = Seq3Visibility.HIDDEN) else it })
+                } else {
+                    message
+                }
+            },
+        )
+        assertEquals(2, seq3FragmentMessageCount(hidden, hidden.fragments.single()))
+    }
+
+    @Test
+    fun fragmentWithNoDrawnMemberCountsNothing() {
+        val document = sequenceDocument(listOf(loop("nope")))
+        assertEquals(0, seq3FragmentMessageCount(document, document.fragments.single()))
+    }
+
+    @Test
+    fun fragmentArrowCountLabelIsSingularForOne() {
+        assertEquals("×1 arrow", seq3FragmentArrowCountLabel(1))
+        assertEquals("×2 arrows", seq3FragmentArrowCountLabel(2))
+        assertEquals("×14 arrows", seq3FragmentArrowCountLabel(14))
     }
 
     // ── WP3 item 4: lifeline drag-to-reorder — variable-height index math ──────────────────────
@@ -635,15 +661,6 @@ class Seq3QueuePanelTest {
     fun footerTextCountsTemplatesMessagesAndMissingTargets() {
         assertEquals("11 templates · 45 messages · 0 need a target", seq3QueueFooterText(11, 45, 0))
         assertEquals("1 template · 1 message · 1 need a target", seq3QueueFooterText(1, 1, 1))
-    }
-
-    @Test
-    fun theGhostFillIsOpaqueSoTheRowsUnderItNeverShowThrough() {
-        listOf(LIGHT_THEME, DARK_GITHUB).forEach { theme ->
-            val fill = seq3SequenceGhostBackground(theme)
-            assertEquals(1f, fill.alpha, "the lifted row paints an opaque fill")
-            assertTrue(fill != theme.abg, "it is the accent tint over the panel colour, not the bare translucent tint")
-        }
     }
 
     @Test

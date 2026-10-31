@@ -31,6 +31,7 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateMapOf
@@ -50,8 +51,6 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -74,7 +73,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.PopupProperties
-import androidx.compose.ui.zIndex
 import com.indagium.diagram3.SEQ3_OPERAND_FRAGMENT_KINDS
 import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3Authoring
@@ -113,6 +111,7 @@ import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3DisplayName
 import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.seq3FilterCounts
+import com.indagium.diagram3.seq3FragmentDrawnRowCount
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
 import com.indagium.diagram3.seq3SuggestedDelays
@@ -706,10 +705,10 @@ private fun Seq3CustomOrderStrip(onReset: () -> Unit) {
     }
 }
 
-/** The draggable list of drawn rows. The pointer gesture and its row animation are the ones the
- *  Templates list used to carry: a press on a grip arms a drag, the dragged row is lifted into a
- *  ghost while its slot stays as a gap, neighbours slide by block-centre crossing over measured row
- *  heights, and a release dispatches one `MoveRow`. */
+/** The draggable list of drawn rows. A press on a grip arms a drag; the dragged row then follows the
+ *  pointer in its own slot, lifted exactly like a dragged Lifeline ([seq3DragLift]), while the other
+ *  rows slide by block-centre crossing over measured row heights; a release dispatches one `MoveRow`.
+ *  The lazy list always lays the rows out in the list's own order and only the offsets change. */
 @Composable
 private fun Seq3SequenceList(
     state: AppState,
@@ -738,6 +737,14 @@ private fun Seq3SequenceList(
     }
     val gutterDp = remember(document, allRows) { seq3RailGutterDp(seq3FragmentRails(document, allRows.map(Seq3SequenceRow::ref))) }
     val listState = rememberLazyListState()
+    // Whether the dragged row's own slot is still placed by the lazy list. It is until an edge scroll
+    // has carried the slot out of the viewport; then the row is drawn under the pointer instead.
+    val draggedRowInSlot by remember(listState, view) {
+        derivedStateOf {
+            val dragged = view.queueReorderDraggedId
+            dragged == null || listState.layoutInfo.visibleItemsInfo.any { it.key == dragged }
+        }
+    }
     val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
     val currentVisibleKeys = rememberUpdatedState(visibleKeys)
     val currentDocument = rememberUpdatedState(document)
@@ -755,8 +762,8 @@ private fun Seq3SequenceList(
 
     val bodyHeightPx = SEQ3_SUBMESSAGE_ROW_HEIGHT.value * density
 
-    // The lifted row leaves only its 44dp body as the hole (its fragment label, if any, moved to the
-    // next row of the run), every other row is as tall as it was measured, label included.
+    // The dragged row is its 44dp body only (its fragment label, if any, moved to the next row of the
+    // run), every other row is as tall as it was measured, label included.
     fun heightOf(key: String): Float =
         if (key == view.queueReorderDraggedId) bodyHeightPx else rowHeights[key] ?: bodyHeightPx
 
@@ -1003,89 +1010,45 @@ private fun Seq3SequenceList(
                         label = "seq3-sequence-row-y-${row.key}",
                     )
                 }
-                if (view.queueReorderDraggedId == row.key) {
-                    // The lifted row's own slot stays an empty hole; the neighbours slide over it and
-                    // the insertion gap is drawn over the list at the row's visual slot.
+                val isDragging = view.queueReorderDraggedId == row.key
+                if (isDragging && !draggedRowInSlot) {
+                    // Only while a long edge scroll has carried the row's own slot out of the viewport:
+                    // the lazy list no longer places it, so the same row is drawn under the pointer below.
                     Spacer(Modifier.fillMaxWidth().height((bodyHeightPx / density).dp))
                 } else {
                     val isJustReleased = justReleasedKey == row.key
-                    val renderY = sequenceRenderY(
-                        isDragging = false,
-                        isJustReleased = isJustReleased,
-                        pointerY = 0f,
-                        targetY = targetY,
-                        animatedY = animatedY,
-                    )
+                    // The Lifelines list's rule: the dragged row sits where the pointer is, a row that was
+                    // just dropped snaps to its slot, every other row follows its animated slot.
                     Box(
                         Modifier.fillMaxWidth()
-                            .offset { IntOffset(0, (renderY - layoutY).roundToInt()) }
-                            .zIndex(if (isJustReleased) 1f else 0f)
-                            .graphicsLayer {
-                                if (isJustReleased) {
-                                    scaleX = 1.015f
-                                    scaleY = 1.015f
-                                }
+                            .offset {
+                                val y = sequenceRenderY(
+                                    isDragging = isDragging,
+                                    isJustReleased = isJustReleased,
+                                    pointerY = layoutY + view.queueReorderOffsetY,
+                                    targetY = targetY,
+                                    animatedY = animatedY,
+                                )
+                                IntOffset(0, (y - layoutY).roundToInt())
                             }
+                            .seq3DragLift(isDragging, tc.p)
                             .onSizeChanged { rowHeights[row.key] = it.height.toFloat() },
                     ) {
                         Seq3SequenceRowItem(
                             state, session, view, document, row, railsByKey[row.key], gutterDp, docTheme.seq1,
-                            reorderEnabled = reorderEnabled, isDragging = false,
+                            reorderEnabled = reorderEnabled, isDragging = isDragging,
                         )
                     }
                 }
             }
         }
         val draggingRow = view.queueReorderDraggedId?.let(rowsByKey::get)
-        if (draggingRow != null) {
-            // Where the dragged row would land: the gap the neighbours leave, with the insertion bar
-            // at its top. The list's scroll shows through the first visible row's layout offset.
-            val slot = visualKeys.indexOf(draggingRow.key)
-            val inside = seq3DropInsideFragments(
-                document,
-                visualKeys.getOrNull(slot - 1)?.let(rowsByKey::get)?.ref,
-                visualKeys.getOrNull(slot + 1)?.let(rowsByKey::get)?.ref,
-            )
-            val gapContentY by animateFloatAsState(
-                targetValue = targetOffsets[draggingRow.key] ?: 0f,
-                animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f),
-                label = "seq3-sequence-gap-y",
-            )
-            Box(
-                Modifier.fillMaxWidth()
-                    .padding(end = 6.dp)
-                    .height((bodyHeightPx / density).dp)
-                    .offset {
-                        // Read here, in the placement phase: reading the list's layout info while
-                        // composing re-composes the list after every one of its own measures.
-                        val anchor = listState.layoutInfo.visibleItemsInfo.firstOrNull { (it.key as? String) in layoutOffsets }
-                        val scrollShift = anchor?.let { it.offset - (layoutOffsets[it.key as String] ?: 0f) } ?: 0f
-                        IntOffset(0, (gapContentY + scrollShift).roundToInt())
-                    },
-            ) {
-                if (inside.isNotEmpty()) {
-                    Seq3FragmentRail(inside, inside.mapTo(HashSet()) { it.id }, gutterDp, docTheme.seq1)
-                }
-                Box(
-                    Modifier.fillMaxWidth().height(2.dp).align(Alignment.TopStart)
-                        .background(tc.ac, RoundedCornerShape(1.dp))
-                        .testTag("seq3-sequence-drop-bar"),
-                )
-                inside.firstOrNull()?.let { fragment ->
-                    AppText(
-                        "inside ${seq3FragmentRailLabel(fragment)}",
-                        color = tc.ac,
-                        fontSize = 9.sp,
-                        modifier = Modifier.align(Alignment.TopEnd).padding(top = 4.dp, end = 8.dp),
-                    )
-                }
-            }
+        if (draggingRow != null && !draggedRowInSlot) {
             Box(
                 Modifier.fillMaxWidth()
                     .padding(end = 6.dp)
                     .offset { IntOffset(0, (view.queueReorderPointerY - dragGrabOffsetY).roundToInt()) }
-                    .zIndex(2f)
-                    .testTag("seq3-sequence-drag-ghost-${draggingRow.key}"),
+                    .seq3DragLift(isDragging = true, panel = tc.p),
             ) {
                 Seq3SequenceRowItem(
                     state, session, view, document, draggingRow, null, gutterDp, docTheme.seq1,
@@ -1126,7 +1089,7 @@ private fun Seq3SequenceRowItem(
     val hidden = row.occurrence?.visibility == Seq3Visibility.HIDDEN
     val count = seq3SequenceRowCount(row)
     Column(Modifier.fillMaxWidth()) {
-        // The lifted ghost is the row alone: its fragment label and rail stay with the run in the list.
+        // The dragged row is the row alone: its fragment label and rail stay with the run in the list.
         if (!isDragging) rails?.starting?.forEach { fragment ->
             AppText(
                 seq3FragmentRailLabel(fragment),
@@ -1145,13 +1108,11 @@ private fun Seq3SequenceRowItem(
             }
             Seq3EvidenceRowShell(
                 background = when {
-                    isDragging -> seq3SequenceGhostBackground(tc)
                     emphasis == Seq3SequenceRowEmphasis.EXACT -> tc.sl
                     hovered -> tc.hv
                     else -> Color.Transparent
                 },
                 marked = emphasis == Seq3SequenceRowEmphasis.SIBLING,
-                lifted = isDragging,
                 modifier = Modifier.weight(1f)
                     .onPointerEvent(PointerEventType.Enter) { view.hoveredMessageId = message.id }
                     .onPointerEvent(PointerEventType.Exit) { if (view.hoveredMessageId == message.id) view.hoveredMessageId = null }
@@ -1437,15 +1398,8 @@ internal fun Seq3LifelinesSection(
                                 Box(
                                     Modifier.fillMaxWidth()
                                         .offset { IntOffset(0, y.roundToInt()) }
-                                        .zIndex(if (isDragging) 1f else 0f)
-                                        .graphicsLayer {
-                                            if (isDragging) {
-                                                scaleX = 1.02f
-                                                scaleY = 1.02f
-                                            }
-                                        }
-                                        .onSizeChanged { size -> rowHeights[lifeline.id] = size.height.toFloat() }
-                                        .background(if (isDragging) tc.p else Color.Transparent),
+                                        .seq3DragLift(isDragging, tc.p)
+                                        .onSizeChanged { size -> rowHeights[lifeline.id] = size.height.toFloat() },
                                 ) {
                                     Seq3LifelineRow(
                                         state = state,
@@ -2625,12 +2579,13 @@ internal fun Seq3ArtifactsHeaderActions(state: AppState, session: Seq3WorkspaceS
     }
 }
 
-/** Every message id a fragment's bracket spans — [Seq3Fragment.occurrenceRefs] takes precedence
- *  for their own message ids over [Seq3Fragment.messageIds] (that field's own doc), so the two
- *  are unioned rather than either read alone. Mirrors `Seq3Queue.kt`'s private
- *  `applyGroup`'s own `referencedMessageIds` computation. */
-internal fun seq3FragmentMessageCount(fragment: Seq3Fragment): Int =
-    (fragment.messageIds + fragment.occurrenceRefs.map { it.messageId }).distinct().size
+/** How many arrows the fragment's box covers on the canvas: the drawn rows from its first to its last
+ *  member. Not the number of message templates it names, which says nothing about the box. */
+internal fun seq3FragmentMessageCount(document: Seq3Document, fragment: Seq3Fragment): Int =
+    seq3FragmentDrawnRowCount(document, fragment)
+
+/** The Artifacts row's count for a fragment: "×1 arrow", "×3 arrows". */
+internal fun seq3FragmentArrowCountLabel(count: Int): String = "×$count ${if (count == 1) "arrow" else "arrows"}"
 
 /** Keeps the editable artifact label visible while avoiding a repeated kind word in the row title. */
 internal data class Seq3ArtifactHeading(val kind: String?, val label: String)
@@ -2654,7 +2609,7 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
         id = fragment.id,
         kindWord = fragment.kind.name.lowercase(),
         label = fragment.label,
-        messageCount = seq3FragmentMessageCount(fragment),
+        countLabel = seq3FragmentMessageCount(session.document, fragment).takeIf { it > 0 }?.let(::seq3FragmentArrowCountLabel),
         hidden = fragment.visibility == Seq3Visibility.HIDDEN,
         selected = view.selectedFragmentId == fragment.id,
         hovered = view.hoveredFragmentId == fragment.id,
@@ -2771,7 +2726,7 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
         id = note.id,
         kindWord = "note",
         label = note.text,
-        messageCount = note.messageIds.distinct().size,
+        countLabel = note.messageIds.distinct().size.takeIf { it > 0 }?.let { "×$it messages" },
         hidden = note.visibility == Seq3Visibility.HIDDEN,
         selected = view.selectedNoteId == note.id,
         hovered = view.hoveredNoteId == note.id,
@@ -2820,7 +2775,7 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
 
 /** The delay counterpart of [Seq3FragmentRenameRow]/[Seq3NoteRenameRow] above — same
  *  select/hover/rename/hide/remove recipe via [Seq3ArtifactRow], added when delays moved into
- *  this panel from being canvas/context-menu-only. [messageCount] is 0 (no "×N messages" badge):
+ *  this panel from being canvas/context-menu-only. [countLabel] is null (no "×N" badge):
  *  a delay is anchored to exactly one point in the timeline, not attached to a set of messages,
  *  so that badge — accurate for a fragment's span or a note's attachment — has nothing to count
  *  here. */
@@ -2839,7 +2794,7 @@ private fun Seq3DelayRenameRow(state: AppState, session: Seq3WorkspaceSession, v
         id = delayItem.id,
         kindWord = "delay",
         label = delayItem.label,
-        messageCount = 0,
+        countLabel = null,
         hidden = delayItem.visibility == Seq3Visibility.HIDDEN,
         selected = view.selectedDelayId == delayItem.id,
         hovered = view.hoveredDelayId == delayItem.id,
@@ -2910,7 +2865,7 @@ private fun Seq3ManualActivationRow(
         id = activation.id,
         kindWord = "activation",
         label = seq3ManualActivationRowLabel(document, activation),
-        messageCount = 0,
+        countLabel = null,
         hidden = activation.visibility == Seq3Visibility.HIDDEN,
         selected = view.selectedManualActivationId == activation.id,
         hovered = view.hoveredManualActivationId == activation.id,
@@ -2960,7 +2915,7 @@ private fun Seq3ArtifactRow(
     id: String,
     kindWord: String,
     label: String,
-    messageCount: Int,
+    countLabel: String?,
     hidden: Boolean,
     selected: Boolean,
     hovered: Boolean,
@@ -3063,7 +3018,7 @@ private fun Seq3ArtifactRow(
                                 modifier = Modifier.weight(1f),
                             )
                         }
-                        if (messageCount > 0) AppText("×$messageCount messages", color = tc.ts, fontSize = 10.sp)
+                        countLabel?.let { AppText(it, color = tc.ts, fontSize = 10.sp, modifier = Modifier.testTag("seq3-artifact-count-$id")) }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                         ToolbarBtn(
@@ -3801,7 +3756,7 @@ private fun Seq3OccurrenceToggle(expanded: Boolean, modifier: Modifier = Modifie
  *  [background] by default, a hairline divider along the bottom, its fixed height, [leading]
  *  controls, the two-line [body] column and the [trailing] buttons. [marked] draws the 2dp accent
  *  mark on the left edge (a row related to the selection without being the selected one);
- *  [lifted] is a dragged ghost: rounded and without the divider. [hoverTint] lets the shell tint
+ *  [hoverTint] lets the shell tint
  *  itself on hover when the caller tracks no hover of its own. [bodyModifier] carries the body's
  *  click handling so a leading checkbox or grip never receives it. */
 @Composable
@@ -3809,7 +3764,6 @@ private fun Seq3EvidenceRowShell(
     background: Color,
     modifier: Modifier = Modifier,
     marked: Boolean = false,
-    lifted: Boolean = false,
     hoverTint: Boolean = false,
     leading: @Composable RowScope.() -> Unit,
     bodyModifier: Modifier = Modifier,
@@ -3819,19 +3773,15 @@ private fun Seq3EvidenceRowShell(
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val fill = if (hoverTint && hovered && background == Color.Transparent) tc.hv else background
-    val shape = if (lifted) CORNER_SM else RectangleShape
     Row(
         modifier.fillMaxWidth()
-            .clip(shape)
             .background(fill)
             .height(SEQ3_SUBMESSAGE_ROW_HEIGHT)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .drawBehind {
-                if (!lifted) {
-                    val line = 1.dp.toPx()
-                    drawRect(tc.br, topLeft = Offset(0f, size.height - line), size = Size(size.width, line))
-                }
+                val line = 1.dp.toPx()
+                drawRect(tc.br, topLeft = Offset(0f, size.height - line), size = Size(size.width, line))
                 if (marked) drawRect(tc.ac, size = Size(SEQ3_ROW_MARK_DP.dp.toPx(), size.height))
             }
             .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),

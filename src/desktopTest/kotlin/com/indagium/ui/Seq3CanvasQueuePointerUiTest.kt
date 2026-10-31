@@ -9,6 +9,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
@@ -195,7 +196,11 @@ class Seq3CanvasQueuePointerUiTest {
         // well past the pointer's own travel.
         val pointerTravel = edgeTarget.y - start.y
         rule.waitUntil(1_500) { view.queueReorderOffsetY > pointerTravel + 8f }
-        rule.onNodeWithTag("seq3-sequence-row-$rowId", useUnmergedTree = true).fetchSemanticsNode()
+        // The row's own slot has scrolled far out of the viewport by now, yet the row is still the one
+        // under the held pointer (the node is unique: there is no second copy of it).
+        val dragged = rule.onAllNodesWithTag("seq3-sequence-row-$rowId", useUnmergedTree = true).fetchSemanticsNodes().single().boundsInRoot
+        val pointerRootY = edgeTarget.y + root.top
+        assertTrue(pointerRootY in dragged.top..dragged.bottom, "the dragged row $dragged is under the pointer at $pointerRootY")
         assertEquals(document.messages.map { it.id }, currentSession(sessionId).document.messages.map { it.id })
 
         workspace.performMouseInput { release() }

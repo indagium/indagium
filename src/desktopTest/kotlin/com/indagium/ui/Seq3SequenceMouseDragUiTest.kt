@@ -13,6 +13,8 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
@@ -61,17 +63,34 @@ class Seq3SequenceMouseDragUiTest {
         val before = seq3DrawnRowRefs(currentSession(sessionId).document)
         val undoBefore = currentSession(sessionId).undoStack.size
         val firstKey = key(1)
+        val restingRows = (1..5).associateWith { bounds(row(it)) }
 
-        dragFirstRowBetween(afterRow = 4, beforeRow = 5, release = false)
+        val pointerCentre = dragFirstRowBetween(afterRow = 4, beforeRow = 5, release = false)
 
         assertEquals(firstKey, view.queueReorderDraggedId, "the press on the grip arms a drag")
         assertEquals(3, view.queueReorderVisualIds.indexOf(firstKey), "the slot opens after row 4: ${view.queueReorderVisualIds}")
-        val bar = bounds(rule.onNodeWithTag("seq3-sequence-drop-bar", useUnmergedTree = true))
-        val above = bounds(row(4))
-        val below = bounds(row(5))
-        assertTrue(bar.top >= above.bottom - 1f, "drop bar $bar sits below row 4 $above")
-        assertTrue(bar.bottom <= below.top + 1f, "drop bar $bar sits above row 5 $below")
-        for (n in 2..4) assertTrue(rowExists(n), "row $n stays in view while it slides up")
+        // Dragged like a Lifeline: no insertion bar, no floating copy, the row itself is the one node ...
+        rule.onNodeWithTag("seq3-sequence-drop-bar", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithTag("seq3-sequence-drag-ghost-$firstKey", useUnmergedTree = true).assertDoesNotExist()
+        assertEquals(1, rule.onAllNodesWithTag("seq3-sequence-row-$firstKey", useUnmergedTree = true).fetchSemanticsNodes().size)
+        // ... and it follows the pointer in a slightly enlarged lift while the rows below slide up into its old place.
+        val dragged = bounds(row(1))
+        assertEquals(pointerCentre, dragged.center.y, 2.5f, "the dragged row is under the pointer")
+        assertEquals(
+            SEQ3_DRAG_LIFT_SCALE,
+            dragged.height / restingRows.getValue(1).height,
+            0.005f,
+            "the dragged row is lifted by the scale a dragged Lifeline gets",
+        )
+        for (n in 2..4) {
+            assertEquals(
+                restingRows.getValue(n - 1).top,
+                bounds(row(n)).top,
+                2.5f,
+                "row $n slid up by one row",
+            )
+        }
+        assertEquals(restingRows.getValue(5).top, bounds(row(5)).top, 2.5f, "row 5 is below the new slot and stays")
         assertEquals(before, seq3DrawnRowRefs(currentSession(sessionId).document), "the preview does not touch the document")
 
         rule.onNodeWithTag("seq3-workspace-root").performMouseInput { release() }
@@ -138,7 +157,7 @@ class Seq3SequenceMouseDragUiTest {
     }
 
     @Test
-    fun theGhostCarriesNoFragmentLabelAndTheLabelStaysWithTheRun() {
+    fun theDraggedRowCarriesNoFragmentLabelAndTheLabelStaysWithTheRun() {
         val sessionId = startWorkspace("mouse-drag-label")
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
         view.messagesMode = Seq3MessagesMode.SEQUENCE
@@ -155,9 +174,8 @@ class Seq3SequenceMouseDragUiTest {
         }
         rule.waitForIdle()
         assertEquals(key(5), view.queueReorderDraggedId)
-        val ghost = hasTestTag("seq3-sequence-drag-ghost-${key(5)}")
-        rule.onNode(label and hasAnyAncestor(ghost), useUnmergedTree = true).assertDoesNotExist()
-        rule.onNodeWithTag("seq3-sequence-drag-ghost-${key(5)}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithTag("seq3-sequence-drag-ghost-${key(5)}", useUnmergedTree = true).assertDoesNotExist()
+        row(5).assertIsDisplayed()
         // The run's first row moved out, so its label moves to the next row of the run (row 6) and stays in the list.
         val listLabels = rule.onAllNodes(inList, useUnmergedTree = true).fetchSemanticsNodes()
         assertEquals(1, listLabels.size, "exactly one label, in the list")
@@ -168,14 +186,34 @@ class Seq3SequenceMouseDragUiTest {
         rule.waitForIdle()
     }
 
-    /** Presses row 1's grip and walks the mouse in steps until the ghost's centre sits between the
-     *  centres of rows [afterRow] and [beforeRow], optionally releasing there. */
-    private fun dragFirstRowBetween(afterRow: Int, beforeRow: Int, release: Boolean) {
+    @Test
+    fun aDraggedLifelineIsLiftedByTheSameScaleAsADraggedMessage() {
+        startWorkspace("mouse-drag-lifeline-lift")
+        showWorkspace()
+        val resting = bounds(rule.onNodeWithTag("seq3-lifeline-row-a", useUnmergedTree = true))
+        val handle = rule.onAllNodesWithText("⠿", useUnmergedTree = true)[0]
+
+        handle.performMouseInput {
+            moveTo(center)
+            press()
+            for (step in 1..4) moveTo(Offset(center.x, center.y + 6f * step))
+        }
+        rule.waitForIdle()
+
+        val lifted = bounds(rule.onNodeWithTag("seq3-lifeline-row-a", useUnmergedTree = true))
+        assertEquals(SEQ3_DRAG_LIFT_SCALE, lifted.height / resting.height, 0.005f, "the Lifelines list lifts by the shared scale")
+        rule.onNodeWithTag("seq3-workspace-root").performMouseInput { release() }
+        rule.waitForIdle()
+    }
+
+    /** Presses row 1's grip and walks the mouse in steps until the dragged row's centre sits between the
+     *  centres of rows [afterRow] and [beforeRow], optionally releasing there. Returns that centre's root Y. */
+    private fun dragFirstRowBetween(afterRow: Int, beforeRow: Int, release: Boolean): Float {
         val grip = grip(1)
         val gripBounds = bounds(grip)
         val row1 = bounds(row(1))
         val targetCentre = (bounds(row(afterRow)).center.y + bounds(row(beforeRow)).center.y) / 2f
-        // The pointer sits on the grip, so it is (grip centre - row centre) off the ghost's centre.
+        // The pointer sits on the grip, so it is (grip centre - row centre) off the row's centre.
         val pointerRootY = targetCentre + (gripBounds.center.y - row1.center.y)
         val deltaY = pointerRootY - gripBounds.center.y
         grip.performMouseInput {
@@ -186,12 +224,8 @@ class Seq3SequenceMouseDragUiTest {
             if (release) release()
         }
         rule.waitForIdle()
+        return targetCentre
     }
-
-    private fun rowExists(n: Int): Boolean = row(n).isDisplayedSafely()
-
-    private fun SemanticsNodeInteraction.isDisplayedSafely(): Boolean =
-        runCatching { assertIsDisplayed() }.isSuccess
 
     private fun key(n: Int): String = seq3SequenceRowKey(Seq3RowRef("m$n"))
 

@@ -219,6 +219,8 @@ class Seq3SourceAndQueueInteractionsUiTest {
         showWorkspace(sessionId)
 
         val handle = rule.onNodeWithTag("seq3-sequence-drag-$firstKey", useUnmergedTree = true)
+        val firstRow = rule.onNodeWithTag("seq3-sequence-row-$firstKey", useUnmergedTree = true)
+        val restingTop = firstRow.fetchSemanticsNode().boundsInRoot.top
         handle.performTouchInput {
             down(center)
             moveBy(Offset(0f, 220f * rule.density.density))
@@ -230,7 +232,13 @@ class Seq3SourceAndQueueInteractionsUiTest {
             "drag preview does not mutate the document",
         )
         assertEquals(firstKey, requireNotNull(state.seq3Sessions.viewState(sessionId)).queueReorderDraggedId)
-        rule.onNodeWithTag("seq3-sequence-drop-bar", useUnmergedTree = true).assertIsDisplayed()
+        // Dragged like a Lifeline: no insertion bar and no floating copy; the row itself follows the pointer.
+        rule.onNodeWithTag("seq3-sequence-drop-bar", useUnmergedTree = true).assertDoesNotExist()
+        rule.onNodeWithTag("seq3-sequence-drag-ghost-$firstKey", useUnmergedTree = true).assertDoesNotExist()
+        assertTrue(
+            firstRow.fetchSemanticsNode().boundsInRoot.top > restingTop + 100f * rule.density.density,
+            "the dragged row moved down with the pointer",
+        )
 
         rule.onNodeWithTag("seq3-workspace-root").performTouchInput { up() }
         rule.waitForIdle()

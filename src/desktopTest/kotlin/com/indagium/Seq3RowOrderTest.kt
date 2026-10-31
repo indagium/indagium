@@ -359,7 +359,10 @@ class Seq3RowOrderTest {
             boxRows(original, "f"),
         )
         val moved = move(original, Seq3Command.MoveRow(Seq3RowRef("c", 5), Seq3InsertionPosition.AfterRow(Seq3RowRef("d", 7))))
-        assertEquals(listOf("a", "b"), moved.fragments.single().messageIds)
+        // The box shrinks to a..b; membership names every arrow it now draws, so x2 (which sat inside the
+        // box without being a member) is held too, and only through its own exact row: x4 is outside.
+        assertEquals(listOf("a", "x", "b"), moved.fragments.single().messageIds)
+        assertEquals(listOf(Seq3OccurrenceRef("x", 2)), moved.fragments.single().occurrenceRefs)
         assertEquals(listOf(Seq3RowRef("a", 1), Seq3RowRef("x", 2), Seq3RowRef("b", 3)), boxRows(moved, "f"))
         assertEquals(Seq3RowRef("b", 3), boxRows(moved, "f").last())
     }
@@ -381,9 +384,13 @@ class Seq3RowOrderTest {
 
         // x6 is one occurrence of a message the fragment holds by exact refs: it gets its own ref.
         val exact = move(original, Seq3Command.MoveRow(Seq3RowRef("x", 6), Seq3InsertionPosition.BeforeRow(Seq3RowRef("x", 4))))
-        assertEquals(listOf(Seq3OccurrenceRef("x", 4), Seq3OccurrenceRef("x", 6)), exact.fragments.single().occurrenceRefs)
+        // x2 sat inside the box all along without being a member, so with x6 joining, every arrow of x is
+        // inside: x is now held by its id alone and membership equals the box.
+        assertTrue(exact.fragments.single().occurrenceRefs.isEmpty())
+        assertTrue("x" in exact.fragments.single().messageIds)
         assertTrue(Seq3RowRef("x", 6) in boxRows(exact, "f"))
-        assertFalse(fragmentContainsRow(exact.fragments.single(), Seq3RowRef("x", 2)))
+        assertTrue(fragmentContainsRow(exact.fragments.single(), Seq3RowRef("x", 2)))
+        assertEquals(boxRows(exact, "f").toSet(), seq3DrawnRowRefs(exact).filter { fragmentContainsRow(exact.fragments.single(), it) }.toSet())
     }
 
     @Test

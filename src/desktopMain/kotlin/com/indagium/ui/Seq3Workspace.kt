@@ -1708,13 +1708,13 @@ private fun seq3FragmentContainsRow(fragment: Seq3Fragment, messageId: String, o
  *  when there is none — which is what gates the menu item's very presence (task: "only when the
  *  right-clicked row is inside a fragment whose kind takes operands"). Only [SEQ3_OPERAND_FRAGMENT_KINDS]
  *  are candidates. When fragments nest (one row inside two or more eligible brackets), the
- *  INNERMOST one wins — the smallest [seq3FragmentMessageCount], i.e. the most specific bracket the
+ *  INNERMOST one wins — the one covering the fewest drawn rows ([seq3FragmentMessageCount]), i.e. the most specific bracket the
  *  user is actually pointing at — mirroring how a right-click on nested UI elements always targets
  *  the topmost/most specific one, not an ancestor. */
 internal fun seq3OperandFragmentIdAt(document: Seq3Document, messageId: String, occurrenceEntryId: Int?): String? =
     document.fragments
         .filter { it.kind in SEQ3_OPERAND_FRAGMENT_KINDS && seq3FragmentContainsRow(it, messageId, occurrenceEntryId) }
-        .minByOrNull { seq3FragmentMessageCount(it) }
+        .minByOrNull { seq3FragmentMessageCount(document, it) }
         ?.id
 
 /** Creates a new `else` operand anchored at [startsAtMessageId] (and, when the click hit one exact

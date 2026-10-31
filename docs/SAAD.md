@@ -1661,7 +1661,12 @@ row). A Sequence drag, a canvas drag, the arrow menu's Move submenu and Alt+↑/
 membership follows the drop (`reassignSeq3FragmentMembership`): a row belongs to a fragment only
 when both of its new neighbours do, a template-level member is materialised into
 `occurrenceRefs` before one of its rows leaves, and a fragment's only member travels with it, so
-a fragment box never stretches to follow a moved member. Hidden references retain their positions
+a fragment box never stretches to follow a moved member. `normalizeSeq3FragmentSpans`
+(`diagram3/Seq3FragmentSpans.kt`) keeps membership equal to the drawn box: every visible fragment holds every drawn
+row from its first to its last member (children clamped to their parent, hidden rows ignored but their refs kept).
+It runs after every command and when a diagram is opened, so the Artifacts "×N arrows" count, the Sequence list
+rail and the canvas box always agree. Both Messages-list views drag like the Lifelines list (shared
+`seq3DragLift`: the row moves in its own slot, neighbours slide). Hidden references retain their positions
 and obsolete references are discarded during edits. The Templates list's default order
 ("Diagram order") follows the first represented row; its alternative sorts remain views rather
 than mutations.

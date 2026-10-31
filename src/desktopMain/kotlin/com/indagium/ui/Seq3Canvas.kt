@@ -706,6 +706,13 @@ private fun seq3CanvasGestureModifier(
             var selectionAdditive = false
             var selectionRange = false
             var childOwnsGesture = false
+            // A right-click press whose context menu is (about to be) open. Kept apart from
+            // [childOwnsGesture] because opening the menu puts a popup under the pointer, so the canvas
+            // is sent an Exit while the button is still down and clearPressState() wipes every
+            // press-local flag. The Release that follows would then be read as a plain left click on the
+            // arrow under the pointer and collapse the multi-selection the menu was opened on. Only a
+            // Release, or the next Press, ends it.
+            var secondaryPressActive = false
             var rowDragCandidate: Seq3RowRef? = null
             var rowDragWasActivated = false
             var rowDragCancelled = false
@@ -786,9 +793,11 @@ private fun seq3CanvasGestureModifier(
                             // A second down event is a new gesture even if a platform/child lost the
                             // previous mouse-up. Clear all transient gesture state before arming it.
                             clearPressState()
+                            secondaryPressActive = false
                             val isMiddle = event.buttons.isTertiaryPressed
                             view.hoveredMessageId = null
                             if (event.buttons.isSecondaryPressed) {
+                                secondaryPressActive = true
                                 if (!change.isConsumed) {
                                     view.textFieldFocused = false
                                     runCatching { view.focusRequester.requestFocus() }
@@ -1014,7 +1023,8 @@ private fun seq3CanvasGestureModifier(
                             }
                         }
                         PointerEventType.Release -> {
-                            if (childOwnsGesture) {
+                            if (childOwnsGesture || secondaryPressActive) {
+                                secondaryPressActive = false
                                 clearPressState()
                                 continue
                             }
@@ -1241,8 +1251,12 @@ private fun seq3HandleCanvasRowClick(
     }
     view.focusedMessageId = hitRow.messageId.takeIf { view.selection.selectedIds.isNotEmpty() }
     view.scrollRequestId = hitRow.messageId
-    val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
-    if (doubleClick && hitRow is Seq3ArrowRow) {
+    // A double click is two clicks on the same ARROW, not on the same message: the arrows of a repeated
+    // message share one message id, so Cmd/Ctrl-clicking three of them in a row used to read as a double
+    // click, open the rename popover and swallow the right-click that was meant to group them. A
+    // modified click is a selection gesture and never starts an edit.
+    val doubleClick = registerClick(System.currentTimeMillis(), "${hitRow.messageId}::${hitRow.occurrenceEntryId}")
+    if (doubleClick && hitRow is Seq3ArrowRow && !additive && !range) {
         seq3ActivateCanvasEditor(
             view,
             Seq3CanvasEditorTarget(Seq3CanvasEditorKind.MESSAGE_LABEL, hitRow.messageId, hitRow.occurrenceEntryId),
@@ -2968,6 +2982,7 @@ private fun Seq3CanvasContextMenu(
                         CtxSubmenuOption(kind.name.lowercase()) { seq3GroupMessages(state, session, view, selectedIds, kind) }
                     },
                     preferLeft = submenuOpensLeft,
+                    triggerTag = "seq3-canvas-ctx-group-as",
                     onClick = { seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP) },
                 )
             }

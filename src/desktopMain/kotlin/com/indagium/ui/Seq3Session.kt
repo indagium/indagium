@@ -28,6 +28,7 @@ import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
 import com.indagium.diagram3.importSeq3Source
 import com.indagium.diagram3.matchOneMessage
+import com.indagium.diagram3.normalizeSeq3FragmentSpans
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.diagram3.seq3NoteHasHandEdit
@@ -413,11 +414,14 @@ class Seq3Session(
         val tab = appState.tab(tabId) ?: return null
         val block = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note ?: return null
         val parsed = parseSeq3Note(block.text) ?: return null
+        // A document saved by an older build can hold fragment membership that disagrees with the box
+        // the canvas draws; it is made to agree on open (see normalizeSeq3FragmentSpans).
+        val openedDocument = normalizeSeq3FragmentSpans(parsed.document)
         val attachmentLibraryId = parsed.attachment?.diagramId
         val isSnapshot = parsed.attachment?.mode == Seq3AttachmentMode.SNAPSHOT
         sessions.firstOrNull { existing ->
             existing.sourceTabId == tabId &&
-                (!isSnapshot || existing.document == parsed.document) &&
+                (!isSnapshot || existing.document == openedDocument) &&
                 (existing.confirmedBlockId == blockId ||
                     (attachmentLibraryId != null && existing.libraryItemId == attachmentLibraryId))
         }?.let { existing ->
@@ -428,7 +432,7 @@ class Seq3Session(
         val session = Seq3WorkspaceSession(
             id = id,
             sourceTabId = tabId,
-            document = parsed.document,
+            document = openedDocument,
             range = parsed.document.range,
             generateOptions = Seq3GenerateOptions(sourceFile = parsed.document.sourceFile ?: File(tab.filename).name),
             confirmedBlockId = blockId,
@@ -444,7 +448,7 @@ class Seq3Session(
         sessions = sessions + session
         appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(id))
         appState.revealTabGroupForActivation(TabRef.Diagram(id))
-        generatedBaselines[id] = parsed.document
+        generatedBaselines[id] = openedDocument
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
         return id
@@ -1424,12 +1428,13 @@ class Seq3Session(
         val item = libraryStore.markOpened(id) ?: return false
         libraryRevision++
         val parsed = item.parsed ?: return false
+        val openedDocument = normalizeSeq3FragmentSpans(parsed.document)
         val usableTabId = tabId?.takeIf { appState.tab(it) != null }
         val sessionId = "seq3-${UUID.randomUUID()}"
         val session = Seq3WorkspaceSession(
             id = sessionId,
             sourceTabId = usableTabId,
-            document = parsed.document,
+            document = openedDocument,
             range = parsed.document.range,
             generateOptions = Seq3GenerateOptions(
                 sourceFile = parsed.document.sourceFile
@@ -1442,7 +1447,7 @@ class Seq3Session(
         sessions = sessions + session
         appState.inheritTabGroupForOpenedRef(originGroupId, TabRef.Diagram(sessionId))
         appState.revealTabGroupForActivation(TabRef.Diagram(sessionId))
-        generatedBaselines[sessionId] = parsed.document
+        generatedBaselines[sessionId] = openedDocument
         activeSessionId = sessionId
         appState.activeSurface = ActiveSurface.Diagram3(sessionId)
         return true

@@ -1,7 +1,10 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.zIndex
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3FilterCounts
@@ -22,6 +25,18 @@ internal fun seq3SequenceFilterCounts(document: Seq3Document, rows: List<Seq3Seq
     )
 }
 
-/** The lifted row's fill: the accent tint laid over the opaque panel colour, so the rows it floats
- *  over never show through the ghost. */
-internal fun seq3SequenceGhostBackground(theme: ThemeColors): Color = theme.abg.compositeOver(theme.p)
+/** Scale of a dragged row in the Lifelines and the Sequence list. */
+internal const val SEQ3_DRAG_LIFT_SCALE = 1.02f
+
+/** How a dragged row of the Lifelines and the Sequence list is lifted: above its neighbours, slightly
+ *  larger, over an opaque [panel] fill so the rows it passes never show through. The one place both
+ *  lists get that look from, so they cannot drift apart. */
+internal fun Modifier.seq3DragLift(isDragging: Boolean, panel: Color): Modifier =
+    zIndex(if (isDragging) 1f else 0f)
+        .graphicsLayer {
+            if (isDragging) {
+                scaleX = SEQ3_DRAG_LIFT_SCALE
+                scaleY = SEQ3_DRAG_LIFT_SCALE
+            }
+        }
+        .background(if (isDragging) panel else Color.Transparent)

@@ -218,7 +218,11 @@ fun applySeq3Command(document: Seq3Document, command: Seq3Command): Seq3CommandR
         // ResetRowOrder is the one command whose result legitimately has an EMPTY rowOrder while the
         // prior document had a manual one; reconcile would read that as "not specified" and carry
         // the old order back in, so it is applied as-is.
-        val normalized = if (command == Seq3Command.ResetRowOrder) outcome.document else reconcileSeq3RowOrder(document, outcome.document)
+        // Fragment membership is then made to match what is drawn (see normalizeSeq3FragmentSpans), once the
+        // row order it is measured against is final.
+        val normalized = normalizeSeq3FragmentSpans(
+            if (command == Seq3Command.ResetRowOrder) outcome.document else reconcileSeq3RowOrder(document, outcome.document),
+        )
         val boundsViolation = seq3RowOrderBoundsViolation(normalized)
             .takeIf { normalized.rowOrder.size > document.rowOrder.size }
         if (boundsViolation != null) {
