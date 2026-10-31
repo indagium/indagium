@@ -1,12 +1,25 @@
 package com.indagium
 
 import com.indagium.model.AppSettings
+import com.indagium.model.ChromeEdge
+import com.indagium.model.CtrlFTarget
 import com.indagium.model.CustomLogViewLayout
 import com.indagium.model.CustomWorkspaceProfile
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewSectionId
+import com.indagium.model.MIN_VERTICAL_TAB_BAR_DP
+import com.indagium.model.ProfileAppearance
+import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
+import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.TabCloseButtonPosition
+import com.indagium.model.TabLabelMode
+import com.indagium.model.TabSizeMode
+import com.indagium.model.TabStripPosition
+import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
+import com.indagium.model.ToolbarAlign
+import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.LogViewLegacySizes
@@ -15,6 +28,8 @@ import com.indagium.ui.WorkspaceProfile
 import com.indagium.ui.activeLogViewLayoutRef
 import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.classicLogViewLayout
+import com.indagium.ui.currentProfileAppearance
+import com.indagium.ui.currentProfileBehavior
 import com.indagium.ui.customProfilesFromJson
 import com.indagium.ui.decodeWorkspaceProfileFile
 import com.indagium.ui.describeProfileSpec
@@ -32,6 +47,7 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -209,7 +225,10 @@ class CustomWorkspaceProfileTest {
 
         state.updateWorkspaceProfileFromCurrent(saved.id)
 
-        assertEquals(WorkspaceProfile.MINIMAL.spec, state.settings.customWorkspaceProfiles.single().spec)
+        val updated = state.settings.customWorkspaceProfiles.single().spec
+        assertEquals(WorkspaceProfile.MINIMAL.spec.copy(appearance = updated.appearance, behavior = updated.behavior), updated)
+        assertEquals(currentProfileAppearance(state.settings), updated.appearance, "Update captures the Appearance group in full")
+        assertEquals(currentProfileBehavior(state.settings), updated.behavior, "Update captures the Editor behavior group in full")
         assertEquals(saved.id, state.settings.workspaceProfileId)
         assertEquals(emptyList(), state.workspaceProfileDifferences())
     }
@@ -461,5 +480,147 @@ class CustomWorkspaceProfileTest {
         assertEquals(ProfilePanels(filterBar = true, notes = true, video = true), profilePanelsOf(ProfileLayoutRef.Saved(saved.id), listOf(saved)))
         assertNull(profilePanelsOf(null, emptyList()))
         assertNull(profilePanelsOf(ProfileLayoutRef.Saved("gone"), listOf(saved)))
+    }
+
+    // ---- Appearance / Editor behavior groups ------------------------------------------------------------------------
+
+    private val fullAppearance = ProfileAppearance(
+        interfaceScalePercent = 130,
+        showRowNumbers = true,
+        tabStripStyle = TabStripStyle.SEGMENTED,
+        tabSizeMode = TabSizeMode.FIT,
+        tabLabelMode = TabLabelMode.FILE_ONLY,
+        tabShowTypeBadge = true,
+        tabShowSourceStripe = true,
+        tabCloseOnEvery = false,
+        tabCloseButtonPosition = TabCloseButtonPosition.LEFT,
+        visibleTabLimit = 12,
+        tabStripPosition = TabStripPosition.RIGHT,
+        toolbarPlacement = ToolbarPlacement.OWN_EDGE,
+        toolbarEdge = ChromeEdge.BOTTOM,
+        toolbarOuter = true,
+        toolbarAlign = ToolbarAlign.CENTER,
+        verticalTabBarWidthDp = 210.5f,
+    )
+
+    private val fullBehavior = ProfileBehavior(
+        ctrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+        openUnfilteredOnCtrlF = true,
+        searchScopeBehavior = SearchScopeBehavior.FOLLOW_VIEW,
+        syncSplitPanelSelectionAndScroll = false,
+        autoLogRowWrap = false,
+        logRowWrapLimitChars = 900,
+        autoScrollWhileTailing = false,
+        navScrollMargin = 8,
+        filterListRows = 10,
+        mostUsedTagLimit = 20,
+        showProcessNamesInNewTabs = true,
+        showRegexFilterSummary = true,
+        showVideoFollowReadout = true,
+        enableDoubleClickVideoSeekOnLink = false,
+        highlightEntireCrashGroup = true,
+    )
+
+    @Test
+    fun bothGroupsRoundTripThroughSettingsJsonAndTheProfileFile() {
+        val grouped = spec.copy(appearance = fullAppearance, behavior = fullBehavior)
+        val profile = CustomWorkspaceProfile("custom-g", "Grouped", grouped)
+
+        val fromSettings = settingsFromJson(AppSettings(customWorkspaceProfiles = listOf(profile)).settingsJson())!!
+        assertEquals(listOf(profile), fromSettings.customWorkspaceProfiles)
+
+        val fromFile = decodeWorkspaceProfileFile(encodeWorkspaceProfileFile("Grouped", grouped)).getOrThrow()
+        assertEquals(grouped, fromFile.spec)
+
+        val written = profileSpecToJson(grouped)
+        assertEquals("SEGMENTED", written["appearance"]!!.jsonObject["tabStripStyle"]!!.jsonPrimitive.content)
+        assertEquals("KEYWORD_REGEX", written["behavior"]!!.jsonObject["ctrlFTarget"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun partialGroupsRoundTripWithoutInventingValues() {
+        val partial = spec.copy(appearance = ProfileAppearance(tabStripStyle = TabStripStyle.PILL), behavior = ProfileBehavior())
+
+        val written = profileSpecToJson(partial)
+
+        assertEquals(setOf("tabStripStyle"), written["appearance"]!!.jsonObject.keys)
+        assertEquals(emptySet(), written["behavior"]!!.jsonObject.keys, "an empty group stays present and empty")
+        assertEquals(partial, profileSpecFromJson(written))
+    }
+
+    @Test
+    fun oldJsonWithoutGroupsDecodesToNullGroupsAndKeepsTheLook() {
+        val old = Json.parseToJsonElement(
+            """{"theme":"DRACULA","fontSize":15,"showMinimap":false,"toolbarIconOnlyButtons":false,
+               "openNewFilesWithUnfiltered":true,"layout":"preset:FILTER_BAR"}""",
+        ) as JsonObject
+
+        val decoded = profileSpecFromJson(old)
+
+        assertNull(decoded.appearance)
+        assertNull(decoded.behavior)
+        assertEquals(ThemePreset.DRACULA, decoded.theme)
+        assertEquals(15, decoded.fontSize)
+        assertEquals(ProfileLayoutRef.Preset(LogViewPresetId.FILTER_BAR), decoded.layout)
+        assertNull(profileSpecToJson(decoded)["appearance"], "a null group writes no key")
+        assertNull(profileSpecToJson(decoded)["behavior"])
+
+        val inSettings = customProfilesFromJson(Json.parseToJsonElement("""[{"id":"custom-old","name":"Old","spec":$old}]"""))
+        assertNull(inSettings.single().spec.appearance)
+        assertNull(inSettings.single().spec.behavior)
+    }
+
+    @Test
+    fun unknownMistypedAndMissingGroupKeysAreIgnoredAndOutOfRangeNumbersAreClamped() {
+        val o = Json.parseToJsonElement(
+            """{"appearance":{"tabStripStyle":"FROM_THE_FUTURE","tabSizeMode":7,"tabShowTypeBadge":"yes","somethingNew":1,
+                              "interfaceScalePercent":9000,"visibleTabLimit":0,"verticalTabBarWidthDp":1,"toolbarAlign":"END"},
+               "behavior":{"ctrlFTarget":"NOPE","logRowWrapLimitChars":3,"navScrollMargin":-4,"filterListRows":99,"autoLogRowWrap":false}}""",
+        ) as JsonObject
+
+        val decoded = profileSpecFromJson(o)
+
+        val a = decoded.appearance!!
+        assertNull(a.tabStripStyle)
+        assertNull(a.tabSizeMode)
+        assertNull(a.tabShowTypeBadge)
+        assertNull(a.tabLabelMode, "a missing key is null: keep the live value")
+        assertEquals(200, a.interfaceScalePercent)
+        assertEquals(2, a.visibleTabLimit)
+        assertEquals(MIN_VERTICAL_TAB_BAR_DP, a.verticalTabBarWidthDp)
+        assertEquals(ToolbarAlign.END, a.toolbarAlign)
+        val b = decoded.behavior!!
+        assertNull(b.ctrlFTarget)
+        assertEquals(80, b.logRowWrapLimitChars)
+        assertEquals(0, b.navScrollMargin)
+        assertEquals(20, b.filterListRows)
+        assertEquals(false, b.autoLogRowWrap)
+
+        assertNull(profileSpecFromJson(Json.parseToJsonElement("""{"appearance":"x","behavior":[1]}""") as JsonObject).appearance)
+        assertNull(profileSpecFromJson(Json.parseToJsonElement("""{"appearance":"x","behavior":[1]}""") as JsonObject).behavior)
+    }
+
+    @Test
+    fun savingAProfileCapturesBothGroupsFromTheLiveSettings() {
+        val state = AppState()
+        state.updateSettings {
+            it.copy(
+                tabStripStyle = TabStripStyle.PILL,
+                tabStripPosition = TabStripPosition.LEFT,
+                toolbarPlacement = ToolbarPlacement.OWN_EDGE,
+                ctrlFTarget = CtrlFTarget.TAGS,
+                interfaceScalePercent = 110,
+                filterListRows = 8,
+            )
+        }
+
+        val saved = state.saveCurrentAsWorkspaceProfile("Mine")
+
+        assertEquals(currentProfileAppearance(state.settings), saved.spec.appearance)
+        assertEquals(currentProfileBehavior(state.settings), saved.spec.behavior)
+        assertEquals(TabStripStyle.PILL, saved.spec.appearance!!.tabStripStyle)
+        assertEquals(CtrlFTarget.TAGS, saved.spec.behavior!!.ctrlFTarget)
+        assertEquals(8, saved.spec.behavior!!.filterListRows)
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
     }
 }

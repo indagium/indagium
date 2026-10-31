@@ -916,11 +916,19 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   the filter bar. Every current single-view preset sets all five panel flags (sidebar, filter bar, Notes, Video, AI) from one table,
   `LogViewLayoutPreset.panels`, in `applyLogViewPreset`; `logViewPresetActive` compares them too, so a tab-strip panel toggle shows the
   preset as Modified and Revert restores it. The legacy Review / Filters on top presets (`panels == null`) leave Notes, Video and AI alone.
-  The badge counts applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the Diagram library
-  hidden). Tab-strip Filter/Notes/AI/Video buttons keep toggling the group flags, which stay the source of truth for the strip and shortcuts; a workspace
-  profile (look + defaults) never writes them, it points at a layout (`ProfileLayoutRef`: a preset or a saved layout, null = keep) that it applies through
-  `applyLogViewPreset` / `applySavedLogViewLayout`; `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
-  Filter group off instead of listing eight hidden tiles (the badge stays meaningful and the Filter button reflects it);
+  The Layout button shows no count: a small dot appears only while the layout is Modified against its selected preset or saved layout
+  (`logViewLayoutModified` / `compareLayoutModified`), and on the New tab, Tests and diagrams only while their hidden tiles differ from that
+  surface's default. The menu is capped below the window height and shows the thin scrollbar when it overflows. Tab-strip Filter/Notes/AI/Video
+  buttons keep toggling the group flags, which stay the source of truth for the strip and shortcuts; a workspace profile never writes them, it
+  points at a layout (`ProfileLayoutRef`: a preset or a saved layout, null = keep) that it applies through `applyLogViewPreset` /
+  `applySavedLogViewLayout`. Besides its top-level look fields (theme, fonts, size, minimap, toolbar labels, Original for new files) a profile
+  may define two optional groups covering the rest of the Appearance and Editor behavior pages: `ProfileAppearance` (interface scale, row
+  numbers, tab strip style and options, tab-strip position and toolbar placement) and `ProfileBehavior` (Ctrl+F target and search scope, split
+  sync, row wrapping, tailing, scroll margin, list sizes and similar). Built-in profiles define neither, so applying one never resets them;
+  "Save as new profile…", "Update from current setup" and the setup assistant's "My setup" profile (created when its choices differ from the
+  picked profile) capture both in full. Applying sets only the fields a profile defines, and "Customized" compares only those.
+  `AppState.showLogViewTile` un-hides a tile *and* switches its group on. The **Log focus** preset switches the
+  Filter group off instead of listing eight hidden tiles (the Filter button reflects it);
   `logViewPresetActive` folds a switched-off group back into the hidden list for the highlight, and every preset that shows filters
   switches the group on again. `revealFilterTiles` (Cmd+1, the filter-input Ctrl+F path, and the filter bar's residual chip) un-hides,
   expands and un-maximizes. Plain Ctrl+F with a maximized Original or Log tile opens Find in that visible pane instead: Original uses

@@ -1814,7 +1814,11 @@ sealed interface ProfileLayoutRef {
     data class Saved(val id: String) : ProfileLayoutRef
 }
 
-/** The look and default settings a workspace profile applies (ui/WorkspaceProfiles.kt), plus the [layout] it points at (null = keep the current one). */
+/**
+ * The look and default settings a workspace profile applies (ui/WorkspaceProfiles.kt), plus the [layout] it points at (null = keep the
+ * current one). The first block is always applied (older files carry exactly these at the top level); [appearance] and [behavior] hold the
+ * rest of the Settings Appearance and Editor behavior pages, and a null group means "don't touch" (every built-in profile).
+ */
 data class ProfileSpec(
     val theme: ThemePreset,
     val fontSize: Int,
@@ -1825,6 +1829,56 @@ data class ProfileSpec(
     val interfaceFontFamily: String? = null,
     val logFontFamily: String? = null,
     val layout: ProfileLayoutRef? = null,
+    val appearance: ProfileAppearance? = null,
+    val behavior: ProfileBehavior? = null,
+)
+
+/**
+ * The Appearance page's settings that [ProfileSpec] does not already carry at the top level: interface scale, row numbers, the tab strip
+ * (style ... visible tab limit) and the window chrome (tab strip position, toolbar placement/edge/order/alignment, vertical tab bar
+ * width). A null field keeps the live value when the profile is applied and is not compared. `chromeLocked` (a safety preference for
+ * the grips) and `toolbarFallbackPlacement` (derived by the placement itself) are deliberately not part of a profile.
+ */
+data class ProfileAppearance(
+    val interfaceScalePercent: Int? = null,
+    val showRowNumbers: Boolean? = null,
+    val tabStripStyle: TabStripStyle? = null,
+    val tabSizeMode: TabSizeMode? = null,
+    val tabLabelMode: TabLabelMode? = null,
+    val tabShowTypeBadge: Boolean? = null,
+    val tabShowSourceStripe: Boolean? = null,
+    val tabCloseOnEvery: Boolean? = null,
+    val tabCloseButtonPosition: TabCloseButtonPosition? = null,
+    val visibleTabLimit: Int? = null,
+    val tabStripPosition: TabStripPosition? = null,
+    val toolbarPlacement: ToolbarPlacement? = null,
+    val toolbarEdge: ChromeEdge? = null,
+    val toolbarOuter: Boolean? = null,
+    val toolbarAlign: ToolbarAlign? = null,
+    val verticalTabBarWidthDp: Float? = null,
+)
+
+/**
+ * The Editor behavior page's settings (Ctrl+F and search, row wrapping, scrolling, list sizes, new-tab defaults, video readouts) except
+ * the Original-panel default (top level on [ProfileSpec]), custom issue rules and proofreading, which stay global. Null fields keep the
+ * live value and are not compared.
+ */
+data class ProfileBehavior(
+    val ctrlFTarget: CtrlFTarget? = null,
+    val openUnfilteredOnCtrlF: Boolean? = null,
+    val searchScopeBehavior: SearchScopeBehavior? = null,
+    val syncSplitPanelSelectionAndScroll: Boolean? = null,
+    val autoLogRowWrap: Boolean? = null,
+    val logRowWrapLimitChars: Int? = null,
+    val autoScrollWhileTailing: Boolean? = null,
+    val navScrollMargin: Int? = null,
+    val filterListRows: Int? = null,
+    val mostUsedTagLimit: Int? = null,
+    val showProcessNamesInNewTabs: Boolean? = null,
+    val showRegexFilterSummary: Boolean? = null,
+    val showVideoFollowReadout: Boolean? = null,
+    val enableDoubleClickVideoSeekOnLink: Boolean? = null,
+    val highlightEntireCrashGroup: Boolean? = null,
 )
 
 /** A user-made workspace profile. [id] is `custom-<uuid>`, so it can never collide with a built-in id. */

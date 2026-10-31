@@ -1,4 +1,7 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
 
 package com.indagium.ui
 
@@ -10,6 +13,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -52,6 +57,9 @@ import com.indagium.model.ProfileSpec
 // "Keep my current setup" variant.
 
 private val WIREFRAME_HEIGHT = 68.dp
+
+/** The "⋯" shortcut on a custom profile's card: always drawn (never hover-only), with a 22dp target. */
+private val CARD_MENU_TARGET = 22.dp
 
 /** One selectable card: a [preview] area, the [title] and a one-line-ish [description]. */
 @Composable
@@ -116,17 +124,17 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Un
     val density = LocalDensity.current
     Box(modifier) {
         Box(
-            Modifier.size(18.dp).background(tc.p.copy(alpha = .85f), CircleShape).border(0.5.dp, tc.br, CircleShape)
+            Modifier.size(CARD_MENU_TARGET).background(tc.p, CircleShape).border(1.dp, tc.br, CircleShape)
                 .clip(CircleShape).clickable { open = !open }
                 .testTag("profile-card-menu"),
             contentAlignment = Alignment.Center,
         ) {
-            AppText("⋯", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            AppText("⋯", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
         if (open) {
             Popup(
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 22.dp.roundToPx() }),
+                offset = IntOffset(0, with(density) { (CARD_MENU_TARGET + 4.dp).roundToPx() }),
                 onDismissRequest = {
                     open = false
                     onClosed()
@@ -157,6 +165,38 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Un
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The strip under the cards for the selected custom profile: its name and the same actions as the card's "⋯" menu, always in view
+ * ("Rename…", "Update from current setup", "Export…", "Delete…"). Wraps onto more lines in a narrow window.
+ */
+@Composable
+internal fun ProfileActionStrip(name: String, actions: List<ProfileMenuAction>, modifier: Modifier = Modifier) {
+    val tc = tc()
+    FlowRow(
+        modifier.fillMaxWidth().testTag("profile-strip"),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText(
+            name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, fontFamily = UI,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(end = 8.dp).widthIn(max = 220.dp).testTag("profile-strip-name"),
+        )
+        actions.forEach { action ->
+            val tag = "profile-strip-action-" + action.label.removeSuffix("…").lowercase().replace(' ', '-')
+            HoverBox(modifier = Modifier.clip(RoundedCornerShape(4.dp)).testTag(tag), onClick = action.onClick) {
+                AppText(
+                    action.label,
+                    color = if (action.danger) DANGER_RED else tc.ac,
+                    fontSize = 11.sp,
+                    fontFamily = UI,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                )
             }
         }
     }

@@ -1,9 +1,19 @@
 package com.indagium
 
 import com.indagium.model.AppSettings
+import com.indagium.model.ChromeEdge
+import com.indagium.model.CtrlFTarget
+import com.indagium.model.CustomWorkspaceProfile
 import com.indagium.model.LogViewPresetId
+import com.indagium.model.ProfileAppearance
+import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
+import com.indagium.model.SearchScopeBehavior
+import com.indagium.model.TabStripPosition
+import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
+import com.indagium.model.ToolbarAlign
+import com.indagium.model.ToolbarPlacement
 import com.indagium.ui.AppState
 import com.indagium.ui.LogViewLayoutPreset
 import com.indagium.ui.WorkspaceProfile
@@ -11,8 +21,10 @@ import com.indagium.ui.activeLogViewLayoutRef
 import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.profileDifferences
+import com.indagium.ui.resolved
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
+import com.indagium.ui.withProfileSpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -169,5 +181,154 @@ class WorkspaceProfileTest {
     @Test
     fun jsonWithoutTheKeyDecodesToNoProfile() {
         assertNull(settingsFromJson("{}")!!.workspaceProfileId)
+    }
+
+    // ---- Appearance / Editor behavior groups --------------------------------------------------------------------------
+
+    private val groupedSpec = WorkspaceProfile.CLASSIC.spec.copy(
+        appearance = ProfileAppearance(
+            tabStripStyle = TabStripStyle.PILL,
+            tabShowSourceStripe = true,
+            tabStripPosition = TabStripPosition.LEFT,
+            toolbarPlacement = ToolbarPlacement.OWN_EDGE,
+            toolbarEdge = ChromeEdge.BOTTOM,
+            toolbarAlign = ToolbarAlign.END,
+            interfaceScalePercent = 120,
+        ),
+        behavior = ProfileBehavior(
+            ctrlFTarget = CtrlFTarget.TAGS,
+            searchScopeBehavior = SearchScopeBehavior.TWO_SEARCHES,
+            navScrollMargin = 8,
+        ),
+    )
+
+    @Test
+    fun builtInProfilesDefineNeitherGroupSoApplyingOneLeavesTabStyleChromeAndCtrlFAlone() {
+        for (profile in WorkspaceProfile.entries) {
+            assertNull(profile.spec.appearance, profile.id)
+            assertNull(profile.spec.behavior, profile.id)
+        }
+        val state = AppState()
+        state.updateSettings {
+            it.copy(
+                tabStripStyle = TabStripStyle.QUIET,
+                tabStripPosition = TabStripPosition.RIGHT,
+                toolbarPlacement = ToolbarPlacement.OWN_EDGE,
+                toolbarEdge = ChromeEdge.LEFT,
+                ctrlFTarget = CtrlFTarget.KEYWORD_REGEX,
+                interfaceScalePercent = 140,
+                navScrollMargin = 12,
+            )
+        }
+        val before = state.settings
+
+        for (profile in WorkspaceProfile.entries) state.applyWorkspaceProfile(profile)
+
+        val after = state.settings
+        assertEquals(before.tabStripStyle, after.tabStripStyle)
+        assertEquals(before.tabStripPosition, after.tabStripPosition)
+        assertEquals(before.toolbarPlacement, after.toolbarPlacement)
+        assertEquals(before.toolbarEdge, after.toolbarEdge)
+        assertEquals(before.ctrlFTarget, after.ctrlFTarget)
+        assertEquals(before.interfaceScalePercent, after.interfaceScalePercent)
+        assertEquals(before.navScrollMargin, after.navScrollMargin)
+    }
+
+    @Test
+    fun applyingACustomProfileRestoresTabStyleChromePlacementAndCtrlFTarget() {
+        val state = AppState()
+        val profile = CustomWorkspaceProfile("custom-g", "Grouped", groupedSpec)
+        state.updateSettings { it.copy(customWorkspaceProfiles = listOf(profile)) }
+
+        state.applyResolvedProfile(profile.resolved())
+
+        val s = state.settings
+        assertEquals("custom-g", s.workspaceProfileId)
+        assertEquals(TabStripStyle.PILL, s.tabStripStyle)
+        assertTrue(s.tabShowSourceStripe)
+        assertEquals(TabStripPosition.LEFT, s.tabStripPosition)
+        assertEquals(ToolbarPlacement.OWN_EDGE, s.toolbarPlacement)
+        assertEquals(ChromeEdge.BOTTOM, s.toolbarEdge)
+        assertEquals(ToolbarAlign.END, s.toolbarAlign)
+        assertEquals(120, s.interfaceScalePercent)
+        assertEquals(CtrlFTarget.TAGS, s.ctrlFTarget)
+        assertEquals(SearchScopeBehavior.TWO_SEARCHES, s.searchScopeBehavior)
+        assertEquals(8, s.navScrollMargin)
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
+    }
+
+    @Test
+    fun aGroupFieldThatIsNullKeepsTheLiveValueWhenApplied() {
+        val defaults = AppSettings()
+        val live = defaults.copy(tabStripStyle = TabStripStyle.QUIET, ctrlFTarget = CtrlFTarget.MESSAGE_RULE, filterListRows = 9)
+        val spec = WorkspaceProfile.CLASSIC.spec.copy(
+            appearance = ProfileAppearance(tabStripPosition = TabStripPosition.BOTTOM),
+            behavior = ProfileBehavior(),
+        )
+
+        val applied = live.withProfileSpec(spec)
+
+        assertEquals(TabStripPosition.BOTTOM, applied.tabStripPosition)
+        assertEquals(TabStripStyle.QUIET, applied.tabStripStyle)
+        assertEquals(CtrlFTarget.MESSAGE_RULE, applied.ctrlFTarget)
+        assertEquals(9, applied.filterListRows)
+    }
+
+    @Test
+    fun applyingTheInLayoutToolbarPlacementRecordsItsFallbackLikeTheSettingsRadio() {
+        val state = AppState()
+        state.updateSettings { it.copy(toolbarPlacement = ToolbarPlacement.WITH_TABS_START) }
+        val spec = WorkspaceProfile.CLASSIC.spec.copy(appearance = ProfileAppearance(toolbarPlacement = ToolbarPlacement.IN_LAYOUT))
+
+        state.applyResolvedProfile(CustomWorkspaceProfile("custom-l", "L", spec).resolved())
+
+        assertEquals(ToolbarPlacement.IN_LAYOUT, state.settings.toolbarPlacement)
+        assertEquals(ToolbarPlacement.WITH_TABS_START, state.settings.toolbarFallbackPlacement)
+    }
+
+    @Test
+    fun customizedListsOnlyTheDifferencesOfGroupsTheProfileDefines() {
+        val state = AppState()
+        val profile = CustomWorkspaceProfile("custom-g", "Grouped", groupedSpec)
+        state.updateSettings { it.copy(customWorkspaceProfiles = listOf(profile)) }
+        state.applyResolvedProfile(profile.resolved())
+
+        state.updateSettings { it.copy(tabStripStyle = TabStripStyle.OUTLINED, ctrlFTarget = CtrlFTarget.FIND_BAR) }
+        // A value the profile leaves null (filterListRows) never counts, and neither does the chrome lock.
+        state.updateSettings { it.copy(filterListRows = 12, chromeLocked = true) }
+
+        assertEquals(listOf("Tab style", "Ctrl+F opens"), state.workspaceProfileDifferences())
+    }
+
+    @Test
+    fun aTabStyleChangeShowsForACustomProfileButNeverForABuiltIn() {
+        val builtIn = AppState()
+        builtIn.applyWorkspaceProfile(WorkspaceProfile.CLASSIC)
+        builtIn.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL, ctrlFTarget = CtrlFTarget.TAGS, tabStripPosition = TabStripPosition.LEFT) }
+        assertEquals(emptyList(), builtIn.workspaceProfileDifferences())
+
+        val custom = AppState()
+        val saved = custom.saveCurrentAsWorkspaceProfile("Mine")
+        assertEquals(emptyList(), custom.workspaceProfileDifferences())
+        custom.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) }
+        assertEquals(listOf("Tab style"), custom.workspaceProfileDifferences())
+        assertEquals(saved.id, custom.selectedWorkspaceProfile?.id)
+    }
+
+    @Test
+    fun profileDifferencesLabelsEveryGroupFieldReadably() {
+        val live = AppSettings()
+        val spec = WorkspaceProfile.CLASSIC.spec.copy(theme = live.theme, fontSize = live.fontSize, showMinimap = live.showMinimap)
+            .copy(
+                toolbarIconOnlyButtons = live.toolbarIconOnlyButtons,
+                openNewFilesWithUnfiltered = live.openNewFilesWithUnfiltered,
+                appearance = ProfileAppearance(tabStripStyle = TabStripStyle.PILL, tabStripPosition = TabStripPosition.LEFT, toolbarOuter = true),
+                behavior = ProfileBehavior(openUnfilteredOnCtrlF = true, autoLogRowWrap = false, logRowWrapLimitChars = 900),
+            )
+
+        assertEquals(
+            listOf("Tab style", "Tab position", "Toolbar order on the tab edge", "Ctrl+F also shows Original", "Row wrapping"),
+            profileDifferences(spec, live),
+        )
     }
 }

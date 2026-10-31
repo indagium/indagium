@@ -324,6 +324,9 @@ private const val CLOSED_TAB_ROWS_RELEASE_DELAY_MS = 1_500L
 /** Bump when setup gains a section that completed users should see once on their next launch. */
 private const val SETUP_ASSISTANT_CURRENT_REVISION = 2
 
+/** The name of the custom profile the setup assistant saves when its choices differ from the profile picked (made unique if taken). */
+internal const val SETUP_PROFILE_NAME = "My setup"
+
 /**
  * A reader's claim on a tab's row store (see [AppState.pinRows]): while any pin on a store is open,
  * closing the tab does not release the rows (they stay readable); the last [close] performs the
@@ -6868,25 +6871,14 @@ class AppState(
     }
 
     // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
-    // A profile owns the look and the defaults and points at a layout. It is applied as one updateSettings for the look, then the
-    // layout through the Layout menu's own functions; the panel toggles are never written from here (the layout owns them).
+    // A profile owns the look and the defaults and points at a layout. It is applied as one updateSettings for everything the profile
+    // defines (the always-applied look, plus its Appearance / Editor behavior groups when it has them; AppSettings.withProfileSpec),
+    // then the layout through the Layout menu's own functions; the panel toggles are never written from here (the layout owns them).
     internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved(settings.customLogViewLayouts))
 
     internal fun applyResolvedProfile(profile: ResolvedProfile) {
         val spec = profile.spec
-        updateSettings {
-            it.copy(
-                theme = spec.theme,
-                fontSize = spec.fontSize,
-                fontMono = spec.fontMono,
-                interfaceFontFamily = spec.interfaceFontFamily,
-                logFontFamily = spec.logFontFamily,
-                showMinimap = spec.showMinimap,
-                toolbarIconOnlyButtons = spec.toolbarIconOnlyButtons,
-                openNewFilesWithUnfiltered = spec.openNewFilesWithUnfiltered,
-                workspaceProfileId = profile.id,
-            )
-        }
+        updateSettings { it.withProfileSpec(spec).copy(workspaceProfileId = profile.id) }
         applyProfileLayout(spec.layout)
     }
 
@@ -7356,16 +7348,21 @@ class AppState(
         private set
     private var setupAssistantStartsAtSearch by mutableStateOf(false)
 
+    /** The settings the assistant opened with: what its choices are compared against when it closes. Null while it is closed. */
+    private var setupAssistantBaseline: AppSettings? = null
+
     /** Called once at startup (see Main.kt). App.kt holds the dialog back until the license and
      *  update dialogs are out of the way. */
     fun maybeShowSetupAssistantOnStartup() {
         when {
             !settings.setupAssistantDone -> {
                 setupAssistantStartsAtSearch = false
+                setupAssistantBaseline = settings
                 setupAssistantOpen = true
             }
             settings.setupAssistantRevision < SETUP_ASSISTANT_CURRENT_REVISION -> {
                 setupAssistantStartsAtSearch = true
+                setupAssistantBaseline = settings
                 setupAssistantOpen = true
             }
         }
@@ -7386,6 +7383,8 @@ class AppState(
     private fun closeSetupAssistant() {
         setupAssistantOpen = false
         setupAssistantStartsAtSearch = false
+        saveSetupAssistantChoicesAsProfileIfCustom()
+        setupAssistantBaseline = null
         updateSettings {
             it.copy(
                 setupAssistantDone = true,
@@ -7398,8 +7397,30 @@ class AppState(
     fun rerunSetupAssistant() {
         settingsOpen = false
         setupAssistantStartsAtSearch = false
+        setupAssistantBaseline = settings
         setupAssistantOpen = true
     }
+
+    /**
+     * When the assistant closes and the user's choices (theme, Ctrl+F target and its Original option, search scope, Original panel for
+     * new files, split-panel link, or a profile pick) differ from what a profile pick alone would give, those choices become a custom
+     * profile "My setup" (made unique by the usual name helper) captured from the current setup and selected. Otherwise the selected
+     * profile stays as it is. The reference is the opening settings, with the profile applied during the assistant laid over them.
+     */
+    private fun saveSetupAssistantChoicesAsProfileIfCustom() {
+        val baseline = setupAssistantBaseline ?: AppSettings()
+        val pickedDuringSetup = settings.workspaceProfileId != baseline.workspaceProfileId
+        val reference = selectedWorkspaceProfile?.takeIf { pickedDuringSetup }?.let { baseline.withProfileSpec(it.spec) } ?: baseline
+        if (setupChoicesDiffer(reference, settings)) saveCurrentAsWorkspaceProfile(SETUP_PROFILE_NAME)
+    }
+
+    private fun setupChoicesDiffer(reference: AppSettings, current: AppSettings): Boolean =
+        reference.theme != current.theme ||
+            reference.ctrlFTarget != current.ctrlFTarget ||
+            reference.openUnfilteredOnCtrlF != current.openUnfilteredOnCtrlF ||
+            reference.openNewFilesWithUnfiltered != current.openNewFilesWithUnfiltered ||
+            reference.searchScopeBehavior != current.searchScopeBehavior ||
+            reference.syncSplitPanelSelectionAndScroll != current.syncSplitPanelSelectionAndScroll
 
     /** Opens the popup. Used both by the startup auto-prompt and by the manual "Support project"
      *  link in Settings — a manual open never touches lastSupportPromptAt, so it doesn't reset the

@@ -3,9 +3,12 @@ package com.indagium
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -14,8 +17,11 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.unit.height
+import androidx.compose.ui.unit.width
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.ProfileLayoutRef
+import com.indagium.model.TabStripStyle
 import com.indagium.model.ThemePreset
 import com.indagium.ui.AppState
 import com.indagium.ui.SettingsDialog
@@ -51,7 +57,7 @@ class WorkspaceProfileUiTest {
         val saved = state.settings.customWorkspaceProfiles.single()
         assertEquals("Evening", saved.name)
         assertEquals(saved.id, state.settings.workspaceProfileId)
-        rule.onNodeWithText("Evening").assertExists()
+        rule.onNodeWithTag("profile-strip-name").assertTextEquals("Evening") // the selected custom profile's visible strip
     }
 
     @Test
@@ -72,13 +78,15 @@ class WorkspaceProfileUiTest {
     }
 
     @Test
-    fun deletingTheSelectedProfileThroughTheMenuAsksFirstAndClearsTheSelection() {
+    fun deletingTheSelectedProfileThroughTheCardMenuAsksFirstAndClearsTheSelection() {
         val state = AppState()
         state.saveCurrentAsWorkspaceProfile("Doomed")
         install(state)
 
         rule.onNodeWithTag("profile-card-menu").performClick()
-        rule.onNodeWithText("Delete…").performClick()
+        // The strip shows the same action; the popup's entry is the second "Delete…" node.
+        rule.onAllNodesWithText("Delete…").assertCountEquals(2)
+        rule.onAllNodesWithText("Delete…")[1].performClick()
         rule.waitForIdle()
         rule.onNodeWithText("Delete profile?").assertExists()
         assertEquals(1, state.settings.customWorkspaceProfiles.size)
@@ -88,6 +96,95 @@ class WorkspaceProfileUiTest {
 
         assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
         assertNull(state.settings.workspaceProfileId)
+    }
+
+    @Test
+    fun theVisibleStripDeletesTheSelectedCustomProfileAfterAConfirm() {
+        val state = AppState()
+        val doomed = state.saveCurrentAsWorkspaceProfile("Doomed")
+        install(state)
+
+        rule.onNodeWithTag("profile-strip").assertExists()
+        rule.onNodeWithTag("profile-strip-name").assertTextEquals("Doomed")
+        rule.onNodeWithTag("profile-strip-action-delete").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete profile?").assertExists()
+        assertEquals(1, state.settings.customWorkspaceProfiles.size)
+
+        // Cancel keeps it.
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        assertEquals(doomed.id, state.settings.customWorkspaceProfiles.single().id)
+
+        rule.onNodeWithTag("profile-strip-action-delete").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete").performClick()
+        rule.waitForIdle()
+
+        assertTrue(state.settings.customWorkspaceProfiles.isEmpty())
+        assertNull(state.settings.workspaceProfileId)
+        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+    }
+
+    @Test
+    fun theStripOffersRenameAndUpdateFromCurrentSetupAndOnlyForACustomProfile() {
+        val state = AppState()
+        install(state)
+        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+
+        rule.runOnIdle { state.applyWorkspaceProfile(WorkspaceProfile.FOCUSED) }
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-strip").assertDoesNotExist()
+
+        val saved = rule.runOnIdle { state.saveCurrentAsWorkspaceProfile("Mine") }
+        rule.waitForIdle()
+        listOf("rename", "update-from-current-setup", "export", "delete").forEach {
+            rule.onNodeWithTag("profile-strip-action-$it").assertExists()
+        }
+
+        rule.runOnIdle { state.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) } }
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-strip-action-update-from-current-setup").performClick()
+        rule.waitForIdle()
+
+        assertEquals(TabStripStyle.PILL, state.settings.customWorkspaceProfiles.single { it.id == saved.id }.spec.appearance?.tabStripStyle)
+        assertEquals(emptyList(), state.workspaceProfileDifferences())
+
+        rule.onNodeWithTag("profile-strip-action-rename").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").assertExists()
+    }
+
+    @Test
+    fun theCardMenuButtonIsDrawnWithoutHoverAndIsA22dpTarget() {
+        val state = AppState()
+        state.saveCurrentAsWorkspaceProfile("Mine")
+        install(state)
+
+        // No pointer has entered anything: the "⋯" is on screen anyway, and only on the custom profile's card.
+        rule.onAllNodesWithTag("profile-card-menu").assertCountEquals(1)
+        val node = rule.onNodeWithTag("profile-card-menu")
+        node.assertIsDisplayed()
+        val bounds = node.getBoundsInRoot()
+        assertEquals(22f, bounds.width.value, 0.5f)
+        assertEquals(22f, bounds.height.value, 0.5f)
+    }
+
+    @Test
+    fun theCustomizedStripNamesATabStyleChangeOnlyForACustomProfile() {
+        val state = AppState()
+        state.saveCurrentAsWorkspaceProfile("Mine")
+        state.updateSettings { it.copy(tabStripStyle = TabStripStyle.PILL) }
+        install(state)
+
+        rule.onNodeWithText("Customized — 1 setting differs from Mine: Tab style").assertExists()
+
+        rule.runOnIdle { state.applyWorkspaceProfile(WorkspaceProfile.CLASSIC) }
+        rule.waitForIdle()
+        rule.onAllNodesWithText("Customized", substring = true).assertCountEquals(0)
+        rule.runOnIdle { state.updateSettings { it.copy(tabStripStyle = TabStripStyle.QUIET) } }
+        rule.waitForIdle()
+        rule.onAllNodesWithText("Customized", substring = true).assertCountEquals(0)
     }
 
     @Test

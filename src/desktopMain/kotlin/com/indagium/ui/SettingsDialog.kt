@@ -754,10 +754,19 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     var deleteRequest by remember { mutableStateOf<ResolvedProfile?>(null) }
     val savedLayouts = state.settings.customLogViewLayouts
     val profiles = WorkspaceProfile.entries.map { it.resolved(savedLayouts) } + state.settings.customWorkspaceProfiles.map { it.resolved(savedLayouts) }
+    val profileActions: (ResolvedProfile) -> List<ProfileMenuAction> = { profile ->
+        listOf(
+            ProfileMenuAction("Rename…") { nameRequest = ProfileNameRequest.Rename(profile) },
+            ProfileMenuAction("Update from current setup") { state.updateWorkspaceProfileFromCurrent(profile.id) },
+            ProfileMenuAction("Export…") { state.exportWorkspaceProfile(profile) },
+            ProfileMenuAction("Delete…", danger = true) { deleteRequest = profile },
+        )
+    }
     Column(Modifier.settingsAnchor("Workspace profile"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         AppText(
-            "Sets the theme, font size and defaults, and applies a layout, in one step. Every setting stays editable afterwards.",
+            "Sets the theme, font size and defaults, and applies a layout, in one step. Profiles you save also keep your tab style, " +
+                "window layout and editor behavior. Every setting stays editable afterwards.",
             color = tc.ts,
             fontSize = 11.sp,
             fontFamily = UI,
@@ -769,16 +778,23 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             onSelect = state::applyResolvedProfile,
             panelsFor = { state.profilePanelsFor(it.spec) },
             onMenuClosed = reclaimFocus,
-            menuFor = { profile ->
-                listOf(
-                    ProfileMenuAction("Rename…") { nameRequest = ProfileNameRequest.Rename(profile) },
-                    ProfileMenuAction("Update from current setup") { state.updateWorkspaceProfileFromCurrent(profile.id) },
-                    ProfileMenuAction("Export…") { state.exportWorkspaceProfile(profile) },
-                    ProfileMenuAction("Delete…", danger = true) { deleteRequest = profile },
-                )
-            },
+            menuFor = profileActions,
         )
         if (selectedProfile != null) ProfileLayoutRow(state, selectedProfile, reclaimFocus)
+        // The same actions as the card's "⋯", always in view for the selected custom profile.
+        if (selectedProfile != null && selectedProfile.custom) {
+            ProfileActionStrip(
+                selectedProfile.title,
+                profileActions(selectedProfile).map { action ->
+                    action.copy(
+                        onClick = {
+                            reclaimFocus()
+                            action.onClick()
+                        },
+                    )
+                },
+            )
+        }
         // Read straight from state on every recomposition: theme/font edits made elsewhere
         // (Appearance) show up here without any extra plumbing. Panels belong to the layout, not the profile.
         val differences = state.workspaceProfileDifferences()
