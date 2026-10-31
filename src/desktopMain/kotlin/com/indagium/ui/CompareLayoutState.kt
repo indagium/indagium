@@ -66,9 +66,8 @@ internal fun AppState.resetCompareLayout() = applyComparePreset(lastComparePrese
 internal fun AppState.comparePresetActive(preset: LogViewLayoutPreset): Boolean =
     logViewPresetIsActive(preset, settings, legacyLogViewSizes())
 
-/** The Layout button's badge in compare: applicable tiles hidden beyond what the last compare preset hides on purpose. */
-internal fun AppState.compareBadgeCount(ctx: LogViewTileContext): Int =
-    logViewHiddenBadgeCount(ctx, settings.compareHidden - lastComparePresetOrGrid().hidden, LogViewScope.COMPARE)
+/** True when the compare view no longer matches the compare preset it started from (the Layout button's warning dot). */
+internal fun AppState.compareLayoutModified(): Boolean = !comparePresetActive(lastComparePresetOrGrid())
 
 /** The F6 focus stops of the compare view in reading order (filter tiles are one stop; each side's Original and Log are one stop). */
 internal fun AppState.compareVisiblePanels(left: LogTab, right: LogTab): List<LogViewFocusPanel> {

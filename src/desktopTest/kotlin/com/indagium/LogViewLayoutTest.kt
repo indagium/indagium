@@ -53,7 +53,6 @@ import com.indagium.ui.isLogTile
 import com.indagium.ui.layoutMenuPanels
 import com.indagium.ui.logViewDropLabel
 import com.indagium.ui.logViewFocusOrder
-import com.indagium.ui.logViewHiddenBadgeCount
 import com.indagium.ui.logViewLoneColumn
 import com.indagium.ui.logViewPresetIsActive
 import com.indagium.ui.logViewScrollsInColumn
@@ -287,23 +286,6 @@ class LogViewLayoutTest {
         assertSame(s, s.withCompareTileHidden(LOG_A, true))
         val state = sanitizeLogViewLayoutState(classicLogViewLayout(sizes), listOf(LOG, TAGS), LogViewScope.SINGLE)
         assertEquals(listOf(TAGS), state.second)
-    }
-
-    @Test
-    fun badgeCountsApplicableTilesHiddenViaTheListOnly() {
-        val hidden = listOf(DIAGRAMS, VIDEO, TAGS, ORIGINAL, LOG_A, ORIGINAL_A)
-        // Single: Diagrams, Video and Tags count; Original is not shown, LOG_A / ORIGINAL_A belong to compare.
-        assertEquals(3, logViewHiddenBadgeCount(ctx(), hidden, LogViewScope.SINGLE))
-        assertEquals(2, logViewHiddenBadgeCount(ctx(video = false), hidden, LogViewScope.SINGLE))
-        assertEquals(4, logViewHiddenBadgeCount(ctx(showUnfiltered = true), hidden, LogViewScope.SINGLE))
-        assertEquals(1, logViewHiddenBadgeCount(ctx(filterBar = true), listOf(TAGS, DIAGRAMS), LogViewScope.SINGLE))
-        // Group switches never change the count: the tiles are not in the hidden list.
-        assertEquals(0, logViewHiddenBadgeCount(ctx(groups = emptySet()), emptyList(), LogViewScope.SINGLE))
-        assertEquals(1, logViewHiddenBadgeCount(ctx(groups = emptySet()), listOf(AI), LogViewScope.SINGLE))
-        // Compare: ORIGINAL_A counts only when the left pane shows its unfiltered log.
-        val compare = ctx(compare = true, left = true)
-        assertEquals(4, logViewHiddenBadgeCount(compare, hidden, LogViewScope.COMPARE))
-        assertEquals(0, logViewHiddenBadgeCount(compare, emptyList(), LogViewScope.COMPARE))
     }
 
     // ---- sanitizer -----------------------------------------------------------------------------------------------
@@ -694,7 +676,6 @@ class LogViewLayoutTest {
         val settings = AppSettings()
         assertSame(settings, settings.withLogViewTileHidden(TOOLBAR, true), "refused")
         assertSame(settings, settings.withLogViewTileCollapsed(TOOLBAR, true), "it does not collapse either")
-        assertEquals(0, logViewHiddenBadgeCount(inLayoutCtx(), listOf(TOOLBAR), LogViewScope.SINGLE))
     }
 
     @Test

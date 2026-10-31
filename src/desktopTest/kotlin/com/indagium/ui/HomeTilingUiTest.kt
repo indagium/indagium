@@ -25,10 +25,12 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -150,11 +152,29 @@ class HomeTilingUiTest {
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-tests").assertDoesNotExist()
         assertEquals(listOf(HomeSectionId.TESTS), state.settings.homeHiddenSections)
+        rule.onNodeWithTag("layout-menu-modified-dot").assertExists()
+        rule.onNodeWithTag("layout-menu-badge").assertDoesNotExist()
         rule.onNodeWithTag("layout-menu-button").performClick()
         rule.onNodeWithTag("home-layout-menu-panel-tests").performClick()
         rule.waitForIdle()
         rule.onNodeWithTag("home-card-tests").assertExists()
         assertTrue(state.settings.homeHiddenSections.isEmpty())
+        rule.onNodeWithTag("layout-menu-modified-dot").assertDoesNotExist()
+    }
+
+    @Test
+    fun theLayoutButtonShowsADotOnlyWhenTheHiddenSectionsDifferFromTheDefaultAndNeverACount() {
+        setHost()
+        rule.onNodeWithTag("layout-menu-modified-dot").assertDoesNotExist()
+        assertTrue(state.settings.homeHiddenSections.isEmpty(), "a default New tab hides nothing")
+        rule.runOnIdle { state.updateSettings { it.withHomeSectionHidden(HomeSectionId.TESTS).withHomeSectionHidden(HomeSectionId.CAPTURE) } }
+        rule.waitForIdle()
+        rule.onNodeWithTag("layout-menu-modified-dot").assertExists()
+        rule.onNodeWithTag("layout-menu-badge").assertDoesNotExist()
+        rule.onAllNodesWithText("2", useUnmergedTree = true).assertCountEquals(0)
+        rule.runOnIdle { state.updateSettings { it.withHomeSectionShown(HomeSectionId.TESTS).withHomeSectionShown(HomeSectionId.CAPTURE) } }
+        rule.waitForIdle()
+        rule.onNodeWithTag("layout-menu-modified-dot").assertDoesNotExist()
     }
 
     @Test

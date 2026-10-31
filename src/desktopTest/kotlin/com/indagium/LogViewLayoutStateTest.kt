@@ -25,8 +25,8 @@ import com.indagium.ui.hideLogViewTile
 import com.indagium.ui.isLogViewTileCollapsed
 import com.indagium.ui.lastLogViewResetLabel
 import com.indagium.ui.legacyLogViewSizes
-import com.indagium.ui.logViewBadgeCount
 import com.indagium.ui.logViewDefaultDp
+import com.indagium.ui.logViewLayoutModified
 import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.logViewTileContext
 import com.indagium.ui.logViewTileVisible
@@ -161,7 +161,7 @@ class LogViewLayoutStateTest {
         assertNotNull(root.children.first().sizeDp)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
-        assertEquals(0, state.logViewBadgeCount(state.logViewTileContext(assertNotNull(state.tab(TAB)))))
+        assertFalse(state.logViewLayoutModified(), "applying a preset leaves the layout unmodified")
     }
 
     @Test
@@ -252,7 +252,7 @@ class LogViewLayoutStateTest {
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
-        assertEquals(0, state.logViewBadgeCount(state.logViewTileContext(assertNotNull(state.tab(TAB)))))
+        assertFalse(state.logViewLayoutModified(), "applying a preset leaves the layout unmodified")
 
         val restored = assertNotNull(settingsFromJson(state.settings.settingsJson()))
         assertEquals(LogViewPresetId.FILTER_BAR, restored.lastLogViewPreset)
@@ -457,13 +457,21 @@ class LogViewLayoutStateTest {
     }
 
     @Test
-    fun theBadgeCountsOnlyWhatTheLastPresetDoesNotHide() {
-        val ctx = state.logViewTileContext(assertNotNull(state.tab(TAB)))
-        assertEquals(0, state.logViewBadgeCount(ctx), "the default layout shows the Diagram library")
+    fun theLayoutIsModifiedOnlyWhenItNoLongerMatchesItsPresetOrSavedLayout() {
+        assertFalse(state.logViewLayoutModified(), "the default layout matches Classic")
         state.hideLogViewTile(LogViewSectionId.NOTES)
-        assertEquals(1, state.logViewBadgeCount(ctx))
-        state.showLogViewTile(LogViewSectionId.DIAGRAMS)
-        assertEquals(1, state.logViewBadgeCount(ctx), "showing a tile the preset hid never drives the count negative")
+        assertTrue(state.logViewLayoutModified(), "hiding a tile the preset shows modifies it")
+        state.showLogViewTile(LogViewSectionId.NOTES)
+        assertFalse(state.logViewLayoutModified(), "putting it back matches again")
+
+        val saved = state.saveCurrentAsLogViewLayout("Mine")
+        assertFalse(state.logViewLayoutModified(), "right after saving the layout matches the saved snapshot")
+        state.hideLogViewTile(LogViewSectionId.NOTES)
+        assertTrue(state.logViewLayoutModified(), "a change against the selected saved layout is a modification")
+        state.updateSavedLogViewLayoutFromCurrent(saved.id)
+        assertFalse(state.logViewLayoutModified(), "updating the saved layout clears it")
+        state.resetLogViewLayout()
+        assertFalse(state.logViewLayoutModified())
     }
 
     // ---- pure helpers ---------------------------------------------------------------------------------------------

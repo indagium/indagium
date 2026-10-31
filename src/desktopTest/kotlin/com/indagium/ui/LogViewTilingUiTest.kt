@@ -14,12 +14,14 @@ import androidx.compose.ui.graphics.asComposeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
-import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.getBoundsInRoot
@@ -40,6 +42,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
@@ -421,17 +424,217 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun hidingNotesListsItAsHiddenAndCountsOnTheBadgeWithoutTouchingTheGroupFlag() {
+    fun hidingNotesListsItAsHiddenAndShowsTheModifiedDotWithoutTouchingTheGroupFlag() {
         setup()
-        assertFalse(exists("layout-menu-badge"), "nothing is hidden in the default preset")
+        assertFalse(exists("layout-menu-modified-dot"), "the default layout matches Classic")
         assertTrue(state.annotationVisible)
         rule.onNodeWithTag("tile-hide-notes").performClick()
         rule.waitForIdle()
         assertTrue(LogViewSectionId.NOTES in state.settings.logViewHidden)
         assertTrue(state.annotationVisible, "the tab-strip Notes toggle is unchanged")
         assertFalse(exists("tile-card-notes"))
-        assertTrue(exists("layout-menu-badge"))
-        rule.onNodeWithTag("layout-menu-badge").assertTextEquals("1")
+        assertTrue(exists("layout-menu-modified-dot"))
+        assertNoCountOnTheLayoutButton()
+    }
+
+    // The Layout button carries a dot, never a number: no text node anywhere inside the button or on the dot.
+    private fun assertNoCountOnTheLayoutButton() {
+        val texts = rule.onAllNodesWithTag("layout-menu-button", useUnmergedTree = true).fetchSemanticsNodes()
+            .flatMap { it.children + it }
+            .flatMap { node -> node.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.Text).orEmpty() }
+        assertTrue(texts.none { text -> text.text.any(Char::isDigit) }, "no numeric badge: $texts")
+        assertFalse(exists("layout-menu-badge"))
+    }
+
+    @Test
+    fun theLayoutButtonDotFollowsModifiedThroughSaveToggleAndRevert() {
+        setup(height = 900)
+        assertFalse(exists("layout-menu-modified-dot"))
+
+        // A panel toggle against the active preset shows the dot; Revert clears it.
+        rule.runOnIdle { state.updateAiPanelVisible(true) }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-dot"))
+        rule.onNodeWithTag("layout-menu-modified-dot").assertContentDescriptionEquals("Layout — modified")
+        rule.runOnIdle { state.resetLogViewLayout() }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"), "reverting matches the preset again")
+
+        // Saving the modified view makes the saved layout the reference, so no dot right after saving.
+        rule.runOnIdle { state.updateAiPanelVisible(true) }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-dot"))
+        val saved = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Dot test") }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"), "right after saving the layout is not modified")
+
+        // Against the saved layout a change shows the dot, updating the layout clears it, reverting restores the snapshot.
+        rule.runOnIdle { state.hideLogViewTile(LogViewSectionId.NOTES) }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-dot"))
+        rule.runOnIdle { state.resetLogViewLayout() }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"))
+        assertEquals(saved.id, state.settings.lastCustomLogViewLayoutId)
+        rule.runOnIdle { state.hideLogViewTile(LogViewSectionId.NOTES) }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-dot"))
+        rule.runOnIdle { state.updateSavedLogViewLayoutFromCurrent(saved.id) }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"), "updating the saved layout clears the dot")
+        assertNoCountOnTheLayoutButton()
+    }
+
+    @Test
+    fun aSavedLayoutStripOffersRenameExportAndDeleteThatWork() {
+        setup(height = 900)
+        val saved = rule.runOnIdle { state.saveCurrentAsLogViewLayout("Strip actions") }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        // Unmodified: the name and the three always-on actions plus Revert, no Modified label and no Update.
+        assertFalse(exists("layout-menu-modified-label"))
+        assertFalse(exists("layout-menu-update-existing"))
+        assertFalse(exists("layout-menu-save-as-new"))
+        listOf("layout-menu-reset", "layout-menu-strip-rename", "layout-menu-strip-export", "layout-menu-strip-delete").forEach {
+            rule.onNodeWithTag(it).assertIsEnabled()
+        }
+        assertFalse(exists("layout-menu-actions-${saved.id}"), "the right-click row is a shortcut, hidden until asked for")
+
+        rule.onNodeWithTag("layout-menu-strip-rename").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("profile-name-field").performTextReplacement("Renamed on strip")
+        rule.onNode(hasText("Rename") and hasAnyAncestor(isDialog()), useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals("Renamed on strip", state.settings.customLogViewLayouts.single().name)
+        assertEquals(saved.id, state.settings.customLogViewLayouts.single().id, "renaming keeps the identity")
+
+        rule.onNodeWithTag("layout-menu-strip-delete").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(1, state.settings.customLogViewLayouts.size, "Cancel keeps the layout")
+        rule.onNodeWithTag("layout-menu-strip-delete").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.customLogViewLayouts.isEmpty())
+        // With no saved layout selected any more the strip is the preset's.
+        assertFalse(exists("layout-menu-strip-rename"))
+        assertTrue(exists("layout-menu-save-as-new"))
+    }
+
+    @Test
+    fun theStripShowsModifiedAndUpdateOnlyWhileModifiedAndEveryActionFitsTheMenuWidth() {
+        setup(height = 900)
+        val saved = rule.runOnIdle { state.saveCurrentAsLogViewLayout("A fairly long saved layout name that needs ellipsis") }
+        rule.runOnIdle { state.updateAiPanelVisible(true) }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-label"))
+        assertTrue(exists("layout-menu-update-existing"))
+
+        val popup = bounds("layout-menu-popup")
+        val strip = bounds("layout-menu-strip")
+        assertEquals(400f, popup.width.value, 0.5f, "the single log menu is 400 dp wide")
+        assertTrue(strip.left >= popup.left && strip.right <= popup.right, "the strip $strip stays inside the menu $popup")
+        listOf(
+            "layout-menu-update-existing", "layout-menu-reset", "layout-menu-strip-rename", "layout-menu-strip-export",
+            "layout-menu-strip-delete",
+        ).forEach { tag ->
+            val b = bounds(tag)
+            assertTrue(b.left >= strip.left && b.right <= strip.right, "$tag $b is clipped by the strip $strip")
+            assertTrue(b.top >= strip.top && b.bottom <= strip.bottom, "$tag $b leaves the strip $strip vertically")
+        }
+        saveScreenshot("saved-layouts-strip-modified.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
+        // The strip stays above Panels however it wraps.
+        assertTrue(strip.bottom <= bounds("layout-menu-panel-notes").top)
+        assertEquals(saved.id, state.settings.lastCustomLogViewLayoutId)
+    }
+
+    @Test
+    fun aPresetStripKeepsRevertAndSaveAsNewWithoutTheSavedLayoutActions() {
+        setup(height = 900)
+        rule.runOnIdle { state.saveCurrentAsLogViewLayout("Somewhere else") }
+        rule.runOnIdle { state.applyLogViewPreset(LogViewLayoutPreset.CLASSIC) }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-reset") && exists("layout-menu-save-as-new"))
+        assertFalse(exists("layout-menu-strip-rename") || exists("layout-menu-strip-export") || exists("layout-menu-strip-delete"))
+        assertFalse(exists("layout-menu-update-existing"))
+    }
+
+    @Test
+    fun manySavedLayoutsWrapOntoFurtherRowsInsideTheMenu() {
+        setup(height = 900)
+        val ids = rule.runOnIdle { (1..9).map { state.saveCurrentAsLogViewLayout("Layout $it").id } }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        val popup = bounds("layout-menu-popup")
+        val first = bounds("layout-menu-apply-${ids.first()}")
+        val last = bounds("layout-menu-apply-${ids.last()}")
+        assertTrue(last.top > first.top, "the ninth thumbnail wraps below the first: $first vs $last")
+        ids.forEach {
+            val b = bounds("layout-menu-apply-$it")
+            assertTrue(b.left >= popup.left && b.right <= popup.right, "thumbnail $it $b stays inside the menu $popup")
+        }
+        val add = bounds("layout-menu-save-current")
+        assertTrue(add.right <= popup.right, "the + thumbnail wraps too instead of growing sideways")
+        assertEquals(400f, popup.width.value, 0.5f, "the menu does not grow wider")
+    }
+
+    @Test
+    fun theMenuShowsTheThinScrollbarOnlyWhenItsContentOverflows() {
+        setup(height = 900)
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(bounds("layout-menu-popup").height.value < 640f, "the default menu fits under its 640 dp cap: ${bounds("layout-menu-popup")}")
+        assertFalse(exists("layout-menu-scrollbar"), "no scrollbar while everything fits")
+
+        // Many saved layouts wrap onto many rows and push the menu past its cap.
+        rule.runOnIdle { for (i in 1..40) state.saveCurrentAsLogViewLayout("Layout $i") }
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-scrollbar"), "the thin scrollbar appears once the content is taller than the menu")
+        val popup = bounds("layout-menu-popup")
+        val bar = bounds("layout-menu-scrollbar")
+        assertTrue(bar.right <= popup.right && bar.left >= popup.left && bar.top >= popup.top && bar.bottom <= popup.bottom, "bar $bar sits inside $popup")
+        assertEquals(THIN_SCROLLBAR_DP, bar.width.value, 0.5f)
+        assertEquals(640f, popup.height.value, 1f, "the menu is capped at 640 dp")
+        saveScreenshot("layout-menu-scrollbar.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
+    }
+
+    @OptIn(androidx.compose.ui.test.InternalTestApi::class, androidx.compose.ui.InternalComposeUiApi::class)
+    @Test
+    fun aShortWindowMakesTheMenuOverflowAndShowTheScrollbar() {
+        rule.runOnUiThread {
+            (rule as androidx.compose.ui.test.junit4.DesktopComposeTestRule).scene.size = androidx.compose.ui.unit.IntSize(1100, 420)
+        }
+        setup(height = 420)
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-scrollbar"), "a short window makes the default menu overflow")
+        val popup = bounds("layout-menu-popup")
+        // Only the height cap is asserted here: the test scene hands the popup position provider a taller window than
+        // the content is measured against, so the popup's top (and a click on its last row) is not representative. In the
+        // app both are the same window. Scrolling to and clicking the last row is covered by
+        // scrollingAnOverflowingMenuReachesTheLastRowAndItsClickable.
+        assertTrue(popup.height.value <= 420f - 24f, "the menu is capped below the window height")
+    }
+
+    @Test
+    fun scrollingAnOverflowingMenuReachesTheLastRowAndItsClickable() {
+        setup(height = 900)
+        rule.runOnIdle { for (i in 1..20) state.saveCurrentAsLogViewLayout("Layout $i") }
+        rule.onNodeWithTag("layout-menu-button").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-scrollbar"), "20 saved layouts push the menu past its cap")
+        rule.onNodeWithTag("layout-menu-lock").assertIsNotDisplayed()
+        rule.onNodeWithTag("layout-menu-lock").performScrollTo()
+        rule.waitForIdle()
+        rule.onNodeWithTag("layout-menu-lock").assertIsDisplayed()
+        assertFalse(state.settings.logViewTilesLocked)
+        rule.onNodeWithTag("layout-menu-lock").performClick()
+        rule.waitForIdle()
+        assertTrue(state.settings.logViewTilesLocked, "the last row is reachable by scrolling and clickable")
     }
 
     @Test
@@ -448,7 +651,7 @@ class LogViewTilingUiTest {
     }
 
     @Test
-    fun theLogFocusPresetSwitchesTheFilterGroupOffAndKeepsTheBadgeAtZero() {
+    fun theLogFocusPresetSwitchesTheFilterGroupOffAndLeavesTheLayoutUnmodified() {
         setup()
         rule.onNodeWithTag("layout-menu-button").performClick()
         rule.waitForIdle()
@@ -460,7 +663,7 @@ class LogViewTilingUiTest {
         filterKeys.forEach { assertFalse(exists("tile-card-$it")) }
         assertTrue(exists("tile-card-log"))
         assertFalse(exists("tile-card-notes"))
-        assertFalse(exists("layout-menu-badge"))
+        assertFalse(exists("layout-menu-modified-dot"))
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.LOG_FOCUS))
         assertFalse(state.logViewPresetActive(LogViewLayoutPreset.CLASSIC))
     }
@@ -610,7 +813,7 @@ class LogViewTilingUiTest {
         rule.onNodeWithTag("layout-menu-apply-${selected.id}").assertIsSelected()
         assertFalse(exists("layout-menu-status-${selected.id}"))
         assertFalse(exists("layout-menu-modified-label"))
-        rule.onNodeWithTag("layout-menu-update-existing").assertIsNotEnabled()
+        assertFalse(exists("layout-menu-update-existing"), "Update only shows while the layout is Modified")
         rule.onNodeWithTag("layout-menu-preset-CLASSIC").assertIsNotSelected()
         saveScreenshot("saved-layouts-active.png", rule.onNodeWithTag("layout-menu-popup").captureToImage())
 

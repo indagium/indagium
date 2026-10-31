@@ -449,10 +449,6 @@ fun logViewTileVisible(id: LogViewSectionId, ctx: LogViewTileContext, hidden: Co
         (id.group == LogViewTileGroup.NONE || ctx.groupOn(id.group)) &&
         (id.neverHidden || id !in hidden)
 
-/** How many applicable tiles of [scope] the hidden list hides (the Layout button's badge); tiles off through a group do not count. */
-fun logViewHiddenBadgeCount(ctx: LogViewTileContext, hidden: Collection<LogViewSectionId>, scope: LogViewScope): Int =
-    hidden.distinct().count { !it.neverHidden && it.inScope(scope) && logViewTileApplicable(it, ctx) }
-
 // ---------------------------------------------------------------------------------------------------------------
 // Sanitizing
 // ---------------------------------------------------------------------------------------------------------------

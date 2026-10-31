@@ -361,8 +361,10 @@ internal fun AppState.logViewVisiblePanels(tab: LogTab): List<LogViewFocusPanel>
 }
 
 /**
- * The Layout button's badge: the applicable tiles hidden beyond what the last-applied preset hides on purpose (Classic keeps the
- * Diagram library hidden, which is no news to anyone). Hidden through the menu or a tile's hide button, they are what the badge counts.
+ * True when the single log view no longer matches the layout it started from: the selected saved layout, else the last-applied preset.
+ * The Layout menu strip's "Modified" label and the Layout button's warning dot both read this, so they cannot disagree.
  */
-internal fun AppState.logViewBadgeCount(ctx: LogViewTileContext): Int =
-    logViewHiddenBadgeCount(ctx, settings.logViewHidden - lastLogViewPresetOrClassic().hidden, LogViewScope.SINGLE)
+internal fun AppState.logViewLayoutModified(): Boolean {
+    val selectedCustom = settings.customLogViewLayouts.firstOrNull { it.id == settings.lastCustomLogViewLayoutId }
+    return if (selectedCustom != null) !matchesCustomLogViewLayout(selectedCustom) else !logViewPresetActive(lastLogViewPresetOrClassic())
+}

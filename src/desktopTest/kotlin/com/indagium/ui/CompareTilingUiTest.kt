@@ -399,6 +399,22 @@ class CompareTilingUiTest {
     }
 
     @Test
+    fun theCompareLayoutButtonShowsADotOnlyWhileTheLayoutIsModified() {
+        setup()
+        assertFalse(exists("layout-menu-modified-dot"), "the default compare layout matches Compare grid")
+        rule.onNodeWithTag("tile-hide-notes").performClick()
+        rule.waitForIdle()
+        assertTrue(exists("layout-menu-modified-dot"), "hiding a tile the preset shows modifies the layout")
+        assertFalse(exists("layout-menu-badge"), "no numeric badge")
+        rule.runOnIdle { state.resetCompareLayout() }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"), "Reset puts the preset back")
+        rule.runOnIdle { state.applyComparePreset(LogViewLayoutPreset.COMPARE_COLUMNS) }
+        rule.waitForIdle()
+        assertFalse(exists("layout-menu-modified-dot"), "applying a preset is not a modification")
+    }
+
+    @Test
     fun hidingNotesInCompareUsesTheCompareHiddenList() {
         setup()
         rule.onNodeWithTag("tile-hide-notes").performClick()

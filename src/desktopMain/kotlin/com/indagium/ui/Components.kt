@@ -534,7 +534,7 @@ internal fun BoundedScrollBoxDp(
  * the scrolling column. [contentPadding] is applied inside the scroll area. [endGutter] is extra end
  * padding reserved only while the content overflows, so a list that fits keeps its exact layout and
  * an overflowing one doesn't run text under the thumb; pass `0.dp` when [contentPadding] already
- * leaves room at the end.
+ * leaves room at the end. [scrollbarTag], when set, tags the scrollbar thumb track only while the content overflows (for tests).
  */
 @Composable
 internal fun ScrollColumnWithBar(
@@ -544,6 +544,7 @@ internal fun ScrollColumnWithBar(
     endGutter: Dp = 8.dp,
     verticalArrangement: Arrangement.Vertical = Arrangement.Top,
     horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    scrollbarTag: String? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     // ScrollState.maxValue is Int.MAX_VALUE until the first layout; treat that as "not known yet".
@@ -556,7 +557,8 @@ internal fun ScrollColumnWithBar(
             content = content,
         )
         Box(Modifier.matchParentSize()) {
-            ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight())
+            val tag = if (scrollbarTag != null && overflowing) Modifier.testTag(scrollbarTag) else Modifier
+            ThinVerticalScrollbar(state, Modifier.align(Alignment.CenterEnd).fillMaxHeight().then(tag))
         }
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -19,10 +20,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.runtime.Composable
@@ -42,6 +42,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -69,10 +70,12 @@ import com.indagium.model.TileNode
 
 // The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the five single-view presets (the two
 // compare presets in compare mode) as thumbnails, the user's saved layouts as a second row of thumbnails (right-click for Rename / Export /
-// Delete, a dashed "+" saves the current view), one strip naming the current layout with Update / Revert, a checklist of the panels
-// that currently apply and a "Lock tiles" switch. The button carries a small
-// badge counting the applicable tiles hidden through the menu or a tile's hide button. Every click and the dismissal hand keyboard focus
-// back to the root (CLAUDE.md: a clickable or a dismissed Popup steals it and never returns it).
+// Delete, a dashed "+" saves the current view; they wrap onto further rows), one strip naming the current layout (a saved one offers
+// Update while Modified, Revert, Rename…, Export… and Delete…; a preset offers Revert and "Save as new…"), a checklist of the panels
+// that currently apply and a "Lock tiles" switch. The menu scrolls with the app's thin scrollbar when it is taller than the space. The
+// button carries a small warning dot: in the log view and compare when the layout is Modified against its preset or saved layout
+// (never right after applying or saving it), on the New tab, the Tests tab and a diagram when the hidden panels differ from the default. Every click and the
+// dismissal hand keyboard focus back to the root (CLAUDE.md: a clickable or a dismissed Popup steals it and never returns it).
 
 private const val MENU_WIDTH_DP = 320
 private const val LOG_LAYOUT_MENU_WIDTH_DP = 400
@@ -82,11 +85,31 @@ private const val THUMB_VIRTUAL_WIDTH = 1200f
 private const val THUMB_VIRTUAL_HEIGHT = 720f
 private const val THUMB_FILL_ALPHA = 0.55f
 private const val THUMB_LOG_FILL_ALPHA = 0.9f
-private const val BADGE_SIZE_DP = 14
 private const val MODIFIED_DOT_DP = 7
 private const val THUMB_FILTER_BAR_HEIGHT = 90f
 private const val THUMB_FILTER_BAR_GAP = 36f
 private const val MENU_GAP_PX = 4
+private const val MENU_MAX_HEIGHT_DP = 640
+private const val MENU_WINDOW_MARGIN_DP = 24
+private const val MENU_MIN_HEIGHT_DP = 160
+
+/**
+ * Keeps a popup menu shorter than the window it opens in. A popup's content is measured against the window, so the
+ * incoming max height is the window height: without this a 640 dp menu in a short window hangs off the bottom edge,
+ * where scrolling can never bring its last rows into view. The position provider then keeps the shorter menu inside.
+ */
+private fun Modifier.capHeightToWindow(): Modifier = layout { measurable, constraints ->
+    val maxHeight = if (constraints.hasBoundedHeight) {
+        val floor = minOf(MENU_MIN_HEIGHT_DP.dp.roundToPx(), constraints.maxHeight)
+        (constraints.maxHeight - MENU_WINDOW_MARGIN_DP.dp.roundToPx()).coerceAtLeast(floor)
+    } else {
+        constraints.maxHeight
+    }
+    val placeable = measurable.measure(constraints.copy(minHeight = minOf(constraints.minHeight, maxHeight), maxHeight = maxHeight))
+    layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+}
+
+private const val STRIP_NAME_MAX_DP = 150
 
 /** Height (dp) of a button in a wrapping toolbar (MainToolbar's flow layout), the same as a vertical toolbar's buttons. */
 internal const val WRAPPED_BUTTON_HEIGHT_DP = 32
@@ -117,7 +140,7 @@ internal fun layoutMenuPanels(ctx: LogViewTileContext): List<LogViewSectionId> =
     LogViewSectionId.entries.filter { !it.neverHidden && it !in ORIGINAL_TILES && logViewTileApplicable(it, ctx) }
 
 /**
- * The toolbar button, with the hidden-tile badge. Draws nothing where the menu does not apply (see [layoutMenuTab]). In a [vertical]
+ * The toolbar button, with the "modified" dot. Draws nothing where the menu does not apply (see [layoutMenuTab]). In a [vertical]
  * toolbar it fills the toolbar's width, and its menu opens beside it ([menuBeside]) rather than below. In a [wrap]ping toolbar (a row of
  * buttons that flows onto more lines, with 32 dp buttons) it is a fixed-size button.
  */
@@ -135,20 +158,22 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
     var open by remember { mutableStateOf(false) }
     val ctx = tab?.let(state::layoutMenuContext)
     val testsLayout = if (tests) state.settings.currentTestsWorkspaceLayout() else null
-    val badge = when {
-        home -> state.settings.homeHiddenSections.size
-        testsLayout != null -> testsLayout.hidden.size
-        diagramView != null -> diagramView.diagramHiddenTiles.size
-        ctx?.compare == true -> state.compareBadgeCount(ctx)
-        ctx != null -> state.logViewBadgeCount(ctx)
-        else -> 0
+    // Log view and compare: the layout no longer matches its selected preset or saved layout. Elsewhere: the hidden panels differ from
+    // that surface's default (nothing hidden on the New tab and the Tests tab, the Source tile on a diagram).
+    val modified = when {
+        home -> state.settings.homeHiddenSections.isNotEmpty()
+        testsLayout != null -> testsLayout.hidden.toSet() != testsWorkspaceDefaultState().hidden.toSet()
+        diagramView != null -> diagramView.diagramHiddenTiles.toSet() != DiagramWorkspacePreset.STANDARD.hidden
+        ctx?.compare == true -> state.compareLayoutModified()
+        ctx != null -> state.logViewLayoutModified()
+        else -> false
     }
     Box(if (vertical) Modifier.fillMaxWidth() else if (wrap) Modifier else Modifier.fillMaxHeight()) {
         ToolbarBtn(
             "",
             icon = Icons.Outlined.Dashboard,
             showLabel = false,
-            tooltip = "Layout",
+            tooltip = if (modified) "Layout — modified" else "Layout",
             active = open,
             modifier = when {
                 vertical -> Modifier.fillMaxWidth().height(36.dp)
@@ -157,17 +182,16 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
             }.testTag("layout-menu-button"),
             shape = RoundedCornerShape(7.dp),
         ) { open = !open }
-        if (badge > 0) {
+        if (modified) {
             Box(
                 Modifier
                     .align(Alignment.TopEnd)
-                    .offset(x = (-1).dp, y = 1.dp)
-                    .size(BADGE_SIZE_DP.dp)
-                    .background(tc.ac, CircleShape)
-                    .testTag("layout-menu-badge")
-                    .semantics(mergeDescendants = true) {},
-                contentAlignment = Alignment.Center,
-            ) { AppText(badge.toString(), color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold) }
+                    .offset(x = (-3).dp, y = 3.dp)
+                    .size(MODIFIED_DOT_DP.dp)
+                    .background(tc.warn, CircleShape)
+                    .testTag("layout-menu-modified-dot")
+                    .semantics { contentDescription = "Layout — modified" },
+            )
         }
         if (open) {
             val dismiss = {
@@ -577,12 +601,16 @@ internal fun LayoutMenuPopup(
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
-        Column(
-            Modifier.width((if (compare) MENU_WIDTH_DP else LOG_LAYOUT_MENU_WIDTH_DP).dp).heightIn(max = 640.dp).verticalScroll(rememberScrollState())
-                .background(tc.p, shape).border(1.dp, tc.br, shape).padding(vertical = 8.dp).testTag("layout-menu-popup"),
+        ScrollColumnWithBar(
+            Modifier.capHeightToWindow().width((if (compare) MENU_WIDTH_DP else LOG_LAYOUT_MENU_WIDTH_DP).dp)
+                .heightIn(max = MENU_MAX_HEIGHT_DP.dp)
+                .background(tc.p, shape).border(1.dp, tc.br, shape).testTag("layout-menu-popup"),
+            contentPadding = PaddingValues(vertical = 8.dp),
+            // The rows carry their own 12 dp side padding, which leaves room for the 6 dp thumb.
+            endGutter = 0.dp,
+            scrollbarTag = "layout-menu-scrollbar",
         ) {
             val selectedCustom = if (compare) null else settings.customLogViewLayouts.firstOrNull { it.id == settings.lastCustomLogViewLayoutId }
-            val selectedCustomActive = selectedCustom?.let(state::matchesCustomLogViewLayout) == true
             MenuLabel("Layout presets")
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 LogViewLayoutPreset.forScope(if (compare) LogViewScope.COMPARE else LogViewScope.SINGLE).forEach { preset ->
@@ -652,8 +680,22 @@ internal fun LayoutMenuPopup(
                 CurrentLayoutStrip(
                     state = state,
                     selectedCustom = selectedCustom,
-                    selectedCustomActive = selectedCustomActive,
                     onSaveAsNew = { saveLayoutDialog = true },
+                    onRename = { layout ->
+                        renameLayoutRequest = layout
+                        actionsLayoutId = null
+                        onReclaimFocus()
+                    },
+                    onExport = { layout ->
+                        state.exportLogViewLayout(layout)
+                        actionsLayoutId = null
+                        onReclaimFocus()
+                    },
+                    onDelete = { layout ->
+                        deleteLayoutRequest = layout
+                        actionsLayoutId = null
+                        onReclaimFocus()
+                    },
                     onReclaimFocus = onReclaimFocus,
                 )
             }
@@ -749,52 +791,56 @@ internal fun LayoutMenuPopup(
 
 /**
  * One strip under the thumbnails naming the layout the view started from ("‹name›", plus "· Modified" in the warning colour once the
- * view no longer matches it). A saved layout offers Update (write the view into it; only while Modified) and Revert; a preset offers
- * Revert and "Save as new…". Revert is always available, so tile sizes (which the preset match ignores) can still be put back.
+ * view no longer matches it). A saved layout offers Update (write the view into it; only while Modified), Revert, Rename…, Export… and
+ * Delete…; a preset offers Revert and "Save as new…". Revert is always available, so tile sizes (which the preset match ignores) can still
+ * be put back. The actions wrap onto a second line when the menu is too narrow for all of them next to the name.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun CurrentLayoutStrip(
     state: AppState,
     selectedCustom: CustomLogViewLayout?,
-    selectedCustomActive: Boolean,
     onSaveAsNew: () -> Unit,
+    onRename: (CustomLogViewLayout) -> Unit,
+    onExport: (CustomLogViewLayout) -> Unit,
+    onDelete: (CustomLogViewLayout) -> Unit,
     onReclaimFocus: () -> Unit,
 ) {
     val tc = tc()
     val preset = state.lastLogViewPresetOrClassic()
     val name = selectedCustom?.name ?: preset.label
-    val modified = if (selectedCustom != null) !selectedCustomActive else !state.logViewPresetActive(preset)
+    val modified = state.logViewLayoutModified()
     val stripShape = RoundedCornerShape(6.dp)
-    Row(
+    FlowRow(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             .background(if (modified) tc.warnBg else tc.p2, stripShape)
             .padding(start = 8.dp, end = 4.dp, top = 3.dp, bottom = 3.dp)
             .testTag("layout-menu-strip"),
-        verticalAlignment = Alignment.CenterVertically,
+        verticalArrangement = Arrangement.Center,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText(
                 name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-                overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = STRIP_NAME_MAX_DP.dp),
             )
             if (modified) {
                 AppText(" · Modified", color = tc.warn, fontSize = 11.sp, maxLines = 1, modifier = Modifier.testTag("layout-menu-modified-label"))
             }
         }
-        if (selectedCustom != null) {
+        if (selectedCustom != null && modified) {
             AppButton(
                 "Update",
                 onClick = {
                     state.updateSavedLogViewLayoutFromCurrent(selectedCustom.id)
                     onReclaimFocus()
                 },
-                enabled = modified,
                 variant = ButtonVariant.Ghost,
                 horizontalPadding = 7.dp,
-                tooltip = if (modified) "Update ${selectedCustom.name} with the current view" else "Saved layout already matches the current view",
+                tooltip = "Update ${selectedCustom.name} with the current view",
                 modifier = Modifier.height(24.dp).testTag("layout-menu-update-existing"),
-                textColor = if (modified) tc.ac else null,
+                textColor = tc.ac,
             )
         }
         AppButton(
@@ -817,6 +863,31 @@ private fun CurrentLayoutStrip(
                 horizontalPadding = 7.dp,
                 modifier = Modifier.height(24.dp).testTag("layout-menu-save-as-new"),
                 textColor = tc.ac,
+            )
+        } else {
+            AppButton(
+                "Rename…",
+                onClick = { onRename(selectedCustom) },
+                variant = ButtonVariant.Ghost,
+                horizontalPadding = 7.dp,
+                modifier = Modifier.height(24.dp).testTag("layout-menu-strip-rename"),
+                textColor = tc.ac,
+            )
+            AppButton(
+                "Export…",
+                onClick = { onExport(selectedCustom) },
+                variant = ButtonVariant.Ghost,
+                horizontalPadding = 7.dp,
+                modifier = Modifier.height(24.dp).testTag("layout-menu-strip-export"),
+                textColor = tc.ac,
+            )
+            AppButton(
+                "Delete…",
+                onClick = { onDelete(selectedCustom) },
+                variant = ButtonVariant.Ghost,
+                horizontalPadding = 7.dp,
+                modifier = Modifier.height(24.dp).testTag("layout-menu-strip-delete"),
+                textColor = DANGER_RED,
             )
         }
     }
