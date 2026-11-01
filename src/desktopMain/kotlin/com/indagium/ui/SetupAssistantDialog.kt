@@ -49,6 +49,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.model.ProfileSpec
+import com.indagium.ui.holiday.withRegularTheme
 
 // First-run setup assistant: five short steps that apply the same choices Settings offers, through
 // the same AppState functions (applyWorkspaceProfile, updateSettings, pickSaveFolder, ...), so there
@@ -352,7 +353,7 @@ private fun LookStep(state: AppState) {
     ThemeGallery(
         settings = state.settings,
         selected = state.settings.theme,
-        onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
+        onSelect = { preset -> preset?.let { state.updateSettings { s -> s.withRegularTheme(it) } } },
         height = null,
     )
     AppearanceBasicsRow(state)

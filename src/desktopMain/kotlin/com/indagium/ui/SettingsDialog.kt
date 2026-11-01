@@ -202,6 +202,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     // there), so it must go through the same unsaved-changes guard rather than closing unconditionally.
     SideEffect { onRequestCloseChanged(::requestClose) }
 
+    SideEffect { anchors.pendingKey = pendingAnchor }
     val contentScroll = rememberScrollState()
     val density = LocalDensity.current
     // After a result click the section is composed again (and, for another section, for the first
@@ -711,19 +712,10 @@ internal fun AppearanceSystemFontSelectors(state: AppState) {
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
-    Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        ThemeGallery(
-            settings = state.settings,
-            selected = state.settings.theme,
-            onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
-            height = null,
-        )
-    }
+    ThemeSettingsBlock(state)
     AppearanceBasicsRow(state)
     AppearanceSystemFontSelectors(state)
     TabsAppearanceSettings(state)
-    SeasonalThemesSettings(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",

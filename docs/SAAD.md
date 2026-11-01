@@ -5786,6 +5786,14 @@ in a 1400 x 860 window), none under 480 x 360, and a later art that would overla
 (`LocalHolidayArtClock`, created in App.kt, running only while some art has a place, animation is on, nothing is capturing or playing and the window is
 focused), read only while drawing.
 
+Settings. Settings > Appearance has ONE "Theme" block (`ThemeSettingsBlock`) with a Themes | Seasonal themes switcher. The Themes tab is the regular
+gallery; picking a card calls `AppSettings.withRegularTheme`, which also turns the seasonal theme off (the setup assistant uses it too), and no card
+shows as selected while a seasonal theme is on. The Seasonal themes tab has a card per registered theme (picking one calls `withPackOn`: off becomes
+Always, an Automatic choice is kept), a When row (Always | Only during its dates), a status line under Automatic outside the dates, a "Turn off
+seasonal theme" link while one is on, and the dimmed Light or dark, Effects, Fun icons and Pause rows. The block opens on the active tab and the tab
+choice is not persisted. A settings search that targets a seasonal row (`SEASONAL_ANCHORS`) makes the block open its Seasonal tab: the dialog mirrors
+the pending anchor into `SettingsAnchors.pendingKey`, the block reacts, and the row then composes and registers its anchor for the usual scroll and flash.
+
 ### 27.2 Which theme is active
 
 `AppSettings.holiday.mode` is Off, Automatic or Always. Always uses the selected `pack`. Automatic takes the theme whose `dates` contain today; when

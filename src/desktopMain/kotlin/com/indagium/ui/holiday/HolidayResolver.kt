@@ -10,6 +10,7 @@ import com.indagium.model.HolidayLightness
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.model.HolidaySettings
+import com.indagium.model.ThemePreset
 import com.indagium.ui.*
 import com.indagium.ui.ThemeColors
 import com.indagium.ui.isLight
@@ -138,6 +139,15 @@ internal fun effectiveThemeColors(settings: AppSettings, today: LocalDate = Loca
 
 /** [this] with its holiday settings transformed (the one write path for the Settings dialog and the Layout menu). */
 fun AppSettings.withHoliday(fn: (HolidaySettings) -> HolidaySettings): AppSettings = copy(holiday = fn(holiday))
+
+/**
+ * [this] with the regular theme [preset] chosen: it applies, and any seasonal theme is turned off (picking a regular theme is how one leaves
+ * the seasonal one). The one write path of every place that picks a regular preset (Settings, the setup assistant).
+ */
+fun AppSettings.withRegularTheme(preset: ThemePreset): AppSettings = copy(theme = preset).withHoliday { it.copy(mode = HolidayMode.OFF) }
+
+/** [this] with seasonal theme [pack] on: selected, and switched on as Always if it was off (an Automatic choice is kept). */
+fun HolidaySettings.withPackOn(pack: HolidayPack): HolidaySettings = copy(pack = pack, mode = if (mode == HolidayMode.OFF) HolidayMode.ALWAYS else mode)
 
 /** The active pack's look, or null (no pack). Provided by App.kt next to LocalTheme. */
 internal val LocalHoliday = compositionLocalOf<HolidayLook?> { null }

@@ -232,26 +232,27 @@ private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} r
 private fun seasonalThemes() = listOf(
     entry(
         SettingsSection.Appearance, "Seasonal theme",
-        "Turns a seasonal pack on for its dates (Automatic), always, or never. $SEASONAL_DATES and goes back to your preset after.",
+        "Theme > Seasonal themes: turn a seasonal pack on always or only during its dates. $SEASONAL_DATES and goes back to your theme after.",
         SEASONAL_KEYWORDS + listOf("automatic", "always", "off", "dates", "colours"),
+        anchor = SEASONAL_ANCHOR_WHEN,
     ),
     entry(
         SettingsSection.Appearance, "Seasonal theme pack",
         "$SEASONAL_NAMES, each with its own palette, tab shapes, scene behind the tabs and pictures.",
         SEASONAL_KEYWORDS + listOf("tabs", "scene", "cat"),
-        anchor = "Theme pack",
+        anchor = SEASONAL_ANCHOR_PACK,
     ),
     entry(
         SettingsSection.Appearance, "Seasonal light or dark",
         "Whether the seasonal pack uses its light or dark colours, or follows your theme preset.",
         SEASONAL_KEYWORDS + listOf("follow preset", "light", "dark", "mode"),
-        anchor = "Light or dark",
+        anchor = SEASONAL_ANCHOR_LIGHTNESS,
     ),
     entry(
         SettingsSection.Appearance, "Seasonal effects",
         "Full: bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
         SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
-        anchor = "Effects",
+        anchor = SEASONAL_ANCHOR_EFFECTS,
     ),
     entry(
         SettingsSection.Appearance, "Fun icons",

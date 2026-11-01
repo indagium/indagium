@@ -75,6 +75,9 @@ internal class SettingsAnchors {
      *  the top of the whole content, not of the viewport). */
     var content: LayoutCoordinates? = null
 
+    /** The anchor a search result or jump is heading for, until it has been scrolled to: a row hidden in a tab opens its tab on seeing it. */
+    var pendingKey by mutableStateOf<String?>(null)
+
     /** Key of the row being flashed, and how strong the flash still is (1 -> 0). */
     var flashKey by mutableStateOf<String?>(null)
     val flash = Animatable(0f)

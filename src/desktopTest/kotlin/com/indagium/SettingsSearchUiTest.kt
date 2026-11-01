@@ -14,6 +14,7 @@ import androidx.compose.ui.test.pressKey
 import com.indagium.model.SearchScopeBehavior
 import com.indagium.ui.AppState
 import com.indagium.ui.SettingsDialog
+import com.indagium.ui.holiday.seasonalPackTag
 import com.indagium.ui.isMacOs
 import org.junit.Rule
 import org.junit.Test
@@ -103,5 +104,18 @@ class SettingsSearchUiTest {
         rule.waitForIdle()
 
         rule.onNodeWithTag("settings-search-field").assertIsFocused()
+    }
+
+    @Test
+    fun aSeasonalResultOpensTheSeasonalTabOfTheThemeBlockAndShowsItsRow() {
+        install()
+        type("halloween")
+        rule.onNodeWithText("Seasonal theme").performClick()
+        rule.waitForIdle()
+
+        rule.onNodeWithText("All results").assertDoesNotExist()
+        // The Theme block is open on its Seasonal themes tab: the pack card and the When row are on screen.
+        rule.onNodeWithTag(seasonalPackTag(com.indagium.model.HolidayPack.PUMPKIN_PATCH)).assertExists()
+        rule.onNodeWithText("When it applies").assertExists()
     }
 }

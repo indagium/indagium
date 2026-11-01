@@ -27,7 +27,7 @@ import com.indagium.ui.holiday.LAYOUT_MENU_HOLIDAY_TAG
 import com.indagium.ui.holiday.LocalHoliday
 import com.indagium.ui.holiday.SEASONAL_FUN_ICONS_TAG
 import com.indagium.ui.holiday.SEASONAL_PAUSE_TAG
-import com.indagium.ui.holiday.SeasonalThemesSettings
+import com.indagium.ui.holiday.ThemeSettingsBlock
 import com.indagium.ui.holiday.layoutMenuHolidayToggleTag
 import com.indagium.ui.holiday.resolveHolidayLook
 import com.indagium.ui.holiday.seasonalPackTag
@@ -94,7 +94,7 @@ class HolidayFakeThemeUiTest {
     fun theSettingsSectionHasACardPerRegisteredThemeAndNoFunIconsRow() {
         newState()
         rule.setContent {
-            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 900.dp)) { SeasonalThemesSettings(state, FAKE_THEMES) } }
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { Box(Modifier.size(700.dp, 900.dp)) { ThemeSettingsBlock(state, FAKE_THEMES) } }
         }
         rule.waitForIdle()
         rule.onNodeWithText("Fake fest").assertExists()
