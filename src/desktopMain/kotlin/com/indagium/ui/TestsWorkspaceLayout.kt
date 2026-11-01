@@ -219,6 +219,8 @@ internal val TESTS_WORKSPACE_CHROME_SPEC = TileChromeSpec<TestsWorkspaceTileId>(
     scrollEdgeRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
     scrollEndHandleOuterRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
+    // The Workspace tile is the main content: no seasonal arts in it, and under Calm no effects over it.
+    holidayClear = { it == TestsWorkspaceTileId.WORKSPACE },
 )
 
 internal fun testsWorkspaceTileTitle(id: TestsWorkspaceTileId): String = when (id) {

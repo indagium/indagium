@@ -68,6 +68,7 @@ import com.indagium.model.LogTab
 import com.indagium.model.TabCloseButtonPosition
 import com.indagium.model.TabStripPosition
 import com.indagium.model.TabStripStyle
+import com.indagium.ui.holiday.*
 
 // How each tab strip style (Settings > Appearance > Tabs) draws one tab. The shell keeps one structure for every style (a stripe
 // overlay and a Row of [close?] [live dot] [badge] [label] [close?]) and only the metrics, the chrome behind the Row and the label's type
@@ -451,21 +452,44 @@ internal fun TabShell(
     var rowRoot by remember { mutableStateOf(Offset.Zero) }
     val style = appearance.style
     val position = appearance.position
+    val holiday = LocalHoliday.current
     val metrics = tabMetrics(style, position)
-    val shape = tabShape(style, position)
+    // Under a seasonal pack the tab takes the pack's shape, extra outer inset and fill; the user's style is only left unread here.
+    val inset = if (holiday != null) holidayTabInset(metrics.inset, position) else metrics.inset
+    val shape = if (holiday != null) holidayTabShape(position, holiday.theme.corners.tabDp.dp) else tabShape(style, position)
+    val ornament = holiday?.theme?.tabOrnament?.takeIf { isActive }
     val drawSourceContour = appearance.showStripe && shape != RectangleShape
     val sourceColor = if (appearance.showStripe) tabSourceColor(appearance.kind, tc) else Color.Transparent
     val lit = isActive || dragging
     val labelStyle = tabLabelStyle(style, isActive, lit, tc)
     val groupTint = appearance.groupColor?.takeIf { appearance.groupTintAlpha > 0f }?.copy(alpha = appearance.groupTintAlpha)
     Box(Modifier.fillMaxWidth()) {
-        Box(Modifier.fillMaxWidth()) {
+        Box(
+            Modifier.fillMaxWidth().then(
+                if (ornament != null && holiday != null) {
+                    // Over the tab and outside its clip, so the stem can stand above the rounded top.
+                    val edgeDp = holidayOuterEdgeInset(inset, position)
+                    Modifier.testTag("tab-stem-$pointerKey").drawWithContent {
+                        drawContent()
+                        ornament.draw(this, position, edgeDp.toPx(), holiday.isDark)
+                    }
+                } else {
+                    Modifier
+                },
+            ),
+        ) {
             Row(
                 Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
-                    .padding(metrics.inset)
+                    .padding(inset)
                     .testTag("tab-$pointerKey")
                     .then(if (appearance.outlineColor == null) Modifier else Modifier.tabOutline(style, position, appearance.outlineColor))
-                    .tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
+                    .then(
+                        if (holiday != null) {
+                            Modifier.holidayTabChrome(isActive, hov || dragging, tc, holiday.chrome, position, groupTint, holiday.theme.corners.tabDp.dp)
+                        } else {
+                            Modifier.tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
+                        },
+                    )
                     // Cuts what is drawn after the chrome (the hover / press / focus highlights of the click below) to the tab's own shape. A plain
                     // rectangle needs no clip, so the default style adds no layer and draws exactly what it always did.
                     .then(if (shape == RectangleShape) Modifier else Modifier.clip(shape))
@@ -490,7 +514,12 @@ internal fun TabShell(
                             Modifier.testTag("tab-stripe-$pointerKey")
                                 .drawWithContent {
                                     drawContent()
-                                    drawEdgeContour(position, STRIPE_HEIGHT.toPx(), tabEdgeRadius(style, position, position), sourceColor)
+                                    drawEdgeContour(
+                                        position,
+                                        STRIPE_HEIGHT.toPx(),
+                                        if (holiday != null) holiday.theme.corners.tabDp.dp.toPx() else tabEdgeRadius(style, position, position),
+                                        sourceColor,
+                                    )
                                 }
                         } else {
                             Modifier

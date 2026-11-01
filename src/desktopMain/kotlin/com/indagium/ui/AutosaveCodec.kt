@@ -5,6 +5,8 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.capture.decodeCaptureSegmentManualAnchors
 import com.indagium.capture.encodeCaptureSegmentManualAnchors
 import com.indagium.model.*
+import com.indagium.ui.holiday.putHolidaySettings
+import com.indagium.ui.holiday.withHolidaySettingsFrom
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
 import kotlinx.serialization.json.Json
@@ -704,6 +706,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     putLogViewLayoutSettings(this@settingsJson)
     // Tab strip appearance and chrome placement, JSON form only (see ChromeSettingsJson.kt).
     putChromeSettings(this@settingsJson)
+    putHolidaySettings(this@settingsJson)
     // Tests workspace tiling, JSON form only (see TestsLayoutSettingsJson.kt).
     putTestsWorkspaceLayoutSettings(this@settingsJson)
 }.toString()
@@ -1062,7 +1065,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeLayoutTipDismissed = home.tipDismissed,
         homeOpenActionsHeightDp = o.intOrDefault("homeOpenActionsHeightDp", DEFAULT_HOME_OPEN_ACTIONS_HEIGHT_DP)
             .coerceIn(MIN_HOME_OPEN_ACTIONS_HEIGHT_DP, MAX_HOME_OPEN_ACTIONS_HEIGHT_DP),
-    ).withLogViewLayoutSettingsFrom(o).withChromeSettingsFrom(o).withTestsWorkspaceLayoutSettingsFrom(o)
+    ).withLogViewLayoutSettingsFrom(o).withChromeSettingsFrom(o).withHolidaySettingsFrom(o).withTestsWorkspaceLayoutSettingsFrom(o)
 }.getOrNull()
 
 /**

@@ -1,6 +1,5 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +26,7 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.ui.holiday.pageBackground
 
 /** Stable ids stored with each diagram session's view state. */
 internal enum class DiagramWorkspaceSectionId(val key: String) {
@@ -195,6 +195,8 @@ internal val DIAGRAM_WORKSPACE_CHROME_SPEC = TileChromeSpec<DiagramWorkspaceSect
     scrollEdgeRoomDp = DIAGRAM_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
     scrollEndHandleOuterRoomDp = DIAGRAM_HOST_PAD_DP.toFloat(),
+    // The diagram preview is the main content: no seasonal arts in it, and under Calm no effects over it.
+    holidayClear = { it == DiagramWorkspaceSectionId.PREVIEW },
 )
 
 internal fun diagramWorkspaceTitle(id: DiagramWorkspaceSectionId): String = when (id) {
@@ -298,7 +300,7 @@ internal fun DiagramWorkspaceTilingHost(
     )
 
     Box(
-        modifier.fillMaxSize().background(tc.bg),
+        modifier.fillMaxSize().pageBackground(),
     ) {
         // Same host padding / right scrollbar gutter / bottom resize gutter as the log view. Measure with onSizeChanged because
         // Popup-based editors inside the tiles must stay under the same composition hierarchy.

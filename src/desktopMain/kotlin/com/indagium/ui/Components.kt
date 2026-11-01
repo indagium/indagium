@@ -42,6 +42,7 @@ import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
@@ -725,6 +726,8 @@ fun PillBtn(label: String, active: Boolean, modifier: Modifier = Modifier, onCli
     }
 }
 
+private const val MULTICOLOR_DISABLED_ALPHA = 0.45f
+
 @Composable
 fun ToolbarBtn(
     label: String,
@@ -738,11 +741,13 @@ fun ToolbarBtn(
     contentPadding: PaddingValues = PaddingValues(horizontal = 10.dp, vertical = 5.dp),
     baseBg: Color = Color.Transparent,
     ellipsize: Boolean = false,
+    // A full-colour picture (the seasonal pack's icons): drawn untinted and a little larger, faded when disabled.
+    multicolor: Boolean = false,
     onClick: () -> Unit,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
-    val contentColor = if (!enabled) tc.td.copy(.5f) else if (active) Color.White else tc.ts
+    val contentColor = if (!enabled) tc.td.copy(.5f) else if (active) tc.onAc else tc.ts
     // Solid fill (matching AppButton's Primary variant) rather than a translucent accent tint, so
     // an active toggle in this row reads the same way the AI/Notes panel toggle does.
     val button: @Composable () -> Unit = {
@@ -775,8 +780,12 @@ fun ToolbarBtn(
                         Icon(
                             imageVector = icon,
                             contentDescription = if (showLabel) null else tooltip ?: label,
-                            tint = contentColor,
-                            modifier = Modifier.size(15.dp),
+                            tint = if (multicolor) Color.Unspecified else contentColor,
+                            modifier = if (multicolor) {
+                                Modifier.size(18.dp).alpha(if (enabled) 1f else MULTICOLOR_DISABLED_ALPHA)
+                            } else {
+                                Modifier.size(15.dp)
+                            },
                         )
                     }
                     if (showLabel || icon == null) {
@@ -1509,7 +1518,8 @@ fun SegmentedControl(
     ) {
         options.forEachIndexed { index, label ->
             val selected = index in selectedIndices
-            val selColor = selectedColors?.getOrNull(index) ?: tc.ac
+            val customColor = selectedColors?.getOrNull(index)
+            val selColor = customColor ?: tc.ac
             // The selected fill is part of the segment, not an unshaped overlay. Keeping the
             // outer segment corners rounded makes the highlight follow the control's silhouette;
             // middle segments remain square where they meet their neighbors.
@@ -1539,7 +1549,7 @@ fun SegmentedControl(
                         text = label,
                         color = when {
                             !enabled -> tc.td.copy(.5f)
-                            selected && selectedSolid -> Color.White
+                            selected && selectedSolid -> if (customColor == null) tc.onAc else Color.White
                             selected -> selColor
                             else -> tc.ts
                         },
@@ -1584,7 +1594,7 @@ fun AppButton(
     val accentColor = if (isDanger) DANGER_RED else tc.ac
     val resolvedTextColor = textColor ?: when {
         !enabled -> tc.td.copy(.5f)
-        variant == ButtonVariant.Primary -> Color.White
+        variant == ButtonVariant.Primary -> if (isDanger) Color.White else tc.onAc
         variant == ButtonVariant.Secondary && isDanger -> DANGER_RED
         variant == ButtonVariant.Ghost -> tc.td
         else -> tc.tx

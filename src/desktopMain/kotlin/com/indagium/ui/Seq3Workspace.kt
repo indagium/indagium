@@ -87,6 +87,7 @@ import com.indagium.diagram3.seq3DrawnRowRefs
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.ThemePreset
+import com.indagium.ui.holiday.pageBackground
 import java.util.UUID
 
 // ── v3 workspace shell (phase 4) ────────────────────────────────────────────────────────────
@@ -138,7 +139,7 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
     // draws, sheet included.
     CompositionLocalProvider(LocalSeq3FocusRequester provides view.focusRequester) {
         Column(
-            Modifier.fillMaxSize().background(tc.bg)
+            Modifier.fillMaxSize().pageBackground()
                 .focusRequester(view.focusRequester).focusable()
                 .testTag("seq3-workspace-root")
                 .onPreviewKeyEvent { event -> handleSeq3Key(state, session, view, event) },

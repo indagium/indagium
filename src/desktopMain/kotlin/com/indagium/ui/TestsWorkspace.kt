@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.sp
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.store.StoreResult
+import com.indagium.ui.holiday.pageBackground
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,7 +118,7 @@ internal fun TestsWorkspace(state: AppState) {
     }
     CompositionLocalProvider(LocalTestsUi provides ui, LocalTestsLimits provides limits, LocalTextInputFocusTracker provides ui.textFocus) {
         Column(
-            Modifier.fillMaxSize().background(tc.bg)
+            Modifier.fillMaxSize().pageBackground()
                 // Bare keys (arrows, Esc) go to the current screen, but never while a text input has focus (see TestsUi.routeKey).
                 .onPreviewKeyEvent { ui.routeKey(it) }
                 .onKeyEvent { event ->

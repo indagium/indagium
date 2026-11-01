@@ -83,6 +83,7 @@ import androidx.compose.ui.unit.sp
 import com.indagium.debug.AppLogger
 import com.indagium.model.TileAxis
 import com.indagium.model.TileNode
+import com.indagium.ui.holiday.*
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -147,6 +148,9 @@ internal data class TileChromeSpec<K>(
     val scrollEdgeRoomDp: Float = 0f,
     val scrollEndHandle: Boolean = false,
     val scrollEndHandleOuterRoomDp: Float = 0f,
+    // Main-content tiles (the log and Original panes, the diagram preview, ...): the seasonal effects and the seasonal art wash keep clear of
+    // them under Calm intensity.
+    val holidayClear: (K) -> Boolean = { false },
 ) {
     /** [loneColumn] together with [scrolls], as the layout edits (drop, remove, normalize) take them. */
     val loneColumns: TileLoneColumns<K> get() = TileLoneColumns(loneColumn, scrolls)
@@ -653,6 +657,7 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape)
+            .holidayExcluded(s.spec.holidayClear(id))
             .testTag("${s.spec.tagPrefix}-card-${s.spec.keyOf(id)}"),
     ) {
         if (!slot.headerless) {

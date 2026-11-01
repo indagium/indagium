@@ -1630,6 +1630,8 @@ data class AppSettings(
     val customLogViewLayouts: List<CustomLogViewLayout> = emptyList(),
     // The custom layout the Layout menu's Reset action reapplies. Null means the last built-in preset.
     val lastCustomLogViewLayoutId: String? = null,
+    // Seasonal theme pack (ui/holiday). JSON-only (ui/holiday/HolidaySettingsJson.kt); appended last to keep positional callers stable.
+    val holiday: HolidaySettings = HolidaySettings(),
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
@@ -1915,6 +1917,39 @@ enum class ThemePreset(val label: String) {
     GRAPHITE_DIM("Graphite Dim"),
     TERMINAL_DARK("Terminal Dark"),
 }
+
+/** When a seasonal pack applies: never, only inside its date range, or whenever the user wants it. */
+enum class HolidayMode { OFF, AUTOMATIC, ALWAYS }
+
+/** The seasonal packs: the persisted id of each theme. Its name, dates and art live in its ui/holiday HolidayTheme (see docs/SAAD.md). */
+enum class HolidayPack {
+    PUMPKIN_PATCH,
+}
+
+/** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */
+enum class HolidayLightness { FOLLOW_PRESET, LIGHT, DARK }
+
+/** How much the pack moves: everything, rarer and never over the log, or static decorations only. */
+enum class HolidayIntensity { FULL, CALM, OFF }
+
+/**
+ * The seasonal-theme choices; see ui/holiday. [effectToggles] holds only the user's explicit choices per effect id (an id no theme
+ * declares is ignored); an effect with no entry takes its spec's own default. The other toggles are generic and only read while a pack is
+ * active that provides the thing they switch.
+ */
+data class HolidaySettings(
+    val mode: HolidayMode = HolidayMode.OFF,
+    val pack: HolidayPack = HolidayPack.PUMPKIN_PATCH,
+    val lightness: HolidayLightness = HolidayLightness.FOLLOW_PRESET,
+    val intensity: HolidayIntensity = HolidayIntensity.FULL,
+    val funIcons: Boolean = true,
+    val pauseWhileBusy: Boolean = true,
+    val effectToggles: Map<String, Boolean> = emptyMap(),
+    val tabScene: Boolean = true,
+    val filterPicture: Boolean = true,
+    val animatePicture: Boolean = true,
+    val notesCompanion: Boolean = true,
+)
 
 // ── Misc ───────────────────────────────────────────────────────────
 data class CtxMenuState(

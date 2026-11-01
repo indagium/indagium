@@ -1,6 +1,5 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -38,6 +37,7 @@ import com.indagium.model.TileAxis
 import com.indagium.model.TileLeaf
 import com.indagium.model.TileNode
 import com.indagium.model.TileSplit
+import com.indagium.ui.holiday.*
 import kotlin.math.abs
 
 // The single log view as tiles: FileView's Row of (filter panel | log | Notes / AI / Video sidebar) is one tiling surface here. The
@@ -82,7 +82,26 @@ internal val LOG_VIEW_CHROME_SPEC = TileChromeSpec<LogViewSectionId>(
     scrollEdgeRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
     scrollEndHandle = true,
     scrollEndHandleOuterRoomDp = LOG_VIEW_HOST_PAD_DP.toFloat(),
+    holidayClear = ::logViewHolidayClear,
 )
+
+// The tiles holding the log text: the seasonal effects stay off them under Calm intensity.
+private fun logViewHolidayClear(id: LogViewSectionId): Boolean = when (id) {
+    LogViewSectionId.ORIGINAL, LogViewSectionId.ORIGINAL_A, LogViewSectionId.ORIGINAL_B -> true
+    else -> id.isLogTile
+}
+
+// [LOG_VIEW_CHROME_SPEC] with a seasonal theme's tile corner, one stable instance per radius (so a pack never rebuilds tile state).
+private val LOG_VIEW_HOLIDAY_SPECS = java.util.concurrent.ConcurrentHashMap<Int, TileChromeSpec<LogViewSectionId>>()
+
+/** The spec for tiles with [cornerDp] corners (what a seasonal theme asks for), cached per radius. */
+internal fun logViewHolidaySpec(cornerDp: Int): TileChromeSpec<LogViewSectionId> =
+    LOG_VIEW_HOLIDAY_SPECS.getOrPut(cornerDp) { LOG_VIEW_CHROME_SPEC.copy(cornerDp = cornerDp) }
+
+/** The log view's tile chrome for the current look: the theme's tile corners while a seasonal pack is active. */
+@Composable
+internal fun logViewChromeSpec(): TileChromeSpec<LogViewSectionId> =
+    LocalHoliday.current?.let { logViewHolidaySpec(it.theme.corners.tileDp) } ?: LOG_VIEW_CHROME_SPEC
 
 /**
  * What FileView hands the host to keep keyboard focus working: the four panels' requesters (the Filters one lands on the first visible
@@ -175,7 +194,7 @@ internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @C
     // a bubbling handler would never see it from the log. A focused Find field gets first refusal so its Escape closes Find while the
     // maximized view stays put; Escape from the log or another tile control still restores immediately.
     Box(
-        modifier.background(tc.bg).onPreviewKeyEvent { event ->
+        modifier.pageBackground().onPreviewKeyEvent { event ->
             val escape = event.type == KeyEventType.KeyDown && event.key == Key.Escape
             val escapeBelongsToFind = escape && focusedSearchField != null
             val restoring = escape && state.logViewMaximized != null && !escapeBelongsToFind
@@ -224,7 +243,7 @@ internal fun LogViewSurface(
             isVisible = isVisible,
             parked = parked,
             cardHeightDp = (heightDp * LOG_VIEW_STACKED_SHARE).coerceIn(LOG_VIEW_STACKED_MIN_DP, LOG_VIEW_STACKED_MAX_DP),
-            spec = LOG_VIEW_CHROME_SPEC,
+            spec = logViewChromeSpec(),
             callbacks = callbacks,
             // The toolbar's card is a slim one, not a screenful.
             heightOf = { id -> TOOLBAR_STACKED_CARD_DP.takeIf { id == LogViewSectionId.TOOLBAR } },
@@ -241,7 +260,7 @@ internal fun LogViewSurface(
             locked = locked,
             widthDp = widthDp,
             heightDp = heightDp,
-            spec = LOG_VIEW_CHROME_SPEC,
+            spec = logViewChromeSpec(),
             callbacks = callbacks,
             external = external,
             content = content,

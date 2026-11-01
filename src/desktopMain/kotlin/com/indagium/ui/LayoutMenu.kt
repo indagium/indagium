@@ -67,6 +67,7 @@ import com.indagium.model.LogViewScope
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.LogViewTileGroup
 import com.indagium.model.TileNode
+import com.indagium.ui.holiday.*
 
 // The Layout menu: a dashboard button in the tab strip (just before Settings) that opens a popup with the five single-view presets (the two
 // compare presets in compare mode) as thumbnails, the user's saved layouts as a second row of thumbnails (right-click for Rename / Export /
@@ -169,18 +170,21 @@ internal fun LayoutMenuButton(state: AppState, onReclaimFocus: () -> Unit, verti
         else -> false
     }
     Box(if (vertical) Modifier.fillMaxWidth() else if (wrap) Modifier else Modifier.fillMaxHeight()) {
+        val pack = holidayToolbarIcon(ToolbarIconId.LAYOUT)
         ToolbarBtn(
             "",
-            icon = Icons.Outlined.Dashboard,
+            icon = pack?.vector ?: Icons.Outlined.Dashboard,
+            multicolor = pack != null,
             showLabel = false,
-            tooltip = if (modified) "Layout — modified" else "Layout",
+            tooltip = (pack?.tooltip ?: "Layout") + if (modified) " — modified" else "",
             active = open,
             modifier = when {
                 vertical -> Modifier.fillMaxWidth().height(36.dp)
                 wrap -> Modifier.width(36.dp).height(WRAPPED_BUTTON_HEIGHT_DP.dp)
                 else -> Modifier.fillMaxHeight().width(36.dp)
             }.testTag("layout-menu-button"),
-            shape = RoundedCornerShape(7.dp),
+            shape = RoundedCornerShape(toolbarCornerDp().dp),
+            contentPadding = if (pack != null) PICTURE_ONLY_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp),
         ) { open = !open }
         if (modified) {
             Box(
@@ -717,6 +721,7 @@ internal fun LayoutMenuPopup(
                     onReclaimFocus()
                 }) { AppText("Lock tiles", color = tc.tx, fontSize = 12.sp) }
             }
+            HolidayEffectsMenuSection(state, onReclaimFocus)
             if (compare) {
                 Row(
                     Modifier
@@ -911,7 +916,7 @@ private fun SavedLayoutActions(layout: CustomLogViewLayout, onRename: () -> Unit
 }
 
 @Composable
-private fun MenuLabel(text: String) {
+internal fun MenuLabel(text: String) {
     AppText(text, color = tc().td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
 }
 

@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.ui.SETTINGS_SEARCH_INDEX
 import com.indagium.ui.SettingsSection
+import com.indagium.ui.holiday.*
 import com.indagium.ui.matchRanges
 import com.indagium.ui.searchSettings
 import kotlin.test.Test
@@ -124,5 +125,24 @@ class SettingsSearchTest {
         assertEquals(listOf(0..2, 4..7), matchRanges("Log font", listOf("log", "font")))
         assertEquals(listOf(0..3), matchRanges("abcd", listOf("ab", "bc", "cd")))
         assertTrue(matchRanges("abc", emptyList()).isEmpty())
+    }
+
+    @Test
+    fun halloweenAndPumpkinFindTheSeasonalThemeRows() {
+        for (query in listOf("halloween", "pumpkin", "seasonal", "spooky")) {
+            val found = labels(query)
+            assertTrue("Seasonal theme" in found, "$query: $found")
+            assertTrue("Seasonal theme pack" in found, "$query: $found")
+        }
+    }
+
+    @Test
+    fun theSeasonalEffectRowsAreFoundByWhatTheyDo() {
+        assertTrue("Seasonal effects" in labels("bats"))
+        assertTrue("Seasonal effects" in labels("lightning"))
+        assertTrue("Fun icons" in labels("icons"))
+        assertTrue("Pause effects while capturing or playing video" in labels("pause"))
+        assertTrue("Seasonal light or dark" in labels("follow preset"))
+        assertTrue(searchSettings("halloween", all).all { it.section == SettingsSection.Appearance })
     }
 }

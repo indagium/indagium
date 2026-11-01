@@ -110,6 +110,7 @@ import com.indagium.testing.store.TestStorageMigrationReport
 import com.indagium.testing.store.importGoldenImage
 import com.indagium.testing.store.migrateLegacyTestStorage
 import com.indagium.testing.store.resolveTestAsset
+import com.indagium.ui.holiday.effectiveThemeColors
 import com.indagium.update.ReleaseInfo
 import com.indagium.update.RuntimePackage
 import com.indagium.update.SponsorChecker
@@ -7191,7 +7192,7 @@ class AppState(
         }
         // searchScopeBehavior deliberately has no hook here: it decides what the NEXT Find open
         // does and never rewrites Find sessions that are already open.
-        if (next.theme != prev.theme) recomputeTidMapColorsForThemeChange()
+        if (next.theme != prev.theme || next.holiday != prev.holiday) recomputeTidMapColorsForThemeChange()
         if (next.customIssueRules != prev.customIssueRules) recomputeIssueAnalysis(next.customIssueRules)
         if (testFolderSettingsChanged(prev, next)) reconcileTestStorage()
         autosaveNow()
@@ -7223,7 +7224,7 @@ class AppState(
     // that exact target — a close/reopen racing this recompute must not resurrect a map the user
     // just closed, or clobber a newer one opened for a different target in the meantime.
     private fun recomputeTidMapColorsForThemeChange() {
-        val theme = themeColors(settings.theme)
+        val theme = effectiveThemeColors(settings)
         val palette = listOf(theme.ac, theme.seq2, theme.seq1)
         tabs.forEach { t ->
             val target = t.tidMap?.target ?: return@forEach
@@ -9030,9 +9031,9 @@ class AppState(
         // theme) — it's the field that actually makes a theme look like itself. seq1/seq2 stay as
         // fallback entries only for the rare case more than one distinct color is ever needed here.
         // Read from `settings` (not composed via tc()/LocalXxx) since this is a plain function, not
-        // a composable — themeColors() is the same non-composable ThemePreset->ThemeColors lookup
-        // tc() itself wraps.
-        val theme = themeColors(settings.theme)
+        // a composable — effectiveThemeColors() is the same non-composable lookup (the active seasonal pack's palette,
+        // else the preset's) that App.kt feeds to LocalTheme.
+        val theme = effectiveThemeColors(settings)
         val palette = listOf(theme.ac, theme.seq2, theme.seq1)
         ioScope.launch {
             val colors = withContext(Dispatchers.Default) { computeTidMapColors(opened.logData, target, palette) }
@@ -9241,6 +9242,12 @@ class AppState(
 
     /** Current playhead when a video controller is already open; does not instantiate a decoder. */
     internal fun existingVideoPositionMs(tabId: String): Long? = videoControllers[tabId]?.positionMs
+
+    /**
+     * True while a device capture is recording or any video is playing: the seasonal effects stand still then. Reads snapshot
+     * state only (tabs, each controller's isPlaying), so it needs no stateLock and a composable can observe it.
+     */
+    internal fun holidayBusy(): Boolean = tabs.any { it.captureSessionId != null } || videoControllers.values.any { it.isPlaying }
 
     private fun videoUnavailableMessage(attachment: VideoAttachment): String = when (val source = attachment.source) {
         is VideoSource.LocalFile -> "No video path is set for \"${attachment.sourceLabel}\""

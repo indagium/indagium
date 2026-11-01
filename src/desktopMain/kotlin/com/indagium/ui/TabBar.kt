@@ -17,7 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.rememberTextMeasurer
@@ -32,6 +34,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
+import com.indagium.ui.holiday.*
 import kotlin.math.roundToInt
 
 internal fun groupedFixedVisibleWidthsPx(
@@ -535,8 +538,17 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
             justReleasedTabId = null
         }
     }
+    // Under a seasonal pack with its tab scene on, a FIXED strip's tabs share the tab area less the scene's slot at its end (only while they
+    // keep their minimum widths); everything below that sizes, drags or drops tabs uses this narrower area. Without a pack it is tabAreaPx.
+    val sceneOn = LocalHoliday.current?.effects?.tabScene == true
+    val sceneSlotPx = HOLIDAY_SCENE_SLOT_DP * density
+    val minVisibleTabsPx = visibleItems.sumOf { item ->
+        selectionWidthsPx.getOrElse(stripItems.indexOfFirst { it.key == item.key }) { minTabPx.toFloat() }.toDouble()
+    }.toFloat()
+    val reservedPx = if (sceneOn && !fit) holidaySceneSlotPx(tabAreaPx.toFloat(), minVisibleTabsPx, sceneSlotPx, true) else 0f
+    val laidOutAreaPx = tabAreaPx - reservedPx
     val tabWidthPx = if (visibleItems.isNotEmpty() && tabAreaPx > 0) {
-        tabAreaPx.toFloat() / visibleItems.size
+        laidOutAreaPx / visibleItems.size
     } else {
         minTabPx.toFloat()
     }
@@ -553,7 +565,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
             },
             tabAreaPx.toFloat(),
         )
-        groupedFixedMode -> groupedFixedVisibleWidthsPx(visibleItems, groupHeaderWidthsPx, tabAreaPx.toFloat(), minTabPx.toFloat())
+        groupedFixedMode -> groupedFixedVisibleWidthsPx(visibleItems, groupHeaderWidthsPx, laidOutAreaPx, minTabPx.toFloat())
         else -> emptyList()
     }
     val variableWidthMode = fit || groupedFixedMode
@@ -562,6 +574,16 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         liveVisualTabIds.takeIf { it.toSet() == visibleTabIds.toSet() && it.size == visibleTabIds.size }
             ?: visibleTabIds
     val visualOffsetsPx = if (variableWidthMode) tabOffsets(visualOrderIds.map { widthById[it] ?: tabWidthPx }) else emptyList()
+    // Where the scene may draw: after the last tab (FIT, vertical) or in the reserved slot (FIXED), reported to the bar behind the strip.
+    var areaOrigin by remember { mutableStateOf(Offset.Zero) }
+    var areaCrossPx by remember { mutableStateOf(0f) }
+    val tabsEndPx = when {
+        vertical -> visibleItems.size * stripHeightDp * density
+        variableWidthMode -> visibleWidthsPx.sum()
+        else -> tabWidthPx * visibleItems.size
+    }
+    val sceneRange = if (sceneOn) holidaySceneSlotRange(tabAreaPx.toFloat(), tabsEndPx, if (vertical) 1f else sceneSlotPx) else null
+    if (sceneOn) ReportHolidaySceneSlot(areaOrigin, areaCrossPx, vertical, sceneRange)
     val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
     val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
     val currentUnifiedOrder by rememberUpdatedState(renderOrder)
@@ -651,6 +673,16 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
         Box(
             Modifier.fillStrip()
                 .onSizeChanged { tabAreaPx = if (vertical) it.height else it.width }
+                .then(
+                    if (sceneOn) {
+                        Modifier.onGloballyPositioned {
+                            areaOrigin = it.positionInRoot()
+                            areaCrossPx = (if (vertical) it.size.width else it.size.height).toFloat()
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
                 .pointerInput(visibleTabIds, tabWidthPx, visibleWidthsPx) {
                     var downPos = Offset.Zero
                     var downMain = 0f

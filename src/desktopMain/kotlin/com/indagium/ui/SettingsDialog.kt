@@ -68,6 +68,7 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
+import com.indagium.ui.holiday.*
 import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
 import com.indagium.voice.VoiceModelCatalog
@@ -722,6 +723,7 @@ private fun AppearanceSettingsSection(state: AppState) {
     AppearanceBasicsRow(state)
     AppearanceSystemFontSelectors(state)
     TabsAppearanceSettings(state)
+    SeasonalThemesSettings(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",

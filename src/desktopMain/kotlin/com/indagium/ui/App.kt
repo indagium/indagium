@@ -51,6 +51,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
 import com.indagium.proofread.EnglishProofreadingService
 import com.indagium.source.SourceCodeView
+import com.indagium.ui.holiday.*
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.isUtf16LogFile
@@ -188,7 +189,16 @@ fun App(
     // raiseWindowForIncomingDrag's own KDoc for why this is Linux-only.
     window: java.awt.Window? = null,
 ) {
-    val theme = themeColors(state.settings.theme)
+    val holidayToday by rememberHolidayToday()
+    val holiday = remember(state.settings.holiday, state.settings.theme, holidayToday) {
+        resolveHolidayLook(state.settings, holidayToday)
+    }
+    val theme = holiday?.colors ?: themeColors(state.settings.theme)
+    val holidayExclusions = remember { HolidayExclusions() }
+    val holidayPaused by remember(state) { derivedStateOf { state.settings.holiday.pauseWhileBusy && state.holidayBusy() } }
+    // The window's content area (set by ChromeScaffold) and the one clock of the seasonal art passes (no frame loop while no art has a place).
+    val holidayArtFrame = remember { HolidayArtFrame() }
+    val holidayArtClock = rememberHolidayArtClock(holiday, holidayArtFrame, holidayPaused)
     val platformDensity = LocalDensity.current
     val mainWindowSize = LocalWindowInfo.current.containerSize
     val voiceSettings = state.settings.voiceInput
@@ -269,6 +279,11 @@ fun App(
 
     CompositionLocalProvider(
         LocalTheme provides theme,
+        LocalHoliday provides holiday,
+        LocalHolidayPaused provides holidayPaused,
+        LocalHolidayExclusions provides holidayExclusions,
+        LocalHolidayArtFrame provides holidayArtFrame,
+        LocalHolidayArtClock provides holidayArtClock,
         LocalFontBase provides state.settings.fontSize,
         LocalUseMono provides state.settings.fontMono,
         LocalUiFontFamily provides state.settings.resolvedInterfaceFontFamily(),
@@ -435,6 +450,9 @@ fun App(
                     )
                 }
         ) {
+            // The seasonal pack's picture and companion in the content area's bottom corners, behind everything: they show wherever the window
+            // background does. Input-transparent. The faint wash over everything is below, with the effects overlay.
+            HolidayArtsBehind()
             // The visible "Loading file…" cover only appears once loading has been continuously true
             // for LOADING_OVERLAY_DELAY_MS, so a quick open (a small file from the New tab) never
             // flashes it. Input is blocked from the very start of loading by the transparent layer
@@ -535,6 +553,11 @@ fun App(
             // This belongs above FileView's active-tab key: a detached mirror owns the one native
             // Canvas while the user moves through other tabs or hides the sidebar.
             DetachedEmbeddedMirrorWindows(state)
+
+            // The seasonal pack's faint wash of its corner arts, then its bats, embers and lightning: over the content, under the loading blocker
+            // and dialogs, and input-transparent. Deliberately not embedded-mirror occluders, so a native mirror surface stays above them.
+            HolidayArtsWash()
+            HolidayEffectsOverlay(Modifier.fillMaxSize())
 
             // ── Loading input block ───────────────────────────────────
             // Transparent, over the tab bar and the content alike, for the whole of isLoading

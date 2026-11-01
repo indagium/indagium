@@ -11,7 +11,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.indagium.model.ThemePreset
 
-private const val ALPHA_HOVER = 0.04f
+internal const val ALPHA_HOVER = 0.04f
 private const val ALPHA_ACCENT_BG = 0.15f
 private const val ALPHA_SELECTION = 0.18f
 
@@ -79,21 +79,29 @@ data class ThemeColors(
     // per light/dark family (see theme()) rather than `ok`, which is a preset's seq1 and can be purple or blue.
     // Appended last; runtime-only like every other field here.
     val success: Color,
+    // Text/icon colour on an `ac` fill (active toolbar button, solid segment, primary button). White on every preset
+    // (their accents are mid-tone and dark enough); a pack with a bright accent supplies a dark one. Appended last.
+    val onAc: Color = Color.White,
 )
 
 // Relative luminance of a packed 0xAARRGGBB background — lets theme() pick light- vs dark-tuned
 // search-highlight alphas without every preset having to declare which family it belongs to.
 private fun bgIsLight(argb: Long): Boolean = Color(argb).luminance() > LIGHT_LUMINANCE_THRESHOLD
 
+/** Whether this palette belongs to the light family (same luminance test theme() uses to tune its alphas). */
+internal fun ThemeColors.isLight(): Boolean = bg.luminance() > LIGHT_LUMINANCE_THRESHOLD
+
 // One parameter per palette role plus the two optional overrides; a preset table row is the only caller shape that reads well.
 @Suppress("LongParameterList")
-private fun theme(
+internal fun theme(
     bg: Long, p: Long, p2: Long, br: Long,
     tx: Long, ts: Long, td: Long,
     ac: Long, seq1: Long, seq2: Long,
     hv: Color = Color.White.copy(ALPHA_HOVER),
     // Only for a preset whose derived green misses 3:1 against its own bg/panel (pinned by ThemeSuccessContrastTest).
     success: Long? = null,
+    // Text on an accent fill; null keeps white (every preset). A pack with a bright accent passes a dark one.
+    onAc: Long? = null,
 ): ThemeColors {
     val light = bgIsLight(bg)
     return ThemeColors(
@@ -122,6 +130,7 @@ private fun theme(
         ok = Color(seq1),
         seqCellBgAlpha = if (light) ALPHA_SEQ_CELL_BG_LIGHT else ALPHA_SEQ_CELL_BG_DARK,
         success = Color(success ?: if (light) SUCCESS_LIGHT else SUCCESS_DARK),
+        onAc = onAc?.let { Color(it) } ?: Color.White,
     )
 }
 

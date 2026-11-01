@@ -24,6 +24,7 @@ import androidx.compose.ui.layout.MeasurePolicy
 import androidx.compose.ui.layout.MeasureResult
 import androidx.compose.ui.layout.MeasureScope
 import androidx.compose.ui.layout.Placeable
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -33,6 +34,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.indagium.ui.holiday.*
 import kotlin.math.roundToInt
 
 // The window chrome: the tab strip and the main toolbar on whichever window edges Settings > Appearance > Tabs says (or the toolbar as a
@@ -149,11 +151,29 @@ internal fun ChromeScaffold(
         onCancel = ::cancelDrag,
         isDragging = { drag.dragged == it },
     )
-    val cardShape = RoundedCornerShape(LOG_VIEW_CHROME_SPEC.cornerDp.dp)
+    val holiday = LocalHoliday.current
+    val cardShape = RoundedCornerShape(logViewChromeSpec().cornerDp.dp)
     // The default joined top bar keeps its flat, square frame; every other bar is a card like the log view's tiles.
     val barLook = if (arrangement.cards) Modifier.background(tc.p, cardShape) else Modifier.background(tabStripBackground(settings.tabStripStyle, tc))
+    // Under a seasonal pack with its scene on, the tab bar (not the toolbar bar) is the night-sky picture.
+    val tabScene = holiday?.takeIf { it.effects.tabScene }
+    val scenePainter = tabScene?.theme?.tabScene
+    // The strip reports where it keeps room free of tabs (and clear of the toolbar); the scene draws only there.
+    val sceneSlot = remember { HolidaySceneSlot() }
+    val artFrame = LocalHolidayArtFrame.current
+    val tabBarLook = if (tabScene == null || scenePainter == null) {
+        barLook
+    } else {
+        Modifier.holidayTabBarScene(
+            tabScene,
+            scenePainter,
+            arrangement.tabsOrientation == ChromeOrientation.VERTICAL,
+            cardShape.takeIf { arrangement.cards },
+            sceneSlot,
+        )
+    }
     val borderLook = if (arrangement.cards) Modifier.border(BorderStroke(1.dp, tc.br), cardShape) else Modifier.border(BorderStroke(1.dp, tc.br))
-    CompositionLocalProvider(LocalToolbarDock provides bridge, LocalChromeAnchors provides anchors) {
+    CompositionLocalProvider(LocalToolbarDock provides bridge, LocalChromeAnchors provides anchors, LocalHolidaySceneSlot provides sceneSlot) {
         Box(
             modifier.fillMaxSize()
                 .onSizeChanged { hostPx = it }
@@ -162,7 +182,7 @@ internal fun ChromeScaffold(
             Layout(
                 content = {
                     // The same children in the same order whatever the arrangement; see the header comment.
-                    Box(Modifier.layoutId(ChromePart.TAB_BAR).testTag("tab-strip").then(barLook))
+                    Box(Modifier.layoutId(ChromePart.TAB_BAR).testTag("tab-strip").then(tabBarLook))
                     Box(Modifier.layoutId(ChromePart.TOOLBAR_BAR).testTag("main-toolbar-bar").then(barLook))
                     Box(Modifier.layoutId(ChromePart.TABS)) {
                         TabStrip(state, arrangement.tabsOrientation, Modifier.fillMaxSize(), onReclaimFocus)
@@ -190,7 +210,8 @@ internal fun ChromeScaffold(
                         Modifier.layoutId(ChromePart.TOOLBAR_BAR_BORDER)
                             .then(if (arrangement.toolbarBarEdge != null) borderLook else Modifier),
                     )
-                    Box(Modifier.layoutId(ChromePart.CONTENT)) { content() }
+                    // The content rect, root pixels, is where the seasonal pack's corner arts go (App.kt draws them).
+                    Box(Modifier.layoutId(ChromePart.CONTENT).onGloballyPositioned { artFrame?.rootRect = it.boundsInRoot() }) { content() }
                     Box(Modifier.layoutId(ChromePart.TABS_GRIP)) {
                         if (!locked) ChromeGrip(ChromeSlot.TABS, tabsVertical, "Move tabs", "chrome-grip-tabs", gripCallbacks)
                     }

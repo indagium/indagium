@@ -5746,6 +5746,79 @@ against `bg` and `p` for every preset. `ui/TestsFormat.kt` holds the display for
 
 ---
 
+## 27. Seasonal themes
+
+A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
+pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
+changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.
+
+### 27.1 Framework, contract, themes
+
+| Layer | Where | Knows |
+|-------|-------|-------|
+| Framework | `ui/holiday/*.kt` | The resolver (`HolidayResolver.kt`: dates, active theme, `HolidayLook`, `HolidayEffects`), the clock, the effects overlay, exclusions, tab chrome and the tab-scene slot (`HolidayTabSceneHost.kt`), corner-art placement and the two art passes (`HolidayBackdropLayout.kt`, `HolidayBackdropHost.kt`), the toolbar-icon kit, the Layout menu section, the Settings section, the codec (`HolidaySettingsJson.kt`). Nothing pack-specific. |
+| Contract | `HolidayTheme.kt`, `HolidayEffectKit.kt` | `HolidayTheme` (one instance per pack) with optional capabilities: `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`; the painter interfaces; the effect specs. |
+| Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. `ui/holiday/pumpkin/` is the first. |
+
+`HOLIDAY_THEMES` (`HolidayRegistry.kt`) maps each `HolidayPack` (the persisted enum id, `model/Model.kt`) to its theme, in registry order. Every
+pure function takes the registry as a parameter with that default (`resolveHolidayLook(settings, today, themes = HOLIDAY_THEMES)`), so a test can
+inject a fake theme (`FakeHolidayTheme` in the tests).
+
+The framework turns capabilities into booleans once, in `resolveHolidayEffects`: a decoration the theme does not provide is off whatever the
+setting says, so no call site checks for it. The Layout menu rows and the Settings rows are generated from the active theme (its effects, plus the
+generic rows for the capabilities it has; no companion row without a companion, no scene row without a scene, no Fun icons row without icons).
+
+Backdrop arts. The picture and the companion are *backdrop arts*: the theme only declares a design size and a `draw(t)`, and the framework places
+them at the **app window's bottom corners**, on every screen and in every layout (log view with any tiles shown or hidden, maximized tiles, stacked
+layouts, compare, the New tab, the diagram and Tests workspaces, non-tiled screens), whatever is shown over them. Nothing in a tiling surface or a
+tile knows about them. `ChromeScaffold` reports its CONTENT rectangle (below and inside the tab strip and the toolbar) through `HolidayArtFrame`
+(root pixels, like `HolidaySceneSlot`); `App.kt` draws two input-transparent passes from it (`HolidayBackdropHost.kt`):
+- **Behind** everything, the root Box's first child: the arts at full strength, visible wherever the window background shows (free space, gaps,
+  margins). They carry the test tags `holiday-filter-picture` and `holiday-notes-companion`.
+- **Over** everything, next to the effects overlay (below dialogs and the loading blocker): the same arts as a faint wash through any tile (a light
+  theme multiplies it in at alpha 0.10, so it only darkens and dark text keeps its contrast; a dark theme lays it over at 0.14), clipped to the arts'
+  own rectangles. Under Calm it is a still frame and keeps off the main-content tiles (`TileChromeSpec.holidayClear`, the same `HolidayExclusions`
+  the effects overlay uses: log and Original panes, the diagram preview, the Tests Workspace tile); under Full it covers them too.
+
+Placement is one pure function of the content size (`holidayArtRect`): the picture bottom-left (`BOTTOM_START`), the companion bottom-right
+(`BOTTOM_END`), each at its design size times `min(1, contentWidth * 0.24 / designWidth, contentHeight * 0.5 / designHeight)` (about the design size
+in a 1400 x 860 window), none under 480 x 360, and a later art that would overlap an earlier one is dropped. Both passes share one clock
+(`LocalHolidayArtClock`, created in App.kt, running only while some art has a place, animation is on, nothing is capturing or playing and the window is
+focused), read only while drawing.
+
+### 27.2 Which theme is active
+
+`AppSettings.holiday.mode` is Off, Automatic or Always. Always uses the selected `pack`. Automatic takes the theme whose `dates` contain today; when
+several windows overlap, the selected pack wins if it is among them, else the first in registry order. `App.kt` provides `LocalHoliday` (the
+look) and the theme's palette as `LocalTheme`, re-resolved when the date, the settings or the preset change.
+
+### 27.3 Settings keys
+
+`AppSettings.holiday` is JSON-only (`ui/holiday/HolidaySettingsJson.kt`, one nested `"holiday"` object; the decoder never throws and an absent or
+wrongly typed key keeps its default). Generic keys: `mode`, `pack`, `lightness`, `intensity`, `funIcons`, `tabScene`, `filterPicture`,
+`animatePicture`, `notesCompanion`, `pauseWhileBusy`. Per-effect switches are `effects`, an object of effect id to boolean holding only the
+user's explicit choices: an effect with no entry takes its spec's `defaultOn`, so a new effect appears as its author intended and an unknown id
+is ignored. Effect ids are globally unique across themes (a contract test enforces it); the convention is `<theme>.<effect>`.
+
+### 27.4 Flash safety
+
+A flash (lightning today, fireworks later) is a `HolidayFlashEffect`: the theme only says how a flash looks. WHEN and how strong is decided in one
+place, `holidayFlashFrame` in `HolidayEffectKit.kt`, and a theme cannot bypass it: alpha at most 0.12, at most 0.15 s per flash, flashes (of all
+flash effects together, sharing one schedule) more than 20 s apart (45 s under Calm intensity). Under Off intensity nothing moves; under Calm
+nothing is drawn over the log and Original panes (`HolidayExclusions`). The overlay takes no input and is not composed at all (no frame loop)
+when nothing is on, the app is capturing or playing video, or the window has no focus.
+
+### 27.5 Adding a theme
+
+1. Add the enum entry to `HolidayPack` (`model/Model.kt`).
+2. Create `ui/holiday/<name>/` with an `object <Name>Theme : HolidayTheme`: `pack`, `label`, `occasion`, `dates`, `palette(dark)`, `chrome(dark)`,
+   and whichever optional parts it has (`tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`, `keywords`).
+3. Put its art in the same package (the art kit in `HolidayArtKit.kt` has the path, gradient and ellipse helpers; `holidayIconMap` builds icons).
+4. Register it in `HOLIDAY_THEMES` (`HolidayRegistry.kt`).
+5. Nothing else: `HolidayThemeContractTest` iterates the registry and checks palette contrast in dark and light, a complete icon set, unique effect
+   ids, valid dates, a scene that stays inside its slot at several sizes and positive design sizes. The Layout menu, Settings, search, codec,
+   overlay, tab strip and toolbar need no edit.
+
 ## Related documents
 
 - [USER_GUIDE.md](USER_GUIDE.md) — how to use Indagium.

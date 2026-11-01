@@ -1,4 +1,5 @@
 package com.indagium.ui
+import com.indagium.ui.holiday.*
 
 // Search index behind the Settings dialog's "Search settings" field: one entry per labelled setting
 // row. Labels are copied from the literals the rows render (so a result reads exactly like the row
@@ -208,6 +209,7 @@ private fun appearance() = buildList {
         ),
     )
     addAll(chromePlacement())
+    addAll(seasonalThemes())
     if (isLinuxOs) {
         add(
             entry(
@@ -218,6 +220,50 @@ private fun appearance() = buildList {
         )
     }
 }
+
+// Settings > Appearance > Seasonal theme (ui/holiday/SeasonalThemesSettings.kt). What names a theme (label, occasion, its own keywords) comes from
+// the registry, so a new theme is found by its words without touching this index.
+private val SEASONAL_THEMES = HOLIDAY_THEMES.values
+private val SEASONAL_KEYWORDS = listOf("seasonal", "holiday", "theme pack") +
+    SEASONAL_THEMES.flatMap { listOf(it.label.lowercase(), it.occasion.lowercase()) + it.keywords }.distinct()
+private val SEASONAL_NAMES = SEASONAL_THEMES.joinToString(", ") { it.label }
+private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} runs ${holidayDatesLabel(it)}" }
+
+private fun seasonalThemes() = listOf(
+    entry(
+        SettingsSection.Appearance, "Seasonal theme",
+        "Turns a seasonal pack on for its dates (Automatic), always, or never. $SEASONAL_DATES and goes back to your preset after.",
+        SEASONAL_KEYWORDS + listOf("automatic", "always", "off", "dates", "colours"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Seasonal theme pack",
+        "$SEASONAL_NAMES, each with its own palette, tab shapes, scene behind the tabs and pictures.",
+        SEASONAL_KEYWORDS + listOf("tabs", "scene", "cat"),
+        anchor = "Theme pack",
+    ),
+    entry(
+        SettingsSection.Appearance, "Seasonal light or dark",
+        "Whether the seasonal pack uses its light or dark colours, or follows your theme preset.",
+        SEASONAL_KEYWORDS + listOf("follow preset", "light", "dark", "mode"),
+        anchor = "Light or dark",
+    ),
+    entry(
+        SettingsSection.Appearance, "Seasonal effects",
+        "Full: bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
+        SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
+        anchor = "Effects",
+    ),
+    entry(
+        SettingsSection.Appearance, "Fun icons",
+        "Toolbar buttons become pictures under a seasonal pack. Hover one to see its real name.",
+        SEASONAL_KEYWORDS + listOf("icons", "toolbar", "pictures", "tooltip", "cat"),
+    ),
+    entry(
+        SettingsSection.Appearance, "Pause effects while capturing or playing video",
+        "Stops the seasonal bats, embers, lightning and animated pictures while a capture is running or a video plays.",
+        SEASONAL_KEYWORDS + listOf("pause", "capture", "video", "effects", "animation", "motion"),
+    ),
+)
 
 // Settings > Appearance > Tabs, the placement half (ui/ChromePlacementSettings.kt).
 private fun chromePlacement() = listOf(
