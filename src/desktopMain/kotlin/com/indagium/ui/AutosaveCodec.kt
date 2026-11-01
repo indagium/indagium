@@ -690,6 +690,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     workspaceProfileId?.let { put("workspaceProfileId", it) }
     put("setupAssistantDone", setupAssistantDone)
     put("setupAssistantRevision", setupAssistantRevision)
+    put("lastSeenWhatsNewVersion", lastSeenWhatsNewVersion)
+    put("lastSeenHolidayAnnouncementVersion", lastSeenHolidayAnnouncementVersion)
     put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
     put("captureMirrorLayouts", captureMirrorLayoutsJson(captureMirrorLayouts))
     lastCaptureMirrorLayout?.let { put("lastCaptureMirrorLayout", captureMirrorLayoutJson(it)) }
@@ -1056,6 +1058,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
         setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
         setupAssistantRevision = o.intOrDefault("setupAssistantRevision", 0).coerceAtLeast(0),
+        lastSeenWhatsNewVersion = o.stringOrNull("lastSeenWhatsNewVersion").orEmpty(),
+        lastSeenHolidayAnnouncementVersion = o.stringOrNull("lastSeenHolidayAnnouncementVersion").orEmpty(),
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
         tracker = trackerSettingsFromJson(o["tracker"]),
         testing = testingSettingsFromJson(o["testing"]),

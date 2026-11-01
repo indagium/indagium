@@ -1632,6 +1632,9 @@ data class AppSettings(
     val lastCustomLogViewLayoutId: String? = null,
     // Seasonal theme pack (ui/holiday). JSON-only (ui/holiday/HolidaySettingsJson.kt); appended last to keep positional callers stable.
     val holiday: HolidaySettings = HolidaySettings(),
+    // Versioned startup announcements are acknowledged independently; JSON-only and appended for source compatibility.
+    val lastSeenWhatsNewVersion: String = "",
+    val lastSeenHolidayAnnouncementVersion: String = "",
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */

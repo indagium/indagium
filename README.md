@@ -406,6 +406,14 @@ the native bridge, so users do not need CMake or a compiler installed.
 
 ## Releasing
 
+Write `docs/releases/X.Y.Z.md` for each version before building: its introduction and `##` sections become the offline
+“What's New in this version” pages shown once after installation or upgrade. Historical releases through the version in
+`docs/releases/whats-new-start.txt` never show the walkthrough. When a release introduces seasonal themes, add a
+`version X.Y.Z PACK_ID...` entry to [seasonal theme announcements](docs/releases/seasonal-themes.txt); releases without new
+packs need no entry. An `after X.Y.Z` entry announces packs only in the first release after that version.
+For a development-only preview with example text, run `./gradlew desktopRun -Dindagium.previewRelease=true`; skipping the preview
+does not acknowledge a release, and choosing a theme applies it. Add `-Dindagium.run.home=<temporary-home>` to use separate settings.
+
 Push a version tag to trigger the GitHub Actions build, which produces Linux `.deb`, AppImage, and
 Flatpak bundles for x86-64 and arm64, plus Windows and macOS packages, and creates a GitHub Release automatically:
 

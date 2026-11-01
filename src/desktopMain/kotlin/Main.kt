@@ -196,6 +196,11 @@ fun main(args: Array<String>) {
             // trigger only happens once the dialog actually opens.
             appState.maybeShowSupportPromptOnStartup()
             appState.maybeShowSetupAssistantOnStartup()
+            if (!isPackaged && System.getProperty("indagium.previewRelease") == "true") {
+                appState.previewReleaseAnnouncement()
+            } else {
+                appState.maybeShowReleaseAnnouncementOnStartup()
+            }
             onDispose {}
         }
         Window(

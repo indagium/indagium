@@ -1,0 +1,101 @@
+package com.indagium.ui
+
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import com.indagium.model.HolidayMode
+import com.indagium.model.HolidayPack
+import com.indagium.ui.holiday.seasonalPackTag
+import org.junit.After
+import org.junit.Rule
+import org.junit.Test
+import java.io.File
+import kotlin.io.path.createTempDirectory
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+@OptIn(ExperimentalTestApi::class)
+class ReleaseAnnouncementUiTest {
+    @get:Rule val rule = createComposeRule()
+    private val directory = createTempDirectory("release-announcement-ui").toFile()
+    private val state = AppState(
+        autosaveFile = File(directory, "cache"), notesDir = File(directory, "notes"), archiveCacheDir = File(directory, "archive"),
+        customCommandsDir = File(directory, "commands"), autoExportNotes = false,
+    )
+    private val release = ReleaseAnnouncement(
+        "1.9.1", listOf(WhatsNewPage("First page", "First change"), WhatsNewPage("Second page", "Second change")),
+        listOf(HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT),
+    )
+
+    @After fun close() { state.close(); directory.deleteRecursively() }
+
+    private fun show() {
+        state.maybeShowReleaseAnnouncementOnStartup(release)
+        rule.setContent { CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { ReleaseAnnouncementDialog(state) } }
+        rule.waitForIdle()
+    }
+
+    private fun assertButtonsCentered(dialogTag: String, first: String, last: String) {
+        val dialog = rule.onNodeWithTag(dialogTag).getUnclippedBoundsInRoot()
+        val firstButton = rule.onNodeWithText(first).getUnclippedBoundsInRoot()
+        val lastButton = rule.onNodeWithText(last).getUnclippedBoundsInRoot()
+        val dialogCenter = (dialog.left.value + dialog.right.value) / 2f
+        val buttonsCenter = (firstButton.left.value + firstButton.right.value + lastButton.left.value + lastButton.right.value) / 4f
+        assertTrue(kotlin.math.abs(dialogCenter - buttonsCenter) < 2f, "buttons should be centered in the dialog")
+    }
+
+    @Test fun nextPreviousSkipAndThemeSelection() {
+        show()
+        rule.onNodeWithTag(WHATS_NEW_TAG).assertExists()
+        assertButtonsCentered(WHATS_NEW_TAG, "Skip", "Next")
+        rule.onNodeWithText("What's New in this version").assertExists()
+        rule.onNodeWithText("First page").assertExists()
+        rule.onNodeWithText("Next").performClick()
+        rule.onNodeWithText("Second page").assertExists()
+        rule.onNodeWithText("Previous").performClick()
+        rule.onNodeWithText("First page").assertExists()
+        rule.onNodeWithText("Skip").performClick()
+        rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
+        assertButtonsCentered(HOLIDAY_ANNOUNCEMENT_TAG, "Skip", "Use theme")
+        rule.onNodeWithText("Use theme").assertIsNotEnabled()
+        val dialog = rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).getUnclippedBoundsInRoot()
+        val card = rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).getUnclippedBoundsInRoot()
+        assertTrue(kotlin.math.abs((dialog.left + dialog.right - card.left - card.right).value) < 2f, "theme cards are centered")
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).performClick()
+        rule.onNodeWithText("Use theme").performClick()
+        rule.waitForIdle()
+        assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+        assertNull(state.releaseAnnouncementStep)
+    }
+
+    @Test fun skipThemeDoesNotChangeAppearance() {
+        show()
+        val original = state.settings.holiday
+        rule.onNodeWithText("Skip").performClick()
+        rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
+        rule.onNodeWithText("Skip").performClick()
+        rule.waitForIdle()
+        assertEquals(original, state.settings.holiday)
+        assertNull(state.releaseAnnouncementStep)
+    }
+
+    @Test fun previewShowsExamplePagesThenTheThemeSelectorWithoutAcknowledgingARelease() {
+        state.previewReleaseAnnouncement()
+        rule.setContent { CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { ReleaseAnnouncementDialog(state) } }
+        rule.onNodeWithText("Preview").assertExists()
+        rule.onNodeWithText("Next").performClick()
+        rule.onNodeWithText("Browsing changes").assertExists()
+        rule.onNodeWithText("Done").performClick()
+        rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
+        rule.onNodeWithText("Skip").performClick()
+        assertEquals("", state.settings.lastSeenWhatsNewVersion)
+        assertEquals("", state.settings.lastSeenHolidayAnnouncementVersion)
+    }
+}

@@ -262,7 +262,7 @@ private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayP
 }
 
 @Composable
-private fun PackCard(theme: HolidayTheme, selected: Boolean, onClick: () -> Unit) {
+internal fun PackCard(theme: HolidayTheme, selected: Boolean, onClick: () -> Unit) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     Row(

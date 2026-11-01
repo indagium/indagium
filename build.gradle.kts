@@ -93,6 +93,7 @@ val renderedLicenseAgreement = "# $licenseTitle\n\nTerms version: $licenseVersio
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
+val generatedReleaseResourcesDir = layout.buildDirectory.dir("generated/indagiumReleaseResources/desktopMain/resources")
 val mediaLegalDirectory = file("licenses/third-party")
 val mediaSourceScript = file("scripts/prepare_media_sources.py")
 val pythonExecutable = if (org.gradle.internal.os.OperatingSystem.current().isWindows) "python" else "python3"
@@ -362,11 +363,15 @@ tasks.register<Exec>("testMacMirrorNative") {
 
 val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
+    inputs.files(fileTree("docs/releases") { include("*.md") })
     inputs.property("appAuthor", appAuthor)
     inputs.property("licenseVersion", licenseVersion)
     inputs.property("licenseKind", distributionLicenseKind)
     outputs.dir(generatedBuildInfoDir)
     doLast {
+        val releaseVersions = file("docs/releases").listFiles().orEmpty().mapNotNull { file ->
+            file.name.removeSuffix(".md").takeIf { file.extension == "md" && it.matches(Regex("[0-9]+(\\.[0-9]+)*")) }
+        }.plus(appVersion).distinct().sorted().joinToString(",")
         val outputFile = generatedBuildInfoDir.get().file("com/indagium/generated/BuildInfo.kt").asFile
         outputFile.parentFile.mkdirs()
         outputFile.writeText(
@@ -375,6 +380,7 @@ val generateBuildInfo by tasks.registering {
 
             object BuildInfo {
                 const val APP_VERSION: String = "$appVersion"
+                const val RELEASE_VERSIONS: String = "$releaseVersions"
                 const val APP_AUTHOR: String = "$appAuthor"
                 const val LICENSE_VERSION: String = "$licenseVersion"
                 const val LICENSE_KIND: String = "$distributionLicenseKind"
@@ -385,6 +391,28 @@ val generateBuildInfo by tasks.registering {
             """.trimIndent() + "\n"
         )
     }
+}
+
+// Bundle only this build's eligible notes, not historical release documents. Sync removes stale notes when the version changes.
+val prepareReleaseAnnouncementResources by tasks.registering(Sync::class) {
+    val baselineFile = file("docs/releases/whats-new-start.txt")
+    inputs.property("appVersion", appVersion)
+    inputs.file(baselineFile)
+    from("docs/releases") { include("whats-new-start.txt", "seasonal-themes.txt") }
+    from("docs/releases") {
+        include("$appVersion.md")
+        eachFile {
+            val baseline = baselineFile.readLines().map { it.substringBefore('#').trim() }
+                .firstOrNull { it.matches(Regex("[0-9]+(\\.[0-9]+)*")) }
+            val versionParts = appVersion.split('.').map { it.toIntOrNull() ?: 0 }
+            val baselineParts = baseline?.split('.')?.map { it.toIntOrNull() ?: 0 }
+            val comparison = if (baselineParts == null) 0 else (0 until maxOf(versionParts.size, baselineParts.size))
+                .map { versionParts.getOrElse(it) { 0 }.compareTo(baselineParts.getOrElse(it) { 0 }) }
+                .firstOrNull { it != 0 } ?: 0
+            if (comparison <= 0) exclude()
+        }
+    }
+    into(generatedReleaseResourcesDir)
 }
 
 val validateMediaLicenseInventory by tasks.registering(Exec::class) {
@@ -671,6 +699,7 @@ kotlin {
             kotlin.srcDir(generatedBuildInfoDir)
             resources.srcDir(generatedLicenseResourcesDir)
             resources.srcDir(generatedNativeResourcesDir)
+            resources.srcDir(generatedReleaseResourcesDir)
             dependencies {
                 implementation(compose.desktop.currentOs)
                 implementation(compose.material3)
@@ -889,6 +918,7 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
+    dependsOn(prepareReleaseAnnouncementResources)
     dependsOn(compileWhisperNative)
     if (isMacHost) {
         dependsOn(compileAppleSpeechNative)
@@ -1037,6 +1067,7 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     }
     System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
     System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
+    System.getProperty("indagium.previewRelease")?.let { systemProperty("indagium.previewRelease", it) }
     // AI test-suite edition limits: -Dindagium.edition=free|premium|friends_family|unlimited picks the
     // edition, and -Dindagium.dev=true lets a packaged-style run switch it at runtime (see edition/Edition.kt).
     System.getProperty("indagium.edition")?.let { systemProperty("indagium.edition", it) }

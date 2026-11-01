@@ -100,7 +100,7 @@ private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
 
 private fun appHasOpenAppLevelDialog(state: AppState): Boolean =
     state.isLoading || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
-        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.setupAssistantOpen ||
+        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.setupAssistantOpen || state.releaseAnnouncementStep != null ||
         state.updateDialogVisible || state.cacheClearConfirmOpen ||
         state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen
 
@@ -2655,9 +2655,12 @@ fun App(
                 }
             }
 
-            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible &&
-                !state.setupAssistantOpen
-            ) {
+            val startupAnnouncementsBlocked = state.needsLicenseAcceptance || state.updateDialogVisible || state.setupAssistantOpen
+            if (state.releaseAnnouncementStep != null && !startupAnnouncementsBlocked) {
+                ReleaseAnnouncementDialog(state)
+            }
+
+            if (state.supportDialogOpen && !startupAnnouncementsBlocked && state.releaseAnnouncementStep == null) {
                 SupportDialog(state)
             }
 

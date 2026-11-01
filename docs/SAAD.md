@@ -1628,6 +1628,18 @@ choices with the opening settings overlaid by that applied profile. Keep Current
 opening settings. Importing a profile records it as applied after the import flow applies it, without
 applying it twice. The legacy positional settings decoder remains frozen.
 
+After the license, update dialog and setup assistant, the first launch of a version displays the bundled
+`docs/releases/<version>.md` as a paged What's New dialog for versions after `docs/releases/whats-new-start.txt`; historical
+releases through that baseline never trigger it. The build bundles only its own eligible release notes, never the historical notes.
+Next, Previous, Skip and Escape retain their own completion state; page state survives temporary hiding behind another startup dialog.
+New seasonal packs are offered separately with an explicit
+choice to apply one immediately or keep the current appearance. `docs/releases/seasonal-themes.txt` records either an exact
+release or the first release after a baseline; `BuildInfo.RELEASE_VERSIONS` is generated from the documented versions and current
+build, so an `after` entry applies to only one release. Each prompt's last-seen version is independent and stored in settings JSON;
+missing notes or metadata cause no fabricated announcement, and downgrading does not re-show an already acknowledged version.
+The development-only `indagium.previewRelease=true` launch property displays labeled example pages followed by the theme selector without
+acknowledging either prompt; choosing a theme in the preview still applies it. Packaged builds ignore the property.
+
 `LogItem` is the render model — the output of the filter pipeline and the input to the `LazyColumn`.
 It is never persisted and never leaves the process.
 

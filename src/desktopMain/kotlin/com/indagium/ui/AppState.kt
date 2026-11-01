@@ -7368,6 +7368,72 @@ class AppState(
         }
     }
 
+    // ── Versioned release announcements ──────────────────────────────────────────
+    internal var releaseAnnouncement by mutableStateOf<ReleaseAnnouncement?>(null)
+        private set
+    internal var releaseAnnouncementStep by mutableStateOf<ReleaseAnnouncementStep?>(null)
+        private set
+    internal var releaseAnnouncementPage by mutableIntStateOf(0)
+        private set
+
+    internal fun maybeShowReleaseAnnouncementOnStartup(release: ReleaseAnnouncement = loadReleaseAnnouncement()) {
+        val step = initialReleaseStep(release, settings.lastSeenWhatsNewVersion, settings.lastSeenHolidayAnnouncementVersion)
+        releaseAnnouncement = release.takeIf { step != null }
+        releaseAnnouncementStep = step
+        releaseAnnouncementPage = 0
+    }
+
+    internal fun previewReleaseAnnouncement() {
+        releaseAnnouncement = releaseAnnouncementPreview()
+        releaseAnnouncementStep = ReleaseAnnouncementStep.WHATS_NEW
+        releaseAnnouncementPage = 0
+    }
+
+    internal fun releaseAnnouncementPrevious() {
+        releaseAnnouncementPage = (releaseAnnouncementPage - 1).coerceAtLeast(0)
+    }
+
+    internal fun releaseAnnouncementNext() {
+        val release = releaseAnnouncement ?: return
+        if (releaseAnnouncementStep != ReleaseAnnouncementStep.WHATS_NEW) return
+        if (releaseAnnouncementPage < release.pages.lastIndex) {
+            releaseAnnouncementPage++
+        } else {
+            finishWhatsNew()
+        }
+    }
+
+    internal fun finishWhatsNew() {
+        val release = releaseAnnouncement ?: return
+        if (releaseAnnouncementStep != ReleaseAnnouncementStep.WHATS_NEW) return
+        if (!release.preview) updateSettings { it.copy(lastSeenWhatsNewVersion = release.version) }
+        releaseAnnouncementPage = 0
+        releaseAnnouncementStep = if (release.preview && release.themes.isNotEmpty() ||
+            themeAnnouncementDue(release, settings.lastSeenHolidayAnnouncementVersion)
+        ) {
+            ReleaseAnnouncementStep.HOLIDAY_THEMES
+        } else {
+            null
+        }
+        if (releaseAnnouncementStep == null) releaseAnnouncement = null
+    }
+
+    internal fun finishHolidayAnnouncement(pack: HolidayPack? = null) {
+        val release = releaseAnnouncement ?: return
+        if (releaseAnnouncementStep != ReleaseAnnouncementStep.HOLIDAY_THEMES) return
+        val validPack = pack?.takeIf { it in release.themes }
+        if (!release.preview || validPack != null) {
+            updateSettings { current ->
+                current.copy(
+                    holiday = validPack?.let { current.holiday.applyAnnouncedTheme(it) } ?: current.holiday,
+                    lastSeenHolidayAnnouncementVersion = if (release.preview) current.lastSeenHolidayAnnouncementVersion else release.version,
+                )
+            }
+        }
+        releaseAnnouncementStep = null
+        releaseAnnouncement = null
+    }
+
     // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────
     var setupAssistantOpen by mutableStateOf(false)
         private set
