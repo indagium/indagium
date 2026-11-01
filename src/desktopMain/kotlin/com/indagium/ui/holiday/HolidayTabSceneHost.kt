@@ -6,6 +6,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.State
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
@@ -95,6 +96,7 @@ internal fun Modifier.holidayTabBarScene(
     vertical: Boolean,
     shape: Shape? = null,
     slot: HolidaySceneSlot? = null,
+    clock: State<Float>? = null,
 ): Modifier {
     val outline = shape ?: RectangleShape
     return background(look.chrome.tabBar, outline)
@@ -106,7 +108,8 @@ internal fun Modifier.holidayTabBarScene(
             onDrawBehind {
                 if (layout != null) {
                     val r = layout.slot
-                    clipPath(clip) { clipRect(r.left, r.top, r.right, r.bottom) { painter.draw(this, layout, look.isDark) } }
+                    val time = if (look.effects.animatePicture) (clock?.value ?: HOLIDAY_STILL_TIME) * look.effects.speedScale else HOLIDAY_STILL_TIME
+                    clipPath(clip) { clipRect(r.left, r.top, r.right, r.bottom) { painter.drawFrame(this, layout, look.isDark, time) } }
                 }
             }
         }

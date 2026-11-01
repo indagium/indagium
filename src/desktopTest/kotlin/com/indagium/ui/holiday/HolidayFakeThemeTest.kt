@@ -5,6 +5,8 @@ import com.indagium.model.HolidayIntensity
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidaySettings
 import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.DayOfWeek
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -30,6 +32,20 @@ class HolidayFakeThemeTest {
         assertNull(activeHolidayTheme(auto, LocalDate.of(2026, 10, 31), FAKE_THEMES), "pumpkin dates mean nothing to it")
         assertEquals(FakeHolidayTheme, activeHolidayTheme(auto, LocalDate.of(2026, 6, 15), FAKE_THEMES))
         assertNull(activeHolidayTheme(auto, LocalDate.of(2026, 7, 1), FAKE_THEMES))
+    }
+
+    @Test
+    fun automaticCanFollowAWeeklyTimeSchedule() {
+        val weekly = object : HolidayTheme by FakeHolidayTheme {
+            override fun automaticAt(now: LocalDateTime): Boolean = now.dayOfWeek == DayOfWeek.FRIDAY && now.hour >= 17
+            override val automaticLabel = "Fridays from 17:00"
+        }
+        val themes = holidayThemeRegistry(weekly)
+        val auto = HolidaySettings(mode = HolidayMode.AUTOMATIC)
+        assertNull(activeHolidayTheme(auto, LocalDateTime.of(2026, 10, 30, 16, 59), themes))
+        assertEquals(weekly, activeHolidayTheme(auto, LocalDateTime.of(2026, 10, 30, 17, 0), themes))
+        assertNull(activeHolidayTheme(auto, LocalDateTime.of(2026, 10, 31, 0, 0), themes))
+        assertEquals("Fridays from 17:00", holidayDatesLabel(weekly))
     }
 
     @Test

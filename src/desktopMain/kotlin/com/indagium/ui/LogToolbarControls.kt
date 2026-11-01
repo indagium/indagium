@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.ui.holiday.holidayFindIcon
 import kotlin.math.roundToInt
 
 // The buttons of the log toolbar between the leading and trailing parts, in the shape [LogToolbarVariant] asks for. FULL is the legacy
@@ -143,11 +144,14 @@ internal fun RowScope.LogToolbarControls(variant: LogToolbarVariant, model: LogT
         )
     }
     Spacer(Modifier.width(LOG_TOOLBAR_GAP_DP.dp))
+    val findIcon = holidayFindIcon()
     AppButton(
         "",
         onClick = model.actions.onOpenSearch,
         variant = if (model.view.searchActive) ButtonVariant.Primary else ButtonVariant.Secondary,
-        leadingIcon = Icons.Outlined.Search,
+        leadingIcon = findIcon?.vector ?: Icons.Outlined.Search,
+        multicolorIcon = findIcon != null,
+        tooltip = findIcon?.tooltip,
         horizontalPadding = 10.dp,
         modifier = ring(LogToolbarItem.SEARCH),
     )

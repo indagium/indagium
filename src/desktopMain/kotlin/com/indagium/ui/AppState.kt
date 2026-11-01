@@ -7375,18 +7375,31 @@ class AppState(
         private set
     internal var releaseAnnouncementPage by mutableIntStateOf(0)
         private set
+    internal var releaseAnnouncementPreviewPack by mutableStateOf<HolidayPack?>(null)
+        private set
+
+    internal fun previewAnnouncedTheme(pack: HolidayPack) {
+        if (releaseAnnouncementStep == ReleaseAnnouncementStep.HOLIDAY_THEMES && pack in releaseAnnouncement?.themes.orEmpty()) {
+            releaseAnnouncementPreviewPack = pack
+        }
+    }
+
+    internal fun settingsForReleaseThemePreview(): AppSettings =
+        releaseAnnouncementPreviewPack?.let { pack -> settings.copy(holiday = settings.holiday.applyAnnouncedTheme(pack)) } ?: settings
 
     internal fun maybeShowReleaseAnnouncementOnStartup(release: ReleaseAnnouncement = loadReleaseAnnouncement()) {
         val step = initialReleaseStep(release, settings.lastSeenWhatsNewVersion, settings.lastSeenHolidayAnnouncementVersion)
         releaseAnnouncement = release.takeIf { step != null }
         releaseAnnouncementStep = step
         releaseAnnouncementPage = 0
+        releaseAnnouncementPreviewPack = null
     }
 
     internal fun previewReleaseAnnouncement() {
         releaseAnnouncement = releaseAnnouncementPreview()
         releaseAnnouncementStep = ReleaseAnnouncementStep.WHATS_NEW
         releaseAnnouncementPage = 0
+        releaseAnnouncementPreviewPack = null
     }
 
     internal fun releaseAnnouncementPrevious() {
@@ -7432,6 +7445,7 @@ class AppState(
         }
         releaseAnnouncementStep = null
         releaseAnnouncement = null
+        releaseAnnouncementPreviewPack = null
     }
 
     // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────

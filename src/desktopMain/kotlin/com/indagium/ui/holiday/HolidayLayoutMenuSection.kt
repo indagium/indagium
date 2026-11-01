@@ -11,7 +11,7 @@ import com.indagium.model.HolidayIntensity
 import com.indagium.model.HolidaySettings
 import com.indagium.ui.*
 
-// The "Holiday effects" part of the log view's Layout menu, shown only while a seasonal pack is active: how much it moves and which of its
+// The "Special effects" part of the log view's Layout menu, shown only while a special theme is active: how much it moves and which of its
 // decorations are on, generated from the active theme's declared effects and capabilities. The pack itself is chosen in Settings. Every
 // click goes through updateSettings and then hands keyboard focus back (a clicked row in a popup otherwise keeps it, CLAUDE.md).
 
@@ -48,7 +48,7 @@ internal fun HolidayEffectsMenuSection(state: AppState, onReclaimFocus: () -> Un
     val tc = tc()
     val holiday = state.settings.holiday
     Divider()
-    Box(Modifier.testTag(LAYOUT_MENU_HOLIDAY_TAG)) { MenuLabel("Holiday effects") }
+    Box(Modifier.testTag(LAYOUT_MENU_HOLIDAY_TAG)) { MenuLabel("Special effects") }
     val intensities = HolidayIntensity.entries
     SegmentedControl(
         options = intensities.map(::intensityLabel),

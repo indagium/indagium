@@ -158,6 +158,8 @@ internal fun ChromeScaffold(
     // Under a seasonal pack with its scene on, the tab bar (not the toolbar bar) is the night-sky picture.
     val tabScene = holiday?.takeIf { it.effects.tabScene }
     val scenePainter = tabScene?.theme?.tabScene
+    val sceneRunning = holidayPicturesRunning(scenePainter?.animated == true && tabScene.effects.animatePicture)
+    val sceneClock = rememberHolidayClock(sceneRunning)
     // The strip reports where it keeps room free of tabs (and clear of the toolbar); the scene draws only there.
     val sceneSlot = remember { HolidaySceneSlot() }
     val artFrame = LocalHolidayArtFrame.current
@@ -170,6 +172,7 @@ internal fun ChromeScaffold(
             arrangement.tabsOrientation == ChromeOrientation.VERTICAL,
             cardShape.takeIf { arrangement.cards },
             sceneSlot,
+            sceneClock,
         )
     }
     val borderLook = if (arrangement.cards) Modifier.border(BorderStroke(1.dp, tc.br), cardShape) else Modifier.border(BorderStroke(1.dp, tc.br))

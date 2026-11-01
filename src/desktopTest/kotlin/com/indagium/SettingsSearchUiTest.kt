@@ -110,7 +110,7 @@ class SettingsSearchUiTest {
     fun aSeasonalResultOpensTheSeasonalTabOfTheThemeBlockAndShowsItsRow() {
         install()
         type("halloween")
-        rule.onNodeWithText("Seasonal theme").performClick()
+        rule.onNodeWithText("Special theme").performClick()
         rule.waitForIdle()
 
         rule.onNodeWithText("All results").assertDoesNotExist()

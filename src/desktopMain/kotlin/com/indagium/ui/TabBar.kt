@@ -541,7 +541,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     // Under a seasonal pack with its tab scene on, a FIXED strip's tabs share the tab area less the scene's slot at its end (only while they
     // keep their minimum widths); everything below that sizes, drags or drops tabs uses this narrower area. Without a pack it is tabAreaPx.
     val sceneOn = LocalHoliday.current?.effects?.tabScene == true
-    val sceneSlotPx = HOLIDAY_SCENE_SLOT_DP * density
+    val sceneSlotPx = (LocalHoliday.current?.theme?.tabSceneSlotDp ?: HOLIDAY_SCENE_SLOT_DP) * density
     val minVisibleTabsPx = visibleItems.sumOf { item ->
         selectionWidthsPx.getOrElse(stripItems.indexOfFirst { it.key == item.key }) { minTabPx.toFloat() }.toDouble()
     }.toFloat()

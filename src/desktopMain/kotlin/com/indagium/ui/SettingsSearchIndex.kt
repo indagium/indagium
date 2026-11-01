@@ -221,47 +221,47 @@ private fun appearance() = buildList {
     }
 }
 
-// Settings > Appearance > Seasonal theme (ui/holiday/SeasonalThemesSettings.kt). What names a theme (label, occasion, its own keywords) comes from
+// Settings > Appearance > Special theme (ui/holiday/SeasonalThemesSettings.kt). What names a theme (label, occasion, its own keywords) comes from
 // the registry, so a new theme is found by its words without touching this index.
 private val SEASONAL_THEMES = HOLIDAY_THEMES.values
-private val SEASONAL_KEYWORDS = listOf("seasonal", "holiday", "theme pack") +
+private val SEASONAL_KEYWORDS = listOf("special", "seasonal", "holiday", "theme pack") +
     SEASONAL_THEMES.flatMap { listOf(it.label.lowercase(), it.occasion.lowercase()) + it.keywords }.distinct()
 private val SEASONAL_NAMES = SEASONAL_THEMES.joinToString(", ") { it.label }
 private val SEASONAL_DATES = SEASONAL_THEMES.joinToString("; ") { "${it.label} runs ${holidayDatesLabel(it)}" }
 
 private fun seasonalThemes() = listOf(
     entry(
-        SettingsSection.Appearance, "Seasonal theme",
-        "Theme > Seasonal themes: turn a seasonal pack on always or only during its dates. $SEASONAL_DATES and goes back to your theme after.",
+        SettingsSection.Appearance, "Special theme",
+        "Theme > Special themes: turn a special theme on always or only during its dates. $SEASONAL_DATES and goes back to your theme after.",
         SEASONAL_KEYWORDS + listOf("automatic", "always", "off", "dates", "colours"),
         anchor = SEASONAL_ANCHOR_WHEN,
     ),
     entry(
-        SettingsSection.Appearance, "Seasonal theme pack",
+        SettingsSection.Appearance, "Special theme pack",
         "$SEASONAL_NAMES, each with its own palette, tab shapes, scene behind the tabs and pictures.",
         SEASONAL_KEYWORDS + listOf("tabs", "scene", "cat"),
         anchor = SEASONAL_ANCHOR_PACK,
     ),
     entry(
-        SettingsSection.Appearance, "Seasonal light or dark",
-        "Whether the seasonal pack uses its light or dark colours, or follows your theme preset.",
+        SettingsSection.Appearance, "Special light or dark",
+        "Whether the special theme uses its light or dark colours, or follows your theme preset.",
         SEASONAL_KEYWORDS + listOf("follow preset", "light", "dark", "mode"),
         anchor = SEASONAL_ANCHOR_LIGHTNESS,
     ),
     entry(
-        SettingsSection.Appearance, "Seasonal effects",
+        SettingsSection.Appearance, "Special effects",
         "Full: ghosts, fog, bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
         SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "ghosts", "fog", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
         anchor = SEASONAL_ANCHOR_EFFECTS,
     ),
     entry(
         SettingsSection.Appearance, "Fun icons",
-        "Toolbar buttons become pictures under a seasonal pack. Hover one to see its real name.",
+        "Toolbar buttons become pictures under a special theme. Hover one to see its real name.",
         SEASONAL_KEYWORDS + listOf("icons", "toolbar", "pictures", "tooltip", "cat"),
     ),
     entry(
         SettingsSection.Appearance, "Pause effects while capturing or playing video",
-        "Stops seasonal ghosts, fog, bats, embers, lightning and animated pictures while a capture is running or a video plays.",
+        "Stops special theme effects and animated pictures while a capture is running or a video plays.",
         SEASONAL_KEYWORDS + listOf("pause", "capture", "video", "effects", "animation", "motion"),
     ),
 )

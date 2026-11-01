@@ -138,6 +138,17 @@ class HolidayThemeContractTest {
     }
 
     @Test
+    fun tileDividerHasExactlyThreeColorsWhenProvided() {
+        themes.forEach { theme ->
+            listOf(true, false).forEach { dark ->
+                theme.tileDividerColors(dark)?.let { colors ->
+                    assertEquals(3, colors.size, "${theme.pack} divider must have three segments")
+                }
+            }
+        }
+    }
+
+    @Test
     fun theChromeColoursAreSolidAndTheSceneIsDistinctFromThePanel() {
         themes.forEach { theme ->
             listOf(true, false).forEach { dark ->

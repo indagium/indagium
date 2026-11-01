@@ -131,23 +131,23 @@ class SettingsSearchTest {
     fun halloweenAndPumpkinFindTheSeasonalThemeRows() {
         for (query in listOf("halloween", "pumpkin", "seasonal", "spooky")) {
             val found = labels(query)
-            assertTrue("Seasonal theme" in found, "$query: $found")
-            assertTrue("Seasonal theme pack" in found, "$query: $found")
+            assertTrue("Special theme" in found, "$query: $found")
+            assertTrue("Special theme pack" in found, "$query: $found")
         }
         for (query in listOf("haunted", "manor", "ghost", "cobweb")) {
             val found = labels(query)
-            assertTrue("Seasonal theme" in found, "$query: $found")
-            assertTrue("Seasonal theme pack" in found, "$query: $found")
+            assertTrue("Special theme" in found, "$query: $found")
+            assertTrue("Special theme pack" in found, "$query: $found")
         }
     }
 
     @Test
     fun theSeasonalEffectRowsAreFoundByWhatTheyDo() {
-        assertTrue("Seasonal effects" in labels("bats"))
-        assertTrue("Seasonal effects" in labels("lightning"))
+        assertTrue("Special effects" in labels("bats"))
+        assertTrue("Special effects" in labels("lightning"))
         assertTrue("Fun icons" in labels("icons"))
         assertTrue("Pause effects while capturing or playing video" in labels("pause"))
-        assertTrue("Seasonal light or dark" in labels("follow preset"))
+        assertTrue("Special light or dark" in labels("follow preset"))
         assertTrue(searchSettings("halloween", all).all { it.section == SettingsSection.Appearance })
     }
 }

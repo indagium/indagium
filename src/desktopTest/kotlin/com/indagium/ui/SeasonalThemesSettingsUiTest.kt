@@ -39,7 +39,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-/** Settings > Appearance > Seasonal theme: each control writes its HolidaySettings field. */
+/** Settings > Appearance > Special theme: each control writes its HolidaySettings field. */
 @OptIn(ExperimentalTestApi::class)
 class SeasonalThemesSettingsUiTest {
     @get:Rule
@@ -71,7 +71,7 @@ class SeasonalThemesSettingsUiTest {
     }
 
     private fun openSeasonalTab() {
-        rule.onNode(hasText("Seasonal themes") and hasAnyAncestor(hasTestTag(THEME_TABS_TAG))).performClick()
+        rule.onNode(hasText("Special themes") and hasAnyAncestor(hasTestTag(THEME_TABS_TAG))).performClick()
         rule.waitForIdle()
     }
 
@@ -186,7 +186,7 @@ class SeasonalThemesSettingsUiTest {
     fun theCheckboxesFlipTheirFieldsAndTheDimmedRowsStayEditable() {
         setup()
         openSeasonalTab()
-        // No seasonal theme is on, so the rows look dimmed, but they still take clicks.
+        // No special theme is on, so the rows look dimmed, but they still take clicks.
         rule.onNodeWithTag(SEASONAL_FUN_ICONS_TAG).performClick()
         assertTrue(!state.settings.holiday.funIcons)
         rule.onNodeWithTag(SEASONAL_PAUSE_TAG).performClick()
@@ -214,6 +214,18 @@ class SeasonalThemesSettingsUiTest {
         rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).assertIsSelected()
         assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
         assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+    }
+
+    @Test
+    fun beerCardsSelectTheirOwnTheme() {
+        setup()
+        openSeasonalTab()
+        for (pack in listOf(HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN)) {
+            rule.onNodeWithTag(seasonalPackTag(pack)).performClick()
+            rule.onNodeWithTag(seasonalPackTag(pack)).assertIsSelected()
+            assertEquals(pack, state.settings.holiday.pack)
+            assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+        }
     }
 
     @Test

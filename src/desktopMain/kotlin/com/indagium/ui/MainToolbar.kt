@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
@@ -33,6 +34,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.indagium.ui.holiday.*
+import com.indagium.model.TabStripPosition
 
 // The main toolbar: New tab, the panel toggles (Filter, Notes, AI, Video, Compare, Cases), Open with its recent-files arrow, the Layout
 // menu and Settings. It comes in three shapes: the row the window always had (a horizontal bar), the same buttons stacked in a column
@@ -141,11 +143,17 @@ private fun ToolbarButtons(
     val homeActive = state.activeTab()?.isCaptureLauncher == true
     val density = LocalDensity.current.density
     // A bar button is as tall as the bar, a column button as wide as it, a flowing button a fixed height.
-    val fill = when (mode) {
+    val fillBase = when (mode) {
         ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_BUTTON_HEIGHT)
         ToolbarMode.FLOW -> Modifier.height(WRAP_BUTTON_HEIGHT)
         ToolbarMode.BAR -> Modifier.fillMaxHeight()
     }
+    val holiday = LocalHoliday.current
+    val ornament = holiday?.theme?.toolbarOrnament
+    val fill = fillBase.then(if (ornament == null) Modifier else Modifier.drawWithContent {
+        drawContent()
+        ornament.draw(this, TabStripPosition.TOP, 0f, holiday.isDark)
+    })
     val pad = if (flow) WRAP_BUTTON_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp)
     val gap: @Composable () -> Unit = {
         if (!flow) Spacer(if (vertical) Modifier.height(TOOLBAR_GAP) else Modifier.width(TOOLBAR_GAP))

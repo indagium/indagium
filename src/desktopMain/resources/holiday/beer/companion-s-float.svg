@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" aria-hidden="true"><defs>
+              <linearGradient id="mb-beer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd36b" /><stop offset=".6" stop-color="#f2a93b" /><stop offset="1" stop-color="#c46f12" /></linearGradient>
+              <linearGradient id="mb-foam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#f3e3bf" /></linearGradient>
+              <radialGradient id="mb-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g class="s-float">
+              <path d="M52 98c-6-14 6-26 18-21 3-14 22-18 30-8 8-12 30-11 33 2 11-7 28 0 27 14 11 0 17 12 10 20-4 4-10 4-14 2H64c-6 2-11 0-12-9z" fill="url(#mb-foam)" />
+              <g fill="#f3e3bf"><circle cx="82" cy="84" r="3" /><circle cx="112" cy="76" r="2.4" /><circle cx="140" cy="86" r="2.8" /><circle cx="98" cy="94" r="1.8" /><circle cx="160" cy="96" r="2" /></g>
+            </g>
+            </svg>

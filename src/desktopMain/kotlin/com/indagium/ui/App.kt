@@ -189,9 +189,10 @@ fun App(
     // raiseWindowForIncomingDrag's own KDoc for why this is Linux-only.
     window: java.awt.Window? = null,
 ) {
-    val holidayToday by rememberHolidayToday()
-    val holiday = remember(state.settings.holiday, state.settings.theme, holidayToday) {
-        resolveHolidayLook(state.settings, holidayToday)
+    val holidayNow by rememberHolidayNow()
+    val previewPack = state.releaseAnnouncementPreviewPack
+    val holiday = remember(state.settings.holiday, state.settings.theme, holidayNow, previewPack) {
+        resolveHolidayLook(state.settingsForReleaseThemePreview(), holidayNow)
     }
     val theme = holiday?.colors ?: themeColors(state.settings.theme)
     val holidayExclusions = remember { HolidayExclusions() }

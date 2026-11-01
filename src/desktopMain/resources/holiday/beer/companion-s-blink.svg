@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" aria-hidden="true"><defs>
+              <linearGradient id="mb-beer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd36b" /><stop offset=".6" stop-color="#f2a93b" /><stop offset="1" stop-color="#c46f12" /></linearGradient>
+              <linearGradient id="mb-foam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#f3e3bf" /></linearGradient>
+              <radialGradient id="mb-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+            </defs>
+            <g class="s-blink">
+              <ellipse cx="94" cy="142" rx="9" ry="10" fill="#ffffff" />
+              <ellipse cx="130" cy="142" rx="9" ry="10" fill="#ffffff" />
+              <circle cx="96" cy="144" r="4.6" fill="#2a1a0a" />
+              <circle cx="132" cy="144" r="4.6" fill="#2a1a0a" />
+              <circle cx="97.6" cy="142" r="1.6" fill="#ffffff" />
+              <circle cx="133.6" cy="142" r="1.6" fill="#ffffff" />
+            </g>
+            </svg>

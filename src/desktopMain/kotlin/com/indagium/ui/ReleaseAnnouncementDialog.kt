@@ -76,13 +76,13 @@ private fun WhatsNewContent(state: AppState, release: ReleaseAnnouncement) {
 private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncement) {
     val colors = tc()
     val shape = RoundedCornerShape(8.dp)
-    var selected by remember(release.version) { mutableStateOf<HolidayPack?>(null) }
+    val selected = state.releaseAnnouncementPreviewPack
     Column(
         Modifier.width(640.dp).heightIn(max = 600.dp).testTag(HOLIDAY_ANNOUNCEMENT_TAG)
             .background(colors.p, shape).border(1.dp, colors.br, shape).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        AppText("New seasonal themes", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+        AppText("New special themes", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
         AppText("Choose a new theme to use it now, or skip and keep your current appearance.", color = colors.ts, fontSize = 12.sp)
         Column(
             Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
@@ -90,7 +90,7 @@ private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncemen
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             release.themes.mapNotNull { HOLIDAY_THEMES[it] }.forEach { theme ->
-                PackCard(theme, selected == theme.pack) { selected = theme.pack }
+                PackCard(theme, selected == theme.pack) { state.previewAnnouncedTheme(theme.pack) }
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {

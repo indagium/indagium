@@ -1588,6 +1588,7 @@ fun AppButton(
     tooltip: String? = null,
     tooltipMaxLines: Int = 2,
     labelOverflow: TextOverflow = TextOverflow.Clip,
+    multicolorIcon: Boolean = false,
 ) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
@@ -1636,7 +1637,7 @@ fun AppButton(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     leadingIcon?.let {
-                        Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = resolvedTextColor)
+                        Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = if (multicolorIcon) Color.Unspecified else resolvedTextColor)
                     }
                     if (label.isNotEmpty()) {
                         AppText(

@@ -8,6 +8,7 @@ import androidx.compose.ui.text.font.FontFamily
 import com.indagium.model.HolidayPack
 import com.indagium.model.TabStripPosition
 import com.indagium.ui.ThemeColors
+import java.time.LocalDateTime
 
 // The contract every seasonal theme implements (see docs/SAAD.md "Seasonal themes"). The framework in this package (resolver, overlay,
 // chrome, Layout menu, Settings section, codec) knows nothing pack-specific: it only calls what is declared here. A new pack is ONE
@@ -42,6 +43,7 @@ internal enum class HolidayTabTexture { RIBS, STONE, PLAIN }
 /** The theme's toolbar pictures: name, mnemonic and vector per [ToolbarIconId], line work in [outline] (the toolbar's text colour). */
 internal fun interface HolidayIconSet {
     fun icons(outline: Color): Map<ToolbarIconId, HolidayIcon>
+    fun findIcon(outline: Color): HolidayIcon? = null
 }
 
 /** The geometry of a scene inside its slot: [slot] and the rectangle of every element it draws (all of them must lie inside [slot]). */
@@ -52,11 +54,14 @@ internal interface HolidaySceneLayout {
 
 /** The picture behind the tab strip, laid out inside a slot the strip keeps clear of tabs and the toolbar. */
 internal interface HolidayScenePainter {
+    val animated: Boolean get() = false
     /** Lays the scene out inside [slot] (bar pixels); [vertical] is a side tab bar. */
     fun layout(slot: Rect, vertical: Boolean): HolidaySceneLayout
 
     /** Paints [layout] (its own coordinates, the bar's pixels). The bar colour itself is drawn by the framework. */
     fun draw(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean)
+
+    fun drawFrame(scope: DrawScope, layout: HolidaySceneLayout, dark: Boolean, time: Float) = draw(scope, layout, dark)
 }
 
 /** A backdrop art: the picture under the filter sections, drawn at time [t] seconds in its own [designWidthDp] x [designHeightDp] coordinates. */
@@ -91,6 +96,12 @@ internal interface HolidayTheme {
     /** The days it applies in Automatic mode. */
     val dates: HolidayDates
 
+    /** Whether Automatic mode applies at this local time; packs may use schedules other than yearly dates. */
+    fun automaticAt(now: LocalDateTime): Boolean = dates.contains(now.toLocalDate())
+
+    /** Human-readable description of the Automatic schedule. */
+    val automaticLabel: String? get() = null
+
     /** Extra words that find the theme's Settings rows in the settings search. */
     val keywords: List<String> get() = emptyList()
 
@@ -107,10 +118,14 @@ internal interface HolidayTheme {
     val tabTexture: HolidayTabTexture get() = HolidayTabTexture.RIBS
     val tintTabsByGroup: Boolean get() = true
     val tabOrnament: HolidayTabOrnament? get() = null
+    /** Optional decoration on toolbar button groups. */
+    val toolbarOrnament: HolidayTabOrnament? get() = null
     val newButtonStick: Boolean get() = false
+    /** Optional three colors for the three segments of an expanded tile's divider. */
     fun tileDividerColors(dark: Boolean): List<Color>? = null
     val icons: HolidayIconSet? get() = null
     val tabScene: HolidayScenePainter? get() = null
+    val tabSceneSlotDp: Float get() = HOLIDAY_SCENE_SLOT_DP
     val picture: HolidayPicturePainter? get() = null
     val companion: HolidayCompanionPainter? get() = null
     val effects: List<HolidayEffectSpec> get() = emptyList()

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240" aria-hidden="true">
+            <defs>
+              <linearGradient id="mb-beer" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffd36b" /><stop offset=".6" stop-color="#f2a93b" /><stop offset="1" stop-color="#c46f12" /></linearGradient>
+              <linearGradient id="mb-foam" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff" /><stop offset="1" stop-color="#f3e3bf" /></linearGradient>
+              <radialGradient id="mb-shadow"><stop offset="0" stop-color="#000" stop-opacity=".3" /><stop offset="1" stop-color="#000" stop-opacity="0" /></radialGradient>
+            </defs>
+            <ellipse cx="112" cy="222" rx="64" ry="9" fill="#f6ecd6" />
+            <ellipse cx="112" cy="222" rx="50" ry="6.5" fill="none" stroke="#c0392b" stroke-width="2" />
+            <path d="M162 110h12a20 20 0 0 1 20 20v38a20 20 0 0 1-20 20h-12" fill="none" stroke="#f2e6c9" stroke-width="12" stroke-opacity=".75" />
+            <path d="M162 110h12a20 20 0 0 1 20 20v38a20 20 0 0 1-20 20h-12" fill="none" stroke="#ffffff" stroke-width="3" stroke-opacity=".45" />
+            <path d="M58 92h108v114a14 14 0 0 1-14 14H72a14 14 0 0 1-14-14z" fill="#fff8e6" fill-opacity=".2" stroke="#fff4dc" stroke-opacity=".75" stroke-width="2.5" />
+            <path d="M62 98h100v106a10 10 0 0 1-10 10H72a10 10 0 0 1-10-10z" fill="url(#mb-beer)" />
+            <path d="M88 98v116M112 98v116M136 98v116" stroke="#ffffff" stroke-opacity=".12" stroke-width="3" />
+            <g fill="#fff4dc" opacity=".8"><circle class="s-rise" cx="76" cy="200" r="2" /><circle class="s-rise3" cx="150" cy="196" r="1.8" /></g>
+            <path d="M70 104v90" stroke="#ffffff" stroke-opacity=".45" stroke-width="5" stroke-linecap="round" />
+            <ellipse cx="80" cy="162" rx="7" ry="4" fill="#e8554a" opacity=".45" />
+            <ellipse cx="144" cy="162" rx="7" ry="4" fill="#e8554a" opacity=".45" />
+            <path d="M100 164q12 12 24 0" stroke="#2a1a0a" stroke-width="3.4" stroke-linecap="round" fill="none" />
+            <circle class="s-rise" cx="96" cy="64" r="3" fill="#fff4dc" opacity=".8" />
+            <circle class="s-rise2" cx="124" cy="58" r="2.4" fill="#fff4dc" opacity=".8" />
+            <circle class="s-rise3" cx="144" cy="68" r="2" fill="#fff4dc" opacity=".8" />
+          </svg>

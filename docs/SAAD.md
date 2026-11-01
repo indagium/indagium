@@ -5763,6 +5763,10 @@ against `bg` and `p` for every preset. `ui/TestsFormat.kt` holds the display for
 
 ## 27. Seasonal themes
 
+Beer time Yellow and Green share the SVG picture and mug companion from the Beer Time design. Their palette, chrome and bubble colour differ;
+both can activate automatically on Fridays from 17:00 until local midnight. `HolidayTheme.automaticAt` supplies that schedule, while other packs
+retain their inclusive yearly ranges. The local clock is refreshed on minute boundaries so the transition does not require an app restart.
+
 A seasonal theme ("Pumpkin patch") re-skins the chrome for a date window: its own palette, tab shapes, a scene behind the tab strip, toolbar
 pictures, a picture under the filters, a companion in the Notes corner and window-wide effects. The user's own preset and tab style are never
 changed; the theme only overrides what the UI reads. Everything lives in `src/desktopMain/kotlin/com/indagium/ui/holiday/`, split three ways.
@@ -5816,9 +5820,9 @@ the pending anchor into `SettingsAnchors.pendingKey`, the block reacts, and the 
 
 ### 27.2 Which theme is active
 
-`AppSettings.holiday.mode` is Off, Automatic or Always. Always uses the selected `pack`. Automatic takes the theme whose `dates` contain today; when
-several windows overlap, the selected pack wins if it is among them, else the first in registry order. `App.kt` provides `LocalHoliday` (the
-look) and the theme's palette as `LocalTheme`, re-resolved when the date, the settings or the preset change.
+`AppSettings.holiday.mode` is Off, Automatic or Always. Always uses the selected `pack`. Automatic takes a theme whose `automaticAt` matches
+the local time; when several schedules overlap, the selected pack wins if it is among them, else the first in registry order. `App.kt` provides
+`LocalHoliday` (the look) and the theme's palette as `LocalTheme`, re-resolved when the local time, the settings or the preset change.
 
 ### 27.3 Settings keys
 

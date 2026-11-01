@@ -44,11 +44,14 @@ data class HolidayDates(val start: MonthDay, val end: MonthDay) {
  * else the first in registry order.
  */
 internal fun activeHolidayTheme(h: HolidaySettings, today: LocalDate, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES): HolidayTheme? =
+    activeHolidayTheme(h, today.atStartOfDay(), themes)
+
+internal fun activeHolidayTheme(h: HolidaySettings, now: LocalDateTime, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES): HolidayTheme? =
     when (h.mode) {
         HolidayMode.OFF -> null
         HolidayMode.ALWAYS -> themes[h.pack]
         HolidayMode.AUTOMATIC -> {
-            val inWindow = themes.values.filter { it.dates.contains(today) }
+            val inWindow = themes.values.filter { it.automaticAt(now) }
             inWindow.firstOrNull { it.pack == h.pack } ?: inWindow.firstOrNull()
         }
     }
@@ -122,7 +125,11 @@ internal data class HolidayLook(
 
 /** The look for [today], or null when no theme applies and the user's preset is used as it is. [themes] is injectable for tests. */
 internal fun resolveHolidayLook(settings: AppSettings, today: LocalDate, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES): HolidayLook? {
-    val theme = activeHolidayTheme(settings.holiday, today, themes) ?: return null
+    return resolveHolidayLook(settings, today.atStartOfDay(), themes)
+}
+
+internal fun resolveHolidayLook(settings: AppSettings, now: LocalDateTime, themes: Map<HolidayPack, HolidayTheme> = HOLIDAY_THEMES): HolidayLook? {
+    val theme = activeHolidayTheme(settings.holiday, now, themes) ?: return null
     val dark = resolveHolidayDark(settings.holiday.lightness, themeColors(settings.theme))
     return HolidayLook(
         theme = theme,
@@ -134,8 +141,11 @@ internal fun resolveHolidayLook(settings: AppSettings, today: LocalDate, themes:
 }
 
 /** The colours the UI draws with: the active pack's palette, else the user's preset. Non-composable twin of App.kt's choice. */
-internal fun effectiveThemeColors(settings: AppSettings, today: LocalDate = LocalDate.now()): ThemeColors =
+internal fun effectiveThemeColors(settings: AppSettings, today: LocalDate): ThemeColors =
     resolveHolidayLook(settings, today)?.colors ?: themeColors(settings.theme)
+
+internal fun effectiveThemeColors(settings: AppSettings): ThemeColors =
+    resolveHolidayLook(settings, LocalDateTime.now())?.colors ?: themeColors(settings.theme)
 
 /** [this] with its holiday settings transformed (the one write path for the Settings dialog and the Layout menu). */
 fun AppSettings.withHoliday(fn: (HolidaySettings) -> HolidaySettings): AppSettings = copy(holiday = fn(holiday))
@@ -163,5 +173,16 @@ fun rememberHolidayToday(): State<LocalDate> = produceState(LocalDate.now()) {
         val untilMidnight = Duration.between(now, now.toLocalDate().plusDays(1).atStartOfDay()).toMillis()
         delay(untilMidnight.coerceIn(MIN_CLOCK_REFRESH_MS, MAX_CLOCK_REFRESH_MS))
         value = LocalDate.now()
+    }
+}
+
+/** Re-read the local clock on minute boundaries, including weekly schedule transitions. */
+@Composable
+internal fun rememberHolidayNow(): State<LocalDateTime> = produceState(LocalDateTime.now()) {
+    while (true) {
+        val now = LocalDateTime.now()
+        val nextMinute = now.plusMinutes(1).withSecond(0).withNano(0)
+        delay(Duration.between(now, nextMinute).toMillis().coerceAtLeast(MIN_CLOCK_REFRESH_MS))
+        value = LocalDateTime.now()
     }
 }

@@ -32,7 +32,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-/** The Layout menu's "Holiday effects" section: only under an active pack, and every row writes its setting. */
+/** The Layout menu's "Special effects" section: only under an active pack, and every row writes its setting. */
 @OptIn(ExperimentalTestApi::class)
 class LayoutMenuHolidayUiTest {
     @get:Rule
@@ -79,7 +79,7 @@ class LayoutMenuHolidayUiTest {
     fun theSectionIsAbsentWithoutAPack() {
         setup(HolidayMode.OFF)
         assertTrue(present("layout-menu-lock"), "the menu itself is open")
-        assertFalse(present(LAYOUT_MENU_HOLIDAY_TAG), "no pack, no Holiday effects")
+        assertFalse(present(LAYOUT_MENU_HOLIDAY_TAG), "no pack, no Special effects")
     }
 
     @Test

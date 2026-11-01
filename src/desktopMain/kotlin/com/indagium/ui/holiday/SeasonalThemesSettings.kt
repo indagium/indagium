@@ -48,10 +48,10 @@ import java.time.MonthDay
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-// Settings > Appearance > Theme: ONE block with two tabs, Themes (the regular gallery) and Seasonal themes (a card per registered theme, when it
+// Settings > Appearance > Theme: ONE block with two tabs, Themes (the regular gallery) and Special themes (a card per registered theme, when it
 // applies, light or dark, how much it moves, the fun toolbar icons). Picking a regular theme turns the seasonal one off; picking a seasonal card
-// turns it on. The user's own theme and tab style are never touched by a seasonal pack; every change goes through AppState.updateSettings. The
-// rows after the cards only look dimmed while no seasonal theme is on: they stay editable so a choice can be made before switching it on.
+// turns it on. The user's own theme and tab style are never touched by a special theme; every change goes through AppState.updateSettings. The
+// rows after the cards only look dimmed while no special theme is on: they stay editable so a choice can be made before switching it on.
 
 internal const val SEASONAL_MODE_TAG = "seasonal-mode"
 internal const val SEASONAL_LIGHTNESS_TAG = "seasonal-lightness"
@@ -62,7 +62,7 @@ internal const val THEME_TABS_TAG = "theme-tabs"
 internal const val SEASONAL_OFF_TAG = "seasonal-turn-off"
 internal const val SEASONAL_STATUS_TAG = "seasonal-status"
 
-/** The settings anchors of the rows on the Seasonal themes tab: a search or jump to one of them opens that tab first. */
+/** The settings anchors of the rows on the Special themes tab: a search or jump to one of them opens that tab first. */
 internal const val SEASONAL_ANCHOR_WHEN = "When it applies"
 internal const val SEASONAL_ANCHOR_PACK = "Theme pack"
 internal const val SEASONAL_ANCHOR_LIGHTNESS = "Light or dark"
@@ -102,7 +102,7 @@ internal fun intensityLabel(intensity: HolidayIntensity): String = when (intensi
 private fun MonthDay.label(): String = DATE_FORMAT.format(this.atYear(2001))
 
 /** "Oct 24 – Nov 1": the days a theme applies in Automatic mode. */
-internal fun holidayDatesLabel(theme: HolidayTheme): String = "${theme.dates.start.label()} – ${theme.dates.end.label()}"
+internal fun holidayDatesLabel(theme: HolidayTheme): String = theme.automaticLabel ?: "${theme.dates.start.label()} – ${theme.dates.end.label()}"
 
 /** "Full: bats, embers and lightning. Calm: ..." for [theme]'s effects (no list when it has none). */
 internal fun holidayEffectsHint(theme: HolidayTheme): String {
@@ -116,8 +116,8 @@ internal fun holidayEffectsHint(theme: HolidayTheme): String {
 }
 
 /**
- * The "Theme" block of Settings > Appearance: a Themes | Seasonal themes switcher over the regular gallery or the seasonal cards. It opens on the
- * tab that is active (Seasonal while a seasonal theme is on); switching tabs changes nothing by itself, and the choice is not persisted. A search
+ * The "Theme" block of Settings > Appearance: a Themes | Special themes switcher over the regular gallery or the seasonal cards. It opens on the
+ * tab that is active (Seasonal while a special theme is on); switching tabs changes nothing by itself, and the choice is not persisted. A search
  * result that targets a seasonal row opens the Seasonal tab (see [SEASONAL_ANCHORS]).
  */
 @Composable
@@ -130,7 +130,7 @@ internal fun ThemeSettingsBlock(state: AppState, themes: Map<HolidayPack, Holida
     Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         SegmentedControl(
-            options = listOf("Themes", "Seasonal themes"),
+            options = listOf("Themes", "Special themes"),
             selectedIndices = setOf(tab),
             onToggle = { tab = it },
             modifier = Modifier.testTag(THEME_TABS_TAG),
@@ -164,7 +164,7 @@ private fun SeasonalThemesTab(state: AppState, themes: Map<HolidayPack, HolidayT
             WhenRow(selected, holiday.mode) { mode -> update { copy(mode = mode, pack = selected.pack) } }
             AutomaticStatus(state, selected, holiday)
         }
-        if (on) AccentLink("Turn off seasonal theme", onClick = { update { copy(mode = HolidayMode.OFF) } }, modifier = Modifier.testTag(SEASONAL_OFF_TAG))
+        if (on) AccentLink("Turn off special theme", onClick = { update { copy(mode = HolidayMode.OFF) } }, modifier = Modifier.testTag(SEASONAL_OFF_TAG))
         Column(Modifier.alpha(if (on) 1f else DIMMED_ALPHA), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             SettingsControlRow {
                 LightnessRow(holiday.lightness) { lightness -> update { copy(lightness = lightness) } }
@@ -182,14 +182,14 @@ private fun SeasonalThemesTab(state: AppState, themes: Map<HolidayPack, HolidayT
     }
 }
 
-// Always | Only during its dates. With no seasonal theme on neither is selected; picking one turns the selected theme on.
+// Always | Only during its dates. With no special theme on neither is selected; picking one turns the selected theme on.
 @Composable
 private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMode) -> Unit) {
     val tc = tc()
     CompactSetting(SEASONAL_ANCHOR_WHEN) {
         val modes = listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC)
         SegmentedControl(
-            options = listOf("Always", "Only during its dates"),
+            options = listOf("Always", if (theme.automaticLabel == null) "Only during its dates" else "Automatic"),
             selectedIndices = setOfNotNull(modes.indexOf(mode).takeIf { it >= 0 }),
             onToggle = { onSelect(modes[it]) },
             modifier = Modifier.testTag(SEASONAL_MODE_TAG),
@@ -201,8 +201,8 @@ private fun WhenRow(theme: HolidayTheme, mode: HolidayMode, onSelect: (HolidayMo
 // Under Automatic outside the dates the theme is waiting: say when it turns on and what shows until then.
 @Composable
 private fun AutomaticStatus(state: AppState, theme: HolidayTheme, holiday: HolidaySettings) {
-    val today by rememberHolidayToday()
-    if (holiday.mode != HolidayMode.AUTOMATIC || theme.dates.contains(today)) return
+    val now by rememberHolidayNow()
+    if (holiday.mode != HolidayMode.AUTOMATIC || theme.automaticAt(now)) return
     val tc = tc()
     AppText(
         "${theme.label} turns on ${holidayDatesLabel(theme).substringBefore(" – ")}; until then your theme is ${state.settings.theme.label}",

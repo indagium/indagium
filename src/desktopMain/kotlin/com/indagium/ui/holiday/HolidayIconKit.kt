@@ -80,3 +80,11 @@ internal fun holidayToolbarIcon(id: ToolbarIconId): HolidayIcon? {
     val set = remember(holiday.pack, outline) { icons.icons(outline) }
     return set.getValue(id)
 }
+
+@Composable
+internal fun holidayFindIcon(): HolidayIcon? {
+    val holiday = LocalHoliday.current ?: return null
+    if (!holiday.effects.funIcons) return null
+    val outline = tc().tx
+    return remember(holiday.pack, outline) { holiday.theme.icons?.findIcon(outline) }
+}
