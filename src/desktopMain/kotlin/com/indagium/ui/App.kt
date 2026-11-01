@@ -198,7 +198,11 @@ fun App(
     val holidayPaused by remember(state) { derivedStateOf { state.settings.holiday.pauseWhileBusy && state.holidayBusy() } }
     // The window's content area (set by ChromeScaffold) and the one clock of the seasonal art passes (no frame loop while no art has a place).
     val holidayArtFrame = remember { HolidayArtFrame() }
+    val logViewMeasurementMemory = remember(state) { LogViewMeasurementMemory() }
     val holidayArtClock = rememberHolidayArtClock(holiday, holidayArtFrame, holidayPaused)
+    val holidayEffectsClock = rememberHolidayClock(
+        running = holiday?.effects?.activeEffects?.any { it.moves } == true && !holidayPaused && LocalWindowInfo.current.isWindowFocused,
+    )
     val platformDensity = LocalDensity.current
     val mainWindowSize = LocalWindowInfo.current.containerSize
     val voiceSettings = state.settings.voiceInput
@@ -284,6 +288,8 @@ fun App(
         LocalHolidayExclusions provides holidayExclusions,
         LocalHolidayArtFrame provides holidayArtFrame,
         LocalHolidayArtClock provides holidayArtClock,
+        LocalLogViewMeasurementMemory provides logViewMeasurementMemory,
+        LocalHolidayEffectClock provides holidayEffectsClock,
         LocalFontBase provides state.settings.fontSize,
         LocalUseMono provides state.settings.fontMono,
         LocalUiFontFamily provides state.settings.resolvedInterfaceFontFamily(),
@@ -453,6 +459,7 @@ fun App(
             // The seasonal pack's picture and companion in the content area's bottom corners, behind everything: they show wherever the window
             // background does. Input-transparent. The faint wash over everything is below, with the effects overlay.
             HolidayArtsBehind()
+            HolidayEffectsOverlay(Modifier.fillMaxSize(), behindContent = true)
             // The visible "Loading file…" cover only appears once loading has been continuously true
             // for LOADING_OVERLAY_DELAY_MS, so a quick open (a small file from the New tab) never
             // flashes it. Input is blocked from the very start of loading by the transparent layer

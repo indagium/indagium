@@ -946,6 +946,9 @@ The compare view runs on the same surface with four log tiles (`LOG_A`/`LOG_B`/`
   not a tile because tiles move. The tiles are the filter sections, A (Original over Log), B (Original over Log), Notes, Diagram library, AI and
   Video, emitted in that fixed order; Notes, AI and Video follow the left tab, as they always did. `LogViewTilingFrame` (size, Esc to restore a
   maximized tile) and `LogViewSurface` (wide `TilingSurface` or `TileStackedSurface` below 720 dp) are shared with the single view. The layout is
+  app-wide. For the single log view, `LogViewMeasurementMemory` also keeps the last viewport and content-sized tile measurements across tab changes;
+  the incoming tab remeasures its own content, without first showing unmeasured, oversized filter tiles.
+  The compare layout is
   app-wide: `AppSettings.compareLayout` (null = Compare grid from `compareSplit` and the legacy widths), `compareHidden`, `lastComparePreset`
   (Compare grid = originals on top, A left; Compare rows = both Originals in one row, both Logs in the next), edited by `commitCompareLayout` /
   `AppState.hideLogViewTile` (compare-aware) on release. ORIGINAL_A / ORIGINAL_B apply per tab's own `showUnfiltered` (`compareTileContext`).
@@ -5757,8 +5760,8 @@ changed; the theme only overrides what the UI reads. Everything lives in `src/de
 | Layer | Where | Knows |
 |-------|-------|-------|
 | Framework | `ui/holiday/*.kt` | The resolver (`HolidayResolver.kt`: dates, active theme, `HolidayLook`, `HolidayEffects`), the clock, the effects overlay, exclusions, tab chrome and the tab-scene slot (`HolidayTabSceneHost.kt`), corner-art placement and the two art passes (`HolidayBackdropLayout.kt`, `HolidayBackdropHost.kt`), the toolbar-icon kit, the Layout menu section, the Settings section, the codec (`HolidaySettingsJson.kt`). Nothing pack-specific. |
-| Contract | `HolidayTheme.kt`, `HolidayEffectKit.kt` | `HolidayTheme` (one instance per pack) with optional capabilities: `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`; the painter interfaces; the effect specs. |
-| Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. `ui/holiday/pumpkin/` is the first. |
+| Contract | `HolidayTheme.kt`, `HolidayEffectKit.kt` | `HolidayTheme` (one instance per pack) with optional capabilities: `tabShape`, `labelFontFamily`, `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`; the painter interfaces; the effect specs. |
+| Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. `ui/holiday/pumpkin/` is the first; `ui/holiday/manor/` is the second. |
 
 `HOLIDAY_THEMES` (`HolidayRegistry.kt`) maps each `HolidayPack` (the persisted enum id, `model/Model.kt`) to its theme, in registry order. Every
 pure function takes the registry as a parameter with that default (`resolveHolidayLook(settings, today, themes = HOLIDAY_THEMES)`), so a test can
@@ -5767,6 +5770,9 @@ inject a fake theme (`FakeHolidayTheme` in the tests).
 The framework turns capabilities into booleans once, in `resolveHolidayEffects`: a decoration the theme does not provide is off whatever the
 setting says, so no call site checks for it. The Layout menu rows and the Settings rows are generated from the active theme (its effects, plus the
 generic rows for the capabilities it has; no companion row without a companion, no scene row without a scene, no Fun icons row without icons).
+When a theme declares `labelFontFamily`, the tab labels and tile titles use it; toolbar labels and the user's saved interface font stay as chosen.
+Themes can select a tab texture and whether group colors tint tab fills. Particle effects can request a full-strength behind-content pass and a
+synchronized faint wash over cards, like the backdrop art; the manor ghost and bats use it. Other effects and flashes retain the ordinary overlay.
 
 Backdrop arts. The picture and the companion are *backdrop arts*: the theme only declares a design size and a `draw(t)`, and the framework places
 them at the **app window's bottom corners**, on every screen and in every layout (log view with any tiles shown or hidden, maximized tiles, stacked
@@ -5820,7 +5826,7 @@ when nothing is on, the app is capturing or playing video, or the window has no 
 
 1. Add the enum entry to `HolidayPack` (`model/Model.kt`).
 2. Create `ui/holiday/<name>/` with an `object <Name>Theme : HolidayTheme`: `pack`, `label`, `occasion`, `dates`, `palette(dark)`, `chrome(dark)`,
-   and whichever optional parts it has (`tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`, `keywords`).
+   and whichever optional parts it has (`tabShape`, `labelFontFamily`, `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`, `keywords`).
 3. Put its art in the same package (the art kit in `HolidayArtKit.kt` has the path, gradient and ellipse helpers; `holidayIconMap` builds icons).
 4. Register it in `HOLIDAY_THEMES` (`HolidayRegistry.kt`).
 5. Nothing else: `HolidayThemeContractTest` iterates the registry and checks palette contrast in dark and light, a complete icon set, unique effect

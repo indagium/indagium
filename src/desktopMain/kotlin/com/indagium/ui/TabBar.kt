@@ -421,7 +421,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier, vertical: Boole
     val fit = vertical || settings.tabsFitLabel()
     val groupedFixedMode = groupedMode && !fit
     val textMeasurer = rememberTextMeasurer()
-    val uiFont = LocalUiFontFamily.current
+    val uiFont = LocalHoliday.current?.theme?.labelFontFamily ?: LocalUiFontFamily.current
     val groupHeaderWidthsPx = remember(groups, textMeasurer, densityContext, uiFont, settings.tabStripStyle, position) {
         groups.associate { group ->
             group.id to tabGroupHeaderWidthPx(group, textMeasurer, uiFont, densityContext, settings.tabStripStyle, position)

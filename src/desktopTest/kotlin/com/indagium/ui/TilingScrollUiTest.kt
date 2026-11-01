@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material3.Text
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
@@ -107,6 +109,41 @@ class TilingScrollUiTest {
     private var innerScroll: ScrollState? = null
     private val clicks = mutableMapOf<ScrollTile, Int>()
     private val focusE = FocusRequester()
+
+    @Test
+    fun switchingKeyedViewsReusesSettledTileMeasurementsOnTheFirstFrame() {
+        var tab by mutableStateOf(0)
+        val memory = TileMeasureStore<ScrollTile>()
+        val observedHeights = mutableListOf<Float>()
+        val layoutTree = layoutOf(ScrollTile.C to null, ScrollTile.E to null)
+        val density = rule.density.density
+        rule.setContent {
+            key(tab) {
+                Box(Modifier.size(HOST_W.dp, HOST_H.dp)) {
+                    TilingSurface(
+                        fullLayout = layoutTree, isVisible = { true }, collapsed = emptySet(), parked = emptySet(),
+                        maximized = null, locked = false, widthDp = HOST_W.toFloat(), heightDp = HOST_H.toFloat(),
+                        spec = sizedSpec, measurements = memory,
+                        callbacks = TilingCallbacks(onCommitLayout = {}, onHide = {}, onToggleCollapse = {}, onMaximize = {},
+                            onReclaimFocus = {}, dropLabel = { "drop" }),
+                    ) {
+                        Tile(ScrollTile.LOG, slot(ScrollTile.LOG))
+                        for (id in listOf(ScrollTile.C, ScrollTile.E)) {
+                            Tile(id, sizedSlot(id), Modifier.onGloballyPositioned {
+                                if (tab == 1 && id == ScrollTile.C) observedHeights.add(it.size.height / density)
+                            })
+                        }
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+        val settled = bounds("t-card-c").height.value
+        rule.runOnIdle { tab = 1 }
+        rule.waitForIdle()
+        assertTrue(observedHeights.isNotEmpty())
+        assertTrue(observedHeights.all { kotlin.math.abs(it - settled) < 1.5f }, "tile jumped on switch: $observedHeights vs $settled")
+    }
 
     // What the host is built from: the spec, how a tile's slot is made and the host's height. The sized tests swap them.
     private var hostSpec = SCROLL_SPEC

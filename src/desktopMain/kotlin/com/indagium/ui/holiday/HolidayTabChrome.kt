@@ -13,6 +13,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.addOutline
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipPath
@@ -80,21 +81,34 @@ internal fun Modifier.holidayTabChrome(
     position: TabStripPosition,
     tint: Color? = null,
     radius: Dp = HOLIDAY_TAB_RADIUS,
+    shape: Shape = holidayTabShape(position, radius),
+    texture: HolidayTabTexture = HolidayTabTexture.RIBS,
 ): Modifier {
-    val shape = holidayTabShape(position, radius)
-    val fill = if (active) {
-        background(tc.p, shape)
-    } else {
-        background(chrome.tabBg.copy(alpha = IDLE_FILL_ALPHA), shape).drawBehind { drawRibs(shape, chrome.rib) }
-    }
+    val fill = background(if (active) tc.p else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = IDLE_FILL_ALPHA), shape)
+        .drawBehind {
+            when (texture) {
+                HolidayTabTexture.RIBS -> if (!active) drawRibs(shape, chrome.rib)
+                HolidayTabTexture.STONE -> drawStoneSpeckles(shape)
+            }
+        }
     return fill
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
-        .then(if (active) Modifier.border(ACTIVE_BORDER, tc.ac, shape) else Modifier)
+        .then(if (active) Modifier.border(ACTIVE_BORDER, tc.ac, shape) else if (texture == HolidayTabTexture.STONE) Modifier.border(1.dp, tc.br, shape) else Modifier)
+}
+
+// The manor reference uses three faint, fixed stone marks instead of the pumpkin's repeated ribs.
+private fun DrawScope.drawStoneSpeckles(shape: Shape) {
+    val outline = Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawStoneSpeckles)) }
+    clipPath(outline) {
+        drawCircle(Color.Black.copy(alpha = .09f), 1.5.dp.toPx(), Offset(size.width * .22f, size.height * .72f))
+        drawCircle(Color.Black.copy(alpha = .07f), 1.5.dp.toPx(), Offset(size.width * .63f, size.height * .40f))
+        drawCircle(Color.Black.copy(alpha = .06f), 1.dp.toPx(), Offset(size.width * .86f, size.height * .80f))
+    }
 }
 
 // Vertical hairlines every RIB_SPACING, cut to the tab's rounded outline so none pokes past a corner.
-private fun DrawScope.drawRibs(shape: RoundedCornerShape, color: Color) {
+private fun DrawScope.drawRibs(shape: Shape, color: Color) {
     val outline = Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawRibs)) }
     val spacing = RIB_SPACING.toPx()
     val width = RIB_WIDTH.toPx()

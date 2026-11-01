@@ -1924,6 +1924,7 @@ enum class HolidayMode { OFF, AUTOMATIC, ALWAYS }
 /** The seasonal packs: the persisted id of each theme. Its name, dates and art live in its ui/holiday HolidayTheme (see docs/SAAD.md). */
 enum class HolidayPack {
     PUMPKIN_PATCH,
+    HAUNTED_MANOR,
 }
 
 /** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */

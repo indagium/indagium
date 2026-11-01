@@ -25,6 +25,8 @@ internal interface HolidayEffectSpec {
 
 /** A particle effect: [spawn] gives the same field for the same arguments (seeded), so a frame is a function of the clock only. */
 internal interface HolidayParticleEffect : HolidayEffectSpec {
+    /** Draw behind window content when the decoration must never cover text or controls. */
+    val behindContent: Boolean get() = false
     fun spawn(seed: Int, countScale: Float, speedScale: Float): HolidayParticleField
 }
 

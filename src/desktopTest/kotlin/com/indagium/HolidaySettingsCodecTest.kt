@@ -75,6 +75,15 @@ class HolidaySettingsCodecTest {
     }
 
     @Test
+    fun everyPackSurvivesAndPumpkinStaysTheDefault() {
+        assertEquals(HolidayPack.PUMPKIN_PATCH, AppSettings().holiday.pack)
+        HolidayPack.entries.forEach { pack ->
+            val decoded = decode(AppSettings().copy(holiday = defaults.copy(pack = pack)).settingsJson())
+            assertEquals(pack, decoded.holiday.pack)
+        }
+    }
+
+    @Test
     fun aMissingHolidayKeyGivesDefaults() {
         val root = Json.parseToJsonElement(AppSettings().copy(holiday = custom).settingsJson()).jsonObject.toMutableMap()
         root.remove("holiday")

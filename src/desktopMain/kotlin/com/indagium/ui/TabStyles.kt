@@ -456,17 +456,26 @@ internal fun TabShell(
     val metrics = tabMetrics(style, position)
     // Under a seasonal pack the tab takes the pack's shape, extra outer inset and fill; the user's style is only left unread here.
     val inset = if (holiday != null) holidayTabInset(metrics.inset, position) else metrics.inset
-    val shape = if (holiday != null) holidayTabShape(position, holiday.theme.corners.tabDp.dp) else tabShape(style, position)
+    val shape = if (holiday != null) {
+        holiday.theme.tabShape?.shape(position) ?: holidayTabShape(position, holiday.theme.corners.tabDp.dp)
+    } else {
+        tabShape(style, position)
+    }
     val ornament = holiday?.theme?.tabOrnament?.takeIf { isActive }
     val drawSourceContour = appearance.showStripe && shape != RectangleShape
     val sourceColor = if (appearance.showStripe) tabSourceColor(appearance.kind, tc) else Color.Transparent
     val lit = isActive || dragging
-    val labelStyle = tabLabelStyle(style, isActive, lit, tc)
+    val labelStyle = tabLabelStyle(style, isActive, lit, tc).let { base ->
+        val themed = holiday?.theme?.labelFontFamily?.let { base.copy(family = it) } ?: base
+        if (holiday?.theme?.tabTexture == HolidayTabTexture.STONE) {
+            themed.copy(size = 12.sp, weight = FontWeight.Normal, color = if (lit) tc.tx else tc.ts)
+        } else themed
+    }
     val groupTint = appearance.groupColor?.takeIf { appearance.groupTintAlpha > 0f }?.copy(alpha = appearance.groupTintAlpha)
     Box(Modifier.fillMaxWidth()) {
         Box(
             Modifier.fillMaxWidth().then(
-                if (ornament != null && holiday != null) {
+                if (ornament != null) {
                     // Over the tab and outside its clip, so the stem can stand above the rounded top.
                     val edgeDp = holidayOuterEdgeInset(inset, position)
                     Modifier.testTag("tab-stem-$pointerKey").drawWithContent {
@@ -482,10 +491,14 @@ internal fun TabShell(
                 Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
                     .padding(inset)
                     .testTag("tab-$pointerKey")
-                    .then(if (appearance.outlineColor == null) Modifier else Modifier.tabOutline(style, position, appearance.outlineColor))
+                    .then(if (appearance.outlineColor == null) Modifier else if (holiday != null) Modifier.border(1.dp, appearance.outlineColor, shape) else Modifier.tabOutline(style, position, appearance.outlineColor))
                     .then(
                         if (holiday != null) {
-                            Modifier.holidayTabChrome(isActive, hov || dragging, tc, holiday.chrome, position, groupTint, holiday.theme.corners.tabDp.dp)
+                            Modifier.holidayTabChrome(
+                                isActive, hov || dragging, tc, holiday.chrome, position,
+                                groupTint.takeIf { holiday.theme.tintTabsByGroup },
+                                radius = holiday.theme.corners.tabDp.dp, shape = shape, texture = holiday.theme.tabTexture,
+                            )
                         } else {
                             Modifier.tabChrome(style, isActive, hov, dragging, tc, position, groupTint)
                         },

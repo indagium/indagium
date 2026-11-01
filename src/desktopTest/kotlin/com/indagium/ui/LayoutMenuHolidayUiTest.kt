@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import com.indagium.model.AppSettings
 import com.indagium.model.HolidayIntensity
 import com.indagium.model.HolidayMode
+import com.indagium.model.HolidayPack
 import com.indagium.ui.holiday.*
 import org.junit.After
 import org.junit.Rule
@@ -47,7 +48,7 @@ class LayoutMenuHolidayUiTest {
         if (::directory.isInitialized) directory.deleteRecursively()
     }
 
-    private fun setup(mode: HolidayMode) {
+    private fun setup(mode: HolidayMode, pack: HolidayPack = HolidayPack.PUMPKIN_PATCH) {
         directory = createTempDirectory("layout-menu-holiday-ui").toFile()
         state = AppState(
             autosaveFile = File(directory, "state.cache"),
@@ -59,7 +60,7 @@ class LayoutMenuHolidayUiTest {
         val tab = mkTab("holiday-menu", "menu.log", emptyList())
         state.tabs = listOf(tab)
         state.activeTabId = tab.id
-        state.updateSettings { it.withHoliday { h -> h.copy(mode = mode) } }
+        state.updateSettings { it.withHoliday { h -> h.copy(mode = mode, pack = pack) } }
         // The pack is active exactly when the setting says so, like App.kt decides it.
         val look = resolveHolidayLook(state.settings, LocalDate.of(2026, 10, 31))
         rule.setContent {
@@ -89,6 +90,17 @@ class LayoutMenuHolidayUiTest {
         listOf("pumpkin.embers", "pumpkin.bats", "pumpkin.lightning", "scene", "picture", "animate", "icons", "companion", "pause").forEach {
             assertTrue(present(layoutMenuHolidayToggleTag(it)), "row $it")
         }
+    }
+
+    @Test
+    fun theManorLayoutMenuOffersItsOwnEffectsAndCompanionSwitch() {
+        setup(HolidayMode.ALWAYS, HolidayPack.HAUNTED_MANOR)
+        listOf("manor.ghosts", "manor.fog", "manor.lightning", "scene", "picture", "animate", "icons", "companion", "pause").forEach {
+            assertTrue(present(layoutMenuHolidayToggleTag(it)), "row $it")
+        }
+        rule.onNodeWithTag(layoutMenuHolidayToggleTag("manor.fog")).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(false, state.settings.holiday.effectToggles["manor.fog"])
     }
 
     @Test

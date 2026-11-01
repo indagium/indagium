@@ -61,7 +61,8 @@ internal class HolidayBackdropArt(
 @Composable
 internal fun Modifier.pageBackground(): Modifier {
     val look = LocalHoliday.current
-    return if (look != null && holidayBackdropArts(look).isNotEmpty()) this else background(tc().bg)
+    val hasBehindEffect = look?.effects?.activeEffects?.any { it is HolidayParticleEffect && it.behindContent } == true
+    return if (look != null && (holidayBackdropArts(look).isNotEmpty() || hasBehindEffect)) this else background(tc().bg)
 }
 
 /** The arts [look]'s theme provides and the user has on: the picture (bottom-left), then the companion (bottom-right). */

@@ -293,14 +293,13 @@ private val LocalTileTitle = compositionLocalOf { "tile" }
 // ---------------------------------------------------------------------------------------------------------------
 
 /** The interaction state of one surface; lives as long as the surface does. Pointers are in host dp. */
-private class TileDragState<K> {
+private class TileDragState<K>(val measured: TileMeasureStore<K> = TileMeasureStore()) {
     var dragged by mutableStateOf<K?>(null)
     var pointer by mutableStateOf<Offset?>(null)
     var pointerRoot: Offset? = null
     var hostRoot by mutableStateOf(Offset.Zero)
     var draft by mutableStateOf<TileNode<K>?>(null)
     val scroll = TileScrollState<K>()
-    val measured = TileMeasureStore<K>()
 }
 
 // What one composition of a surface knows; it is the [TileScope] the content lambda receives. [composed] says which tiles are kept
@@ -399,9 +398,10 @@ internal fun <K> TilingSurface(
     spec: TileChromeSpec<K>,
     callbacks: TilingCallbacks<K>,
     external: TileExternalDrag<K>? = null,
+    measurements: TileMeasureStore<K>? = null,
     content: @Composable TileScope<K>.() -> Unit,
 ) {
-    val drag = remember { TileDragState<K>() }
+    val drag = remember(measurements) { TileDragState(measurements ?: TileMeasureStore<K>()) }
     val layout = drag.draft ?: fullLayout
     val shown: (K) -> Boolean = { isVisible(it) && it !in parked }
     val projection = projectTileLayout(layout, shown)
@@ -709,6 +709,7 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
     val key = s.spec.keyOf(id)
     val parts = slot.headerParts?.invoke(rect?.w ?: 0f) ?: tileHeaderParts(rect?.w ?: 0f)
     val callbacks = s.callbacks
+    val titleFont = LocalHoliday.current?.theme?.labelFontFamily ?: LocalUiFontFamily.current
     Row(
         Modifier.fillMaxWidth().height(s.spec.headerDp.dp).padding(horizontal = 8.dp).testTag("$prefix-header-$key"),
         verticalAlignment = Alignment.CenterVertically,
@@ -721,6 +722,7 @@ private fun <K> TileHeader(s: TileScopeImpl<K>, id: K, slot: TileSlot, rect: Til
                 slot.title,
                 color = tc.tx,
                 fontSize = s.spec.titleSp.sp,
+                fontFamily = titleFont,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

@@ -134,6 +134,11 @@ class SettingsSearchTest {
             assertTrue("Seasonal theme" in found, "$query: $found")
             assertTrue("Seasonal theme pack" in found, "$query: $found")
         }
+        for (query in listOf("haunted", "manor", "ghost", "cobweb")) {
+            val found = labels(query)
+            assertTrue("Seasonal theme" in found, "$query: $found")
+            assertTrue("Seasonal theme pack" in found, "$query: $found")
+        }
     }
 
     @Test

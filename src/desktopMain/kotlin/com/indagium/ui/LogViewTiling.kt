@@ -60,6 +60,14 @@ private const val PIN_EPSILON_DP = 0.5f
 internal val LocalLogViewSearchFieldFocusChanged =
     staticCompositionLocalOf<(owner: Any, focused: Boolean) -> Unit> { { _, _ -> } }
 
+/** Measurements survive switching log tabs, so the new tab starts from the last settled tile geometry. */
+internal class LogViewMeasurementMemory {
+    var sizePx by mutableStateOf(IntSize.Zero)
+    val tiles = TileMeasureStore<LogViewSectionId>()
+}
+
+internal val LocalLogViewMeasurementMemory = staticCompositionLocalOf<LogViewMeasurementMemory?> { null }
+
 /**
  * The log view's tile chrome: 32dp headers, 8dp / 6dp gaps, `tile-*` tags, and scrolling sidebar columns ([logViewScrollsInColumn]) with a splitter
  * under their last tile. A column's scrollbar is drawn in the 8 dp gap beside it (1 dp, the 6 dp bar, 1 dp), or, for a column at the right edge, in the
@@ -170,7 +178,8 @@ internal fun LogViewTilingHost(
     inputs: LogViewHostInputs,
     modifier: Modifier = Modifier,
 ) {
-    LogViewTilingFrame(state, modifier) { widthDp, heightDp -> LogViewTileSurface(state, tab, focus, inputs, widthDp, heightDp) }
+    val memory = LocalLogViewMeasurementMemory.current
+    LogViewTilingFrame(state, modifier, memory) { widthDp, heightDp -> LogViewTileSurface(state, tab, focus, inputs, widthDp, heightDp, memory?.tiles) }
 }
 
 /**
@@ -179,10 +188,11 @@ internal fun LogViewTilingHost(
  * [content] the remaining viewport size in dp once there is one.
  */
 @Composable
-internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @Composable (widthDp: Float, heightDp: Float) -> Unit) {
+internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, memory: LogViewMeasurementMemory? = null, content: @Composable (widthDp: Float, heightDp: Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
-    var sizePx by remember { mutableStateOf(IntSize.Zero) }
+    val frameMemory = memory ?: remember { LogViewMeasurementMemory() }
+    val sizePx = frameMemory.sizePx
     var focusedSearchField by remember { mutableStateOf<Any?>(null) }
     val reportSearchFieldFocus: (Any, Boolean) -> Unit = remember {
         { owner, focused ->
@@ -208,7 +218,7 @@ internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, content: @C
             Box(
                 Modifier.fillMaxSize()
                     .padding(start = LOG_VIEW_HOST_PAD_DP.dp, top = LOG_VIEW_HOST_PAD_DP.dp)
-                    .onSizeChanged { sizePx = it },
+                    .onSizeChanged { frameMemory.sizePx = it },
             ) {
                 val widthDp = sizePx.width / density
                 val heightDp = (sizePx.height / density - LOG_VIEW_HOST_PAD_DP).coerceAtLeast(0f)
@@ -235,6 +245,7 @@ internal fun LogViewSurface(
     heightDp: Float,
     callbacks: TilingCallbacks<LogViewSectionId>,
     external: TileExternalDrag<LogViewSectionId>? = null,
+    measurements: TileMeasureStore<LogViewSectionId>? = null,
     content: @Composable TileScope<LogViewSectionId>.() -> Unit,
 ) {
     if (widthDp < LOG_VIEW_STACK_BELOW_DP) {
@@ -263,6 +274,7 @@ internal fun LogViewSurface(
             spec = logViewChromeSpec(),
             callbacks = callbacks,
             external = external,
+            measurements = measurements,
             content = content,
         )
     }
@@ -276,6 +288,7 @@ private fun LogViewTileSurface(
     inputs: LogViewHostInputs,
     widthDp: Float,
     heightDp: Float,
+    measurements: TileMeasureStore<LogViewSectionId>?,
 ) {
     val settings = state.settings
     val ctx = state.logViewTileContext(tab)
@@ -342,7 +355,8 @@ private fun LogViewTileSurface(
         LogViewTiles(state, tab, focus, inputs, isVisible, collapsibleTiles, toggles) { videoExpanded = it }
     }
     LogViewSurface(
-        layout, isVisible, collapsedTiles, parked, settings.logViewTilesLocked, state.logViewMaximized, widthDp, heightDp, callbacks, bridge?.external, content,
+        layout, isVisible, collapsedTiles, parked, settings.logViewTilesLocked, state.logViewMaximized, widthDp, heightDp, callbacks, bridge?.external,
+        measurements = measurements, content = content,
     )
 }
 

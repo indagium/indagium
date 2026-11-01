@@ -1,9 +1,14 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
@@ -14,6 +19,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AppSettings
 import com.indagium.model.HolidayMode
+import com.indagium.model.HolidayPack
 import com.indagium.model.LogTab
 import com.indagium.model.TabSizeMode
 import com.indagium.model.TabStripStyle
@@ -99,6 +105,26 @@ class HolidayTabUiTest {
         setup(pumpkin, TabStripStyle.RAISED)
         assertEquals(TabStripStyle.RAISED, state.settings.tabStripStyle)
         rule.onNodeWithTag("tab-stem-b").assertIsDisplayed()
+    }
+
+    @Test
+    fun manorGroupOutlineFollowsTheRoundedTabShape() {
+        val look = resolveHolidayLook(AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.HAUNTED_MANOR) }, LocalDate.of(2026, 10, 31))!!
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides look.colors, LocalHoliday provides look) {
+                Box(Modifier.width(200.dp).background(Color.Black).testTag("group-test")) {
+                    TabShell("group", "Group", "Group", false, false, onClick = {}, onClose = {},
+                        appearance = TabAppearance(outlineColor = Color.Red))
+                }
+            }
+        }
+        val pixels = rule.onNodeWithTag("group-test").captureToImage().toPixelMap()
+        val density = rule.density.density
+        fun pixel(x: Float, y: Float) = pixels[(x * density).toInt(), (y * density).toInt()]
+        val corner = pixel(0f, 6f)
+        val top = pixel(100f, 6f)
+        assertTrue(corner.red < .5f, "the group outline must not form a square at the rounded corner")
+        assertTrue(top.red > .5f && top.green < .3f, "the group outline follows the rounded tab's top edge")
     }
 
     private fun tabWidthDp(id: String): Float = rule.onNodeWithTag("tab-$id").getUnclippedBoundsInRoot().let { (it.right - it.left).value }

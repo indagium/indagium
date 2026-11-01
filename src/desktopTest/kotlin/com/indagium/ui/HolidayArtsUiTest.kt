@@ -16,6 +16,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.key
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
@@ -113,6 +117,27 @@ class HolidayArtsUiTest {
     }
 
     private fun plain() = @Composable { Box(Modifier.fillMaxSize()) { Text("content") } }
+
+    @Test
+    fun switchedLogViewStartsWithTheLastMeasuredViewport() {
+        var tab by mutableStateOf(0)
+        val memory = LogViewMeasurementMemory()
+        val observedWidths = mutableListOf<Float>()
+        rule.setContent {
+            Box(Modifier.size(1000.dp, 700.dp)) {
+                key(tab) {
+                    LogViewTilingFrame(state, Modifier.fillMaxSize(), memory) { width, _ ->
+                        if (tab == 1) observedWidths.add(width)
+                    }
+                }
+            }
+        }
+        rule.waitForIdle()
+        rule.runOnIdle { tab = 1 }
+        rule.waitForIdle()
+        assertTrue(observedWidths.isNotEmpty(), "the new tab renders without waiting for a fresh viewport measurement")
+        assertTrue(observedWidths.all { it > 900f })
+    }
 
     @Test
     fun thePictureIsInTheContentAreasBottomLeftAndTheCatInItsBottomRightBelowTheChrome() {

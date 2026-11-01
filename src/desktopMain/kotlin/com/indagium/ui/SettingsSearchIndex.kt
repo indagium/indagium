@@ -250,8 +250,8 @@ private fun seasonalThemes() = listOf(
     ),
     entry(
         SettingsSection.Appearance, "Seasonal effects",
-        "Full: bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
-        SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
+        "Full: ghosts, fog, bats, embers and lightning. Calm: fewer, slower and none over the log. Off: decorations stay, nothing moves.",
+        SEASONAL_KEYWORDS + listOf("effects", "animation", "motion", "ghosts", "fog", "bats", "embers", "lightning", "calm", "full", "reduce motion"),
         anchor = SEASONAL_ANCHOR_EFFECTS,
     ),
     entry(
@@ -261,7 +261,7 @@ private fun seasonalThemes() = listOf(
     ),
     entry(
         SettingsSection.Appearance, "Pause effects while capturing or playing video",
-        "Stops the seasonal bats, embers, lightning and animated pictures while a capture is running or a video plays.",
+        "Stops seasonal ghosts, fog, bats, embers, lightning and animated pictures while a capture is running or a video plays.",
         SEASONAL_KEYWORDS + listOf("pause", "capture", "video", "effects", "animation", "motion"),
     ),
 )

@@ -18,6 +18,7 @@ import com.indagium.model.AppSettings
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.ui.holiday.FAKE_THEMES
+import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.FakeSparkles
 import com.indagium.ui.holiday.HOLIDAY_EFFECTS_OVERLAY_TAG
 import com.indagium.ui.holiday.HolidayEffectsMenuSection
@@ -102,6 +103,23 @@ class HolidayFakeThemeUiTest {
         assertTrue(present(seasonalPackTag(HolidayPack.PUMPKIN_PATCH)))
         assertTrue(!present(SEASONAL_FUN_ICONS_TAG), "no icons, no Fun icons row")
         assertTrue(present(SEASONAL_PAUSE_TAG))
+    }
+
+    @Test
+    fun theRealSeasonalSettingsShowAndSelectTheHauntedManorCard() {
+        newState()
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides LIGHT_THEME) {
+                Box(Modifier.size(700.dp, 900.dp)) { ThemeSettingsBlock(state, HOLIDAY_THEMES) }
+            }
+        }
+        rule.waitForIdle()
+        rule.onNodeWithText("Haunted manor").assertExists()
+        assertTrue(present(seasonalPackTag(HolidayPack.HAUNTED_MANOR)))
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.HAUNTED_MANOR)).performClick()
+        rule.waitForIdle()
+        assertEquals(HolidayPack.HAUNTED_MANOR, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
     }
 
     @Test

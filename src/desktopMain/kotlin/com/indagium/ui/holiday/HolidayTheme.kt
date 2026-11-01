@@ -2,7 +2,9 @@ package com.indagium.ui.holiday
 
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.text.font.FontFamily
 import com.indagium.model.HolidayPack
 import com.indagium.model.TabStripPosition
 import com.indagium.ui.ThemeColors
@@ -29,6 +31,13 @@ internal data class HolidayCorners(val tabDp: Float = DEFAULT_TAB_DP, val toolba
 internal fun interface HolidayTabOrnament {
     fun draw(scope: DrawScope, position: TabStripPosition, outerEdgePx: Float, dark: Boolean)
 }
+
+/** Optional pack-specific tab silhouette (for example, a tombstone with a rounded crown and a flat base). */
+internal fun interface HolidayTabShape {
+    fun shape(position: TabStripPosition): Shape
+}
+
+internal enum class HolidayTabTexture { RIBS, STONE }
 
 /** The theme's toolbar pictures: name, mnemonic and vector per [ToolbarIconId], line work in [outline] (the toolbar's text colour). */
 internal fun interface HolidayIconSet {
@@ -90,6 +99,11 @@ internal interface HolidayTheme {
     fun chrome(dark: Boolean): HolidayChromeColors
 
     val corners: HolidayCorners get() = HolidayCorners.DEFAULT
+    /** Optional label typeface. Log text and explicitly chosen monospace text keep their own fonts. */
+    val labelFontFamily: FontFamily? get() = null
+    val tabShape: HolidayTabShape? get() = null
+    val tabTexture: HolidayTabTexture get() = HolidayTabTexture.RIBS
+    val tintTabsByGroup: Boolean get() = true
     val tabOrnament: HolidayTabOrnament? get() = null
     val icons: HolidayIconSet? get() = null
     val tabScene: HolidayScenePainter? get() = null
