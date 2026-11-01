@@ -4,9 +4,9 @@ import com.indagium.model.AppSettings
 import com.indagium.model.HolidayIntensity
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidaySettings
+import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.LocalDateTime
-import java.time.DayOfWeek
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -38,6 +38,7 @@ class HolidayFakeThemeTest {
     fun automaticCanFollowAWeeklyTimeSchedule() {
         val weekly = object : HolidayTheme by FakeHolidayTheme {
             override fun automaticAt(now: LocalDateTime): Boolean = now.dayOfWeek == DayOfWeek.FRIDAY && now.hour >= 17
+
             override val automaticLabel = "Fridays from 17:00"
         }
         val themes = holidayThemeRegistry(weekly)

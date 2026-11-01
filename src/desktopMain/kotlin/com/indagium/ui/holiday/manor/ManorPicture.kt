@@ -6,7 +6,6 @@ package com.indagium.ui.holiday.manor
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -23,7 +22,10 @@ import kotlin.math.sin
 private val ghostBody = parsePath("M56 250V140a54 54 0 0 1 108 0v110l-13.5-12-13.5 12-13.5-12-13.5 12-13.5-12-13.5 12-13.5-12z")
 private val ghostArms = parsePath("M58 178c-16 4-26 14-24 26 11-2 18-8 24-13zM162 178c16 4 26 14 24 26-11-2-18-8-24-13z")
 private val tree = parsePath("M270 396c-8-64 6-130-10-214")
-private val branches = parsePath("M262 262c-22-14-32-32-36-54M260 226c14-14 22-30 22-50M264 300c14-10 28-12 36-10M228 210c-8-6-10-14-8-22M276 186c6-8 8-18 6-26")
+private val branches = parsePath(
+    "M262 262c-22-14-32-32-36-54M260 226c14-14 22-30 22-50" +
+        "M264 300c14-10 28-12 36-10M228 210c-8-6-10-14-8-22M276 186c6-8 8-18 6-26",
+)
 private val lamp = parsePath("M224 236h16l-2 4v16l2 4h-16l2-4v-16z")
 private val largeStone = parsePath("M28 390V320a42 42 0 0 1 84 0v70z")
 private val stoneHighlight = parsePath("M34 388V322a36 36 0 0 1 22-32")
@@ -32,16 +34,29 @@ private val crack = parsePath("M98 300l-6 12 5 6-6 12")
 private val grass1 = parsePath("M28 376c8-6 16-2 22 2s14 2 20-2 14-4 20 0 14 4 22-2v16H28z")
 private val smallStone = parsePath("M132 392v-44q0-10 10-10h40q10 0 10 10v44z")
 private val grass2 = parsePath("M132 384c10-5 18-1 26 2s16 1 34-4v10h-60z")
-private val bat = parsePath("M20 5c1.6 0 2.6 1 2.6 1l1-2.4.7 3C26.6 5 30.4 3.6 36 6c-2.6 1.2-3.8 3.6-3.8 6.2-2.6-1.2-5.2-1.2-7.2 1.4-1.6-1.2-3.4-1.8-5-1.8s-3.4.6-5 1.8c-2-2.6-4.6-2.6-7.2-1.4C7.8 9.6 6.6 7.2 4 6c5.6-2.4 9.4-1 11.7.6l.7-3 1 2.4S18.4 5 20 5z")
-private val ghostBrush = Brush.linearGradient(0f to hex(0xffffff), .6f to hex(0xf1f6f4), 1f to hex(0xcfdcd8), start = Offset(56f, 86f), end = Offset(164f, 250f))
-private val stoneBrush = Brush.linearGradient(0f to hex(0xcfd4d8), .55f to hex(0x9aa1a8), 1f to hex(0x666d75), start = Offset(28f, 278f), end = Offset(112f, 390f))
-private val smallStoneBrush = Brush.linearGradient(0f to hex(0xcfd4d8), .55f to hex(0x9aa1a8), 1f to hex(0x666d75), start = Offset(132f, 338f), end = Offset(192f, 392f))
+private val bat = parsePath(
+    "M20 5c1.6 0 2.6 1 2.6 1l1-2.4.7 3C26.6 5 30.4 3.6 36 6c-2.6 1.2-3.8 3.6-3.8 6.2-2.6-1.2-5.2-1.2-7.2 1.4-1.6-1.2-3" +
+        ".4-1.8-5-1.8s-3.4.6-5 1.8c-2-2.6-4.6-2.6-7.2-1.4C7.8 9.6 6.6 7.2 4 6c5.6-2.4 9.4-1 11.7.6l.7-3 1 2.4S18.4 5 20 5z",
+)
+private val ghostBrush = Brush.linearGradient(
+    0f to hex(0xffffff), .6f to hex(0xf1f6f4), 1f to hex(0xcfdcd8),
+    start = Offset(56f, 86f), end = Offset(164f, 250f),
+)
+private val stoneBrush = Brush.linearGradient(
+    0f to hex(0xcfd4d8), .55f to hex(0x9aa1a8), 1f to hex(0x666d75),
+    start = Offset(28f, 278f), end = Offset(112f, 390f),
+)
+private val smallStoneBrush = Brush.linearGradient(
+    0f to hex(0xcfd4d8), .55f to hex(0x9aa1a8), 1f to hex(0x666d75),
+    start = Offset(132f, 338f), end = Offset(192f, 392f),
+)
 private val lampGlow = unitRadial(arrayOf(0f to hex(0xfff3b0), .4f to hex(0xffd166, .8f), 1f to hex(0xffb000, 0f)))
 private val mist = unitRadial(arrayOf(0f to hex(0xffffff, .18f), .6f to hex(0xffffff, .08f), 1f to hex(0xffffff, 0f)))
 
 internal object ManorPicture : HolidayPicturePainter {
     override val designWidthDp = 300f
     override val designHeightDp = 420f
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) { drawManorPicture(t) }
 }
 

@@ -637,7 +637,8 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val shape = RoundedCornerShape(s.spec.cornerDp.dp)
     val holiday = LocalHoliday.current
     val dividerColors = holiday?.theme?.tileDividerColors(holiday.isDark)
-    val dividerDp = if (dividerColors == null) 1f else 3f
+    val dividerDashes = holiday?.theme?.tileDividerDashes(holiday.isDark)?.takeIf { dividerColors == null }
+    val dividerDp = if (dividerColors != null) 3f else dividerDashes?.heightDp ?: 1f
     val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else dividerDp
     val region = s.regionOf(id)
     // A tile in a scrolling column whose slot says so is sized by what its body asks for: the body is measured at its natural height.
@@ -667,7 +668,8 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
         if (!slot.headerless) {
             TileHeader(s, id, slot, rect, collapsed)
             if (!collapsed) {
-                if (dividerColors == null) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                if (dividerDashes != null) HolidayDashedDivider(dividerDashes)
+                else if (dividerColors == null) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
                 else Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(
                     0f to dividerColors[0], 1f / 3f to dividerColors[0], 1f / 3f to dividerColors[1],
                     2f / 3f to dividerColors[1], 2f / 3f to dividerColors[2], 1f to dividerColors[2],

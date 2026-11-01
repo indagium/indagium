@@ -8,11 +8,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.layout.layoutId
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import kotlin.math.max
 
 // The wrapping main toolbar (MainToolbar.kt's FLOW shape): a row of button chunks that wraps between groups, never inside one. A chunk is a
@@ -29,6 +31,9 @@ import kotlin.math.max
 internal class ToolbarFlowState {
     var joined by mutableStateOf(true)
     var split by mutableStateOf(emptySet<Int>())
+
+    /** The rectangles (the flow's own pixels) of the units laid out as a whole: what a theme's group ornament is drawn over. */
+    var groups by mutableStateOf(emptyList<Rect>())
 }
 
 /** The layout id of a chunk of the wrapping toolbar (a cell of a split chunk carries its [key]). */
@@ -57,11 +62,15 @@ internal fun ToolbarCell(key: String, content: @Composable () -> Unit) {
 // The chunks that make up the bar's one joined group.
 private val JOINED_CHUNKS = 1..3
 
-/** The [gap] between the units of a line and between lines. */
+/**
+ * The [gap] between the units of a line and between lines. [capRoom] is kept free above the first line and added to every line gap: the room
+ * a theme's group ornament (a foam cap) draws in above each unit; the units' rectangles are reported in [ToolbarFlowState.groups].
+ */
 @Composable
-internal fun ToolbarGroupFlow(state: ToolbarFlowState, modifier: Modifier, gap: Dp, content: @Composable () -> Unit) {
+internal fun ToolbarGroupFlow(state: ToolbarFlowState, modifier: Modifier, gap: Dp, capRoom: Dp = 0.dp, content: @Composable () -> Unit) {
     Layout(content, modifier) { measurables, constraints ->
         val gapPx = gap.roundToPx()
+        val roomPx = capRoom.roundToPx()
         val limit = if (constraints.hasBoundedWidth) constraints.maxWidth else Int.MAX_VALUE
         // Natural widths: a chunk is measured without a limit, so one that does not fit shows as wider than the room.
         val items = measurables.mapNotNull { m ->
@@ -103,11 +112,24 @@ internal fun ToolbarGroupFlow(state: ToolbarFlowState, modifier: Modifier, gap: 
             }
         }
         val lineHeights = lines.map { line -> line.maxOf { unit -> unit.maxOf { it.height } } }
-        val height = lineHeights.sum() + gapPx * max(0, lines.size - 1)
+        val lineGapPx = gapPx + roomPx
+        val height = roomPx + lineHeights.sum() + lineGapPx * max(0, lines.size - 1)
         // As wide as its widest line (like a FlowRow), not the whole room.
         val widest = lines.maxOfOrNull { l -> l.sumOf { u -> u.sumOf { it.width } } + gapPx * (l.size - 1) } ?: 0
+        val rects = mutableListOf<Rect>()
+        var rectY = roomPx
+        lines.forEachIndexed { row, line ->
+            var rectX = 0
+            line.forEach { unit ->
+                val width = unit.sumOf { it.width }
+                rects += Rect(rectX.toFloat(), rectY.toFloat(), (rectX + width).toFloat(), (rectY + lineHeights[row]).toFloat())
+                rectX += width + gapPx
+            }
+            rectY += lineHeights[row] + lineGapPx
+        }
+        if (rects != state.groups) state.groups = rects
         layout(widest.coerceIn(constraints.minWidth, limit), height.coerceAtLeast(constraints.minHeight)) {
-            var y = 0
+            var y = roomPx
             lines.forEachIndexed { row, line ->
                 var x = 0
                 line.forEach { unit ->
@@ -117,7 +139,7 @@ internal fun ToolbarGroupFlow(state: ToolbarFlowState, modifier: Modifier, gap: 
                     }
                     x += gapPx
                 }
-                y += lineHeights[row] + gapPx
+                y += lineHeights[row] + lineGapPx
             }
         }
     }

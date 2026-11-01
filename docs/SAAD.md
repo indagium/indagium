@@ -5775,7 +5775,7 @@ changed; the theme only overrides what the UI reads. Everything lives in `src/de
 
 | Layer | Where | Knows |
 |-------|-------|-------|
-| Framework | `ui/holiday/*.kt` | The resolver (`HolidayResolver.kt`: dates, active theme, `HolidayLook`, `HolidayEffects`), the clock, the effects overlay, exclusions, tab chrome and the tab-scene slot (`HolidayTabSceneHost.kt`), corner-art placement and the two art passes (`HolidayBackdropLayout.kt`, `HolidayBackdropHost.kt`), the toolbar-icon kit, the Layout menu section, the Settings section, the codec (`HolidaySettingsJson.kt`). Nothing pack-specific. |
+| Framework | `ui/holiday/*.kt` | The resolver (`HolidayResolver.kt`: dates, active theme, `HolidayLook`, `HolidayEffects`), the clock, the effects overlay, exclusions, tab chrome and the scene behind the tabs (`HolidayTabSceneHost.kt`), corner-art placement and the two art passes (`HolidayBackdropLayout.kt`, `HolidayBackdropHost.kt`), the toolbar-icon kit, the Layout menu section, the Settings section, the codec (`HolidaySettingsJson.kt`). Nothing pack-specific. |
 | Contract | `HolidayTheme.kt`, `HolidayEffectKit.kt` | `HolidayTheme` (one instance per pack) with optional capabilities: `tabShape`, `labelFontFamily`, `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`; the painter interfaces; the effect specs. |
 | Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. The Halloween packs are `pumpkin/`, `manor/` and `candy/`. |
 
@@ -5796,7 +5796,7 @@ Backdrop arts. The picture and the companion are *backdrop arts*: the theme only
 them at the **app window's bottom corners**, on every screen and in every layout (log view with any tiles shown or hidden, maximized tiles, stacked
 layouts, compare, the New tab, the diagram and Tests workspaces, non-tiled screens), whatever is shown over them. Nothing in a tiling surface or a
 tile knows about them. `ChromeScaffold` reports its CONTENT rectangle (below and inside the tab strip and the toolbar) through `HolidayArtFrame`
-(root pixels, like `HolidaySceneSlot`); `App.kt` draws two input-transparent passes from it (`HolidayBackdropHost.kt`):
+(root pixels); `App.kt` draws two input-transparent passes from it (`HolidayBackdropHost.kt`):
 - **Behind** everything, the root Box's first child: the arts at full strength, visible wherever the window background shows (free space, gaps,
   margins). They carry the test tags `holiday-filter-picture` and `holiday-notes-companion`.
 - **Over** everything, next to the effects overlay (below dialogs and the loading blocker): the same arts as a faint wash through any tile (a light
@@ -5817,6 +5817,29 @@ Always, an Automatic choice is kept), a When row (Always | Only during its dates
 seasonal theme" link while one is on, and the dimmed Light or dark, Effects, Fun icons and Pause rows. The block opens on the active tab and the tab
 choice is not persisted. A settings search that targets a seasonal row (`SEASONAL_ANCHORS`) makes the block open its Seasonal tab: the dialog mirrors
 the pending anchor into `SettingsAnchors.pendingKey`, the block reacts, and the row then composes and registers its anchor for the usual scroll and flash.
+
+### 27.1a The scene behind the tabs
+
+A pack with a `tabScene` draws it as the **background of the tab bar's own row** (`HolidayTabSceneHost.kt`): there is no extra row, the tab strip and
+the toolbar sit exactly where they do without a pack and the tabs keep their whole width (no slot or reservation in FIXED, FIT or vertical strips).
+`ChromeScaffold` gives the `TAB_BAR` box `Modifier.holidayTabBarScene`: the chrome's bar colour (cut to the card's corners on a card bar), then the
+theme's painter, drawn before the tabs, which therefore cover it where they are (idle tabs are opaque under the scene) and it shows in the
+uncovered part of the row: most with few or label-width (FIT) tabs, little with FIXED tabs that fill the row.
+
+It shows while a pack is active, has a scene, the "Scene in the title bar" switch (`tabScene`) is on and `holidaySceneShown` holds: the tab position is
+TOP. A bottom, left or right (vertical) tab bar has no scene. It is **clipped to the tab strip's span of the bar**: the scaffold's Layout computes
+the chrome frames and writes `ChromeFrames.sceneSpan` (the bar's tab region, which ends before a toolbar sharing the row, or starts after it) into
+a `HolidaySceneSpan`; the modifier clips the painter to that span, so nothing is painted under or between the toolbar's buttons. The painter gets the
+span as its rectangle (`HolidayScenePainter.layout(band)`), as tall as the bar, and lays its composition out on the design's 1600 x 30 title bar
+(`HolidayBandSpace`: one design unit is `bar height / 30` pixels, so natural size on a 30 dp bar): elements are right-aligned to the span's end (the
+middle of a wide span stays clear) and a piece that does not fit whole in a narrow span is left out, never cut (`HolidayBandLayout`,
+`HolidayBandPart`); a backdrop (hills) is stretched over the span. Every reported element rectangle lies inside the span (a contract test).
+
+Beer time's lettering (the swinging sign, the LAGER label, the neon) is drawn as cached glyph outlines (`BeerText.kt`: Skia font, sub-pixel on,
+hinting off), in the same transform as the board behind it, so letters never move individually. Its companion is a taller art than wide
+(`HolidayCompanionPainter.designWidthDp` x `designHeightDp`): the mug with a tilted neon sign above it, both covered by the "Mug buddy" switch. A theme's
+`toolbarOrnament` (the foam cap) is drawn once over each group of toolbar buttons, which keep the room for it above them; `tabOrnament` caps the active
+tab; `activeTabWashAlpha` adds the accent wash on the active tab and `tileDividerDashes` replaces the tile header's divider by dashes.
 
 ### 27.2 Which theme is active
 
@@ -5848,7 +5871,7 @@ when nothing is on, the app is capturing or playing video, or the window has no 
 3. Put its art in the same package (the art kit in `HolidayArtKit.kt` has the path, gradient and ellipse helpers; `holidayIconMap` builds icons).
 4. Register it in `HOLIDAY_THEMES` (`HolidayRegistry.kt`).
 5. Nothing else: `HolidayThemeContractTest` iterates the registry and checks palette contrast in dark and light, a complete icon set, unique effect
-   ids, valid dates, a scene that stays inside its slot at several sizes and positive design sizes. The Layout menu, Settings, search, codec,
+   ids, valid dates, a scene that stays inside its span at several sizes and positive design sizes. The Layout menu, Settings, search, codec,
    overlay, tab strip and toolbar need no edit.
 
 ## Related documents

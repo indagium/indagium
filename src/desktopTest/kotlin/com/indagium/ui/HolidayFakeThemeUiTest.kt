@@ -18,9 +18,9 @@ import com.indagium.model.AppSettings
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.ui.holiday.FAKE_THEMES
-import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.FakeSparkles
 import com.indagium.ui.holiday.HOLIDAY_EFFECTS_OVERLAY_TAG
+import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.HolidayEffectsMenuSection
 import com.indagium.ui.holiday.HolidayEffectsOverlay
 import com.indagium.ui.holiday.LAYOUT_MENU_HOLIDAY_INTENSITY_TAG

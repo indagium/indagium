@@ -13,15 +13,14 @@ import com.indagium.ui.holiday.manor.HauntedManorTheme
 import com.indagium.ui.holiday.manor.MANOR_DARK
 import com.indagium.ui.holiday.manor.MANOR_LIGHT
 import com.indagium.ui.holiday.manor.ManorFog
+import com.indagium.ui.holiday.manor.ManorFogParticle
+import com.indagium.ui.holiday.manor.ManorGhostParticle
 import com.indagium.ui.holiday.manor.ManorGhosts
 import com.indagium.ui.holiday.manor.ManorLightning
+import com.indagium.ui.holiday.manor.manorBlinkScale
 import com.indagium.ui.holiday.manor.manorFogAt
 import com.indagium.ui.holiday.manor.manorGhostAt
 import com.indagium.ui.holiday.manor.manorTabSceneLayout
-import com.indagium.ui.holiday.manor.ManorFogParticle
-import com.indagium.ui.holiday.manor.ManorGhostParticle
-import com.indagium.ui.holiday.manor.manorBlinkScale
-import com.indagium.ui.holiday.resolveHolidayEffects
 import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -36,7 +35,10 @@ class HauntedManorThemeTest {
     fun pumpkinRemainsTheDefaultAndFirstFallbackWhileManorCanBeSelectedForTheSameDates() {
         assertEquals(HolidayPack.PUMPKIN_PATCH, HolidaySettings().pack)
         assertEquals(HolidayPack.PUMPKIN_PATCH, HOLIDAY_THEMES.values.first().pack)
-        assertEquals(listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT), HOLIDAY_THEMES.keys.toList())
+        assertEquals(
+            listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN),
+            HOLIDAY_THEMES.keys.toList(),
+        )
 
         val auto = HolidaySettings(mode = HolidayMode.AUTOMATIC, pack = HolidayPack.HAUNTED_MANOR)
         assertNull(activeHolidayPack(auto, LocalDate.of(2026, 10, 23)))
@@ -92,7 +94,7 @@ class HauntedManorThemeTest {
     }
 
     @Test
-    fun seededParticlesAndSceneGeometryStayStableAndInsideTheirSlots() {
+    fun seededParticlesAndSceneGeometryStayStableAndInsideTheirBands() {
         val ghostsA = ManorGhosts.spawn(seed = 19, countScale = 1f, speedScale = 1f)
         val ghostsB = ManorGhosts.spawn(seed = 19, countScale = 1f, speedScale = 1f)
         assertEquals(ghostsA.count, ghostsB.count)
@@ -109,18 +111,14 @@ class HauntedManorThemeTest {
         assertEquals(1f, manorBlinkScale(0f))
         assertTrue(manorBlinkScale(4.6f) < 0.1f, "ghosts blink briefly")
 
-        val slots = listOf(
-            Rect(100f, 0f, 260f, 36f) to false,
-            Rect(40f, 5f, 310f, 58f) to false,
-            Rect(0f, 300f, 200f, 800f) to true,
-            Rect(20f, 100f, 160f, 510f) to true,
-        )
-        slots.forEach { (slot, vertical) ->
-            val layout = manorTabSceneLayout(slot, vertical)
+        val bands = listOf(Rect(0f, 0f, 300f, 30f), Rect(0f, 0f, 1000f, 30f), Rect(0f, 0f, 1600f, 30f), Rect(10f, 5f, 2610f, 65f))
+        bands.forEach { band ->
+            val layout = manorTabSceneLayout(band)
             layout.elementBounds.forEach { bounds ->
-                assertTrue(bounds.left >= slot.left - 0.01f && bounds.right <= slot.right + 0.01f, "$bounds escapes $slot")
-                assertTrue(bounds.top >= slot.top - 0.01f && bounds.bottom <= slot.bottom + 0.01f, "$bounds escapes $slot")
+                assertTrue(bounds.left >= band.left - 0.01f && bounds.right <= band.right + 0.01f, "$bounds escapes $band")
+                assertTrue(bounds.top >= band.top - 0.01f && bounds.bottom <= band.bottom + 0.01f, "$bounds escapes $band")
             }
         }
+        assertEquals(5, manorTabSceneLayout(Rect(0f, 0f, 1600f, 30f)).elementBounds.size, "moon, graves, house, grave and tree as designed")
     }
 }

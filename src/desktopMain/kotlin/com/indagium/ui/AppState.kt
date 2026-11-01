@@ -7378,14 +7378,22 @@ class AppState(
     internal var releaseAnnouncementPreviewPack by mutableStateOf<HolidayPack?>(null)
         private set
 
-    internal fun previewAnnouncedTheme(pack: HolidayPack) {
+    /** The mode of the previewed card: true for its dark version, false for the light one (meaningful while a pack is previewed). */
+    internal var releaseAnnouncementPreviewDark by mutableStateOf(false)
+        private set
+
+    /** Previews [pack] in its light or [dark] version: the whole app re-themes, the settings stay untouched. */
+    internal fun previewAnnouncedTheme(pack: HolidayPack, dark: Boolean) {
         if (releaseAnnouncementStep == ReleaseAnnouncementStep.HOLIDAY_THEMES && pack in releaseAnnouncement?.themes.orEmpty()) {
             releaseAnnouncementPreviewPack = pack
+            releaseAnnouncementPreviewDark = dark
         }
     }
 
     internal fun settingsForReleaseThemePreview(): AppSettings =
-        releaseAnnouncementPreviewPack?.let { pack -> settings.copy(holiday = settings.holiday.applyAnnouncedTheme(pack)) } ?: settings
+        releaseAnnouncementPreviewPack?.let { pack ->
+            settings.copy(holiday = settings.holiday.applyAnnouncedTheme(pack, announcedLightness(releaseAnnouncementPreviewDark)))
+        } ?: settings
 
     internal fun maybeShowReleaseAnnouncementOnStartup(release: ReleaseAnnouncement = loadReleaseAnnouncement()) {
         val step = initialReleaseStep(release, settings.lastSeenWhatsNewVersion, settings.lastSeenHolidayAnnouncementVersion)
@@ -7393,6 +7401,7 @@ class AppState(
         releaseAnnouncementStep = step
         releaseAnnouncementPage = 0
         releaseAnnouncementPreviewPack = null
+        releaseAnnouncementPreviewDark = false
     }
 
     internal fun previewReleaseAnnouncement() {
@@ -7400,6 +7409,7 @@ class AppState(
         releaseAnnouncementStep = ReleaseAnnouncementStep.WHATS_NEW
         releaseAnnouncementPage = 0
         releaseAnnouncementPreviewPack = null
+        releaseAnnouncementPreviewDark = false
     }
 
     internal fun releaseAnnouncementPrevious() {
@@ -7431,14 +7441,15 @@ class AppState(
         if (releaseAnnouncementStep == null) releaseAnnouncement = null
     }
 
-    internal fun finishHolidayAnnouncement(pack: HolidayPack? = null) {
+    /** Closes the theme step: [pack] (when it was announced) is switched on with [lightness] (null keeps the user's own); null [pack] is Skip. */
+    internal fun finishHolidayAnnouncement(pack: HolidayPack? = null, lightness: HolidayLightness? = null) {
         val release = releaseAnnouncement ?: return
         if (releaseAnnouncementStep != ReleaseAnnouncementStep.HOLIDAY_THEMES) return
         val validPack = pack?.takeIf { it in release.themes }
         if (!release.preview || validPack != null) {
             updateSettings { current ->
                 current.copy(
-                    holiday = validPack?.let { current.holiday.applyAnnouncedTheme(it) } ?: current.holiday,
+                    holiday = validPack?.let { current.holiday.applyAnnouncedTheme(it, lightness) } ?: current.holiday,
                     lastSeenHolidayAnnouncementVersion = if (release.preview) current.lastSeenHolidayAnnouncementVersion else release.version,
                 )
             }
@@ -7446,6 +7457,7 @@ class AppState(
         releaseAnnouncementStep = null
         releaseAnnouncement = null
         releaseAnnouncementPreviewPack = null
+        releaseAnnouncementPreviewDark = false
     }
 
     // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────

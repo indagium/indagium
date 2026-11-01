@@ -252,6 +252,14 @@ internal data class ChromeFrames(
     val cards: Boolean = false,
 )
 
+/**
+ * The span along a horizontal tab bar (from the bar's own left edge, in the frames' unit) where a seasonal pack's scene may show: the tab
+ * strip's region, which ends before a toolbar sharing the bar. Null for a vertical tab bar, which has no scene. The scene is drawn
+ * behind the tabs and clipped to this span, so it never reaches under the toolbar's buttons.
+ */
+internal fun ChromeFrames.sceneSpan(vertical: Boolean): ClosedFloatingPointRange<Float>? =
+    if (vertical || tabs.w <= 0f) null else (tabs.x - tabBar.x)..(tabs.right - tabBar.x)
+
 internal fun TileRect.inset(cross: Float, vertical: Boolean): TileRect =
     if (vertical) TileRect(x + cross, y, max(0f, w - 2 * cross), h) else TileRect(x, y + cross, w, max(0f, h - 2 * cross))
 

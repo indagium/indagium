@@ -24,13 +24,18 @@ private val glow = unitRadial(arrayOf(0f to hex(0xffd166, .55f), 1f to Color.Tra
 private val brass = Brush.verticalGradient(0f to hex(0xe9c46a), 1f to hex(0x7a5a14), startY = 201f, endY = 227f)
 private val flamePath = parsePath("M0-16c-6 9-9 15-9 20a9 9 0 0 0 18 0c0-5-3-11-9-20z")
 private val innerFlame = parsePath("M0-4c-2 3-3 6-3 8a3 3 0 0 0 6 0c0-2-1-5-3-8z")
-private val drips = parsePath("M70 124q5 12 0 26 7-5 6-24zM96 123q-4 16 0 34-7-7-6-30zM106 94q5 18 0 36 8-8 7-34zM136 94q-4 12 0 24-6-5-6-22zM146 150q4 10 0 20 6-4 6-18zM170 150q-3 14 0 26-6-6-6-24z")
+private val drips = parsePath(
+    "M70 124q5 12 0 26 7-5 6-24zM96 123q-4 16 0 34-7-7-6-30zM106 94q5 18 0 36 8-8 7-34z" +
+        "M136 94q-4 12 0 24-6-5-6-22zM146 150q4 10 0 20 6-4 6-18zM170 150q-3 14 0 26-6-6-6-24z",
+)
 private val spiderLegs = parsePath("M-6-2l-10-8-4 6M-6 2l-12 2-2 8M-5 5l-9 8-1 7M6-2l10-8 4 6M6 2l12 2 2 8M5 5l9 8 1 7")
 private val ink = hex(0x1d1d1d)
 
 internal object ManorCompanion : HolidayCompanionPainter {
     override val label = "Candles and a spider in the Notes corner"
-    override val designSizeDp = 240f
+    override val designWidthDp = 240f
+    override val designHeightDp = 240f
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) { drawManorCompanion(t) }
 }
 

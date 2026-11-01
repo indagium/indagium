@@ -1,5 +1,6 @@
 // Paths, colors and positions are from the supplied Trick or treat SVG boards.
 @file:Suppress("MagicNumber")
+
 package com.indagium.ui.holiday.candy
 
 import androidx.compose.ui.geometry.Offset
@@ -10,9 +11,9 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.withTransform
 import com.indagium.ui.holiday.*
 import kotlin.math.PI
 import kotlin.math.floor
@@ -30,11 +31,16 @@ private val white = hex(0xfff6e8)
 private val ink = hex(0x4a1e05)
 private val orange = hex(0xff8a2a)
 private val purple = hex(0x9b4dff)
+
 // Paths are immutable and reused by the animated picture, companion and candy fields on every frame.
 private val paths = java.util.concurrent.ConcurrentHashMap<String, Path>()
+
 private fun path(data: String): Path = paths.getOrPut(data) { parsePath(data) }
+
 private fun DrawScope.stroke(data: String, color: Color, width: Float) = drawPath(path(data), color, style = Stroke(width, cap = StrokeCap.Round))
+
 private fun phase(t: Float, period: Float): Float = (t / period - floor(t / period)).coerceIn(0f, 1f)
+
 private fun bob(t: Float, offset: Float = 0f): Float = -5f * (1f - kotlin.math.cos((t + offset) * 2f * PI.toFloat() / 4.2f))
 
 /** Wrapped sweet from the picture and companion boards, in its original 72 x 30 coordinates. */
@@ -78,6 +84,7 @@ private fun DrawScope.lollipop(x: Float, y: Float, radius: Float, t: Float) {
 internal object CandyPicture : HolidayPicturePainter {
     override val designWidthDp = 300f
     override val designHeightDp = 420f
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
         drawUnitEllipse(shadow, 150f, 396f, 130f, 14f)
         drawUnitEllipse(aura, 150f, 292f, 120f, 60f, .9f + .1f * sin(t))
@@ -91,8 +98,8 @@ internal object CandyPicture : HolidayPicturePainter {
         drawPath(path("M80 372l-12 20h20zM220 372l12 20h-20z"), hex(0x1c1f24))
         drawOval(rim, Offset(42f, 281f), Size(216f, 38f))
         drawUnitEllipse(potion, 150f, 300f, 96f, 13f)
-        listOf(Triple(112f, 297f, 9f), Triple(132f, 301f, 6f), Triple(186f, 298f, 7f)).forEach { (x,y,r) -> drawUnitEllipse(bubbles, x,y,r,r) }
-        listOf(Triple(122f, 292f, 5f), Triple(160f, 294f, 4f), Triple(196f, 292f, 3.5f)).forEachIndexed { i, (x,y,r) ->
+        listOf(Triple(112f, 297f, 9f), Triple(132f, 301f, 6f), Triple(186f, 298f, 7f)).forEach { (x, y, r) -> drawUnitEllipse(bubbles, x, y, r, r) }
+        listOf(Triple(122f, 292f, 5f), Triple(160f, 294f, 4f), Triple(196f, 292f, 3.5f)).forEachIndexed { i, (x, y, r) ->
             val u = phase(t + i * 1.1f, 3.3f); drawUnitEllipse(bubbles, x, y - u * 36f, r * (1f - u * .35f), r * (1f - u * .35f), 1f - u)
         }
         candyAt(146f, 286f, -24f); candyAt(176f, 282f, 18f, corn = true)
@@ -112,7 +119,9 @@ internal object CandyPicture : HolidayPicturePainter {
 
 internal object CandyPail : HolidayCompanionPainter {
     override val label = "Treat pail in the Notes corner"
-    override val designSizeDp = 240f
+    override val designWidthDp = 240f
+    override val designHeightDp = 240f
+
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) = with(scope) {
         drawUnitEllipse(shadow, 120f, 230f, 80f, 8f)
         stroke("M56 120c0-80 128-80 128 0", hex(0x2b2b2b), 5f)

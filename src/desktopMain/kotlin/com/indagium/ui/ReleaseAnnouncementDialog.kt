@@ -14,7 +14,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
-import com.indagium.model.HolidayPack
 import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.PackCard
 import com.mikepenz.markdown.m3.Markdown
@@ -76,26 +75,51 @@ private fun WhatsNewContent(state: AppState, release: ReleaseAnnouncement) {
 private fun NewHolidayThemesContent(state: AppState, release: ReleaseAnnouncement) {
     val colors = tc()
     val shape = RoundedCornerShape(8.dp)
-    val selected = state.releaseAnnouncementPreviewPack
+    val selectedPack = state.releaseAnnouncementPreviewPack
+    val selectedDark = state.releaseAnnouncementPreviewDark
     Column(
-        Modifier.width(640.dp).heightIn(max = 600.dp).testTag(HOLIDAY_ANNOUNCEMENT_TAG)
+        Modifier.width(HOLIDAY_DIALOG_WIDTH).heightIn(max = 600.dp).testTag(HOLIDAY_ANNOUNCEMENT_TAG)
             .background(colors.p, shape).border(1.dp, colors.br, shape).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         AppText("New special themes", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-        AppText("Choose a new theme to use it now, or skip and keep your current appearance.", color = colors.ts, fontSize = 12.sp)
+        AppText(
+            "Choose a new theme, in its light or dark version, to use it now, or skip and keep your current appearance.",
+            color = colors.ts,
+            fontSize = 12.sp,
+        )
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(COLUMN_GAP)) {
+            listOf("Light", "Dark").forEach { header ->
+                AppText(
+                    header, color = colors.td, fontSize = 11.sp, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f).testTag("release-themes-header-${header.lowercase()}"),
+                )
+            }
+        }
         Column(
             Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             release.themes.mapNotNull { HOLIDAY_THEMES[it] }.forEach { theme ->
-                PackCard(theme, selected == theme.pack) { state.previewAnnouncedTheme(theme.pack) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(COLUMN_GAP)) {
+                    listOf(false, true).forEach { dark ->
+                        Box(Modifier.weight(1f)) {
+                            PackCard(theme, selected = selectedPack == theme.pack && selectedDark == dark, dark = dark) {
+                                state.previewAnnouncedTheme(theme.pack, dark)
+                            }
+                        }
+                    }
+                }
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
             DialogActionButton("Skip", active = false) { state.finishHolidayAnnouncement() }
-            DialogActionButton("Use theme", active = true, enabled = selected != null) { state.finishHolidayAnnouncement(selected) }
+            DialogActionButton("Use theme", active = true, enabled = selectedPack != null) {
+                state.finishHolidayAnnouncement(selectedPack, announcedLightness(selectedDark))
+            }
         }
     }
 }
+
+private val HOLIDAY_DIALOG_WIDTH = 700.dp
+private val COLUMN_GAP = 8.dp

@@ -17,12 +17,16 @@ internal class HolidayLandingAreas {
     private val rectangles = LinkedHashMap<Any, Rect>()
     var version by mutableIntStateOf(0)
         private set
+
     fun set(key: Any, rect: Rect) {
         if (rect.isEmpty) remove(key) else if (rectangles.put(key, rect) != rect) version++
     }
+
     fun remove(key: Any) { if (rectangles.remove(key) != null) version++ }
+
     fun bounds(): List<Rect> = rectangles.values.toList()
 }
+
 internal val LocalHolidayLandingAreas = staticCompositionLocalOf<HolidayLandingAreas?> { null }
 
 @Composable

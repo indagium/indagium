@@ -26,7 +26,7 @@ internal fun holidayToggles(theme: HolidayTheme): List<HolidayToggle> = buildLis
     theme.effects.forEach { spec ->
         add(HolidayToggle(spec.id, spec.label, { it.isEffectOn(spec) }, { it.copy(effectToggles = it.effectToggles + (spec.id to !it.isEffectOn(spec))) }))
     }
-    if (theme.tabScene != null) add(HolidayToggle("scene", "Scene in the tab bar", { it.tabScene }, { it.copy(tabScene = !it.tabScene) }))
+    if (theme.tabScene != null) add(HolidayToggle("scene", "Scene in the title bar", { it.tabScene }, { it.copy(tabScene = !it.tabScene) }))
     if (theme.picture != null) add(HolidayToggle("picture", "Picture under the filters", { it.filterPicture }, { it.copy(filterPicture = !it.filterPicture) }))
     if (theme.picture != null || theme.companion != null) {
         add(HolidayToggle("animate", "Animate the picture", { it.animatePicture }, { it.copy(animatePicture = !it.animatePicture) }))

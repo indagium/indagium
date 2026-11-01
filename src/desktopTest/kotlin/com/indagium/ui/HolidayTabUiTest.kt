@@ -1,17 +1,17 @@
 package com.indagium.ui
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -109,7 +109,8 @@ class HolidayTabUiTest {
 
     @Test
     fun manorGroupOutlineFollowsTheRoundedTabShape() {
-        val look = resolveHolidayLook(AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.HAUNTED_MANOR) }, LocalDate.of(2026, 10, 31))!!
+        val settings = AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.HAUNTED_MANOR) }
+        val look = resolveHolidayLook(settings, LocalDate.of(2026, 10, 31))!!
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides look.colors, LocalHoliday provides look) {
                 Box(Modifier.width(200.dp).background(Color.Black).testTag("group-test")) {
@@ -120,6 +121,7 @@ class HolidayTabUiTest {
         }
         val pixels = rule.onNodeWithTag("group-test").captureToImage().toPixelMap()
         val density = rule.density.density
+
         fun pixel(x: Float, y: Float) = pixels[(x * density).toInt(), (y * density).toInt()]
         val corner = pixel(0f, 6f)
         val top = pixel(100f, 6f)
@@ -129,7 +131,8 @@ class HolidayTabUiTest {
 
     @Test
     fun trickOrTreatUsesPillTabsAndCandyCornStripe() {
-        val look = resolveHolidayLook(AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.TRICK_OR_TREAT) }, LocalDate.of(2026, 10, 31))!!
+        val settings = AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.TRICK_OR_TREAT) }
+        val look = resolveHolidayLook(settings, LocalDate.of(2026, 10, 31))!!
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides look.colors, LocalHoliday provides look) {
                 Box(Modifier.width(200.dp).background(Color.Black).testTag("candy-tab-test")) {
@@ -139,6 +142,7 @@ class HolidayTabUiTest {
         }
         val pixels = rule.onNodeWithTag("candy-tab-test").captureToImage().toPixelMap()
         val d = rule.density.density
+
         fun pixel(x: Float, y: Float) = pixels[(x * d).toInt(), (y * d).toInt()]
         assertTrue(pixel(3f, 5f).red < .1f, "the pill's corner is outside the tab")
         val yellow = pixel(40f, 34f)
@@ -160,21 +164,18 @@ class HolidayTabUiTest {
     }
 
     @Test
-    fun aFixedStripLeavesTheScenesSlotAtTheEndUnderThePack() {
+    fun aFixedStripUsesItsWholeAreaUnderThePack() {
         setup(pumpkin, widthDp = WIDE_DP)
         val area = rule.onNodeWithTag("tab-strip-drag-idle").getUnclippedBoundsInRoot()
         val right = rule.onNodeWithTag("tab-c").getUnclippedBoundsInRoot().right
-        assertTrue((area.right - right).value >= HOLIDAY_SCENE_SLOT_DP - TOLERANCE_DP, "last tab ends ${(area.right - right).value} dp before the end")
-        assertTrue(abs(tabWidthDp("a") * 3 - ((area.right - area.left).value - HOLIDAY_SCENE_SLOT_DP)) < TOLERANCE_DP, "tabs share what is left")
+        assertTrue((area.right - right).value < TOLERANCE_DP, "the last tab ends at the end of the area, no room is kept for a scene")
+        assertTrue(abs(tabWidthDp("a") * 3 - areaWidthDp()) < TOLERANCE_DP, "tabs share the whole area")
     }
 
     @Test
-    fun noSlotIsKeptWhenTheTabsWouldDropBelowTheirMinimumWidth() {
+    fun crowdedTabsKeepTheirMinimumWidthUnderThePack() {
         setup(pumpkin, widthDp = WIDE_DP)
-        val areaDp = areaWidthDp()
-        // As many tabs as fit at 80 dp each, but not once the slot is taken off the area.
-        val count = ((areaDp - HOLIDAY_SCENE_SLOT_DP) / MIN_TAB_DP).toInt() + 1
-        assertTrue(count * MIN_TAB_DP <= areaDp, "the tabs fit the whole area")
+        val count = (areaWidthDp() / MIN_TAB_DP).toInt()
         rule.runOnIdle {
             state.updateSettings { it.copy(visibleTabLimit = count) }
             state.tabs = (1..count).map { tab("t$it") }
@@ -183,19 +184,21 @@ class HolidayTabUiTest {
         rule.waitForIdle()
         val area = rule.onNodeWithTag("tab-strip-drag-idle").getUnclippedBoundsInRoot()
         val last = rule.onNodeWithTag("tab-t$count").getUnclippedBoundsInRoot()
-        assertTrue((area.right - last.right).value < HOLIDAY_SCENE_SLOT_DP, "no slot was reserved")
+        assertTrue((area.right - last.right).value < TOLERANCE_DP, "every tab fits the whole area")
         assertTrue(tabWidthDp("t1") >= MIN_TAB_DP - TOLERANCE_DP, "the tabs keep their minimum width")
     }
 
     @Test
-    fun aFitStripNeedsNoReservation() {
+    fun aFitStripIsAsWideAsWithoutThePack() {
+        setup(null, widthDp = WIDE_DP)
+        rule.runOnIdle { state.updateSettings { it.copy(tabSizeMode = TabSizeMode.FIT) } }
+        rule.waitForIdle()
+        val plain = tabWidthDp("a")
+        tearDown()
         setup(pumpkin, widthDp = WIDE_DP)
         rule.runOnIdle { state.updateSettings { it.copy(tabSizeMode = TabSizeMode.FIT) } }
         rule.waitForIdle()
-        // Tabs take their label's width, so the free space after the last one is the slot.
-        val area = rule.onNodeWithTag("tab-strip-drag-idle").getUnclippedBoundsInRoot()
-        val last = rule.onNodeWithTag("tab-c").getUnclippedBoundsInRoot()
-        assertTrue((area.right - last.right).value >= HOLIDAY_SCENE_SLOT_DP, "the free space after the tabs is the slot")
+        assertTrue(abs(tabWidthDp("a") - plain) < TOLERANCE_DP, "a FIT tab is as wide as without a pack: ${tabWidthDp("a")} vs $plain")
     }
 
     private companion object {

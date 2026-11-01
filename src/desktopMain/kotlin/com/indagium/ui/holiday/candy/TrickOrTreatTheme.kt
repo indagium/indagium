@@ -1,4 +1,5 @@
 @file:Suppress("MagicNumber")
+
 package com.indagium.ui.holiday.candy
 
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -11,9 +12,9 @@ import androidx.compose.ui.unit.dp
 import com.indagium.model.HolidayPack
 import com.indagium.model.TabStripPosition
 import com.indagium.ui.ThemeColors
-import com.indagium.ui.theme
 import com.indagium.ui.holiday.*
 import com.indagium.ui.holiday.pumpkin.PumpkinIcons
+import com.indagium.ui.theme
 import java.time.MonthDay
 
 internal val CANDY_DARK = theme(
@@ -73,8 +74,11 @@ internal object TrickOrTreatTheme : HolidayTheme {
     override val picture = CandyPicture
     override val companion = CandyPail
     override val effects = listOf(CandyRain, CandyLanding, CandyLightning)
+
     override fun palette(dark: Boolean): ThemeColors = if (dark) CANDY_DARK else CANDY_LIGHT
+
     override fun chrome(dark: Boolean) = if (dark) HolidayChromeColors(Color(0xFF1e1536), Color(0xFF2f2353), Color.Transparent)
-        else HolidayChromeColors(Color(0xFFfbe6cc), Color(0xFFf6dcbc), Color.Transparent)
+    else HolidayChromeColors(Color(0xFFfbe6cc), Color(0xFFf6dcbc), Color.Transparent)
+
     override fun tileDividerColors(dark: Boolean): List<Color> = candyStripe(dark)
 }

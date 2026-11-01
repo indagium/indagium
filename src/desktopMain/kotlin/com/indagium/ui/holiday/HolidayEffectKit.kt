@@ -3,8 +3,8 @@
 
 package com.indagium.ui.holiday
 
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import com.indagium.model.HolidaySettings
 import com.indagium.ui.*
 import kotlin.math.floor
@@ -28,6 +28,7 @@ internal interface HolidayEffectSpec {
 internal interface HolidayParticleEffect : HolidayEffectSpec {
     /** Draw behind window content when the decoration must never cover text or controls. */
     val behindContent: Boolean get() = false
+
     fun spawn(seed: Int, countScale: Float, speedScale: Float): HolidayParticleField
 }
 
@@ -40,6 +41,7 @@ internal interface HolidayParticleField {
 
 /** A particle field that lands on the current visible tab and tile bounds instead of a fixed window coordinate. */
 internal interface HolidayLandingEffect : HolidayParticleEffect
+
 internal interface HolidayLandingField : HolidayParticleField {
     fun drawLanding(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean, anchors: List<Rect>)
 }

@@ -108,7 +108,8 @@ private fun DrawScope.drawCatFireflies(t: Float) {
 /** The pumpkin patch's [HolidayCompanionPainter]: the black cat on a pumpkin. */
 internal object PumpkinCat : HolidayCompanionPainter {
     override val label = "Black cat in the Notes corner"
-    override val designSizeDp = 240f
+    override val designWidthDp = 240f
+    override val designHeightDp = 240f
 
     override fun draw(scope: DrawScope, t: Float, dark: Boolean) {
         with(scope) { drawCatCompanion(t) }

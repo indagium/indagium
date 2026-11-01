@@ -1,4 +1,5 @@
 @file:Suppress("MagicNumber")
+
 package com.indagium.ui.holiday.beer
 
 import androidx.compose.ui.graphics.Color
@@ -6,6 +7,7 @@ import com.indagium.ui.holiday.*
 
 internal object BeerIcons : HolidayIconSet {
     override fun icons(outline: Color): Map<ToolbarIconId, HolidayIcon> = holidayIconMap(outline, ::beerIcon)
+
     override fun findIcon(outline: Color): HolidayIcon = icons(outline).getValue(ToolbarIconId.CASES).copy(name = "Find")
 }
 
@@ -37,7 +39,12 @@ private fun beerIcon(id: ToolbarIconId): IconSpec = when (id) {
         part(roundRectPath(4.0f, 23.0f, 24.0f, 4.0f, 1.5f), fill = 0xFF8a5a2c, stroke = OUTLINE),
     ))
     ToolbarIconId.OPEN -> IconSpec("Open file", "pop it open", 1.4f, listOf(
-        part("M9 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 9 26.5z", fill = 0xFF2a8a38, stroke = OUTLINE),
+        part(
+            "M9 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 " +
+                "2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 9 26.5z",
+            fill = 0xFF2a8a38,
+            stroke = OUTLINE,
+        ),
         part(ellipsePath(13.5f, 20.0f, 3.3f, 2.7f), fill = 0xFFf4f6f3, stroke = NONE),
         part(circlePath(13.5f, 9.8f, 1.0f), fill = 0xFFe1252e, stroke = NONE),
         part("M11.6 5c-1.8-1-1.6-3.4.3-3.6.6-1.4 2.7-1.3 3.1.2 1.6.4 1.6 2.7 0 3.4z", fill = 0xFFfff4dc, stroke = OUTLINE),
@@ -45,11 +52,21 @@ private fun beerIcon(id: ToolbarIconId): IconSpec = when (id) {
         part("M19 9.5l2.6-1.2M19.5 12.5l2.6-.2", fill = NONE, stroke = 0xFFf2b33d, width = 1.4f),
     ))
     ToolbarIconId.COMPARE -> IconSpec("Compare", "two side by side", 1.4f, listOf(
-        part("M4 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 4 26.5z", fill = 0xFF2a8a38, stroke = OUTLINE),
+        part(
+            "M4 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 " +
+                "2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 4 26.5z",
+            fill = 0xFF2a8a38,
+            stroke = OUTLINE,
+        ),
         part(ellipsePath(8.5f, 20.0f, 3.3f, 2.7f), fill = 0xFFf4f6f3, stroke = NONE),
         part(circlePath(8.5f, 9.8f, 1.0f), fill = 0xFFe1252e, stroke = NONE),
         part("M6.6 5.4h3.8V3.8h-3.8z", fill = 0xFFc9cdd2, stroke = OUTLINE),
-        part("M19 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 19 26.5z", fill = 0xFF1d6e2c, stroke = OUTLINE),
+        part(
+            "M19 26.5V16c0-2.4 2.2-3.6 2.8-6.2.3-1.2.3-2.4.3-3.6V5.4h3v.8c0 1.2 0 2.4.3 3.6.6 " +
+                "2.6 2.8 3.8 2.8 6.2v10.5a1.5 1.5 0 0 1-1.5 1.5h-6A1.5 1.5 0 0 1 19 26.5z",
+            fill = 0xFF1d6e2c,
+            stroke = OUTLINE,
+        ),
         part(ellipsePath(23.5f, 20.0f, 3.3f, 2.7f), fill = 0xFFf4f6f3, stroke = NONE),
         part(circlePath(23.5f, 9.8f, 1.0f), fill = 0xFFe1252e, stroke = NONE),
         part("M21.6 5.4h3.8V3.8h-3.8z", fill = 0xFFc9cdd2, stroke = OUTLINE),

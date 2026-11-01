@@ -5,12 +5,17 @@ package com.indagium.ui.holiday
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
@@ -36,7 +41,9 @@ internal val HOLIDAY_TAB_OUTER_INSET = 6.dp
 private val ACTIVE_BORDER = 1.5.dp
 private val RIB_SPACING = 18.dp
 private val RIB_WIDTH = 1.dp
-private const val IDLE_FILL_ALPHA = 0.85f
+
+/** Alpha of an idle seasonal tab's fill (1 over the scene, so the picture never shows through a tab). */
+internal const val HOLIDAY_IDLE_TAB_ALPHA = 0.85f
 
 /** The pack's tab outline on a strip at [position]: rounded on the side away from the content, like the raised card. */
 internal fun holidayTabShape(position: TabStripPosition, radius: Dp = HOLIDAY_TAB_RADIUS): RoundedCornerShape = when (position) {
@@ -83,8 +90,10 @@ internal fun Modifier.holidayTabChrome(
     radius: Dp = HOLIDAY_TAB_RADIUS,
     shape: Shape = holidayTabShape(position, radius),
     texture: HolidayTabTexture = HolidayTabTexture.RIBS,
+    wash: Float? = null,
+    idleAlpha: Float = HOLIDAY_IDLE_TAB_ALPHA,
 ): Modifier {
-    val fill = background(if (active) tc.p else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = IDLE_FILL_ALPHA), shape)
+    val fill = background(if (active) tc.p else if (texture == HolidayTabTexture.STONE) chrome.tabBg else chrome.tabBg.copy(alpha = idleAlpha), shape)
         .drawBehind {
             when (texture) {
                 HolidayTabTexture.RIBS -> if (!active) drawRibs(shape, chrome.rib)
@@ -93,9 +102,22 @@ internal fun Modifier.holidayTabChrome(
             }
         }
     return fill
+        .then(if (active && wash != null) Modifier.drawBehind { drawWash(shape, tc.ac, wash, position) } else Modifier)
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
-        .then(if (active) Modifier.border(ACTIVE_BORDER, tc.ac, shape) else if (texture != HolidayTabTexture.RIBS) Modifier.border(1.dp, tc.br, shape) else Modifier)
+        .then(
+            when {
+                active -> Modifier.border(ACTIVE_BORDER, tc.ac, shape)
+                texture != HolidayTabTexture.RIBS -> Modifier.border(1.dp, tc.br, shape)
+                else -> Modifier
+            },
+        )
+}
+
+// The active tab's accent wash, cut to the tab's outline (Modifier.background(brush, shape) with the gradient sized to the tab).
+private fun DrawScope.drawWash(shape: Shape, accent: Color, alpha: Float, position: TabStripPosition) {
+    val outline = Path().apply { addOutline(shape.createOutline(size, layoutDirection, this@drawWash)) }
+    clipPath(outline) { drawRect(holidayTabWash(accent, alpha, position, size)) }
 }
 
 // The manor reference uses three faint, fixed stone marks instead of the pumpkin's repeated ribs.
@@ -121,3 +143,33 @@ private fun DrawScope.drawRibs(shape: Shape, color: Color) {
         }
     }
 }
+
+/** The theme's dashed tile divider ([HolidayDividerDashes]): the gap colour as the line, the dashes over it. */
+@Composable
+internal fun HolidayDashedDivider(dashes: HolidayDividerDashes) {
+    Box(
+        Modifier.fillMaxWidth().height(dashes.heightDp.dp).background(dashes.gap).drawBehind {
+            val dash = dashes.dashDp.dp.toPx()
+            val period = dash + dashes.gapDp.dp.toPx()
+            var x = 0f
+            while (x < size.width) {
+                drawRect(dashes.dash, Offset(x, 0f), Size(minOf(dash, size.width - x), size.height))
+                x += period
+            }
+        },
+    )
+}
+
+/** The active tab's wash: the accent at [alpha] on the tab's outer edge fading to transparent over three quarters of its depth. */
+internal fun holidayTabWash(accent: Color, alpha: Float, position: TabStripPosition, size: Size): Brush {
+    val colors = listOf(accent.copy(alpha = alpha), Color.Transparent)
+    val stops = arrayOf(0f to colors[0], WASH_DEPTH to colors[1], 1f to colors[1])
+    return when (position) {
+        TabStripPosition.TOP -> Brush.verticalGradient(colorStops = stops, startY = 0f, endY = size.height)
+        TabStripPosition.BOTTOM -> Brush.verticalGradient(colorStops = stops, startY = size.height, endY = 0f)
+        TabStripPosition.LEFT -> Brush.horizontalGradient(colorStops = stops, startX = 0f, endX = size.width)
+        TabStripPosition.RIGHT -> Brush.horizontalGradient(colorStops = stops, startX = size.width, endX = 0f)
+    }
+}
+
+private const val WASH_DEPTH = 0.75f

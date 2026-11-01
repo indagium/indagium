@@ -191,7 +191,8 @@ fun App(
 ) {
     val holidayNow by rememberHolidayNow()
     val previewPack = state.releaseAnnouncementPreviewPack
-    val holiday = remember(state.settings.holiday, state.settings.theme, holidayNow, previewPack) {
+    val previewDark = state.releaseAnnouncementPreviewDark
+    val holiday = remember(state.settings.holiday, state.settings.theme, holidayNow, previewPack, previewDark) {
         resolveHolidayLook(state.settingsForReleaseThemePreview(), holidayNow)
     }
     val theme = holiday?.colors ?: themeColors(state.settings.theme)

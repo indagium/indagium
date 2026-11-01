@@ -45,7 +45,8 @@ internal val FAKE_THEMES: Map<HolidayPack, HolidayTheme> = holidayThemeRegistry(
 internal object FakeCompanionTheme : HolidayTheme by FakeHolidayTheme {
     override val companion = object : HolidayCompanionPainter {
         override val label = "Little ghost in the Notes corner"
-        override val designSizeDp = 120f
+        override val designWidthDp = 120f
+        override val designHeightDp = 120f
 
         override fun draw(scope: DrawScope, t: Float, dark: Boolean) = Unit
     }

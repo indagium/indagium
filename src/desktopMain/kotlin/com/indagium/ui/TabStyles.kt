@@ -459,7 +459,11 @@ internal fun TabShell(
     val inset = if (crossInset != null) {
         if (position == TabStripPosition.TOP || position == TabStripPosition.BOTTOM) PaddingValues(horizontal = 2.dp, vertical = crossInset.dp)
         else PaddingValues(horizontal = crossInset.dp, vertical = 2.dp)
-    } else if (holiday != null) holidayTabInset(metrics.inset, position) else metrics.inset
+    } else if (holiday != null) {
+        holidayTabInset(metrics.inset, position)
+    } else {
+        metrics.inset
+    }
     val shape = if (holiday != null) {
         holiday.theme.tabShape?.shape(position) ?: holidayTabShape(position, holiday.theme.corners.tabDp.dp)
     } else {
@@ -473,7 +477,9 @@ internal fun TabShell(
         val themed = holiday?.theme?.labelFontFamily?.let { base.copy(family = it) } ?: base
         if (holiday?.theme?.tabTexture == HolidayTabTexture.STONE) {
             themed.copy(size = 12.sp, weight = FontWeight.Normal, color = if (lit) tc.tx else tc.ts)
-        } else themed
+        } else {
+            themed
+        }
     }
     val groupTint = appearance.groupColor?.takeIf { appearance.groupTintAlpha > 0f }?.copy(alpha = appearance.groupTintAlpha)
     Box(Modifier.fillMaxWidth()) {
@@ -496,13 +502,22 @@ internal fun TabShell(
                     .padding(inset)
                     .holidayLandingAnchor()
                     .testTag("tab-$pointerKey")
-                    .then(if (appearance.outlineColor == null) Modifier else if (holiday != null) Modifier.border(1.dp, appearance.outlineColor, shape) else Modifier.tabOutline(style, position, appearance.outlineColor))
+                    .then(
+                        when {
+                            appearance.outlineColor == null -> Modifier
+                            holiday != null -> Modifier.border(1.dp, appearance.outlineColor, shape)
+                            else -> Modifier.tabOutline(style, position, appearance.outlineColor)
+                        },
+                    )
                     .then(
                         if (holiday != null) {
                             Modifier.holidayTabChrome(
                                 isActive, hov || dragging, tc, holiday.chrome, position,
                                 groupTint.takeIf { holiday.theme.tintTabsByGroup },
                                 radius = holiday.theme.corners.tabDp.dp, shape = shape, texture = holiday.theme.tabTexture,
+                                wash = holiday.theme.activeTabWashAlpha(holiday.isDark),
+                                // Over the scene behind the tab bar an idle tab is opaque, so the picture never shows through a tab.
+                                idleAlpha = if (holidaySceneShown(holiday.effects.tabScene, position)) 1f else HOLIDAY_IDLE_TAB_ALPHA,
                             )
                         } else {
                             Modifier.tabChrome(style, isActive, hov, dragging, tc, position, groupTint)

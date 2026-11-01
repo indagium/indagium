@@ -1637,7 +1637,12 @@ fun AppButton(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     leadingIcon?.let {
-                        Icon(it, contentDescription = null, modifier = Modifier.size(14.dp), tint = if (multicolorIcon) Color.Unspecified else resolvedTextColor)
+                        Icon(
+                            it,
+                            contentDescription = null,
+                            modifier = Modifier.size(14.dp),
+                            tint = if (multicolorIcon) Color.Unspecified else resolvedTextColor,
+                        )
                     }
                     if (label.isNotEmpty()) {
                         AppText(

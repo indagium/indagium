@@ -188,7 +188,12 @@ internal fun LogViewTilingHost(
  * [content] the remaining viewport size in dp once there is one.
  */
 @Composable
-internal fun LogViewTilingFrame(state: AppState, modifier: Modifier, memory: LogViewMeasurementMemory? = null, content: @Composable (widthDp: Float, heightDp: Float) -> Unit) {
+internal fun LogViewTilingFrame(
+    state: AppState,
+    modifier: Modifier,
+    memory: LogViewMeasurementMemory? = null,
+    content: @Composable (widthDp: Float, heightDp: Float) -> Unit,
+) {
     val tc = tc()
     val density = LocalDensity.current.density
     val frameMemory = memory ?: remember { LogViewMeasurementMemory() }

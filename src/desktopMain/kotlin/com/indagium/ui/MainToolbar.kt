@@ -28,13 +28,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.inset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
-import com.indagium.ui.holiday.*
 import com.indagium.model.TabStripPosition
+import com.indagium.ui.holiday.*
 
 // The main toolbar: New tab, the panel toggles (Filter, Notes, AI, Video, Compare, Cases), Open with its recent-files arrow, the Layout
 // menu and Settings. It comes in three shapes: the row the window always had (a horizontal bar), the same buttons stacked in a column
@@ -101,17 +102,31 @@ internal fun MainToolbar(
     val labels = showLabels ?: !state.settings.toolbarIconOnlyButtons
     val tagged = modifier.testTag("main-toolbar")
     val scroll = if (scrolls) Modifier.verticalScroll(rememberScrollState()) else Modifier
+    // A theme's toolbar ornament (Beer's foam) caps each group of buttons; the toolbar keeps that room free above its groups so nothing clips it.
+    val holiday = LocalHoliday.current
+    val ornament = holiday?.theme?.toolbarOrnament
+    val capRoom = if (ornament != null) HOLIDAY_TAB_OUTER_INSET else 0.dp
     when (mode) {
-        ToolbarMode.COLUMN -> Column(tagged.then(scroll)) {
+        ToolbarMode.COLUMN -> Column(tagged.then(scroll).padding(top = capRoom)) {
             ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor, null)
         }
         ToolbarMode.FLOW -> {
             val flow = remember { ToolbarFlowState() }
-            ToolbarGroupFlow(flow, tagged.then(scroll).padding(WRAP_PADDING), TOOLBAR_GAP) {
+            val caps = if (ornament == null) {
+                Modifier
+            } else {
+                Modifier.drawWithContent {
+                    drawContent()
+                    flow.groups.forEach { g ->
+                        inset(g.left, g.top, size.width - g.right, size.height - g.bottom) { ornament.draw(this, TabStripPosition.TOP, 0f, holiday.isDark) }
+                    }
+                }
+            }
+            ToolbarGroupFlow(flow, tagged.then(scroll).padding(WRAP_PADDING).then(caps), TOOLBAR_GAP, capRoom) {
                 ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor, flow)
             }
         }
-        ToolbarMode.BAR -> Row(tagged, verticalAlignment = Alignment.CenterVertically) {
+        ToolbarMode.BAR -> Row(tagged.padding(top = capRoom), verticalAlignment = Alignment.CenterVertically) {
             ToolbarButtons(state, mode, labels, popupsBeside, onReclaimFocus, onRecentAnchor, null)
         }
     }
@@ -150,13 +165,28 @@ private fun ToolbarButtons(
     }
     val holiday = LocalHoliday.current
     val ornament = holiday?.theme?.toolbarOrnament
-    val fill = fillBase.then(if (ornament == null) Modifier else Modifier.drawWithContent {
-        drawContent()
-        ornament.draw(this, TabStripPosition.TOP, 0f, holiday.isDark)
-    })
+    val fill = fillBase
+    // In the bar and the column a group of buttons is a row / column of its own with the theme's cap drawn over it (the wrapping row's groups
+    // are the flow's units, capped in MainToolbar). The cap's room above a group sits in the bar's top padding / in the gap before it.
+    val group: @Composable (@Composable () -> Unit) -> Unit = { content ->
+        val cap = if (ornament == null) {
+            Modifier
+        } else {
+            Modifier.drawWithContent {
+                drawContent()
+                ornament.draw(this, TabStripPosition.TOP, 0f, holiday.isDark)
+            }
+        }
+        when (mode) {
+            ToolbarMode.BAR -> Row(Modifier.fillMaxHeight().then(cap), verticalAlignment = Alignment.CenterVertically) { content() }
+            ToolbarMode.COLUMN -> Column(Modifier.fillMaxWidth().then(cap)) { content() }
+            ToolbarMode.FLOW -> content()
+        }
+    }
     val pad = if (flow) WRAP_BUTTON_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp)
     val gap: @Composable () -> Unit = {
-        if (!flow) Spacer(if (vertical) Modifier.height(TOOLBAR_GAP) else Modifier.width(TOOLBAR_GAP))
+        val room = if (ornament != null) HOLIDAY_TAB_OUTER_INSET else 0.dp
+        if (!flow) Spacer(if (vertical) Modifier.height(TOOLBAR_GAP + room) else Modifier.width(TOOLBAR_GAP))
     }
     // Where the joined corners go. In the bar and the column the toggles run from Filter (lead) through Cases (middle) to Open / its arrow
     // (tail). In the wrapping row each chunk is a run of its own, or, while the whole group fits a line, they are one run as in the bar.
@@ -186,151 +216,159 @@ private fun ToolbarButtons(
         it.attachedVideo != null || it.captureSessionId != null
     } == true
     gap()
-    chunk(CHUNK_NEW) {
-        val pack = holidayToolbarIcon(ToolbarIconId.NEW)
-        val stickColor = tc().ts.copy(alpha = .55f)
-        val stick = LocalHoliday.current?.theme?.newButtonStick == true
-        val newButtonModifier = if (stick) fill.drawBehind {
-            val length = 5.dp.toPx()
-            drawLine(stickColor, Offset(size.width / 2f, size.height - length), Offset(size.width / 2f, size.height), 2.dp.toPx())
-        }.padding(bottom = 5.dp) else fill
-        ToolbarBtn(
-            "",
-            icon = pack?.vector ?: Icons.Outlined.Add,
-            multicolor = pack != null,
-            showLabel = false,
-            tooltip = pack?.tooltip ?: "New tab",
-            active = homeActive,
-            modifier = newButtonModifier,
-            shape = shapes.solo,
-            contentPadding = pad,
-        ) { state.openHomeTab(); onReclaimFocus() }
+    group {
+        chunk(CHUNK_NEW) {
+            val pack = holidayToolbarIcon(ToolbarIconId.NEW)
+            val stickColor = tc().ts.copy(alpha = .55f)
+            val stick = LocalHoliday.current?.theme?.newButtonStick == true
+            val newButtonModifier = if (stick) fill.drawBehind {
+                val length = 5.dp.toPx()
+                drawLine(stickColor, Offset(size.width / 2f, size.height - length), Offset(size.width / 2f, size.height), 2.dp.toPx())
+            }.padding(bottom = 5.dp) else fill
+            ToolbarBtn(
+                "",
+                icon = pack?.vector ?: Icons.Outlined.Add,
+                multicolor = pack != null,
+                showLabel = false,
+                tooltip = pack?.tooltip ?: "New tab",
+                active = homeActive,
+                modifier = newButtonModifier,
+                shape = shapes.solo,
+                contentPadding = pad,
+            ) { state.openHomeTab(); onReclaimFocus() }
+        }
     }
     gap()
-    chunk(CHUNK_TOGGLES) {
-        cell("filter") {
-            val pack = holidayToolbarIcon(ToolbarIconId.FILTERS)
-            ToolbarBtn(
-                "Filter",
-                icon = pack?.vector ?: Icons.Outlined.FilterList,
-                multicolor = pack != null,
-                showLabel = labels,
-                tooltip = pack?.tooltip ?: "Toggle filter panel",
-                active = state.filterVisible,
-                modifier = fill,
-                shape = if (flow) shapeOf(CHUNK_TOGGLES, first = true, last = false) else shapes.lead,
-                contentPadding = pad,
-                ellipsize = vertical,
-            ) { state.updateFilterVisible(!state.filterVisible); onReclaimFocus() }
-        }
-        cell("notes") {
-            val pack = holidayToolbarIcon(ToolbarIconId.NOTES)
-            ToolbarBtn(
-                "Notes",
-                icon = pack?.vector ?: Icons.AutoMirrored.Outlined.StickyNote2,
-                multicolor = pack != null,
-                showLabel = labels,
-                tooltip = pack?.tooltip ?: "Toggle notes panel",
-                active = state.annotationVisible,
-                modifier = fill,
-                shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = false) else shapes.middle,
-                contentPadding = pad,
-                ellipsize = vertical,
-            ) { state.updateAnnotationVisible(!state.annotationVisible); onReclaimFocus() }
-        }
-        // The last toggle of the chunk takes its end corners in the wrapping row (the chunk is a run of its own once the group does not fit).
-        cell("ai") {
-            val pack = holidayToolbarIcon(ToolbarIconId.AI)
-            ToolbarBtn(
-                "AI",
-                icon = pack?.vector ?: Icons.Outlined.AutoAwesome,
-                multicolor = pack != null,
-                showLabel = labels,
-                tooltip = pack?.tooltip ?: "Toggle AI panel",
-                active = state.aiPanelVisible,
-                modifier = fill,
-                shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = !activeTabCanShowVideo) else shapes.middle,
-                contentPadding = pad,
-                ellipsize = vertical,
-            ) { state.updateAiPanelVisible(!state.aiPanelVisible); onReclaimFocus() }
-        }
-        // Capture sessions expose a status card before a video attachment exists; the same global
-        // toggle must therefore remain reachable for live tabs as well as imported captures.
-        if (activeTabCanShowVideo) {
-            cell("video") {
-                val pack = holidayToolbarIcon(ToolbarIconId.VIDEO)
+    group {
+        chunk(CHUNK_TOGGLES) {
+            cell("filter") {
+                val pack = holidayToolbarIcon(ToolbarIconId.FILTERS)
                 ToolbarBtn(
-                    "Video",
-                    icon = pack?.vector ?: Icons.Outlined.Movie,
+                    "Filter",
+                    icon = pack?.vector ?: Icons.Outlined.FilterList,
                     multicolor = pack != null,
                     showLabel = labels,
-                    tooltip = pack?.tooltip ?: "Toggle video in sidebar",
-                    active = state.videoPanelVisible,
+                    tooltip = pack?.tooltip ?: "Toggle filter panel",
+                    active = state.filterVisible,
                     modifier = fill,
-                    shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = true) else shapes.middle,
+                    shape = if (flow) shapeOf(CHUNK_TOGGLES, first = true, last = false) else shapes.lead,
                     contentPadding = pad,
                     ellipsize = vertical,
-                ) { state.updateVideoPanelVisible(!state.videoPanelVisible); onReclaimFocus() }
+                ) { state.updateFilterVisible(!state.filterVisible); onReclaimFocus() }
+            }
+            cell("notes") {
+                val pack = holidayToolbarIcon(ToolbarIconId.NOTES)
+                ToolbarBtn(
+                    "Notes",
+                    icon = pack?.vector ?: Icons.AutoMirrored.Outlined.StickyNote2,
+                    multicolor = pack != null,
+                    showLabel = labels,
+                    tooltip = pack?.tooltip ?: "Toggle notes panel",
+                    active = state.annotationVisible,
+                    modifier = fill,
+                    shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = false) else shapes.middle,
+                    contentPadding = pad,
+                    ellipsize = vertical,
+                ) { state.updateAnnotationVisible(!state.annotationVisible); onReclaimFocus() }
+            }
+            // The last toggle of the chunk takes its end corners in the wrapping row (the chunk is a run of its own once the group does not fit).
+            cell("ai") {
+                val pack = holidayToolbarIcon(ToolbarIconId.AI)
+                ToolbarBtn(
+                    "AI",
+                    icon = pack?.vector ?: Icons.Outlined.AutoAwesome,
+                    multicolor = pack != null,
+                    showLabel = labels,
+                    tooltip = pack?.tooltip ?: "Toggle AI panel",
+                    active = state.aiPanelVisible,
+                    modifier = fill,
+                    shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = !activeTabCanShowVideo) else shapes.middle,
+                    contentPadding = pad,
+                    ellipsize = vertical,
+                ) { state.updateAiPanelVisible(!state.aiPanelVisible); onReclaimFocus() }
+            }
+            // Capture sessions expose a status card before a video attachment exists; the same global
+            // toggle must therefore remain reachable for live tabs as well as imported captures.
+            if (activeTabCanShowVideo) {
+                cell("video") {
+                    val pack = holidayToolbarIcon(ToolbarIconId.VIDEO)
+                    ToolbarBtn(
+                        "Video",
+                        icon = pack?.vector ?: Icons.Outlined.Movie,
+                        multicolor = pack != null,
+                        showLabel = labels,
+                        tooltip = pack?.tooltip ?: "Toggle video in sidebar",
+                        active = state.videoPanelVisible,
+                        modifier = fill,
+                        shape = if (flow) shapeOf(CHUNK_TOGGLES, first = false, last = true) else shapes.middle,
+                        contentPadding = pad,
+                        ellipsize = vertical,
+                    ) { state.updateVideoPanelVisible(!state.videoPanelVisible); onReclaimFocus() }
+                }
             }
         }
-    }
-    chunk(CHUNK_TOOLS) {
-        cell("compare") {
-            val pack = holidayToolbarIcon(ToolbarIconId.COMPARE)
-            ToolbarBtn(
-                "Compare",
-                icon = pack?.vector ?: Icons.AutoMirrored.Outlined.CompareArrows,
-                multicolor = pack != null,
-                showLabel = labels,
-                tooltip = pack?.tooltip ?: "Toggle compare view",
-                active = state.compareMode,
-                enabled = state.canCompare,
-                modifier = fill,
-                shape = if (flow) shapeOf(CHUNK_TOOLS, first = true, last = false) else shapes.middle,
-                contentPadding = pad,
-                ellipsize = vertical,
-            ) { state.updateCompareMode(!state.compareMode); onReclaimFocus() }
+        chunk(CHUNK_TOOLS) {
+            cell("compare") {
+                val pack = holidayToolbarIcon(ToolbarIconId.COMPARE)
+                ToolbarBtn(
+                    "Compare",
+                    icon = pack?.vector ?: Icons.AutoMirrored.Outlined.CompareArrows,
+                    multicolor = pack != null,
+                    showLabel = labels,
+                    tooltip = pack?.tooltip ?: "Toggle compare view",
+                    active = state.compareMode,
+                    enabled = state.canCompare,
+                    modifier = fill,
+                    shape = if (flow) shapeOf(CHUNK_TOOLS, first = true, last = false) else shapes.middle,
+                    contentPadding = pad,
+                    ellipsize = vertical,
+                ) { state.updateCompareMode(!state.compareMode); onReclaimFocus() }
+            }
+            cell("cases") {
+                val pack = holidayToolbarIcon(ToolbarIconId.CASES)
+                ToolbarBtn(
+                    "Cases",
+                    icon = pack?.vector ?: Icons.AutoMirrored.Outlined.ManageSearch,
+                    multicolor = pack != null,
+                    showLabel = labels,
+                    tooltip = pack?.tooltip ?: "Search past analyses",
+                    enabled = state.tabs.isNotEmpty(),
+                    modifier = fill,
+                    shape = if (flow) shapeOf(CHUNK_TOOLS, first = false, last = true) else shapes.middle,
+                    contentPadding = pad,
+                    ellipsize = vertical,
+                ) { state.activeTab()?.id?.let(state::openCaseLibrary); onReclaimFocus() }
+            }
         }
-        cell("cases") {
-            val pack = holidayToolbarIcon(ToolbarIconId.CASES)
-            ToolbarBtn(
-                "Cases",
-                icon = pack?.vector ?: Icons.AutoMirrored.Outlined.ManageSearch,
-                multicolor = pack != null,
-                showLabel = labels,
-                tooltip = pack?.tooltip ?: "Search past analyses",
-                enabled = state.tabs.isNotEmpty(),
-                modifier = fill,
-                shape = if (flow) shapeOf(CHUNK_TOOLS, first = false, last = true) else shapes.middle,
-                contentPadding = pad,
-                ellipsize = vertical,
-            ) { state.activeTab()?.id?.let(state::openCaseLibrary); onReclaimFocus() }
+        chunk(CHUNK_OPEN) {
+            OpenButtons(state, mode, labels, fill, pad, hasRecentFiles, onReclaimFocus, onRecentAnchor, density, ::shapeOf)
         }
-    }
-    chunk(CHUNK_OPEN) {
-        OpenButtons(state, mode, labels, fill, pad, hasRecentFiles, onReclaimFocus, onRecentAnchor, density, ::shapeOf)
     }
     gap()
     // The log view's Layout menu (single log view and compare; draws nothing elsewhere), just before Settings.
-    chunk(CHUNK_LAYOUT) { LayoutMenuButton(state, onReclaimFocus, vertical = vertical, wrap = flow, menuBeside = popupsBeside) }
+    group {
+        chunk(CHUNK_LAYOUT) { LayoutMenuButton(state, onReclaimFocus, vertical = vertical, wrap = flow, menuBeside = popupsBeside) }
+    }
     gap()
-    chunk(CHUNK_SETTINGS) {
-        val pack = holidayToolbarIcon(ToolbarIconId.SETTINGS)
-        ToolbarBtn(
-            "⚙",
-            icon = pack?.vector,
-            multicolor = pack != null,
-            showLabel = pack == null,
-            tooltip = pack?.tooltip ?: "Settings",
-            modifier = when (mode) {
-                ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_SETTINGS_HEIGHT)
-                ToolbarMode.FLOW -> Modifier.width(36.dp).height(WRAP_BUTTON_HEIGHT)
-                ToolbarMode.BAR -> Modifier.fillMaxHeight().width(36.dp)
-            },
-            shape = shapes.solo,
-            // The picture is wider than the glyph it replaces; the 36 dp button leaves it no side padding.
-            contentPadding = if (pack != null) PICTURE_ONLY_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp),
-        ) { state.settingsOpen = true; onReclaimFocus() }
+    group {
+        chunk(CHUNK_SETTINGS) {
+            val pack = holidayToolbarIcon(ToolbarIconId.SETTINGS)
+            ToolbarBtn(
+                "⚙",
+                icon = pack?.vector,
+                multicolor = pack != null,
+                showLabel = pack == null,
+                tooltip = pack?.tooltip ?: "Settings",
+                modifier = when (mode) {
+                    ToolbarMode.COLUMN -> Modifier.fillMaxWidth().height(VERTICAL_SETTINGS_HEIGHT)
+                    ToolbarMode.FLOW -> Modifier.width(36.dp).height(WRAP_BUTTON_HEIGHT)
+                    ToolbarMode.BAR -> Modifier.fillMaxHeight().width(36.dp)
+                },
+                shape = shapes.solo,
+                // The picture is wider than the glyph it replaces; the 36 dp button leaves it no side padding.
+                contentPadding = if (pack != null) PICTURE_ONLY_PADDING else PaddingValues(horizontal = 10.dp, vertical = 5.dp),
+            ) { state.settingsOpen = true; onReclaimFocus() }
+        }
     }
     gap()
 }

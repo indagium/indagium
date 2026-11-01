@@ -79,7 +79,7 @@ internal fun holidayBackdropArts(look: HolidayLook): List<HolidayBackdropArt> = 
     if (look.effects.notesCompanion && companion != null) {
         add(
             HolidayBackdropArt(
-                HolidayArtAnchor.BOTTOM_END, companion.designSizeDp, companion.designSizeDp, HOLIDAY_NOTES_COMPANION_TAG, companion::draw,
+                HolidayArtAnchor.BOTTOM_END, companion.designWidthDp, companion.designHeightDp, HOLIDAY_NOTES_COMPANION_TAG, companion::draw,
             ),
         )
     }

@@ -110,16 +110,15 @@ class HolidayThemeContractTest {
     }
 
     @Test
-    fun aTabSceneStaysInsideItsSlotAtSeveralSizes() {
+    fun aTabSceneStaysInsideItsBandAtSeveralSizes() {
         themes.mapNotNull { t -> t.tabScene?.let { t to it } }.forEach { (theme, painter) ->
-            val horizontal = listOf(Rect(0f, 0f, 160f, 24f), Rect(300f, 0f, 460f, 48f), Rect(50f, 0f, 2450f, 36f), Rect(0f, 0f, 160f, 60f))
-            val vertical = listOf(Rect(0f, 0f, 120f, 300f), Rect(0f, 300f, 200f, 800f), Rect(10f, 100f, 370f, 1500f), Rect(0f, 760f, 200f, 800f))
-            (horizontal.map { it to false } + vertical.map { it to true }).forEach { (slot, isVertical) ->
-                val layout = painter.layout(slot, isVertical)
-                assertEquals(slot, layout.slot, "${theme.pack} reports the slot it was given")
+            val bands = listOf(Rect(0f, 0f, 300f, 30f), Rect(0f, 0f, 1000f, 30f), Rect(0f, 0f, 1600f, 30f), Rect(0f, 0f, 2600f, 60f), Rect(0f, 20f, 1200f, 50f))
+            bands.forEach { band ->
+                val layout = painter.layout(band)
+                assertEquals(band, layout.band, "${theme.pack} reports the band it was given")
                 layout.elementBounds.forEach {
-                    val inside = it.left >= slot.left - EPS && it.right <= slot.right + EPS && it.top >= slot.top - EPS && it.bottom <= slot.bottom + EPS
-                    assertTrue(inside, "${theme.pack} element $it escapes $slot (vertical=$isVertical)")
+                    val inside = it.left >= band.left - EPS && it.right <= band.right + EPS && it.top >= band.top - EPS && it.bottom <= band.bottom + EPS
+                    assertTrue(inside, "${theme.pack} element $it escapes $band")
                 }
             }
         }
@@ -130,7 +129,7 @@ class HolidayThemeContractTest {
         themes.forEach { theme ->
             theme.picture?.let { assertTrue(it.designWidthDp > 0f && it.designHeightDp > 0f, "${theme.pack} picture design size") }
             theme.companion?.let {
-                assertTrue(it.designSizeDp > 0f, "${theme.pack} companion design size")
+                assertTrue(it.designWidthDp > 0f && it.designHeightDp > 0f, "${theme.pack} companion design size")
                 assertTrue(it.label.isNotBlank(), "${theme.pack} companion needs a label for the menu")
             }
             assertTrue(theme.corners.tabDp > 0f && theme.corners.toolbarDp > 0 && theme.corners.tileDp > 0, "${theme.pack} corners")

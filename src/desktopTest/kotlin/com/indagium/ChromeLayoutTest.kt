@@ -25,6 +25,7 @@ import com.indagium.ui.isVertical
 import com.indagium.ui.key
 import com.indagium.ui.recentMenuEdge
 import com.indagium.ui.recentMenuPlacement
+import com.indagium.ui.sceneSpan
 import com.indagium.ui.toEdge
 import com.indagium.ui.toTabStripPosition
 import com.indagium.ui.withChromeArrangement
@@ -782,5 +783,31 @@ class ChromeLayoutTest {
         // A toolbar in a bar keeps its bar's edge, the tab strip's when it shares the bar.
         assertEquals(ChromeEdge.TOP, recentMenuEdge(arrangement(), null, width))
         assertEquals(ChromeEdge.BOTTOM, recentMenuEdge(arrangement(placement = ToolbarPlacement.OWN_EDGE, edge = ChromeEdge.BOTTOM), null, width))
+    }
+
+    // ── Scene span ─────────────────────────────────────────────────
+
+    @Test
+    fun theSceneSpanIsTheTabStripsPartOfTheBarAndStopsBeforeTheToolbar() {
+        val joined = frames(arrangement())
+        val span = checkNotNull(joined.sceneSpan(vertical = false))
+        assertEquals(0f, span.start)
+        assertEquals(width - toolbarLength, span.endInclusive, "the scene ends where the toolbar at the end of the bar starts")
+        val atStart = frames(arrangement(placement = ToolbarPlacement.WITH_TABS_START))
+        val startSpan = checkNotNull(atStart.sceneSpan(vertical = false))
+        assertEquals(toolbarLength, startSpan.start, "a toolbar at the start of the bar keeps the scene off its part")
+        assertEquals(width, startSpan.endInclusive)
+        // A toolbar with a bar of its own leaves the tab bar all to the tabs.
+        val own = frames(arrangement(placement = ToolbarPlacement.OWN_EDGE, edge = ChromeEdge.BOTTOM))
+        val ownSpan = checkNotNull(own.sceneSpan(vertical = false))
+        assertEquals(own.tabs.w, ownSpan.endInclusive - ownSpan.start)
+        assertNull(own.sceneSpan(vertical = true), "a vertical tab bar has no scene")
+    }
+
+    @Test
+    fun noSceneBandAddsHeightToTheFrames() {
+        val f = frames(arrangement())
+        assertEquals(0f, f.tabBar.y, "the tab bar is the first row of the window")
+        assertEquals(metrics.tabBarHeight, f.tabBar.h)
     }
 }

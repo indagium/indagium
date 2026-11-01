@@ -4,7 +4,6 @@
 package com.indagium
 
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Outline
@@ -17,18 +16,15 @@ import com.indagium.ui.holiday.*
 import com.indagium.ui.holiday.HOLIDAY_TAB_OUTER_INSET
 import com.indagium.ui.holiday.HOLIDAY_TAB_RADIUS
 import com.indagium.ui.holiday.HolidayCorners
-import com.indagium.ui.holiday.HolidaySceneSlot
 import com.indagium.ui.holiday.holidayOuterEdgeInset
-import com.indagium.ui.holiday.holidaySceneSlotPx
-import com.indagium.ui.holiday.holidaySceneSlotRange
 import com.indagium.ui.holiday.holidayTabInset
 import com.indagium.ui.holiday.holidayTabShape
 import com.indagium.ui.holiday.pumpkin.PumpkinPatchTheme
-import com.indagium.ui.holiday.pumpkin.PumpkinTabSceneLayout
 import com.indagium.ui.holiday.pumpkin.pumpkinTabSceneLayout
 import com.indagium.ui.logViewHolidaySpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -81,119 +77,68 @@ class HolidayChromeTest {
         }
     }
 
-    private fun assertInside(layout: PumpkinTabSceneLayout, label: String) {
-        val slot = layout.slot
+    private fun band(width: Float, height: Float = HOLIDAY_SCENE_REFERENCE_HEIGHT_DP) = Rect(0f, 0f, width, height)
 
-        fun circle(name: String, cx: Float, cy: Float, r: Float) {
-            assertTrue(
-                cx - r >= slot.left - eps && cx + r <= slot.right + eps && cy - r >= slot.top - eps && cy + r <= slot.bottom + eps,
-                "$label $name ($cx,$cy,r=$r) escapes $slot",
-            )
+    @Test
+    fun theSceneShowsOnlyForASceneOnAHorizontalTopStrip() {
+        assertTrue(holidaySceneShown(sceneOn = true, tabPosition = TabStripPosition.TOP))
+        assertFalse(holidaySceneShown(sceneOn = false, tabPosition = TabStripPosition.TOP))
+        listOf(TabStripPosition.BOTTOM, TabStripPosition.LEFT, TabStripPosition.RIGHT).forEach {
+            assertFalse(holidaySceneShown(sceneOn = true, tabPosition = it), "$it")
         }
-        layout.moon?.let { circle("moon", it.cx, it.cy, it.r) }
-        layout.craters.forEach {
-            circle("crater", it.cx, it.cy, it.r)
-            val moon = checkNotNull(layout.moon)
-            val dx = it.cx - moon.cx
-            val dy = it.cy - moon.cy
-            assertTrue(kotlin.math.sqrt(dx * dx + dy * dy) + it.r <= moon.r + 0.01f, "$label crater is off the moon")
+    }
+
+    @Test
+    fun theCompositionIsAuthoredOnA1600By30BarAndScalesWithTheBarHeight() {
+        assertEquals(30f, HOLIDAY_SCENE_REFERENCE_HEIGHT_DP)
+        assertEquals(1600f, HOLIDAY_SCENE_REFERENCE_WIDTH)
+        val space = HolidayBandSpace(band(1600f))
+        assertEquals(1f, space.unit)
+        assertEquals(0f, space.shift, "a 1600 band shows the reference as authored")
+        assertEquals(1.2f, HolidayBandSpace(band(1000f, 36f)).unit, 0.001f, "a taller tab bar scales the composition to its height")
+    }
+
+    @Test
+    fun elementsAreRightAlignedAtNaturalScale() {
+        val ref = Rect(1000f, 4f, 1100f, 26f)
+        assertEquals(Rect(1000f, 4f, 1100f, 26f), HolidayBandSpace(band(1600f)).fit(ref))
+        assertEquals(Rect(1400f, 4f, 1500f, 26f), HolidayBandSpace(band(2000f)).fit(ref), "a wider band moves the element with the right edge")
+        assertEquals(Rect(400f, 4f, 500f, 26f), HolidayBandSpace(band(1000f)).fit(ref), "a narrower one keeps its size")
+        assertEquals(null, HolidayBandSpace(band(550f)).fit(ref), "an element that does not fit whole is left out")
+    }
+
+    @Test
+    fun everySceneKeepsItsElementsInsideTheBandAtSeveralWidths() {
+        HOLIDAY_THEMES.values.mapNotNull { t -> t.tabScene?.let { t to it } }.forEach { (theme, painter) ->
+            listOf(300f, 700f, 1000f, 1600f, 2600f).forEach { width ->
+                listOf(30f, 45f, 60f).forEach { height ->
+                    val b = band(width, height)
+                    val layout = painter.layout(b)
+                    assertEquals(b, layout.band)
+                    layout.elementBounds.forEach {
+                        val inside = it.left >= b.left - eps && it.right <= b.right + eps && it.top >= b.top - eps && it.bottom <= b.bottom + eps
+                        assertTrue(inside, "${theme.pack} $it escapes $b")
+                    }
+                }
+            }
         }
-        layout.pumpkins.forEach {
-            assertTrue(
-                it.cx - it.rx >= slot.left - eps && it.cx + it.rx <= slot.right + eps &&
-                    it.cy - it.ry >= slot.top - eps && it.cy + it.ry <= slot.bottom + eps,
-                "$label pumpkin escapes $slot",
-            )
+    }
+
+    @Test
+    fun theWideBandsMiddleStaysClear() {
+        // Every scene keeps its pieces in the right half of a 1600 band (the candy bunting runs the whole width but leaves the middle).
+        HOLIDAY_THEMES.values.mapNotNull { it.tabScene }.forEach { painter ->
+            val layout = painter.layout(band(1600f))
+            assertTrue(layout.elementBounds.isNotEmpty())
+            layout.elementBounds.forEach { assertTrue(it.right <= 800f || it.left >= 800f, "an element sits over the middle: $it") }
         }
-        assertTrue(layout.hill.size >= 2, "$label hill needs an outline")
-        layout.hill.forEach { assertTrue(it.x in slot.left..slot.right && it.y in slot.top..slot.bottom, "$label hill point $it escapes") }
-        assertEquals(slot.left, layout.hill.first().x, "$label hill starts at the slot's start")
-        assertEquals(slot.right, layout.hill.last().x, 0.01f, "$label hill ends at the slot's end")
     }
 
     @Test
-    fun theHorizontalSceneStaysInsideTheSlotAndKeepsToTheBottomHills() {
-        // A 160 px slot at the end of a 1200 px bar, 36 px tall.
-        val slot = Rect(1040f, 0f, 1200f, 36f)
-        val layout = pumpkinTabSceneLayout(slot, vertical = false)
-        assertInside(layout, "$slot")
-        assertTrue(layout.hill.all { it.y >= 36f * 0.5f }, "hills hug the bottom of the strip")
-        assertEquals(3, layout.pumpkins.size)
-        val moon = checkNotNull(layout.moon)
-        assertTrue(layout.pumpkins.all { it.cx > moon.cx }, "the moon sits left of the pumpkins")
-        val pair = layout.pumpkins.take(2)
-        assertTrue(layout.pumpkins[2].cx > pair.maxOf { it.cx }, "the small pumpkin is furthest right")
-    }
-
-    @Test
-    fun theHorizontalSceneStaysInsideSlotsOfOtherSizes() {
-        listOf(
-            Rect(0f, 0f, 160f, 24f), Rect(300f, 0f, 460f, 48f), Rect(50f, 0f, 2450f, 36f), Rect(0f, 0f, 90f, 36f), Rect(0f, 0f, 160f, 60f),
-        ).forEach { assertInside(pumpkinTabSceneLayout(it, vertical = false), "$it") }
-    }
-
-    @Test
-    fun theVerticalSceneStaysInsideTheSlotUnderTheTabs() {
-        // 200 px wide bar, the tabs fill the first 300 px, the free slot is below them.
-        val slot = Rect(0f, 300f, 200f, 800f)
-        val layout = pumpkinTabSceneLayout(slot, vertical = true)
-        assertInside(layout, "$slot")
-        assertTrue(layout.hill.all { it.y >= slot.bottom - 72f }, "the hill band is a short strip along the bottom of the slot")
-        assertEquals(1, layout.pumpkins.size)
-        assertTrue(layout.moon != null)
-    }
-
-    @Test
-    fun theVerticalSceneKeepsOnlyHillsWhenTheTabsReachTheBand() {
-        val slot = Rect(0f, 760f, 200f, 800f)
-        val layout = pumpkinTabSceneLayout(slot, vertical = true)
-        assertInside(layout, "$slot")
-        assertEquals(null, layout.moon)
-        assertTrue(layout.pumpkins.isEmpty() && layout.craters.isEmpty())
-    }
-
-    @Test
-    fun theVerticalSceneStaysInsideOtherSlots() {
-        listOf(Rect(0f, 0f, 120f, 300f), Rect(10f, 100f, 370f, 1500f)).forEach { assertInside(pumpkinTabSceneLayout(it, vertical = true), "$it") }
-    }
-
-    @Test
-    fun theSlotIsReservedOnlyWhileThePackIsOnAndTheTabsKeepTheirMinimumWidth() {
-        // 4 tabs of at least 80 px need 320 px; a 160 px slot fits in a 600 px tab area.
-        assertEquals(160f, holidaySceneSlotPx(600f, 320f, 160f, active = true))
-        // Exactly enough room still reserves it.
-        assertEquals(160f, holidaySceneSlotPx(480f, 320f, 160f, active = true))
-        // One px short: the tabs would drop below their minimum, so the scene has no slot.
-        assertEquals(0f, holidaySceneSlotPx(479f, 320f, 160f, active = true))
-        assertEquals(0f, holidaySceneSlotPx(0f, 0f, 160f, active = true))
-        // Without a pack nothing is reserved.
-        assertEquals(0f, holidaySceneSlotPx(600f, 320f, 160f, active = false))
-    }
-
-    @Test
-    fun theSceneRangeIsTheFreeSpaceAfterTheLastTabAndNeedsTheMinimumWidth() {
-        assertEquals(440f..600f, holidaySceneSlotRange(600f, 440f, 160f))
-        assertEquals(100f..600f, holidaySceneSlotRange(600f, 100f, 160f))
-        assertEquals(null, holidaySceneSlotRange(600f, 450f, 160f))
-        assertEquals(null, holidaySceneSlotRange(600f, 600f, 160f))
-        // A vertical strip needs only a pixel.
-        assertEquals(500f..600f, holidaySceneSlotRange(600f, 500f, 1f))
-    }
-
-    @Test
-    fun theSlotIsStretchedOverTheBarsCrossAxisAndCutToTheBar() {
-        val holder = HolidaySceneSlot()
-        assertEquals(null, holder.localRect(Size(1000f, 36f), vertical = false), "no slot reported, nothing to draw")
-        holder.barOrigin = Offset(10f, 20f)
-        // A tab area inset 1 px in the bar, ending before the toolbar at x = 700 (root).
-        holder.rootRect = Rect(550f, 21f, 700f, 55f)
-        assertEquals(Rect(540f, 0f, 690f, 36f), holder.localRect(Size(1000f, 36f), vertical = false))
-        // The same slot in a bar that ends first is cut to it.
-        assertEquals(Rect(540f, 0f, 600f, 36f), holder.localRect(Size(600f, 36f), vertical = false))
-        holder.rootRect = Rect(11f, 320f, 190f, 800f)
-        assertEquals(Rect(0f, 300f, 200f, 780f), holder.localRect(Size(200f, 780f), vertical = true))
-        holder.rootRect = null
-        assertEquals(null, holder.localRect(Size(200f, 780f), vertical = true))
+    fun thePumpkinSceneHoldsTheMoonAndThreePumpkinsAtTheRight() {
+        val layout = pumpkinTabSceneLayout(band(1600f))
+        assertTrue(layout.has("moon") && layout.has("pumpkins"))
+        assertTrue(pumpkinTabSceneLayout(band(250f)).elementBounds.isEmpty(), "a narrow band leaves the elements out and keeps the hills")
     }
 
     @Test

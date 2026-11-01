@@ -2,13 +2,13 @@ package com.indagium.ui.holiday
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -114,7 +114,8 @@ class TrickOrTreatThemeTest {
     }
 
     @Test fun landingAnchorsAreRemovedWhenTheirTilesDisappear() {
-        val look = resolveHolidayLook(AppSettings().copy(holiday = HolidaySettings(mode = HolidayMode.ALWAYS, pack = HolidayPack.TRICK_OR_TREAT)), LocalDate.of(2026, 10, 31))
+        val settings = AppSettings().copy(holiday = HolidaySettings(mode = HolidayMode.ALWAYS, pack = HolidayPack.TRICK_OR_TREAT))
+        val look = resolveHolidayLook(settings, LocalDate.of(2026, 10, 31))
         val areas = HolidayLandingAreas()
         var visible by mutableStateOf(true)
         rule.setContent {

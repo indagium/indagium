@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.model.HolidayLightness
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.ui.*
@@ -46,7 +47,10 @@ class ReleaseAnnouncementTest {
         assertTrue(release.themes.isEmpty(), "the Halloween packs belong to the next release")
         assertNull(initialReleaseStep(release, "", ""), "a fresh install does not show historical announcements")
         val next = loadReleaseAnnouncement("1.9.1", releaseVersions = listOf("1.9.0", "1.9.1"))
-        assertEquals(listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT), next.themes)
+        assertEquals(
+            listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN),
+            next.themes,
+        )
         val current = loadReleaseAnnouncement("1.9.1", { name ->
             when (name) {
                 "whats-new-start.txt" -> "1.9.0"
@@ -87,9 +91,13 @@ class ReleaseAnnouncementTest {
                 ReleaseAnnouncementStep.HOLIDAY_THEMES,
                 initialReleaseStep(release, persisted.lastSeenWhatsNewVersion, persisted.lastSeenHolidayAnnouncementVersion),
             )
-            state.finishHolidayAnnouncement(HolidayPack.TRICK_OR_TREAT)
+            state.previewAnnouncedTheme(HolidayPack.TRICK_OR_TREAT, dark = true)
+            assertEquals(HolidayLightness.DARK, state.settingsForReleaseThemePreview().holiday.lightness)
+            assertEquals(HolidayLightness.FOLLOW_PRESET, state.settings.holiday.lightness, "a preview never writes the settings")
+            state.finishHolidayAnnouncement(HolidayPack.TRICK_OR_TREAT, HolidayLightness.DARK)
             assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
             assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+            assertEquals(HolidayLightness.DARK, state.settings.holiday.lightness)
             assertEquals("1.9.1", state.settings.lastSeenHolidayAnnouncementVersion)
             assertNull(state.releaseAnnouncementStep)
             state.maybeShowReleaseAnnouncementOnStartup(release)

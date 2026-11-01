@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.generated.BuildInfo
+import com.indagium.model.HolidayLightness
 import com.indagium.model.HolidayPack
 import com.indagium.model.HolidaySettings
 import com.indagium.ui.holiday.HOLIDAY_THEMES
@@ -104,6 +105,12 @@ internal fun initialReleaseStep(
 internal fun themeAnnouncementDue(release: ReleaseAnnouncement, seen: String): Boolean =
     release.themes.isNotEmpty() && announcementDue(seen, release.version)
 
-/** Selecting a theme from the announcement applies it now, including when the previous mode was Automatic. */
-internal fun HolidaySettings.applyAnnouncedTheme(pack: HolidayPack): HolidaySettings =
-    copy(pack = pack, mode = com.indagium.model.HolidayMode.ALWAYS)
+/** The lightness a card's column stands for: its dark version is DARK, its light one LIGHT. */
+internal fun announcedLightness(dark: Boolean): HolidayLightness = if (dark) HolidayLightness.DARK else HolidayLightness.LIGHT
+
+/**
+ * Selecting a theme from the announcement applies it now, including when the previous mode was Automatic. [lightness] (the card's column:
+ * LIGHT or DARK) is applied with it; null keeps the user's own choice.
+ */
+internal fun HolidaySettings.applyAnnouncedTheme(pack: HolidayPack, lightness: HolidayLightness? = null): HolidaySettings =
+    copy(pack = pack, mode = com.indagium.model.HolidayMode.ALWAYS, lightness = lightness ?: this.lightness)

@@ -29,9 +29,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -256,14 +259,25 @@ private fun SeasonalCheck(label: String, hint: String?, checked: Boolean, tag: S
 private fun PackCards(themes: Map<HolidayPack, HolidayTheme>, selected: HolidayPack?, onSelect: (HolidayPack) -> Unit) {
     CompactSetting(SEASONAL_ANCHOR_PACK) {
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            themes.values.forEach { theme -> PackCard(theme, theme.pack == selected) { onSelect(theme.pack) } }
+            themes.values.forEach { theme -> PackCard(theme, theme.pack == selected, onClick = { onSelect(theme.pack) }) }
         }
     }
 }
 
+/** The test tag of [pack]'s card drawn in a fixed mode: [seasonalPackTag] plus "-light" or "-dark". */
+internal fun seasonalPackModeTag(pack: HolidayPack, dark: Boolean): String = seasonalPackTag(pack) + if (dark) "-dark" else "-light"
+
+/**
+ * A theme card. [dark] null follows the current theme (the Settings tab); true / false draws the card in the theme's OWN dark / light palette
+ * (`theme.palette(dark)` for background, border and text, `theme.chrome(dark)` for the thumbnail), whatever the app shows now (the release
+ * announcement's two columns). A fixed-mode card carries [seasonalPackModeTag] and a "Pumpkin patch, light" content description.
+ */
 @Composable
-internal fun PackCard(theme: HolidayTheme, selected: Boolean, onClick: () -> Unit) {
-    val tc = tc()
+internal fun PackCard(theme: HolidayTheme, selected: Boolean, dark: Boolean? = null, onClick: () -> Unit) {
+    val current = tc()
+    val tc = if (dark == null) current else remember(theme, dark) { theme.palette(dark) }
+    val tag = if (dark == null) seasonalPackTag(theme.pack) else seasonalPackModeTag(theme.pack, dark)
+    val description = if (dark == null) null else "${theme.label}, ${if (dark) "dark" else "light"}"
     val shape = RoundedCornerShape(8.dp)
     Row(
         Modifier
@@ -271,14 +285,18 @@ internal fun PackCard(theme: HolidayTheme, selected: Boolean, onClick: () -> Uni
             .clip(shape)
             .border(if (selected) 1.5.dp else 1.dp, if (selected) tc.ac else tc.br, shape)
             .background(if (selected) tc.abg else tc.p2)
-            .semantics { role = Role.Button; this.selected = selected }
+            .semantics {
+                role = Role.Button
+                this.selected = selected
+                if (description != null) contentDescription = description
+            }
             .clickable(role = Role.Button, onClick = onClick)
             .padding(8.dp)
-            .testTag(seasonalPackTag(theme.pack)),
+            .testTag(tag),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        PackPreview(theme)
+        PackPreview(theme, tc, dark ?: !tc.isLight())
         Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             AppText(theme.label, color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             AppText("${theme.occasion} · ${holidayDatesLabel(theme)}", color = tc.td, fontSize = 10.sp)
@@ -286,18 +304,16 @@ internal fun PackCard(theme: HolidayTheme, selected: Boolean, onClick: () -> Uni
     }
 }
 
-// The theme's tab-strip scene (when it has one) with three of its toolbar pictures (when it has them) on top, in the palette of the family it will use.
+// The theme's scene band (when it has one) with three of its toolbar pictures (when it has them) on top, in the palette of the family it will use.
 @Composable
-private fun PackPreview(theme: HolidayTheme) {
-    val tc = tc()
-    val dark = !tc.isLight()
+private fun PackPreview(theme: HolidayTheme, tc: ThemeColors, dark: Boolean) {
     val chrome = remember(theme, dark) { theme.chrome(dark) }
     val icons = remember(theme, tc.tx) { theme.icons?.icons(tc.tx) }
     Box(PREVIEW_MODIFIER) {
         Canvas(Modifier.size(PREVIEW_WIDTH, PREVIEW_HEIGHT)) {
             drawRect(chrome.tabBar)
             val painter = theme.tabScene
-            if (painter != null) clipRect { painter.draw(this, painter.layout(Rect(Offset.Zero, size), vertical = false), dark) }
+            if (painter != null) clipRect { drawSceneThumbnail(painter, dark) }
         }
         if (icons != null) {
             Row(Modifier.padding(start = 6.dp, top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -312,3 +328,16 @@ private fun PackPreview(theme: HolidayTheme) {
 private val PREVIEW_WIDTH = 120.dp
 private val PREVIEW_HEIGHT = 36.dp
 private val PREVIEW_MODIFIER = Modifier.size(PREVIEW_WIDTH, PREVIEW_HEIGHT).clip(RoundedCornerShape(6.dp))
+
+// The scene band is a 1600 dp wide title bar; the thumbnail shows its right-hand part, where the compositions are, at THUMBNAIL_SCALE along the
+// bottom of the card (the band's bar colour is the card's).
+private const val THUMBNAIL_SCALE = 0.3f
+
+private fun DrawScope.drawSceneThumbnail(painter: HolidayScenePainter, dark: Boolean) {
+    val band = Rect(0f, 0f, HOLIDAY_SCENE_REFERENCE_WIDTH * density, HOLIDAY_SCENE_REFERENCE_HEIGHT_DP * density)
+    val layout = painter.layout(band)
+    withTransform({
+        translate(size.width - band.width * THUMBNAIL_SCALE, size.height - band.height * THUMBNAIL_SCALE)
+        scale(THUMBNAIL_SCALE, THUMBNAIL_SCALE, Offset.Zero)
+    }) { painter.draw(this, layout, dark) }
+}

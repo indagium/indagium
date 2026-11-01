@@ -83,6 +83,9 @@ internal fun ChromeScaffold(
     val settings = state.settings
     val arrangement = chromeArrangement(settings, state.toolbarHostedInLayout())
     val locked = settings.chromeLocked
+    // The scene is the tab bar's background, behind the tabs, and only over the tab strip's own span: the Layout writes it from the frames,
+    // so a toolbar sharing the bar is never painted under.
+    val sceneSpan = remember { HolidaySceneSpan() }
     val drag = remember { ChromeDragState() }
     val bridge = remember { ToolbarDockBridge() }
     val metrics = ChromeMetrics(
@@ -94,7 +97,7 @@ internal fun ChromeScaffold(
     var toolbarLengthPx by remember { mutableStateOf(0) }
     val axisVertical = arrangement.toolbarAxisVertical
     val tabsVertical = arrangement.tabsOrientation == ChromeOrientation.VERTICAL
-    val policy = remember(arrangement, metrics, locked) { ChromeMeasurePolicy(arrangement, metrics, grips = !locked) }
+    val policy = remember(arrangement, metrics, locked) { ChromeMeasurePolicy(arrangement, metrics, grips = !locked, sceneSpan = sceneSpan) }
     // The zones of the drop strips, for the part being dragged, in host dp (the same maths the Layout uses, in px).
     val zonesFor: (ChromeSlot) -> List<ChromeDockZone> = { slot ->
         val frames = chromeFrames(arrangement, hostPx.width / density, hostPx.height / density, metrics, toolbarLengthPx / density, !locked)
@@ -156,12 +159,10 @@ internal fun ChromeScaffold(
     // The default joined top bar keeps its flat, square frame; every other bar is a card like the log view's tiles.
     val barLook = if (arrangement.cards) Modifier.background(tc.p, cardShape) else Modifier.background(tabStripBackground(settings.tabStripStyle, tc))
     // Under a seasonal pack with its scene on, the tab bar (not the toolbar bar) is the night-sky picture.
-    val tabScene = holiday?.takeIf { it.effects.tabScene }
+    val tabScene = holiday?.takeIf { holidaySceneShown(it.effects.tabScene, arrangement.tabPosition) }
     val scenePainter = tabScene?.theme?.tabScene
     val sceneRunning = holidayPicturesRunning(scenePainter?.animated == true && tabScene.effects.animatePicture)
     val sceneClock = rememberHolidayClock(sceneRunning)
-    // The strip reports where it keeps room free of tabs (and clear of the toolbar); the scene draws only there.
-    val sceneSlot = remember { HolidaySceneSlot() }
     val artFrame = LocalHolidayArtFrame.current
     val tabBarLook = if (tabScene == null || scenePainter == null) {
         barLook
@@ -169,14 +170,13 @@ internal fun ChromeScaffold(
         Modifier.holidayTabBarScene(
             tabScene,
             scenePainter,
-            arrangement.tabsOrientation == ChromeOrientation.VERTICAL,
             cardShape.takeIf { arrangement.cards },
-            sceneSlot,
+            sceneSpan,
             sceneClock,
         )
     }
     val borderLook = if (arrangement.cards) Modifier.border(BorderStroke(1.dp, tc.br), cardShape) else Modifier.border(BorderStroke(1.dp, tc.br))
-    CompositionLocalProvider(LocalToolbarDock provides bridge, LocalChromeAnchors provides anchors, LocalHolidaySceneSlot provides sceneSlot) {
+    CompositionLocalProvider(LocalToolbarDock provides bridge, LocalChromeAnchors provides anchors) {
         Box(
             modifier.fillMaxSize()
                 .onSizeChanged { hostPx = it }
@@ -271,6 +271,7 @@ private class ChromeMeasurePolicy(
     private val arrangement: ChromeArrangement,
     private val metricsDp: ChromeMetrics,
     private val grips: Boolean,
+    private val sceneSpan: HolidaySceneSpan,
 ) : MeasurePolicy {
     override fun MeasureScope.measure(measurables: List<Measurable>, constraints: Constraints): MeasureResult {
         val width = constraints.maxWidth
@@ -292,6 +293,7 @@ private class ChromeMeasurePolicy(
         )
         val toolbarLength = toolbarPlaceable?.let { if (axisVertical) it.height else it.width } ?: 0
         val frames = chromeFrames(arrangement, width.toFloat(), height.toFloat(), m, toolbarLength.toFloat(), grips)
+        sceneSpan.set(frames.sceneSpan(arrangement.tabsOrientation == ChromeOrientation.VERTICAL))
 
         fun fixed(part: ChromePart, rect: TileRect?): Placeable? {
             val w = rect?.w?.roundToInt()?.coerceAtLeast(0) ?: 0

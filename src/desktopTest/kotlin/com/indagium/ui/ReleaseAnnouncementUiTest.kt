@@ -1,30 +1,38 @@
 package com.indagium.ui
 
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Description
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.width
+import com.indagium.model.HolidayLightness
 import com.indagium.model.HolidayMode
 import com.indagium.model.HolidayPack
 import com.indagium.model.TileLeaf
+import com.indagium.ui.holiday.HOLIDAY_THEMES
 import com.indagium.ui.holiday.LocalHoliday
 import com.indagium.ui.holiday.resolveHolidayLook
-import com.indagium.ui.holiday.seasonalPackTag
-import androidx.compose.ui.unit.dp
-import java.time.LocalDateTime
+import com.indagium.ui.holiday.seasonalPackModeTag
 import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import java.io.File
+import java.time.LocalDateTime
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -48,7 +56,7 @@ class ReleaseAnnouncementUiTest {
     private fun show() {
         state.maybeShowReleaseAnnouncementOnStartup(release)
         rule.setContent {
-            val look = resolveHolidayLook(state.settingsForReleaseThemePreview(), LocalDateTime.of(2026, 11, 1, 12, 0))
+            val look = resolveHolidayLook(state.settingsForReleaseThemePreview(), PREVIEW_TIME)
             CompositionLocalProvider(LocalTheme provides (look?.colors ?: LIGHT_THEME), LocalHoliday provides look) {
                 AppText("Current preview: ${look?.theme?.label ?: "none"}")
                 ReleaseAnnouncementDialog(state)
@@ -80,14 +88,83 @@ class ReleaseAnnouncementUiTest {
         rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
         assertButtonsCentered(HOLIDAY_ANNOUNCEMENT_TAG, "Skip", "Use theme")
         rule.onNodeWithText("Use theme").assertIsNotEnabled()
-        val dialog = rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).getUnclippedBoundsInRoot()
-        val card = rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).getUnclippedBoundsInRoot()
-        assertTrue(kotlin.math.abs((dialog.left + dialog.right - card.left - card.right).value) < 2f, "theme cards are centered")
-        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).performClick()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.TRICK_OR_TREAT, dark = false)).performClick()
         rule.onNodeWithText("Use theme").performClick()
         rule.waitForIdle()
         assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
         assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+        assertEquals(HolidayLightness.LIGHT, state.settings.holiday.lightness)
+        assertNull(state.releaseAnnouncementStep)
+    }
+
+    private fun showThemes() {
+        show()
+        rule.onNodeWithText("Skip").performClick()
+        rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
+    }
+
+    @Test fun everyAnnouncedThemeHasALightCardLeftAndADarkCardRight() {
+        showThemes()
+        val dialog = rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).getUnclippedBoundsInRoot()
+        assertTrue(dialog.width.value >= 700f - 1f, "the dialog is wide enough for two columns")
+        val lightHeader = rule.onNodeWithTag("release-themes-header-light").getUnclippedBoundsInRoot()
+        val darkHeader = rule.onNodeWithTag("release-themes-header-dark").getUnclippedBoundsInRoot()
+        assertTrue(lightHeader.left < darkHeader.left)
+        rule.onNodeWithText("Light").assertExists()
+        rule.onNodeWithText("Dark").assertExists()
+        release.themes.forEach { pack ->
+            val light = rule.onNodeWithTag(seasonalPackModeTag(pack, dark = false)).getUnclippedBoundsInRoot()
+            val dark = rule.onNodeWithTag(seasonalPackModeTag(pack, dark = true)).getUnclippedBoundsInRoot()
+            assertTrue(light.right <= dark.left, "$pack: the light card is left of the dark one")
+            assertTrue(kotlin.math.abs(light.top.value - dark.top.value) < 1f, "$pack: both cards share one row")
+            assertTrue(light.left >= dialog.left && dark.right <= dialog.right, "$pack: both cards fit the dialog")
+            assertTrue(light.left < lightHeader.right && dark.left >= lightHeader.right - 1.dp, "$pack: cards sit under their column headers")
+            val label = HOLIDAY_THEMES.getValue(pack).label
+            rule.onNodeWithContentDescription("$label, light").assertExists()
+            rule.onNodeWithContentDescription("$label, dark").assertExists()
+        }
+    }
+
+    @Test fun eachCardIsDrawnInItsOwnPaletteWhateverTheAppShows() {
+        // The app currently shows the light fallback theme; the dark column must still use the theme's dark palette, and the light one its light.
+        showThemes()
+        HolidayPack.entries.filter { it in release.themes }.forEach { pack ->
+            val theme = HOLIDAY_THEMES.getValue(pack)
+            listOf(false, true).forEach { dark ->
+                val bounds = rule.onNodeWithTag(seasonalPackModeTag(pack, dark)).getUnclippedBoundsInRoot()
+                val pixel = rule.onNodeWithTag(seasonalPackModeTag(pack, dark)).captureToImage().toPixelMap()
+                val expected = theme.palette(dark).p2
+                val corner = pixel[(bounds.width.value * rule.density.density / 2).toInt(), (rule.density.density * 3).toInt()]
+                assertTrue(
+                    kotlin.math.abs(corner.red - expected.red) < .06f && kotlin.math.abs(corner.green - expected.green) < .06f &&
+                        kotlin.math.abs(corner.blue - expected.blue) < .06f,
+                    "$pack dark=$dark background $corner vs $expected",
+                )
+            }
+        }
+    }
+
+    @Test fun pickingADarkCardPreviewsItInDarkAndUseThemeStoresTheLightness() {
+        showThemes()
+        val original = state.settings.holiday
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = true)).performClick()
+        rule.onNodeWithText("Current preview: Haunted manor").assertExists()
+        assertEquals(HolidayLightness.DARK, state.settingsForReleaseThemePreview().holiday.lightness)
+        assertEquals(original, state.settings.holiday, "previewing leaves the settings untouched")
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = true)).assertIsSelected()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = false)).assertIsNotSelected()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.TRICK_OR_TREAT, dark = true)).assertIsNotSelected()
+        // The light card of the same theme previews it in light, and is then the selected one.
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = false)).performClick()
+        assertEquals(HolidayLightness.LIGHT, state.settingsForReleaseThemePreview().holiday.lightness)
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = false)).assertIsSelected()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = true)).assertIsNotSelected()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.TRICK_OR_TREAT, dark = true)).performClick()
+        rule.onNodeWithText("Use theme").performClick()
+        rule.waitForIdle()
+        assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
+        assertEquals(HolidayLightness.DARK, state.settings.holiday.lightness)
         assertNull(state.releaseAnnouncementStep)
     }
 
@@ -96,8 +173,9 @@ class ReleaseAnnouncementUiTest {
         val original = state.settings.holiday
         rule.onNodeWithText("Skip").performClick()
         rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
-        rule.onNodeWithTag(seasonalPackTag(HolidayPack.HAUNTED_MANOR)).performClick()
+        rule.onNodeWithTag(seasonalPackModeTag(HolidayPack.HAUNTED_MANOR, dark = true)).performClick()
         rule.onNodeWithText("Current preview: Haunted manor").assertExists()
+        assertEquals(HolidayLightness.DARK, state.settingsForReleaseThemePreview().holiday.lightness)
         assertEquals(original, state.settings.holiday)
         rule.onNodeWithText("Skip").performClick()
         rule.waitForIdle()
@@ -145,12 +223,17 @@ class ReleaseAnnouncementUiTest {
             if (index > 0) rule.runOnIdle {
                 state.maybeShowReleaseAnnouncementOnStartup(ReleaseAnnouncement("1.9.2", emptyList(), listOf(pack)))
             }
-            rule.onNodeWithTag(seasonalPackTag(pack)).performClick()
+            rule.onNodeWithTag(seasonalPackModeTag(pack, dark = true)).performClick()
             rule.onNodeWithText("Use theme").performClick()
             rule.waitForIdle()
             assertEquals(pack, state.settings.holiday.pack)
+            assertEquals(HolidayLightness.DARK, state.settings.holiday.lightness)
             rule.onNodeWithTag("beer-test-card-filter").assertExists()
             rule.onNodeWithText("Filter content").assertExists()
         }
+    }
+
+    private companion object {
+        val PREVIEW_TIME: LocalDateTime = LocalDateTime.of(2026, 11, 1, 12, 0)
     }
 }
