@@ -89,12 +89,13 @@ internal fun Modifier.holidayTabChrome(
             when (texture) {
                 HolidayTabTexture.RIBS -> if (!active) drawRibs(shape, chrome.rib)
                 HolidayTabTexture.STONE -> drawStoneSpeckles(shape)
+                HolidayTabTexture.PLAIN -> Unit
             }
         }
     return fill
         .then(if (tint == null) Modifier else Modifier.background(tint, shape))
         .then(if (!active && hovered) Modifier.background(tc.hv, shape) else Modifier)
-        .then(if (active) Modifier.border(ACTIVE_BORDER, tc.ac, shape) else if (texture == HolidayTabTexture.STONE) Modifier.border(1.dp, tc.br, shape) else Modifier)
+        .then(if (active) Modifier.border(ACTIVE_BORDER, tc.ac, shape) else if (texture != HolidayTabTexture.RIBS) Modifier.border(1.dp, tc.br, shape) else Modifier)
 }
 
 // The manor reference uses three faint, fixed stone marks instead of the pumpkin's repeated ribs.

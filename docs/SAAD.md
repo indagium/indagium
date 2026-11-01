@@ -5761,7 +5761,7 @@ changed; the theme only overrides what the UI reads. Everything lives in `src/de
 |-------|-------|-------|
 | Framework | `ui/holiday/*.kt` | The resolver (`HolidayResolver.kt`: dates, active theme, `HolidayLook`, `HolidayEffects`), the clock, the effects overlay, exclusions, tab chrome and the tab-scene slot (`HolidayTabSceneHost.kt`), corner-art placement and the two art passes (`HolidayBackdropLayout.kt`, `HolidayBackdropHost.kt`), the toolbar-icon kit, the Layout menu section, the Settings section, the codec (`HolidaySettingsJson.kt`). Nothing pack-specific. |
 | Contract | `HolidayTheme.kt`, `HolidayEffectKit.kt` | `HolidayTheme` (one instance per pack) with optional capabilities: `tabShape`, `labelFontFamily`, `tabOrnament`, `icons`, `tabScene`, `picture`, `companion`, `effects`, `corners`; the painter interfaces; the effect specs. |
-| Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. `ui/holiday/pumpkin/` is the first; `ui/holiday/manor/` is the second. |
+| Theme | `ui/holiday/<name>/` | Its palette, chrome colours, art, icons, scene, picture, companion and effects. The Halloween packs are `pumpkin/`, `manor/` and `candy/`. |
 
 `HOLIDAY_THEMES` (`HolidayRegistry.kt`) maps each `HolidayPack` (the persisted enum id, `model/Model.kt`) to its theme, in registry order. Every
 pure function takes the registry as a parameter with that default (`resolveHolidayLook(settings, today, themes = HOLIDAY_THEMES)`), so a test can
@@ -5773,6 +5773,8 @@ generic rows for the capabilities it has; no companion row without a companion, 
 When a theme declares `labelFontFamily`, the tab labels and tile titles use it; toolbar labels and the user's saved interface font stay as chosen.
 Themes can select a tab texture and whether group colors tint tab fills. Particle effects can request a full-strength behind-content pass and a
 synchronized faint wash over cards, like the backdrop art; the manor ghost and bats use it. Other effects and flashes retain the ordinary overlay.
+Trick or treat's landed sweets use `HolidayLandingAreas`: visible tabs and tiles report their current clipped bounds only while the landing effect
+is enabled, and unregister on disposal. The overlay positions the sweets on those edges as layouts and scroll positions change.
 
 Backdrop arts. The picture and the companion are *backdrop arts*: the theme only declares a design size and a `draw(t)`, and the framework places
 them at the **app window's bottom corners**, on every screen and in every layout (log view with any tiles shown or hidden, maximized tiles, stacked

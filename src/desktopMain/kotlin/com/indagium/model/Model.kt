@@ -1925,6 +1925,7 @@ enum class HolidayMode { OFF, AUTOMATIC, ALWAYS }
 enum class HolidayPack {
     PUMPKIN_PATCH,
     HAUNTED_MANOR,
+    TRICK_OR_TREAT,
 }
 
 /** Whether a pack renders its light or dark palette; FOLLOW_PRESET takes the family of the user's own theme preset. */

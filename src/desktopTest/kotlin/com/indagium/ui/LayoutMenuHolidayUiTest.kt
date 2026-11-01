@@ -104,6 +104,17 @@ class LayoutMenuHolidayUiTest {
     }
 
     @Test
+    fun trickOrTreatExposesAndPersistsItsOwnEffectControls() {
+        setup(HolidayMode.ALWAYS, HolidayPack.TRICK_OR_TREAT)
+        listOf("candy.rain", "candy.landing", "candy.lightning", "scene", "picture", "animate", "icons", "companion").forEach {
+            assertTrue(present(layoutMenuHolidayToggleTag(it)), "row $it")
+        }
+        rule.onNodeWithTag(layoutMenuHolidayToggleTag("candy.landing")).performScrollTo().performClick()
+        rule.waitForIdle()
+        assertEquals(false, state.settings.holiday.effectToggles["candy.landing"])
+    }
+
+    @Test
     fun clickingARowFlipsItsSettingAndHandsFocusBack() {
         setup(HolidayMode.ALWAYS)
         val before = reclaims

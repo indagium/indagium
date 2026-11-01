@@ -455,7 +455,11 @@ internal fun TabShell(
     val holiday = LocalHoliday.current
     val metrics = tabMetrics(style, position)
     // Under a seasonal pack the tab takes the pack's shape, extra outer inset and fill; the user's style is only left unread here.
-    val inset = if (holiday != null) holidayTabInset(metrics.inset, position) else metrics.inset
+    val crossInset = holiday?.theme?.tabCrossAxisInsetDp
+    val inset = if (crossInset != null) {
+        if (position == TabStripPosition.TOP || position == TabStripPosition.BOTTOM) PaddingValues(horizontal = 2.dp, vertical = crossInset.dp)
+        else PaddingValues(horizontal = crossInset.dp, vertical = 2.dp)
+    } else if (holiday != null) holidayTabInset(metrics.inset, position) else metrics.inset
     val shape = if (holiday != null) {
         holiday.theme.tabShape?.shape(position) ?: holidayTabShape(position, holiday.theme.corners.tabDp.dp)
     } else {
@@ -490,6 +494,7 @@ internal fun TabShell(
             Row(
                 Modifier.fillMaxWidth().height(tabStripHeightDp(style).dp)
                     .padding(inset)
+                    .holidayLandingAnchor()
                     .testTag("tab-$pointerKey")
                     .then(if (appearance.outlineColor == null) Modifier else if (holiday != null) Modifier.border(1.dp, appearance.outlineColor, shape) else Modifier.tabOutline(style, position, appearance.outlineColor))
                     .then(

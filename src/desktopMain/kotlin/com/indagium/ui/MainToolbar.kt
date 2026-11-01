@@ -25,6 +25,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -178,6 +180,12 @@ private fun ToolbarButtons(
     gap()
     chunk(CHUNK_NEW) {
         val pack = holidayToolbarIcon(ToolbarIconId.NEW)
+        val stickColor = tc().ts.copy(alpha = .55f)
+        val stick = LocalHoliday.current?.theme?.newButtonStick == true
+        val newButtonModifier = if (stick) fill.drawBehind {
+            val length = 5.dp.toPx()
+            drawLine(stickColor, Offset(size.width / 2f, size.height - length), Offset(size.width / 2f, size.height), 2.dp.toPx())
+        }.padding(bottom = 5.dp) else fill
         ToolbarBtn(
             "",
             icon = pack?.vector ?: Icons.Outlined.Add,
@@ -185,7 +193,7 @@ private fun ToolbarButtons(
             showLabel = false,
             tooltip = pack?.tooltip ?: "New tab",
             active = homeActive,
-            modifier = fill,
+            modifier = newButtonModifier,
             shape = shapes.solo,
             contentPadding = pad,
         ) { state.openHomeTab(); onReclaimFocus() }

@@ -195,6 +195,7 @@ fun App(
     }
     val theme = holiday?.colors ?: themeColors(state.settings.theme)
     val holidayExclusions = remember { HolidayExclusions() }
+    val holidayLandingAreas = remember { HolidayLandingAreas() }
     val holidayPaused by remember(state) { derivedStateOf { state.settings.holiday.pauseWhileBusy && state.holidayBusy() } }
     // The window's content area (set by ChromeScaffold) and the one clock of the seasonal art passes (no frame loop while no art has a place).
     val holidayArtFrame = remember { HolidayArtFrame() }
@@ -286,6 +287,7 @@ fun App(
         LocalHoliday provides holiday,
         LocalHolidayPaused provides holidayPaused,
         LocalHolidayExclusions provides holidayExclusions,
+        LocalHolidayLandingAreas provides holidayLandingAreas,
         LocalHolidayArtFrame provides holidayArtFrame,
         LocalHolidayArtClock provides holidayArtClock,
         LocalLogViewMeasurementMemory provides logViewMeasurementMemory,

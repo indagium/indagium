@@ -36,7 +36,7 @@ class HauntedManorThemeTest {
     fun pumpkinRemainsTheDefaultAndFirstFallbackWhileManorCanBeSelectedForTheSameDates() {
         assertEquals(HolidayPack.PUMPKIN_PATCH, HolidaySettings().pack)
         assertEquals(HolidayPack.PUMPKIN_PATCH, HOLIDAY_THEMES.values.first().pack)
-        assertEquals(listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR), HOLIDAY_THEMES.keys.toList())
+        assertEquals(listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT), HOLIDAY_THEMES.keys.toList())
 
         val auto = HolidaySettings(mode = HolidayMode.AUTOMATIC, pack = HolidayPack.HAUNTED_MANOR)
         assertNull(activeHolidayPack(auto, LocalDate.of(2026, 10, 23)))

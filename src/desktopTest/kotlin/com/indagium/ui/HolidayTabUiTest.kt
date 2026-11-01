@@ -127,6 +127,28 @@ class HolidayTabUiTest {
         assertTrue(top.red > .5f && top.green < .3f, "the group outline follows the rounded tab's top edge")
     }
 
+    @Test
+    fun trickOrTreatUsesPillTabsAndCandyCornStripe() {
+        val look = resolveHolidayLook(AppSettings().withHoliday { it.copy(mode = HolidayMode.ALWAYS, pack = HolidayPack.TRICK_OR_TREAT) }, LocalDate.of(2026, 10, 31))!!
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides look.colors, LocalHoliday provides look) {
+                Box(Modifier.width(200.dp).background(Color.Black).testTag("candy-tab-test")) {
+                    TabShell("candy", "Candy", "Candy", true, false, onClick = {}, onClose = {})
+                }
+            }
+        }
+        val pixels = rule.onNodeWithTag("candy-tab-test").captureToImage().toPixelMap()
+        val d = rule.density.density
+        fun pixel(x: Float, y: Float) = pixels[(x * d).toInt(), (y * d).toInt()]
+        assertTrue(pixel(3f, 5f).red < .1f, "the pill's corner is outside the tab")
+        val yellow = pixel(40f, 34f)
+        val orange = pixel(100f, 34f)
+        val white = pixel(160f, 34f)
+        assertTrue(yellow.red > .7f && yellow.green > .5f, "yellow candy-corn stripe")
+        assertTrue(orange.red > .7f && orange.green < .7f, "orange candy-corn stripe")
+        assertTrue(white.red > .8f && white.green > .8f, "white candy-corn stripe")
+    }
+
     private fun tabWidthDp(id: String): Float = rule.onNodeWithTag("tab-$id").getUnclippedBoundsInRoot().let { (it.right - it.left).value }
 
     private fun areaWidthDp(): Float = rule.onNodeWithTag("tab-strip-drag-idle").getUnclippedBoundsInRoot().let { (it.right - it.left).value }

@@ -4,6 +4,7 @@
 package com.indagium.ui.holiday
 
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.geometry.Rect
 import com.indagium.model.HolidaySettings
 import com.indagium.ui.*
 import kotlin.math.floor
@@ -35,6 +36,12 @@ internal interface HolidayParticleField {
     val count: Int
 
     fun draw(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean)
+}
+
+/** A particle field that lands on the current visible tab and tile bounds instead of a fixed window coordinate. */
+internal interface HolidayLandingEffect : HolidayParticleEffect
+internal interface HolidayLandingField : HolidayParticleField {
+    fun drawLanding(scope: DrawScope, t: Float, widthDp: Float, heightDp: Float, dark: Boolean, anchors: List<Rect>)
 }
 
 /** A window flash: the framework decides WHEN and how strong ([alpha], already within the limits); the theme only says how it looks. */

@@ -635,12 +635,15 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
     val rect = s.geometry.cardOf(id)
     val collapsed = rect != null && id in s.collapsed
     val shape = RoundedCornerShape(s.spec.cornerDp.dp)
-    val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else 1f
+    val holiday = LocalHoliday.current
+    val dividerColors = holiday?.theme?.tileDividerColors(holiday.isDark)
+    val dividerDp = if (dividerColors == null) 1f else 3f
+    val headerHeight = if (slot.headerless) 0f else s.spec.headerDp + if (collapsed) 0f else dividerDp
     val region = s.regionOf(id)
     // A tile in a scrolling column whose slot says so is sized by what its body asks for: the body is measured at its natural height.
     val contentSized = region != null && rect != null && rect.w > 0f && slot.sizing != TileBodySizing.FILL
     val bodyInfo = TileBodyInfo(rect?.w ?: 0f, if (collapsed) 0f else max(0f, (rect?.h ?: 0f) - headerHeight), contentSized)
-    val chromeDp = if (slot.headerless) 0f else s.spec.headerDp + 1f
+    val chromeDp = if (slot.headerless) 0f else s.spec.headerDp + dividerDp
     val flex = remember(id) { TileFlexHost() }
     val store = s.drag.measured
     flex.onFlex = { natural, cap ->
@@ -658,11 +661,18 @@ private fun <K> TileCard(s: TileScopeImpl<K>, id: K, slot: TileSlot, modifier: M
             .background(tc.p)
             .border(1.dp, tc.br, shape)
             .holidayExcluded(s.spec.holidayClear(id))
+            .holidayLandingAnchor()
             .testTag("${s.spec.tagPrefix}-card-${s.spec.keyOf(id)}"),
     ) {
         if (!slot.headerless) {
             TileHeader(s, id, slot, rect, collapsed)
-            if (!collapsed) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+            if (!collapsed) {
+                if (dividerColors == null) Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                else Box(Modifier.fillMaxWidth().height(3.dp).background(androidx.compose.ui.graphics.Brush.horizontalGradient(
+                    0f to dividerColors[0], 1f / 3f to dividerColors[0], 1f / 3f to dividerColors[1],
+                    2f / 3f to dividerColors[1], 2f / 3f to dividerColors[2], 1f to dividerColors[2],
+                )))
+            }
         }
         // A collapsed tile keeps its body composed (so it keeps its state) but gives it no height.
         TileBodyHost(

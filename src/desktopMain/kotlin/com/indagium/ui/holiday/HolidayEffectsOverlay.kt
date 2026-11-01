@@ -55,15 +55,20 @@ internal fun HolidayEffectsOverlay(modifier: Modifier = Modifier, behindContent:
         }
     }
     val exclusions = LocalHolidayExclusions.current
+    val landingAreas = LocalHolidayLandingAreas.current
     val dark = holiday.isDark
     Canvas(modifier.graphicsLayer().testTag(if (behindContent) HOLIDAY_EFFECTS_BEHIND_TAG else HOLIDAY_EFFECTS_OVERLAY_TAG)) {
         val t = clock.value
+        val anchors = landingAreas?.let { holder ->
+            holder.version
+            holder.bounds().map { Rect(it.left / density, it.top / density, it.right / density, it.bottom / density) }
+        } ?: emptyList()
         val clear = exclusions?.let { holder ->
             holder.version
             holder.path()
         }
         val draw: DrawScope.() -> Unit = {
-            drawEffects(t, fields, flashes, fx.flashMinGapSec, dark, density)
+            drawEffects(t, fields, flashes, fx.flashMinGapSec, dark, density, anchors)
             if (washFields.isNotEmpty()) {
                 drawIntoCanvas { canvas ->
                     val paint = Paint().apply {
@@ -71,7 +76,7 @@ internal fun HolidayEffectsOverlay(modifier: Modifier = Modifier, behindContent:
                         blendMode = if (dark) BlendMode.SrcOver else BlendMode.Multiply
                     }
                     canvas.saveLayer(Rect(Offset.Zero, size), paint)
-                    drawEffects(t, washFields, emptyList(), fx.flashMinGapSec, dark, density)
+                    drawEffects(t, washFields, emptyList(), fx.flashMinGapSec, dark, density, anchors)
                     canvas.restore()
                 }
             }
@@ -88,6 +93,7 @@ private fun DrawScope.drawEffects(
     flashGapSec: Float,
     dark: Boolean,
     density: Float,
+    anchors: List<Rect>,
 ) {
     withTransform({ scale(density, density, Offset.Zero) }) {
         val w = size.width / density
@@ -97,6 +103,6 @@ private fun DrawScope.drawEffects(
             val frame = holidayFlashFrame(OVERLAY_SEED, t, flashGapSec)
             if (frame.alpha > 0f) flashes[frame.slot.mod(flashes.size)].draw(this, frame.alpha.coerceAtMost(HOLIDAY_FLASH_MAX_ALPHA), w, h, dark)
         }
-        fields.forEach { it.draw(this, t, w, h, dark) }
+        fields.forEach { if (it is HolidayLandingField) it.drawLanding(this, t, w, h, dark, anchors) else it.draw(this, t, w, h, dark) }
     }
 }

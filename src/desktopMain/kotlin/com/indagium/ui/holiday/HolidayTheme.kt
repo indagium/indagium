@@ -37,7 +37,7 @@ internal fun interface HolidayTabShape {
     fun shape(position: TabStripPosition): Shape
 }
 
-internal enum class HolidayTabTexture { RIBS, STONE }
+internal enum class HolidayTabTexture { RIBS, STONE, PLAIN }
 
 /** The theme's toolbar pictures: name, mnemonic and vector per [ToolbarIconId], line work in [outline] (the toolbar's text colour). */
 internal fun interface HolidayIconSet {
@@ -102,9 +102,13 @@ internal interface HolidayTheme {
     /** Optional label typeface. Log text and explicitly chosen monospace text keep their own fonts. */
     val labelFontFamily: FontFamily? get() = null
     val tabShape: HolidayTabShape? get() = null
+    /** Optional symmetric inset on the cross-axis of a tab strip. */
+    val tabCrossAxisInsetDp: Float? get() = null
     val tabTexture: HolidayTabTexture get() = HolidayTabTexture.RIBS
     val tintTabsByGroup: Boolean get() = true
     val tabOrnament: HolidayTabOrnament? get() = null
+    val newButtonStick: Boolean get() = false
+    fun tileDividerColors(dark: Boolean): List<Color>? = null
     val icons: HolidayIconSet? get() = null
     val tabScene: HolidayScenePainter? get() = null
     val picture: HolidayPicturePainter? get() = null

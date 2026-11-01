@@ -198,11 +198,22 @@ class SeasonalThemesSettingsUiTest {
         setup()
         openSeasonalTab()
         rule.onNodeWithText("Pumpkin patch").assertExists()
-        rule.onNodeWithText("Halloween · Oct 24 – Nov 1").assertExists()
+        assertTrue(rule.onAllNodes(hasText("Halloween · Oct 24 – Nov 1")).fetchSemanticsNodes().isNotEmpty())
         rule.onNodeWithTag(seasonalPackTag(HolidayPack.PUMPKIN_PATCH)).assertIsNotSelected()
         rule.onNodeWithTag(seasonalPackTag(HolidayPack.PUMPKIN_PATCH)).performClick()
         rule.onNodeWithTag(seasonalPackTag(HolidayPack.PUMPKIN_PATCH)).assertIsSelected()
         assertEquals("Oct 24 – Nov 1", holidayDatesLabel(PumpkinPatchTheme))
+    }
+
+    @Test
+    fun trickOrTreatCardSelectsTheNewTheme() {
+        setup()
+        openSeasonalTab()
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).assertIsNotSelected()
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).performClick()
+        rule.onNodeWithTag(seasonalPackTag(HolidayPack.TRICK_OR_TREAT)).assertIsSelected()
+        assertEquals(HolidayPack.TRICK_OR_TREAT, state.settings.holiday.pack)
+        assertEquals(HolidayMode.ALWAYS, state.settings.holiday.mode)
     }
 
     @Test
