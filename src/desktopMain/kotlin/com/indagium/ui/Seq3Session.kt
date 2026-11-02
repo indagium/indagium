@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3NoteSeed
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
+import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.Seq3SourceDiagnostic
 import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3UndoEntry
@@ -32,7 +33,7 @@ import com.indagium.diagram3.normalizeSeq3FragmentSpans
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.diagram3.seq3NoteHasHandEdit
-import com.indagium.diagram3.toPlantUml
+import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.utils.computeLogFingerprint
@@ -723,6 +724,19 @@ class Seq3Session(
         return true
     }
 
+    /** Switches the detached source draft to another text dialect after the UI has resolved any
+     *  dirty-draft confirmation. A dialect switch always starts from the latest document source;
+     *  the caller must not invoke this while an unconfirmed draft should be kept. */
+    fun switchSourceDraftDialect(id: String, dialect: Seq3Dialect): Boolean {
+        val current = session(id) ?: return false
+        val view = viewState(id) ?: return false
+        if (view.sourceEditorDialect == dialect && view.sourceDraftInitialized) return true
+        view.sourceEditorDialect = dialect
+        view.sourceDraftInitialized = false
+        refreshSourceDraft(view, current.document, force = true)
+        return true
+    }
+
     /** Explicitly discards the draft and reloads the latest diagram source. */
     fun reloadSourceDraft(id: String): Boolean {
         val current = session(id) ?: return false
@@ -737,7 +751,7 @@ class Seq3Session(
         val view = viewState(id) ?: return
         view.sourceDraft = source
         view.sourceDraftDirty = source != view.sourceDraftCanonical
-        val currentCanonical = current.document.toPlantUml()
+        val currentCanonical = current.document.toSource(view.sourceEditorDialect)
         if (view.sourceDraftDirty) {
             view.sourceDraftStale = currentCanonical != view.sourceDraftCanonical
             if (view.sourceDraftStale) view.sourceEvidenceLossPending = false
@@ -750,7 +764,7 @@ class Seq3Session(
     }
 
     private fun refreshSourceDraft(view: Seq3ViewState, document: Seq3Document, force: Boolean = false) {
-        val canonical = document.toPlantUml()
+        val canonical = document.toSource(view.sourceEditorDialect)
         if (force || !view.sourceDraftInitialized || view.sourceDraftCanonical != canonical) {
             view.sourceDraft = canonical
             view.sourceDraftCanonical = canonical
@@ -759,14 +773,17 @@ class Seq3Session(
         view.sourceDraftInitialized = true
         view.sourceDraftDirty = false
         view.sourceDraftStale = false
+        view.sourceLiveLastAppliedText = view.sourceDraft
         view.sourceDiagnostics = emptyList()
         view.sourceEvidenceLossPending = false
+        view.sourceLiveImportBaseline = document
+        view.sourceLiveLastAppliedDocument = document
     }
 
     private fun updateSourceDraftForDocument(id: String, document: Seq3Document) {
         val view = workspaceViewStates[id] ?: return
         if (!view.sourceDraftInitialized) return
-        val currentCanonical = document.toPlantUml()
+        val currentCanonical = document.toSource(view.sourceEditorDialect)
         val hasDraft = view.sourceDraft != view.sourceDraftCanonical
         view.sourceDraftDirty = hasDraft
         if (hasDraft) {
@@ -777,6 +794,348 @@ class Seq3Session(
             // preserve. Follow the latest document even if the tile was previously stale.
             refreshSourceDraft(view, document)
         }
+    }
+
+    /** Imports a debounced editor revision without taking ownership of the editor buffer. A valid
+     *  revision becomes one ordinary document undo step; an invalid partial edit only updates its
+     *  diagnostic, and a revision that removes evidence waits for the existing explicit
+     *  confirmation flow. The import baseline stays fixed until reload/dialect change so source
+     *  markers keep referring to the same generated rows while the user types. */
+    fun applyLiveSourceDraft(id: String, source: String, dialect: Seq3Dialect): Seq3SourceImportResult {
+        val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val view = viewState(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        if (view.sourceEditorDialect != dialect) {
+            val failure = Seq3SourceImportResult.Failure(
+                listOf(Seq3SourceDiagnostic(1, "Source dialect changed. Reload source to continue.")),
+            )
+            view.sourceDiagnostics = failure.diagnostics
+            return failure
+        }
+
+        // The editor calls updateSourceDraftText for every text change. Calling it here too keeps
+        // the API safe for non-UI callers and test harnesses, without changing the buffer when it
+        // already contains this exact revision.
+        if (view.sourceDraft != source) updateSourceDraftText(id, source)
+        val latest = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val currentCanonical = latest.document.toSource(dialect)
+        val stale = view.sourceDraftStale ||
+            (view.sourceDraft != view.sourceDraftCanonical && view.sourceDraftCanonical != currentCanonical)
+        if (stale) {
+            view.sourceDraftStale = true
+            view.sourceEvidenceLossPending = false
+            view.sourceDiagnostics = emptyList()
+            return Seq3SourceImportResult.Failure(
+                listOf(Seq3SourceDiagnostic(1, "Diagram changed. Reload source to continue.")),
+            )
+        }
+
+        if (view.sourceLiveImportBaseline == null) {
+            view.sourceLiveImportBaseline = latest.document
+            view.sourceLiveLastAppliedDocument = latest.document
+        }
+        val baseline = requireNotNull(view.sourceLiveImportBaseline)
+        // A blank editor clears structure while keeping current session metadata, including a
+        // title entered since the source baseline was established.
+        val importBase = if (source.isBlank()) latest.document else baseline
+        val imported = importSourceText(source, dialect, importBase, sourceOwnsVisibleLifelines = true)
+        val success = imported as? Seq3SourceImportResult.Success
+        if (success == null) {
+            view.sourceDiagnostics = (imported as Seq3SourceImportResult.Failure).diagnostics
+            view.sourceEvidenceLossPending = false
+            return imported
+        }
+        if (success.evidenceLoss) {
+            view.sourceDiagnostics = emptyList()
+            view.sourceEvidenceLossPending = true
+            return success
+        }
+
+        val stableDocument = retainLiveSourceIdentities(
+            baseline = baseline,
+            previous = view.sourceLiveLastAppliedDocument ?: baseline,
+            imported = success.document,
+        )
+        if (stableDocument != latest.document && !applyCommand(id, Seq3Command.ReplaceDocument(stableDocument))) {
+            return Seq3SourceImportResult.Failure(emptyList())
+        }
+        val appliedDocument = session(id)?.document ?: stableDocument
+        view.sourceLiveLastAppliedDocument = appliedDocument
+        view.sourceLiveLastAppliedText = source
+        // Keep the text as typed. This baseline is only the current diagram's canonical form for
+        // stale protection; advancing it must not increment the editor generation or move focus.
+        view.sourceDraftCanonical = appliedDocument.toSource(dialect)
+        view.sourceDraftDirty = source != view.sourceDraftCanonical
+        view.sourceDraftStale = false
+        view.sourceDiagnostics = emptyList()
+        view.sourceEvidenceLossPending = false
+        return success.copy(document = appliedDocument, canonicalSource = view.sourceDraftCanonical)
+    }
+
+    /** Starts a new source-authored diagram after the UI's explicit replace confirmation. Unlike
+     *  an ordinary source import, this parses against a structurally empty document so omitted
+     *  old participants and rows cannot survive the new source. Existing evidence is a separate
+     *  confirmation gate: the first call returns the prospective result without touching the
+     *  diagram, and only a repeat with [confirmEvidenceLoss] commits it. */
+    fun startNewSourceDiagram(
+        id: String,
+        source: String,
+        dialect: Seq3Dialect,
+        confirmEvidenceLoss: Boolean = false,
+    ): Seq3SourceImportResult {
+        val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val view = viewState(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val seed = current.document.copy(
+            title = "",
+            sourceFile = null,
+            lifelines = emptyList(),
+            messages = emptyList(),
+            fragments = emptyList(),
+            notes = emptyList(),
+            delays = emptyList(),
+            stateInvariants = emptyList(),
+            manualActivations = emptyList(),
+            rowOrder = emptyList(),
+            elidedMessageCount = null,
+        )
+        val imported = importSourceText(source, dialect, seed)
+        val success = imported as? Seq3SourceImportResult.Success ?: run {
+            view.sourceDiagnostics = (imported as Seq3SourceImportResult.Failure).diagnostics
+            view.sourceEvidenceLossPending = false
+            return imported
+        }
+        val evidenceLoss = current.document.messages.any { it.occurrences.isNotEmpty() }
+        val result = success.copy(evidenceLoss = evidenceLoss)
+        if (evidenceLoss && !confirmEvidenceLoss) {
+            view.sourceDiagnostics = emptyList()
+            view.sourceEvidenceLossPending = true
+            return result
+        }
+
+        if (result.document != current.document && !applyCommand(id, Seq3Command.ReplaceDocument(result.document))) {
+            return Seq3SourceImportResult.Failure(emptyList())
+        }
+        view.sourceEditorDialect = dialect
+        seq3ClearSelection(view, clearFocus = true)
+        reloadSourceDraft(id)
+        return result.copy(canonicalSource = result.document.toSource(dialect).trimEnd('\n'))
+    }
+
+    private fun importSourceText(
+        source: String,
+        dialect: Seq3Dialect,
+        existing: Seq3Document,
+        sourceOwnsVisibleLifelines: Boolean = false,
+    ): Seq3SourceImportResult {
+        if (source.length > 2 * 1024 * 1024) {
+            return Seq3SourceImportResult.Failure(
+                listOf(Seq3SourceDiagnostic(1, "Source exceeds the import limit.")),
+            )
+        }
+        if (!source.isBlank()) {
+            val imported = importSeq3Source(source, dialect, existing, sourceOwnsVisibleLifelines)
+            val success = imported as? Seq3SourceImportResult.Success ?: return imported
+            // The text source owns its title: removing its title statement removes the document
+            // title too. Whitespace-only input is handled below as a structural clear that keeps
+            // session metadata, and therefore remains distinct from a new wrapper with no title.
+            if (source.lineSequence().none { it.trim().startsWith("title ") }) {
+                val untitled = success.document.copy(title = "")
+                return success.copy(
+                    document = untitled,
+                    canonicalSource = untitled.toSource(dialect).trimEnd('\n'),
+                )
+            }
+            return success
+        }
+        val empty = existing.copy(
+            lifelines = emptyList(),
+            messages = emptyList(),
+            fragments = emptyList(),
+            notes = emptyList(),
+            delays = emptyList(),
+            stateInvariants = emptyList(),
+            manualActivations = emptyList(),
+            rowOrder = emptyList(),
+            elidedMessageCount = null,
+        )
+        val evidenceLoss = existing.messages.any { it.occurrences.isNotEmpty() }
+        return Seq3SourceImportResult.Success(empty, "", evidenceLoss)
+    }
+
+    /** Newly typed, unmarked rows receive temporary importer ids. Reconcile them against the last
+     *  accepted source result before publishing so changing a label (or another field) retains
+     *  selection, references, and identity instead of manufacturing a fresh row every keystroke. */
+    private fun retainLiveSourceIdentities(
+        baseline: Seq3Document,
+        previous: Seq3Document,
+        imported: Seq3Document,
+    ): Seq3Document {
+        val baselineLifelineIds = baseline.lifelines.mapTo(hashSetOf()) { it.id }
+        val addedLifelines = imported.lifelines.filter { it.id !in baselineLifelineIds }
+        val previousLifelines = previous.lifelines.filter { it.id !in baselineLifelineIds }
+        val lifelineIds = stableIdsForSourceRows(addedLifelines, previousLifelines, { it.id }) { new, old ->
+            new.id == old.id
+        }.toMutableMap()
+        val usedLifelineIds = lifelineIds.values.toMutableSet()
+        // Match unchanged names before positions so moving or deleting declarations keeps the
+        // remaining columns attached to their own identities. Position resolves an edit to the
+        // sole remaining declaration, including a partially typed alias or display name.
+        addedLifelines.forEach { fresh ->
+            if (fresh.id !in lifelineIds) {
+                val match = previousLifelines.firstOrNull { it.id !in usedLifelineIds && it.name == fresh.name && it.kind == fresh.kind }
+                if (match != null) {
+                    lifelineIds[fresh.id] = match.id
+                    usedLifelineIds += match.id
+                }
+            }
+        }
+        addedLifelines.forEachIndexed { index, fresh ->
+            if (fresh.id !in lifelineIds) {
+                val match = previousLifelines.getOrNull(index)?.takeIf { it.id !in usedLifelineIds }
+                if (match != null) {
+                    lifelineIds[fresh.id] = match.id
+                    usedLifelineIds += match.id
+                }
+            }
+        }
+        fun lifelineId(id: String): String = lifelineIds[id] ?: id
+        val normalized = imported.copy(
+            lifelines = imported.lifelines.map { it.copy(id = lifelineId(it.id)) },
+            messages = imported.messages.map { message ->
+                message.copy(
+                    fromLifelineId = lifelineId(message.fromLifelineId),
+                    toLifelineId = message.toLifelineId?.let(::lifelineId),
+                    match = if (message.occurrences.isEmpty() && message.match.tag == message.fromLifelineId) {
+                        message.match.copy(tag = lifelineId(message.match.tag))
+                    } else message.match,
+                )
+            },
+            manualActivations = imported.manualActivations.map { it.copy(lifelineId = lifelineId(it.lifelineId)) },
+        )
+        val baselineMessageIds = baseline.messages.mapTo(hashSetOf()) { it.id }
+        val previousMessages = previous.messages.filter { it.id !in baselineMessageIds && it.occurrences.isEmpty() }
+        val addedMessages = normalized.messages.filter { it.id !in baselineMessageIds && it.occurrences.isEmpty() }
+        val messageIds = stableIdsForSourceRows(
+            addedMessages,
+            previousMessages,
+            { it.id },
+        ) { new, old ->
+            new.fromLifelineId == old.fromLifelineId && new.toLifelineId == old.toLifelineId &&
+                new.kind == old.kind && new.labelTemplate == old.labelTemplate
+        }.toMutableMap()
+        val usedMessageIds = messageIds.values.toMutableSet()
+        addedMessages.forEachIndexed { index, message ->
+            if (message.id in messageIds) return@forEachIndexed
+            val fallback = previousMessages.firstOrNull {
+                it.id !in usedMessageIds && it.fromLifelineId == message.fromLifelineId &&
+                    it.toLifelineId == message.toLifelineId && it.kind == message.kind
+            } ?: previousMessages.getOrNull(index)?.takeIf { it.id !in usedMessageIds }
+            if (fallback != null) {
+                messageIds[message.id] = fallback.id
+                usedMessageIds += fallback.id
+            }
+        }
+
+        fun messageId(id: String): String = messageIds[id] ?: id
+        val baseFragmentIds = baseline.fragments.mapTo(hashSetOf()) { it.id }
+        val fragmentIds = stableIdsForSourceRows(
+            imported.fragments.filter { it.id !in baseFragmentIds },
+            previous.fragments.filter { it.id !in baseFragmentIds },
+            { it.id },
+        ) { new, old -> new.kind == old.kind && new.label == old.label }.toMutableMap()
+        val usedFragmentIds = fragmentIds.values.toMutableSet()
+        imported.fragments.filter { it.id !in baseFragmentIds }.forEachIndexed { index, fragment ->
+            if (fragment.id in fragmentIds) return@forEachIndexed
+            val fallback = previous.fragments.filter { it.id !in baseFragmentIds }.getOrNull(index)
+                ?.takeIf { it.id !in usedFragmentIds }
+            if (fallback != null) {
+                fragmentIds[fragment.id] = fallback.id
+                usedFragmentIds += fallback.id
+            }
+        }
+        val baseNoteIds = baseline.notes.mapTo(hashSetOf()) { it.id }
+        val noteIds = stableIdsForSourceRows(
+            imported.notes.filter { it.id !in baseNoteIds },
+            previous.notes.filter { it.id !in baseNoteIds },
+            { it.id },
+        ) { new, old -> new.text == old.text }.toMutableMap()
+        val usedNoteIds = noteIds.values.toMutableSet()
+        imported.notes.filter { it.id !in baseNoteIds }.forEachIndexed { index, note ->
+            if (note.id in noteIds) return@forEachIndexed
+            val fallback = previous.notes.filter { it.id !in baseNoteIds }.getOrNull(index)
+                ?.takeIf { it.id !in usedNoteIds }
+            if (fallback != null) {
+                noteIds[note.id] = fallback.id
+                usedNoteIds += fallback.id
+            }
+        }
+
+        val baseDelayIds = baseline.delays.mapTo(hashSetOf()) { it.id }
+        val delayIds = stableIdsForSourceRows(
+            imported.delays.filter { it.id !in baseDelayIds },
+            previous.delays.filter { it.id !in baseDelayIds },
+            { it.id },
+        ) { new, old -> new.label == old.label }.toMutableMap()
+        val baseStateIds = baseline.stateInvariants.mapTo(hashSetOf()) { it.id }
+        val stateIds = stableIdsForSourceRows(
+            imported.stateInvariants.filter { it.id !in baseStateIds },
+            previous.stateInvariants.filter { it.id !in baseStateIds },
+            { it.id },
+        ) { new, old -> new.captureName == old.captureName }.toMutableMap()
+
+        val stableMessages = normalized.messages.map { message ->
+            message.copy(
+                id = messageId(message.id),
+                fromLifelineId = message.fromLifelineId,
+                toLifelineId = message.toLifelineId,
+                movedOutFromMessageId = message.movedOutFromMessageId?.let(::messageId),
+            )
+        }
+        val stableFragments = imported.fragments.map { fragment ->
+            fragment.copy(
+                id = fragmentIds[fragment.id] ?: fragment.id,
+                messageIds = fragment.messageIds.map(::messageId),
+                occurrenceRefs = fragment.occurrenceRefs.map { it.copy(messageId = messageId(it.messageId)) },
+                elseOperands = fragment.elseOperands.map { operand -> operand.copy(startsAtMessageId = messageId(operand.startsAtMessageId)) },
+            )
+        }
+        return normalized.copy(
+            messages = stableMessages,
+            fragments = stableFragments,
+            notes = imported.notes.map { note ->
+                note.copy(id = noteIds[note.id] ?: note.id, messageIds = note.messageIds.map(::messageId))
+            },
+            delays = imported.delays.map { delay ->
+                delay.copy(id = delayIds[delay.id] ?: delay.id, afterMessageId = messageId(delay.afterMessageId))
+            },
+            stateInvariants = imported.stateInvariants.map { state ->
+                state.copy(id = stateIds[state.id] ?: state.id, messageId = messageId(state.messageId))
+            },
+            manualActivations = normalized.manualActivations.map { activation ->
+                activation.copy(
+                    startMessageId = messageId(activation.startMessageId),
+                    endMessageId = activation.endMessageId?.let(::messageId),
+                )
+            },
+            rowOrder = imported.rowOrder.map { row -> Seq3RowRef(messageId(row.messageId), row.occurrenceEntryId) },
+        )
+    }
+
+    private fun <T> stableIdsForSourceRows(
+        fresh: List<T>,
+        previous: List<T>,
+        id: (T) -> String,
+        sameShape: (T, T) -> Boolean,
+    ): Map<String, String> {
+        val used = hashSetOf<String>()
+        val result = linkedMapOf<String, String>()
+        fresh.forEach { item ->
+            val match = previous.firstOrNull { candidate -> id(candidate) !in used && sameShape(item, candidate) }
+            if (match != null) {
+                result[id(item)] = id(match)
+                used += id(match)
+            }
+        }
+        return result
     }
 
     /**
@@ -838,24 +1197,38 @@ class Seq3Session(
     }
 
     /**
-     * Applies a fence import as one ordinary ReplaceDocument undo step.  The pure importer does
-     * all parsing before this method reaches mutable session state; therefore malformed source is
-     * an atomic no-op.  Evidence deletion is intentionally a two-step UI flow: callers inspect a
+     * Applies a source import as one ordinary ReplaceDocument undo step. Parsing finishes before
+     * this method reaches mutable session state; therefore malformed source is an atomic no-op.
+     * Whitespace-only input denotes an empty diagram. Evidence deletion is intentionally a two-step UI flow: callers inspect a
      * successful result with [Seq3SourceImportResult.Success.evidenceLoss] and repeat with
      * [confirmEvidenceLoss] only after the user explicitly agrees.
      */
     fun importSource(id: String, source: String, dialect: Seq3Dialect, confirmEvidenceLoss: Boolean = false): Seq3SourceImportResult {
         val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
         val view = viewState(id)
-        val currentCanonical = current.document.toPlantUml()
+        if (view != null && view.sourceDraftInitialized && view.sourceEditorDialect != dialect) {
+            return Seq3SourceImportResult.Failure(
+                listOf(Seq3SourceDiagnostic(1, "Source dialect changed. Reload source to continue.")),
+            )
+        }
+        val currentCanonical = current.document.toSource(dialect)
         val stale = view?.sourceDraftInitialized == true && view.sourceDraft != view.sourceDraftCanonical &&
             view.sourceDraftCanonical != currentCanonical
         if (stale) {
             return Seq3SourceImportResult.Failure(listOf(Seq3SourceDiagnostic(1, "Diagram changed. Reload source to continue.")))
         }
-        val result = importSeq3Source(source, dialect, current.document)
-        val success = result as? Seq3SourceImportResult.Success ?: return result
-        if (success.evidenceLoss && !confirmEvidenceLoss) return success
+        val liveBaseline = view?.sourceLiveImportBaseline?.takeIf { view.sourceEvidenceLossPending && source.isNotBlank() }
+        val result = importSourceText(source, dialect, liveBaseline ?: current.document, sourceOwnsVisibleLifelines = liveBaseline != null)
+        val imported = result as? Seq3SourceImportResult.Success ?: return result
+        if (imported.evidenceLoss && !confirmEvidenceLoss) return imported
+        val baseline = view?.sourceLiveImportBaseline ?: current.document
+        val success = imported.copy(
+            document = retainLiveSourceIdentities(
+                baseline = baseline,
+                previous = view?.sourceLiveLastAppliedDocument ?: current.document,
+                imported = imported.document,
+            ),
+        ).let { stable -> stable.copy(canonicalSource = stable.document.toSource(dialect).trimEnd('\n')) }
         if (success.document != current.document) {
             if (!applyCommand(id, Seq3Command.ReplaceDocument(success.document))) {
                 return Seq3SourceImportResult.Failure(emptyList())

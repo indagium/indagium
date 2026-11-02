@@ -58,6 +58,183 @@ class Seq3SourceImportTest {
         assertEquals(before.messages.single().occurrences, result.document.messages.single().occurrences)
     }
 
+    @Test fun guidedActivationDirectivesBecomeManualBarsAndKeepEvidenceInBothDialects() {
+        val before = document().copy(messages = document().messages +
+            Seq3Message("m2", Seq3Match("B", "reply"), "B", "A", "reply"),
+        )
+        Seq3Dialect.entries.forEach { dialect ->
+            val lines = before.toSource(dialect).lines().toMutableList()
+            val firstArrow = lines.indexOfFirst { it.contains("ping") && it.contains(":") }
+            val firstActivation = if (dialect == Seq3Dialect.MERMAID) "    activate B" else "activate B"
+            val deactivation = if (dialect == Seq3Dialect.MERMAID) "    deactivate B" else "deactivate B"
+            lines.add(firstArrow, firstActivation)
+            val secondArrow = lines.indexOfFirst { it.contains("reply") && it.contains(":") }
+            lines.add(secondArrow + 1, deactivation)
+
+            val imported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(lines.joinToString("\n"), dialect, before),
+                dialect.name,
+            )
+            assertFalse(imported.evidenceLoss, dialect.name)
+            assertEquals(before.messages.first().occurrences, imported.document.messages.first().occurrences, dialect.name)
+            assertFalse(imported.document.showActivations, "hand-authored bars replace auto bars after source edits")
+            assertEquals("B", imported.document.manualActivations.single().lifelineId, dialect.name)
+            assertEquals("m1", imported.document.manualActivations.single().startMessageId, dialect.name)
+            assertEquals("m2", imported.document.manualActivations.single().endMessageId, dialect.name)
+            assertEquals(imported.canonicalSource, imported.document.toSource(dialect).trimEnd('\n'), dialect.name)
+        }
+    }
+
+    @Test fun activationAfterAMessageClosesOnThatMessageAndMovedDirectivesChangeAnchors() {
+        val before = document().copy(
+            messages = document().messages + listOf(
+                Seq3Message("m2", Seq3Match("B", "reply"), "B", "A", "reply"),
+                Seq3Message("m3", Seq3Match("A", "again"), "A", "B", "again"),
+            ),
+        )
+        Seq3Dialect.entries.forEach { dialect ->
+            val existing = before.copy(
+                manualActivations = listOf(
+                    Seq3ManualActivation("bar", "B", "m1", endMessageId = "m2"),
+                ),
+            )
+            val lines = existing.toSource(dialect).lines().toMutableList()
+            val activationLines = lines.filter { it.trim().startsWith("activate ") || it.trim().startsWith("deactivate ") }
+            assertEquals(2, activationLines.size, dialect.name)
+            lines.removeAll { it.trim().startsWith("activate ") || it.trim().startsWith("deactivate ") }
+            val start = activationLines.single { it.trim().startsWith("activate ") }
+            val end = activationLines.single { it.trim().startsWith("deactivate ") }
+            val secondRow = lines.indexOfFirst { it.contains(": reply") }
+            lines.add(secondRow + 1, start)
+            val thirdRow = lines.indexOfFirst { it.contains(": again") }
+            lines.add(thirdRow + 1, end)
+
+            val imported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(lines.joinToString("\n"), dialect, existing),
+                dialect.name,
+            )
+            assertEquals(listOf("activate B", "deactivate B"), activationLines.map { it.trim() }, dialect.name)
+            assertEquals("m2", imported.document.manualActivations.single().startMessageId, dialect.name)
+            assertEquals("m3", imported.document.manualActivations.single().endMessageId, dialect.name)
+            assertFalse(imported.document.showActivations, dialect.name)
+        }
+    }
+
+    @Test fun activationAnchorsDoNotChangeWhenCommentsAndBlankLinesAreInserted() {
+        val before = document().copy(
+            messages = document().messages + Seq3Message("m2", Seq3Match("B", "reply"), "B", "A", "reply"),
+            manualActivations = listOf(Seq3ManualActivation("bar", "B", "m1", endMessageId = "m2")),
+        )
+        Seq3Dialect.entries.forEach { dialect ->
+            val lines = before.toSource(dialect).lines().toMutableList()
+            val activation = lines.indexOfFirst { it.trim() == "activate B" }
+            val comment = if (dialect == Seq3Dialect.MERMAID) {
+                "    %% spacing around this directive is irrelevant"
+            } else {
+                "' spacing around this directive is irrelevant"
+            }
+            repeat(4) { lines.add(activation, "") }
+            lines.add(activation + 4, comment)
+
+            val imported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(lines.joinToString("\n"), dialect, before),
+                dialect.name,
+            )
+            assertEquals(before.manualActivations, imported.document.manualActivations, dialect.name)
+            assertFalse(imported.document.showActivations, dialect.name)
+        }
+    }
+
+    @Test fun insertedNotesAndFragmentsImportAsAuthoredStructures() {
+        val before = document()
+        Seq3Dialect.entries.forEach { dialect ->
+            val sourceLines = before.toSource(dialect).lines().toMutableList()
+            val arrow = sourceLines.indexOfFirst { it.contains(": ping") }
+            val note = if (dialect == Seq3Dialect.MERMAID) {
+                "    Note over A,B: explanatory note"
+            } else {
+                "note over A,B: explanatory note"
+            }
+            sourceLines.add(arrow + 1, note)
+            val withNote = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(sourceLines.joinToString("\n"), dialect, before),
+                dialect.name,
+            )
+            assertEquals("explanatory note", withNote.document.notes.single().text, dialect.name)
+            assertEquals(listOf("m1"), withNote.document.notes.single().messageIds, dialect.name)
+        }
+
+        val wrongScopeLines = before.toSource(Seq3Dialect.MERMAID).lines().toMutableList()
+        val messageArrow = wrongScopeLines.indexOfFirst { it.contains("A->>B: ping") }
+        wrongScopeLines.add(messageArrow + 1, "    Note over A: explanatory note")
+        val wrongScope = assertIs<Seq3SourceImportResult.Failure>(
+            importSeq3Source(wrongScopeLines.joinToString("\n"), Seq3Dialect.MERMAID, before),
+        )
+        assertTrue(wrongScope.diagnostics.any { it.message.contains("scope does not match") })
+
+        val fragmentLines = before.toSource(Seq3Dialect.MERMAID).lines().toMutableList()
+        val message = fragmentLines.indexOfFirst { it.contains("A->>B: ping") }
+        fragmentLines.add(message + 1, "    loop retry")
+        fragmentLines.add(message + 2, "    A->>B: retry")
+        fragmentLines.add(message + 3, "    end")
+        val withFragment = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(fragmentLines.joinToString("\n"), Seq3Dialect.MERMAID, before),
+        )
+        assertEquals("retry", withFragment.document.fragments.single().label)
+        assertEquals(listOf("retry"), withFragment.document.fragments.single().messageIds.map { id ->
+            withFragment.document.messages.single { it.id == id }.labelTemplate
+        })
+
+        val emptyFragment = assertIs<Seq3SourceImportResult.Failure>(
+            importSeq3Source(
+                "sequenceDiagram\n    participant A as Alpha\n    participant B as Beta\n    loop retry\n    end",
+                Seq3Dialect.MERMAID,
+                Seq3Document(),
+            ),
+        )
+        assertTrue(emptyFragment.diagnostics.any { it.message.contains("at least one message") })
+    }
+
+    @Test fun plantUmlRefRoundTripPreservesItsExistingSpan() {
+        val before = document().copy(
+            fragments = listOf(Seq3Fragment("ref", Seq3FragmentKind.REF, "linked flow", listOf("m1"))),
+        )
+        val result = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(before.toSource(Seq3Dialect.PLANTUML), Seq3Dialect.PLANTUML, before),
+        )
+        assertEquals(before.fragments.single(), result.document.fragments.single())
+
+        val unmarked = assertIs<Seq3SourceImportResult.Failure>(
+            importSeq3Source(
+                "@startuml\nparticipant A as Alpha\nparticipant B as Beta\nref over A,B : linked flow\nA -> B: ping\n@enduml",
+                Seq3Dialect.PLANTUML,
+                Seq3Document(),
+            ),
+        )
+        assertTrue(unmarked.diagnostics.any { it.message.contains("cannot be mapped to a message span") })
+    }
+
+    @Test fun fallbackFragmentTracksInsertedRowsAndRejectsUnrepresentableScopeEdits() {
+        val before = document().copy(
+            fragments = listOf(Seq3Fragment("group", Seq3FragmentKind.GROUP, "work", listOf("m1"))),
+        )
+        val lines = before.toSource(Seq3Dialect.MERMAID).lines().toMutableList()
+        val message = lines.indexOfFirst { it.contains("A->>B: ping") }
+        lines.add(message + 1, "    A->>B: added")
+        val imported = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(lines.joinToString("\n"), Seq3Dialect.MERMAID, before),
+        )
+        assertEquals(2, imported.document.fragments.single().messageIds.size)
+        assertTrue(imported.document.messages.any { it.labelTemplate == "added" })
+
+        val changedScope = before.toSource(Seq3Dialect.MERMAID)
+            .replace("Note over A,B: work", "Note over A: work")
+        val rejected = assertIs<Seq3SourceImportResult.Failure>(
+            importSeq3Source(changedScope, Seq3Dialect.MERMAID, before),
+        )
+        assertTrue(rejected.diagnostics.any { it.message.contains("participant span is not editable") })
+    }
+
     @Test fun sourceImportKeepsStyleAndHeaderWidthMetadata() {
         val style = Seq3ArtifactStyle(fillArgb = 0xff112233.toInt(), borderArgb = 0xff445566.toInt(), textArgb = null)
         val before = document().copy(
@@ -216,6 +393,43 @@ class Seq3SourceImportTest {
         )
         assertTrue(boundsFailure.diagnostics.single().line > 0)
         assertTrue(boundsFailure.diagnostics.single().message.contains("too many lifelines"))
+    }
+
+    @Test fun authoredParticipantsKeepReadableUniqueAliasesAcrossExport() {
+        Seq3Dialect.entries.forEach { dialect ->
+            val source = if (dialect == Seq3Dialect.MERMAID) {
+                "sequenceDiagram\n    participant Participant as Participant\n    actor Actor as Actor\n    Participant->>Actor: call"
+            } else {
+                "@startuml\nparticipant \"Participant\" as Participant\nactor \"Actor\" as Actor\nParticipant -> Actor: call\n@enduml"
+            }
+            val imported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(source, dialect, Seq3Document()),
+                dialect.name,
+            )
+            assertEquals(setOf("Participant", "Actor"), imported.document.lifelines.map { it.id }.toSet(), dialect.name)
+            assertTrue(imported.canonicalSource.contains(" as Participant"), dialect.name)
+            assertTrue(imported.canonicalSource.contains(" as Actor"), dialect.name)
+
+            val reimported = assertIs<Seq3SourceImportResult.Success>(
+                importSeq3Source(imported.canonicalSource, dialect, imported.document),
+                dialect.name,
+            )
+            assertEquals(setOf("Participant", "Actor"), reimported.document.lifelines.map { it.id }.toSet(), dialect.name)
+        }
+
+        val collisionExisting = Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A-B", "Existing", setOf("Existing"), 0)),
+        )
+        val collision = assertIs<Seq3SourceImportResult.Success>(
+            importSeq3Source(
+                "sequenceDiagram\n    participant A_B as New\n    A_B->>A_B: self",
+                Seq3Dialect.MERMAID,
+                collisionExisting,
+            ),
+        )
+        assertEquals("A-B", collision.document.lifelines.first().id)
+        assertTrue(collision.document.lifelines.last().id != "A_B", "the source alias collides with the existing emitted alias")
+        assertEquals(2, collision.document.lifelines.map { it.id }.toSet().size)
     }
 
     @Test fun unmarkedLifecycleAndSelfStatementsBecomeAuthoredKinds() {

@@ -204,7 +204,7 @@ internal fun diagramWorkspaceTitle(id: DiagramWorkspaceSectionId): String = when
     DiagramWorkspaceSectionId.LIFELINES -> "Lifelines"
     DiagramWorkspaceSectionId.ARTIFACTS -> "Artifacts"
     DiagramWorkspaceSectionId.PREVIEW -> "Diagram preview"
-    DiagramWorkspaceSectionId.SOURCE -> "PlantUML"
+    DiagramWorkspaceSectionId.SOURCE -> "Source"
 }
 
 private fun diagramWorkspaceSlot(

@@ -1166,16 +1166,32 @@ internal class Seq3ViewState {
     var rowReorderPreview by mutableStateOf<Seq3RowReorderPreview?>(null)
     var headerResizePreview by mutableStateOf<Seq3HeaderResizePreview?>(null)
 
-    /** Source text stays a detached draft until Apply, independent of tile visibility. */
+    /** Source text is a session-scoped draft, independent of tile visibility. Live import keeps
+     *  the editor text intact while the diagram follows every valid debounced revision. */
     var sourceDraftInitialized by mutableStateOf(false)
     var sourceDraft by mutableStateOf("")
     var sourceDraftCanonical by mutableStateOf("")
+    /** Exact raw source most recently accepted by live import. This is distinct from
+     *  [sourceDraftCanonical], since canonical output inserts identity markers the editor may not
+     *  be showing. */
+    var sourceLiveLastAppliedText by mutableStateOf("")
+    var sourceEditorDialect by mutableStateOf(Seq3Dialect.PLANTUML)
+    var sourceLiveEnabled by mutableStateOf(true)
+    var sourceAutocompleteEnabled by mutableStateOf(true)
     var sourceDraftDirty by mutableStateOf(false)
     var sourceDraftStale by mutableStateOf(false)
     var sourceDiagnostics by mutableStateOf<List<com.indagium.diagram3.Seq3SourceDiagnostic>>(emptyList())
     var sourceEvidenceLossPending by mutableStateOf(false)
+    var sourceDialectChangePending by mutableStateOf<Seq3Dialect?>(null)
     var sourceEditorGeneration by mutableStateOf(0)
     var sourceFocusRequestGeneration by mutableStateOf(0)
+
+    /** Fixed identity baseline for source imports until the user reloads or changes dialect. The
+     *  most recent successful live result is tracked separately so newly-authored rows can retain
+     *  their identity across repeated parses of an unmarked draft. These are runtime-only and
+     *  deliberately not Compose state: their companion source status lives in the fields above. */
+    var sourceLiveImportBaseline: Seq3Document? = null
+    var sourceLiveLastAppliedDocument: Seq3Document? = null
 
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT_WIDTH)

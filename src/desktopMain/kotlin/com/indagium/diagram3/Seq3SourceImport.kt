@@ -26,7 +26,25 @@ private data class ParsedArrow(val from: String, val to: String?, val label: Str
 
 private data class LifecycleDirective(val kind: Seq3Kind, val targetAlias: String)
 
+private data class SourceActivationDirective(val line: Int, val activate: Boolean, val alias: String)
+
+private data class SourceEmissionAnchor(val line: Int, val messageId: String, val occurrenceEntryId: Int?)
+
+private data class OpenSourceActivation(val alias: String, val start: SourceEmissionAnchor)
+
+private data class BoundSourceActivation(
+    val activate: Boolean,
+    val alias: String,
+    val messageId: String,
+    val occurrenceEntryId: Int?,
+)
+
 private const val MAX_SEQ3_IMPORT_SOURCE_CHARS = 2 * 1024 * 1024
+private val SAFE_SOURCE_LIFELINE_ID = Regex("^[A-Za-z_][A-Za-z0-9_]*$")
+private val RESERVED_SOURCE_LIFELINE_IDS = setOf(
+    "participant", "actor", "as", "end", "loop", "alt", "opt", "par", "critical", "break", "group",
+    "else", "and", "option", "rect", "activate", "deactivate", "create", "destroy", "note", "ref",
+)
 
 /**
  * Conservative inverse of Indagium's two emitters.  This is intentionally not a Mermaid or
@@ -35,7 +53,12 @@ private const val MAX_SEQ3_IMPORT_SOURCE_CHARS = 2 * 1024 * 1024
  * writes.  Marked rows retain their evidence; unmarked arrows become authored/evidence-free rows.
  */
 @Suppress("CyclomaticComplexMethod", "LongMethod", "ReturnCount")
-fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Document): Seq3SourceImportResult {
+fun importSeq3Source(
+    source: String,
+    dialect: Seq3Dialect,
+    existing: Seq3Document,
+    sourceOwnsVisibleLifelines: Boolean = false,
+): Seq3SourceImportResult {
     val lines = source.replace("\r\n", "\n").replace('\r', '\n').split('\n')
     val errors = mutableListOf<Seq3SourceDiagnostic>()
 
@@ -61,10 +84,14 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     val knownOperands = existing.fragments.flatMap { fragment ->
         fragment.elseOperands.map { it.id to (fragment.id to it) }
     }.toMap()
-    val expectedRenderedLabels = sourceMarkerLabels(existing.toSource(dialect), dialect)
+    val existingSource = existing.toSource(dialect)
+    val expectedRenderedLabels = sourceMarkerLabels(existingSource, dialect)
+    val expectedFragmentScopes = sourceMarkerFragmentScopes(existingSource, dialect)
     val aliases = linkedMapOf<String, String>() // alias -> stable lifeline id
     existing.lifelines.forEach { aliases[it.id] = it.id } // stable ids are the normal aliases
     val lifelineEdits = mutableMapOf<String, Seq3Lifeline>()
+    val declaredAliases = mutableSetOf<String>()
+    val declaredLifelines = mutableListOf<String>()
     val messageEdits = mutableMapOf<String, Seq3Message>()
     val fragmentEdits = mutableMapOf<String, Seq3Fragment>()
     val noteEdits = mutableMapOf<String, Seq3Note>()
@@ -90,16 +117,22 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
     val seenEvidence = mutableSetOf<Pair<String, Int?>>()
     val seenMarkerPayloads = mutableSetOf<String>()
     val unmarkedMessages = mutableListOf<Seq3Message>()
+    val sourceActivationDirectives = mutableListOf<SourceActivationDirective>()
+    val sourceEmissions = mutableListOf<SourceEmissionAnchor>()
     val fragmentStack = ArrayDeque<String>()
+    val fragmentOpenOrder = ArrayDeque<Pair<Boolean, String>>() // true for an unmarked fragment
     var title: String? = null
     var pending: SourceMarker? = null
     var precedingEmission: SourceMarker? = null
     var lifecycleBeforeArrow: LifecycleDirective? = null
     var lastMarkedArrow: SourceMarker? = null
     var lastUnmarkedMessageIndex: Int? = null
+    var precedingMessageId: String? = null
 
-    fun recordEmission(marker: SourceMarker) {
+    fun recordEmission(marker: SourceMarker, line: Int? = null) {
         importedRowOrder += Seq3RowRef(marker.id, marker.entryId)
+        if (line != null) sourceEmissions += SourceEmissionAnchor(line, marker.id, marker.entryId)
+        precedingMessageId = marker.id
         pendingOperands.toList().forEach { (operandMarker, guard) ->
             val (fragmentId, old) = knownOperands[operandMarker.id] ?: return@forEach
             rebuiltOperands.getOrPut(fragmentId, ::mutableListOf).add(
@@ -120,6 +153,22 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                 .add(Seq3OccurrenceRef(marker.id, marker.entryId ?: -1))
         }
         activeNewFragments.forEach { id -> newFragmentMessages.getOrPut(id, ::mutableListOf).add(marker.id) }
+    }
+
+    fun expectedNoteScope(messageId: String): String? {
+        val message = messageEdits[messageId]
+            ?: knownMessages[messageId]
+            ?: unmarkedMessages.firstOrNull { it.id == messageId }
+            ?: return null
+        val lifelines = existing.lifelines + lifelineEdits.values.filter { candidate ->
+            existing.lifelines.none { it.id == candidate.id }
+        }
+        val order = lifelines.withIndex().associate { it.value.id to it.index }
+        val aliasById = aliases.entries.associate { (alias, id) -> id to alias }
+        val endpoints = listOfNotNull(message.fromLifelineId, message.toLifelineId)
+            .distinct()
+            .sortedBy { order[it] ?: Int.MAX_VALUE }
+        return endpoints.mapNotNull { aliasById[it] }.takeIf { it.isNotEmpty() }?.joinToString(",")
     }
 
     lines.forEachIndexed { index, raw ->
@@ -175,6 +224,11 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         if (text == expectedStart || (dialect == Seq3Dialect.PLANTUML && text == "@enduml")) return@forEachIndexed
         if (text.startsWith("title ")) { title = unescapeSource(text.removePrefix("title "), dialect); return@forEachIndexed }
 
+        parseActivationDirective(text)?.let { (activate, alias) ->
+            sourceActivationDirectives += SourceActivationDirective(lineNo, activate, alias)
+            return@forEachIndexed
+        }
+
         parseLifecycleDirective(text, dialect)?.let { directive ->
             if (directive.kind == Seq3Kind.DESTROY && dialect == Seq3Dialect.PLANTUML) {
                 val marker = lastMarkedArrow
@@ -207,8 +261,13 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         parseParticipant(text, dialect)?.let { (alias, name, kind) ->
             lastMarkedArrow = null
             val marker = pending.also { pending = null }
-            val id = marker?.takeIf { it.type == "lifeline" }?.id ?: aliases[alias] ?: "import-${UUID.randomUUID()}"
+            val id = marker?.takeIf { it.type == "lifeline" }?.id ?: aliases[alias]
+                ?: newImportedLifelineId(alias, existing.lifelines, lifelineEdits.values)
             aliases[alias] = id
+            if (!declaredAliases.add(alias) || id in declaredLifelines) {
+                fail(lineNo, "Duplicate participant declaration '$alias'.")
+            }
+            declaredLifelines += id
             val previous = knownLifelines[id]
             if (previous != null) {
                 val renderedName = seq3DisplayName(
@@ -234,6 +293,11 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         }
         parseArrow(text, dialect)?.let { arrow ->
             val marker = pending.also { pending = null }
+            if (sourceOwnsVisibleLifelines &&
+                (arrow.from !in declaredAliases || (arrow.to != null && arrow.to !in declaredAliases))) {
+                fail(lineNo, "Arrow references an undeclared participant.")
+                return@forEachIndexed
+            }
             val from = aliases[arrow.from] ?: arrow.from.takeIf { it in knownLifelines }
             val to = arrow.to?.let { aliases[it] ?: it.takeIf { candidate -> candidate in knownLifelines } }
             if (from == null || (arrow.to != null && to == null)) {
@@ -275,11 +339,11 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                     fail(lineNo, "Repeated message '${marker.id}' has inconsistent edits.")
                 }
                 seenMarkedMessages += marker.id
-                recordEmission(marker)
+                recordEmission(marker, lineNo)
                 lastMarkedArrow = marker
                 lastUnmarkedMessageIndex = null
             } else {
-                unmarkedMessages += Seq3Message(
+                val newMessage = Seq3Message(
                     "import-${UUID.randomUUID()}",
                     Seq3Match(from, arrow.label),
                     from,
@@ -289,7 +353,17 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                     repeat = Seq3Repeat.EVERY,
                     authoring = Seq3Authoring.EDITED,
                 )
+                unmarkedMessages += newMessage
+                sourceEmissions += SourceEmissionAnchor(lineNo, newMessage.id, null)
                 importedRowOrder += Seq3RowRef(unmarkedMessages.last().id)
+                precedingMessageId = newMessage.id
+                activeFragments.forEach { fragmentId ->
+                    rebuiltFragmentMessages.getOrPut(fragmentId, ::mutableListOf).add(Seq3OccurrenceRef(newMessage.id, -1))
+                }
+                activeNotes.forEach { noteId ->
+                    rebuiltNoteMessages.getOrPut(noteId, ::mutableListOf).add(Seq3OccurrenceRef(newMessage.id, -1))
+                }
+                activeNewFragments.forEach { id -> newFragmentMessages.getOrPut(id, ::mutableListOf).add(newMessage.id) }
                 lifecycleBeforeArrow = null
                 lastMarkedArrow = null
                 lastUnmarkedMessageIndex = unmarkedMessages.lastIndex
@@ -301,15 +375,22 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             val marker = pending.also { pending = null }
             if (marker?.type == "message" && marker.role == "elision") {
                 seenMarkedMessages += marker.id
-                recordEmission(marker)
+                recordEmission(marker, lineNo)
                 return@forEachIndexed
             }
             if (marker?.type == "fragment") {
                 val old = knownFragments[marker.id] ?: return@forEachIndexed
+                val expectedScope = expectedFragmentScopes[marker.id]
+                if (expectedScope != null && note.from != expectedScope) {
+                    fail(lineNo, "Fragment participant span is not editable in this source form.")
+                    return@forEachIndexed
+                }
                 val label = if (old.kind == Seq3FragmentKind.GROUP) note.label else note.label.substringAfter(' ', "")
                 fragmentEdits[marker.id] = old.copy(label = label)
                 seenMarkedFragments += marker.id
+                activeFragments.addLast(marker.id)
                 fragmentStack.addLast(marker.id)
+                fragmentOpenOrder.addLast(false to marker.id)
                 return@forEachIndexed
             }
             // A document note uses the same dialect statement as a NOTE message.  Its identity
@@ -354,15 +435,21 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                 return@forEachIndexed
             }
             if (marker == null) {
-                if (dialect == Seq3Dialect.MERMAID) {
-                    fail(lineNo, "Unmarked Mermaid note is ambiguous; add an Indagium note-span marker.")
+                val invalidAlias = note.from.split(',').map(String::trim).firstOrNull { aliases[it] == null }
+                val anchor = precedingMessageId ?: run {
+                    fail(lineNo, "Unmarked note has no preceding message.")
                     return@forEachIndexed
                 }
-                val anchor = precedingEmission ?: run {
-                    fail(lineNo, "Unmarked note has no preceding marked message.")
+                val expectedScope = expectedNoteScope(anchor)
+                if (invalidAlias != null || expectedScope == null) {
+                    fail(lineNo, "Note references an undeclared participant or an unsupported message scope.")
                     return@forEachIndexed
                 }
-                newNotes += Seq3Note("import-${UUID.randomUUID()}", note.label, listOf(anchor.id))
+                if (note.from.split(',').map(String::trim).joinToString(",") != expectedScope) {
+                    fail(lineNo, "Note scope does not match the participants touched by its preceding message.")
+                    return@forEachIndexed
+                }
+                newNotes += Seq3Note("import-${UUID.randomUUID()}", note.label, listOf(anchor))
                 return@forEachIndexed
             }
             if (marker.type != "message") {
@@ -374,7 +461,7 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
                 // summary, not a NOTE message edit or omitted evidence, so preserve its parent and
                 // record only the stable summary-row position.
                 seenMarkedMessages += marker.id
-                recordEmission(marker)
+                recordEmission(marker, lineNo)
                 return@forEachIndexed
             }
             val old = knownMessages[marker.id] ?: return@forEachIndexed
@@ -400,15 +487,20 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             )
             messageEdits[marker.id] = update
             seenMarkedMessages += marker.id
-            recordEmission(marker)
+            recordEmission(marker, lineNo)
             return@forEachIndexed
         }
         parseFragmentOpen(text, dialect)?.let { (kind, label) ->
             val marker = pending.also { pending = null }
             if (marker == null) {
+                if (kind == Seq3FragmentKind.REF) {
+                    fail(lineNo, "An unmarked PlantUML ref cannot be mapped to a message span.")
+                    return@forEachIndexed
+                }
                 val id = "import-${UUID.randomUUID()}"
                 newFragments += Seq3Fragment(id, kind, label, emptyList())
                 activeNewFragments.addLast(id)
+                fragmentOpenOrder.addLast(true to id)
                 return@forEachIndexed
             }
             if (marker.type != "fragment") {
@@ -423,10 +515,23 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             }
             val resolvedKind = fallbackKind ?: kind
             val resolvedLabel = if (fallbackKind != null) label.substringAfter(' ', "") else label
+            if (resolvedKind == Seq3FragmentKind.REF) {
+                val expectedScope = expectedFragmentScopes[marker.id]
+                val importedScope = parsePlantUmlRefScope(text)
+                if (expectedScope != null && importedScope != expectedScope) {
+                    fail(lineNo, "Fragment participant span is not editable in this source form.")
+                    return@forEachIndexed
+                }
+            }
             fragmentEdits[marker.id] = old.copy(kind = resolvedKind, label = resolvedLabel)
             seenMarkedFragments += marker.id
-            activeFragments.addLast(marker.id)
-            if (resolvedKind != Seq3FragmentKind.REF) fragmentStack.addLast(marker.id)
+            // PlantUML ref-over is a standalone statement. Its source has no closing `end`, so
+            // retain the known message span rather than treating every later row as its member.
+            if (resolvedKind != Seq3FragmentKind.REF) {
+                activeFragments.addLast(marker.id)
+                fragmentStack.addLast(marker.id)
+                fragmentOpenOrder.addLast(false to marker.id)
+            }
             return@forEachIndexed
         }
         parseDelay(text, dialect)?.let { label ->
@@ -457,8 +562,21 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         }
         if (text == "end") {
             pending = null
-            if (fragmentStack.isNotEmpty()) fragmentStack.removeLast()
-            if (activeNewFragments.isNotEmpty()) activeNewFragments.removeLast()
+            val (isNew, fragmentId) = fragmentOpenOrder.removeLastOrNull() ?: run {
+                fail(lineNo, "Fragment end has no matching fragment start.")
+                return@forEachIndexed
+            }
+            if (isNew) {
+                val openId = activeNewFragments.removeLastOrNull()
+                if (openId != fragmentId) fail(lineNo, "Fragment ends do not match their start order.")
+                if (newFragmentMessages[fragmentId].isNullOrEmpty()) {
+                    fail(lineNo, "A fragment must contain at least one message row.")
+                }
+            } else if (fragmentStack.isNotEmpty()) {
+                fragmentStack.removeLast()
+            } else {
+                fail(lineNo, "Fragment end has no matching fragment start.")
+            }
             return@forEachIndexed
         }
         parseOperand(text, dialect)?.let { guard ->
@@ -484,11 +602,66 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
         }
         fail(lineNo, "Unsupported ${dialect.name.lowercase()} statement '$text'.")
     }
+    val canonicalSource = existing.toSource(dialect)
+    val canonicalActivationAnchors = bindSourceActivations(
+        canonicalSource,
+        sourceEmissionAnchors(canonicalSource, dialect),
+    )
+    val importedActivationAnchors = bindSourceActivations(sourceActivationDirectives, sourceEmissions)
+    val activationDirectivesChanged = importedActivationAnchors != canonicalActivationAnchors
+    var importedManualActivations: List<Seq3ManualActivation>? = null
+    if (activationDirectivesChanged) {
+        val open = mutableListOf<OpenSourceActivation>()
+        val imported = mutableListOf<Seq3ManualActivation>()
+        fun anchorFor(line: Int): SourceEmissionAnchor? =
+            sourceEmissions.lastOrNull { it.line < line } ?: sourceEmissions.firstOrNull()
+        sourceActivationDirectives.forEach { directive ->
+            if (aliases[directive.alias] == null) {
+                fail(directive.line, "Activation references an undeclared participant '${directive.alias}'.")
+                return@forEach
+            }
+            val anchor = anchorFor(directive.line)
+            if (anchor == null) {
+                fail(directive.line, "Activation has no message row to anchor to.")
+                return@forEach
+            }
+            if (directive.activate) {
+                open += OpenSourceActivation(directive.alias, anchor)
+            } else {
+                val openIndex = open.indexOfLast { it.alias == directive.alias }
+                val start = if (openIndex >= 0) open.removeAt(openIndex) else null
+                if (start == null) {
+                    fail(directive.line, "Deactivation for '${directive.alias}' has no matching activation.")
+                } else {
+                    val lifelineId = aliases[directive.alias] ?: return@forEach
+                    imported += Seq3ManualActivation(
+                        id = "source-${UUID.randomUUID()}",
+                        lifelineId = lifelineId,
+                        startMessageId = start.start.messageId,
+                        startOccurrenceEntryId = start.start.occurrenceEntryId,
+                        endMessageId = anchor.messageId,
+                        endOccurrenceEntryId = anchor.occurrenceEntryId,
+                    )
+                }
+            }
+        }
+        open.asReversed().forEach { start ->
+            val lifelineId = aliases[start.alias] ?: return@forEach
+            imported += Seq3ManualActivation(
+                id = "source-${UUID.randomUUID()}",
+                lifelineId = lifelineId,
+                startMessageId = start.start.messageId,
+                startOccurrenceEntryId = start.start.occurrenceEntryId,
+            )
+        }
+        importedManualActivations = imported
+    }
     pending?.let { fail(lines.size, "Marker for ${it.type} '${it.id}' is not followed by a statement.") }
     if (pendingOperands.isNotEmpty()) fail(lines.size, "Operand divider has no following marked emission.")
     if (activeFragments.isNotEmpty()) fail(lines.size, "Missing fragment end marker for '${activeFragments.last()}'.")
     if (activeNotes.isNotEmpty()) fail(lines.size, "Missing note span end marker for '${activeNotes.last()}'.")
     if (activeNewFragments.isNotEmpty()) fail(lines.size, "Unmarked fragment is missing end.")
+    if (fragmentOpenOrder.isNotEmpty()) fail(lines.size, "Fragment is missing its end statement.")
     if (dialect == Seq3Dialect.PLANTUML && lines.none { it.trim() == "@enduml" }) {
         fail(lines.size, "Missing @enduml.")
     }
@@ -511,8 +684,13 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             message.occurrences.isNotEmpty() &&
             message.id !in order
     }
-    val mergedLifelines = existing.lifelines.map { lifelineEdits[it.id] ?: it } +
-        lifelineEdits.values.filter { it.id !in knownLifelines }
+    val mergedLifelines = if (sourceOwnsVisibleLifelines) {
+        declaredLifelines.mapIndexedNotNull { index, id -> lifelineEdits[id]?.copy(ordinal = index) } +
+            existing.lifelines.filter { it.visibility == Seq3Visibility.HIDDEN && it.id !in declaredLifelines }
+    } else {
+        existing.lifelines.map { lifelineEdits[it.id] ?: it } +
+            lifelineEdits.values.filter { it.id !in knownLifelines }
+    }
     val importedMessages = existing.messages
         .filter { it.id in order || it.visibility == Seq3Visibility.HIDDEN }
         .map { message ->
@@ -565,6 +743,8 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             .filter { it.visibility == Seq3Visibility.HIDDEN || it.id in seenMarkedDelays } + newDelays,
         stateInvariants = existing.stateInvariants.map { stateEdits[it.id] ?: it }
             .filter { it.visibility == Seq3Visibility.HIDDEN || it.id in seenMarkedStates },
+        manualActivations = importedManualActivations ?: existing.manualActivations,
+        showActivations = if (activationDirectivesChanged) false else existing.showActivations,
     )
     val orderedBase = if (orderChanged) {
         resultBase.copy(rowOrder = mergeImportedRowOrder(existing, resultBase, baselineRows, observedRows, missingRows))
@@ -581,7 +761,19 @@ fun importSeq3Source(source: String, dialect: Seq3Dialect, existing: Seq3Documen
             listOf(Seq3SourceDiagnostic(1, lifecycleError.rejectionReason())),
         )
     }
-    if (sourceDirectives(source) != sourceDirectives(result.toSource(dialect))) {
+    val expectedSource = result.toSource(dialect)
+    val expectedDirectives = sourceDirectives(expectedSource)
+    val actualDirectives = sourceDirectives(source)
+    val directiveMismatch = if (activationDirectivesChanged) {
+        val expectedLifecycle = expectedDirectives.filterNot { it.startsWith("activate ") || it.startsWith("deactivate ") }
+        val actualLifecycle = actualDirectives.filterNot { it.startsWith("activate ") || it.startsWith("deactivate ") }
+        bindSourceActivations(expectedSource, sourceEmissionAnchors(expectedSource, dialect)) !=
+            bindSourceActivations(sourceActivationDirectives, sourceEmissions) ||
+            actualLifecycle != expectedLifecycle
+    } else {
+        actualDirectives != expectedDirectives
+    }
+    if (directiveMismatch) {
         return Seq3SourceImportResult.Failure(
             listOf(
                 Seq3SourceDiagnostic(
@@ -666,6 +858,39 @@ private fun parseParticipant(text: String, dialect: Seq3Dialect): Triple<String,
     else Triple(m.groupValues[3], unescapeSource(m.groupValues[2], dialect), kind)
 }
 
+private fun newImportedLifelineId(
+    alias: String,
+    existing: List<Seq3Lifeline>,
+    edits: Collection<Seq3Lifeline>,
+): String {
+    val knownLifelines = (existing + edits).distinctBy { it.id }
+    val existingIds = knownLifelines.mapTo(hashSetOf()) { it.id }
+    val emittedAliases = sanitizedSourceLifelineAliases(knownLifelines.filter { it.visibility == Seq3Visibility.VISIBLE })
+    val canKeepAlias = SAFE_SOURCE_LIFELINE_ID.matches(alias) &&
+        alias !in RESERVED_SOURCE_LIFELINE_IDS &&
+        alias !in existingIds &&
+        alias !in emittedAliases
+    return if (canKeepAlias) alias else "import-${UUID.randomUUID()}"
+}
+
+/** Mirrors the emitter's alias sanitizer so a new stable id is only chosen when it will remain
+ * exactly the source alias after the whole document is rendered and deduplicated. */
+private fun sanitizedSourceLifelineAliases(lifelines: List<Seq3Lifeline>): Set<String> {
+    val used = hashSetOf<String>()
+    return lifelines.map { lifeline ->
+        val seed = lifeline.id.ifBlank { lifeline.name }
+        var base = seed.replace(Regex("[^A-Za-z0-9_]"), "_")
+        if (base.isEmpty() || base[0].isDigit()) base = "p$base"
+        var candidate = base
+        var suffix = 2
+        while (!used.add(candidate)) {
+            candidate = "${base}_$suffix"
+            suffix++
+        }
+        candidate
+    }.toSet()
+}
+
 private fun parseLifecycleDirective(text: String, dialect: Seq3Dialect): LifecycleDirective? {
     if (text.startsWith("destroy ")) {
         return text.removePrefix("destroy ").trim().takeIf(String::isNotBlank)
@@ -679,6 +904,11 @@ private fun parseLifecycleDirective(text: String, dialect: Seq3Dialect): Lifecyc
         rest.substringBefore(' ').trim()
     }
     return alias.takeIf(String::isNotBlank)?.let { LifecycleDirective(Seq3Kind.CREATE, it) }
+}
+
+private fun parseActivationDirective(text: String): Pair<Boolean, String>? {
+    val match = Regex("^(activate|deactivate)\\s+(\\S+)$").matchEntire(text) ?: return null
+    return (match.groupValues[1] == "activate") to match.groupValues[2]
 }
 
 private fun parseArrow(text: String, dialect: Seq3Dialect): ParsedArrow? {
@@ -718,14 +948,22 @@ private fun parseMessageNote(text: String, dialect: Seq3Dialect): ParsedArrow? {
 
 private fun parseFragmentOpen(text: String, dialect: Seq3Dialect): Pair<Seq3FragmentKind, String>? {
     val normalized = text.trim()
-    if (dialect == Seq3Dialect.PLANTUML && normalized.startsWith("ref over ")) {
-        return Seq3FragmentKind.REF to unescapeSource(normalized.substringAfter(": ", ""), dialect)
+    if (dialect == Seq3Dialect.PLANTUML) {
+        val ref = parsePlantUmlRef(normalized)
+        if (ref != null) return Seq3FragmentKind.REF to unescapeSource(ref.second, dialect)
     }
     val keyword = normalized.substringBefore(' ').lowercase()
     val kind = runCatching { Seq3FragmentKind.valueOf(keyword.uppercase()) }.getOrNull() ?: return null
     if (kind == Seq3FragmentKind.REF) return null
     return kind to unescapeSource(normalized.substringAfter(' ', ""), dialect)
 }
+
+private fun parsePlantUmlRef(text: String): Pair<String, String>? {
+    val match = Regex("^ref over (\\S+)\\s+:\\s?(.*)$").matchEntire(text) ?: return null
+    return match.groupValues[1] to match.groupValues[2]
+}
+
+private fun parsePlantUmlRefScope(text: String): String? = parsePlantUmlRef(text)?.first
 
 private fun parseOperand(text: String, dialect: Seq3Dialect): String? {
     val keyword = text.substringBefore(' ').lowercase()
@@ -754,6 +992,32 @@ private fun sourceMarkerLabels(source: String, dialect: Seq3Dialect): Map<Marker
             pending = null
         } else if (text.isNotBlank() && !isSourceComment(text, dialect) && !text.startsWith("create ") && !text.startsWith("destroy ")) {
             // A source marker binds to the next semantic statement, never another marker.
+            pending = null
+        }
+    }
+    return result
+}
+
+/** Scopes that text editing cannot represent on the fragment model itself: Mermaid's fallback
+ * note and PlantUML's standalone ref statement. Their marked source remains editable for labels,
+ * but changing the participant span must be rejected rather than silently discarded. */
+private fun sourceMarkerFragmentScopes(source: String, dialect: Seq3Dialect): Map<String, String> {
+    val result = mutableMapOf<String, String>()
+    var pending: SourceMarker? = null
+    source.lineSequence().forEach { raw ->
+        val text = raw.trim()
+        parseSourceMarker(text, dialect)?.let { marker ->
+            pending = marker.takeIf { it.type == "fragment" && it.role == "start" }
+            return@forEach
+        }
+        val marker = pending ?: return@forEach
+        if (text.isBlank() || isSourceComment(text, dialect)) return@forEach
+        if (dialect == Seq3Dialect.MERMAID && text.startsWith("rect ")) return@forEach
+        val scope = parseMessageNote(text, dialect)?.from ?: parsePlantUmlRefScope(text)
+        if (scope != null) {
+            result[marker.id] = scope
+            pending = null
+        } else if (parseFragmentOpen(text, dialect) != null || parseArrow(text, dialect) != null) {
             pending = null
         }
     }
@@ -809,6 +1073,74 @@ private fun sourceDirectives(source: String): List<String> = source.lineSequence
     .filter { it.startsWith("activate ") || it.startsWith("deactivate ") || it.startsWith("create ") || it.startsWith("destroy ") }
     .toList()
 
+/** Finds the marked emissions in canonical exporter output, retaining their physical source line. */
+private fun sourceEmissionAnchors(source: String, dialect: Seq3Dialect): List<SourceEmissionAnchor> {
+    val emissions = mutableListOf<SourceEmissionAnchor>()
+    var pending: SourceMarker? = null
+    source.lineSequence().forEachIndexed { index, raw ->
+        val text = raw.trim()
+        parseSourceMarker(text, dialect)?.let { marker ->
+            pending = marker.takeIf { it.type == "message" }
+            return@forEachIndexed
+        }
+        val marker = pending ?: return@forEachIndexed
+        if (parseArrow(text, dialect) != null || parseMessageNote(text, dialect) != null) {
+            emissions += SourceEmissionAnchor(index + 1, marker.id, marker.entryId)
+            pending = null
+        } else if (text.isNotBlank() && !isSourceComment(text, dialect) &&
+            !text.startsWith("activate ") && !text.startsWith("deactivate ") &&
+            !text.startsWith("create ") && !text.startsWith("destroy ")
+        ) {
+            pending = null
+        }
+    }
+    return emissions
+}
+
+/** Binds a directive to the previous source emission, as the emitters place it after that row.
+ *  Before the first row, it binds to the first emission. This uses statement order rather than
+ *  line distance so added whitespace or comments cannot change the associated row. An open
+ *  activation is the model's "through the end" form and is normalized to an explicit close at the
+ *  last emission. */
+private fun bindSourceActivations(
+    source: String,
+    emissions: List<SourceEmissionAnchor>,
+): List<BoundSourceActivation> {
+    val directives = source.lineSequence().mapIndexedNotNull { index, raw ->
+        parseActivationDirective(raw.trim())?.let { (activate, alias) ->
+            SourceActivationDirective(index + 1, activate, alias)
+        }
+    }.toList()
+    return bindSourceActivations(directives, emissions)
+}
+
+private fun bindSourceActivations(
+    directives: List<SourceActivationDirective>,
+    emissions: List<SourceEmissionAnchor>,
+): List<BoundSourceActivation> {
+    fun anchorFor(line: Int): SourceEmissionAnchor? = emissions.lastOrNull { it.line < line } ?: emissions.firstOrNull()
+
+    val result = mutableListOf<BoundSourceActivation>()
+    val open = mutableListOf<String>()
+    directives.forEach { directive ->
+        val anchor = anchorFor(directive.line) ?: return@forEach
+        result += BoundSourceActivation(directive.activate, directive.alias, anchor.messageId, anchor.occurrenceEntryId)
+        if (directive.activate) {
+            open += directive.alias
+        } else {
+            val openIndex = open.indexOfLast { it == directive.alias }
+            if (openIndex >= 0) open.removeAt(openIndex)
+        }
+    }
+    val end = emissions.lastOrNull()
+    if (end != null) {
+        open.asReversed().forEach { alias ->
+            result += BoundSourceActivation(false, alias, end.messageId, end.occurrenceEntryId)
+        }
+    }
+    return result
+}
+
 private fun String.removeSuffixRegex(regex: Regex): String = replace(regex, "")
 
 private fun unescapeSource(value: String, dialect: Seq3Dialect): String = if (dialect == Seq3Dialect.MERMAID) {
@@ -824,5 +1156,5 @@ private fun isSupportedStructural(text: String): Boolean {
         lower.startsWith("loop") || lower.startsWith("alt") || lower.startsWith("opt") || lower.startsWith("par") ||
         lower.startsWith("critical") || lower.startsWith("break") || lower.startsWith("group") || lower.startsWith("rect ") ||
         lower.startsWith("activate ") || lower.startsWith("deactivate ") || lower.startsWith("create ") || lower.startsWith("destroy ") ||
-        lower.startsWith("note ") || lower.startsWith("ref ") || text.startsWith("...")
+        lower.startsWith("note ") || text.startsWith("...")
 }

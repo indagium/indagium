@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toPlantUml
+import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
@@ -952,6 +953,296 @@ class Seq3SessionTest {
         assertFalse(view.sourceDraftStale)
         assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetTitle("After reload")))
         assertEquals(state.seq3Sessions.sessions.single().document.toPlantUml(), view.sourceDraft)
+    }
+
+    @Test
+    fun sourceDialectSwitchRebuildsTheDraftAndStalenessUsesTheSelectedLanguage() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+
+        view.sourceDraft += "\n%% mermaid draft"
+        state.seq3Sessions.updateSourceDraftText(id, view.sourceDraft)
+        assertTrue(view.sourceDraftDirty)
+        assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, Seq3Dialect.MERMAID))
+        assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
+        assertTrue(view.sourceDraft.startsWith("sequenceDiagram"))
+        assertEquals(state.seq3Sessions.sessions.single { it.id == id }.document.toMermaid(), view.sourceDraft)
+        assertFalse(view.sourceDraftDirty)
+
+        view.sourceDraft += "\n%% edit"
+        state.seq3Sessions.updateSourceDraftText(id, view.sourceDraft)
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetTitle("Changed visually")))
+        assertTrue(view.sourceDraftStale, "the Mermaid base becomes stale after a source-changing visual edit")
+        assertIs<Seq3SourceImportResult.Failure>(
+            state.seq3Sessions.importSource(id, view.sourceDraft, Seq3Dialect.MERMAID),
+        )
+    }
+
+    @Test
+    fun liveSourceDraftFollowsValidEditsInBothDialectsAndKeepsAuthoredRowIdentity() {
+        Seq3Dialect.entries.forEach { dialect ->
+            val state = state()
+            val id = state.seq3Sessions.beginEmpty("log")!!
+            val view = state.seq3Sessions.viewState(id)!!
+            assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
+            assertTrue(view.sourceLiveEnabled)
+            assertTrue(view.sourceAutocompleteEnabled)
+            val editorGeneration = view.sourceEditorGeneration
+            val source = when (dialect) {
+                Seq3Dialect.MERMAID -> """
+                    sequenceDiagram
+                    participant A as Alpha
+                    participant B as Beta
+                    A->>B: first
+                """.trimIndent()
+                Seq3Dialect.PLANTUML -> """
+                    @startuml
+                    participant "Alpha" as A
+                    participant "Beta" as B
+                    A -> B: first
+                    @enduml
+                """.trimIndent()
+            }
+            assertTrue(state.seq3Sessions.applyLiveSourceDraft(id, source, dialect) is Seq3SourceImportResult.Success)
+            assertEquals(source, view.sourceLiveLastAppliedText)
+            val firstDocument = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(listOf("Alpha", "Beta"), firstDocument.lifelines.map { it.name })
+            assertEquals(1, firstDocument.messages.size)
+            val authoredId = firstDocument.messages.single().id
+
+            val invalid = source.replace("first", "unfinished") + "\nnot valid source"
+            state.seq3Sessions.updateSourceDraftText(id, invalid)
+            assertIs<Seq3SourceImportResult.Failure>(state.seq3Sessions.applyLiveSourceDraft(id, invalid, dialect))
+            assertEquals(firstDocument, state.seq3Sessions.sessions.single { it.id == id }.document)
+            assertTrue(view.sourceDiagnostics.isNotEmpty())
+            assertEquals(source, view.sourceLiveLastAppliedText, "invalid partial source is not marked as applied")
+
+            val edited = source.replace("first", "second")
+            state.seq3Sessions.updateSourceDraftText(id, edited)
+            assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, edited, dialect))
+            val editedDocument = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(2, editedDocument.lifelines.size, "participant declarations stay unique across source revisions")
+            assertEquals(1, editedDocument.messages.size, "repeated imports replace the authored row instead of appending")
+            assertEquals(authoredId, editedDocument.messages.single().id, "editing a row's label retains its identity")
+            assertEquals("second", editedDocument.messages.single().labelTemplate)
+            assertEquals(editorGeneration, view.sourceEditorGeneration, "live updates keep the editor state and cursor owner intact")
+            assertEquals(edited, view.sourceDraft, "the editor keeps the exact text typed by the user")
+            assertEquals(edited, view.sourceLiveLastAppliedText)
+
+            // This mirrors undoing a source edit in the editor: the reverted text is imported
+            // against the same stable baseline and therefore restores the previous diagram shape.
+            state.seq3Sessions.updateSourceDraftText(id, source)
+            assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, source, dialect))
+            val reverted = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(1, reverted.messages.size)
+            assertEquals(authoredId, reverted.messages.single().id)
+            assertEquals("first", reverted.messages.single().labelTemplate)
+            assertEquals(source, view.sourceLiveLastAppliedText)
+        }
+    }
+
+    @Test
+    fun liveSourceParticipantEditsDoNotAccumulateAndKeepIdentity() {
+        Seq3Dialect.entries.forEach { dialect ->
+            val state = state()
+            val id = state.seq3Sessions.beginEmpty("log")!!
+            assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
+            val view = state.seq3Sessions.viewState(id)!!
+            val generation = view.sourceEditorGeneration
+            fun source(alias: String, name: String = "qweqwe", second: Boolean = false, reverse: Boolean = false): String {
+                val first = if (dialect == Seq3Dialect.MERMAID) "participant \"$alias\" as \"$name\""
+                    else "participant \"$name\" as $alias"
+                val other = if (dialect == Seq3Dialect.MERMAID) "participant Other as Other"
+                    else "participant \"Other\" as Other"
+                val declarations = if (!second) listOf(first) else if (reverse) listOf(other, first) else listOf(first, other)
+                return (listOf(if (dialect == Seq3Dialect.MERMAID) "sequenceDiagram" else "@startuml") + declarations +
+                    (if (dialect == Seq3Dialect.PLANTUML) listOf("@enduml") else emptyList())).joinToString("\n")
+            }
+            fun apply(text: String) {
+                assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, text, dialect), "$dialect: $text")
+                assertEquals(text, view.sourceDraft)
+                assertEquals(generation, view.sourceEditorGeneration)
+            }
+            var originalId = ""
+            listOf("q", "qw", "qwe", "qweq", "qweqw", "qweqwe").forEachIndexed { index, alias ->
+                apply(source(alias))
+                val lifeline = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.single()
+                if (index == 0) originalId = lifeline.id else assertEquals(originalId, lifeline.id)
+            }
+            apply(source("qweqwe", "renamed"))
+            assertEquals(originalId, state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.single().id)
+            apply(source("qweqwe", "renamed", second = true))
+            val beforeMove = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.associate { it.name to it.id }
+            apply(source("qweqwe", "renamed", second = true, reverse = true))
+            val moved = state.seq3Sessions.sessions.single { it.id == id }.document.lifelines
+            assertEquals(beforeMove, moved.associate { it.name to it.id })
+            assertEquals(listOf("Other", if (dialect == Seq3Dialect.MERMAID) "\"renamed\"" else "renamed"), moved.map { it.name })
+            apply(source("qweqwe", "renamed"))
+            assertEquals(originalId, state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.single().id)
+            apply(source("qweqwe", "renamed", second = true, reverse = true))
+            assertEquals(2, state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.size)
+        }
+    }
+
+    @Test
+    fun liveSourceAliasRenameKeepsMessageEndpointsAndRemovalIsAuthoritative() {
+        Seq3Dialect.entries.forEach { dialect ->
+            val state = state()
+            val id = state.seq3Sessions.beginEmpty("log")!!
+            assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, dialect))
+            fun source(alias: String): String = when (dialect) {
+                Seq3Dialect.MERMAID -> "sequenceDiagram\nparticipant $alias as Alpha\nparticipant B as Beta\n$alias->>B: hello"
+                Seq3Dialect.PLANTUML -> "@startuml\nparticipant \"Alpha\" as $alias\nparticipant \"Beta\" as B\n$alias -> B: hello\n@enduml"
+            }
+            fun apply(text: String) = assertIs<Seq3SourceImportResult.Success>(state.seq3Sessions.applyLiveSourceDraft(id, text, dialect))
+            apply(source("A"))
+            val before = state.seq3Sessions.sessions.single { it.id == id }.document
+            val alpha = before.lifelines.single { it.name == "Alpha" }.id
+            val message = before.messages.single().id
+            apply(source("Alias"))
+            val renamed = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(alpha, renamed.lifelines.single { it.name == "Alpha" }.id)
+            assertEquals(alpha, renamed.messages.single().fromLifelineId)
+            assertEquals(alpha, renamed.messages.single().match.tag)
+            assertEquals(message, renamed.messages.single().id)
+            val onlyBeta = when (dialect) {
+                Seq3Dialect.MERMAID -> "sequenceDiagram\nparticipant B as Beta"
+                Seq3Dialect.PLANTUML -> "@startuml\nparticipant \"Beta\" as B\n@enduml"
+            }
+            apply(onlyBeta)
+            val deleted = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(listOf("Beta"), deleted.lifelines.map { it.name })
+            assertTrue(deleted.messages.isEmpty())
+            apply(source("Alias")) // editor undo restores the source structure
+            assertEquals(2, state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.size)
+        }
+    }
+
+    @Test
+    fun liveSourceRejectsAStaleDraftAfterAnExternalVisualEdit() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val view = state.seq3Sessions.viewState(id)!!
+        assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+        val draft = view.sourceDraft + "\n' pending source change"
+        state.seq3Sessions.updateSourceDraftText(id, draft)
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetTitle("External visual edit")))
+        val externallyEdited = state.seq3Sessions.sessions.single { it.id == id }.document
+
+        val result = state.seq3Sessions.applyLiveSourceDraft(id, draft, Seq3Dialect.PLANTUML)
+
+        assertIs<Seq3SourceImportResult.Failure>(result)
+        assertTrue(view.sourceDraftStale)
+        assertEquals(externallyEdited, state.seq3Sessions.sessions.single { it.id == id }.document)
+    }
+
+    @Test
+    fun emptyLiveSourceClearsAuthoredStructureAndEvidenceLossWaitsForConfirmation() {
+        val manualState = state()
+        val manualId = manualState.seq3Sessions.beginEmpty("log")!!
+        val manualView = manualState.seq3Sessions.viewState(manualId)!!
+        manualState.seq3Sessions.prepareSourceDraft(manualId)
+        val authored = """
+            @startuml
+            title Manual diagram
+            participant "Alpha" as A
+            participant "Beta" as B
+            A -> B: note
+            @enduml
+        """.trimIndent()
+        manualState.seq3Sessions.updateSourceDraftText(manualId, authored)
+        assertIs<Seq3SourceImportResult.Success>(
+            manualState.seq3Sessions.applyLiveSourceDraft(manualId, authored, Seq3Dialect.PLANTUML),
+        )
+        val title = manualState.seq3Sessions.sessions.single { it.id == manualId }.document.title
+        manualState.seq3Sessions.updateSourceDraftText(manualId, "  \n\t")
+        val cleared = assertIs<Seq3SourceImportResult.Success>(
+            manualState.seq3Sessions.applyLiveSourceDraft(manualId, "  \n\t", Seq3Dialect.PLANTUML),
+        )
+        assertFalse(cleared.evidenceLoss)
+        assertTrue(cleared.document.lifelines.isEmpty())
+        assertTrue(cleared.document.messages.isEmpty())
+        assertEquals(title, cleared.document.title)
+        assertEquals("  \n\t", manualView.sourceDraft)
+
+        val newDiagramWrapper = "@startuml\n@enduml"
+        manualState.seq3Sessions.updateSourceDraftText(manualId, newDiagramWrapper)
+        val untitled = assertIs<Seq3SourceImportResult.Success>(
+            manualState.seq3Sessions.applyLiveSourceDraft(manualId, newDiagramWrapper, Seq3Dialect.PLANTUML),
+        )
+        assertEquals("", untitled.document.title, "a wrapper without a title clears old title metadata in one import")
+
+        val generatedState = state()
+        val generatedId = generatedState.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(generatedState, generatedId)
+        val generatedView = generatedState.seq3Sessions.viewState(generatedId)!!
+        generatedState.seq3Sessions.prepareSourceDraft(generatedId)
+        val withEvidence = generatedState.seq3Sessions.sessions.single { it.id == generatedId }.document
+        generatedState.seq3Sessions.updateSourceDraftText(generatedId, "")
+        val pending = assertIs<Seq3SourceImportResult.Success>(
+            generatedState.seq3Sessions.applyLiveSourceDraft(generatedId, "", Seq3Dialect.PLANTUML),
+        )
+        assertTrue(pending.evidenceLoss)
+        assertTrue(generatedView.sourceEvidenceLossPending)
+        assertEquals(withEvidence, generatedState.seq3Sessions.sessions.single { it.id == generatedId }.document)
+
+        val confirmed = assertIs<Seq3SourceImportResult.Success>(
+            generatedState.seq3Sessions.importSource(generatedId, "", Seq3Dialect.PLANTUML, confirmEvidenceLoss = true),
+        )
+        assertTrue(confirmed.document.messages.isEmpty())
+        assertTrue(confirmed.document.lifelines.isEmpty())
+        assertEquals(1, generatedState.seq3Sessions.sessions.single { it.id == generatedId }.undoStack.size)
+    }
+
+    @Test
+    fun newSourceDiagramReplacesAllOldStructureAndWaitsForEvidenceConfirmation() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val view = state.seq3Sessions.viewState(id)!!
+        state.seq3Sessions.prepareSourceDraft(id)
+        val oldDocument = state.seq3Sessions.sessions.single { it.id == id }.document
+        assertTrue(oldDocument.messages.any { it.occurrences.isNotEmpty() })
+        val source = """
+            @startuml
+            title Fresh diagram
+            actor "New actor" as NewActor
+            @enduml
+        """.trimIndent()
+
+        val pending = assertIs<Seq3SourceImportResult.Success>(
+            state.seq3Sessions.startNewSourceDiagram(id, source, Seq3Dialect.PLANTUML),
+        )
+        assertTrue(pending.evidenceLoss)
+        assertTrue(view.sourceEvidenceLossPending)
+        assertEquals(oldDocument, state.seq3Sessions.sessions.single { it.id == id }.document)
+        assertTrue(state.seq3Sessions.sessions.single { it.id == id }.undoStack.isEmpty())
+
+        val confirmed = assertIs<Seq3SourceImportResult.Success>(
+            state.seq3Sessions.startNewSourceDiagram(id, source, Seq3Dialect.PLANTUML, confirmEvidenceLoss = true),
+        )
+        val replacement = state.seq3Sessions.sessions.single { it.id == id }
+        assertTrue(confirmed.evidenceLoss)
+        assertEquals("Fresh diagram", replacement.document.title)
+        assertNull(replacement.document.sourceFile)
+        assertEquals(listOf("New actor"), replacement.document.lifelines.map { it.name })
+        assertTrue(replacement.document.messages.isEmpty(), "omitted old messages do not survive a new-source import")
+        assertEquals(1, replacement.undoStack.size)
+        assertFalse(view.sourceEvidenceLossPending)
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+        assertEquals(replacement.document.toPlantUml(), view.sourceDraft)
+        assertEquals(view.sourceDraft, view.sourceLiveLastAppliedText)
+
+        assertTrue(state.seq3Sessions.undo(id))
+        assertEquals(oldDocument, state.seq3Sessions.sessions.single { it.id == id }.document)
     }
 
     @Test

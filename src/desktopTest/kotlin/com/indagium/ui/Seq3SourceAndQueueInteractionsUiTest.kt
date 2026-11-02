@@ -18,6 +18,7 @@ import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
@@ -29,6 +30,7 @@ import androidx.compose.ui.test.withKeyDown
 import androidx.compose.ui.unit.dp
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CustomMessageSpec
+import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3RowRef
 import com.indagium.diagram3.seq3DrawnRowRefs
@@ -63,6 +65,8 @@ class Seq3SourceAndQueueInteractionsUiTest {
         showWorkspace(sessionId)
 
         rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
+        rule.onNodeWithTag("seq3-source-editor").performClick()
         rule.waitForIdle()
         assertTrue(sourceVisible(view))
         assertTrue(view.sourceDraftInitialized)
@@ -77,7 +81,10 @@ class Seq3SourceAndQueueInteractionsUiTest {
         val firstLineDiagnostic = requireNotNull(view.sourceDiagnostics.firstOrNull { it.line == 1 }) {
             "the parser should locate the malformed first source line"
         }
+        rule.onNodeWithTag("seq3-source-draft-status").assertIsDisplayed()
+        rule.onNodeWithTag("seq3-source-diagnostics-details").performClick()
         rule.onNodeWithText("Line 1: ${firstLineDiagnostic.message}", useUnmergedTree = true).assertIsDisplayed()
+        rule.onNodeWithText("Close", useUnmergedTree = true).performClick()
 
         rule.onNodeWithTag("seq3-source-reload").performClick()
         rule.waitForIdle()
@@ -90,6 +97,44 @@ class Seq3SourceAndQueueInteractionsUiTest {
     }
 
     @Test
+    fun dirtyDraftMustBeConfirmedBeforeSwitchingDialectAndMermaidCanApply() {
+        val sessionId = startEmptyWorkspace("source-dialect")
+        val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
+        showWorkspace(sessionId)
+        rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement("unsaved source draft")
+        rule.waitForIdle()
+        val dirtyDraft = view.sourceDraft
+        assertTrue(view.sourceDraftDirty)
+
+        rule.onNodeWithTag("seq3-source-dialect").performClick()
+        rule.onAllNodesWithText("Mermaid", useUnmergedTree = true)[1].performClick()
+        rule.waitForIdle()
+        rule.onNodeWithTag("seq3-source-confirm-dialect-switch").assertIsDisplayed()
+        rule.onNodeWithText("Keep editing", useUnmergedTree = true).performClick()
+        rule.waitForIdle()
+        assertEquals(Seq3Dialect.PLANTUML, view.sourceEditorDialect)
+        assertEquals(dirtyDraft, view.sourceDraft)
+
+        rule.onNodeWithTag("seq3-source-dialect").performClick()
+        rule.onAllNodesWithText("Mermaid", useUnmergedTree = true)[1].performClick()
+        rule.onNodeWithTag("seq3-source-confirm-dialect-switch").performClick()
+        rule.waitForIdle()
+        assertEquals(Seq3Dialect.MERMAID, view.sourceEditorDialect)
+        assertTrue(view.sourceDraft.startsWith("sequenceDiagram"))
+        assertFalse(view.sourceDraftDirty)
+
+        val authored = "sequenceDiagram\n    participant A as Alpha\n    participant B as Beta\n    A->>B: authored call"
+        rule.onNodeWithTag("seq3-source-editor").performTextReplacement(authored)
+        rule.onNodeWithTag("seq3-source-apply").performClick()
+        rule.waitForIdle()
+        assertEquals("authored call", currentSession(sessionId).document.messages.single().labelTemplate)
+        assertTrue(view.sourceDraft.startsWith("sequenceDiagram"))
+        assertFalse(view.sourceDraftDirty)
+    }
+
+    @Test
     fun validPlantUmlApplyIsOneDiagramUndoAndDraftUndoStaysInsideTheEditor() {
         val sessionId = startEmptyWorkspace("source-apply")
         val view = requireNotNull(state.seq3Sessions.viewState(sessionId))
@@ -97,6 +142,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
         showWorkspace(sessionId)
 
         rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
         val editor = rule.onNodeWithTag("seq3-source-editor")
         val source = currentSession(sessionId).document.toPlantUml()
         val edited = source.replaceFirst(Regex("(?m)^title .+$"), "title Authored in source")
@@ -112,9 +158,8 @@ class Seq3SourceAndQueueInteractionsUiTest {
         assertEquals(canonical, view.sourceDraft, "Apply refreshes the draft from canonical source")
         assertFalse(view.sourceDraftDirty)
         assertFalse(view.sourceDraftStale)
-        rule.onNodeWithTag("seq3-source-apply").performClick()
-        rule.waitForIdle()
-        assertEquals(1, currentSession(sessionId).undoStack.size, "reapplying canonical source is a no-op in diagram history")
+        rule.onNodeWithTag("seq3-source-apply").assertDoesNotExist()
+        assertEquals(1, currentSession(sessionId).undoStack.size, "a clean source draft has no Apply action")
 
         editor.performTextReplacement("$canonical\n' draft-only change")
         editor.performKeyInput {
@@ -146,6 +191,7 @@ class Seq3SourceAndQueueInteractionsUiTest {
         showWorkspace(sessionId)
 
         rule.onNodeWithTag("seq3-source-edit").performClick()
+        rule.onNodeWithTag("seq3-source-live-toggle").performClick()
         rule.waitForIdle()
         val sourceBefore = view.sourceDraft
         val titleLine = Regex("(?m)^title .+$")
