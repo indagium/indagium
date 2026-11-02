@@ -9,6 +9,7 @@ import com.indagium.model.ProfileBehavior
 import com.indagium.model.ProfileLayoutRef
 import com.indagium.model.ProfileSpec
 import com.indagium.model.ThemePreset
+import com.indagium.ui.holiday.withRegularTheme
 
 // Built-in workspace profiles (Settings → General): one click sets the theme and log typography and
 // applies the log-view layout the profile points at. A profile owns the look and the defaults; the
@@ -197,8 +198,7 @@ internal fun ProfileBehavior?.orAppDefaults(): ProfileBehavior {
  * the Settings radio does.
  */
 internal fun AppSettings.withProfileSpec(spec: ProfileSpec): AppSettings =
-    copy(
-        theme = spec.theme,
+    withRegularTheme(spec.theme).copy(
         fontSize = spec.fontSize,
         fontMono = spec.fontMono,
         interfaceFontFamily = spec.interfaceFontFamily,

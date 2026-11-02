@@ -1637,8 +1637,9 @@ choice to apply one immediately or keep the current appearance. `docs/releases/s
 release or the first release after a baseline; `BuildInfo.RELEASE_VERSIONS` is generated from the documented versions and current
 build, so an `after` entry applies to only one release. Each prompt's last-seen version is independent and stored in settings JSON;
 missing notes or metadata cause no fabricated announcement, and downgrading does not re-show an already acknowledged version.
-The development-only `indagium.previewRelease=true` launch property displays labeled example pages followed by the theme selector without
-acknowledging either prompt; choosing a theme in the preview still applies it. Packaged builds ignore the property.
+The development-only `indagium.previewRelease=true` launch property displays the bundled release notes followed by the theme selector without
+acknowledging either prompt; labeled example pages are used only when no notes are available. Choosing a theme in the preview still applies it.
+Packaged builds ignore the property.
 
 `LogItem` is the render model — the output of the filter pipeline and the input to the `LazyColumn`.
 It is never persisted and never leaves the process.

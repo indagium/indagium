@@ -19,14 +19,15 @@ internal data class ReleaseAnnouncement(
 
 internal enum class ReleaseAnnouncementStep { WHATS_NEW, HOLIDAY_THEMES }
 
-/** Explicit development preview: example copy is never treated as a published release note. */
-internal fun releaseAnnouncementPreview(): ReleaseAnnouncement = ReleaseAnnouncement(
-    version = BuildInfo.APP_VERSION,
-    pages = listOf(
-        WhatsNewPage("Preview", "This is a preview. The next release's actual changes will appear here."),
-        WhatsNewPage("Browsing changes", "Use Previous and Next to read each section, or Skip to continue."),
-    ),
-    themes = HOLIDAY_THEMES.keys.toList(),
+/** Preview the bundled release without acknowledging it; example pages are only a fallback while no notes exist. */
+internal fun releaseAnnouncementPreview(release: ReleaseAnnouncement = loadReleaseAnnouncement()): ReleaseAnnouncement = release.copy(
+    pages = release.pages.ifEmpty {
+        listOf(
+            WhatsNewPage("Preview", "This is a preview. The next release's actual changes will appear here."),
+            WhatsNewPage("Browsing changes", "Use Previous and Next to read each section, or Skip to continue."),
+        )
+    },
+    themes = release.themes.ifEmpty { HOLIDAY_THEMES.keys.toList() },
     preview = true,
 )
 

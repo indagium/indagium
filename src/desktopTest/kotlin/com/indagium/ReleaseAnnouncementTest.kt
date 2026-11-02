@@ -46,7 +46,9 @@ class ReleaseAnnouncementTest {
         assertTrue(release.pages.isEmpty(), "already-released notes are never presented as new")
         assertTrue(release.themes.isEmpty(), "the Halloween packs belong to the next release")
         assertNull(initialReleaseStep(release, "", ""), "a fresh install does not show historical announcements")
-        val next = loadReleaseAnnouncement("1.9.1", releaseVersions = listOf("1.9.0", "1.9.1"))
+        val next = loadReleaseAnnouncement()
+        assertEquals("1.9.1", next.version)
+        assertTrue(next.pages.isNotEmpty(), "the new release bundles its real notes")
         assertEquals(
             listOf(HolidayPack.PUMPKIN_PATCH, HolidayPack.HAUNTED_MANOR, HolidayPack.TRICK_OR_TREAT, HolidayPack.BEER_TIME_YELLOW, HolidayPack.BEER_TIME_GREEN),
             next.themes,
@@ -111,6 +113,23 @@ class ReleaseAnnouncementTest {
             state.close()
             dir.deleteRecursively()
         }
+    }
+
+    @Test fun previewUsesTheBundledReleaseNotesAndThemes() {
+        val release = loadReleaseAnnouncement()
+        val preview = releaseAnnouncementPreview()
+        assertTrue(preview.preview)
+        assertEquals(release.version, preview.version)
+        assertEquals(release.pages, preview.pages)
+        assertEquals(release.themes, preview.themes)
+        assertFalse(preview.pages.any { "This is a preview" in it.markdown })
+    }
+
+    @Test fun previewFallsBackToExamplesWhenNoReleaseNotesExist() {
+        val preview = releaseAnnouncementPreview(ReleaseAnnouncement("2.0.0", emptyList(), emptyList()))
+        assertEquals(listOf("Preview", "Browsing changes"), preview.pages.map { it.title })
+        assertTrue(preview.preview)
+        assertTrue(preview.themes.isNotEmpty())
     }
 
     @Test fun skippingThemesKeepsTheUsersCurrentSelectionAndDowngradesDoNotRepeat() {

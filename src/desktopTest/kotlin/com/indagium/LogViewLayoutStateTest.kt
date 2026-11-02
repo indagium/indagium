@@ -33,6 +33,7 @@ import com.indagium.ui.logViewTileVisible
 import com.indagium.ui.matchesCustomLogViewLayout
 import com.indagium.ui.mkTab
 import com.indagium.ui.resetLogViewLayout
+import com.indagium.ui.restoredSettingsFromAutosave
 import com.indagium.ui.revealFilterTiles
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
@@ -359,6 +360,45 @@ class LogViewLayoutStateTest {
         assertTrue(state.filterBarVisible)
         assertTrue(state.logViewPresetActive(LogViewLayoutPreset.FILTER_BAR))
         assertEquals("Filter bar", state.lastLogViewResetLabel())
+    }
+
+    @Test
+    fun namedLayoutsAreSavedImmediatelyAndRestoredFromDisk() {
+        state.applyLogViewPreset(LogViewLayoutPreset.ANALYSIS)
+        state.hideLogViewTile(LogViewSectionId.NOTES)
+        val first = state.saveCurrentAsLogViewLayout("Review")
+        state.applyLogViewPreset(LogViewLayoutPreset.LOG_FOCUS)
+        val second = state.saveCurrentAsLogViewLayout("Focus")
+        state.renameSavedLogViewLayout(second.id, "Quiet focus")
+        state.applySavedLogViewLayout(first.id)
+        val expected = state.settings.customLogViewLayouts
+        val file = File(directory, "state.cache")
+
+        // Read before shutdown or an explicit autosave: the Save action must already be durable.
+        val saved = restoredSettingsFromAutosave(file)
+        assertEquals(expected, saved.customLogViewLayouts)
+        assertEquals(first.id, saved.lastCustomLogViewLayoutId)
+        assertNull(state.autosaveError)
+
+        val restarted = AppState(
+            autosaveFile = file,
+            restoreOnCreate = true,
+            notesDir = File(directory, "notes"),
+            archiveCacheDir = File(directory, "archives"),
+            customCommandsDir = File(directory, "commands"),
+            autoExportNotes = false,
+        )
+        try {
+            assertEquals(expected, restarted.settings.customLogViewLayouts)
+            assertEquals(first.id, restarted.settings.lastCustomLogViewLayoutId)
+            restarted.applySavedLogViewLayout(second.id)
+            assertTrue(restarted.matchesCustomLogViewLayout(expected.last()))
+            assertEquals("Quiet focus", restarted.lastLogViewResetLabel())
+            restarted.resetLogViewLayout()
+            assertTrue(restarted.matchesCustomLogViewLayout(expected.last()))
+        } finally {
+            restarted.close()
+        }
     }
 
     @Test

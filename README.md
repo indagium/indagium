@@ -2,7 +2,7 @@
 
 Android log viewer and logcat analyzer for Windows, macOS and Linux — investigate crashes, ANRs, adb bug reports, and supported DLT captures, with optional synchronized device logcat and screen-video capture. Built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.9.0-blue)
+![Version](https://img.shields.io/badge/version-1.9.1-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ![Folding a repeating region into a collapsible sequence](docs/images/gif-05-sequences.gif)
@@ -157,6 +157,7 @@ Live capture timing begins from a synchronization estimate and can be calibrated
 | [MCP guide](docs/mcp/README.md) | Connecting an external MCP client |
 | [MCP methods](docs/mcp/AVAILABLE_METHODS.md) | The automation tool reference |
 | [Analysis playbook](docs/mcp/ANALYSIS_PLAYBOOK.md) | Prompt patterns for log analysis |
+| [Release 1.9.1](docs/releases/1.9.1.md) | Special themes, tab groups, saved layouts, workspace profiles and sequence diagram editing |
 | [Release 1.9.0](docs/releases/1.9.0.md) | Tiles across the log view, compare, New tab, diagrams and Tests; dockable tabs and toolbar; binary EULA |
 | [Release 1.8.15](docs/releases/1.8.15.md) | Compact capture archives, archive extraction, and capture reliability fixes |
 | [Release 1.8.10](docs/releases/1.8.10.md) | AI test suites, configurable Find behavior, and Search onboarding |
@@ -411,14 +412,14 @@ Write `docs/releases/X.Y.Z.md` for each version before building: its introductio
 `docs/releases/whats-new-start.txt` never show the walkthrough. When a release introduces special themes, add a
 `version X.Y.Z PACK_ID...` entry to [special theme announcements](docs/releases/seasonal-themes.txt); releases without new
 packs need no entry. An `after X.Y.Z` entry announces packs only in the first release after that version.
-For a development-only preview with example text, run `./gradlew desktopRun -Dindagium.previewRelease=true`; skipping the preview
+For a development-only preview of the bundled release notes (example pages when no notes are available), run `./gradlew desktopRun -Dindagium.previewRelease=true`; skipping the preview
 does not acknowledge a release, and choosing a theme applies it. Add `-Dindagium.run.home=<temporary-home>` to use separate settings.
 
 Push a version tag to trigger the GitHub Actions build, which produces Linux `.deb`, AppImage, and
 Flatpak bundles for x86-64 and arm64, plus Windows and macOS packages, and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.9.0 && git push --tags
+git tag v1.9.1 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.

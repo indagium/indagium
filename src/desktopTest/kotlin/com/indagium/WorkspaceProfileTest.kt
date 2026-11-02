@@ -4,6 +4,11 @@ import com.indagium.model.AppSettings
 import com.indagium.model.ChromeEdge
 import com.indagium.model.CtrlFTarget
 import com.indagium.model.CustomWorkspaceProfile
+import com.indagium.model.HolidayIntensity
+import com.indagium.model.HolidayLightness
+import com.indagium.model.HolidayMode
+import com.indagium.model.HolidayPack
+import com.indagium.model.HolidaySettings
 import com.indagium.model.LogViewPresetId
 import com.indagium.model.LogViewSectionId
 import com.indagium.model.ProfileAppearance
@@ -22,6 +27,7 @@ import com.indagium.ui.activeLogViewLayoutRef
 import com.indagium.ui.applyLogViewPreset
 import com.indagium.ui.currentProfileAppearance
 import com.indagium.ui.currentProfileBehavior
+import com.indagium.ui.holiday.effectiveThemeColors
 import com.indagium.ui.logViewLayoutModified
 import com.indagium.ui.logViewPresetActive
 import com.indagium.ui.logViewTileContext
@@ -32,12 +38,15 @@ import com.indagium.ui.profileSpecFromJson
 import com.indagium.ui.resolved
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
+import com.indagium.ui.themeColors
 import com.indagium.ui.withProfileSpec
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import java.time.LocalDate
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -131,6 +140,34 @@ class WorkspaceProfileTest {
         state.updateSettings { it.copy(theme = ThemePreset.DARK_GITHUB) }
 
         assertEquals(listOf("Theme"), state.workspaceProfileDifferences())
+    }
+
+    @Test
+    fun applyingAProfileTurnsOffSeasonalOverridesAndKeepsOtherHolidayPreferences() {
+        val spec = WorkspaceProfile.CLASSIC.spec
+        val date = LocalDate.of(2026, 10, 31)
+        val holidayPreferences = HolidaySettings(
+            pack = HolidayPack.PUMPKIN_PATCH,
+            lightness = HolidayLightness.LIGHT,
+            intensity = HolidayIntensity.CALM,
+            funIcons = false,
+            pauseWhileBusy = false,
+            effectToggles = mapOf("pumpkin.bats" to false),
+            tabScene = false,
+            filterPicture = false,
+            animatePicture = false,
+            notesCompanion = false,
+        )
+
+        for (mode in listOf(HolidayMode.ALWAYS, HolidayMode.AUTOMATIC)) {
+            val before = AppSettings(theme = ThemePreset.DRACULA).copy(holiday = holidayPreferences.copy(mode = mode))
+            val after = before.withProfileSpec(spec)
+
+            assertNotEquals(themeColors(spec.theme), effectiveThemeColors(before, date), "$mode should override the profile theme before applying")
+            assertEquals(spec.theme, after.theme, "$mode: the profile preset is stored")
+            assertEquals(holidayPreferences.copy(mode = HolidayMode.OFF), after.holiday, "$mode: only the seasonal mode changes")
+            assertEquals(themeColors(spec.theme), effectiveThemeColors(after, date), "$mode: the profile theme is displayed")
+        }
     }
 
     @Test

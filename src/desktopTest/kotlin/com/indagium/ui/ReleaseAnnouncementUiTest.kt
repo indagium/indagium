@@ -11,6 +11,7 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -184,12 +185,16 @@ class ReleaseAnnouncementUiTest {
         assertNull(state.releaseAnnouncementStep)
     }
 
-    @Test fun previewShowsExamplePagesThenTheThemeSelectorWithoutAcknowledgingARelease() {
+    @Test fun previewShowsRealReleasePagesThenTheThemeSelectorWithoutAcknowledgingARelease() {
+        val pages = loadReleaseAnnouncement().pages
+        assertTrue(pages.isNotEmpty())
         state.previewReleaseAnnouncement()
         rule.setContent { CompositionLocalProvider(LocalTheme provides LIGHT_THEME) { ReleaseAnnouncementDialog(state) } }
-        rule.onNodeWithText("Preview").assertExists()
-        rule.onNodeWithText("Next").performClick()
-        rule.onNodeWithText("Browsing changes").assertExists()
+        rule.onNodeWithTag("release-page-title").assertTextEquals(pages.first().title)
+        pages.drop(1).forEach { page ->
+            rule.onNodeWithText("Next").performClick()
+            rule.onNodeWithTag("release-page-title").assertTextEquals(page.title)
+        }
         rule.onNodeWithText("Done").performClick()
         rule.onNodeWithTag(HOLIDAY_ANNOUNCEMENT_TAG).assertExists()
         rule.onNodeWithText("Skip").performClick()
