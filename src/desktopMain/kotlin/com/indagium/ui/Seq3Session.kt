@@ -852,10 +852,13 @@ class Seq3Session(
             return success
         }
 
-        val stableDocument = retainLiveSourceIdentities(
-            baseline = baseline,
-            previous = view.sourceLiveLastAppliedDocument ?: baseline,
-            imported = success.document,
+        val stableDocument = retainLatestLiveSourcePresentation(
+            latest = latest.document,
+            imported = retainLiveSourceIdentities(
+                baseline = baseline,
+                previous = view.sourceLiveLastAppliedDocument ?: baseline,
+                imported = success.document,
+            ),
         )
         if (stableDocument != latest.document && !applyCommand(id, Seq3Command.ReplaceDocument(stableDocument))) {
             return Seq3SourceImportResult.Failure(emptyList())
@@ -1122,6 +1125,65 @@ class Seq3Session(
         )
     }
 
+    /** The source parser must keep reading its fixed import baseline so source markers and evidence
+     * stay anchored while the user types. Canvas-only edits made after the draft began are a
+     * separate layer: once the imported entities have their stable ids, carry those edits forward
+     * from the latest document. Looking up only ids in [imported] keeps source-owned deletions
+     * authoritative; structural/source-authored fields continue to come from the import result. */
+    private fun retainLatestLiveSourcePresentation(latest: Seq3Document, imported: Seq3Document): Seq3Document {
+        val lifelines = latest.lifelines.associateBy { it.id }
+        val messages = latest.messages.associateBy { it.id }
+        val fragments = latest.fragments.associateBy { it.id }
+        val notes = latest.notes.associateBy { it.id }
+        val delays = latest.delays.associateBy { it.id }
+        val states = latest.stateInvariants.associateBy { it.id }
+
+        return imported.copy(
+            lifelines = imported.lifelines.map { fresh ->
+                lifelines[fresh.id]?.let { old ->
+                    fresh.copy(
+                        visibility = old.visibility,
+                        displaySegments = old.displaySegments,
+                        headerWidthDp = old.headerWidthDp,
+                    )
+                } ?: fresh
+            },
+            messages = imported.messages.map { fresh ->
+                messages[fresh.id]?.let { old -> fresh.copy(visibility = old.visibility, noteStyle = old.noteStyle) } ?: fresh
+            },
+            fragments = imported.fragments.map { fresh ->
+                fragments[fresh.id]?.let { old ->
+                    fresh.copy(visibility = old.visibility, hideKindLabel = old.hideKindLabel, style = old.style)
+                } ?: fresh
+            },
+            notes = imported.notes.map { fresh ->
+                notes[fresh.id]?.let { old ->
+                    fresh.copy(
+                        x = old.x,
+                        y = old.y,
+                        width = old.width,
+                        height = old.height,
+                        visibility = old.visibility,
+                        style = old.style,
+                    )
+                } ?: fresh
+            },
+            delays = imported.delays.map { fresh ->
+                delays[fresh.id]?.let { fresh.copy(visibility = it.visibility) } ?: fresh
+            },
+            stateInvariants = imported.stateInvariants.map { fresh ->
+                states[fresh.id]?.let { fresh.copy(visibility = it.visibility) } ?: fresh
+            },
+            // Source does not explicitly encode these defaults. Preserve their values; if their
+            // rendered effect changes source text, the canonical-source stale guard above rejects
+            // the draft. Explicit source fields such as title and activation directives remain
+            // importer-owned.
+            defaultRepeat = latest.defaultRepeat,
+            lifelineDisplaySegments = latest.lifelineDisplaySegments,
+            themePresetName = latest.themePresetName,
+        )
+    }
+
     private fun <T> stableIdsForSourceRows(
         fresh: List<T>,
         previous: List<T>,
@@ -1225,10 +1287,13 @@ class Seq3Session(
         if (imported.evidenceLoss && !confirmEvidenceLoss) return imported
         val baseline = view?.sourceLiveImportBaseline ?: current.document
         val success = imported.copy(
-            document = retainLiveSourceIdentities(
-                baseline = baseline,
-                previous = view?.sourceLiveLastAppliedDocument ?: current.document,
-                imported = imported.document,
+            document = retainLatestLiveSourcePresentation(
+                latest = current.document,
+                imported = retainLiveSourceIdentities(
+                    baseline = baseline,
+                    previous = view?.sourceLiveLastAppliedDocument ?: current.document,
+                    imported = imported.document,
+                ),
             ),
         ).let { stable -> stable.copy(canonicalSource = stable.document.toSource(dialect).trimEnd('\n')) }
         if (success.document != current.document) {

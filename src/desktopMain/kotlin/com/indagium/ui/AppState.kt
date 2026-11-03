@@ -377,6 +377,8 @@ private class ReleasableLogRmap(val content: ReleasableLogContent) : AbstractMap
 
     override fun get(key: Int): LogEntry? = content.rmap[key]
 
+    override fun containsKey(key: Int): Boolean = content.rmap.containsKey(key)
+
     override val size: Int get() = content.rmap.size
 }
 
@@ -6764,8 +6766,11 @@ class AppState(
 
     private fun displayedLogTabIdsLocked(): Set<String> {
         val surface = activeSurface ?: tabs.firstOrNull { it.id == activeTabId }?.let { ActiveSurface.Log(it.id) }
-        val ids = if (compareMode && surface is ActiveSurface.Log) listOf(surface.tabId, compareTabId) else
+        val ids = if (compareMode && surface is ActiveSurface.Log) {
+            compareTabs()?.let { (left, right) -> listOf(left.id, right.id) } ?: listOf(surface.tabId)
+        } else {
             listOfNotNull((surface as? ActiveSurface.Log)?.tabId)
+        }
         return ids.filterTo(linkedSetOf()) { id -> tabs.any { it.id == id && !it.isCaptureLauncher } }
     }
 

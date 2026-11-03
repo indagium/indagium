@@ -37,6 +37,17 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class InactiveTabResidencyTest {
+    private class CountingLogRows(private val rows: List<LogEntry>) : AbstractList<LogEntry>() {
+        var reads = 0
+
+        override val size: Int get() = rows.size
+
+        override fun get(index: Int): LogEntry {
+            reads++
+            return rows[index]
+        }
+    }
+
     private fun waitUntil(message: String, condition: () -> Boolean) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
@@ -58,6 +69,23 @@ class InactiveTabResidencyTest {
         autoExportNotes = false,
         monotonicNowNanos = clock,
     ).also { it.closedTabRowsReleaseDelayMs = 10L }
+
+    @Test
+    fun releasableRowMapDelegatesMembershipWithoutScanningEntries() {
+        val count = 1_024
+        val rows = CountingLogRows(parsedRows(count))
+        val tab = mkTab("counted", "counted.log", rows)
+        val readsBeforeMembershipChecks = rows.reads
+
+        val selected = (1..count).filterTo(linkedSetOf()) { it in tab.rmap }
+        assertFalse((count + 1) in tab.rmap)
+
+        assertEquals(count, selected.size)
+        assertTrue(
+            rows.reads - readsBeforeMembershipChecks <= 4 * count,
+            "selection membership should use the row map lookup instead of scanning its entries",
+        )
+    }
 
     @Test
     fun idleTimeoutUsesElapsedInactivityAndDropsOrdinaryParsedRowsFromOldSnapshots() {
@@ -196,6 +224,38 @@ class InactiveTabResidencyTest {
         } finally {
             app.close()
             dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun compareFallbackPaneLoadsWhenCompareIdIsEmptyOrEqualsActiveTab() {
+        listOf("" to false, "b" to true).forEach { (compareId, directModeSetter) ->
+            val dir = createTempDirectory("inactive-tab-compare-fallback").toFile()
+            val source = File(dir, "a.log").also { simpleLog(it) }
+            val app = newState(dir)
+            try {
+                app.tabs = listOf(
+                    mkTab("a", source.name, emptyList()).copy(
+                        sourcePath = source.absolutePath,
+                        contentState = TabContentState.UNLOADED,
+                    ),
+                    mkTab("b", "b.log", parsedRows(1)),
+                )
+                app.activeTabId = "b"
+                app.activeSurface = ActiveSurface.Log("b")
+                app.startPendingRestoredTabLoads()
+                app.compareTabId = compareId
+
+                if (directModeSetter) app.compareMode = true else app.updateCompareMode(true)
+
+                assertEquals("a", app.compareTabs()?.second?.id, "the compare pane resolver chooses the fallback tab")
+                waitUntil("the fallback compare pane should be loaded") {
+                    app.tab("a")?.contentState == TabContentState.LOADED
+                }
+            } finally {
+                app.close()
+                dir.deleteRecursively()
+            }
         }
     }
 

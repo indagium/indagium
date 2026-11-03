@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.MAX_SEQ3_HEADER_CHARS
+import com.indagium.diagram3.Seq3ArtifactStyle
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
@@ -8,10 +9,13 @@ import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CustomMessageSpec
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Fragment
+import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3SourceImportResult
@@ -1259,6 +1263,105 @@ class Seq3SessionTest {
         assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetLifelineHeaderWidth(lifelineId, 240.0)))
         assertFalse(view.sourceDraftStale, "presentation changes excluded from emitted source do not invalidate a draft")
         assertTrue(view.sourceDraftDirty)
+
+        assertIs<Seq3SourceImportResult.Success>(
+            state.seq3Sessions.applyLiveSourceDraft(id, view.sourceDraft, Seq3Dialect.PLANTUML),
+        )
+        assertEquals(
+            240.0,
+            state.seq3Sessions.sessions.single { it.id == id }.document.lifelines.first { it.id == lifelineId }.headerWidthDp,
+            "accepting the dirty source revision should retain presentation edits on baseline identities",
+        )
+    }
+
+    @Test
+    fun liveSourceRevisionsRetainPresentationForNewAuthoredIdentitiesAndCanvasArtifacts() {
+        val state = state()
+        val id = state.seq3Sessions.beginEmpty("log")!!
+        try {
+            val view = state.seq3Sessions.viewState(id)!!
+            assertTrue(state.seq3Sessions.prepareSourceDraft(id))
+            assertTrue(state.seq3Sessions.switchSourceDraftDialect(id, Seq3Dialect.PLANTUML))
+            val firstSource = """
+                @startuml
+                participant "Alpha" as A
+                participant "Beta" as B
+                A -> B: first
+                @enduml
+            """.trimIndent()
+            assertIs<Seq3SourceImportResult.Success>(
+                state.seq3Sessions.applyLiveSourceDraft(id, firstSource, Seq3Dialect.PLANTUML),
+            )
+
+            val authored = state.seq3Sessions.sessions.single { it.id == id }.document
+            val alphaId = authored.lifelines.first { it.name == "Alpha" }.id
+            val messageId = authored.messages.single().id
+            assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetLifelineHeaderWidth(alphaId, 240.0)))
+            assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetDocumentTheme("TOKYO_NIGHT")))
+
+            assertIs<Seq3SourceImportResult.Success>(
+                state.seq3Sessions.applyLiveSourceDraft(
+                    id,
+                    firstSource.replace("first", "second"),
+                    Seq3Dialect.PLANTUML,
+                ),
+            )
+            var document = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(messageId, document.messages.single().id, "source-authored messages keep their stable id")
+            assertEquals(240.0, document.lifelines.first { it.id == alphaId }.headerWidthDp)
+            assertEquals("TOKYO_NIGHT", document.themePresetName)
+
+            // Make a canvas note and fragment part of the import baseline, then edit their
+            // source-invisible presentation while a later source revision is already dirty.
+            assertTrue(state.seq3Sessions.reloadSourceDraft(id))
+            val note = Seq3Note("canvas-note", "Call note", listOf(messageId))
+            assertTrue(
+                state.seq3Sessions.applyCommand(
+                    id,
+                    Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.Note(note)),
+                ),
+            )
+            val fragment = Seq3Fragment("canvas-fragment", Seq3FragmentKind.GROUP, "Boundary", listOf(messageId))
+            assertTrue(
+                state.seq3Sessions.applyCommand(
+                    id,
+                    Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.Group(fragment)),
+                ),
+            )
+            assertTrue(state.seq3Sessions.reloadSourceDraft(id))
+            val dirtySource = view.sourceDraft.replace("second", "third")
+            state.seq3Sessions.updateSourceDraftText(id, dirtySource)
+            assertTrue(view.sourceDraftDirty)
+            assertFalse(view.sourceDraftStale)
+
+            val noteStyle = Seq3ArtifactStyle(fillArgb = 0xFF123456.toInt(), borderArgb = 0xFF654321.toInt())
+            val fragmentStyle = Seq3ArtifactStyle(fillArgb = 0xFFABCDEF.toInt(), borderArgb = 0xFF112233.toInt())
+            assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetNoteGeometry(note.id, 42.0, 84.0, 220.0, 64.0)))
+            assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetNoteStyle(note.id, noteStyle)))
+            assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.SetFragmentStyle(fragment.id, fragmentStyle)))
+            assertTrue(
+                state.seq3Sessions.applyCommand(
+                    id,
+                    Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentHideKindLabel(fragment.id, true)),
+                ),
+            )
+            assertFalse(view.sourceDraftStale, "canvas-only changes do not make the pending source revision stale")
+
+            assertIs<Seq3SourceImportResult.Success>(
+                state.seq3Sessions.applyLiveSourceDraft(
+                    id,
+                    dirtySource.replace("third", "fourth"),
+                    Seq3Dialect.PLANTUML,
+                ),
+            )
+            document = state.seq3Sessions.sessions.single { it.id == id }.document
+            assertEquals(240.0, document.lifelines.first { it.id == alphaId }.headerWidthDp)
+            assertEquals("TOKYO_NIGHT", document.themePresetName)
+            assertEquals(note.copy(x = 42.0, y = 84.0, width = 220.0, height = 64.0, style = noteStyle), document.notes.single())
+            assertEquals(fragment.copy(hideKindLabel = true, style = fragmentStyle), document.fragments.single())
+        } finally {
+            state.close()
+        }
     }
 
     @Test
