@@ -253,7 +253,7 @@ internal fun CopyFormatSplitButton(
                 "▾",
                 onClick = { expanded = !expanded; onReclaimFocus() },
                 enabled = feedback.phase != CopyPhase.Copying,
-                modifier = Modifier.width(18.dp).testTag(NOTES_COPY_FORMATS_TAG),
+                modifier = modifier.width(18.dp).testTag(NOTES_COPY_FORMATS_TAG),
                 horizontalPadding = 0.dp,
                 shape = rightShape,
             )
