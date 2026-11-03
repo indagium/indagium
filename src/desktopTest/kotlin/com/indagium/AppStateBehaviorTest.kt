@@ -42,6 +42,7 @@ import com.indagium.model.SequenceDef
 import com.indagium.model.SourceFolderInfo
 import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
+import com.indagium.model.TabContentState
 import com.indagium.model.ThemePreset
 import com.indagium.model.searchFor
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
@@ -2277,7 +2278,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun autosaveSkipsTabsWhoseSourceFileNoLongerExists() {
+    fun restoreKeepsTabShellWhenItsSourceFileNoLongerExists() {
         val dir = createTempDirectory("openlog-cache").toFile()
         val logFile = File(dir, "test.log").apply {
             writeText("06-26 10:00:00.000  123  456 I App: hello\n")
@@ -2293,9 +2294,17 @@ class AppStateBehaviorTest {
         logFile.delete()
 
         val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(1, restored.tabs.size, "the user's tab remains available for retry")
+        assertEquals("log", restored.activeTabId)
 
-        assertTrue(restored.tabs.isEmpty())
-        assertEquals("", restored.activeTabId)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tab("log")?.contentState == TabContentState.FAILED && !restored.isLoading }
+
+        val shell = requireNotNull(restored.tab("log"))
+        assertEquals(logFile.absolutePath, shell.sourcePath)
+        assertTrue(shell.logData.isEmpty())
+        assertTrue(shell.rmap.isEmpty())
+        assertTrue(shell.contentLoadError.orEmpty().contains("missing or unreadable"))
     }
 
     @Test
@@ -2431,7 +2440,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun autosaveRestoreDropsArchiveTabWhenSavedEntryIsMissing() {
+    fun autosaveRestoreKeepsArchiveTabWhenSavedEntryIsMissing() {
         val dir = createTempDirectory("openlog-zip-missing-restore").toFile()
         val entryPath = "FS/data/anr/main_log.txt"
         val zip = buildZipFixture(
@@ -2454,12 +2463,14 @@ class AppStateBehaviorTest {
         assertEquals(1, restored.tabs.size)
 
         restored.startPendingRestoredTabLoads()
-        // The loader closes the tab and ends loading before it publishes the error
-        // (scheduleRestoredTabLoad's MissingArchiveEntry branch), so wait for the error too.
-        waitUntil { restored.tabs.isEmpty() && !restored.isLoading && restored.openError != null }
+        waitUntil { restored.tab(restored.activeTabId)?.contentState == TabContentState.FAILED && !restored.isLoading }
 
-        assertEquals("Restored archive entry is unavailable", restored.openError?.title)
-        assertTrue(restored.openError?.path.orEmpty().endsWith("!$entryPath"))
+        val shell = requireNotNull(restored.tab(restored.activeTabId))
+        assertEquals("${zip.absolutePath}!$entryPath", shell.sourcePath)
+        assertTrue(shell.logData.isEmpty(), "the stale parsed rows are not exposed")
+        assertTrue(shell.rmap.isEmpty())
+        assertTrue(shell.contentLoadError.orEmpty().contains("Archive entry is missing"))
+        assertNull(shell.attachedVideo, "a failed entry reload must not keep an unrelated video link")
     }
 
     // Backward compatibility: an archive tab token written before PERF-3b (no trailing candidate

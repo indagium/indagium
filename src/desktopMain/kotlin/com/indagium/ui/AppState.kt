@@ -211,6 +211,7 @@ import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
 import com.indagium.video.sourceDisplayRotationDegrees
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
@@ -348,7 +349,60 @@ internal class RowsPin internal constructor(private val onClose: (() -> Unit)?) 
 }
 
 /** A closed tab's store that could not be released at the delay because a reader still pinned it. */
-private class PendingRowRelease(val rows: AppendOnlyLogList, var trimAfterwards: Boolean)
+private class PendingRowRelease(val releaseRows: () -> Unit, var trimAfterwards: Boolean)
+
+/** Shared backing held by lightweight List/Map facades, so a delayed release also clears stale
+ * Compose snapshots that still reference an old LogTab after its current shell was updated. */
+private class ReleasableLogContent(rows: List<LogEntry>, rmap: Map<Int, LogEntry>) {
+    @Volatile var rows: List<LogEntry> = rows
+        private set
+
+    @Volatile var rmap: Map<Int, LogEntry> = rmap
+        private set
+
+    fun release() {
+        rows = emptyList()
+        rmap = emptyMap()
+    }
+}
+
+private class ReleasableLogRows(val content: ReleasableLogContent) : AbstractList<LogEntry>() {
+    override val size: Int get() = content.rows.size
+
+    override fun get(index: Int): LogEntry = content.rows[index]
+}
+
+private class ReleasableLogRmap(val content: ReleasableLogContent) : AbstractMap<Int, LogEntry>() {
+    override val entries: Set<Map.Entry<Int, LogEntry>> get() = content.rmap.entries
+
+    override fun get(key: Int): LogEntry? = content.rmap[key]
+
+    override val size: Int get() = content.rmap.size
+}
+
+private data class RowReleaseTarget(val store: Any, val release: () -> Unit)
+
+private fun releasableLogRows(
+    rows: List<LogEntry>,
+    rmap: Map<Int, LogEntry>,
+): Pair<List<LogEntry>, Map<Int, LogEntry>> = when (rows) {
+    is AppendOnlyLogList -> rows to rmap
+    is ReleasableLogRows -> rows to rmap
+    else -> {
+        val content = ReleasableLogContent(rows, rmap)
+        ReleasableLogRows(content) to ReleasableLogRmap(content)
+    }
+}
+
+private fun rowReleaseTarget(tab: LogTab): RowReleaseTarget? = when (val rows = tab.logData) {
+    is AppendOnlyLogList -> RowReleaseTarget(rows.storeIdentity) { rows.release() }
+    is ReleasableLogRows -> RowReleaseTarget(rows.content) { rows.content.release() }
+    else -> null
+}
+
+/** Closing historically delays release only for append-only capture/tail stores. */
+private fun closedTabRowReleaseTarget(tab: LogTab): RowReleaseTarget? =
+    rowReleaseTarget(tab)?.takeIf { tab.logData is AppendOnlyLogList }
 
 private const val RELEASED_ROWS_TRIM_REASON = "released closed capture rows"
 private const val CLOSED_TAB_TRIM_REASON = "closed large or capture tab"
@@ -434,13 +488,16 @@ fun mkTab(
     // AppState.newTabProcessNameMode(); see AppSettings.showProcessNamesInNewTabs.
     processNameMode: ProcessNameMode = ProcessNameMode.OFF,
     logFormat: LogFormat = LogFormat.LOGCAT,
-) = LogTab(
-    id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
-    annotations = Annotations(prefix = "From $filename"),
-    analysis = analysis,
-    processNameMode = processNameMode,
-    logFormat = logFormat,
-)
+): LogTab {
+    val (publishedRows, publishedRmap) = releasableLogRows(logData, mkRmap(logData))
+    return LogTab(
+        id = id, filename = filename, logData = publishedRows, rmap = publishedRmap,
+        annotations = Annotations(prefix = "From $filename"),
+        analysis = analysis,
+        processNameMode = processNameMode,
+        logFormat = logFormat,
+    )
+}
 
 fun emptyWorkspaceTab() = LogTab(
     id = "untitled",
@@ -1861,6 +1918,12 @@ class AppState(
     // Blocks a restored archive tab between its rows appearing and its imported snapshot being linked (the tab id is
     // passed), so tests can open the range popover inside that window. A no-op in production.
     internal val beforeImportedSnapshotStored: (String) -> Unit = {},
+    // Injectable monotonic source and sweep cadence keep idle-residency lifecycle tests deterministic.
+    private val monotonicNowNanos: () -> Long = System::nanoTime,
+    private val tabMemorySweepIntervalMs: Long = 30_000L,
+    // Allows deterministic control of the settings-driven per-row issue-rule scan in lifecycle tests.
+    private val customIssueSitesComputer: (List<LogEntry>, List<CustomIssueRule>) -> List<CustomIssueSite> =
+        ::computeCustomIssueSites,
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -3221,6 +3284,7 @@ class AppState(
     // UI thread while a previously-scheduled recompute for that same tabId is still in flight.
     private val searchJobs = ConcurrentHashMap<SearchJobKey, Job>()
     private val searchJobRevisions = ConcurrentHashMap<SearchJobKey, Long>()
+    private val customIssueRuleGeneration = AtomicLong()
 
     // Only one search item list may be materialized at a time. In Two searches mode this bounds
     // peak memory on very large logs. The lock is cancellation-aware.
@@ -6081,6 +6145,13 @@ class AppState(
 
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
+    private val reloadSourcesByTab = ConcurrentHashMap<String, RestoredTabSource>()
+    private val inactiveSinceNanos = ConcurrentHashMap<String, Long>()
+    private val contentLoadGenerations = ConcurrentHashMap<String, AtomicLong>()
+    private val contentLoadJobs = ConcurrentHashMap<String, Job>()
+    private val readerPinsByTab = HashMap<String, Int>()
+    private var tabMemoryLifecycleStarted by mutableStateOf(!restoreOnCreate)
+    private val tabMemoryLifecycleJobsStarted = AtomicBoolean(false)
 
     // Reader-pin registry (see pinRows). Both guarded by stateLock. A background job (merge, export,
     // Save analysis, note auto-export) captures a LogTab snapshot and reads its rows later; it is not
@@ -6153,13 +6224,29 @@ class AppState(
 
     // ── Tabs ────────────────────────────────────────────────────────
     var tabs by mutableStateOf(emptyList<LogTab>())
-    var activeTabId by mutableStateOf("")
+    private var activeTabIdState by mutableStateOf("")
+    var activeTabId: String
+        get() = activeTabIdState
+        set(value) {
+            if (activeTabIdState == value) return
+            val before = if (tabMemoryLifecycleStarted) synchronized(stateLock) { displayedLogTabIdsLocked() } else emptySet()
+            activeTabIdState = value
+            if (tabMemoryLifecycleStarted) handleDisplayedLogTabsChanged(before)
+        }
 
     /** Main content routing only.  [tabs] intentionally remains a collection of log tabs; open
      * sequence diagrams are independent editor surfaces owned by seq3Sessions — see
      * [diagramTabsToken]/[restoreDiagramTabs] (AutosaveCodec.kt) for how a diagram workspace tab's
      * content (not this routing field itself) survives a restart. */
-    var activeSurface by mutableStateOf<ActiveSurface?>(null)
+    private var activeSurfaceState by mutableStateOf<ActiveSurface?>(null)
+    var activeSurface: ActiveSurface?
+        get() = activeSurfaceState
+        set(value) {
+            if (activeSurfaceState == value) return
+            val before = if (tabMemoryLifecycleStarted) synchronized(stateLock) { displayedLogTabIdsLocked() } else emptySet()
+            activeSurfaceState = value
+            if (tabMemoryLifecycleStarted) handleDisplayedLogTabsChanged(before)
+        }
 
     /** True while a diagram workspace owns the content area (App.kt:317).  activeTabId stays
      *  semantically intact for everything that depends on it — the Video/Cases/Compare toolbar
@@ -6260,8 +6347,24 @@ class AppState(
     /** Group metadata and memberships for the unified strip. Every membership/order RMW uses
      * [stateLock], the same monitor that protects structural log-tab mutations. */
     internal var tabGroups by mutableStateOf(emptyList<TabGroup>())
-    var compareMode by mutableStateOf(false)
-    var compareTabId by mutableStateOf("")
+    private var compareModeState by mutableStateOf(false)
+    var compareMode: Boolean
+        get() = compareModeState
+        set(value) {
+            if (compareModeState == value) return
+            val before = if (tabMemoryLifecycleStarted) synchronized(stateLock) { displayedLogTabIdsLocked() } else emptySet()
+            compareModeState = value
+            if (tabMemoryLifecycleStarted) handleDisplayedLogTabsChanged(before)
+        }
+    private var compareTabIdState by mutableStateOf("")
+    var compareTabId: String
+        get() = compareTabIdState
+        set(value) {
+            if (compareTabIdState == value) return
+            val before = if (tabMemoryLifecycleStarted) synchronized(stateLock) { displayedLogTabIdsLocked() } else emptySet()
+            compareTabIdState = value
+            if (tabMemoryLifecycleStarted) handleDisplayedLogTabsChanged(before)
+        }
     var splitSyncRevision by mutableStateOf(0L)
         private set
     var loadingStatus by mutableStateOf<String?>(null)
@@ -6648,10 +6751,237 @@ class AppState(
     fun rotateControlToken() = controlServerManager.rotateControlToken()
 
     fun startPendingRestoredTabLoads() {
-        val loads = synchronized(stateLock) {
-            pendingRestoredLoads.toList().also { pendingRestoredLoads.clear() }
+        val targets = synchronized(stateLock) {
+            tabMemoryLifecycleStarted = true
+            val shells = pendingRestoredLoads.toList().also { pendingRestoredLoads.clear() }
+            shells.forEach { shell -> reloadSourcesByTab[shell.tab.id] = shell.source }
+            if (settings.inactiveTabUnloadMinutes <= 0) shells.map { it.tab.id }
+            else displayedLogTabIdsLocked().filter { id -> shells.any { it.tab.id == id } }
         }
-        loads.forEach { shell -> scheduleRestoredTabLoad(shell.tab.id, shell.source) }
+        targets.forEach { id -> ensureTabLoaded(id, retryFailed = false, showGlobalLoading = true) }
+        reconcileDisplayedTabResidency()
+    }
+
+    private fun displayedLogTabIdsLocked(): Set<String> {
+        val surface = activeSurface ?: tabs.firstOrNull { it.id == activeTabId }?.let { ActiveSurface.Log(it.id) }
+        val ids = if (compareMode && surface is ActiveSurface.Log) listOf(surface.tabId, compareTabId) else
+            listOfNotNull((surface as? ActiveSurface.Log)?.tabId)
+        return ids.filterTo(linkedSetOf()) { id -> tabs.any { it.id == id && !it.isCaptureLauncher } }
+    }
+
+    private fun handleDisplayedLogTabsChanged(previous: Set<String>) {
+        if (!tabMemoryLifecycleStarted) return
+        val now = monotonicNowNanos()
+        val loads = synchronized(stateLock) {
+            val current = displayedLogTabIdsLocked()
+            (previous + current).forEach { id ->
+                tabs.firstOrNull { it.id == id }?.let { updateInactiveSinceLocked(it, current, now) }
+            }
+            current.filter { id -> tabs.firstOrNull { it.id == id }?.contentState == TabContentState.UNLOADED }
+        }
+        loads.forEach { ensureTabLoaded(it, retryFailed = false, showGlobalLoading = false) }
+    }
+
+    private fun restoredSourceForTab(tab: LogTab): RestoredTabSource? {
+        tab.captureArchivePath?.takeIf(String::isNotBlank)?.let { path ->
+            return RestoredTabSource.CaptureSource.restore(path, tab.sourcePath)
+        }
+        tab.sourcePath?.takeIf(String::isNotBlank)?.let { path ->
+            val split = path.indexOf('!')
+            if (split > 0) {
+                val archive = File(path.substring(0, split))
+                val entry = path.substring(split + 1).takeIf(String::isNotBlank) ?: return null
+                return RestoredTabSource.ArchiveSource(archive, entry, tab.archiveCandidate)
+            }
+            return RestoredTabSource.FileSource(File(path))
+        }
+        tab.attachedVideo?.captureSourcePath?.takeIf(String::isNotBlank)?.let { path ->
+            return RestoredTabSource.CaptureSource.restore(path, tab.sourcePath)
+        }
+        return null
+    }
+
+    private fun isReloadableTab(tab: LogTab): Boolean =
+        !tab.isCaptureLauncher && !tab.tailing && tab.captureSessionId == null &&
+            restoredSourceForTab(tab) != null
+
+    private fun reconcileDisplayedTabResidency() {
+        if (!tabMemoryLifecycleStarted) return
+        val shouldLoad = mutableListOf<String>()
+        val now = monotonicNowNanos()
+        synchronized(stateLock) {
+            val displayed = displayedLogTabIdsLocked()
+            val ids = tabs.mapTo(HashSet()) { it.id }
+            (inactiveSinceNanos.keys - ids).forEach(inactiveSinceNanos::remove)
+            (reloadSourcesByTab.keys - ids).forEach(reloadSourcesByTab::remove)
+            tabs.forEach { tab ->
+                val source = restoredSourceForTab(tab)
+                if (!isReloadableTab(tab) || source == null) {
+                    inactiveSinceNanos.remove(tab.id)
+                    reloadSourcesByTab.remove(tab.id)
+                    return@forEach
+                }
+                reloadSourcesByTab[tab.id] = source
+                updateInactiveSinceLocked(tab, displayed, now)
+                if (tab.id in displayed) {
+                    if (tab.contentState == TabContentState.UNLOADED) shouldLoad += tab.id
+                }
+            }
+        }
+        shouldLoad.distinct().forEach { id -> ensureTabLoaded(id, retryFailed = false, showGlobalLoading = false) }
+    }
+
+    /** stateLock must be held; LOADING stays on its existing hidden-tab idle clock. */
+    private fun updateInactiveSinceLocked(tab: LogTab, displayed: Set<String>, now: Long) {
+        val stateCanBeTracked = tab.contentState == TabContentState.LOADED ||
+            tab.contentState == TabContentState.UNLOADED || tab.contentState == TabContentState.LOADING
+        if (
+            tab.id !in displayed && stateCanBeTracked && isReloadableTab(tab) &&
+            settings.inactiveTabUnloadMinutes > 0
+        ) {
+            inactiveSinceNanos.putIfAbsent(tab.id, now)
+        } else {
+            inactiveSinceNanos.remove(tab.id)
+        }
+    }
+
+    /** Deterministic lifecycle entry point used by tests and by the 30-second production sweep. */
+    internal fun sweepInactiveTabs() {
+        if (!tabMemoryLifecycleStarted) return
+        reconcileDisplayedTabResidency()
+        val timeoutMinutes = settings.inactiveTabUnloadMinutes.coerceIn(0, MAX_INACTIVE_TAB_UNLOAD_MINUTES)
+        if (timeoutMinutes == 0) return
+        val now = monotonicNowNanos()
+        val timeoutNanos = TimeUnit.MINUTES.toNanos(timeoutMinutes.toLong())
+        val victims = synchronized(stateLock) {
+            val displayed = displayedLogTabIdsLocked()
+            tabs.asSequence()
+                .filter { tab ->
+                    val idleSince = inactiveSinceNanos[tab.id] ?: return@filter false
+                    canUnloadTabContentLocked(tab, displayed) && now - idleSince >= timeoutNanos
+                }
+                .map { it.id }
+                .toList()
+        }
+        victims.forEach(::unloadTabContent)
+    }
+
+    /** stateLock must be held; listed work either reads rows or means a tab is still being loaded. */
+    private fun hasActiveResidencyReadersLocked(tab: LogTab): Boolean {
+        if ((readerPinsByTab[tab.id] ?: 0) > 0) return true
+        val target = rowReleaseTarget(tab)
+        if (target != null && (rowsPinCounts[target.store] ?: 0) > 0) return true
+        if (videoControllers[tab.id]?.isPlaying == true) return true
+        if (activeLoads[tab.id]?.job?.isActive == true || contentLoadJobs[tab.id]?.isActive == true) return true
+        if (captureIndexBuildsByTab[tab.id]?.result?.isDone == false) return true
+        return compositionJobs[tab.id]?.isActive == true
+    }
+
+    /** stateLock must be held; both sweep and unload use the same eligibility gate. */
+    private fun canUnloadTabContentLocked(tab: LogTab, displayed: Set<String>): Boolean {
+        if (tab.id in displayed || tab.contentState != TabContentState.LOADED) return false
+        if (!isReloadableTab(tab) || rowReleaseTarget(tab) == null) return false
+        return !hasActiveResidencyReadersLocked(tab)
+    }
+
+    internal fun ensureTabLoaded(tabId: String, retryFailed: Boolean = true): Job? =
+        ensureTabLoaded(tabId, retryFailed, showGlobalLoading = false)
+
+    /** Loads a row-dependent action's source if needed, then returns only the published loaded tab. */
+    internal suspend fun awaitTabLoaded(tabId: String): LogTab? {
+        var retriedFailure = false
+        while (currentCoroutineContext().isActive) {
+            val current = tab(tabId) ?: return null
+            if (current.contentState == TabContentState.LOADED) return current
+            if (current.contentState == TabContentState.FAILED) {
+                if (retriedFailure) return null
+                retriedFailure = true
+            }
+            val job = ensureTabLoaded(tabId, retryFailed = current.contentState == TabContentState.FAILED)
+            if (job == null) {
+                if (tab(tabId)?.contentState == TabContentState.LOADING) {
+                    yield()
+                    continue
+                }
+                return null
+            }
+            job.join()
+        }
+        return null
+    }
+
+    private fun ensureTabLoaded(tabId: String, retryFailed: Boolean, showGlobalLoading: Boolean): Job? {
+        val source = synchronized(stateLock) {
+            val tab = tabs.firstOrNull { it.id == tabId } ?: return null
+            if (tab.contentState == TabContentState.LOADED || tab.contentState == TabContentState.LOADING) {
+                return contentLoadJobs[tabId]
+            }
+            if (tab.contentState == TabContentState.FAILED && !retryFailed) return null
+            reloadSourcesByTab[tabId] ?: restoredSourceForTab(tab)?.also { reloadSourcesByTab[tabId] = it }
+        } ?: return null
+        return scheduleRestoredTabLoad(tabId, source, showGlobalLoading)
+    }
+
+    private fun unloadTabContent(tabId: String) {
+        var released: RowReleaseTarget? = null
+        var trimAfterRelease = false
+        var detachedSnapshots: List<ImportedCaptureSnapshot> = emptyList()
+        var detachedVideo: VideoPlayerController? = null
+        val unloaded = synchronized(stateLock) {
+            val tab = tabs.firstOrNull { it.id == tabId }
+            val target = tab?.let(::rowReleaseTarget)
+            if (tab == null || target == null || !canUnloadTabContentLocked(tab, displayedLogTabIdsLocked())) {
+                false
+            } else {
+                trimAfterRelease = shouldTrimHeapAfterClosing(listOf(tab))
+                // Invalidate and detach ownership under the same lock as shell publication. A
+                // rapid reactivation can then only create new readers/resources after this cleanup.
+                releaseSearchState(tabId)
+                compositionJobs.remove(tabId)?.cancel()
+                capturePreviewJobsByTab.remove(tabId)?.cancel()
+                captureIndexBuildsByTab.remove(tabId)
+                captureFollowFloorIndexByTab.remove(tabId)
+                captureScreenshotCapabilities.remove(tabId)
+                capturePreviewGenerationByTab.remove(tabId)
+                visibleItemsByTab.remove(tabId)
+                elapsedIndexByTab.remove(tabId)
+                followFloorIndexByTab.remove(tabId)
+                followExpandAttemptByTab.remove(tabId)
+                invalidateComputeCache(tabId)
+                logViewerScrollStateStore.snapshotAndDropLazyStates(tabId)
+                detachedVideo = videoControllers.remove(tabId)
+                detachedSnapshots = detachImportedSnapshots(setOf(tabId))
+
+                contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+                val filtered = tab.searchFor(SearchScope.FILTERED).copy(
+                    isSearching = false, matchIds = IntArray(0), currentIdx = 0, invalidPattern = false, timedOut = false,
+                )
+                val unfiltered = tab.searchFor(SearchScope.UNFILTERED).copy(
+                    isSearching = false, matchIds = IntArray(0), currentIdx = 0, invalidPattern = false, timedOut = false,
+                )
+                val searches = tab.searches.with(SearchScope.FILTERED, filtered).with(SearchScope.UNFILTERED, unfiltered)
+                val next = tab.copy(
+                    logData = emptyList(),
+                    rmap = emptyMap(),
+                    analysis = LogAnalysis(),
+                    captureTimeline = null,
+                    messageComposition = MessageCompositionState.NotComputed,
+                    tidMap = null,
+                    searches = searches,
+                    search = searches[tab.focusedSearchScope],
+                    contentState = TabContentState.UNLOADED,
+                    contentLoadError = null,
+                )
+                tabs = tabs.map { if (it.id == tabId) next else it }
+                inactiveSinceNanos[tabId] = monotonicNowNanos()
+                released = target
+                true
+            }
+        }
+        if (!unloaded) return
+        detachedVideo?.close()
+        closeSnapshotsOffThread(detachedSnapshots)
+        released?.let { releaseRowsLater(listOf(it), trimAfterwards = trimAfterRelease) }
     }
 
     private fun beginLoading(status: String = "Loading file...") = synchronized(stateLock) {
@@ -7184,7 +7514,11 @@ class AppState(
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val prev = settings
-        val next = transform(settings)
+        val next = transform(settings).let { value ->
+            value.copy(
+                inactiveTabUnloadMinutes = value.inactiveTabUnloadMinutes.coerceIn(0, MAX_INACTIVE_TAB_UNLOAD_MINUTES),
+            )
+        }
         if (settings == next) return
         settings = next
         if (next.syncSplitPanelSelectionAndScroll != prev.syncSplitPanelSelectionAndScroll) {
@@ -7204,12 +7538,32 @@ class AppState(
 
     /** Rebuilds cached issue anchors off the UI thread after Settings changes. */
     private fun recomputeIssueAnalysis(rules: List<CustomIssueRule>) {
-        tabs.forEach { snapshot ->
-            ioScope.launch {
-                val customSites = withContext(Dispatchers.Default) { computeCustomIssueSites(snapshot.logData, rules) }
-                if (settings.customIssueRules != rules) return@launch
+        val generation = customIssueRuleGeneration.incrementAndGet()
+        // Capture only loaded tabs and pin each exact row store while still under stateLock. An
+        // unloaded shell has no rows to scan; a hidden loaded tab must remain resident until its
+        // settings-driven scan has finished.
+        val snapshots = synchronized(stateLock) {
+            tabs.asSequence()
+                .filter { it.contentState == TabContentState.LOADED && it.logData.isNotEmpty() }
+                .map { it to pinRows(it) }
+                .toList()
+        }
+        snapshots.forEach { (snapshot, pin) ->
+            launchPinned(pin) {
+                val customSites = withContext(Dispatchers.Default) {
+                    customIssueSitesComputer(snapshot.logData, rules)
+                }
+                ensureActive()
+                if (customIssueRuleGeneration.get() != generation || settings.customIssueRules != rules) return@launchPinned
                 upTab(snapshot.id) { current ->
-                    if (current.logData == snapshot.logData) current.copy(analysis = current.analysis.copy(customIssueSites = customSites)) else current
+                    if (
+                        customIssueRuleGeneration.get() == generation && settings.customIssueRules == rules &&
+                        current.contentState == TabContentState.LOADED && current.logData === snapshot.logData
+                    ) {
+                        current.copy(analysis = current.analysis.copy(customIssueSites = customSites))
+                    } else {
+                        current
+                    }
                 }
             }
         }
@@ -7623,8 +7977,10 @@ class AppState(
         if (before != null && after != null) {
             // A refresh, not an input change: the query is unchanged, so the current matches stay
             // visible and navigable until the recompute lands (see scheduleSearchRecompute).
-            searchScopesNeedingRecompute(before, after).forEach { scope ->
-                scheduleSearchRecompute(tabId, scope)
+            if (after.contentState != TabContentState.UNLOADED) {
+                searchScopesNeedingRecompute(before, after).forEach { scope ->
+                    scheduleSearchRecompute(tabId, scope)
+                }
             }
         }
     }
@@ -9029,7 +9385,7 @@ class AppState(
         // superset of gids, exactly as if the user had expanded before filtering.
         ioScope.launch(Dispatchers.Default) {
             val expanded = visibleExpandableGroupIds(t)
-            ensureActive()
+            currentCoroutineContext().ensureActive()
             synchronized(stateLock) {
                 upTab(tabId) { it.copy(expanded = expanded) }
             }
@@ -11236,20 +11592,23 @@ class AppState(
      *  found; the real tab.expanded and stored filter are never mutated here. */
     private fun scheduleSearchRecompute(tabId: String, scope: SearchScope) {
         val key = SearchJobKey(tabId, scope)
-        val launchedRevision = tab(tabId)?.searchFor(scope)?.inputRevision ?: return
+        val initial = tab(tabId) ?: return
+        if (initial.contentState != TabContentState.LOADED) return
+        val pin = pinRows(initial)
+        val launchedRevision = initial.searchFor(scope).inputRevision
         val generation = searchJobRevisions.compute(key) { _, old -> (old ?: 0L) + 1L } ?: 1L
         searchJobs.remove(key)?.cancel()
-        searchJobs[key] = ioScope.launch {
+        searchJobs[key] = launchPinned(pin) {
             delay(SEARCH_RECOMPUTE_DEBOUNCE_MS)
-            val stored = tab(tabId) ?: return@launch
+            val stored = tab(tabId) ?: return@launchPinned
             val request = stored.searchFor(scope)
-            if (!request.active || request.inputRevision != launchedRevision) return@launch
+            if (!request.active || request.inputRevision != launchedRevision) return@launchPinned
             if (request.query.isEmpty() || !isValidRegexPattern(request.query, ignoreCase = !request.caseSensitive)) {
                 val quickResult = computeSearchMatches(
                     emptyList(), request.query, request.caseSensitive, RegexEvaluationContext(),
                 )
                 applySearchResult(tabId, scope, request.inputRevision, generation, quickResult)
-                return@launch
+                return@launchPinned
             }
             val t = stored.copy(filter = effectiveSearchFilter(tabId, stored))
             // Compare applies its displayed filter only to the Filtered slot. An explicit
@@ -11564,11 +11923,20 @@ class AppState(
         }
     }
 
-    fun activateTab(tabId: String) = synchronized(stateLock) {
-        if (tabs.any { it.id == tabId }) {
-            revealTabGroupForActivation(TabRef.Log(tabId))
-            activeTabId = tabId
-            activeSurface = ActiveSurface.Log(tabId)
+    fun activateTab(tabId: String) {
+        val activated = synchronized(stateLock) {
+            if (tabs.none { it.id == tabId }) {
+                false
+            } else {
+                revealTabGroupForActivation(TabRef.Log(tabId))
+                activeTabId = tabId
+                activeSurface = ActiveSurface.Log(tabId)
+                true
+            }
+        }
+        if (activated) {
+            ensureTabLoaded(tabId, retryFailed = false)
+            reconcileDisplayedTabResidency()
         }
     }
 
@@ -11580,10 +11948,14 @@ class AppState(
     // sites already run inside a `synchronized(stateLock) { ... }` block (mkTab publish paths),
     // and re-entering the lock there is safe (Kotlin's `synchronized` is reentrant); taking it here
     // also protects the group's reveal from a concurrent group removal.
-    private fun setActiveSurfaceToTab(tabId: String) = synchronized(stateLock) {
-        revealTabGroupForActivation(TabRef.Log(tabId))
-        activeTabId = tabId
-        activeSurface = ActiveSurface.Log(tabId)
+    private fun setActiveSurfaceToTab(tabId: String) {
+        synchronized(stateLock) {
+            revealTabGroupForActivation(TabRef.Log(tabId))
+            activeTabId = tabId
+            activeSurface = ActiveSurface.Log(tabId)
+        }
+        ensureTabLoaded(tabId, retryFailed = false)
+        reconcileDisplayedTabResidency()
     }
 
     /** The home/launcher ("New tab") tab's id when it is the tab the user is looking at right now.
@@ -11634,17 +12006,24 @@ class AppState(
         if (launcherId != null) closeTabsById(setOf(launcherId), preferredActiveId = existingId)
     }
 
-    fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
-        if (tabs.none { it.id == tabId }) return
-        val ref = TabRef.Log(tabId)
-        val group = tabGroups.firstOrNull { ref in it.members }
-        val order = reconciledTabOrderLocked()
-        val moved = group?.members?.let { members -> order.filter { it in members } } ?: listOf(ref)
-        val rest = order.filterNot { it in moved }
-        commitTabOrderLocked(rest + moved)
-        revealTabGroupForActivation(ref)
-        activeTabId = tabId
-        activeSurface = ActiveSurface.Log(tabId)
+    fun activateOverflowTab(tabId: String) {
+        val activated = synchronized(stateLock) {
+            if (tabs.none { it.id == tabId }) return
+            val ref = TabRef.Log(tabId)
+            val group = tabGroups.firstOrNull { ref in it.members }
+            val order = reconciledTabOrderLocked()
+            val moved = group?.members?.let { members -> order.filter { it in members } } ?: listOf(ref)
+            val rest = order.filterNot { it in moved }
+            commitTabOrderLocked(rest + moved)
+            revealTabGroupForActivation(ref)
+            activeTabId = tabId
+            activeSurface = ActiveSurface.Log(tabId)
+            true
+        }
+        if (activated) {
+            ensureTabLoaded(tabId, retryFailed = false)
+            reconcileDisplayedTabResidency()
+        }
     }
 
     /** Closes every live log and diagram tab in [id] through each backing store's normal cleanup. */
@@ -11779,7 +12158,7 @@ class AppState(
         // other call sites across this class, so blocking IO/joins must never run while holding it.
         val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
         var trimHeapAfterClose = false
-        var rowsToRelease: List<AppendOnlyLogList> = emptyList()
+        var rowsToRelease: List<RowReleaseTarget> = emptyList()
         var exitCompare = false
         // Closing a snapshot ends its extraction claim (file IO), so it happens after stateLock is released.
         val closedSnapshots = mutableListOf<ImportedCaptureSnapshot>()
@@ -11790,8 +12169,12 @@ class AppState(
             trimHeapAfterClose = shouldTrimHeapAfterClosing(closing)
             // Taken in the same critical section as cancelTailingFor below, and appendTailedLines
             // also needs stateLock, so no tail batch can extend these lists once we are past here.
-            rowsToRelease = closing.mapNotNull { it.logData as? AppendOnlyLogList }.distinctBy { it.storeIdentity }
+            rowsToRelease = closing.mapNotNull(::closedTabRowReleaseTarget).distinctBy { it.store }
             tabIds.forEach { tabId ->
+                contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+                contentLoadJobs.remove(tabId)?.cancel()
+                reloadSourcesByTab.remove(tabId)
+                inactiveSinceNanos.remove(tabId)
                 seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
                 if (tabId !in loadsToFinishAfterClose) cancelActiveLoad(tabId)
@@ -11850,7 +12233,7 @@ class AppState(
         if (rowsToRelease.isNotEmpty()) {
             // The release job issues the trim itself, AFTER dropping the rows: a trim requested here
             // would run first, and HeapTrim's coalescing would then absorb the later request.
-            releaseClosedTabRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
+            releaseRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
         } else if (trimHeapAfterClose) {
             requestHeapTrim(CLOSED_TAB_TRIM_REASON)
         }
@@ -11869,24 +12252,24 @@ class AppState(
      * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). [trimAfterwards] carries the
      * close-time trim decision: the GC has to run after the release to free anything.
      */
-    private fun releaseClosedTabRowsLater(rows: List<AppendOnlyLogList>, trimAfterwards: Boolean) {
+    private fun releaseRowsLater(rows: List<RowReleaseTarget>, trimAfterwards: Boolean) {
         ioScope.launch {
             delay(closedTabRowsReleaseDelayMs)
             var released = false
             var deferred = false
             synchronized(stateLock) {
                 val inUse = storesInUseLocked()
-                for (list in rows) {
-                    val store = list.storeIdentity
+                for (target in rows) {
+                    val store = target.store
                     when {
                         store in inUse -> Unit
                         rowsPinCounts.containsKey(store) -> {
                             deferred = true
-                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(list, false) }
+                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(target.release, false) }
                             pending.trimAfterwards = pending.trimAfterwards || trimAfterwards
                         }
                         else -> {
-                            list.release()
+                            target.release()
                             released = true
                         }
                     }
@@ -11903,8 +12286,8 @@ class AppState(
     /** Stores some tab (open or still waiting to be restored) reads. Caller must hold [stateLock]. */
     private fun storesInUseLocked(): Set<Any> {
         val inUse = HashSet<Any>()
-        tabs.forEach { tab -> (tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
-        pendingRestoredLoads.forEach { shell -> (shell.tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
+        tabs.forEach { tab -> rowReleaseTarget(tab)?.let { inUse += it.store } }
+        pendingRestoredLoads.forEach { shell -> rowReleaseTarget(shell.tab)?.let { inUse += it.store } }
         return inUse
     }
 
@@ -11919,9 +12302,12 @@ class AppState(
      * briefly. Synchronous code that finishes before returning needs no pin.
      */
     internal fun pinRows(tab: LogTab): RowsPin {
-        val store = (tab.logData as? AppendOnlyLogList)?.storeIdentity ?: return RowsPin.NONE
-        synchronized(stateLock) { rowsPinCounts.merge(store, 1, Int::plus) }
-        return RowsPin { unpinRows(store) }
+        val target = rowReleaseTarget(tab) ?: return RowsPin.NONE
+        synchronized(stateLock) {
+            rowsPinCounts.merge(target.store, 1, Int::plus)
+            readerPinsByTab.merge(tab.id, 1, Int::plus)
+        }
+        return RowsPin { unpinRows(tab.id, target.store) }
     }
 
     /** Runs [block] with [tab]'s rows pinned; try/finally so cancellation and exceptions always unpin. */
@@ -11935,10 +12321,12 @@ class AppState(
     private fun launchPinned(pin: RowsPin, block: suspend CoroutineScope.() -> Unit): Job =
         ioScope.launch(block = block).also { job -> job.invokeOnCompletion { pin.close() } }
 
-    private fun unpinRows(store: Any) {
+    private fun unpinRows(tabId: String, store: Any) {
         var pending: PendingRowRelease? = null
         var released = false
         synchronized(stateLock) {
+            val readerCount = (readerPinsByTab[tabId] ?: 0) - 1
+            if (readerCount > 0) readerPinsByTab[tabId] = readerCount else readerPinsByTab.remove(tabId)
             val remaining = (rowsPinCounts[store] ?: 0) - 1
             if (remaining > 0) {
                 rowsPinCounts[store] = remaining
@@ -11949,7 +12337,7 @@ class AppState(
             // Re-checked: the store could have become a tab's rows while the closed one waited. Same
             // critical section as the release, so a reader cannot register in between.
             pending?.takeIf { store !in storesInUseLocked() }?.let {
-                it.rows.release()
+                it.releaseRows()
                 released = true
             }
         }
@@ -11963,7 +12351,20 @@ class AppState(
     // Runs on ioScope for consistency with the rest of the codebase's bias toward backgrounding
     // anything touching logData, even though mergeLogs() itself is a pure in-memory sort.
     fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
-        val tabsToMerge = tabIds.mapNotNull { id -> tab(id) }
+        val requested = tabIds.distinct().mapNotNull(::tab)
+        if (requested.size < 2) return
+        if (requested.any { it.contentState != TabContentState.LOADED }) {
+            ioScope.launch {
+                val loaded = requested.map { source -> awaitTabLoaded(source.id) }
+                if (loaded.any { it == null }) {
+                    showOpenError("Could not merge logs", null, "One or more source logs could not be loaded.")
+                    return@launch
+                }
+                mergeTabs(requested.map { it.id }, newTabName)
+            }
+            return
+        }
+        val tabsToMerge = requested.mapNotNull { snapshot -> tab(snapshot.id) }
         // The first selected source is the explicit origin; capture its group before the merge job
         // is queued so switching tabs while rows are combined cannot change inheritance.
         val originGroupId = tabsToMerge.firstOrNull()?.let { tabGroupIdForOrigin(TabRef.Log(it.id)) }
@@ -13790,12 +14191,20 @@ class AppState(
     }
 
     fun exportAnalysisTo(tabId: String, file: File): Boolean {
-        val t = tab(tabId) ?: return false
-        return runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(buildMd(t, settings))
-            writeAnnotationFrameImages(t, file)
-        }.isSuccess
+        // The in-process synchronous API is used by script/tool adapters. Resolve a shell on demand
+        // before building row-backed output; UI entry points use the suspending path below so they
+        // never block the event thread.
+        val t = tab(tabId)?.let { current ->
+            if (current.contentState == TabContentState.LOADED) current
+            else kotlinx.coroutines.runBlocking { awaitTabLoaded(tabId) }
+        } ?: return false
+        return withPinnedRows(t) {
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeText(buildMd(t, settings))
+                writeAnnotationFrameImages(t, file)
+            }.isSuccess
+        }
     }
 
     // Writes every AnnBlock.Image's bytes into a "<mdFile-base-name>_frames/" subfolder next to
@@ -13858,16 +14267,24 @@ class AppState(
     }
 
     fun exportFilteredTo(tabId: String, file: File, csv: Boolean): Boolean {
-        val t = tab(tabId) ?: return false
-        return runCatching { exportFilteredToFile(t, file, csv, settings) }.isSuccess
+        val t = tab(tabId)?.let { current ->
+            if (current.contentState == TabContentState.LOADED) current
+            else kotlinx.coroutines.runBlocking { awaitTabLoaded(tabId) }
+        } ?: return false
+        return withPinnedRows(t) { runCatching { exportFilteredToFile(t, file, csv, settings) }.isSuccess }
     }
 
     fun saveAnnotationsTo(tabId: String, file: File): Boolean {
-        val t = tab(tabId) ?: return false
-        return runCatching {
-            file.parentFile?.mkdirs()
-            file.writeText(t.annotations.preparedForSave(t).annotationsToken())
-        }.isSuccess
+        val t = tab(tabId)?.let { current ->
+            if (current.contentState == TabContentState.LOADED) current
+            else kotlinx.coroutines.runBlocking { awaitTabLoaded(tabId) }
+        } ?: return false
+        return withPinnedRows(t) {
+            runCatching {
+                file.parentFile?.mkdirs()
+                file.writeText(t.annotations.preparedForSave(t).annotationsToken())
+            }.isSuccess
+        }
     }
 
     // Best-effort app/build version fill-in at save time (com.indagium.cases' "similar past
@@ -14028,29 +14445,28 @@ class AppState(
         if (File(dir).absolutePath == activeNotesDir().absolutePath) {
             upTab(tabId) { it.copy(noteTargetName = saved.name) }
         }
-        // Re-read the tab only now: the modal dialog above can stay open for a long time while the
-        // tab keeps changing (tailing, note edits), and the snapshot taken before it would save
-        // stale content. A tab closed meanwhile has nothing left to save.
-        val t = tab(tabId) ?: return
-        // Same per-file write lane auto-export uses, so a manual save and a concurrent auto-export
-        // of the same file can never interleave or land out of order: the later request wins.
-        val writer = noteExportWriters.computeIfAbsent(saved.absolutePath) { NoteExportWriter() }
-        val revision = writer.revision.incrementAndGet()
-        // The write waits on the lane above and then reads `t`'s rows (buildMd, preparedForSave): pin
-        // them now so closing a capture tab right after Save cannot release them under the job.
-        launchPinned(pinRows(t)) {
-            writer.mutex.withLock {
-                if (revision != writer.revision.get()) return@withLock
-                runCatching {
-                    saved.writeText(buildMd(t, settings))
-                    File(saved.parent, saved.nameWithoutExtension + ".ann")
-                        .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
-                    writeAnnotationFrameImages(t, saved)
-                    rememberRecentNote(saved)
-                }.fold(
-                    onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
-                    onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
-                )
+        // The dialog can remain open while a hidden tab unloads. Resolve the current rows on the
+        // background scope, then pin the exact snapshot before the queued writer reads it.
+        ioScope.launch {
+            val t = awaitTabLoaded(tabId) ?: return@launch
+            // Same per-file write lane auto-export uses, so a manual save and a concurrent
+            // auto-export of the same file cannot interleave or land out of order.
+            val writer = noteExportWriters.computeIfAbsent(saved.absolutePath) { NoteExportWriter() }
+            val revision = writer.revision.incrementAndGet()
+            launchPinned(pinRows(t)) {
+                writer.mutex.withLock {
+                    if (revision != writer.revision.get()) return@withLock
+                    runCatching {
+                        saved.writeText(buildMd(t, settings))
+                        File(saved.parent, saved.nameWithoutExtension + ".ann")
+                            .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
+                        writeAnnotationFrameImages(t, saved)
+                        rememberRecentNote(saved)
+                    }.fold(
+                        onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
+                        onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
+                    )
+                }
             }
         }
     }
@@ -14107,17 +14523,7 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
-        // Re-read the tab only now (like saveAnalysis): the modal dialog can stay open for a long
-        // time, and a tab closed meanwhile has nothing left to export. Pinned before the job
-        // starts so closing a capture tab right after choosing the file cannot release the rows
-        // the export is still streaming.
-        val t = tab(tabId) ?: return
-        launchPinned(pinRows(t)) {
-            runCatching { exportFilteredToFile(t, saved, csv = false, settings = settings) }.fold(
-                onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
-                onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
-            )
-        }
+        exportFilteredAfterLoad(tabId, saved, csv = false)
     }
 
     fun exportFilteredCsv(tabId: String) {
@@ -14131,16 +14537,18 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
-        // Re-read the tab only now (like saveAnalysis): the modal dialog can stay open for a long
-        // time, and a tab closed meanwhile has nothing left to export. Pinned before the job
-        // starts so closing a capture tab right after choosing the file cannot release the rows
-        // the export is still streaming.
-        val t = tab(tabId) ?: return
-        launchPinned(pinRows(t)) {
-            runCatching { exportFilteredToFile(t, saved, csv = true, settings = settings) }.fold(
-                onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
-                onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
-            )
+        exportFilteredAfterLoad(tabId, saved, csv = true)
+    }
+
+    private fun exportFilteredAfterLoad(tabId: String, saved: File, csv: Boolean) {
+        ioScope.launch {
+            val t = awaitTabLoaded(tabId) ?: return@launch
+            launchPinned(pinRows(t)) {
+                runCatching { exportFilteredToFile(t, saved, csv, settings) }.fold(
+                    onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
+                    onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
+                )
+            }
         }
     }
 
@@ -16674,83 +17082,208 @@ class AppState(
         pendingRestoredLoads += shells
     }
 
-    private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource) {
-        beginLoading("Restoring session...")
-        val job = ioScope.launch(start = CoroutineStart.LAZY) {
-            var published = false
-            // The restored capture's opener claim is released once the tab has taken its own (restoreCaptureLink).
-            var restoredCapture: com.indagium.capture.ImportedCapture? = null
-            try {
-                val result = loadRestoredTab(source)
-                restoredCapture = (result as? RestoredTabLoadResult.Loaded)?.captureArchive
-                if (result is RestoredTabLoadResult.MissingArchiveEntry) {
-                    ensureActive()
-                    // Keep the load visible as in flight until the unavailable shell has been
-                    // removed. Otherwise observers can see the load finish while the stale tab
-                    // (including its saved video seek link) is still published.
-                    closeTabsById(setOf(tabId), preferredActiveId = null, loadsToFinishAfterClose = setOf(tabId))
-                    finishActiveLoad(activeLoads.remove(tabId))
-                    showOpenError(
-                        title = "Restored archive entry is unavailable",
-                        path = "${result.archiveFile.absolutePath}!${result.entryPath}",
-                        message = "The saved archive entry no longer exists or is no longer a readable log.",
-                    )
-                    published = true
-                    return@launch
-                }
-                result as RestoredTabLoadResult.Loaded
-                ensureActive()
-                val rmap = mkRmap(result.logData)
-                val logFormat = result.logFormat
-                // Rows and the metadata that controls their Compose computation become visible in
-                // one snapshot update; a regenerated archive cannot expose new large content under
-                // the persisted small-file classification.
-                upTab(tabId) {
-                    it.copy(
-                        logData = result.logData,
-                        rmap = rmap,
-                        analysis = pendingAnalysis(result.logData, logFormat),
-                        logFormat = logFormat,
-                        archiveCandidate = result.archiveCandidate,
-                        largeFileMode = result.largeFileMode,
-                    )
-                }
-                restoreCaptureLink(tabId, result.captureArchive)
-                markActiveLoadFinished(tabId)
-                published = true
-                (source as? RestoredTabSource.FileSource)?.let { scheduleUnfinalizedCaptureAdoption(tabId, it.file) }
-                val issueRules = settings.customIssueRules
-                val full = buildLogAnalysis(result.logData, issueRules, logFormat)
-                ensureActive()
-                upTab(tabId) { current ->
-                    if (current.logData != result.logData) {
-                        current
-                    } else {
-                        val analyzed = current.copy(
-                            analysis = if (settings.customIssueRules == issueRules) full else current.analysis,
-                        )
-                        val preferences = analyzed.pendingLegacyLogRefPreferences
-                        if (preferences == null) {
-                            analyzed
-                        } else {
-                            val frozen = analyzed.annotations.freezeLegacyLogRefs(analyzed, preferences)
-                            analyzed.copy(
-                                annotations = frozen,
-                                pendingLegacyLogRefPreferences = preferences.takeIf {
-                                    frozen.hasUnresolvedLegacyLogRefs(analyzed)
-                                },
-                            )
-                        }
-                    }
-                }
-            } finally {
-                restoredCapture?.close()
-                val load = activeLoads.remove(tabId)
-                if (!published) finishActiveLoad(load)
+    private fun scheduleRestoredTabLoad(tabId: String, source: RestoredTabSource, showGlobalLoading: Boolean): Job? =
+        synchronized(stateLock) {
+            val current = tabs.firstOrNull { it.id == tabId } ?: return@synchronized null
+            if (current.contentState == TabContentState.LOADED) return@synchronized null
+            contentLoadJobs[tabId]?.takeIf { it.isActive }?.let { return@synchronized it }
+            // LOADING is published together with its registered job below. If a shell reaches this
+            // state without a job, decline to start a duplicate; the owning close/retry path must
+            // first invalidate that generation.
+            if (current.contentState == TabContentState.LOADING) return@synchronized null
+
+            val generation = contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
+            reloadSourcesByTab[tabId] = source
+            lateinit var activeLoad: ActiveLoad
+            val job = ioScope.launch(start = CoroutineStart.LAZY) {
+                runRestoredTabLoad(tabId, source, generation, activeLoad)
+            }
+            activeLoad = ActiveLoad(
+                job,
+                countsAsLoading = AtomicBoolean(showGlobalLoading),
+                kind = if (showGlobalLoading) "restore" else "reload",
+            )
+            tabs = tabs.map {
+                if (it.id == tabId) it.copy(contentState = TabContentState.LOADING, contentLoadError = null) else it
+            }
+            tabs.firstOrNull { it.id == tabId }?.let { loadingTab ->
+                updateInactiveSinceLocked(loadingTab, displayedLogTabIdsLocked(), monotonicNowNanos())
+            }
+            activeLoads[tabId] = activeLoad
+            contentLoadJobs[tabId] = job
+            if (showGlobalLoading) beginLoading("Restoring session...")
+            // Publish state and registries together before the lazy job can run. A simultaneous
+            // retry joins this job; close sees and cancels it.
+            job.start()
+            job
+        }
+
+    private suspend fun runRestoredTabLoad(
+        tabId: String,
+        source: RestoredTabSource,
+        generation: Long,
+        activeLoad: ActiveLoad,
+    ) {
+        var restoredCapture: com.indagium.capture.ImportedCapture? = null
+        var didPublish = false
+        try {
+            val result = loadRestoredTab(source)
+            restoredCapture = (result as? RestoredTabLoadResult.Loaded)?.captureArchive
+            currentCoroutineContext().ensureActive()
+            if (!isCurrentTabLoad(tabId, generation)) return
+
+            val failure = restoredLoadFailureMessage(result)
+            if (failure != null) {
+                publishTabLoadFailure(tabId, generation, failure)
+                didPublish = true
+                return
+            }
+            val loaded = result as RestoredTabLoadResult.Loaded
+            val publishedRows = publishRestoredTabRows(tabId, generation, loaded) ?: return
+            if (!completeRestoredTabLoad(tabId, generation, loaded, publishedRows)) return
+            didPublish = true
+            (source as? RestoredTabSource.FileSource)?.let { scheduleUnfinalizedCaptureAdoption(tabId, it.file) }
+            scheduleRestoredTabAnalysis(tabId, generation, publishedRows, loaded.logFormat)
+        } catch (cancelled: CancellationException) {
+            if (contentLoadGenerations[tabId]?.get() == generation) {
+                publishTabLoadFailure(tabId, generation, "Loading was cancelled. Retry to load this log.")
+                didPublish = true
+            }
+            throw cancelled
+        } catch (failure: Throwable) {
+            val message = failure.message?.takeIf(String::isNotBlank)
+                ?: failure::class.simpleName ?: "The source could not be read."
+            publishTabLoadFailure(tabId, generation, message)
+            didPublish = true
+        } finally {
+            restoredCapture?.close()
+            contentLoadJobs.remove(tabId, currentCoroutineContext()[Job])
+            if (activeLoads.remove(tabId, activeLoad)) finishActiveLoad(activeLoad)
+            if (!didPublish && isCurrentTabLoad(tabId, generation) && tab(tabId)?.contentState == TabContentState.LOADING) {
+                publishTabLoadFailure(tabId, generation, "The load did not complete. Retry to load this log.")
             }
         }
-        activeLoads[tabId] = ActiveLoad(job, kind = "restore")
-        job.start()
+    }
+
+    private fun isCurrentTabLoad(tabId: String, generation: Long): Boolean =
+        contentLoadGenerations[tabId]?.get() == generation && tab(tabId) != null
+
+    private fun restoredLoadFailureMessage(result: RestoredTabLoadResult): String? = when (result) {
+        is RestoredTabLoadResult.Failed -> result.message
+        is RestoredTabLoadResult.MissingArchiveEntry ->
+            "Archive entry is missing or is no longer a readable log: ${result.archiveFile.absolutePath}!${result.entryPath}"
+        is RestoredTabLoadResult.Loaded -> null
+    }
+
+    private fun publishRestoredTabRows(
+        tabId: String,
+        generation: Long,
+        loaded: RestoredTabLoadResult.Loaded,
+    ): List<LogEntry>? {
+        val (publishedRows, publishedRmap) = releasableLogRows(loaded.logData, mkRmap(loaded.logData))
+        val pending = pendingAnalysis(publishedRows, loaded.logFormat)
+        val accepted = synchronized(stateLock) {
+            if (contentLoadGenerations[tabId]?.get() != generation || tabs.none { it.id == tabId }) {
+                false
+            } else {
+                tabs = tabs.map { current ->
+                    if (current.id != tabId) {
+                        current
+                    } else {
+                        val compositionInputsChanged = current.logData !== publishedRows ||
+                            current.analysis.stackTraceGroups !== pending.stackTraceGroups
+                        current.copy(
+                            logData = publishedRows,
+                            rmap = publishedRmap,
+                            analysis = pending,
+                            logFormat = loaded.logFormat,
+                            archiveCandidate = loaded.archiveCandidate,
+                            largeFileMode = loaded.largeFileMode,
+                            selected = current.selected.filterTo(linkedSetOf()) { it in publishedRmap },
+                            contentState = TabContentState.LOADED,
+                            contentLoadError = null,
+                            messageCompositionRevision = current.messageCompositionRevision +
+                                if (compositionInputsChanged) 1 else 0,
+                            messageComposition = if (compositionInputsChanged) {
+                                MessageCompositionState.NotComputed
+                            } else {
+                                current.messageComposition
+                            },
+                        )
+                    }
+                }
+                tabs.firstOrNull { it.id == tabId }?.let { loadedTab ->
+                    updateInactiveSinceLocked(loadedTab, displayedLogTabIdsLocked(), monotonicNowNanos())
+                }
+                true
+            }
+        }
+        return publishedRows.takeIf { accepted }
+    }
+
+    private fun completeRestoredTabLoad(
+        tabId: String,
+        generation: Long,
+        loaded: RestoredTabLoadResult.Loaded,
+        publishedRows: List<LogEntry>,
+    ): Boolean {
+        if (!isCurrentTabLoad(tabId, generation)) return false
+        val current = tab(tabId)?.takeIf { it.contentState == TabContentState.LOADED && it.logData === publishedRows }
+            ?: return false
+        SearchScope.entries.filter { current.searchFor(it).active }.forEach { scope ->
+            scheduleSearchRecompute(tabId, scope)
+        }
+        restoreCaptureLink(tabId, loaded.captureArchive)
+        return true
+    }
+
+    private fun scheduleRestoredTabAnalysis(
+        tabId: String,
+        generation: Long,
+        publishedRows: List<LogEntry>,
+        logFormat: LogFormat,
+    ) {
+        val loadedTab = tab(tabId)?.takeIf { it.contentState == TabContentState.LOADED && it.logData === publishedRows } ?: return
+        val pin = pinRows(loadedTab)
+        val issueRules = settings.customIssueRules
+        launchPinned(pin) {
+            val full = withContext(Dispatchers.Default) { buildLogAnalysis(publishedRows, issueRules, logFormat) }
+            ensureActive()
+            if (contentLoadGenerations[tabId]?.get() != generation) return@launchPinned
+            upTab(tabId) { current ->
+                if (current.logData !== publishedRows || current.contentState != TabContentState.LOADED) {
+                    current
+                } else {
+                    val analyzed = current.copy(
+                        analysis = if (settings.customIssueRules == issueRules) full else current.analysis,
+                    )
+                    val preferences = analyzed.pendingLegacyLogRefPreferences
+                    if (preferences == null) {
+                        analyzed
+                    } else {
+                        val frozen = analyzed.annotations.freezeLegacyLogRefs(analyzed, preferences)
+                        analyzed.copy(
+                            annotations = frozen,
+                            pendingLegacyLogRefPreferences = preferences.takeIf {
+                                frozen.hasUnresolvedLegacyLogRefs(analyzed)
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun publishTabLoadFailure(tabId: String, generation: Long, message: String) = synchronized(stateLock) {
+        if (contentLoadGenerations[tabId]?.get() != generation) return@synchronized
+        inactiveSinceNanos.remove(tabId)
+        tabs = tabs.map { current ->
+            if (current.id == tabId && current.contentState == TabContentState.LOADING) {
+                current.copy(contentState = TabContentState.FAILED, contentLoadError = message)
+            } else {
+                current
+            }
+        }
     }
 
     /**
@@ -16763,18 +17296,20 @@ class AppState(
      */
     @Suppress("TooGenericExceptionCaught")
     private fun scheduleUnfinalizedCaptureAdoption(tabId: String, logFile: File) {
-        val tab = tab(tabId) ?: return
+        val tab = tab(tabId)?.takeIf { it.contentState == TabContentState.LOADED } ?: return
         if (tab.attachedVideo != null || tab.captureSessionId != null) return
-        ioScope.launch {
+        val pin = pinRows(tab)
+        launchPinned(pin) {
             try {
                 val imported = synchronized(captureAdoptionLock) {
                     // Re-checked under the lock: two restored tabs on one log must finalize once.
-                    val session = unfinalizedStoppedCaptureForLog(logFile) ?: return@launch
+                    val session = unfinalizedStoppedCaptureForLog(logFile) ?: return@launchPinned
                     AppLogger.info("capture", "Finalizing the capture stopped by the last quit (${session.id})")
                     captureService.finalizeStoppedSession(session)
                 }
-                val current = tab(tabId) ?: return@launch
-                if (current.attachedVideo != null || current.captureSessionId != null) return@launch
+                val current = tab(tabId)?.takeIf { it.contentState == TabContentState.LOADED && it.logData === tab.logData }
+                    ?: return@launchPinned
+                if (current.attachedVideo != null || current.captureSessionId != null) return@launchPinned
                 attachFinalizedCapture(tabId, imported)
                 captureService.updateSessions()
             } catch (cancelled: CancellationException) {
@@ -16792,8 +17327,16 @@ class AppState(
     private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult = when (source) {
         is RestoredTabSource.CaptureSource -> loadRestoredCaptureSource(source)
         is RestoredTabSource.FileSource -> {
-            val parsed = runCatching { parser(source.file) }
-                .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+            if (!source.file.isFile || !source.file.canRead()) {
+                return RestoredTabLoadResult.Failed("The source file is missing or unreadable: ${source.file.absolutePath}")
+            }
+            val parsed = try {
+                parser(source.file)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                return RestoredTabLoadResult.Failed(failure.message ?: "Could not read ${source.file.absolutePath}")
+            }
             RestoredTabLoadResult.Loaded(
                 logData = parsed.entries,
                 archiveCandidate = null,
@@ -16822,6 +17365,9 @@ class AppState(
     }
 
     private fun loadRestoredArchiveSource(source: RestoredTabSource.ArchiveSource): RestoredTabLoadResult {
+        if (!source.archiveFile.isFile || !source.archiveFile.canRead()) {
+            return RestoredTabLoadResult.Failed("The source archive is missing or unreadable: ${source.archiveFile.absolutePath}")
+        }
         if (runCatching {
                 com.indagium.capture.CaptureArchiveReader.isCaptureArchive(source.archiveFile)
             }.getOrDefault(false)
@@ -16838,11 +17384,16 @@ class AppState(
             }
             return loadedImportedCapture(imported)
         }
-        val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
+        val currentCandidate = runCatching { restoredArchiveCandidateResolver(source.archiveFile, source.entryPath) }
+            .getOrNull()
             ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
-        val parsed = runCatching {
+        val parsed = try {
             extractCandidateResult(source.archiveFile, currentCandidate, archiveEntryByteBudget)
-        }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            return RestoredTabLoadResult.Failed(failure.message ?: "Could not read ${source.entryPath}")
+        }
         return RestoredTabLoadResult.Loaded(
             logData = parsed.entries,
             archiveCandidate = currentCandidate,
@@ -16854,15 +17405,24 @@ class AppState(
     /** Restores a capture whose descriptor no longer opens from the archive's checksum-verified log alone. */
     private fun loadVerifiedRestoreLog(archiveFile: File, entryPath: String?, missingEntryPath: String): RestoredTabLoadResult {
         val restoreCache = File(archiveCacheDir, "capture-log-restore")
-        val verifiedLog = com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(
-            archiveFile,
-            entryPath,
-            restoreCache,
-        ) ?: return RestoredTabLoadResult.MissingArchiveEntry(archiveFile, missingEntryPath)
+        if (!archiveFile.isFile || !archiveFile.canRead()) {
+            return RestoredTabLoadResult.Failed("The source archive is missing or unreadable: ${archiveFile.absolutePath}")
+        }
+        val verifiedLog = try {
+            com.indagium.capture.CaptureArchiveReader.extractVerifiedLogForRestore(archiveFile, entryPath, restoreCache)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            return RestoredTabLoadResult.Failed(failure.message ?: "Could not extract ${archiveFile.absolutePath}")
+        } ?: return RestoredTabLoadResult.MissingArchiveEntry(archiveFile, missingEntryPath)
         // Read before the finally below deletes the extracted copy (a deleted file reports length 0).
         val logBytes = verifiedLog.length()
         val parsed = try {
-            runCatching { parser(verifiedLog) }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
+            parser(verifiedLog)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            return RestoredTabLoadResult.Failed(failure.message ?: "Could not parse ${archiveFile.absolutePath}")
         } finally {
             // The extracted copy exists only to be parsed once; an in-place capture's own log is not
             // under the restore cache and is left alone.
@@ -16927,6 +17487,7 @@ class AppState(
     // at startup that CI surfaced as UncaughtExceptionsBeforeTest in whichever runTest came next.
     // Everything launched here starts only after the whole object is constructed.
     init {
+        startTabMemoryLifecycleJobs()
         // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
         // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
         // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
@@ -16936,5 +17497,25 @@ class AppState(
         ioScope.launch { refreshStorageSizeInfo() }
         if (restoreOnCreate) ioScope.launch { sweepCaptureExtractionCache() }
         loadPersistedSourceIndex()
+    }
+
+    private fun startTabMemoryLifecycleJobs() {
+        if (!tabMemoryLifecycleJobsStarted.compareAndSet(false, true)) return
+        ioScope.launch {
+            snapshotFlow {
+                val started = tabMemoryLifecycleStarted
+                val displayed = displayedLogTabIdsLocked()
+                val states = tabs.map { it.id to it.contentState }
+                Triple(started, displayed, states)
+            }.collect { (started, _, _) ->
+                if (started) reconcileDisplayedTabResidency()
+            }
+        }
+        ioScope.launch {
+            while (isActive) {
+                delay(tabMemorySweepIntervalMs.coerceAtLeast(1L))
+                if (tabMemoryLifecycleStarted) sweepInactiveTabs()
+            }
+        }
     }
 }

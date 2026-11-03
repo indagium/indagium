@@ -603,6 +603,10 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("mostUsedTagLimit", mostUsedTagLimit)
     put("filterListRows", filterListRows)
     put("visibleTabLimit", visibleTabLimit)
+    put(
+        "inactiveTabUnloadMinutes",
+        inactiveTabUnloadMinutes.coerceIn(0, MAX_INACTIVE_TAB_UNLOAD_MINUTES),
+    )
     put("autoExportNotes", autoExportNotes)
     put("autoSaveFilters", autoSaveFilters)
     put("annotationLogBlockStyle", annotationLogBlockStyle.name)
@@ -933,6 +937,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         mostUsedTagLimit = o.intOrDefault("mostUsedTagLimit", 5),
         filterListRows = o.intOrDefault("filterListRows", 5).coerceIn(1, 20),
         visibleTabLimit = o.intOrDefault("visibleTabLimit", 8).coerceIn(2, 20),
+        // Missing in older keyed settings and legacy positional snapshots means the default-on
+        // 30 minute policy. Zero is the explicit Off value.
+        inactiveTabUnloadMinutes = o.intOrDefault(
+            "inactiveTabUnloadMinutes",
+            DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES,
+        ).coerceIn(0, MAX_INACTIVE_TAB_UNLOAD_MINUTES),
         autoExportNotes = o.boolOrDefault("autoExportNotes", true),
         autoSaveFilters = o.boolOrDefault("autoSaveFilters", true),
         annotationLogBlockStyle = o.stringOrNull("annotationLogBlockStyle")
@@ -1830,8 +1840,8 @@ internal fun LogTab.tabToken(): String {
 }
 
 // Metadata-only restore: log content is parsed afterwards on ioScope (scheduleRestoredTabLoad),
-// so this must stay cheap — it runs synchronously during AppState init. Source-exists checks
-// stay here so tabs whose backing file/archive vanished are dropped before they ever appear.
+// so this must stay cheap — it runs synchronously during AppState init. Missing sources keep
+// their shell and become retryable load errors after selection.
 internal class RestoredTabShell(val tab: LogTab, val source: RestoredTabSource)
 
 internal sealed interface RestoredTabLoadResult {
@@ -1844,6 +1854,8 @@ internal sealed interface RestoredTabLoadResult {
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
+
+    data class Failed(val message: String) : RestoredTabLoadResult
 }
 
 internal sealed class RestoredTabSource {
@@ -1869,8 +1881,7 @@ internal sealed class RestoredTabSource {
             fun restore(archivePath: String, logSourcePath: String?): CaptureSource? {
                 val bangIndex = logSourcePath?.indexOf('!') ?: -1
                 val logEntryPath = logSourcePath?.substring(bangIndex + 1)?.takeIf { bangIndex > 0 && it.isNotBlank() }
-                return File(archivePath).takeIf { it.exists() }
-                    ?.let { CaptureSource(it, logEntryPath) }
+                return File(archivePath).let { CaptureSource(it, logEntryPath) }
             }
         }
     }
@@ -1892,6 +1903,7 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             filename = p[1],
             logData = emptyList(),
             rmap = emptyMap(),
+            contentState = TabContentState.UNLOADED,
             filter = p[3].savedFilterFromToken()?.toFilter() ?: Filter(),
             showUnfiltered = p[6].toBoolean(),
             expanded = p[7].encodedSet(),
@@ -1925,12 +1937,12 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
 private fun String.restoredTabSource(persistedCandidate: ZipLogCandidate? = null): RestoredTabSource? {
     val bangIndex = indexOf('!')
     if (bangIndex > 0) {
-        val archiveFile = File(substring(0, bangIndex)).takeIf { it.exists() } ?: return null
+        val archiveFile = File(substring(0, bangIndex))
         val entryPath = substring(bangIndex + 1).takeIf { it.isNotBlank() } ?: return null
         val matchingPersistedCandidate = persistedCandidate?.takeIf { it.entryPath == entryPath }
         return RestoredTabSource.ArchiveSource(archiveFile, entryPath, matchingPersistedCandidate)
     }
-    return File(this).takeIf { it.exists() }?.let(RestoredTabSource::FileSource)
+    return File(this).let(RestoredTabSource::FileSource)
 }
 
 internal fun File.totalFileSize(): Long =

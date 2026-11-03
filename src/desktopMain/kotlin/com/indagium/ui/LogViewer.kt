@@ -641,6 +641,10 @@ private fun LogItem.hasEntryId(entryId: Int): Boolean = when (this) {
 
 class LogViewerScrollStateStore {
     private val lazyStates = mutableMapOf<String, LazyListState>()
+    // A tab that releases its rows also releases LazyListState (it can retain visible layout
+    // records). Keep only primitive positions so the shell can restore approximately on reload.
+
+    private val savedLazyPositions = mutableMapOf<String, Pair<Int, Int>>()
     private val horizontalStates = mutableMapOf<String, ScrollState>()
 
     // Whether a panel should keep auto-scrolling to the newest row while its tab is live-watching.
@@ -651,21 +655,39 @@ class LogViewerScrollStateStore {
     // outlives the tab, and never gets written back to the standing autoScrollWhileTailing setting.
     private val followTailStates = mutableMapOf<String, MutableState<Boolean>>()
 
+    @Synchronized
     fun lazyState(panelKey: String): LazyListState =
-        lazyStates.getOrPut(panelKey) { LazyListState() }
+        lazyStates.getOrPut(panelKey) {
+            val (index, offset) = savedLazyPositions.remove(panelKey) ?: (0 to 0)
+            LazyListState(index, offset)
+        }
+
+    @Synchronized
+    fun snapshotAndDropLazyStates(tabId: String) {
+        val prefix = "$tabId:"
+        lazyStates.keys.filter { it.startsWith(prefix) }.forEach { key ->
+            lazyStates.remove(key)?.let { state ->
+                savedLazyPositions[key] = state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset
+            }
+        }
+    }
 
     // ScrollState itself is axis-agnostic — this backs the log rows' horizontal scroll, but is
     // reused as-is (same store, same "$tabId:" prefix cleanup) for other single-axis scroll
     // positions that need to survive a tab switch, e.g. the Notes panel's vertical scroll.
+    @Synchronized
     fun scrollState(panelKey: String): ScrollState =
         horizontalStates.getOrPut(panelKey) { ScrollState(0) }
 
+    @Synchronized
     fun followTailState(panelKey: String): MutableState<Boolean> =
         followTailStates.getOrPut(panelKey) { mutableStateOf(true) }
 
+    @Synchronized
     fun removeTab(tabId: String) {
         val prefix = "$tabId:"
         lazyStates.keys.removeAll { it.startsWith(prefix) }
+        savedLazyPositions.keys.removeAll { it.startsWith(prefix) }
         horizontalStates.keys.removeAll { it.startsWith(prefix) }
         followTailStates.keys.removeAll { it.startsWith(prefix) }
     }

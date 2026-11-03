@@ -60,6 +60,7 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.lang.ref.WeakReference
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.LinkedHashMap
@@ -155,36 +156,8 @@ internal class IndagiumToolOperations(
         },
         "close_tab" to { a -> closeTab(a.str("tabId") ?: "") },
         "get_filter" to { a -> getFilter(a.str("tabId") ?: "") },
-        "get_sequence_summary" to { a ->
-            getSequenceSummary(
-                tabId = a.str("tabId") ?: "",
-                sequenceId = a.str("sequenceId"),
-                offset = a.anyInt("offset") ?: 0,
-                limit = a.anyInt("limit") ?: DEFAULT_SEQUENCE_OCCURRENCE_LIMIT,
-            )
-        },
         "set_filter" to { a -> setFilter(a.str("tabId") ?: "", a) },
-        "get_visible_lines" to { a ->
-            getVisibleLines(
-                a.str("tabId") ?: "", a.anyInt("limit") ?: DEFAULT_VISIBLE_LIMIT,
-                a.anyInt("offset") ?: 0, a.strList("fields")?.toSet(), a.anyBool("compact") == true,
-            )
-        },
-        "get_line_context" to { a ->
-            getLineContext(
-                a.str("tabId") ?: "", a.anyInt("lineId") ?: -1, a.anyInt("before") ?: 10,
-                a.anyInt("after") ?: 10, a.strList("fields")?.toSet(), a.anyBool("compact") == true,
-            )
-        },
-        "select_lines" to { a -> setSelection(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList()) },
         "get_selection" to { a -> getSelection(a.str("tabId") ?: "") },
-        "toggle_group" to { a -> toggleGroupRoute(a.str("tabId") ?: "", a.str("gid") ?: "") },
-        "expand_all" to { a -> expandAllRoute(a.str("tabId") ?: "") },
-        "collapse_all" to { a -> collapseAllRoute(a.str("tabId") ?: "") },
-        "get_tags" to { a -> getTags(a.str("tabId") ?: "") },
-        "get_packages" to { a -> getPackages(a.str("tabId") ?: "") },
-        "get_crash_sites" to { a -> getCrashSites(a.str("tabId") ?: "") },
-        "get_issue_description" to { a -> getIssueDescription(a.str("tabId") ?: "") },
         "get_annotation_sections" to { a -> getAnnotationSections(a.str("tabId") ?: "") },
         "get_annotation_blocks" to { a -> getAnnotationBlocks(a.str("tabId") ?: "") },
         "append_annotation_section" to { a ->
@@ -195,9 +168,6 @@ internal class IndagiumToolOperations(
         },
         "add_text_note" to { a ->
             addTextNoteRoute(a.str("tabId") ?: "", a.str("text") ?: "", a.str("afterId"))
-        },
-        "add_log_note" to { a ->
-            addLogNoteRoute(a.str("tabId") ?: "", a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
         },
         "add_image_note" to { a ->
             addImageNoteRoute(
@@ -220,18 +190,9 @@ internal class IndagiumToolOperations(
         },
         "delete_note_block" to { a -> deleteAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "") },
         "clear_all_notes" to { a -> clearAllNotesRoute(a.str("tabId") ?: "") },
-        "export_analysis" to { a -> exportAnalysisRoute(a.str("tabId") ?: "", a.str("path") ?: "") },
-        "export_filtered_log" to { a ->
-            exportFilteredRoute(a.str("tabId") ?: "", a.str("path") ?: "", a.str("format") ?: "txt")
-        },
-        "save_annotations" to { a -> saveAnnotationsRoute(a.str("tabId") ?: "", a.str("path") ?: "") },
         "load_annotations" to { a -> loadAnnotationsRoute(a.str("tabId") ?: "", a.str("path") ?: "") },
         "list_filter_presets" to { listFilterPresets() },
         "apply_filter_preset" to { a -> applyFilterPresetRoute(a.str("tabId") ?: "", a.str("presetId") ?: "") },
-        "merge_tabs" to { a ->
-            mergeTabsRoute(a.strList("tabIds") ?: emptyList(), a.str("newTabName") ?: "Merged")
-        },
-        "start_tailing" to { a -> startTailingRoute(a.str("tabId") ?: "") },
         "stop_tailing" to { a -> stopTailingRoute(a.str("tabId") ?: "") },
         "resolve_log_source" to { a -> resolveLogSourceRoute(a) },
         "get_source_file" to { a ->
@@ -261,28 +222,10 @@ internal class IndagiumToolOperations(
             searchSimilarCasesRoute(a.str("query") ?: "", a.strList("tags") ?: emptyList(), a.str("excludeSourcePath"), a.anyInt("limit"))
         },
         "get_case" to { a -> getCaseRoute(a.str("id") ?: "") },
-        "build_sequence_diagram" to { a -> buildSequenceDiagramRoute(a.str("tabId") ?: "", a) },
         "set_case_metadata" to { a ->
             setCaseMetadataRoute(a.str("tabId") ?: "", a.str("appVersion"), a.strList("decisiveTags"))
         },
         "reindex_cases" to { reindexCasesRoute() },
-        "get_video_frame" to { a ->
-            getVideoFrameRoute(a.str("tabId") ?: "", a.anyInt("lineId"), a.anyInt("videoMs")?.toLong())
-        },
-        "get_follow_diagnostics" to { a ->
-            getFollowDiagnosticsRoute(a.str("tabId") ?: "", a.anyInt("videoMs")?.toLong() ?: 0L)
-        },
-        "get_log_composition" to { a ->
-            getLogComposition(
-                tabId = a.str("tabId") ?: "",
-                granularityParam = a.str("granularity"),
-                orderParam = a.str("order"),
-                tag = a.str("tag"),
-                search = a.str("search"),
-                offset = a.anyInt("offset") ?: 0,
-                limit = a.anyInt("limit") ?: DEFAULT_LOG_COMPOSITION_LIMIT,
-            )
-        },
         "list_android_devices" to { listAndroidDevicesRoute() },
         "start_device_capture" to { a ->
             appState.startCaptureForAi(
@@ -341,6 +284,89 @@ internal class IndagiumToolOperations(
     private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> =
         coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
 
+    private val rowDependentSuspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "get_sequence_summary" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getSequenceSummary(
+                tabId = it.id,
+                sequenceId = a.str("sequenceId"),
+                offset = a.anyInt("offset") ?: 0,
+                limit = a.anyInt("limit") ?: DEFAULT_SEQUENCE_OCCURRENCE_LIMIT,
+            )
+        } },
+        "get_visible_lines" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getVisibleLines(
+                it.id, a.anyInt("limit") ?: DEFAULT_VISIBLE_LIMIT,
+                a.anyInt("offset") ?: 0, a.strList("fields")?.toSet(), a.anyBool("compact") == true,
+            )
+        } },
+        "get_line_context" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getLineContext(
+                it.id, a.anyInt("lineId") ?: -1, a.anyInt("before") ?: 10,
+                a.anyInt("after") ?: 10, a.strList("fields")?.toSet(), a.anyBool("compact") == true,
+            )
+        } },
+        "select_lines" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            setSelection(it.id, a.intList("lineIds") ?: emptyList())
+        } },
+        "toggle_group" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            toggleGroupRoute(it.id, a.str("gid") ?: "")
+        } },
+        "expand_all" to { a -> withLoadedRows(a.str("tabId") ?: "") { expandAllRoute(it.id) } },
+        "collapse_all" to { a -> withLoadedRows(a.str("tabId") ?: "") { collapseAllRoute(it.id) } },
+        "get_tags" to { a -> withLoadedRows(a.str("tabId") ?: "") { getTags(it.id) } },
+        "get_packages" to { a -> withLoadedRows(a.str("tabId") ?: "") { getPackages(it.id) } },
+        "get_crash_sites" to { a -> withLoadedRows(a.str("tabId") ?: "") { getCrashSites(it.id) } },
+        "get_issue_description" to { a -> withLoadedRows(a.str("tabId") ?: "") { getIssueDescription(it.id) } },
+        "add_log_note" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            addLogNoteRoute(it.id, a.intList("lineIds") ?: emptyList(), a.str("caption") ?: "")
+        } },
+        "export_analysis" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            exportAnalysisRoute(it.id, a.str("path") ?: "")
+        } },
+        "export_filtered_log" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            exportFilteredRoute(it.id, a.str("path") ?: "", a.str("format") ?: "txt")
+        } },
+        "save_annotations" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            saveAnnotationsRoute(it.id, a.str("path") ?: "")
+        } },
+        "start_tailing" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            startTailingRoute(it.id)
+        } },
+        "merge_tabs" to { a ->
+            val ids = a.strList("tabIds") ?: emptyList()
+            val loaded = ids.distinct().map { id -> appState.awaitTabLoaded(id) }
+            if (loaded.any { it == null }) mapOf("error" to "one or more source logs could not be loaded")
+            else mergeTabsRoute(ids, a.str("newTabName") ?: "Merged")
+        },
+        "build_sequence_diagram" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            buildSequenceDiagramRoute(it.id, a)
+        } },
+        "get_video_frame" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getVideoFrameRoute(it.id, a.anyInt("lineId"), a.anyInt("videoMs")?.toLong())
+        } },
+        "get_follow_diagnostics" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getFollowDiagnosticsRoute(it.id, a.anyInt("videoMs")?.toLong() ?: 0L)
+        } },
+        "get_log_composition" to { a -> withLoadedRows(a.str("tabId") ?: "") {
+            getLogComposition(
+                tabId = it.id,
+                granularityParam = a.str("granularity"),
+                orderParam = a.str("order"),
+                tag = a.str("tag"),
+                search = a.str("search"),
+                offset = a.anyInt("offset") ?: 0,
+                limit = a.anyInt("limit") ?: DEFAULT_LOG_COMPOSITION_LIMIT,
+            )
+        } },
+    )
+
+    private suspend fun <T> withLoadedRows(tabId: String, action: (LogTab) -> T): Any? {
+        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+        val tab = appState.awaitTabLoaded(tabId)
+            ?: return mapOf("error" to "tab $tabId could not be loaded")
+        return appState.withPinnedRows(tab) { action(tab) }
+    }
+
     // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
     // Case Library dialog search, get, and reindex the exact same in-memory index/lock over
     // <appDataDir>/case-index — two independent CaseSearch instances would mean two independent
@@ -362,7 +388,7 @@ internal class IndagiumToolOperations(
     )
 
     private data class SequenceSummaryCache(
-        val logData: List<LogEntry>,
+        val logData: WeakReference<List<LogEntry>>,
         val definitions: List<SequenceDef>,
         val occurrences: List<SequenceOccurrence>,
     )
@@ -373,7 +399,7 @@ internal class IndagiumToolOperations(
     internal val toolGateway = IndagiumToolGateway(
         MCP_TOOLS,
         operationHandlers,
-        testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
+        rowDependentSuspendHandlers + testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
         externalServiceCall = { name, args ->
             sendsToExternalService(name, args) || if (name == "draft_test_steps" || name == "rewrite_test_recording" || name == "improve_test_case") {
                 val profileId = args["profileId"] as? String
@@ -1353,11 +1379,11 @@ internal class IndagiumToolOperations(
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
         val definitions = tab.filter.sequences.filter { it.enabled }.sortedBy { it.priority }
         val prior = sequenceSummaryCache
-        val cacheHit = prior != null && prior.logData === tab.logData && prior.definitions == definitions
+        val cacheHit = prior != null && prior.logData.get() === tab.logData && prior.definitions == definitions
         val analysis = if (cacheHit) {
             requireNotNull(prior)
         } else {
-            SequenceSummaryCache(tab.logData, definitions, computeSequenceOccurrences(tab.logData, definitions)).also {
+            SequenceSummaryCache(WeakReference(tab.logData), definitions, computeSequenceOccurrences(tab.logData, definitions)).also {
                 sequenceSummaryCache = it
             }
         }

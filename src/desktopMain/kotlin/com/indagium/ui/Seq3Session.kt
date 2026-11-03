@@ -613,7 +613,7 @@ class Seq3Session(
             // generate+layout pass is far more expensive than the ~180ms a user spends finishing one.
             delay(GENERATE_DEBOUNCE_MS)
             coroutineContext.ensureActive()
-            val tab = appState.tab(tabId)
+            val tab = appState.awaitTabLoaded(tabId)
             if (tab == null) {
                 if (generations[id]?.get() == generation) replace(id) { it.copy(generating = false) }
                 return@launch
@@ -621,7 +621,9 @@ class Seq3Session(
             val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 generate superseded") }
             generateRunCount.incrementAndGet()
             val result = runCatching {
-                generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+                appState.withPinnedRows(tab) {
+                    generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+                }
             }
             coroutineContext.ensureActive()
             result.onSuccess { fresh -> publishGenerated(id, generation, fresh) }
@@ -1906,14 +1908,18 @@ class Seq3Session(
         regenJobs.remove(id)?.cancel()
         replace(id) { it.copy(regenBuilding = true) }
         val job = scope.launch {
-            val tab = appState.tab(tabId)
+            val tab = appState.awaitTabLoaded(tabId)
             if (tab == null) {
                 replace(id) { it.copy(regenBuilding = false) }
                 return@launch
             }
             val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 regen review superseded") }
             generateRunCount.incrementAndGet()
-            val result = runCatching { generateSeq3(tab.logData, range, options, cancellationCheck, appState.sourceIndex) }
+            val result = runCatching {
+                appState.withPinnedRows(tab) {
+                    generateSeq3(tab.logData, range, options, cancellationCheck, appState.sourceIndex)
+                }
+            }
             coroutineContext.ensureActive()
             result.onSuccess { fresh ->
                 val latest = session(id) ?: return@onSuccess
@@ -1982,11 +1988,13 @@ class Seq3Session(
         if (current.document.messages.none { it.id == messageId }) return
         revertJobs.remove(id)?.cancel()
         val job = scope.launch {
-            val tab = appState.tab(tabId) ?: return@launch
+            val tab = appState.awaitTabLoaded(tabId) ?: return@launch
             val cancellationCheck: () -> Unit = { if (!isActive) throw CancellationException("seq3 revert superseded") }
             generateRunCount.incrementAndGet()
             val result = runCatching {
-                generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+                appState.withPinnedRows(tab) {
+                    generateSeq3(tab.logData, current.range, current.generateOptions, cancellationCheck, appState.sourceIndex)
+                }
             }
             coroutineContext.ensureActive()
             result.onSuccess { fresh ->

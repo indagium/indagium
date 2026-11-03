@@ -26,11 +26,11 @@ import kotlin.test.assertTrue
  * rebuilding that same object graph and re-copying its output, never hand-editing the resource).
  *
  * Deliberate limitation: both tabs' `sourcePath` point at `/nonexistent/openlog-golden-fixture/...`
- * — a path guaranteed absent on every machine this test runs on. `tabShellFromToken()` drops any
- * tab whose backing file doesn't exist (`restoredTabSource()` returns null) *before* logData is
- * even scheduled to load, so a frozen golden — whose paths can never point at a file that exists at
- * assertion time, since it must be byte-identical across every checkout and CI runner — can never
- * assert a fully-restored tab. What it CAN and does pin at the field level: every AppSettings
+ * — a path guaranteed absent on every machine this test runs on. `tabShellFromToken()` retains
+ * source descriptors when their backing files are missing, so a frozen golden — whose paths can
+ * never point at a file that exists at assertion time, since it must be byte-identical across every
+ * checkout and CI runner — can pin the restored tab shells but cannot assert successful content
+ * loads. What it CAN and does pin at the field level: every AppSettings
  * value, both saved filters in full, and every session-metadata field that restores independently
  * of any tab's backing file (recent files/notes, active-filter map, compare/layout state, filter
  * panel UI state). The "tabs" section's raw token lines are still asserted structurally below, so
@@ -143,15 +143,10 @@ class AutosaveGoldenV1Test {
         assertEquals(mapOf("app-a" to "sf-golden-1"), restored.activeSavedFilterIds)
 
         // ── Compare/layout state ──
-        // compareMode/compareTabId are also downstream of the dropped tabs (see the class doc
-        // comment): restoreTabsFromAutosave forces compareMode off when canCompare is false
-        // (fewer than 2 real tabs) and reassigns compareTabId away from an id that no longer
-        // resolves to a tab — both fire here since neither golden tab restores. The persisted
-        // "compare" token value (true / "svc-b") still decodes correctly; it's the *tabs* restore
-        // step immediately after that overrides it, which is exactly the real (non-golden)
-        // behavior for a session whose tab files vanished between launches.
-        assertEquals(false, restored.compareMode)
-        assertEquals("", restored.compareTabId)
+        // Missing source files keep their shells and saved compare metadata. The first
+        // composition starts loading the active tab; the other tab remains on demand.
+        assertEquals(true, restored.compareMode)
+        assertEquals("svc-b", restored.compareTabId)
         assertEquals(false, restored.compareFilterRight)
         assertEquals(false, restored.filterVisible)
         assertEquals(false, restored.filterBarVisible)
@@ -173,15 +168,12 @@ class AutosaveGoldenV1Test {
         assertEquals(true, restored.fpState.crashExpanded)
         assertEquals(IssueCategorySelection.BuiltIn(CrashCategory.CRASHES), restored.fpState.crashCategory)
 
-        // ── Tabs: see the class doc comment above for why a frozen golden can't exercise full
-        // tab restoration — both sourcePaths are deliberately absent on every machine, so
-        // tabShellFromToken() drops both shells. Assert that documented behavior explicitly
-        // rather than leaving it as an unexplained gap.
-        assertEquals(emptyList(), restored.tabs)
+        // ── Tabs: both shells survive even though their source files are absent. ──
+        assertEquals(listOf("app-a", "svc-b"), restored.tabs.map { it.id })
+        assertTrue(restored.tabs.all { it.logData.isEmpty() })
 
-        // Structural check that the tab TOKEN FORMAT itself is still pinned in the committed
-        // bytes, even though restoration can't be exercised: a "tabs" section marker followed by
-        // exactly two "tab\t..." lines, one per tab GoldenGenerator wrote.
+        // Structural check that the tab TOKEN FORMAT remains pinned in the committed bytes: a
+        // "tabs" section marker followed by exactly two "tab\t..." lines.
         val lines = golden.lines()
         assertTrue(lines.contains("tabs"), "golden must contain the \"tabs\" section marker")
         assertEquals(2, lines.count { it.startsWith("tab\t") }, "golden must contain exactly the 2 tab tokens it was generated with")

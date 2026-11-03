@@ -897,6 +897,53 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
             }
         }
     }
+    Column(
+        Modifier.settingsAnchor("Inactive tab memory"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AppText("Inactive tab memory", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        AppText(
+            "Release log rows from reloadable tabs after they have been out of view. The displayed tab and compare panes stay loaded.",
+            color = tc.ts,
+            fontSize = 11.sp,
+            fontFamily = UI,
+        )
+        var timeoutText by remember(state.settings.inactiveTabUnloadMinutes) {
+            mutableStateOf(state.settings.inactiveTabUnloadMinutes.takeIf { it > 0 }?.toString().orEmpty())
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (state.settings.inactiveTabUnloadMinutes == 0) {
+                AppText("Off", color = tc.ts, fontSize = 12.sp)
+                AppButton("Enable · 30 min", onClick = {
+                    timeoutText = "30"
+                    state.updateSettings { it.copy(inactiveTabUnloadMinutes = 30) }
+                }, variant = ButtonVariant.Secondary)
+            } else {
+                BasicTextField(
+                    value = timeoutText,
+                    onValueChange = { value ->
+                        val digits = value.filter(Char::isDigit).take(5)
+                        timeoutText = digits
+                        digits.toIntOrNull()?.takeIf { it > 0 }?.let { minutes ->
+                            state.updateSettings { it.copy(inactiveTabUnloadMinutes = minutes) }
+                        }
+                    },
+                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = MONO),
+                    cursorBrush = SolidColor(tc.ac),
+                    singleLine = true,
+                    modifier = Modifier.width(68.dp).height(28.dp)
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(4.dp)).padding(horizontal = 8.dp, vertical = 5.dp),
+                    decorationBox = { inner -> Box(contentAlignment = Alignment.CenterStart) { inner() } },
+                )
+                AppText("minutes", color = tc.ts, fontSize = 12.sp)
+                AppButton("Off", onClick = {
+                    timeoutText = ""
+                    state.updateSettings { it.copy(inactiveTabUnloadMinutes = 0) }
+                }, variant = ButtonVariant.Secondary)
+            }
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         SaveFolderKind.entries.forEach { kind -> SaveFolderSetting(state, kind) }
         state.testStorageStatus?.let { message -> AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }

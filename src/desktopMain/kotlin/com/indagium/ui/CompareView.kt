@@ -51,6 +51,14 @@ internal fun CompareView(
     // state by tab id alone, so two panes on the same tab would share one LazyListState and
     // silently fight over scroll ownership (see LogViewerScrollStateStore). compareTabs() guarantees it.
     val (leftTab, rightTab) = state.compareTabs() ?: return
+    DisposableEffect(state, leftTab.id, leftTab.logData, rightTab.id, rightTab.logData) {
+        val leftPin = state.pinRows(leftTab)
+        val rightPin = state.pinRows(rightTab)
+        onDispose {
+            rightPin.close()
+            leftPin.close()
+        }
+    }
     val filterFr = remember { FocusRequester() }
     val leftLogFr = remember { FocusRequester() }
     val rightLogFr = remember { FocusRequester() }
@@ -115,27 +123,52 @@ internal fun CompareView(
         },
     ) {
         CompareFilterStrip(state, leftTab, rightTab, onReclaimFocus = reclaim)
-        CompareTilingHost(
-            state = state,
-            left = leftTab,
-            right = rightTab,
-            shownLeft = shownLeft,
-            shownRight = shownRight,
-            focus = ComparePanelFocus(
-                panels = LogViewPanelFocus(
-                    filters = filterFr,
-                    log = leftLogFr,
-                    notes = annotationFr,
-                    ai = aiFr,
-                    onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
-                    returnToLog = reclaim,
-                ),
-                rightLog = rightLogFr,
-                filterSearchRequest = filterSearchRequest,
-                onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-            ),
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-        )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            val pending = listOf(leftTab, rightTab).filter { it.contentState != TabContentState.LOADED }
+            // Both panes share the compare tiling host. Keep it unmounted until both source row
+            // sets are available so a temporary empty shell cannot clamp either saved list state.
+            if (pending.isEmpty()) {
+                CompareTilingHost(
+                    state = state,
+                    left = leftTab,
+                    right = rightTab,
+                    shownLeft = shownLeft,
+                    shownRight = shownRight,
+                    focus = ComparePanelFocus(
+                        panels = LogViewPanelFocus(
+                            filters = filterFr,
+                            log = leftLogFr,
+                            notes = annotationFr,
+                            ai = aiFr,
+                            onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                            returnToLog = reclaim,
+                        ),
+                        rightLog = rightLogFr,
+                        filterSearchRequest = filterSearchRequest,
+                        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (pending.isNotEmpty()) {
+                val tc = tc()
+                Box(Modifier.fillMaxSize().background(tc.p.copy(alpha = .96f)), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        if (pending.any { it.contentState == TabContentState.LOADING }) {
+                            AppText("Loading comparison logs…", color = tc.ts, fontSize = 14.sp)
+                            IndeterminateLoadingLine(Modifier.width(180.dp))
+                        }
+                        pending.filter { it.contentState == TabContentState.FAILED }.forEach { failed ->
+                            AppText("${failed.filename}: ${failed.contentLoadError.orEmpty()}", color = tc.ts, fontSize = 11.sp, maxLines = 3)
+                            AppButton("Retry ${failed.filename}", onClick = { state.ensureTabLoaded(failed.id) })
+                        }
+                        pending.filter { it.contentState == TabContentState.UNLOADED }.forEach { unloaded ->
+                            AppButton("Load ${unloaded.filename}", onClick = { state.ensureTabLoaded(unloaded.id) })
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

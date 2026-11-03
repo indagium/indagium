@@ -36,6 +36,11 @@ private fun general() = listOf(
         listOf("profile", "layout", "classic", "focused", "compare", "minimal", "logcat query", "workspace"),
     ),
     entry(
+        SettingsSection.General, "Inactive tab memory",
+        "Release rows from inactive reloadable log tabs after a configurable number of minutes; Off disables it.",
+        listOf("memory", "ram", "unload", "idle", "inactive tabs", "large logs", "timeout", "off"),
+    ),
+    entry(
         SettingsSection.General, "Save as new profile",
         "Save the current theme, font size and panel layout as your own workspace profile.",
         listOf("workspace", "preset", "layout", "custom", "save profile", "my profile"),

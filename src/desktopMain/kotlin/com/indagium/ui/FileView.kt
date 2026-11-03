@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -12,6 +13,8 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.model.*
@@ -253,6 +256,11 @@ internal fun FileView(
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusConsumed: () -> Unit = {},
 ) {
+    val tc = tc()
+    DisposableEffect(state, tab.id, tab.logData) {
+        val pin = state.pinRows(tab)
+        onDispose { pin.close() }
+    }
     val filterFr = remember { FocusRequester() }
     val logViewerFr = remember { FocusRequester() }
     val annotationFr = remember { FocusRequester() }
@@ -322,29 +330,58 @@ internal fun FileView(
         }
         // The panels (filters, log, Notes, AI, Video) are tiles of one tiling surface; see LogViewTiling.kt. The horizontal filter bar
         // (ui/FilterBar.kt) is part of the log tile's toolbar and independently gated by filterBarVisible.
-        LogViewTilingHost(
-            state = state,
-            tab = tab,
-            focus = LogViewPanelFocus(
-                filters = filterFr,
-                log = logViewerFr,
-                notes = annotationFr,
-                ai = aiFr,
-                onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
-                returnToLog = { runCatching { logViewerFr.requestFocus() } },
-            ),
-            inputs = LogViewHostInputs(
-                filterSearchRequest = filterSearchRequest,
-                onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-                captureDeviceEvents = captureDeviceEvents,
-                onExportCaptureRange = if (archiveBackedCapture) {
-                    { importedRangeEditorOpen = true }
-                } else {
-                    null
-                },
-            ),
-            modifier = Modifier.weight(1f).fillMaxWidth(),
-        )
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            // The viewer's LazyListState can clamp a restored nonzero scroll index when composed
+            // against an empty shell. Keep the entire row surface unmounted until its source is
+            // loaded; the loading/error layer below owns this space during that gap.
+            if (tab.contentState == TabContentState.LOADED) {
+                LogViewTilingHost(
+                    state = state,
+                    tab = tab,
+                    focus = LogViewPanelFocus(
+                        filters = filterFr,
+                        log = logViewerFr,
+                        notes = annotationFr,
+                        ai = aiFr,
+                        onPanelFocused = { fr -> focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == fr } },
+                        returnToLog = { runCatching { logViewerFr.requestFocus() } },
+                    ),
+                    inputs = LogViewHostInputs(
+                        filterSearchRequest = filterSearchRequest,
+                        onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+                        captureDeviceEvents = captureDeviceEvents,
+                        onExportCaptureRange = if (archiveBackedCapture) {
+                            { importedRangeEditorOpen = true }
+                        } else {
+                            null
+                        },
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (tab.contentState != TabContentState.LOADED) {
+                Box(Modifier.fillMaxSize().background(tc.p.copy(alpha = .96f)), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        when (tab.contentState) {
+                            TabContentState.LOADING -> {
+                                AppText("Loading ${tab.filename}…", color = tc.ts, fontSize = 14.sp)
+                                IndeterminateLoadingLine(Modifier.width(180.dp))
+                            }
+                            TabContentState.FAILED -> {
+                                AppText("Could not load ${tab.filename}", color = tc.tx, fontSize = 14.sp)
+                                AppText(tab.contentLoadError.orEmpty(), color = tc.ts, fontSize = 11.sp, maxLines = 4)
+                                AppButton("Retry", onClick = { state.ensureTabLoaded(tab.id) })
+                            }
+                            TabContentState.UNLOADED -> {
+                                AppText("${tab.filename} is unloaded", color = tc.tx, fontSize = 14.sp)
+                                AppButton("Load log", onClick = { state.ensureTabLoaded(tab.id) })
+                            }
+                            TabContentState.LOADED -> Unit
+                        }
+                    }
+                }
+            }
+        }
         val archiveSession = if (archiveBackedCapture) state.captureSnapshotSessionFor(tab.id) else null
         if (importedRangeEditorOpen && archiveSession != null) {
             CaptureSnapshotPopover(

@@ -848,6 +848,13 @@ data class VideoFrameReference(
 val VIDEO_FILE_EXTENSIONS: Set<String> = setOf("mp4", "mkv", "webm", "mov", "m4v", "avi")
 
 // ── Tab ────────────────────────────────────────────────────────────
+
+/** Runtime content residency for a tab whose lightweight shell can outlive its parsed rows. */
+enum class TabContentState { LOADED, UNLOADED, LOADING, FAILED }
+
+internal const val DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES = 30
+internal const val MAX_INACTIVE_TAB_UNLOAD_MINUTES = 99_999
+
 data class LogTab(
     val id: String,
     val filename: String,
@@ -1027,6 +1034,10 @@ data class LogTab(
     // loaded. Session-only: restoration captures them before asynchronous parsing, then clears
     // this field once migration completes. Never serialize it.
     val pendingLegacyLogRefPreferences: LegacyLogRefPreferences? = null,
+    // Runtime-only residency. Appended to preserve positional LogTab construction, and deliberately
+    // omitted from tab tokens: restore always creates an unloaded shell.
+    val contentState: TabContentState = TabContentState.LOADED,
+    val contentLoadError: String? = null,
 )
 
 /** Copy presentation preferences captured when a legacy note is opened/restored. */
@@ -1635,6 +1646,8 @@ data class AppSettings(
     // Versioned startup announcements are acknowledged independently; JSON-only and appended for source compatibility.
     val lastSeenWhatsNewVersion: String = "",
     val lastSeenHolidayAnnouncementVersion: String = "",
+    /** Idle minutes before eligible background log rows are released; 0 disables unloading. */
+    val inactiveTabUnloadMinutes: Int = DEFAULT_INACTIVE_TAB_UNLOAD_MINUTES,
 )
 
 /** The sections the New tab can tile. [key] is the stable id stored in settings. */
