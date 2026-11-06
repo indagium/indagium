@@ -18,6 +18,7 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.nio.ShortBuffer
 import java.util.Locale
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.imageio.ImageIO
@@ -1127,6 +1128,38 @@ fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVi
 internal fun videoPlayerControllerWithGrabHook(path: String, beforeGrab: () -> Unit): VideoPlayerController =
     FfmpegVideoPlayerController(path, beforeGrab)
 
+/** Test seam: the production controller with its decode-thread grabber built by [grabberFactory]
+ *  instead of `FFmpegFrameGrabber(path)`, so a test can see where and when it is created or make
+ *  the FFmpeg native load fail. Production never uses this. */
+internal fun videoPlayerControllerWithGrabberFactory(
+    path: String,
+    grabberFactory: (String) -> FFmpegFrameGrabber,
+): VideoPlayerController = FfmpegVideoPlayerController(path, grabberFactory = grabberFactory)
+
+/** Runs [load] once, on its own daemon thread that nothing interrupts, the first time [await] is
+ *  called. [await] ignores interrupts while it waits and leaves the caller's interrupt flag set. */
+internal class UninterruptedOneTimeLoad(private val threadName: String, private val load: () -> Unit) {
+    private val finished by lazy {
+        CompletableFuture<Unit>().also { done ->
+            Thread({
+                runCatching(load).onFailure { AppLogger.error("video", "$threadName failed", it) }
+                done.complete(Unit)
+            }, threadName).apply { isDaemon = true }.start()
+        }
+    }
+
+    /** Returns once the load has ended, however it ended: a failed load surfaces at first use. */
+    fun await() {
+        finished.join()
+    }
+}
+
+// wakeDecoder interrupts the decode thread on every play/seek/rate change, and with an empty
+// JavaCPP cache an interrupted load fails FFmpeg's class init for the rest of the process.
+private val ffmpegNativeLoad = UninterruptedOneTimeLoad("indagium-ffmpeg-load") {
+    Class.forName(FFmpegFrameGrabber::class.java.name)
+}
+
 /** Internal capability implemented by production controllers without widening the established
  * public player interface. Older test doubles continue to work and are treated as discovering
  * until they report a positive duration. */
@@ -1180,11 +1213,19 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
 private class FfmpegVideoPlayerController(
     private val path: String,
     private val beforeGrab: (() -> Unit)? = null,
+    private val grabberFactory: (String) -> FFmpegFrameGrabber = {
+        ffmpegNativeLoad.await()
+        FFmpegFrameGrabber(it)
+    },
 ) : VideoPlayerController,
     SeekReadinessAwareVideoPlayerController,
     VideoDisplayRotationAware {
-    private val grabber = FFmpegFrameGrabber(path)
-    private val converter = Java2DFrameConverter()
+    // Lazy: the first FFmpegFrameGrabber access needs every FFmpeg native library, so it must wait
+    // on the decode thread (openGrabber), never on the UI thread that constructs or closes this
+    // controller. Every use below is decode-thread-only; releaseAll checks isInitialized.
+    private val grabberHandle = lazy { grabberFactory(path) }
+    private val grabber by grabberHandle
+    private val converter by lazy { Java2DFrameConverter() }
 
     private var currentFrameState by mutableStateOf<ImageBitmap?>(null)
     private var positionMsState by mutableStateOf(0L)
@@ -2375,7 +2416,7 @@ private class FfmpegVideoPlayerController(
         // has already exited, so refillReadAheadQueue/presentQueuedVideoFrame won't touch it again)
         // — release every still-queued clone's native buffers rather than leaking them.
         if (invalidatesDecodedState(PlaybackTransition.CLOSE, DecodedStateKind.VIDEO_QUEUE)) clearVideoQueue()
-        runCatching { grabber.release() }
+        if (grabberHandle.isInitialized()) runCatching { grabber.release() }
     }
 
     private fun sleepQuietly(ms: Long) {
