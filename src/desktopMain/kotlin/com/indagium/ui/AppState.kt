@@ -317,7 +317,7 @@ private const val CANONICAL_PATH_CACHE_MAX = 200_000
 private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
 
 /**
- * How long after a tab closes its [AppendOnlyLogList] rows are released (see [AppState.closeTabsById]).
+ * How long after a tab closes its releasable rows are released (see [AppState.closeTabsById]).
  * The tab's own jobs are cancelled at close; this grace only lets a reader that was already past its
  * last cancellation check finish, or hit [com.indagium.utils.ReleasedLogListException] and end quietly.
  */
@@ -349,7 +349,7 @@ internal class RowsPin internal constructor(private val onClose: (() -> Unit)?) 
 }
 
 /** A closed tab's store that could not be released at the delay because a reader still pinned it. */
-private class PendingRowRelease(val releaseRows: () -> Unit, var trimAfterwards: Boolean)
+private class PendingRowRelease(val target: RowReleaseTarget, var forceTrim: Boolean)
 
 /** Shared backing held by lightweight List/Map facades, so a delayed release also clears stale
  * Compose snapshots that still reference an old LogTab after its current shell was updated. */
@@ -382,14 +382,14 @@ private class ReleasableLogRmap(val content: ReleasableLogContent) : AbstractMap
     override val size: Int get() = content.rmap.size
 }
 
-private data class RowReleaseTarget(val store: Any, val release: () -> Unit)
+private data class RowReleaseTarget(val store: Any, val rowCount: () -> Int, val release: () -> Unit)
 
 private fun releasableLogRows(
     rows: List<LogEntry>,
     rmap: Map<Int, LogEntry>,
 ): Pair<List<LogEntry>, Map<Int, LogEntry>> = when (rows) {
     is AppendOnlyLogList -> rows to rmap
-    is ReleasableLogRows -> rows to rmap
+    is ReleasableLogRows -> rows to ReleasableLogRmap(rows.content)
     else -> {
         val content = ReleasableLogContent(rows, rmap)
         ReleasableLogRows(content) to ReleasableLogRmap(content)
@@ -397,14 +397,10 @@ private fun releasableLogRows(
 }
 
 private fun rowReleaseTarget(tab: LogTab): RowReleaseTarget? = when (val rows = tab.logData) {
-    is AppendOnlyLogList -> RowReleaseTarget(rows.storeIdentity) { rows.release() }
-    is ReleasableLogRows -> RowReleaseTarget(rows.content) { rows.content.release() }
+    is AppendOnlyLogList -> RowReleaseTarget(rows.storeIdentity, { if (rows.isReleased) 0 else rows.size }) { rows.release() }
+    is ReleasableLogRows -> RowReleaseTarget(rows.content, { rows.size }) { rows.content.release() }
     else -> null
 }
-
-/** Closing historically delays release only for append-only capture/tail stores. */
-private fun closedTabRowReleaseTarget(tab: LogTab): RowReleaseTarget? =
-    rowReleaseTarget(tab)?.takeIf { tab.logData is AppendOnlyLogList }
 
 private const val RELEASED_ROWS_TRIM_REASON = "released closed capture rows"
 private const val CLOSED_TAB_TRIM_REASON = "closed large or capture tab"
@@ -4201,14 +4197,20 @@ class AppState(
      * counts as live while its controller is registered; stop/close paths unregister it first.
      */
     internal fun requestHeapTrim(reason: String) {
-        val recording = synchronized(stateLock) {
-            val live = captureControllersByTab.isNotEmpty() || tablessLaneControllers.isNotEmpty()
-            // A trim that is actually forwarded clears the closed-row tally, whatever asked for it;
-            // one skipped for a live capture frees nothing, so the tally keeps counting.
-            if (!live) closedRowsSinceTrim = 0L
-            live
-        }
-        if (!recording) heapTrimRequester(reason)
+        val forward = synchronized(stateLock) { reserveHeapTrimLocked(force = true) }
+        if (forward) heapTrimRequester(reason)
+    }
+
+    /**
+     * Atomically decide and reset accounting, so concurrent releases cannot lose or duplicate it.
+     * A trim that is actually forwarded clears the closed-row tally, whatever asked for it; one
+     * skipped for a live capture frees nothing, so the tally keeps counting. Call under [stateLock].
+     */
+    private fun reserveHeapTrimLocked(force: Boolean): Boolean {
+        if ((!force && closedRowsSinceTrim < HEAP_TRIM_CLOSED_ROWS) ||
+            captureControllersByTab.isNotEmpty() || tablessLaneControllers.isNotEmpty()) return false
+        closedRowsSinceTrim = 0L
+        return true
     }
 
     /** Rows of closed tabs since the last forwarded heap trim; see [HEAP_TRIM_CLOSED_ROWS]. Guarded by [stateLock]. */
@@ -6587,8 +6589,10 @@ class AppState(
         com.indagium.capture.CaptureExtractionCache.releaseLeases()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
         // every decoder/audio line explicitly rather than relying on daemon-thread teardown.
-        videoControllers.values.forEach { controller -> controller.close() }
-        videoControllers.clear()
+        val closingVideoControllers = synchronized(stateLock) {
+            videoControllers.values.toList().also { videoControllers.clear() }
+        }
+        closingVideoControllers.forEach { it.close() }
         activeLoads.clear()
         synchronized(stateLock) {
             pendingRestoredLoads.clear()
@@ -6938,7 +6942,7 @@ class AppState(
             if (tab == null || target == null || !canUnloadTabContentLocked(tab, displayedLogTabIdsLocked())) {
                 false
             } else {
-                trimAfterRelease = shouldTrimHeapAfterClosing(listOf(tab))
+                trimAfterRelease = tabForcesHeapTrim(tab)
                 // Invalidate and detach ownership under the same lock as shell publication. A
                 // rapid reactivation can then only create new readers/resources after this cleanup.
                 releaseSearchState(tabId)
@@ -9598,19 +9602,25 @@ class AppState(
     }
 
     private fun attachVideo(tabId: String, source: VideoSource, sourceLabel: String): String? {
-        if (tab(tabId) == null) return null
         // Temporary diagnostic breadcrumb — see the matching openGrabber breadcrumbs in
         // VideoPlayerController.kt for why: there is no other log line marking a video attach at
         // all today, so this pins down exactly when (relative to everything else happening at
         // archive-open time) a stuck-forever video's attach actually occurred.
         AppLogger.info("video", "attachVideo: tabId=$tabId source=${source::class.simpleName} label=$sourceLabel")
-        // A controller owns a grabber/audio line for precisely one source. Dispose it BEFORE
-        // publishing replacement metadata so a recomposition cannot keep using the old decoder.
-        videoControllers.remove(tabId)?.close()
-        bumpVideoAnchorRequest(tabId)
-        // A fresh VideoAttachment defaults rotationDegrees to 0, so replacing the attachment
-        // resets rotation implicitly — no separate clear needed now that rotation lives on it.
-        upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
+        // A controller owns a grabber/audio line for precisely one source. Detach the old controller
+        // and publish the new source atomically; release its resources outside the lock so decoder
+        // shutdown does not block unrelated state updates.
+        val previous = synchronized(stateLock) {
+            if (closed.get() || tab(tabId) == null) return null
+            val controller = videoControllers.remove(tabId)
+            bumpVideoAnchorRequest(tabId)
+            // A fresh VideoAttachment defaults rotationDegrees to 0, so replacing the attachment
+            // resets rotation implicitly — no separate clear needed now that rotation lives on it.
+            // Published under the same lock as controller publication (see videoController).
+            upTab(tabId) { it.copy(attachedVideo = VideoAttachment(source = source, sourceLabel = sourceLabel)) }
+            controller
+        }
+        previous?.close()
         // A successful attachment should be immediately discoverable; otherwise a user who had
         // collapsed the video panel sees no sign that a standalone dropped recording was accepted.
         videoPanelVisible = true
@@ -9622,12 +9632,16 @@ class AppState(
      * resources. The log tab and all of its annotations stay intact.
      */
     fun removeVideo(tabId: String) {
-        videoControllers.remove(tabId)?.close()
-        videoFollowSuppressionByTab.remove(tabId)
-        bumpVideoAnchorRequest(tabId)
-        upTab(tabId) { tab ->
-            if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
+        val previous = synchronized(stateLock) {
+            val controller = videoControllers.remove(tabId)
+            videoFollowSuppressionByTab.remove(tabId)
+            bumpVideoAnchorRequest(tabId)
+            upTab(tabId) { tab ->
+                if (tab.attachedVideo == null) tab else tab.copy(attachedVideo = null, videoFollowLog = false)
+            }
+            controller
         }
+        previous?.close()
         // There can be no embedded player after removing the active tab's only attachment.
         if (tabId == activeTabId) videoPanelVisible = false
         // Detached archive-video attachment may have been the cache's last referencer.
@@ -9665,8 +9679,8 @@ class AppState(
      *  broken local file already gets. [FailedVideoPlayerController] fills that one gap so this
      *  function's contract — non-null whenever [LogTab.attachedVideo] is non-null — actually holds. */
     fun videoController(tabId: String): VideoPlayerController? {
-        // Checked before resolveVideoPlaybackPath, not just via getOrPut's own lazy factory,
-        // because resolveVideoPlaybackPath itself is not free for a VideoSource.ArchiveEntry: it
+        // The cached controller is checked before resolveVideoPlaybackPath because
+        // resolveVideoPlaybackPath itself is not free for a VideoSource.ArchiveEntry: it
         // touches the filesystem (recomputing the cache-key fingerprint from the archive's own
         // canonicalPath/length/lastModified, then stat-ing and touching the cache destination)
         // every time it runs. This function is called unmemoized from BoundVideoPanel's composable
@@ -9679,8 +9693,14 @@ class AppState(
         // sit on a slow mount (reported against a VM shared folder), since the UI thread stayed
         // perpetually busy re-deriving a path it already had instead of ever getting to render the
         // controller's (already correct) published duration.
+        // Lock-free for the common case (this runs on every recomposition): videoControllers is a
+        // ConcurrentHashMap and a controller is taken out of it before it is closed.
         videoControllers[tabId]?.let { return it }
-        val attachment = tab(tabId)?.attachedVideo ?: return null
+        val attachment = synchronized(stateLock) {
+            if (closed.get()) return null
+            videoControllers[tabId]?.let { return it }
+            tab(tabId)?.attachedVideo ?: return null
+        }
         val path = resolveVideoPlaybackPath(attachment.source)
         // Temporary diagnostic breadcrumb, paired with the identity-hash logs in
         // VideoPlayerController.openGrabber and VideoTransportBar's SideEffect — see those for
@@ -9688,9 +9708,20 @@ class AppState(
         // (rather than on every videoController call, which would be call-per-recomposition noise)
         // pins down exactly which controller instance this tab's map entry ends up holding.
         AppLogger.info("video", "videoController: constructing new controller for tabId=$tabId path=$path")
-        return videoControllers.getOrPut(tabId) {
-            if (path != null) videoControllerFactory(path) else FailedVideoPlayerController(videoUnavailableMessage(attachment))
+        // Built outside stateLock (the factory may be slow). Publication re-checks under the lock that
+        // the tab still carries this very attachment, so a controller built for a source that was
+        // replaced, detached or closed meanwhile is never kept, and a racing builder's loser is closed.
+        val candidate = if (path != null) {
+            videoControllerFactory(path)
+        } else {
+            FailedVideoPlayerController(videoUnavailableMessage(attachment))
         }
+        val published = synchronized(stateLock) {
+            if (closed.get() || tab(tabId)?.attachedVideo !== attachment) null
+            else videoControllers[tabId] ?: candidate.also { videoControllers[tabId] = it }
+        }
+        if (published !== candidate) candidate.close()
+        return published
     }
 
     /** Current playhead when a video controller is already open; does not instantiate a decoder. */
@@ -12084,17 +12115,8 @@ class AppState(
         cancelAllLoads()
     }
 
-    /**
-     * Capture/video tabs, or closed rows since the last trim ([closedRowsSinceTrim], cumulative
-     * including [closing]) reaching [HEAP_TRIM_CLOSED_ROWS], free enough to be worth a trim.
-     * A lone small tab does not, but several in a row add up (they leave memory unreturned on Linux).
-     * Call under [stateLock]; it adds [closing]'s rows to the tally.
-     */
-    private fun shouldTrimHeapAfterClosing(closing: List<LogTab>): Boolean {
-        closedRowsSinceTrim += closing.sumOf { it.logData.size.toLong() }
-        return closedRowsSinceTrim >= HEAP_TRIM_CLOSED_ROWS ||
-            closing.any { it.captureSessionId != null || it.captureSourceSessionId != null || it.attachedVideo != null }
-    }
+    private fun tabForcesHeapTrim(tab: LogTab): Boolean =
+        tab.captureSessionId != null || tab.captureSourceSessionId != null || tab.attachedVideo != null
 
     // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
     // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
@@ -12171,10 +12193,12 @@ class AppState(
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
             val closing = tabs.filter { it.id in tabIds }
-            trimHeapAfterClose = shouldTrimHeapAfterClosing(closing)
+            trimHeapAfterClose = closing.any(::tabForcesHeapTrim)
             // Taken in the same critical section as cancelTailingFor below, and appendTailedLines
             // also needs stateLock, so no tail batch can extend these lists once we are past here.
-            rowsToRelease = closing.mapNotNull(::closedTabRowReleaseTarget).distinctBy { it.store }
+            rowsToRelease = closing.mapNotNull(::rowReleaseTarget).distinctBy { it.store }
+            // Plain lists have no explicit release; account for them when their tabs close.
+            closedRowsSinceTrim += closing.filter { rowReleaseTarget(it) == null }.sumOf { it.logData.size.toLong() }
             tabIds.forEach { tabId ->
                 contentLoadGenerations.computeIfAbsent(tabId) { AtomicLong() }.incrementAndGet()
                 contentLoadJobs.remove(tabId)?.cancel()
@@ -12239,8 +12263,9 @@ class AppState(
             // The release job issues the trim itself, AFTER dropping the rows: a trim requested here
             // would run first, and HeapTrim's coalescing would then absorb the later request.
             releaseRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
-        } else if (trimHeapAfterClose) {
-            requestHeapTrim(CLOSED_TAB_TRIM_REASON)
+        } else {
+            val forward = synchronized(stateLock) { reserveHeapTrimLocked(trimHeapAfterClose) }
+            if (forward) heapTrimRequester(CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -12254,15 +12279,15 @@ class AppState(
      * A store is skipped when a remaining tab or a not-yet-loaded restored tab still uses it; that
      * list is read under [stateLock] together with the release itself so a reader cannot register in
      * between. A store a background job still pins ([pinRows]) is not dropped either but parked in
-     * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). [trimAfterwards] carries the
-     * close-time trim decision: the GC has to run after the release to free anything.
+     * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). A force-trim flag follows
+     * capture/video stores to their release; row counts are tallied at release.
      */
     private fun releaseRowsLater(rows: List<RowReleaseTarget>, trimAfterwards: Boolean) {
         ioScope.launch {
             delay(closedTabRowsReleaseDelayMs)
             var released = false
             var deferred = false
-            synchronized(stateLock) {
+            val forward = synchronized(stateLock) {
                 val inUse = storesInUseLocked()
                 for (target in rows) {
                     val store = target.store
@@ -12270,21 +12295,21 @@ class AppState(
                         store in inUse -> Unit
                         rowsPinCounts.containsKey(store) -> {
                             deferred = true
-                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(target.release, false) }
-                            pending.trimAfterwards = pending.trimAfterwards || trimAfterwards
+                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(target, false) }
+                            pending.forceTrim = pending.forceTrim || trimAfterwards
                         }
                         else -> {
+                            closedRowsSinceTrim += target.rowCount().toLong()
                             target.release()
                             released = true
                         }
                     }
                 }
+                // Nothing released and something deferred: this trim would free nothing yet, and the
+                // deferred store's own release issues it (with the same decision) once its readers finish.
+                reserveHeapTrimLocked(trimAfterwards && (released || !deferred))
             }
-            // Nothing released and something deferred: this trim would free nothing yet, and the
-            // deferred store's own release issues it (with the same decision) once its readers finish.
-            if (trimAfterwards && (released || !deferred)) {
-                requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
-            }
+            if (forward) heapTrimRequester(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -12327,9 +12352,8 @@ class AppState(
         ioScope.launch(block = block).also { job -> job.invokeOnCompletion { pin.close() } }
 
     private fun unpinRows(tabId: String, store: Any) {
-        var pending: PendingRowRelease? = null
         var released = false
-        synchronized(stateLock) {
+        val forward = synchronized(stateLock) {
             val readerCount = (readerPinsByTab[tabId] ?: 0) - 1
             if (readerCount > 0) readerPinsByTab[tabId] = readerCount else readerPinsByTab.remove(tabId)
             val remaining = (rowsPinCounts[store] ?: 0) - 1
@@ -12338,18 +12362,18 @@ class AppState(
                 return
             }
             rowsPinCounts.remove(store)
-            pending = rowsPendingRelease.remove(store)
+            val pending = rowsPendingRelease.remove(store)
             // Re-checked: the store could have become a tab's rows while the closed one waited. Same
             // critical section as the release, so a reader cannot register in between.
             pending?.takeIf { store !in storesInUseLocked() }?.let {
-                it.releaseRows()
+                closedRowsSinceTrim += it.target.rowCount().toLong()
+                it.target.release()
                 released = true
             }
+            reserveHeapTrimLocked(pending?.forceTrim == true)
         }
         // Outside stateLock, and after the release: the GC only frees the rows once they are dropped.
-        if (pending?.trimAfterwards == true) {
-            requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
-        }
+        if (forward) heapTrimRequester(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.

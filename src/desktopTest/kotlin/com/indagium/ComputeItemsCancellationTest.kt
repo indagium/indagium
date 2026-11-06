@@ -1,6 +1,8 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.SequenceDef
@@ -58,7 +60,9 @@ class ComputeItemsCancellationTest {
         assertFailsWith<CancellationException> {
             computeItems(
                 tab,
-                applyFilter = true,
+                // false: the filter pass (visibleEntries) polls the check too; skipping it keeps the
+                // checkpoint counted here inside renderRange, which is what this test isolates.
+                applyFilter = false,
                 cancellationCheck = {
                     calls++
                     if (calls == 2) throw CancellationException("test cancel")
@@ -67,5 +71,43 @@ class ComputeItemsCancellationTest {
         }
 
         assertEquals(2, calls, "renderRange must stop at the second checkpoint, not keep rendering past it")
+    }
+
+    @Test
+    fun filteringVisibleRowsChecksCancellation() {
+        val n = CANCELLATION_CHECK_INTERVAL * 4
+        val rows = (1..n).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "T", if (id == n) "drop" else "keep")
+        }
+        val tab = mkTab("cancel-filter-pass", "synthetic.log", rows)
+            .copy(filter = Filter(mode = FilterMode.KEYWORD, kwText = "keep"))
+        var checks = 0
+
+        assertFailsWith<CancellationException> {
+            computeItems(tab, true, cancellationCheck = {
+                if (++checks == 2) throw CancellationException("cancel while filtering")
+            })
+        }
+
+        assertEquals(2, checks, "the filter pass must stop at the second checkpoint, not scan the whole log")
+    }
+
+    @Test
+    fun assigningSequenceParentsChecksCancellationAfterTheScan() {
+        // Every row starts a candidate (no end pattern), so the scan polls once per
+        // CANCELLATION_CHECK_INTERVAL rows (4 times here) and assignParents polls again afterwards:
+        // the fifth check can only come from assignParents.
+        val rowCount = CANCELLATION_CHECK_INTERVAL * 4
+        val logData = plainEntries(rowCount)
+        val defs = listOf(SequenceDef(id = "s1", matchText = "line", priority = 1, color = Color.Red))
+        var calls = 0
+
+        assertFailsWith<CancellationException> {
+            computeSeqGroups(logData, defs, cancellationCheck = {
+                if (++calls == 5) throw CancellationException("cancel while assigning parents")
+            })
+        }
+
+        assertEquals(5, calls)
     }
 }

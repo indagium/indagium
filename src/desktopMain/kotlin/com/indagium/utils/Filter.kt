@@ -238,12 +238,22 @@ internal fun visibleEntries(
     tab: LogTab,
     applyFilter: Boolean,
     regexContext: RegexEvaluationContext,
-): List<LogEntry> =
-    if (applyFilter) {
-        tab.logData.filter { passesFilter(it, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids) }
-    } else {
-        tab.logData
+    cancellationCheck: CancellationCheck = NoCancellationCheck,
+): List<LogEntry> {
+    if (!applyFilter) return tab.logData
+    // The same single pass as List.filter, plus a periodic cancellation poll so a superseded
+    // computation over a huge log stops here instead of finishing the whole filter first.
+    val passing = ArrayList<LogEntry>()
+    var sinceCheck = 0
+    for (entry in tab.logData) {
+        if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCheck = 0
+            cancellationCheck()
+        }
+        if (passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) passing += entry
     }
+    return passing
+}
 
 // Ids are strictly increasing within a tab (parser, merge, and tailing all guarantee it) and
 // dense enough that a BitSet id-set is ~1 bit/entry — the boxed HashSet<Int> equivalents these
@@ -306,9 +316,39 @@ data class CrossingThreadHint(val hostDefId: String, val hostTid: Int, val guest
 
 private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
 
+// A slot survives only while a cache entry or an in-flight computation needs it. Removing a slot
+// invalidates all computations that acquired it, without retaining tombstones for closed tabs.
+private class ComputeCacheSlot(var active: Int = 0)
+
+private val computeCacheLock = Any()
+private val computeCacheSlots = HashMap<String, ComputeCacheSlot>()
+
+private fun acquireComputeCacheSlot(key: String): ComputeCacheSlot = synchronized(computeCacheLock) {
+    computeCacheSlots.getOrPut(key) { ComputeCacheSlot() }.also { it.active++ }
+}
+
+private fun releaseComputeCacheSlot(key: String, slot: ComputeCacheSlot) = synchronized(computeCacheLock) {
+    slot.active--
+    if (slot.active == 0 && computeCacheSlots[key] === slot && !computeCacheByTab.containsKey(key)) {
+        computeCacheSlots.remove(key)
+    }
+}
+
+private fun publishComputeCache(key: String, slot: ComputeCacheSlot, value: TabComputeCache?, observed: TabComputeCache?) {
+    synchronized(computeCacheLock) {
+        if (computeCacheSlots[key] !== slot) return
+        if (value != null) computeCacheByTab[key] = value
+        else if (computeCacheByTab[key] === observed) computeCacheByTab.remove(key)
+    }
+}
+
 fun invalidateComputeCache(tabId: String) {
-    computeCacheByTab.remove("$tabId#true")
-    computeCacheByTab.remove("$tabId#false")
+    synchronized(computeCacheLock) {
+        for (key in listOf("$tabId#true", "$tabId#false")) {
+            computeCacheSlots.remove(key)
+            computeCacheByTab.remove(key)
+        }
+    }
 }
 
 // Read-only peek at the memoized sequence groups from this tab's last computeItems(tab,
@@ -800,7 +840,6 @@ internal fun computeItems(
 // LoopWithTooManyJumpStatements: the crossing-thread-hint scan's inner loop uses continue/break
 // as independent early-outs (already-claimed guest, sorted-start cutoff, contained pair) — see
 // the comments at each jump site just below for what each one skips and why.
-@Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements")
 internal fun computeItems(
     tab: LogTab,
     applyFilter: Boolean,
@@ -808,14 +847,33 @@ internal fun computeItems(
     regexContext: RegexEvaluationContext,
     storeInCache: Boolean = true,
 ): List<LogItem> {
+    val cacheKey = "${tab.id}#$applyFilter"
+    val slot = acquireComputeCacheSlot(cacheKey)
+    try {
+        return computeItemsWithSlot(tab, applyFilter, cancellationCheck, regexContext, storeInCache, cacheKey, slot)
+    } finally {
+        releaseComputeCacheSlot(cacheKey, slot)
+    }
+}
+
+@Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements", "LongParameterList")
+private fun computeItemsWithSlot(
+    tab: LogTab,
+    applyFilter: Boolean,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+    storeInCache: Boolean,
+    cacheKey: String,
+    slot: ComputeCacheSlot,
+): List<LogItem> {
     val sequences = tab.filter.sequences
     // Deliberately NOT keyed on tab.expanded — see spliceStackToggle just above, whose entire
     // point is finding THIS SAME cache entry across an expanded-set change so a single group
     // toggle can splice member rows in/out instead of re-running the whole computation. That
     // sharing is also exactly why storeInCache exists: a probing caller must not overwrite this
     // entry with a result built from a hypothetical expanded set (see the doc above).
-    val cacheKey = "${tab.id}#$applyFilter"
-    val prior = computeCacheByTab[cacheKey]?.takeIf {
+    val observed = computeCacheByTab[cacheKey]
+    val prior = observed?.takeIf {
         it.logData === tab.logData &&
             it.stackGroupsRef === tab.analysis.stackTraceGroups &&
             it.filter == tab.filter
@@ -825,17 +883,17 @@ internal fun computeItems(
     // alter old rows' output) extend the previous result in O(batch) instead of re-filtering and
     // re-rendering the whole log. Must run BEFORE `data` below, which would start a full filter pass.
     if (prior == null) {
-        computeCacheByTab[cacheKey]?.let { cached ->
+        observed?.let { cached ->
             appendComputeFast(tab, applyFilter, cached, cancellationCheck, regexContext)
         }?.let { extended ->
             if (storeInCache) {
-                if (regexContext.hasTimedOut) computeCacheByTab.remove(cacheKey) else computeCacheByTab[cacheKey] = extended
+                publishComputeCache(cacheKey, slot, extended.takeUnless { regexContext.hasTimedOut }, observed)
             }
             appendFastPathHits.incrementAndGet()
             return extended.items.orEmpty()
         }
     }
-    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext)
+    val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext, cancellationCheck)
     var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
     var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
     var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
@@ -850,10 +908,10 @@ internal fun computeItems(
     fun storeCache(items: List<LogItem>) {
         if (!storeInCache) return
         if (regexContext.hasTimedOut) {
-            computeCacheByTab.remove(cacheKey)
+            publishComputeCache(cacheKey, slot, null, observed)
             return
         }
-        computeCacheByTab[cacheKey] = TabComputeCache(
+        val entry = TabComputeCache(
             logData = tab.logData,
             stackGroupsRef = tab.analysis.stackTraceGroups,
             filter = tab.filter,
@@ -870,6 +928,7 @@ internal fun computeItems(
             tagPids = tab.analysis.tagPids,
             analysisPending = tab.analysis.pending,
         )
+        publishComputeCache(cacheKey, slot, entry, observed)
     }
 
     if (prior != null) {
