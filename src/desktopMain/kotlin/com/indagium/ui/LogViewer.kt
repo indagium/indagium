@@ -57,6 +57,7 @@ import androidx.compose.ui.window.PopupProperties
 import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import com.indagium.utils.HlSpan
+import com.indagium.utils.OrderedIntSet
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.asLogEntryView
 import com.indagium.utils.cachedSeqGroupsFor
@@ -194,6 +195,9 @@ internal fun summarizeItems(items: List<LogItem>): ItemsSummary {
             is LogItem.StackTraceHeader -> if (item.expanded) expanded++ else collapsed++
         }
     }
+    // Every item a plain row: rowIds is allIds element for element, so share the one array. Neither
+    // array is ever written after construction (spliceSummarize builds fresh ones), so sharing is safe.
+    if (rows == items.size) return ItemsSummary(allIds, allIds, idBits, collapsed, expanded)
     val rowIds = IntArray(rows)
     var r = 0
     items.forEach { item -> if (item is LogItem.Row) rowIds[r++] = item.entry.id }
@@ -280,6 +284,8 @@ internal fun spliceSummarize(
 
     val oldWindowRows = oldSummary.rowCount - headRows - tailRows
     val rowCount = oldSummary.rowCount - oldWindowRows + windowRowIds.size
+    // All rows again: allIds is fully filled above and equals rowIds, so share it (see summarizeItems).
+    if (rowCount == newN) return ItemsSummary(allIds, allIds, idBits, collapsed, expanded)
     val rowIds = IntArray(rowCount)
     System.arraycopy(oldSummary.rowIds, 0, rowIds, 0, headRows)
     windowRowIds.forEachIndexed { k, id -> rowIds[headRows + k] = id }
@@ -2239,7 +2245,7 @@ internal fun LogViewer(
                             setOf(id)
                         } else {
                             val a = visIds.indexOfId(last); val b = visIds.indexOfId(id)
-                            if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet()
+                            if (a >= 0 && b >= 0) OrderedIntSet.of(visIds, minOf(a, b), maxOf(a, b) + 1)
                             else localAllSelected + id
                         }
                     }
@@ -2247,7 +2253,7 @@ internal fun LogViewer(
                 }
             }
             val allOnSelRowRange: (List<Int>) -> Unit = { ids -> localAllSelected = ids.toSet() }
-            val allOnSelectAll: () -> Unit = { localAllSelected = computedAllItems.summary.allIds.toSet() }
+            val allOnSelectAll: () -> Unit = { localAllSelected = OrderedIntSet.of(computedAllItems.summary.allIds) }
             val allOnClearSelection: () -> Unit = { localAllSelected = emptySet() }
 
             // NOTE for whoever touches tail-follow next: every LaunchedEffect below that calls

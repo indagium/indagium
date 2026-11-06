@@ -280,7 +280,7 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline =
  * isolation.
  */
 internal fun unrollLogTimeline(data: Iterable<LogTimelinePoint>): UnrolledLogTimeline {
-    val points = data.toList()
+    val points = data as? List<LogTimelinePoint> ?: data.toList()
     return unrollDatedTimeline(points) ?: unrollUndatedTimeline(points)
 }
 

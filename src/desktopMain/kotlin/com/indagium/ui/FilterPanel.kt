@@ -55,6 +55,7 @@ import com.indagium.model.*
 import com.indagium.utils.CANCELLATION_CHECK_INTERVAL
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
+import com.indagium.utils.FilterPlan
 import com.indagium.utils.IssueSiteGroup
 import com.indagium.utils.MAX_DISTINCT_TEMPLATES
 import com.indagium.utils.RegexEvaluationContext
@@ -155,16 +156,18 @@ private fun scanUnifiedCandidateEntries(
     val inScope = ArrayList<LogEntry>()
     val outOfScope = ArrayList<LogEntry>()
     val relaxedPassing = ArrayList<LogEntry>()
+    val basePlan = FilterPlan(baseFilter, emptyMap())
+    val relaxedPlan = FilterPlan(relaxedFilter, emptyMap())
     var sinceCheck = 0
     for (entry in entries) {
         if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
             sinceCheck = 0
             cancellationCheck()
         }
-        if (passesFilter(entry, baseFilter, regexContext)) {
+        if (passesFilter(entry, basePlan, regexContext)) {
             inScope += entry
             relaxedPassing += entry
-        } else if (passesFilter(entry, relaxedFilter, regexContext)) {
+        } else if (passesFilter(entry, relaxedPlan, regexContext)) {
             outOfScope += entry
             relaxedPassing += entry
         }

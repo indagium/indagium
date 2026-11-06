@@ -127,6 +127,7 @@ import com.indagium.utils.CONTENT_SNIFF_BYTES
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.FilterPlan
 import com.indagium.utils.HeapPressure
 import com.indagium.utils.HeapPressureMonitor
 import com.indagium.utils.HeapSnapshot
@@ -136,6 +137,7 @@ import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.MergeSourceFile
+import com.indagium.utils.OrderedIntSet
 import com.indagium.utils.ParsedLog
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.RetraceOutcome
@@ -9227,7 +9229,7 @@ class AppState(
                 } else {
                     val a = visIds.indexOfId(last)
                     val b = visIds.indexOfId(id)
-                    if (a >= 0 && b >= 0) (minOf(a, b)..maxOf(a, b)).map { visIds[it] }.toSet() else t.selected + id
+                    if (a >= 0 && b >= 0) OrderedIntSet.of(visIds, minOf(a, b), maxOf(a, b) + 1) else t.selected + id
                 }
             }
 
@@ -9244,14 +9246,16 @@ class AppState(
         // above) instead of re-filtering the full logData on every shift-click.
         val regexContext = RegexEvaluationContext()
         val ids = visibleItemsByTab[tabId]?.allIds
-            ?: t.logData.filter { passesFilter(it, t.filter, t.analysis.processNames, regexContext, t.analysis.tagPids) }
+            ?: FilterPlan(t.filter, t.analysis.processNames, t.analysis.tagPids).let { plan ->
+                t.logData.filter { passesFilter(it, plan, regexContext) }
+            }
                 .map { it.id }
                 .ifEmpty { t.logData.map { it.id } }
                 .toIntArray()
         val a = ids.indexOfId(fromId)
         val b = ids.indexOfId(toId)
         if (a < 0 || b < 0) return@upTab t
-        t.copy(selected = (minOf(a, b)..maxOf(a, b)).map { ids[it] }.toSet())
+        t.copy(selected = OrderedIntSet.of(ids, minOf(a, b), maxOf(a, b) + 1))
     }
 
     fun setSelectedRows(tabId: String, ids: List<Int>) = upTab(tabId) { t ->
@@ -9262,9 +9266,14 @@ class AppState(
 
     fun selectAll(tabId: String) {
         val t = tab(tabId) ?: return
-        val ids = visibleItemsByTab[tabId]?.rowIds?.toList()
-            ?: computeItems(t, true).filterIsInstance<LogItem.Row>().map { it.entry.id }
-        setSelectedRows(tabId, ids)
+        val rowIds = visibleItemsByTab[tabId]?.rowIds ?: computeItems(t, true).let { items ->
+            val ids = IntArray(items.count { it is LogItem.Row })
+            var n = 0
+            for (item in items) if (item is LogItem.Row) ids[n++] = item.entry.id
+            ids
+        }
+        val selected = OrderedIntSet.of(rowIds)
+        upTab(tabId) { it.copy(selected = selected) }
     }
 
     fun requestAnnotationNavigation(ownerTabId: String, block: AnnBlock.LogRef) {
@@ -10325,9 +10334,9 @@ class AppState(
             return ordinal?.let { index.videoMsForOrdinal(it, tab.attachedVideo?.captureOffsetMs ?: 0L) }
         }
         val anchor = tab.attachedVideo?.anchor ?: return null
-        val elapsed = monotonicLogElapsedById(tab)
-        val anchorElapsed = elapsed[anchor.logId] ?: return null
-        val targetElapsed = elapsed[logId] ?: return null
+        val elapsed = logElapsedIndex(tab)
+        val anchorElapsed = elapsed.elapsedOf(anchor.logId) ?: return null
+        val targetElapsed = elapsed.elapsedOf(logId) ?: return null
         return anchor.videoMs + (targetElapsed - anchorElapsed)
     }
 
@@ -10339,24 +10348,24 @@ class AppState(
             return tab.logData.getOrNull(point.ordinal - 1)?.id
         }
         val anchor = tab.attachedVideo?.anchor ?: return null
-        val elapsed = monotonicLogElapsedById(tab)
-        val anchorElapsed = elapsed[anchor.logId] ?: return null
+        val index = logElapsedIndex(tab)
+        val anchorElapsed = index.elapsedOf(anchor.logId) ?: return null
         val targetDeltaMs = videoMs - anchor.videoMs
         var bestId: Int? = null
         var bestDiff = Long.MAX_VALUE
-        for ((id, entryElapsed) in elapsed) {
-            val diff = kotlin.math.abs((entryElapsed - anchorElapsed) - targetDeltaMs)
+        for (i in index.ids.indices) {
+            val diff = kotlin.math.abs((index.elapsed[i] - anchorElapsed) - targetDeltaMs)
             if (diff < bestDiff) {
                 bestDiff = diff
-                bestId = id
+                bestId = index.ids[i]
             }
         }
         return bestId
     }
 
     /**
-     * The elapsed timeline of one tab's whole log, in three shapes the video mapping needs: an
-     * id->elapsed map for point lookups, id/elapsed arrays in log order for floor searches, and the
+     * The elapsed timeline of one tab's whole log, in the shapes the video mapping needs: parallel
+     * id/elapsed arrays in log order (point lookups via [elapsedOf], floor searches), and the
      * range endpoints. Cached per tab against `logDataRef` identity because building it is O(n)
      * over every row and the Follow UI resolves a position on *every* decoded frame — a 300k-row
      * tab measured ~20ms per rebuild, and the panel used to pay for four of them per frame.
@@ -10368,7 +10377,6 @@ class AppState(
      */
     private class LogElapsedIndex(
         val logDataRef: List<LogEntry>,
-        val byId: Map<Int, Long>,
         val ids: IntArray,
         val elapsed: LongArray,
         val ascending: Boolean,
@@ -10395,7 +10403,23 @@ class AppState(
         // com.indagium.utils.unrollLogTimeline's doc comment for the detection rule and rationale.
         // True is the overwhelming common case (one capture, at most one genuine midnight crossing).
         val dayOffsetModelValid: Boolean,
-    )
+    ) {
+        /**
+         * Position of [id] in [ids], or -1 when the row has no timestamp (and so is not in the
+         * index). Ids ascend in log order but rows without a timestamp are missing, so the direct
+         * offset guess (the dense case) is tried first, then a binary search.
+         */
+        fun indexOfId(id: Int): Int {
+            if (ids.isEmpty()) return -1
+            val guess = id - ids[0]
+            if (guess in ids.indices && ids[guess] == id) return guess
+            val found = java.util.Arrays.binarySearch(ids, id)
+            return if (found >= 0) found else -1
+        }
+
+        /** Elapsed milliseconds of the row with [id], or null when it has no timestamp. */
+        fun elapsedOf(id: Int): Long? = indexOfId(id).takeIf { it >= 0 }?.let { elapsed[it] }
+    }
 
     private val elapsedIndexByTab = ConcurrentHashMap<String, LogElapsedIndex>()
 
@@ -10425,7 +10449,6 @@ class AppState(
         }
         return LogElapsedIndex(
             logDataRef = tab.logData,
-            byId = byId,
             ids = ids,
             elapsed = elapsed,
             ascending = ascending,
@@ -10438,8 +10461,6 @@ class AppState(
             dayOffsetModelValid = unrolled.dayOffsetModelValid,
         )
     }
-
-    private fun monotonicLogElapsedById(tab: LogTab): Map<Int, Long> = logElapsedIndex(tab).byId
 
     /**
      * Index of the last entry in [elapsed] whose value is at or before [target] — i.e. the state
@@ -10483,7 +10504,7 @@ class AppState(
                 return@tabLookup captureVisibleLogIdAtOrBefore(tab, index, point.ordinal, point.segmentFirstOrdinal)
             }
             val anchor = tab.attachedVideo?.anchor ?: return@tabLookup null
-            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@tabLookup null
+            val anchorElapsed = logElapsedIndex(tab).elapsedOf(anchor.logId) ?: return@tabLookup null
             lastVisibleLogIdAtOrBefore(tab, anchorElapsed + (videoMs - anchor.videoMs))
         }
 
@@ -10503,7 +10524,7 @@ class AppState(
             val point = index.pointForOrdinal(ordinal) ?: return null
             return captureVisibleLogIdAtOrBefore(tab, index, ordinal, point.segmentFirstOrdinal)
         }
-        val mappedElapsed = logElapsedIndex(tab).byId[mappedLogId] ?: return null
+        val mappedElapsed = logElapsedIndex(tab).elapsedOf(mappedLogId) ?: return null
         return lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
     }
 
@@ -10586,7 +10607,9 @@ class AppState(
         var n = 0
         var ascending = true
         for (visibleId in visibleIds) {
-            val value = elapsedIndex.byId[visibleId] ?: continue
+            val at = elapsedIndex.indexOfId(visibleId)
+            if (at < 0) continue
+            val value = elapsedIndex.elapsed[at]
             if (n > 0 && value < elapsed[n - 1]) ascending = false
             ids[n] = visibleId
             elapsed[n] = value
@@ -10692,7 +10715,7 @@ class AppState(
         }
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
-        val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
+        val anchorElapsed = anchor?.let { elapsedIndex?.elapsedOf(it.logId) }
         if (tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()) {
             return VideoFollowMapping(
                 anchorLogTs = tab?.rmap?.get(anchor?.logId ?: -1)?.ts,
@@ -10780,7 +10803,7 @@ class AppState(
         val tab = tab(tabId)
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
-        val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
+        val anchorElapsed = anchor?.let { elapsedIndex?.elapsedOf(it.logId) }
         val summary = visibleItemsByTab[tabId]
         if (tab != null && hasCaptureTimeline(tab)) {
             val captureIndex = captureTimelineIndex(tab)
@@ -10862,7 +10885,7 @@ class AppState(
             return FollowDiagnostics(
                 tabId = tabId,
                 hasAnchor = anchor != null,
-                anchor = anchor?.let { a -> FollowDiagnosticRow(a.logId, tab.rmap[a.logId]?.ts, elapsedIndex?.byId?.get(a.logId)) },
+                anchor = anchor?.let { a -> FollowDiagnosticRow(a.logId, tab.rmap[a.logId]?.ts, elapsedIndex?.elapsedOf(a.logId)) },
                 anchorVideoMs = anchor?.videoMs,
                 playheadVideoMs = videoMs,
                 mappedElapsedMs = null,
@@ -10913,7 +10936,7 @@ class AppState(
         } else {
             emptyList()
         }
-        val fullFloorRow = fullFloorId?.let { id -> FollowDiagnosticRow(id, tab.rmap[id]?.ts, elapsedIndex.byId[id]) }
+        val fullFloorRow = fullFloorId?.let { id -> FollowDiagnosticRow(id, tab.rmap[id]?.ts, elapsedIndex.elapsedOf(id)) }
         // Falls back to a fresh computeItems() count exactly when followFloorIndex itself did (no
         // summary reported yet) — computeItems memoizes internally, so this second call is a cache
         // hit whenever floorIdx already forced the same recompute, not a second real pass.

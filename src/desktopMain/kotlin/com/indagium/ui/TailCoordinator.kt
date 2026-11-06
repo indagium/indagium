@@ -7,6 +7,7 @@ import com.indagium.model.LogTab
 import com.indagium.model.MessageCompositionState
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.FileTailer
+import com.indagium.utils.FilterPlan
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.appendLogEntries
 import com.indagium.utils.computeMessageTemplates
@@ -358,7 +359,8 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     ) {
                         val forFilter = existingComposition.forFilter
                         val ctx = RegexEvaluationContext()
-                        val admitted = newEntries.filter { passesFilter(it, forFilter, ctx) }
+                        val plan = FilterPlan(forFilter, emptyMap())
+                        val admitted = newEntries.filter { passesFilter(it, plan, ctx) }
                         MessageCompositionState.Computed(
                             mergeMessageTemplates(
                                 existingComposition.histogram,

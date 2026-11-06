@@ -13,7 +13,7 @@ package com.indagium.capture
  * export-local, 1-based row number (matches the row LogParser assigns when the archive's own
  * `logcat.log` is reopened — see CaptureArchiveTest for the invariant this relies on).
  * [logTimeMs] is that row's own device-embedded timestamp, day-unrolled the same way
- * AppState.monotonicLogElapsedById computes it for a manual anchor (both go through
+ * AppState.logElapsedIndex computes it for a manual anchor (both go through
  * com.indagium.utils.unrollLogTimeline over the SAME parsed rows) — so the offset this produces
  * agrees with the manual-anchor math a reopened archive will use at import time. [videoMs] is the
  * host-observed video position for that row (already clip-relative when the export remuxed a clip),

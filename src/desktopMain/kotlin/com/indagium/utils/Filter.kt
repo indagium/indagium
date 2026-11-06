@@ -56,29 +56,64 @@ internal fun passesFilter(
     processNames: Map<Int, String>,
     regexContext: RegexEvaluationContext,
     tagPids: Map<String, Set<Int>> = emptyMap(),
-): Boolean {
-    val enabledRules = if (filter.mode == FilterMode.TAGS) {
-        filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
-    } else {
-        emptyList()
+): Boolean = passesFilter(entry, FilterPlan(filter, processNames, tagPids), regexContext)
+
+// A rule together with its PID/TID selector tokens, resolved once for a whole filter run. Only a
+// RuleTarget.PID_TID rule reads [tokens]; every other rule carries the shared empty value.
+internal class PlannedRule(val rule: MessageRule, val tokens: PidTidTokens)
+
+private val NO_PID_TID_TOKENS = PidTidTokens(emptySet(), emptySet())
+
+/**
+ * Everything [passesFilter] derives from (filter, processNames, tagPids) rather than from the row:
+ * the enabled / negative / positive rule lists and the resolved PID/TID tokens of the selector and
+ * of each PID_TID rule. Those inputs are fixed for the duration of one filter run, so a loop over
+ * rows builds this once and calls the plan overload of [passesFilter] per row instead of redoing
+ * the list filtering and token resolution for every row. The verdict is identical to the
+ * three-argument form, which builds a plan per call for one-off callers.
+ */
+internal class FilterPlan(
+    val filter: Filter,
+    val processNames: Map<Int, String>,
+    val tagPids: Map<String, Set<Int>> = emptyMap(),
+) {
+    val negativeRules: List<PlannedRule>
+    val positiveRules: List<PlannedRule>
+    val hasKwInTag: Boolean = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
+    val hasPosPidTid: Boolean = filter.pidTidFilter.isNotBlank()
+    val pidTidTokens: PidTidTokens =
+        if (hasPosPidTid) resolvePidTidTokens(filter.pidTidFilter, processNames, tagPids) else NO_PID_TID_TOKENS
+
+    init {
+        val enabled = if (filter.mode == FilterMode.TAGS) {
+            filter.messageRules.filter { it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS }
+        } else {
+            emptyList()
+        }
+
+        fun planned(rule: MessageRule) = PlannedRule(
+            rule,
+            if (rule.target == RuleTarget.PID_TID) resolvePidTidTokens(rule.pattern, processNames, tagPids) else NO_PID_TID_TOKENS,
+        )
+        negativeRules = enabled.filter { !it.include }.map(::planned)
+        positiveRules = enabled.filter { it.include }.map(::planned)
     }
-    if (!passesExclusions(entry, filter, enabledRules.filter { !it.include }, processNames, regexContext, tagPids)) return false
-    val posRules = enabledRules.filter { it.include }
-    val hasKwInTag = filter.mode == FilterMode.TAGS && filter.kwInTag.isNotBlank()
-    val hasPosPidTid = filter.pidTidFilter.isNotBlank()
-    if (posRules.isNotEmpty() || hasKwInTag || hasPosPidTid) {
-        return matchesPositiveSelectors(entry, posRules, hasKwInTag, hasPosPidTid, filter, processNames, regexContext, tagPids)
-    }
+
+    val hasPositiveSelectors: Boolean get() = positiveRules.isNotEmpty() || hasKwInTag || hasPosPidTid
+}
+
+internal fun passesFilter(entry: LogEntry, plan: FilterPlan, regexContext: RegexEvaluationContext): Boolean {
+    val filter = plan.filter
+    if (!passesExclusions(entry, filter, plan.negativeRules, regexContext)) return false
+    if (plan.hasPositiveSelectors) return matchesPositiveSelectors(entry, plan, regexContext)
     return passesTagOrKeywordFilter(entry, filter, regexContext)
 }
 
 private fun passesExclusions(
     entry: LogEntry,
     filter: Filter,
-    negativeRules: List<MessageRule>,
-    processNames: Map<Int, String>,
+    negativeRules: List<PlannedRule>,
     regexContext: RegexEvaluationContext,
-    tagPids: Map<String, Set<Int>>,
 ): Boolean {
     if (entry.level !in filter.levels) return false
     // Tag/package exclusion is a Tags-mode-flavored concept — kept out of Regex/Keyword mode so
@@ -89,23 +124,15 @@ private fun passesExclusions(
     }
     if (filter.excludeKw.isNotBlank() &&
         tagMsgContainsPattern(entry.tag, entry.msg, filter.excludeKw, filter.excludeKwRegex, regexContext = regexContext)) return false
-    return negativeRules.none { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext, tagPids) }
+    return negativeRules.none { planned -> ruleScopeMatches(entry, planned.rule) && matchesRule(entry, planned, regexContext) }
 }
 
-private fun matchesPositiveSelectors(
-    entry: LogEntry,
-    posRules: List<MessageRule>,
-    hasKwInTag: Boolean,
-    hasPosPidTid: Boolean,
-    filter: Filter,
-    processNames: Map<Int, String>,
-    regexContext: RegexEvaluationContext,
-    tagPids: Map<String, Set<Int>>,
-): Boolean {
+private fun matchesPositiveSelectors(entry: LogEntry, plan: FilterPlan, regexContext: RegexEvaluationContext): Boolean {
+    val filter = plan.filter
     // ruleScopeMatches is a no-op (always true) for unscoped rules, so this covers both.
-    if (posRules.any { rule -> ruleScopeMatches(entry, rule) && matchesRule(entry, rule, processNames, regexContext, tagPids) }) return true
-    if (hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex, regexContext = regexContext)) return true
-    if (hasPosPidTid && matchesPidTidFilter(entry, filter.pidTidFilter, processNames, tagPids)) return true
+    if (plan.positiveRules.any { planned -> ruleScopeMatches(entry, planned.rule) && matchesRule(entry, planned, regexContext) }) return true
+    if (plan.hasKwInTag && containsPattern(entry.msg, filter.kwInTag, filter.kwInTagRegex, regexContext = regexContext)) return true
+    if (plan.hasPosPidTid && matchesPidTidTokens(entry, plan.pidTidTokens)) return true
     return hasActiveBaseFilter(filter) && passesTagOrKeywordFilter(entry, filter, regexContext)
 }
 
@@ -152,13 +179,6 @@ internal fun resolvePidTidTokens(
 internal fun matchesPidTidTokens(entry: LogEntry, tokens: PidTidTokens): Boolean =
     tokens.rawTokens.any { it == entry.pid.toString() || it == entry.tid.toString() } || entry.pid in tokens.namedPids
 
-private fun matchesPidTidFilter(
-    entry: LogEntry,
-    pidTidFilter: String,
-    processNames: Map<Int, String>,
-    tagPids: Map<String, Set<Int>>,
-): Boolean = matchesPidTidTokens(entry, resolvePidTidTokens(pidTidFilter, processNames, tagPids))
-
 private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexContext: RegexEvaluationContext): Boolean =
     when (filter.mode) {
         FilterMode.TAGS -> {
@@ -197,16 +217,11 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexConte
 internal fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
     tag == prefix || tag.startsWith("$prefix.")
 
-private fun matchesRule(
-    entry: LogEntry,
-    rule: MessageRule,
-    processNames: Map<Int, String>,
-    regexContext: RegexEvaluationContext,
-    tagPids: Map<String, Set<Int>>,
-): Boolean = when (rule.target) {
-    RuleTarget.PID_TID -> matchesPidTidFilter(entry, rule.pattern, processNames, tagPids)
-    RuleTarget.MESSAGE -> rulePatternMatches(entry, rule, regexContext)
-}
+private fun matchesRule(entry: LogEntry, planned: PlannedRule, regexContext: RegexEvaluationContext): Boolean =
+    when (planned.rule.target) {
+        RuleTarget.PID_TID -> matchesPidTidTokens(entry, planned.tokens)
+        RuleTarget.MESSAGE -> rulePatternMatches(entry, planned.rule, regexContext)
+    }
 
 private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
     val exact = rule.tag?.takeIf { it.isNotBlank() }
@@ -244,13 +259,14 @@ internal fun visibleEntries(
     // The same single pass as List.filter, plus a periodic cancellation poll so a superseded
     // computation over a huge log stops here instead of finishing the whole filter first.
     val passing = ArrayList<LogEntry>()
+    val plan = FilterPlan(tab.filter, tab.analysis.processNames, tab.analysis.tagPids)
     var sinceCheck = 0
     for (entry in tab.logData) {
         if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
             sinceCheck = 0
             cancellationCheck()
         }
-        if (passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) passing += entry
+        if (passesFilter(entry, plan, regexContext)) passing += entry
     }
     return passing
 }
@@ -529,13 +545,14 @@ private fun appendComputeFast(
 
     val tailPassing: List<LogEntry> = if (applyFilter) {
         val passing = ArrayList<LogEntry>()
+        val plan = FilterPlan(tab.filter, tab.analysis.processNames, tab.analysis.tagPids)
         var sinceCheck = 0
         for (entry in tail) {
             if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
                 sinceCheck = 0
                 cancellationCheck()
             }
-            if (passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) passing += entry
+            if (passesFilter(entry, plan, regexContext)) passing += entry
         }
         passing
     } else {
@@ -856,6 +873,25 @@ internal fun computeItems(
     }
 }
 
+/**
+ * Which sequence swallowed each stack-trace root row: swallowed id -> owning sequence gid, but only
+ * for ids that are a root (`rid`) of one of [stackGroups]. The one lookup is `[g.rid]` for a stack
+ * group, so mapping every swallowed row (a sequence without an end pattern can swallow most of a
+ * 10M-line file) only cost memory. [stackGroups] must be the full analysis list, a superset of the
+ * groups kept after filtering, so the result stays valid for every later use of its cache entry.
+ * Where several sequences swallow the same id the last one wins, as in a plain map fill.
+ */
+internal fun buildSeqOwnerByStackRoot(seqGroups: List<SeqGroup>, stackGroups: List<StackTraceGroup>): Map<Int, String> {
+    if (seqGroups.isEmpty() || stackGroups.isEmpty()) return emptyMap()
+    val stackRoots = java.util.BitSet()
+    stackGroups.forEach { stackRoots.set(it.rid) }
+    val owner = HashMap<Int, String>()
+    seqGroups.forEach { sg ->
+        sg.plain.forEach { id -> if (stackRoots.get(id)) owner[id] = sg.gid }
+    }
+    return owner
+}
+
 @Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements", "LongParameterList")
 private fun computeItemsWithSlot(
     tab: LogTab,
@@ -991,9 +1027,8 @@ private fun computeItemsWithSlot(
     // children *only while that sequence is already expanded* (a nice "this crash happened during
     // X" grouping); otherwise render it as its own independent, always-visible collapsible block —
     // crash navigation never has to search for or blindly expand a group to find it.
-    val seqOwnerGidBySwallowedId = fullSeqOwner ?: buildMap<Int, String> {
-        seqGroups.forEach { sg -> sg.plain.forEach { id -> put(id, sg.gid) } }
-    }.also { fullSeqOwner = it }
+    val seqOwnerGidBySwallowedId = fullSeqOwner
+        ?: buildSeqOwnerByStackRoot(seqGroups, tab.analysis.stackTraceGroups).also { fullSeqOwner = it }
     val stackGroups = allStackGroups.filter { g ->
         val ownerGid = seqOwnerGidBySwallowedId[g.rid]
         ownerGid == null || ownerGid !in tab.expanded
